@@ -52,8 +52,18 @@ def parse_inputs(raw: Any) -> Dict[str, Path]:
         raise PlanLoaderError("inputs must be a non-empty list")
 
     parsed: Dict[str, Path] = {}
+    single_input = len(raw) == 1
+
     for item in raw:
         alias, path = parse_input_entry(item)
+
+        if alias is None:
+            if not single_input:
+                raise PlanLoaderError(
+                    f"input alias must not be empty when multiple inputs are provided: {item!r}"
+                )
+            alias = "model"
+
         if alias in parsed:
             raise PlanLoaderError(f"duplicate input alias: {alias!r}")
         parsed[alias] = path
@@ -65,18 +75,14 @@ def parse_input_entry(raw: Any) -> tuple[str, Path]:
     if not isinstance(raw, str) or not raw:
         raise PlanLoaderError("each inputs entry must be a non-empty string")
 
-    parts = raw.split("::")
-    if len(parts) != 2:
-        raise PlanLoaderError(f"invalid input entry syntax: {raw!r}")
+    if "::" in raw:
+        alias, path_str = raw.split("::", 1)
+        if not path_str:
+            raise PlanLoaderError(f"input path must not be empty: {raw!r}")
+        return alias, Path(path_str)
 
-    alias, path_str = parts
-    if not alias:
-        raise PlanLoaderError(f"input alias must not be empty: {raw!r}")
-    if not path_str:
-        raise PlanLoaderError(f"input path must not be empty: {raw!r}")
-
-    return alias, Path(path_str)
-
+    # bare path → empty alias (resolved later if single input)
+    return None, Path(raw)
 
 def parse_output(raw: Any) -> OutputSpec:
     if isinstance(raw, str):
