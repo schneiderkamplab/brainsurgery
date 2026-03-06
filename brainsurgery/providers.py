@@ -190,11 +190,8 @@ class InMemoryStateDictProvider(BaseStateDictProvider):
             path = self.model_paths[model]
             logger.info("Opening cranium for brain '%s' at %s", model, path)
 
-            loaded = load_state_dict_from_path(path, max_io_workers=self.max_io_workers)
             sd = InMemoryStateDict()
-            for key, tensor in tqdm(loaded.items(), desc=f"Loading brain '{model}'", unit="tensor"):
-                sd[key] = tensor
-            del loaded
+            load_state_dict_from_path(path, sd, max_io_workers=self.max_io_workers)
 
             self.state_dicts[model] = sd
             logger.info(
@@ -227,11 +224,8 @@ class ArenaStateDictProvider(BaseStateDictProvider):
             path = self.model_paths[model]
             logger.info("Opening cranium for brain '%s' at %s", model, path)
 
-            loaded = load_state_dict_from_path(path, max_io_workers=self.max_io_workers)
             sd = ArenaStateDict(self.arena)
-            for key, tensor in tqdm(loaded.items(), desc=f"Loading brain '{model}'", unit="tensor"):
-                sd[key] = tensor
-            del loaded
+            load_state_dict_from_path(path, sd, max_io_workers=self.max_io_workers)
 
             self.state_dicts[model] = sd
             logger.info(

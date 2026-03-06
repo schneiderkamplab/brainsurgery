@@ -5,13 +5,15 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, Literal, TypeVar
+from threading import Lock
+from typing import Dict, Literal, TypeVar
 
 import torch
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 
 from .plan import OutputSpec
+from .transform import StateDictLike
 
 try:
     from tqdm import tqdm
@@ -268,17 +270,16 @@ def save_safetensors_shard(path: Path, shard: dict[str, torch.Tensor]) -> None:
     save_safetensors_file(shard, str(path))
 
 
-def load_state_dict_from_path(path: Path, *, max_io_workers: int) -> Dict[str, torch.Tensor]:
+def load_state_dict_from_path(path: Path, global_state_dict: StateDictLike, *, max_io_workers: int) -> None:
     if not path.exists():
         raise RuntimeError(f"checkpoint path does not exist: {path}")
     if path.is_dir():
         logger.info("CT scan shows a model directory at %s", path)
-        return load_state_dict_from_directory(path, max_io_workers=max_io_workers)
+        return load_state_dict_from_directory(path, global_state_dict, max_io_workers=max_io_workers)
     logger.info("CT scan shows a single checkpoint file at %s", path)
-    return load_state_dict_from_file(path)
+    return load_state_dict_from_file(path, global_state_dict)
 
-
-def load_state_dict_from_directory(path: Path, *, max_io_workers: int) -> Dict[str, torch.Tensor]:
+def load_state_dict_from_directory(path: Path, global_state_dict: StateDictLike, *, max_io_workers: int) -> Dict[str, torch.Tensor]:
     pt_files = sorted(path.glob("*.pt")) + sorted(path.glob("*.pth")) + sorted(path.glob("*.bin"))
     safetensor_files = sorted(path.glob("*.safetensors"))
     index_file = path / "model.safetensors.index.json"
@@ -306,32 +307,22 @@ def load_state_dict_from_directory(path: Path, *, max_io_workers: int) -> Dict[s
     num_workers = choose_num_io_workers(len(files), max_io_workers=max_io_workers)
     logger.info("Dispatching %d worker thread(s) for shard load", num_workers)
 
-    merged: Dict[str, torch.Tensor] = {}
-
+    merge_lock = Lock()
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = {
-            executor.submit(load_state_dict_from_file, file_path): file_path
+            executor.submit(load_state_dict_from_file, file_path, global_state_dict, merge_lock): file_path
             for file_path in files
         }
 
         progress = tqdm(total=len(files), desc=f"Open {path.name}", unit="file", leave=False)
         try:
             for future in as_completed(futures):
-                file_path = futures[future]
-                shard = future.result()
-                logger.info("Recovered %d tensor(s) from %s", len(shard), file_path.name)
-
-                for key, value in shard.items():
-                    if key in merged:
-                        raise RuntimeError(f"duplicate tensor key {key!r} while loading directory {path}")
-                    merged[key] = value
-
+                future.result()  # propagate exceptions
                 progress.update(1)
         finally:
             progress.close()
 
-    logger.info("Cranial assembly complete for %s: %d tensor(s)", path, len(merged))
-    return merged
+    logger.info("Cranial assembly complete for %s: %d tensor(s)", path, len(global_state_dict))
 
 
 def choose_num_io_workers(num_items: int, max_io_workers: int) -> int:
@@ -362,19 +353,23 @@ def resolve_safetensor_shards_from_index(index_file: Path, base_dir: Path) -> li
     return shard_paths
 
 
-def load_state_dict_from_file(path: Path) -> Dict[str, torch.Tensor]:
+def load_state_dict_from_file(path: Path, global_state_dict: StateDictLike, merge_lock: Lock) -> None:
     suffix = path.suffix.lower()
     if suffix == ".safetensors":
         logger.info("Using safetensors instruments on %s", path)
         loaded = load_safetensors_file(str(path), device="cpu")
-        return validate_state_dict_mapping(loaded, path)
-
-    logger.info("Using torch instruments on %s", path)
-    loaded = torch.load(path, map_location="cpu")
-    if isinstance(loaded, dict) and "state_dict" in loaded and isinstance(loaded["state_dict"], dict):
-        logger.info("Detected wrapped state_dict payload in %s", path)
-        loaded = loaded["state_dict"]
-    return validate_state_dict_mapping(loaded, path)
+    else:
+        logger.info("Using torch instruments on %s", path)
+        loaded = torch.load(path, map_location="cpu")
+        if isinstance(loaded, dict) and "state_dict" in loaded and isinstance(loaded["state_dict"], dict):
+            logger.info("Detected wrapped state_dict payload in %s", path)
+            loaded = loaded["state_dict"]
+    loaded = validate_state_dict_mapping(loaded, path)
+    for key, tensor in loaded.items():
+        with merge_lock:
+            if key in global_state_dict:
+                raise RuntimeError(f"duplicate tensor key {key!r} while loading file {path}")
+            global_state_dict[key] = tensor
 
 
 def validate_state_dict_mapping(loaded: object, path: Path) -> Dict[str, torch.Tensor]:
