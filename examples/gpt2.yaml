@@ -7,4 +7,5 @@ transforms:
   - assign: { from: ln_f_copy.weight, to: ln_f.weight }
   - scale: { target: ln_f.weight, by: 0.5 }
   - assert: { not: { equal: { left: ln_f.weight, right: ln_f_copy.weight } } }
+  - cast: { target: ln_f.weight, to: int64 }
   - delete: { target: ln_f_copy.weight }
