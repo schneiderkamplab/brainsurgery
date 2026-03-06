@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, MutableMapping
 from dataclasses import dataclass
+from os import getpid
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from tempfile import TemporaryDirectory
+from typing import Tuple
 
 import numpy as np
 import torch
-
-from .model import parse_shard_size
 
 
 class ArenaError(RuntimeError):
@@ -64,7 +63,9 @@ class SegmentedFileBackedArena:
         if alignment <= 0:
             raise ArenaError("alignment must be positive")
 
-        self.root = root
+        root.mkdir(parents=True, exist_ok=True)
+        self._tempdir = TemporaryDirectory(prefix=f"arena-{getpid()}-", dir=root, delete=True)
+        self.root = Path(self._tempdir.name)
         self.root.mkdir(parents=True, exist_ok=True)
 
         self.segment_size_bytes = segment_size_bytes
