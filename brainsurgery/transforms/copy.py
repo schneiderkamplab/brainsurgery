@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
+from brainsurgery.model import tqdm
+
+from ..model import tqdm
 from ..transform import (
     BaseTransform,
     ResolvedMapping,
@@ -94,7 +97,7 @@ def resolve_copy_mappings(spec: CopySpec, provider: StateDictProvider) -> List[R
 
 
 def apply_copy_mappings(mappings: List[ResolvedMapping], provider: StateDictProvider) -> None:
-    for item in mappings:
+    for item in tqdm(mappings, desc="Applying copy transforms", unit="tensor"):
         src_sd = provider.get_state_dict(item.src_model)
         dst_sd = provider.get_state_dict(item.dst_model)
 

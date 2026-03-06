@@ -11,8 +11,7 @@ import torch
 from safetensors.torch import load_file as load_safetensors_file
 from safetensors.torch import save_file as save_safetensors_file
 
-from .plan import OutputSpec, SurgeryPlan
-from .transform import infer_output_model
+from .plan import OutputSpec
 
 try:
     from tqdm import tqdm
@@ -39,61 +38,6 @@ except ImportError:  # pragma: no cover
 
 
 logger = logging.getLogger("brainsurgery")
-
-
-class InMemoryStateDictProvider:
-    def __init__(self, model_paths: Dict[str, Path], max_io_workers: int):
-        self.model_paths = model_paths
-        self.state_dicts: Dict[str, Dict[str, torch.Tensor]] = {}
-        self.max_io_workers = max_io_workers
-
-    def get_state_dict(self, model: str) -> Dict[str, torch.Tensor]:
-        if model not in self.state_dicts:
-            path = self.model_paths[model]
-            logger.info("Opening cranium for brain '%s' at %s", model, path)
-            self.state_dicts[model] = load_state_dict_from_path(path, max_io_workers=self.max_io_workers)
-            logger.info(
-                "Brain '%s' exposed: %d tensors on the operating table",
-                model,
-                len(self.state_dicts[model]),
-            )
-        else:
-            logger.debug("Revisiting exposed brain '%s'", model)
-        return self.state_dicts[model]
-
-    def save_output(self, plan: SurgeryPlan, *, default_shard_size, max_io_workers) -> Path:
-        output_model = infer_output_model(plan)
-        state_dict = self.get_state_dict(output_model)
-
-        output_path, output_format, shard_size = resolve_output_destination(plan.output, default_shard_size=default_shard_size)
-
-        logger.info(
-            "Closing incision and preserving brain '%s' to %s (%s)",
-            output_model,
-            output_path,
-            output_format,
-        )
-
-        if output_format == "torch":
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(state_dict, output_path)
-            logger.info("Patient stable. Wrote %d tensors to %s", len(state_dict), output_path)
-            return output_path
-
-        if shard_size is None:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            save_safetensors_file(state_dict, str(output_path))
-            logger.info("Patient stable. Wrote %d tensors to %s", len(state_dict), output_path)
-            return output_path
-
-        output_dir = resolve_sharded_output_directory(plan.output.path, output_path)
-        index_path = save_sharded_safetensors(state_dict, output_dir, shard_size, max_io_workers=max_io_workers)
-        logger.info(
-            "Patient stable. Wrote %d tensors across sharded safetensors in %s",
-            len(state_dict),
-            output_dir,
-        )
-        return index_path
 
 
 def resolve_output_destination(

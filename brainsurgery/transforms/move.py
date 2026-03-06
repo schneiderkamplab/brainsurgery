@@ -90,19 +90,19 @@ def resolve_move_mappings(spec: MoveSpec, provider: StateDictProvider) -> List[R
     return mappings
 
 
-def apply_move_mappings(mappings: List[ResolvedMapping], provider: StateDictProvider) -> None:
+def apply_move_mappings(mappings, provider) -> None:
     for item in mappings:
         src_sd = provider.get_state_dict(item.src_model)
         dst_sd = provider.get_state_dict(item.dst_model)
 
-        src_tensor = src_sd[item.src_name].clone()
+        slot = src_sd.slot(item.src_name)
 
         if item.dst_name in dst_sd:
             raise MoveTransformError(
                 f"move destination already exists during apply: {item.dst_model}::{item.dst_name}"
             )
 
-        dst_sd[item.dst_name] = src_tensor
+        dst_sd.bind_slot(item.dst_name, slot)
         del src_sd[item.src_name]
 
 

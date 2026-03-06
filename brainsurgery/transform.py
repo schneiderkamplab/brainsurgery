@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import MutableMapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Protocol, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Tuple
 
 import re
 import torch
@@ -44,8 +45,18 @@ class ResolvedMapping:
     dst_slice: tuple[object, ...] | None
 
 
+class StateDictLike(MutableMapping[str, torch.Tensor]):
+    @abstractmethod
+    def slot(self, key: str) -> Any:
+        raise NotImplementedError
+
+    @abstractmethod
+    def bind_slot(self, key: str, slot: Any) -> None:
+        raise NotImplementedError
+
+
 class StateDictProvider(Protocol):
-    def get_state_dict(self, model: str) -> Dict[str, torch.Tensor]:
+    def get_state_dict(self, model: str) -> StateDictLike:
         ...
 
 
@@ -263,6 +274,7 @@ def require_dest_present(
         dst_sd = provider.get_state_dict(item.dst_model)
         if item.dst_name not in dst_sd:
             raise TransformError(f"{op_name} destination missing: {item.dst_model}::{item.dst_name}")
+
 
 def ensure_mapping_payload(payload: object, op_name: str) -> dict:
     if not isinstance(payload, dict):

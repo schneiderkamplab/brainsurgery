@@ -1,0 +1,6 @@
+inputs:
+  - src::models/flexolmo
+output: { path: models/test3, shard: 100MB }
+transforms:
+  - assert: { not: { iszero: .* } }  # sanity check that we have non-empty tensors
+  - copy: { from: (.*), to: _\1" }
