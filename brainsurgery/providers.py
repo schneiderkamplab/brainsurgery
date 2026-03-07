@@ -13,7 +13,6 @@ from .model import (
     load_state_dict_from_path,
     resolve_output_destination,
     resolve_sharded_output_directory,
-    tqdm,
     save_sharded_safetensors,
 )
 from .plan import SurgeryPlan
