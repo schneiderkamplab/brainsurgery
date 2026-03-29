@@ -15,6 +15,7 @@ from .axon import (
 )
 from .codegen import emit_model_code_from_synapse_spec, load_synapse_torch_op_map
 from .runtime import SynapseProgramModel
+from .visualize import render_synapse_spec_to_dot
 
 
 def run_axon_test(*args, **kwargs):
@@ -45,6 +46,12 @@ def run_codegen_runtime_parity(*args, **kwargs):
     return _run_codegen_runtime_parity(*args, **kwargs)
 
 
+def run_axon_visualize(*args, **kwargs):
+    from .visualize import run_axon_visualize as _run_axon_visualize
+
+    return _run_axon_visualize(*args, **kwargs)
+
+
 __all__ = [
     "AxonBind",
     "AxonModule",
@@ -58,6 +65,7 @@ __all__ = [
     "run_axon_test_matrix",
     "run_axon_op_parity",
     "run_codegen_runtime_parity",
+    "run_axon_visualize",
     "lower_axon_module_to_synapse_block",
     "lower_axon_module_to_synapse_spec",
     "lower_axon_program_to_synapse_spec",
@@ -65,5 +73,6 @@ __all__ = [
     "parse_axon_module",
     "parse_axon_program",
     "parse_axon_program_from_path",
+    "render_synapse_spec_to_dot",
     "synapse_spec_to_axon_module_text",
 ]

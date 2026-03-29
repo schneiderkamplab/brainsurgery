@@ -7,8 +7,8 @@ import torch
 import typer
 from omegaconf import OmegaConf
 
-from brainsurgery.cli.synapse import axon_to_synapse, emit_generic, synapse_to_axon
-from brainsurgery.synapse import emit_model_code_from_synapse_spec
+from brainsurgery.cli.synapse import axon_to_synapse, axon_visualize, emit_generic, synapse_to_axon
+from brainsurgery.synapse import emit_model_code_from_synapse_spec, render_synapse_spec_to_dot
 
 
 def _spec_dict() -> dict[str, object]:
@@ -149,6 +149,79 @@ def test_cli_axon_to_synapse_requires_yaml_output(tmp_path: Path) -> None:
     with pytest.raises(typer.BadParameter) as exc_info:
         axon_to_synapse(axon_path=axon_path, output_path=bad_output, force=False)
     assert ".yaml" in str(exc_info.value)
+
+
+def test_render_synapse_spec_to_dot_has_variable_labeled_edges_and_block_calls() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}, "y": {"shape": []}},
+            "graph": [
+                {"sum_xy": {"_op": "add", "_args": ["x", "y"], "_bind": "z"}},
+                {
+                    "call_blk": {
+                        "_op": "call",
+                        "_target": "blk",
+                        "_args": "z",
+                        "b": "y",
+                        "_bind": "o",
+                    }
+                },
+            ],
+            "blocks": {
+                "blk": {
+                    "inputs": {"a": {"shape": []}, "b": {"shape": []}},
+                    "graph": [{"sum_ab": {"_op": "add", "_args": ["a", "b"], "_bind": "r"}}],
+                    "outputs": {"r": "r"},
+                }
+            },
+            "outputs": {"o": "o"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "digraph synapse" in dot
+    assert "rankdir=TB;" in dot
+    assert "subgraph cluster_blk" in dot
+    assert 'label="x"' in dot
+    assert 'label="y"' in dot
+    assert 'label="z"' in dot
+    assert 'label="calls"' in dot
+    assert "block blk" in dot
+
+
+def test_cli_axon_visualize_writes_dot_file(tmp_path: Path) -> None:
+    axon_path = tmp_path / "tiny.axon"
+    dot_path = tmp_path / "tiny.dot"
+    axon_path.write_text(
+        """
+tiny :: Tensor -> Tensor -> Tensor
+tiny x y = do
+  z <- x + y
+  return z
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    axon_visualize(axon_path=axon_path, output_path=dot_path, force=False, main_module=None)
+
+    assert dot_path.exists()
+    dot_text = dot_path.read_text(encoding="utf-8")
+    assert "digraph synapse" in dot_text
+    assert "add" in dot_text
+    assert 'label="x"' in dot_text
+
+
+def test_cli_axon_visualize_requires_dot_output(tmp_path: Path) -> None:
+    axon_path = tmp_path / "tiny.axon"
+    bad_output = tmp_path / "tiny.txt"
+    axon_path.write_text(
+        "tiny :: Tensor -> Tensor\ntiny x = do\n  y <- x\n  return y\n", encoding="utf-8"
+    )
+
+    with pytest.raises(typer.BadParameter) as exc_info:
+        axon_visualize(axon_path=axon_path, output_path=bad_output, force=False, main_module=None)
+    assert ".dot" in str(exc_info.value)
 
 
 def test_optional_input_defaults_to_none_in_emitted_code() -> None:

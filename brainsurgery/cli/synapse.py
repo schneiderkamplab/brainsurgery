@@ -509,6 +509,46 @@ def axon_test_matrix(
     raise typer.Exit(code=int(exit_code))
 
 
+@app.command("axon-visualize")
+def axon_visualize(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    output_path: Path = typer.Argument(
+        ...,
+        help="Destination Graphviz DOT file.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite output file if it already exists.",
+    ),
+    main_module: str | None = typer.Option(
+        None,
+        "--main-module",
+        help="Main model module name when Axon file contains multiple modules (defaults to last).",
+    ),
+) -> None:
+    """Lower an Axon program and write a DOT graph of blocks + ops + variable-flow edges."""
+    _ensure_overwrite_allowed(output_path, force=force)
+    if output_path.suffix != ".dot":
+        raise typer.BadParameter("Output path must end with .dot")
+
+    module = _synapse_module()
+    run_fn = getattr(module, "run_axon_visualize")
+    try:
+        written = run_fn(axon_file=axon_path, output_path=output_path, main_module=main_module)
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Wrote Axon graph visualization to {written}")
+
+
 __all__ = [
     "app",
     "emit_generic",
@@ -517,4 +557,5 @@ __all__ = [
     "axon_test",
     "axon_op_parity",
     "axon_test_matrix",
+    "axon_visualize",
 ]
