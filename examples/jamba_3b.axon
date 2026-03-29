@@ -38,17 +38,18 @@ attn_core x = do
 mamba_core :: Tensor[B,S,D] -> Tensor[B,S,D]
 mamba_core x = do
   x_norm <- rms@input_layernorm x
-  in_proj <- linear@mamba.in_proj x_norm dim=2*I
-  u, gate <- split in_proj sizes=[5120, 5120]
-  u_conv <- causal_conv1d@mamba.conv1d u activation=silu
-  params <- linear@mamba.x_proj u_conv dim=R + 2*N
-  dt, b, c <- split params sizes=[160, 16, 16]
-  dt <- rmsnorm@mamba.dt_layernorm dt eps=EPS cast_float=true
-  b <- rmsnorm@mamba.b_layernorm b eps=EPS cast_float=true
-  c <- rmsnorm@mamba.c_layernorm c eps=EPS cast_float=true
-  delta <- linear@mamba.dt_proj dt dim=I bias=true
-  y_scan <- mamba_scan u_conv delta b c A=mamba.A_log D=mamba.D a_is_log=true
-  y <- y_scan |> mul (silu gate) |> linear@mamba.out_proj dim=D
+  y <- scope@mamba do
+    in_proj <- linear@in_proj x_norm dim=2*I
+    u, gate <- split in_proj sizes=[5120, 5120]
+    u_conv <- causal_conv1d@conv1d u activation=silu
+    params <- linear@x_proj u_conv dim=R + 2*N
+    dt, b, c <- split params sizes=[160, 16, 16]
+    dt <- rmsnorm@dt_layernorm dt eps=EPS cast_float=true
+    b <- rmsnorm@b_layernorm b eps=EPS cast_float=true
+    c <- rmsnorm@c_layernorm c eps=EPS cast_float=true
+    delta <- linear@dt_proj dt dim=I bias=true
+    y_scan <- mamba_scan u_conv delta b c A=A_log D=D a_is_log=true
+    return y_scan |> mul (silu gate) |> linear@out_proj dim=D
   return x + y
 
 jamba_3b :: TokenIds[B,S] -> Tensor[B,S,V]
@@ -56,10 +57,9 @@ jamba_3b input_ids = do
   x <- embedding@model.embed_tokens input_ids dim=D
   for@model.layers i <- [0..L) do
     x <- ((i == 7) or (i == 21)) ? attn_core x : mamba_core x
-    res <- x
     x_ff <- rms@pre_ff_layernorm x
     m <- dense_ffn x_ff
-    x <- res + m
+    x <- x + m
   x <- rms@model.final_layernorm x
   logits <- linear@lm_head x dim=V
   return logits

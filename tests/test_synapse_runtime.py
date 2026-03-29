@@ -403,6 +403,18 @@ def _mxfp4_linear_state_dict() -> dict[str, torch.Tensor]:
     }
 
 
+def test_runtime_infer_param_path_uses_scope_for_undotted_explicit_param_name() -> None:
+    model = SynapseProgramModel.from_spec({"synapse": 1, "model": {"graph": [], "outputs": {}}})
+    node_spec = {"A": "A_log", "D": "D"}
+    node_path = "backbone.layers.0.mixer.n_op_6"
+    assert model._infer_param_path(node_spec, node_path=node_path, param_name="A") == (
+        "backbone.layers.0.mixer.A_log"
+    )
+    assert model._infer_param_path(node_spec, node_path=node_path, param_name="D") == (
+        "backbone.layers.0.mixer.D"
+    )
+
+
 def test_runtime_from_spec_and_from_yaml(tmp_path: Path) -> None:
     spec = _tiny_linear_spec()
     model = SynapseProgramModel.from_spec(spec)
@@ -940,3 +952,17 @@ def test_runtime_generate_uses_generic_cache_state_contract() -> None:
     assert generated.shape[1] <= 6
     assert seen_lengths[0] == 3
     assert all(length == 1 for length in seen_lengths[1:])
+
+
+def test_runtime_generate_accepts_singleton_non_logits_output_dict() -> None:
+    spec = _tiny_linear_spec()
+    model_spec = spec["model"]
+    assert isinstance(model_spec, dict)
+    model_spec["outputs"] = {"out_0": "logits"}
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors({"embed_tokens.weight": torch.randn(8, 4)})
+    input_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
+    generated = model.generate(input_ids=input_ids, eos_token_id=7, max_len=6)
+    assert generated.ndim == 2
+    assert generated.shape[0] == 1
+    assert generated.shape[1] <= 6

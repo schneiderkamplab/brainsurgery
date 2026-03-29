@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import gc
 import io
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,11 @@ def _parse_args() -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Show per-run output from synapse axon-test.",
+    )
+    parser.add_argument(
+        "--no-capture-output",
+        action="store_true",
+        help="Do not capture per-run output; stream run_axon_test output directly.",
     )
     parser.add_argument(
         "--exclude-axon",
@@ -335,6 +341,7 @@ def _run_pair(
     max_len: int,
     text: list[str],
     verbose: bool,
+    no_capture_output: bool,
     compile_hf: bool,
     compile_axon: bool,
     compile_backend: str | None,
@@ -359,6 +366,7 @@ def _run_pair(
     }
     if verbose:
         print(f"Running: {kwargs}")
+    if no_capture_output:
         return run_axon_test(**kwargs)
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -374,6 +382,7 @@ def run_axon_test_matrix(
     max_len: int = 32,
     text: list[str] | None = None,
     verbose: bool = False,
+    no_capture_output: bool = False,
     dry_run: bool = False,
     table_format: str = "plain",
     compile_hf: bool = False,
@@ -443,6 +452,7 @@ def run_axon_test_matrix(
                 max_len=max_len,
                 text=prompts,
                 verbose=verbose,
+                no_capture_output=no_capture_output,
                 compile_hf=compile_hf,
                 compile_axon=compile_axon,
                 compile_backend=compile_backend,
@@ -509,6 +519,12 @@ def run_axon_test_matrix(
             )
             passed += 1
         except Exception as exc:
+            if verbose:
+                tqdm.write(
+                    f"ERROR in {pair.axon_path.name} ({pair.model_dir}): {type(exc).__name__}: {exc}"
+                )
+                for line in traceback.format_exc().rstrip().splitlines():
+                    tqdm.write(line)
             rows.append(
                 _SummaryRow(
                     axon_file=pair.axon_path.name,
@@ -558,6 +574,7 @@ def main() -> int:
         max_len=args.max_len,
         text=args.text,
         verbose=args.verbose,
+        no_capture_output=bool(args.no_capture_output),
         dry_run=args.dry_run,
         table_format=args.table_format,
         compile_hf=bool(args.compile_hf),

@@ -523,6 +523,9 @@ def _lower_simple_call(
             node_spec["_args"] = (
                 positional_args[0] if len(positional_args) == 1 else positional_args
             )
+        call_scope = ".".join(part for part in ctx.scope_stack if part)
+        if call_scope and not path_bindings:
+            node_spec["_scope"] = call_scope
         node_spec["_bind"] = out_values[0] if len(out_values) == 1 else out_values
         for key, value in extra_kwargs.items():
             node_spec[key] = value

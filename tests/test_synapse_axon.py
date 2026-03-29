@@ -665,6 +665,24 @@ tiny input_ids = do
     assert linear_nodes[0]["_params"]["weight"] == "lm_head.weight"
 
 
+def test_mamba_scan_param_overrides_are_scoped_inside_scope_bind() -> None:
+    source = """
+tiny :: Tensor[B,S,D] -> Tensor[B,S,D]
+tiny x = do
+  y <- scope@mixer do
+    y <- mamba_scan x x x x A=A_log D=D a_is_log=true
+    return y
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert len(node_specs) == 1
+    assert node_specs[0]["_op"] == "mamba_scan"
+    assert node_specs[0]["A"] == "mixer.A_log"
+    assert node_specs[0]["D"] == "mixer.D"
+
+
 def test_embedding_at_path_uses_neutral_node_name_and_explicit_weight_param() -> None:
     source = """
 gpt2 :: TokenIds[B,T] -> Tensor[B,T,D]

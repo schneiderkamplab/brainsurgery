@@ -35,6 +35,23 @@ def lowering_validate_signature(
     raise ValueError("mamba_scan requires _bind as a single output or [y, final_state]")
 
 
+def lowering_normalize_kwargs(
+    *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
+) -> None:
+    del args, out
+    scope_stack = getattr(ctx, "scope_stack", None)
+    if not isinstance(scope_stack, list) or not scope_stack:
+        return
+    scope_prefix = ".".join(part for part in scope_stack if isinstance(part, str) and part)
+    if not scope_prefix:
+        return
+    for key in ("A", "D"):
+        value = kwargs.get(key)
+        if not isinstance(value, str) or "." in value:
+            continue
+        kwargs[key] = f"{scope_prefix}.{value}"
+
+
 def _validate_shapes(
     *,
     u: torch.Tensor,
@@ -358,6 +375,7 @@ __all__ = [
     "LOWERING_REQUIRED_KWARGS",
     "LOWERING_KWARG_KINDS",
     "OP_NAME",
+    "lowering_normalize_kwargs",
     "lowering_validate_signature",
     "interpret",
     "compile",

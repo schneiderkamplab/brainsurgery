@@ -366,7 +366,12 @@ class _Emitter:
             [
                 "                    model_out = self.forward(step_input, **call_kwargs)",
                 "                    if isinstance(model_out, dict):",
-                "                        logits = model_out['logits']",
+                "                        if 'logits' in model_out:",
+                "                            logits = model_out['logits']",
+                "                        elif len(model_out) == 1:",
+                "                            logits = next(iter(model_out.values()))",
+                "                        else:",
+                "                            raise KeyError(\"Expected 'logits' in model outputs or a single unnamed output\")",
             ]
         )
         for idx, out_name in enumerate(state_output_names):
@@ -591,7 +596,28 @@ class _Emitter:
             var = self._fresh(self._py_name(block_out_name))
             tmp_vars.append(var)
 
-        call_args = ", ".join([*arg_codes, f"scope={scope_var}"])
+        call_scope_var = scope_var
+        raw_scope = node_spec.get("_scope")
+        if isinstance(raw_scope, str) and raw_scope:
+            scoped_var = self._fresh("scope")
+            lines = [
+                (
+                    f"{indent}if ("
+                    f"{scope_var} == {raw_scope!r} or "
+                    f"{scope_var}.startswith({raw_scope!r} + '.') or "
+                    f"{scope_var}.endswith('.' + {raw_scope!r}) or "
+                    f"('.' + {raw_scope!r} + '.') in {scope_var}"
+                    f"):"
+                ),
+                f"{indent}    {scoped_var} = {scope_var}",
+                f"{indent}else:",
+                f"{indent}    {scoped_var} = self._join_scope({scope_var}, {raw_scope!r})",
+            ]
+            call_scope_var = scoped_var
+        else:
+            lines = []
+
+        call_args = ", ".join([*arg_codes, f"scope={call_scope_var}"])
         if len(tmp_vars) == 1:
             call_line = (
                 f"{indent}{tmp_vars[0]} = self._block_{self._py_name(block_name)}({call_args})"
@@ -599,7 +625,7 @@ class _Emitter:
         else:
             call_line = f"{indent}{', '.join(tmp_vars)} = self._block_{self._py_name(block_name)}({call_args})"
 
-        lines = [call_line]
+        lines.append(call_line)
         for dst_name, tmp in zip(binds, tmp_vars, strict=True):
             existing = env.get(dst_name)
             dst_var = (
@@ -668,8 +694,7 @@ class _Emitter:
             return scoped_explicit
         if isinstance(node_spec.get(param_name), str):
             candidate = node_spec[param_name]
-            if "." in candidate:
-                return f"self._join_scope(self._scope_of({node_path_var}), {candidate!r})"
+            return f"self._join_scope(self._scope_of({node_path_var}), {candidate!r})"
         return f"self._join_scope({node_path_var}, {param_name!r})"
 
     def _read_env_var(self, env: dict[str, str], name: str) -> str:

@@ -154,8 +154,7 @@ deepseek_v2_lite_moe_mlp xn = do
 deepseek_v2_lite_embedding_stage :: TokenIds[B,S] -> Tensor[B,S,D]
 deepseek_v2_lite_embedding_stage input_ids = do
   x <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D
-    return x
+    return embedding@embed_tokens input_ids dim=D
   return x
 
 deepseek_v2_lite_layer0_stage :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> Tensor[B,S,D]

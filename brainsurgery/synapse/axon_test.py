@@ -61,9 +61,13 @@ def _extract_logits(output: Any) -> torch.Tensor:
         return output
     if isinstance(output, dict):
         logits = output.get("logits")
-        if not torch.is_tensor(logits):
-            raise ValueError("Expected tensor logits in dict output")
-        return logits
+        if torch.is_tensor(logits):
+            return logits
+        if len(output) == 1:
+            only_value = next(iter(output.values()))
+            if torch.is_tensor(only_value):
+                return only_value
+        raise ValueError("Expected tensor logits in dict output")
     if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
         return output[0]
     raise ValueError(

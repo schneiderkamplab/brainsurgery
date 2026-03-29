@@ -202,7 +202,14 @@ class SynapseProgramModel(nn.Module):
                         call_kwargs[use_cache_name] = True
                     model_out = self.forward(step_input, **call_kwargs)
                     if isinstance(model_out, dict):
-                        logits = model_out["logits"]
+                        if "logits" in model_out:
+                            logits = model_out["logits"]
+                        elif len(model_out) == 1:
+                            logits = next(iter(model_out.values()))
+                        else:
+                            raise KeyError(
+                                "Expected 'logits' in model outputs or a single unnamed output"
+                            )
                         for out_name in state_output_names:
                             if out_name in model_out:
                                 cache_state = model_out[out_name]
@@ -380,7 +387,19 @@ class SynapseProgramModel(nn.Module):
         block_graph = block_spec.get("graph")
         if not isinstance(block_graph, list):
             raise ValueError("block spec must include list graph")
-        self._run_graph(block_graph, block_env, scope=scope, symbols=symbols, blocks=blocks)
+        call_scope = scope
+        raw_scope = node_spec.get("_scope")
+        if isinstance(raw_scope, str) and raw_scope:
+            if (
+                scope == raw_scope
+                or scope.startswith(f"{raw_scope}.")
+                or scope.endswith(f".{raw_scope}")
+                or f".{raw_scope}." in scope
+            ):
+                call_scope = scope
+            else:
+                call_scope = self._join(scope, raw_scope)
+        self._run_graph(block_graph, block_env, scope=call_scope, symbols=symbols, blocks=blocks)
 
         block_outputs = block_spec.get("outputs", {})
         if not isinstance(block_outputs, dict):
@@ -451,9 +470,8 @@ class SynapseProgramModel(nn.Module):
                 return f"{scoped_explicit}" if scoped_explicit else explicit
         if param_name in node_spec and isinstance(node_spec[param_name], str):
             candidate = node_spec[param_name]
-            if "." in candidate:
-                scoped_candidate = self._join(self._scope_of(node_path), candidate)
-                return f"{scoped_candidate}" if scoped_candidate else candidate
+            scoped_candidate = self._join(self._scope_of(node_path), candidate)
+            return f"{scoped_candidate}" if scoped_candidate else candidate
         return f"{node_path}.{param_name}" if node_path else param_name
 
     def _resolve_output_ref(self, ref: Any, env: dict[str, Any]) -> Any:
