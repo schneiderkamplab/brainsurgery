@@ -13,10 +13,16 @@ import safetensors
 import torch
 from mltiming import timing
 from omegaconf import OmegaConf
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.utils.quantization_config import Mxfp4Config
 
-from .axon import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
+from .axon import (
+    candidate_tokenizer_dirs,
+    looks_like_tokenizer_dir,
+    lower_axon_program_to_synapse_spec,
+    parse_axon_program_from_path,
+    tokenize_prompts,
+)
 from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
 from .codegen import emit_model_code_from_synapse_spec
 from .mxfp4 import materialize_mxfp4_aliases
@@ -135,28 +141,6 @@ def _resolve_safetensors_paths(weights: Path) -> list[Path]:
     )
 
 
-def _load_tokenizer(tokenizer_source: str, *, fallback_repo_id: str | None = None) -> Any:
-    candidate = Path(tokenizer_source).expanduser()
-    if candidate.exists():
-        source = str(candidate.resolve())
-        try:
-            return AutoTokenizer.from_pretrained(source, local_files_only=True)
-        except Exception:
-            return AutoTokenizer.from_pretrained(source, local_files_only=True, use_fast=False)
-
-    try:
-        return AutoTokenizer.from_pretrained(tokenizer_source, local_files_only=False)
-    except Exception:
-        if fallback_repo_id and fallback_repo_id != tokenizer_source:
-            try:
-                return AutoTokenizer.from_pretrained(fallback_repo_id, local_files_only=False)
-            except Exception:
-                pass
-        return AutoTokenizer.from_pretrained(
-            tokenizer_source, local_files_only=False, use_fast=False
-        )
-
-
 def _normalize_rope_numeric_fields(config: Any) -> Any:
     def _normalize_dict(mapping: Any) -> None:
         if not isinstance(mapping, dict):
@@ -201,33 +185,6 @@ def _build_non_mxfp4_quantization_config(config: Any) -> Mxfp4Config | None:
         modules_to_not_convert=modules_to_not_convert,
         dequantize=True,
     )
-
-
-def _looks_like_tokenizer_dir(path: Path) -> bool:
-    return (
-        (path / "tokenizer.json").exists()
-        or (path / "tokenizer.model").exists()
-        or ((path / "vocab.json").exists() and (path / "merges.txt").exists())
-    )
-
-
-def _candidate_tokenizer_dirs(model_dir: Path) -> list[Path]:
-    candidates: list[Path] = []
-    candidates.append(model_dir)
-    candidates.append(model_dir.with_name(f"{model_dir.name}.old"))
-    parts = model_dir.name.split("_")
-    for cut in range(len(parts) - 1, 1, -1):
-        candidates.append(model_dir.with_name("_".join(parts[:cut])))
-
-    out: list[Path] = []
-    seen: set[Path] = set()
-    for path in candidates:
-        resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        out.append(resolved)
-    return out
 
 
 def _load_generated_class(py_path: Path, class_name: str) -> type[Any]:
@@ -301,29 +258,6 @@ def _to_cpu_float(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.detach().to(dtype=torch.float32, device="cpu")
 
 
-def _spec_padding_side(spec: dict[str, Any]) -> str | None:
-    model = spec.get("model", {})
-    if not isinstance(model, dict):
-        return None
-    meta = model.get("meta", {})
-    if not isinstance(meta, dict):
-        return None
-    value = meta.get("padding_side")
-    if value is None:
-        return None
-    normalized = str(value).strip().lower()
-    if normalized not in {"left", "right"}:
-        raise ValueError(f"Invalid model.meta.padding_side={value!r}; expected 'left' or 'right'.")
-    return normalized
-
-
-def _preferred_padding_side(spec: dict[str, Any]) -> str:
-    explicit = _spec_padding_side(spec)
-    if explicit is not None:
-        return explicit
-    return "left"
-
-
 def run_axon_test(
     *,
     axon_file: Path,
@@ -370,8 +304,8 @@ def run_axon_test(
     resolved_hf_model_dir = (hf_model_dir or default_hf_dir).resolve()
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:
-        for candidate in _candidate_tokenizer_dirs(resolved_hf_model_dir):
-            if _looks_like_tokenizer_dir(candidate):
+        for candidate in candidate_tokenizer_dirs(resolved_hf_model_dir):
+            if looks_like_tokenizer_dir(candidate):
                 tokenizer_source = str(candidate)
                 break
     tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
@@ -399,7 +333,6 @@ def run_axon_test(
 
         model_cls = _load_generated_class(generated_py_path, class_name)
 
-        tokenizer_obj = _load_tokenizer(tokenizer_source, fallback_repo_id=tokenizer_fallback)
         state_dict: dict[str, torch.Tensor] | None = None
         try:
             hf_config = AutoConfig.from_pretrained(
@@ -443,20 +376,13 @@ def run_axon_test(
             hf.generation_config.top_p = None
             hf.generation_config.top_k = None
 
-        if len(prompts) > 1:
-            tokenizer_obj.padding_side = _preferred_padding_side(lowered_spec)
-            if tokenizer_obj.pad_token_id is None:
-                if tokenizer_obj.eos_token_id is None:
-                    raise ValueError(
-                        "Tokenizer has no pad token and no eos token; cannot batch prompts with padding."
-                    )
-                tokenizer_obj.pad_token = tokenizer_obj.eos_token
-        inputs = tokenizer_obj(
-            prompts,
-            return_tensors="pt",
-            padding=(len(prompts) > 1),
-        ).to(resolved_device)
-        input_ids = inputs["input_ids"]
+        tokenizer_obj, input_ids, attention_mask = tokenize_prompts(
+            prompts=prompts,
+            tokenizer_source=tokenizer_source,
+            tokenizer_fallback=tokenizer_fallback,
+            device=resolved_device,
+            lowered_spec=lowered_spec,
+        )
         model_inputs = lowered_spec.get("model", {}).get("inputs", {})
         model_input_names = (
             set(model_inputs.keys()) if isinstance(model_inputs, dict) else {"input_ids"}
@@ -467,7 +393,6 @@ def run_axon_test(
             else ("attention_mask" if "attention_mask" in model_input_names else None)
         )
         hf_inputs: dict[str, Any] = {"input_ids": input_ids}
-        attention_mask = inputs.get("attention_mask")
         if attention_mask is not None:
             hf_inputs["attention_mask"] = attention_mask
         use_mask_for_syn = bool(attention_mask is not None and syn_mask_key is not None)

@@ -13,14 +13,17 @@ from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import AutoModelForCausalLM
 
-from .axon import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
+from .axon import (
+    candidate_tokenizer_dirs,
+    looks_like_tokenizer_dir,
+    lower_axon_program_to_synapse_spec,
+    parse_axon_program_from_path,
+    tokenize_prompts,
+)
 from .axon_test import (
     _extract_logits,
     _load_generated_class,
     _load_state_dict,
-    _load_tokenizer,
-    _looks_like_tokenizer_dir,
-    _preferred_padding_side,
     _resolve_device,
     _resolve_safetensors_paths,
 )
@@ -459,19 +462,13 @@ def _build_inputs(
     tokenizer_fallback: str | None,
     device: torch.device,
 ) -> tuple[Any, torch.Tensor, torch.Tensor | None]:
-    tokenizer_obj = _load_tokenizer(tokenizer_source, fallback_repo_id=tokenizer_fallback)
-    if len(prompts) > 1:
-        tokenizer_obj.padding_side = _preferred_padding_side(lowered_spec)
-        if tokenizer_obj.pad_token_id is None:
-            if tokenizer_obj.eos_token_id is None:
-                raise ValueError(
-                    "Tokenizer has no pad token and no eos token; cannot batch prompts"
-                )
-            tokenizer_obj.pad_token = tokenizer_obj.eos_token
-    inputs = tokenizer_obj(prompts, return_tensors="pt", padding=(len(prompts) > 1)).to(device)
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs.get("attention_mask")
-    return tokenizer_obj, input_ids, attention_mask
+    return tokenize_prompts(
+        prompts=prompts,
+        tokenizer_source=tokenizer_source,
+        tokenizer_fallback=tokenizer_fallback,
+        device=device,
+        lowered_spec=lowered_spec,
+    )
 
 
 def _forward_kwargs(
@@ -640,11 +637,10 @@ def run_axon_op_parity(
     resolved_hf_model_dir = (hf_model_dir or default_hf_dir).resolve()
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:
-        candidate_old = resolved_hf_model_dir.with_name(f"{resolved_hf_model_dir.name}.old")
-        if not _looks_like_tokenizer_dir(resolved_hf_model_dir) and _looks_like_tokenizer_dir(
-            candidate_old
-        ):
-            tokenizer_source = str(candidate_old)
+        for candidate in candidate_tokenizer_dirs(resolved_hf_model_dir):
+            if looks_like_tokenizer_dir(candidate):
+                tokenizer_source = str(candidate)
+                break
     tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
 
     with TemporaryDirectory(prefix="axon_op_parity_") as _tmp_dir:
@@ -729,11 +725,10 @@ def run_codegen_runtime_parity(
     resolved_hf_model_dir = (hf_model_dir or default_hf_dir).resolve()
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:
-        candidate_old = resolved_hf_model_dir.with_name(f"{resolved_hf_model_dir.name}.old")
-        if not _looks_like_tokenizer_dir(resolved_hf_model_dir) and _looks_like_tokenizer_dir(
-            candidate_old
-        ):
-            tokenizer_source = str(candidate_old)
+        for candidate in candidate_tokenizer_dirs(resolved_hf_model_dir):
+            if looks_like_tokenizer_dir(candidate):
+                tokenizer_source = str(candidate)
+                break
     tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
 
     with TemporaryDirectory(prefix="axon_codegen_runtime_parity_") as tmp_dir:
