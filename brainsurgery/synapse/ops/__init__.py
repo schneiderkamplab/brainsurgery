@@ -73,6 +73,8 @@ OP_MODULES: dict[str, Any] = _load_discovered_op_modules()
 
 
 def get_op_module(op_name: str) -> Any | None:
+    if op_name == "_ir_const":
+        return OP_MODULES.get("_ir_expr")
     module = OP_MODULES.get(op_name)
     if module is not None:
         return module

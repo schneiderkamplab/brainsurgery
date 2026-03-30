@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-OP_NAME = "_ir_const"
+OP_NAME = "_ir_expr"
 LOWERING_ARITY = (0, 0)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
@@ -19,7 +19,7 @@ def lowering_validate_signature(
 ) -> None:
     del args, kwargs, ctx
     if not isinstance(out, str):
-        raise ValueError("_ir_const requires a single scalar output binding")
+        raise ValueError("_ir_expr requires a single scalar output binding")
 
 
 def interpret(
@@ -32,7 +32,7 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope
-    out_name = model._require_name(node_spec.get("_bind"), field="_ir_const._bind")
+    out_name = model._require_name(node_spec.get("_bind"), field="_ir_expr._bind")
     value = node_spec.get("value")
     if isinstance(value, str):
         env[out_name] = model._eval_expr(value, env, symbols)

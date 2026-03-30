@@ -7,7 +7,7 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
-from .ops import OP_MODULES, get_op_module
+from .ops import get_op_module
 
 
 def load_synapse_torch_op_map() -> dict[str, Any]:
@@ -804,7 +804,6 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
         raise ValueError("op map must contain mapping key 'ops'")
 
     known_control_ops = {"for", "call"}
-    known_runtime_builtin_ops = set(OP_MODULES.keys())
 
     def _walk_graph(graph: list[Any]) -> None:
         for item in graph:
@@ -817,9 +816,10 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
             op = node_spec.get("_op")
             if isinstance(op, str):
                 is_dynamic_activation = op.startswith("activations_")
+                has_runtime_op = get_op_module(op) is not None
                 if (
                     op not in known_control_ops
-                    and op not in known_runtime_builtin_ops
+                    and not has_runtime_op
                     and not is_dynamic_activation
                     and op not in ops
                 ):

@@ -274,7 +274,7 @@ def test_render_synapse_spec_to_dot_connects_when_condition_dependencies() -> No
                 },
                 {
                     "null_cache": {
-                        "_op": "_ir_const",
+                        "_op": "_ir_expr",
                         "value": None,
                         "_bind": "new_kv",
                         "when": "not (use_cache)",
@@ -717,6 +717,25 @@ def test_render_synapse_spec_to_dot_renders_scope_subgraph_with_input_output_gat
         '"n_scope_out::main::model.layer":"p_out_h":s -> "n_op::main::graph::0001_out":"p_arg_x"'
         in dot
     )
+
+
+def test_render_synapse_spec_to_dot_prefers_latest_outer_rebind_over_scope_out_for_block_outputs() -> (
+    None
+):
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [
+                {"a": {"_op": "_ir_alias", "_scope": "model.inner", "_args": "x", "_bind": "h"}},
+                {"b": {"_op": "add", "_args": ["h", "x"], "_bind": "h"}},
+            ],
+            "outputs": {"h": "h"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert '"n_op::main::graph::0001_b":"p_out_h" -> "n_outputs::main":"p_h":n;' in dot
+    assert '"n_scope_out::main::model.inner":"p_out_h":s -> "n_outputs::main":"p_h":n;' not in dot
 
 
 def test_render_synapse_spec_to_dot_nests_loop_cluster_under_parent_scope() -> None:

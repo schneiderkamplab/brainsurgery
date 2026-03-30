@@ -424,12 +424,38 @@ def _lower_simple_call(
 
     resolved_args: list[str] = []
     raw_op_name = _op_name_from_callee(callee)
+
+    def _should_materialize_inline_value(token_text: str) -> bool:
+        stripped = token_text.strip()
+        if _is_name_token(stripped):
+            return False
+        if not stripped:
+            return False
+        if (stripped.startswith("[") and stripped.endswith("]")) or (
+            stripped.startswith("{") and stripped.endswith("}")
+        ):
+            # Keep structured literals (e.g., split sizes) inline for op normalizers.
+            return False
+        if re.fullmatch(r"-?[0-9]+(\.[0-9]+([eE][+-]?[0-9]+)?)?", stripped):
+            return False
+        if stripped.lower() in {"true", "false", "null"}:
+            return False
+        try:
+            parsed = ast.parse(stripped, mode="eval")
+        except SyntaxError:
+            # Fallback: materialize complex non-name tokens.
+            return True
+        node = parsed.body
+        if isinstance(node, (ast.Name, ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
+            return False
+        return True
+
     for idx, arg in enumerate(args):
         token = arg.strip()
         inner = token
         if token.startswith("(") and token.endswith(")"):
             inner = token[1:-1].strip()
-        if inner != token and (not _is_name_token(inner)):
+        if _should_materialize_inline_value(inner):
             if raw_op_name in {"repeat", "_repeat"} and idx >= 1:
                 resolved_args.append(inner)
                 continue
@@ -625,7 +651,7 @@ def _lower_alias_or_const(
         if token in ctx.tensor_last_dim:
             ctx.tensor_last_dim[out] = ctx.tensor_last_dim[token]
     else:
-        node = {"_op": "_ir_const", "value": scalar, "_bind": out}
+        node = {"_op": "_ir_expr", "value": scalar, "_bind": out}
     effective_scope = ".".join(part for part in ctx.scope_stack if part)
     if effective_scope:
         node["_scope"] = effective_scope

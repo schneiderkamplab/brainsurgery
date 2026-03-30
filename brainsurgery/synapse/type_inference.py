@@ -190,7 +190,7 @@ def infer_output_types_for_node(
                 if isinstance(idx_dims, list) and len(output_vars) >= 2:
                     inferred[output_vars[1]] = f"IdxTensor[{','.join(idx_dims)}]"
 
-    if op_name == "_ir_const":
+    if op_name == "_ir_expr":
         literal = literal_type(node_spec.get("value"))
         if isinstance(literal, str):
             for out_name in output_vars:

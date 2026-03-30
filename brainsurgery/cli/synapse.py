@@ -539,11 +539,22 @@ def axon_visualize(
         "--control-flow/--no-control-flow",
         help="Show dashed gray control-flow edges between ops.",
     ),
+    direction: str = typer.Option(
+        "top-down",
+        "--direction",
+        help="Graph layout direction: top-down or bottom-up.",
+    ),
 ) -> None:
     """Lower an Axon program and write a DOT graph of blocks + ops + variable-flow edges."""
     _ensure_overwrite_allowed(output_path, force=force)
     if output_path.suffix != ".dot":
         raise typer.BadParameter("Output path must end with .dot")
+    if isinstance(main_module, OptionInfo):
+        main_module = None
+    if isinstance(control_flow, OptionInfo):
+        control_flow = True
+    if isinstance(direction, OptionInfo):
+        direction = "top-down"
 
     module = _synapse_module()
     run_fn = getattr(module, "run_axon_visualize")
@@ -553,6 +564,7 @@ def axon_visualize(
             output_path=output_path,
             main_module=main_module,
             show_control_flow=control_flow,
+            direction=direction,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc

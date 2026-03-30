@@ -25,7 +25,7 @@ type _Endpoint = tuple[str, str | None]
 
 _OP_POSITIONAL_ARG_OVERRIDES: dict[str, tuple[str, ...]] = {
     "_ir_alias": ("x",),
-    "_ir_const": (),
+    "_ir_expr": (),
     "activation": ("x",),
     "add": ("x", "y"),
     "attention": ("q", "k", "v"),
@@ -107,14 +107,20 @@ def _format_block_label(text: str) -> str:
     return f"{head.strip()} ::\n{wrapped_tail}"
 
 
-def _slot_label_html(name: str, type_hint: str | None) -> str:
+def _slot_label_html(
+    name: str,
+    type_hint: str | None,
+    expr_hint: str | None = None,
+) -> str:
     base = f'<FONT POINT-SIZE="7">{_html_escape(name)}</FONT>'
-    if not isinstance(type_hint, str) or not type_hint:
+    extras: list[str] = []
+    if isinstance(type_hint, str) and type_hint:
+        extras.append(f'<FONT POINT-SIZE="6" COLOR="gray50">{_html_escape(type_hint)}</FONT>')
+    if isinstance(expr_hint, str) and expr_hint:
+        extras.append(f'<FONT POINT-SIZE="6" COLOR="gray35">{_html_escape(expr_hint)}</FONT>')
+    if not extras:
         return base
-    return (
-        f'{base}<BR ALIGN="CENTER"/>'
-        f'<FONT POINT-SIZE="6" COLOR="gray50">{_html_escape(type_hint)}</FONT>'
-    )
+    return f'{base}<BR ALIGN="CENTER"/>' + '<BR ALIGN="CENTER"/>'.join(extras)
 
 
 def _arg_slot_bg(kind: str) -> str:
@@ -452,6 +458,52 @@ def _node_input_slot_kinds(node_spec: Mapping[str, Any], *, op_name: str) -> dic
     return kinds
 
 
+def _value_expr_hint(value: Any) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if _looks_identifier(text):
+            return None
+        return text
+    if isinstance(value, (int, float, bool)) or value is None:
+        return repr(value)
+    if isinstance(value, list):
+        return repr(value)
+    return None
+
+
+def _node_input_slot_expr_hints(
+    node_spec: Mapping[str, Any],
+    *,
+    op_name: str,
+) -> dict[str, str]:
+    hints: dict[str, str] = {}
+    raw_args = node_spec.get("_args")
+    positional_values: list[Any]
+    if raw_args is None:
+        positional_values = []
+    elif isinstance(raw_args, list):
+        positional_values = list(raw_args)
+    else:
+        positional_values = [raw_args]
+    positional_names = _op_positional_arg_names(op_name)
+    for idx, value in enumerate(positional_values):
+        slot_name = _positional_slot_name(idx=idx, value=value, positional_names=positional_names)
+        hint = _value_expr_hint(value)
+        if isinstance(hint, str) and hint:
+            hints[slot_name] = hint
+    for key, value in node_spec.items():
+        if not isinstance(key, str):
+            continue
+        if key.startswith("_") or key in {"graph", "when"}:
+            continue
+        hint = _value_expr_hint(value)
+        if isinstance(hint, str) and hint:
+            hints[key] = hint
+    return hints
+
+
 def _node_input_vars(node_spec: Mapping[str, Any], *, known_vars: set[str]) -> list[str]:
     refs: set[str] = set()
     raw_args = node_spec.get("_args")
@@ -628,6 +680,10 @@ def _split_when_polarity(expr: str) -> tuple[bool, str]:
     return True, normalized
 
 
+def _ordered_rows(rows: list[str], *, top_down: bool) -> list[str]:
+    return rows if top_down else list(reversed(rows))
+
+
 def _walk_graph(
     graph: list[Any],
     *,
@@ -651,6 +707,7 @@ def _walk_graph(
     block_io_types: Mapping[str, Mapping[str, Mapping[str, str]]] | None,
     block_scope_prefixes: Mapping[str, str] | None,
     current_block_name: str,
+    top_down: bool,
     scope_context: dict[str, Any] | None = None,
     input_gateway_node_ids: set[str] | None = None,
     output_gateway_node_ids: set[str] | None = None,
@@ -899,6 +956,7 @@ def _walk_graph(
         known_vars = set(var_sources.keys())
         input_slots = _node_input_slots(node_spec, op_name=op_name, known_vars=known_vars)
         input_slot_kinds = _node_input_slot_kinds(node_spec, op_name=op_name)
+        input_slot_expr_hints = _node_input_slot_expr_hints(node_spec, op_name=op_name)
         input_slot_names = [slot for slot, _ in input_slots]
         output_vars = _node_output_vars(node_spec)
         input_slot_display: dict[str, str] = {name: name for name in input_slot_names}
@@ -1046,7 +1104,7 @@ def _walk_graph(
             slot_bg = _arg_slot_bg(slot_kind)
             node_in_cells.append(
                 f'<TD PORT="{port}" BGCOLOR="{slot_bg}" ALIGN="CENTER">'
-                f"{_slot_label_html(input_slot_display.get(slot_name, slot_name), input_slot_types.get(slot_name))}</TD>"
+                f"{_slot_label_html(input_slot_display.get(slot_name, slot_name), input_slot_types.get(slot_name), input_slot_expr_hints.get(slot_name))}</TD>"
             )
         while len(node_in_cells) < slot_cols:
             node_in_cells.append('<TD BGCOLOR="azure"></TD>')
@@ -1074,7 +1132,7 @@ def _walk_graph(
                     f'<TD PORT="{arg_ports[slot_name]}" '
                     f'BGCOLOR="{_arg_slot_bg(input_slot_kinds.get(slot_name, "kw"))}" '
                     f'ALIGN="CENTER">'
-                    f"{_slot_label_html(slot_name, input_slot_types.get(slot_name))}</TD>"
+                    f"{_slot_label_html(slot_name, input_slot_types.get(slot_name), input_slot_expr_hints.get(slot_name))}</TD>"
                 )
                 for slot_name in input_slot_names
                 if slot_name in arg_ports
@@ -1118,9 +1176,18 @@ def _walk_graph(
                 output_gateway_node_ids.add(loop_output_id)
             flow_edges.add((node_id, loop_output_id))
         else:
+            const_detail = ""
+            if op_name == "_ir_expr" and "value" in node_spec:
+                raw_value = node_spec.get("value")
+                if isinstance(raw_value, str):
+                    detail_text = raw_value
+                else:
+                    detail_text = repr(raw_value)
+                const_detail = f'<BR ALIGN="LEFT"/><FONT POINT-SIZE="8" COLOR="gray35">{_html_escape(detail_text)}</FONT>'
             op_content = (
                 f'<FONT POINT-SIZE="10">{_html_escape(op_name)}</FONT>'
                 f'<BR ALIGN="LEFT"/><FONT POINT-SIZE="8" COLOR="gray35">{_html_escape(node_name)}</FONT>'
+                f"{const_detail}"
             )
             row_label_bg = "gray90"
             op_cell_bg = "white"
@@ -1134,19 +1201,29 @@ def _walk_graph(
                     f'<FONT POINT-SIZE="7" COLOR="gray35">{par_text}</FONT></TD>'
                     "</TR>\n"
                 )
-            op_table = (
-                '    <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3">\n'
-                "      <TR>"
-                f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
-                f"{''.join(node_in_cells)}</TR>\n"
-                "      <TR>"
-                f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
-                f'<TD BGCOLOR="{op_cell_bg}" ALIGN="LEFT" COLSPAN="{slot_cols}">{op_content}</TD>'
-                "</TR>\n"
-                f"{par_row}"
+            op_rows = [
+                (
+                    "      <TR>"
+                    f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
+                    f"{''.join(node_in_cells)}</TR>\n"
+                ),
+                (
+                    "      <TR>"
+                    f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
+                    f'<TD BGCOLOR="{op_cell_bg}" ALIGN="LEFT" COLSPAN="{slot_cols}">{op_content}</TD>'
+                    "</TR>\n"
+                ),
+            ]
+            if par_row:
+                op_rows.append(par_row)
+            op_rows.append(
                 "      <TR>"
                 f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
                 f"{''.join(node_out_cells)}</TR>\n"
+            )
+            op_table = (
+                '    <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3">\n'
+                f"{''.join(_ordered_rows(op_rows, top_down=top_down))}"
                 "    </TABLE>"
             )
             lines.append(f'  "{node_id}" [shape=plain, label=<{op_table}>];')
@@ -1309,24 +1386,33 @@ def _walk_graph(
                 then_port = _port_id("arg_then")
                 else_port = _port_id("arg_else")
                 out_port = _port_id(f"out_{out_var}")
+                select_rows = [
+                    (
+                        "      <TR>"
+                        '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
+                        f'<TD PORT="{cond_port}" BGCOLOR="lightyellow" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>cond</B></FONT></TD>'
+                        f'<TD PORT="{then_port}" BGCOLOR="honeydew" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>then</B></FONT></TD>'
+                        f'<TD PORT="{else_port}" BGCOLOR="mistyrose" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>else</B></FONT></TD>'
+                        "</TR>\n"
+                    ),
+                    (
+                        "      <TR>"
+                        '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
+                        '<TD BGCOLOR="seashell2" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="10"><B>?:</B></FONT>'
+                        f'<BR ALIGN="LEFT"/><FONT POINT-SIZE="8" COLOR="gray35">{_html_escape(out_var)}</FONT></TD>'
+                        "</TR>\n"
+                    ),
+                    (
+                        "      <TR>"
+                        '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
+                        f'<TD PORT="{out_port}" BGCOLOR="honeydew" ALIGN="CENTER" COLSPAN="3">'
+                        f'<FONT POINT-SIZE="7">{_html_escape(out_var)}</FONT></TD>'
+                        "</TR>\n"
+                    ),
+                ]
                 select_table = (
                     '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3" COLOR="deeppink4" BGCOLOR="lavenderblush">\n'
-                    "      <TR>"
-                    '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
-                    f'<TD PORT="{cond_port}" BGCOLOR="lightyellow" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>cond</B></FONT></TD>'
-                    f'<TD PORT="{then_port}" BGCOLOR="honeydew" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>then</B></FONT></TD>'
-                    f'<TD PORT="{else_port}" BGCOLOR="mistyrose" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>else</B></FONT></TD>'
-                    "</TR>\n"
-                    "      <TR>"
-                    '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
-                    '<TD BGCOLOR="seashell2" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="10"><B>?:</B></FONT>'
-                    f'<BR ALIGN="LEFT"/><FONT POINT-SIZE="8" COLOR="gray35">{_html_escape(out_var)}</FONT></TD>'
-                    "</TR>\n"
-                    "      <TR>"
-                    '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
-                    f'<TD PORT="{out_port}" BGCOLOR="honeydew" ALIGN="CENTER" COLSPAN="3">'
-                    f'<FONT POINT-SIZE="7">{_html_escape(out_var)}</FONT></TD>'
-                    "</TR>\n"
+                    f"{''.join(_ordered_rows(select_rows, top_down=top_down))}"
                     "    </TABLE>"
                 )
                 lines.append(f'  "{select_id}" [shape=plain, label=<{select_table}>];')
@@ -1409,6 +1495,7 @@ def _walk_graph(
                     block_io_types=block_io_types,
                     block_scope_prefixes=block_scope_prefixes,
                     current_block_name=current_block_name,
+                    top_down=top_down,
                     scope_context=scope_context,
                     input_gateway_node_ids=input_gateway_node_ids,
                     output_gateway_node_ids=output_gateway_node_ids,
@@ -1452,6 +1539,7 @@ def _walk_graph(
                 block_io_types=block_io_types,
                 block_scope_prefixes=block_scope_prefixes,
                 current_block_name=current_block_name,
+                top_down=top_down,
                 scope_context=scope_context,
                 input_gateway_node_ids=input_gateway_node_ids,
                 output_gateway_node_ids=output_gateway_node_ids,
@@ -1550,6 +1638,10 @@ def _walk_graph(
                 continue
             if (out_node_id, out_port) not in scope_out_emitted_ports:
                 continue
+            # Only route through scope-out when this scope still owns the latest
+            # runtime value; otherwise a later outer-scope rebind should win.
+            if runtime_var_scope.get(var_name) != scope_name:
+                continue
             scope_dst_endpoint: _Endpoint = (out_node_id, out_port)
             _append_edge(edge_labels, src=src_endpoint, dst=scope_dst_endpoint, label=var_name)
             var_sources[var_name] = scope_dst_endpoint
@@ -1572,6 +1664,7 @@ def _render_block(
     block_label_by_block: Mapping[str, str] | None = None,
     block_io_types: Mapping[str, Mapping[str, Mapping[str, str]]] | None = None,
     block_scope_prefixes: Mapping[str, str] | None = None,
+    top_down: bool = True,
     input_gateway_node_ids: set[str] | None = None,
     output_gateway_node_ids: set[str] | None = None,
 ) -> None:
@@ -1706,6 +1799,7 @@ def _render_block(
             block_io_types=block_io_types,
             block_scope_prefixes=block_scope_prefixes,
             current_block_name=block_name,
+            top_down=top_down,
             input_gateway_node_ids=input_gateway_node_ids,
             output_gateway_node_ids=output_gateway_node_ids,
         )
@@ -1863,6 +1957,7 @@ def render_synapse_spec_to_dot(
     block_label_by_block: Mapping[str, str] | None = None,
     block_io_types: Mapping[str, Mapping[str, Mapping[str, str]]] | None = None,
     show_control_flow: bool = True,
+    direction: str = "top-down",
 ) -> str:
     model = spec.get("model")
     if not isinstance(model, Mapping):
@@ -1874,9 +1969,19 @@ def render_synapse_spec_to_dot(
         block_io_types if block_io_types is not None else extract_block_io_types_from_spec(spec)
     )
 
+    direction_value = direction.strip().lower()
+    if direction_value == "top-down":
+        rankdir = "TB"
+        top_down = True
+    elif direction_value == "bottom-up":
+        rankdir = "BT"
+        top_down = False
+    else:
+        raise ValueError("direction must be either 'top-down' or 'bottom-up'")
+
     lines: list[str] = [
         "digraph synapse {",
-        "  rankdir=TB;",
+        f"  rankdir={rankdir};",
         "  compound=true;",
         "  newrank=true;",
         '  graph [fontname="Helvetica"];',
@@ -1971,6 +2076,7 @@ def render_synapse_spec_to_dot(
         block_label_by_block=block_label_by_block,
         block_io_types=resolved_block_io_types,
         block_scope_prefixes=block_scope_prefixes,
+        top_down=top_down,
         input_gateway_node_ids=input_gateway_node_ids,
         output_gateway_node_ids=output_gateway_node_ids,
     )
@@ -1992,30 +2098,37 @@ def render_synapse_spec_to_dot(
                 block_label_by_block=block_label_by_block,
                 block_io_types=resolved_block_io_types,
                 block_scope_prefixes=block_scope_prefixes,
+                top_down=top_down,
                 input_gateway_node_ids=input_gateway_node_ids,
                 output_gateway_node_ids=output_gateway_node_ids,
             )
 
     gateway_nodes = input_gateway_node_ids.union(output_gateway_node_ids)
+    src_compass = "s" if top_down else "n"
+    dst_compass = "n" if top_down else "s"
 
     def _render_edge_src(endpoint: _Endpoint) -> str:
         node_id, _port = endpoint
         if node_id in gateway_nodes:
-            return _dot_endpoint_with_compass(endpoint, "s")
+            return _dot_endpoint_with_compass(endpoint, src_compass)
         return _dot_endpoint(endpoint)
 
     def _render_edge_dst(endpoint: _Endpoint) -> str:
         node_id, _port = endpoint
         if node_id in gateway_nodes:
-            return _dot_endpoint_with_compass(endpoint, "n")
+            return _dot_endpoint_with_compass(endpoint, dst_compass)
         return _dot_endpoint(endpoint)
 
     for src, dst in sorted(flow_edges):
         src_render = (
-            _dot_endpoint_with_compass((src, None), "s") if src in gateway_nodes else f'"{src}"'
+            _dot_endpoint_with_compass((src, None), src_compass)
+            if src in gateway_nodes
+            else f'"{src}"'
         )
         dst_render = (
-            _dot_endpoint_with_compass((dst, None), "n") if dst in gateway_nodes else f'"{dst}"'
+            _dot_endpoint_with_compass((dst, None), dst_compass)
+            if dst in gateway_nodes
+            else f'"{dst}"'
         )
         if show_control_flow:
             lines.append(
@@ -2025,10 +2138,14 @@ def render_synapse_spec_to_dot(
             lines.append(f"  {src_render} -> {dst_render} [style=invis];")
     for src, dst, label in sorted(loop_control_edges):
         src_render = (
-            _dot_endpoint_with_compass((src, None), "s") if src in gateway_nodes else f'"{src}"'
+            _dot_endpoint_with_compass((src, None), src_compass)
+            if src in gateway_nodes
+            else f'"{src}"'
         )
         dst_render = (
-            _dot_endpoint_with_compass((dst, None), "n") if dst in gateway_nodes else f'"{dst}"'
+            _dot_endpoint_with_compass((dst, None), dst_compass)
+            if dst in gateway_nodes
+            else f'"{dst}"'
         )
         lines.append(
             f'  {src_render} -> {dst_render} [style=dashed, color="deepskyblue4", '
@@ -2072,6 +2189,7 @@ def run_axon_visualize(
     output_path: Path,
     main_module: str | None = None,
     show_control_flow: bool = True,
+    direction: str = "top-down",
 ) -> Path:
     modules = parse_axon_program_from_path(axon_file)
     spec = lower_axon_program_to_synapse_spec(modules, main_module=main_module)
@@ -2127,6 +2245,7 @@ def run_axon_visualize(
         block_label_by_block=block_label_by_block,
         block_io_types=block_io_types,
         show_control_flow=show_control_flow,
+        direction=direction,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(dot_text, encoding="utf-8")
