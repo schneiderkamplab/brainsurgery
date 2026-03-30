@@ -684,6 +684,58 @@ def _ordered_rows(rows: list[str], *, top_down: bool) -> list[str]:
     return rows if top_down else list(reversed(rows))
 
 
+def _transpose_table(rows: list[list[str]]) -> list[str]:
+    if not rows:
+        return []
+    width = max(len(row) for row in rows)
+    normalized = [row + ['<TD BGCOLOR="white"></TD>'] * (width - len(row)) for row in rows]
+    out: list[str] = []
+    for col in range(width):
+        out.append(f"      <TR>{''.join(row[col] for row in normalized)}</TR>\n")
+    return out
+
+
+def _render_gateway_row_table(
+    *,
+    label: str,
+    label_bg: str,
+    slot_cells: list[str],
+    empty_bg: str,
+    border: int,
+    cellborder: int,
+    cellspacing: int,
+    cellpadding: int,
+    color: str | None,
+    transpose_layout: bool,
+) -> str:
+    if not slot_cells:
+        slot_cells = [f'<TD BGCOLOR="{empty_bg}"></TD>']
+    color_attr = f' COLOR="{color}"' if isinstance(color, str) else ""
+    if not transpose_layout:
+        return (
+            f'    <TABLE BORDER="{border}" CELLBORDER="{cellborder}" '
+            f'CELLSPACING="{cellspacing}" CELLPADDING="{cellpadding}"{color_attr}>\n'
+            "      <TR>"
+            f'<TD BGCOLOR="{label_bg}" ALIGN="CENTER"><B>{_html_escape(label)}</B></TD>'
+            f"{''.join(slot_cells)}</TR>\n"
+            "    </TABLE>"
+        )
+    rows = [
+        [
+            f'<TD BGCOLOR="{label_bg}" ALIGN="CENTER"><B>{_html_escape(label)}</B></TD>',
+            *[f'<TD BGCOLOR="{empty_bg}"></TD>' for _ in slot_cells],
+        ],
+        [*slot_cells],
+    ]
+    transposed = _transpose_table(rows)
+    return (
+        f'    <TABLE BORDER="{border}" CELLBORDER="{cellborder}" '
+        f'CELLSPACING="{cellspacing}" CELLPADDING="{cellpadding}"{color_attr}>\n'
+        f"{''.join(transposed)}"
+        "    </TABLE>"
+    )
+
+
 def _walk_graph(
     graph: list[Any],
     *,
@@ -708,6 +760,7 @@ def _walk_graph(
     block_scope_prefixes: Mapping[str, str] | None,
     current_block_name: str,
     top_down: bool,
+    transpose_layout: bool,
     scope_context: dict[str, Any] | None = None,
     input_gateway_node_ids: set[str] | None = None,
     output_gateway_node_ids: set[str] | None = None,
@@ -848,12 +901,17 @@ def _walk_graph(
             if not in_cells:
                 in_cells.append('<TD BGCOLOR="azure"></TD>')
             scope_in_ports[scope_name] = in_port_map
-            in_table = (
-                '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="steelblue4">\n'
-                "      <TR>"
-                '<TD BGCOLOR="azure" ALIGN="CENTER"><B>SCOPE</B></TD>'
-                f"{''.join(in_cells)}</TR>\n"
-                "    </TABLE>"
+            in_table = _render_gateway_row_table(
+                label="SCOPE",
+                label_bg="azure",
+                slot_cells=in_cells,
+                empty_bg="azure",
+                border=2,
+                cellborder=1,
+                cellspacing=0,
+                cellpadding=6,
+                color="steelblue4",
+                transpose_layout=transpose_layout,
             )
             if in_id not in scope_nodes_emitted:
                 lines.append(f'  "{in_id}" [shape=plain, label=<{in_table}>];')
@@ -875,12 +933,17 @@ def _walk_graph(
             if not out_cells:
                 out_cells.append('<TD BGCOLOR="honeydew"></TD>')
             scope_out_ports[scope_name] = out_port_map
-            out_table = (
-                '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="steelblue4">\n'
-                "      <TR>"
-                '<TD BGCOLOR="honeydew" ALIGN="CENTER"><B>SCOPE</B></TD>'
-                f"{''.join(out_cells)}</TR>\n"
-                "    </TABLE>"
+            out_table = _render_gateway_row_table(
+                label="SCOPE",
+                label_bg="honeydew",
+                slot_cells=out_cells,
+                empty_bg="honeydew",
+                border=2,
+                cellborder=1,
+                cellspacing=0,
+                cellpadding=6,
+                color="steelblue4",
+                transpose_layout=transpose_layout,
             )
             if out_id not in scope_nodes_emitted:
                 lines.append(f'  "{out_id}" [shape=plain, label=<{out_table}>];')
@@ -1139,13 +1202,17 @@ def _walk_graph(
             ]
             if not for_in_cells:
                 for_in_cells = ['<TD BGCOLOR="azure"></TD>']
-            header_table = (
-                '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="deepskyblue4">\n'
-                "      <TR>"
-                '<TD BGCOLOR="azure" ALIGN="CENTER"><B>FOR</B></TD>'
-                f"{''.join(for_in_cells)}"
-                "</TR>\n"
-                "    </TABLE>"
+            header_table = _render_gateway_row_table(
+                label="FOR",
+                label_bg="azure",
+                slot_cells=for_in_cells,
+                empty_bg="azure",
+                border=2,
+                cellborder=1,
+                cellspacing=0,
+                cellpadding=6,
+                color="deepskyblue4",
+                transpose_layout=transpose_layout,
             )
             lines.append(f'  "{node_id}" [shape=plain, label=<{header_table}>];')
             created_nodes.append(node_id)
@@ -1162,13 +1229,17 @@ def _walk_graph(
             ]
             if not for_out_cells:
                 for_out_cells = ['<TD BGCOLOR="honeydew"></TD>']
-            output_table = (
-                '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6" COLOR="deepskyblue4">\n'
-                "      <TR>"
-                '<TD BGCOLOR="honeydew" ALIGN="CENTER"><B>FOR</B></TD>'
-                f"{''.join(for_out_cells)}"
-                "</TR>\n"
-                "    </TABLE>"
+            output_table = _render_gateway_row_table(
+                label="FOR",
+                label_bg="honeydew",
+                slot_cells=for_out_cells,
+                empty_bg="honeydew",
+                border=2,
+                cellborder=1,
+                cellspacing=0,
+                cellpadding=6,
+                color="deepskyblue4",
+                transpose_layout=transpose_layout,
             )
             lines.append(f'  "{loop_output_id}" [shape=plain, label=<{output_table}>];')
             created_nodes.append(loop_output_id)
@@ -1201,31 +1272,76 @@ def _walk_graph(
                     f'<FONT POINT-SIZE="7" COLOR="gray35">{par_text}</FONT></TD>'
                     "</TR>\n"
                 )
-            op_rows = [
-                (
+            if transpose_layout:
+                slot_row_count = max(1, slot_cols)
+                rows: list[str] = []
+                header_cells = [
+                    f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>',
+                    f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>',
+                ]
+                if param_paths:
+                    header_cells.append(
+                        f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>PAR</B></FONT></TD>'
+                    )
+                header_cells.append(
+                    f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
+                )
+                rows.append(f"      <TR>{''.join(header_cells)}</TR>\n")
+                par_cell = (
+                    f'<TD BGCOLOR="{op_cell_bg}" ALIGN="LEFT" ROWSPAN="{slot_row_count}">'
+                    f'<FONT POINT-SIZE="7" COLOR="gray35">{_html_escape(", ".join(param_paths))}</FONT></TD>'
+                    if param_paths
+                    else ""
+                )
+                for i in range(slot_row_count):
+                    in_cell = (
+                        node_in_cells[i] if i < len(node_in_cells) else '<TD BGCOLOR="azure"></TD>'
+                    )
+                    out_cell = (
+                        node_out_cells[i]
+                        if i < len(node_out_cells)
+                        else '<TD BGCOLOR="honeydew"></TD>'
+                    )
+                    cells = [in_cell]
+                    if i == 0:
+                        cells.append(
+                            f'<TD BGCOLOR="{op_cell_bg}" ALIGN="LEFT" ROWSPAN="{slot_row_count}">{op_content}</TD>'
+                        )
+                        if par_cell:
+                            cells.append(par_cell)
+                    cells.append(out_cell)
+                    rows.append(f"      <TR>{''.join(cells)}</TR>\n")
+                op_table = (
+                    '    <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3">\n'
+                    f"{''.join(rows)}"
+                    "    </TABLE>"
+                )
+            else:
+                op_rows = [
+                    (
+                        "      <TR>"
+                        f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
+                        f"{''.join(node_in_cells)}</TR>\n"
+                    ),
+                    (
+                        "      <TR>"
+                        f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
+                        f'<TD BGCOLOR="{op_cell_bg}" ALIGN="LEFT" COLSPAN="{slot_cols}">{op_content}</TD>'
+                        "</TR>\n"
+                    ),
+                ]
+                if par_row:
+                    op_rows.append(par_row)
+                op_rows.append(
                     "      <TR>"
-                    f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
-                    f"{''.join(node_in_cells)}</TR>\n"
-                ),
-                (
-                    "      <TR>"
-                    f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
-                    f'<TD BGCOLOR="{op_cell_bg}" ALIGN="LEFT" COLSPAN="{slot_cols}">{op_content}</TD>'
-                    "</TR>\n"
-                ),
-            ]
-            if par_row:
-                op_rows.append(par_row)
-            op_rows.append(
-                "      <TR>"
-                f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
-                f"{''.join(node_out_cells)}</TR>\n"
-            )
-            op_table = (
-                '    <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3">\n'
-                f"{''.join(_ordered_rows(op_rows, top_down=top_down))}"
-                "    </TABLE>"
-            )
+                    f'<TD BGCOLOR="{row_label_bg}" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
+                    f"{''.join(node_out_cells)}</TR>\n"
+                )
+                op_table = (
+                    '    <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3">\n'
+                    f"{''.join(_ordered_rows(op_rows, top_down=top_down))}"
+                    "    </TABLE>"
+                )
             lines.append(f'  "{node_id}" [shape=plain, label=<{op_table}>];')
             created_nodes.append(node_id)
         if prev_node_id is not None:
@@ -1386,35 +1502,59 @@ def _walk_graph(
                 then_port = _port_id("arg_then")
                 else_port = _port_id("arg_else")
                 out_port = _port_id(f"out_{out_var}")
-                select_rows = [
-                    (
-                        "      <TR>"
-                        '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
-                        f'<TD PORT="{cond_port}" BGCOLOR="lightyellow" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>cond</B></FONT></TD>'
-                        f'<TD PORT="{then_port}" BGCOLOR="honeydew" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>then</B></FONT></TD>'
-                        f'<TD PORT="{else_port}" BGCOLOR="mistyrose" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>else</B></FONT></TD>'
-                        "</TR>\n"
-                    ),
-                    (
-                        "      <TR>"
+                if transpose_layout:
+                    select_rows_cells = [
+                        '<TR><TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
                         '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
-                        '<TD BGCOLOR="seashell2" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="10"><B>?:</B></FONT>'
+                        '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD></TR>\n',
+                        "<TR>"
+                        f'<TD PORT="{cond_port}" BGCOLOR="lightyellow" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>cond</B></FONT></TD>'
+                        '<TD BGCOLOR="seashell2" ALIGN="LEFT" ROWSPAN="3"><FONT POINT-SIZE="10"><B>?:</B></FONT>'
                         f'<BR ALIGN="LEFT"/><FONT POINT-SIZE="8" COLOR="gray35">{_html_escape(out_var)}</FONT></TD>'
-                        "</TR>\n"
-                    ),
-                    (
-                        "      <TR>"
-                        '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
-                        f'<TD PORT="{out_port}" BGCOLOR="honeydew" ALIGN="CENTER" COLSPAN="3">'
-                        f'<FONT POINT-SIZE="7">{_html_escape(out_var)}</FONT></TD>'
-                        "</TR>\n"
-                    ),
-                ]
-                select_table = (
-                    '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3" COLOR="deeppink4" BGCOLOR="lavenderblush">\n'
-                    f"{''.join(_ordered_rows(select_rows, top_down=top_down))}"
-                    "    </TABLE>"
-                )
+                        f'<TD PORT="{out_port}" BGCOLOR="honeydew" ALIGN="CENTER" ROWSPAN="3"><FONT POINT-SIZE="7">{_html_escape(out_var)}</FONT></TD>'
+                        "</TR>\n",
+                        "<TR>"
+                        f'<TD PORT="{then_port}" BGCOLOR="honeydew" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>then</B></FONT></TD>'
+                        "</TR>\n",
+                        "<TR>"
+                        f'<TD PORT="{else_port}" BGCOLOR="mistyrose" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>else</B></FONT></TD>'
+                        "</TR>\n",
+                    ]
+                    select_table = (
+                        '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3" COLOR="deeppink4" BGCOLOR="lavenderblush">\n'
+                        f"{''.join(select_rows_cells)}"
+                        "    </TABLE>"
+                    )
+                else:
+                    select_rows = [
+                        (
+                            "      <TR>"
+                            '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
+                            f'<TD PORT="{cond_port}" BGCOLOR="lightyellow" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>cond</B></FONT></TD>'
+                            f'<TD PORT="{then_port}" BGCOLOR="honeydew" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>then</B></FONT></TD>'
+                            f'<TD PORT="{else_port}" BGCOLOR="mistyrose" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>else</B></FONT></TD>'
+                            "</TR>\n"
+                        ),
+                        (
+                            "      <TR>"
+                            '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
+                            '<TD BGCOLOR="seashell2" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="10"><B>?:</B></FONT>'
+                            f'<BR ALIGN="LEFT"/><FONT POINT-SIZE="8" COLOR="gray35">{_html_escape(out_var)}</FONT></TD>'
+                            "</TR>\n"
+                        ),
+                        (
+                            "      <TR>"
+                            '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
+                            f'<TD PORT="{out_port}" BGCOLOR="honeydew" ALIGN="CENTER" COLSPAN="3">'
+                            f'<FONT POINT-SIZE="7">{_html_escape(out_var)}</FONT></TD>'
+                            "</TR>\n"
+                        ),
+                    ]
+                    select_table = (
+                        '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3" COLOR="deeppink4" BGCOLOR="lavenderblush">\n'
+                        f"{''.join(_ordered_rows(select_rows, top_down=top_down))}"
+                        "    </TABLE>"
+                    )
                 lines.append(f'  "{select_id}" [shape=plain, label=<{select_table}>];')
                 created_nodes.append(select_id)
                 if isinstance(node_scope, str):
@@ -1496,6 +1636,7 @@ def _walk_graph(
                     block_scope_prefixes=block_scope_prefixes,
                     current_block_name=current_block_name,
                     top_down=top_down,
+                    transpose_layout=transpose_layout,
                     scope_context=scope_context,
                     input_gateway_node_ids=input_gateway_node_ids,
                     output_gateway_node_ids=output_gateway_node_ids,
@@ -1540,6 +1681,7 @@ def _walk_graph(
                 block_scope_prefixes=block_scope_prefixes,
                 current_block_name=current_block_name,
                 top_down=top_down,
+                transpose_layout=transpose_layout,
                 scope_context=scope_context,
                 input_gateway_node_ids=input_gateway_node_ids,
                 output_gateway_node_ids=output_gateway_node_ids,
@@ -1665,6 +1807,7 @@ def _render_block(
     block_io_types: Mapping[str, Mapping[str, Mapping[str, str]]] | None = None,
     block_scope_prefixes: Mapping[str, str] | None = None,
     top_down: bool = True,
+    transpose_layout: bool = False,
     input_gateway_node_ids: set[str] | None = None,
     output_gateway_node_ids: set[str] | None = None,
 ) -> None:
@@ -1748,12 +1891,17 @@ def _render_block(
             var_sources[input_name] = (block_id, port)
             if input_name in input_types:
                 var_types[input_name] = input_types[input_name]
-        table = (
-            '    <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6">\n'
-            "      <TR>"
-            f'<TD BGCOLOR="azure" ALIGN="CENTER"><B>{title}</B></TD>'
-            f"{''.join(port_cells)}</TR>\n"
-            "    </TABLE>"
+        table = _render_gateway_row_table(
+            label=title,
+            label_bg="azure",
+            slot_cells=port_cells,
+            empty_bg="azure",
+            border=1,
+            cellborder=1,
+            cellspacing=0,
+            cellpadding=6,
+            color=None,
+            transpose_layout=transpose_layout,
         )
         lines.append(f'    "{block_id}" [shape=plain, label=<{table}>];')
         if input_gateway_node_ids is not None:
@@ -1800,6 +1948,7 @@ def _render_block(
             block_scope_prefixes=block_scope_prefixes,
             current_block_name=block_name,
             top_down=top_down,
+            transpose_layout=transpose_layout,
             input_gateway_node_ids=input_gateway_node_ids,
             output_gateway_node_ids=output_gateway_node_ids,
         )
@@ -1922,12 +2071,17 @@ def _render_block(
                     f'<TD PORT="{_port_id(output_name)}" BGCOLOR="honeydew" ALIGN="CENTER">{_slot_label_html(output_name, output_types.get(output_name) or var_types.get(output_name))}</TD>'
                 )
             output_block_title = _html_escape("BLOCK")
-            output_table = (
-                '    <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0" CELLPADDING="6">\n'
-                "      <TR>"
-                f'<TD BGCOLOR="honeydew" ALIGN="CENTER"><B>{output_block_title}</B></TD>'
-                f"{''.join(output_cells)}</TR>\n"
-                "    </TABLE>"
+            output_table = _render_gateway_row_table(
+                label=output_block_title,
+                label_bg="honeydew",
+                slot_cells=output_cells,
+                empty_bg="honeydew",
+                border=1,
+                cellborder=1,
+                cellspacing=0,
+                cellpadding=6,
+                color=None,
+                transpose_layout=transpose_layout,
             )
             lines.append(f'    "{output_group_id}" [shape=plain, label=<{output_table}>];')
             if output_gateway_node_ids is not None:
@@ -1973,11 +2127,29 @@ def render_synapse_spec_to_dot(
     if direction_value == "top-down":
         rankdir = "TB"
         top_down = True
+        transpose_layout = False
+        src_compass = "s"
+        dst_compass = "n"
     elif direction_value == "bottom-up":
         rankdir = "BT"
         top_down = False
+        transpose_layout = False
+        src_compass = "n"
+        dst_compass = "s"
+    elif direction_value == "left-right":
+        rankdir = "LR"
+        top_down = True
+        transpose_layout = True
+        src_compass = "e"
+        dst_compass = "w"
+    elif direction_value == "right-left":
+        rankdir = "RL"
+        top_down = True
+        transpose_layout = True
+        src_compass = "w"
+        dst_compass = "e"
     else:
-        raise ValueError("direction must be either 'top-down' or 'bottom-up'")
+        raise ValueError("direction must be one of: top-down, bottom-up, left-right, right-left")
 
     lines: list[str] = [
         "digraph synapse {",
@@ -2077,6 +2249,7 @@ def render_synapse_spec_to_dot(
         block_io_types=resolved_block_io_types,
         block_scope_prefixes=block_scope_prefixes,
         top_down=top_down,
+        transpose_layout=transpose_layout,
         input_gateway_node_ids=input_gateway_node_ids,
         output_gateway_node_ids=output_gateway_node_ids,
     )
@@ -2099,13 +2272,12 @@ def render_synapse_spec_to_dot(
                 block_io_types=resolved_block_io_types,
                 block_scope_prefixes=block_scope_prefixes,
                 top_down=top_down,
+                transpose_layout=transpose_layout,
                 input_gateway_node_ids=input_gateway_node_ids,
                 output_gateway_node_ids=output_gateway_node_ids,
             )
 
     gateway_nodes = input_gateway_node_ids.union(output_gateway_node_ids)
-    src_compass = "s" if top_down else "n"
-    dst_compass = "n" if top_down else "s"
 
     def _render_edge_src(endpoint: _Endpoint) -> str:
         node_id, _port = endpoint

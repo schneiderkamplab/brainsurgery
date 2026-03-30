@@ -209,6 +209,33 @@ def test_render_synapse_spec_to_dot_has_variable_labeled_edges_and_block_calls()
     assert "block blk" in dot
 
 
+def test_render_synapse_spec_to_dot_supports_horizontal_directions() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}, "y": {"shape": []}},
+            "graph": [{"sum_xy": {"_op": "add", "_args": ["x", "y"], "_bind": "z"}}],
+            "outputs": {"z": "z"},
+        },
+    }
+    dot_lr = render_synapse_spec_to_dot(spec, direction="left-right")
+    assert "rankdir=LR;" in dot_lr
+    assert '"n_block::main":"p_x":e -> "n_op::main::graph::0000_sum_xy":"p_arg_x";' in dot_lr
+    assert '"n_op::main::graph::0000_sum_xy":"p_out_z" -> "n_outputs::main":"p_z":w;' in dot_lr
+    assert (
+        '<TR><TD BGCOLOR="gray90" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
+        '<TD BGCOLOR="gray90" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
+        '<TD BGCOLOR="gray90" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD></TR>'
+        in dot_lr
+    )
+    assert 'ROWSPAN="2"' in dot_lr
+
+    dot_rl = render_synapse_spec_to_dot(spec, direction="right-left")
+    assert "rankdir=RL;" in dot_rl
+    assert '"n_block::main":"p_x":w -> "n_op::main::graph::0000_sum_xy":"p_arg_x";' in dot_rl
+    assert '"n_op::main::graph::0000_sum_xy":"p_out_z" -> "n_outputs::main":"p_z":e;' in dot_rl
+
+
 def test_cli_axon_visualize_writes_dot_file(tmp_path: Path) -> None:
     axon_path = tmp_path / "tiny.axon"
     dot_path = tmp_path / "tiny.dot"
@@ -230,6 +257,33 @@ tiny x y = do
     assert "digraph synapse" in dot_text
     assert "add" in dot_text
     assert '"p_arg_x"' in dot_text
+
+
+def test_render_synapse_spec_to_dot_vertical_directions_keep_non_transposed_tables() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}, "y": {"shape": []}},
+            "graph": [{"sum_xy": {"_op": "add", "_args": ["x", "y"], "_bind": "z"}}],
+            "outputs": {"z": "z"},
+        },
+    }
+    dot_td = render_synapse_spec_to_dot(spec, direction="top-down")
+    assert "rankdir=TB;" in dot_td
+    assert (
+        '<TR><TD BGCOLOR="gray90" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
+        '<TD PORT="p_arg_x" BGCOLOR="lemonchiffon" ALIGN="CENTER"><FONT POINT-SIZE="7">x</FONT></TD>'
+        '<TD PORT="p_arg_y" BGCOLOR="lemonchiffon" ALIGN="CENTER"><FONT POINT-SIZE="7">y</FONT></TD></TR>'
+        in dot_td
+    )
+
+    dot_bu = render_synapse_spec_to_dot(spec, direction="bottom-up")
+    assert "rankdir=BT;" in dot_bu
+    assert (
+        '<TR><TD BGCOLOR="gray90" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
+        '<TD PORT="p_out_z" BGCOLOR="honeydew" ALIGN="CENTER"><FONT POINT-SIZE="7">z</FONT></TD>'
+        '<TD BGCOLOR="honeydew"></TD></TR>' in dot_bu
+    )
 
 
 def test_cli_axon_visualize_requires_dot_output(tmp_path: Path) -> None:

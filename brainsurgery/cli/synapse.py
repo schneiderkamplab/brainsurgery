@@ -542,7 +542,7 @@ def axon_visualize(
     direction: str = typer.Option(
         "top-down",
         "--direction",
-        help="Graph layout direction: top-down or bottom-up.",
+        help="Graph layout direction: top-down, bottom-up, left-right, or right-left.",
     ),
 ) -> None:
     """Lower an Axon program and write a DOT graph of blocks + ops + variable-flow edges."""
