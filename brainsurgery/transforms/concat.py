@@ -43,8 +43,6 @@ class ConcatTransform(BaseTransform):
     name = "concat"
     error_type = ConcatTransformError
     spec_type = ConcatSpec
-    allowed_keys = {"from", "to", "dim"}
-    required_keys = {"from", "to"}
     help_text = (
         "Concatenates multiple source tensors into one destination tensor.\n"
         "\n"
@@ -60,8 +58,8 @@ class ConcatTransform(BaseTransform):
         return TransformPayloadSchema(
             mode_key=None,
             default_mode="default",
-            common_required=set(self.required_keys),
-            common_allowed=set(self.allowed_keys),
+            common_required={"from", "to"},
+            common_allowed={"from", "to", "dim"},
         )
 
     def completion_reference_keys(self) -> list[str]:

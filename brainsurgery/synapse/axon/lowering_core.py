@@ -13,6 +13,7 @@ from ..ops import (
     get_op_lowering_signature,
     get_op_lowering_validator,
 )
+from ..type_inference import annotate_spec_with_block_io_types, infer_block_io_types_from_modules
 from .call_parser import (
     looks_like_call as _looks_like_call,
 )
@@ -264,6 +265,39 @@ def _with_when(nodes: list[dict[str, Any]], when: str | None) -> list[dict[str, 
     return out
 
 
+def _with_scope(nodes: list[dict[str, Any]], scope: str | None) -> list[dict[str, Any]]:
+    if not isinstance(scope, str) or not scope:
+        return nodes
+
+    def _annotate_node_spec(node_spec: dict[str, Any]) -> dict[str, Any]:
+        spec = dict(node_spec)
+        op = spec.get("_op")
+        if isinstance(op, str) and "_scope" not in spec:
+            spec["_scope"] = scope
+        nested = spec.get("graph")
+        if isinstance(nested, list):
+            spec["graph"] = _annotate_items(nested)
+        body = spec.get("_body")
+        if isinstance(body, list):
+            spec["_body"] = _annotate_items(body)
+        return spec
+
+    def _annotate_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict) or len(item) != 1:
+                out_items.append(item)
+                continue
+            name, node_spec = next(iter(item.items()))
+            if not isinstance(node_spec, dict):
+                out_items.append(item)
+                continue
+            out_items.append({name: _annotate_node_spec(node_spec)})
+        return out_items
+
+    return _annotate_items(nodes)
+
+
 def _op_name_from_callee(callee: str) -> str:
     if "@" in callee:
         return callee.split("@", 1)[0]
@@ -386,6 +420,7 @@ def _lower_simple_call(
     _reject_obsolete_namespace_call(callee)
     pre_graph: list[dict[str, Any]] = []
     effective_when = _merge_when(when, kwargs.pop("when", None))
+    effective_scope = ".".join(part for part in ctx.scope_stack if part)
 
     resolved_args: list[str] = []
     raw_op_name = _op_name_from_callee(callee)
@@ -410,7 +445,8 @@ def _lower_simple_call(
         if isinstance(value, str):
             stripped_value = _strip_wrapping_parens(value)
             if _looks_like_call(stripped_value):
-                tmp = ctx.fresh("kwarg")
+                key_token = re.sub(r"[^A-Za-z0-9_]+", "_", key).strip("_") or "kwarg"
+                tmp = ctx.fresh(f"kwarg_{key_token}")
                 pre_graph.extend(_lower_expr(stripped_value, tmp, ctx, when=when))
                 resolved_kwargs[key] = tmp
                 continue
@@ -531,7 +567,7 @@ def _lower_simple_call(
             node_spec[key] = value
         nodes = _with_when([{node_name: node_spec}], effective_when)
         _record_last_dim_for_call(callee=block_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
-        return [*pre_graph, *nodes]
+        return [*pre_graph, *_with_scope(nodes, effective_scope)]
 
     node_spec = _to_synapse_op(callee, args, kwargs, out)
     if "@" in callee:
@@ -542,7 +578,7 @@ def _lower_simple_call(
             templated_node["param_base"] = param_path
             nodes = _with_when([{node_name: templated_node}], effective_when)
             _record_last_dim_for_call(callee=op_name, args=args, kwargs=kwargs, out=out, ctx=ctx)
-            return [*pre_graph, *nodes]
+            return [*pre_graph, *_with_scope(nodes, effective_scope)]
         concrete_node = _to_synapse_op(op_name, args, kwargs, out)
         try:
             bound_params = _path_bound_param_names(concrete_node)
@@ -556,7 +592,7 @@ def _lower_simple_call(
             concrete_node["_params"] = params
             nodes = _with_when([{node_name: concrete_node}], effective_when)
             _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
-            return [*pre_graph, *nodes]
+            return [*pre_graph, *_with_scope(nodes, effective_scope)]
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
         if not segments:
             raise ValueError(f"invalid @ path in Axon call: {expr!r}")
@@ -565,11 +601,11 @@ def _lower_simple_call(
             item = {segment: {"graph": [item]}}
         nodes = _with_when([item], effective_when)
         _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
-        return [*pre_graph, *nodes]
+        return [*pre_graph, *_with_scope(nodes, effective_scope)]
     node_name = f"n_{ctx.fresh('op')}"
     nodes = _with_when([{node_name: node_spec}], effective_when)
     _record_last_dim_for_call(callee=callee, args=args, kwargs=kwargs, out=out, ctx=ctx)
-    return [*pre_graph, *nodes]
+    return [*pre_graph, *_with_scope(nodes, effective_scope)]
 
 
 def _lower_alias_or_const(
@@ -590,6 +626,9 @@ def _lower_alias_or_const(
             ctx.tensor_last_dim[out] = ctx.tensor_last_dim[token]
     else:
         node = {"_op": "_ir_const", "value": scalar, "_bind": out}
+    effective_scope = ".".join(part for part in ctx.scope_stack if part)
+    if effective_scope:
+        node["_scope"] = effective_scope
     return _with_when([{node_name: node}], when)
 
 
@@ -1198,10 +1237,17 @@ def lower_axon_module_to_synapse_spec(module: AxonModule) -> dict[str, Any]:
         model["symbols"] = dict(module.symbols)
     if module.pragmas:
         model["meta"] = dict(module.pragmas)
-    return {
+    spec = {
         "synapse": 1,
         "model": model,
     }
+    inferred_block_io_types = infer_block_io_types_from_modules(
+        spec=spec,
+        modules=(module,),
+        selected_main=module.name,
+    )
+    annotate_spec_with_block_io_types(spec, block_io_types=inferred_block_io_types)
+    return spec
 
 
 def _lower_statements(
@@ -1438,6 +1484,9 @@ def _resolve_paths_at_lowering_time(
 
         inlined = copy.deepcopy(template_spec)
         inlined = _substitute_names(inlined, input_values)
+        caller_scope = call_spec.get("_scope")
+        if isinstance(caller_scope, str) and caller_scope and "_scope" not in inlined:
+            inlined["_scope"] = caller_scope
 
         param_base = inlined.get("param_base")
         if isinstance(param_base, str):
@@ -1593,6 +1642,40 @@ def _resolve_paths_at_lowering_time(
         model.pop("blocks", None)
 
 
+def _canonical_type_source_block_name(block_name: str) -> str:
+    if "__" in block_name:
+        return block_name.split("__", 1)[0]
+    return block_name
+
+
+def _finalize_block_io_types_for_model(
+    *,
+    model: dict[str, Any],
+    inferred: dict[str, dict[str, dict[str, str]]],
+) -> dict[str, dict[str, dict[str, str]]]:
+    final_types: dict[str, dict[str, dict[str, str]]] = {}
+    main_types = inferred.get("main")
+    if isinstance(main_types, dict):
+        final_types["main"] = main_types
+
+    blocks = model.get("blocks")
+    if not isinstance(blocks, dict):
+        return final_types
+
+    for block_name in blocks:
+        if not isinstance(block_name, str):
+            continue
+        direct = inferred.get(block_name)
+        if isinstance(direct, dict):
+            final_types[block_name] = direct
+            continue
+        source_name = _canonical_type_source_block_name(block_name)
+        source = inferred.get(source_name)
+        if isinstance(source, dict):
+            final_types[block_name] = source
+    return final_types
+
+
 def lower_axon_program_to_synapse_spec(
     modules: tuple[AxonModule, ...], *, main_module: str | None = None
 ) -> dict[str, Any]:
@@ -1705,6 +1788,16 @@ def lower_axon_program_to_synapse_spec(
         spec["model"]["blocks"] = blocks
 
     _resolve_paths_at_lowering_time(spec["model"], block_path_params)
+    inferred_block_io_types = infer_block_io_types_from_modules(
+        spec=spec,
+        modules=modules,
+        selected_main=main_name,
+    )
+    final_block_io_types = _finalize_block_io_types_for_model(
+        model=spec["model"],
+        inferred=inferred_block_io_types,
+    )
+    annotate_spec_with_block_io_types(spec, block_io_types=final_block_io_types)
 
     return spec
 

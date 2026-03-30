@@ -158,43 +158,48 @@ function createActions({
       const runTransformName = appState.selectedTransform;
       const meta = getTransformMeta(runTransformName);
       const cfg = getTransformConfig(runTransformName);
-      const allowed = Array.isArray(meta.allowed_keys) ? meta.allowed_keys : [];
-      const required = new Set(Array.isArray(meta.required_keys) ? meta.required_keys : []);
-      let payload = {};
-
-      if (runTransformName === "prefixes") {
-        const mode = String(cfg.fields.mode == null ? "list" : cfg.fields.mode).trim().toLowerCase();
-        if (!["list", "add", "remove", "rename"].includes(mode)) {
-          setStatus("Invalid prefixes mode: " + mode);
+      const modeKey = typeof meta.mode_key === "string" && meta.mode_key ? meta.mode_key : null;
+      const modeNames = Array.isArray(meta.modes) ? meta.modes.map((m) => String(m).toLowerCase()) : [];
+      const defaultMode = typeof meta.default_mode === "string" && meta.default_mode
+        ? String(meta.default_mode).toLowerCase()
+        : (modeNames[0] || "default");
+      let selectedMode = null;
+      if (modeKey) {
+        const rawMode = String(cfg.fields[modeKey] == null ? defaultMode : cfg.fields[modeKey]).trim().toLowerCase();
+        if (!modeNames.includes(rawMode)) {
+          setStatus("Invalid " + modeKey + " for " + runTransformName + ": " + rawMode);
           return;
         }
-        if (mode === "list") {
-          payload = { mode: "list" };
-        } else if (mode === "add" || mode === "remove") {
-          const alias = String(cfg.fields.alias == null ? "" : cfg.fields.alias).trim();
-          if (!alias) { setStatus("Missing required parameter: alias"); return; }
-          payload = { mode: mode, alias: alias };
-        } else {
-          const fromAlias = String(cfg.fields.from == null ? "" : cfg.fields.from).trim();
-          const toAlias = String(cfg.fields.to == null ? "" : cfg.fields.to).trim();
-          if (!fromAlias) { setStatus("Missing required parameter: from"); return; }
-          if (!toAlias) { setStatus("Missing required parameter: to"); return; }
-          payload = { mode: "rename", from: fromAlias, to: toAlias };
+        selectedMode = rawMode;
+        cfg.fields[modeKey] = selectedMode;
+      }
+      const allowedByMode = meta.mode_allowed_keys && typeof meta.mode_allowed_keys === "object"
+        ? meta.mode_allowed_keys
+        : {};
+      const requiredByMode = meta.mode_required_keys && typeof meta.mode_required_keys === "object"
+        ? meta.mode_required_keys
+        : {};
+      const allowed = modeKey
+        ? (Array.isArray(allowedByMode[selectedMode]) ? allowedByMode[selectedMode].map((k) => String(k)) : [])
+        : (Array.isArray(meta.allowed_keys) ? meta.allowed_keys : []);
+      const required = new Set(
+        modeKey
+          ? (Array.isArray(requiredByMode[selectedMode]) ? requiredByMode[selectedMode].map((k) => String(k)) : [])
+          : (Array.isArray(meta.required_keys) ? meta.required_keys : [])
+      );
+      let payload = {};
+      for (const key of allowed) {
+        const rawValue = cfg.fields[key];
+        if (typeof rawValue === "boolean") {
+          payload[key] = rawValue;
+          continue;
         }
-      } else {
-        for (const key of allowed) {
-          const rawValue = cfg.fields[key];
-          if (typeof rawValue === "boolean") {
-            payload[key] = rawValue;
-            continue;
-          }
-          const parsed = parseFieldValue(rawValue == null ? "" : String(rawValue));
-          if (parsed === undefined) {
-            if (required.has(key)) { setStatus("Missing required parameter: " + key); return; }
-            continue;
-          }
-          payload[key] = parsed;
+        const parsed = parseFieldValue(rawValue == null ? "" : String(rawValue));
+        if (parsed === undefined) {
+          if (required.has(key)) { setStatus("Missing required parameter: " + key); return; }
+          continue;
         }
+        payload[key] = parsed;
       }
 
       if (runTransformName === "help") {

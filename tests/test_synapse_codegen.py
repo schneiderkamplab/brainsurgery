@@ -8,7 +8,12 @@ import typer
 from omegaconf import OmegaConf
 
 from brainsurgery.cli.synapse import axon_to_synapse, axon_visualize, emit_generic, synapse_to_axon
-from brainsurgery.synapse import emit_model_code_from_synapse_spec, render_synapse_spec_to_dot
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
+from brainsurgery.synapse import (
+    emit_model_code_from_synapse_spec,
+    infer_output_types_for_node,
+    render_synapse_spec_to_dot,
+)
 
 
 def _spec_dict() -> dict[str, object]:
@@ -97,6 +102,17 @@ def test_emit_model_code_from_synapse_spec_generic() -> None:
     assert "def generate(self, input_ids: torch.Tensor" in source
 
 
+def test_infer_output_types_for_node_linear_uses_input_shape_and_dim() -> None:
+    inferred = infer_output_types_for_node(
+        op_name="linear",
+        node_spec={"dim": 64},
+        input_slots=[("x", {"x"})],
+        output_vars=["y"],
+        var_types={"x": "Tensor[B,S,D]"},
+    )
+    assert inferred == {"y": "Tensor[B,S,64]"}
+
+
 def test_cli_synapse_to_axon_and_back_roundtrip(tmp_path: Path) -> None:
     spec_path = tmp_path / "spec.yaml"
     axon_path = tmp_path / "spec.axon"
@@ -178,17 +194,18 @@ def test_render_synapse_spec_to_dot_has_variable_labeled_edges_and_block_calls()
             "outputs": {"o": "o"},
         },
     }
-    dot = render_synapse_spec_to_dot(spec)
+    dot = render_synapse_spec_to_dot(spec, block_label_by_block={"main": "demo.main"})
     assert "digraph synapse" in dot
     assert "rankdir=TB;" in dot
     assert "subgraph cluster_blk" in dot
-    assert "sum_xy\\nadd" in dot
-    assert "sum_xy\\\\nadd" not in dot
+    assert 'label="block demo.main"' in dot
+    assert "sum_xy" in dot
+    assert ">add<" in dot
     assert 'style=dashed, color="gray65"' in dot
-    assert 'label="x"' in dot
-    assert 'label="y"' in dot
-    assert 'label="z"' in dot
-    assert 'label="calls"' in dot
+    assert '"n_block::main":"p_x":s -> "n_op::main::graph::0000_sum_xy":"p_arg_x";' in dot
+    assert '"n_block::main":"p_y":s -> "n_op::main::graph::0000_sum_xy":"p_arg_y";' in dot
+    assert '"n_outputs::blk":"p_r":s -> "n_op::main::graph::0001_call_blk":"p_out_o"' in dot
+    assert 'label="call"' in dot
     assert "block blk" in dot
 
 
@@ -212,7 +229,7 @@ tiny x y = do
     dot_text = dot_path.read_text(encoding="utf-8")
     assert "digraph synapse" in dot_text
     assert "add" in dot_text
-    assert 'label="x"' in dot_text
+    assert '"p_arg_x"' in dot_text
 
 
 def test_cli_axon_visualize_requires_dot_output(tmp_path: Path) -> None:
@@ -239,7 +256,7 @@ def test_render_synapse_spec_to_dot_includes_parameter_annotations() -> None:
         },
     }
     dot = render_synapse_spec_to_dot(spec)
-    assert "params: proj.weight" in dot
+    assert "proj.weight" in dot
 
 
 def test_render_synapse_spec_to_dot_connects_when_condition_dependencies() -> None:
@@ -268,7 +285,633 @@ def test_render_synapse_spec_to_dot_connects_when_condition_dependencies() -> No
         },
     }
     dot = render_synapse_spec_to_dot(spec)
-    assert 'label="use_cache"' in dot
+    assert 'PORT="p_arg_cond"' in dot
+    assert 'PORT="p_arg_then"' in dot
+    assert 'PORT="p_arg_else"' in dot
+    assert (
+        '"n_block::main":"p_use_cache":s -> "n_ternary::main::graph::0001_new_kv":"p_arg_cond"'
+        in dot
+    )
+    assert (
+        '"n_op::main::graph::0000_init_cache":"p_out_new_kv" -> "n_ternary::main::graph::0001_new_kv":"p_arg_then"'
+        in dot
+    )
+    assert (
+        '"n_op::main::graph::0001_null_cache":"p_out_new_kv" -> "n_ternary::main::graph::0001_new_kv":"p_arg_else"'
+        in dot
+    )
+    assert (
+        '"n_block::main":"p_use_cache" -> "n_op::main::graph::0000_init_cache" [label="use_cache"]'
+        not in dot
+    )
+    assert (
+        '"n_block::main":"p_use_cache" -> "n_op::main::graph::0001_null_cache" [label="use_cache"]'
+        not in dot
+    )
+
+
+def test_render_synapse_spec_to_dot_uses_canonical_cache_seq_len_slot_name() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"cache": {"shape": []}},
+            "graph": [
+                {"len": {"_op": "cache_seq_len", "_args": "cache", "_bind": "n"}},
+            ],
+            "outputs": {"n": "n"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "p_arg_entry" in dot
+    assert "p_arg_cache" not in dot
+
+
+def test_render_synapse_spec_to_dot_renders_for_as_flowchart_loop() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [
+                {
+                    "loop_main": {
+                        "_op": "for",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 3,
+                        "_step": 1,
+                        "_body": [
+                            {"step_a": {"_op": "_ir_alias", "_args": "x", "_bind": "x"}},
+                            {"step_b": {"_op": "_ir_alias", "_args": "x", "_bind": "x"}},
+                        ],
+                    }
+                }
+            ],
+            "outputs": {"x": "x"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "<B>FOR</B>" in dot
+    assert 'label="for i <- [0..3)"' in dot
+    assert 'COLOR="deepskyblue4"' in dot
+    assert 'PORT="p_arg_i"' in dot
+    assert 'PORT="p_arg_from"' not in dot
+    assert 'PORT="p_arg_to"' not in dot
+    assert 'PORT="p_arg_step"' not in dot
+    assert 'PORT="p_arg_x"' in dot
+    assert 'label="loop"' in dot
+    assert 'label="next"' in dot
+    assert "subgraph cluster_loop_" in dot
+
+
+def test_render_synapse_spec_to_dot_wires_loop_variable_into_body_ops() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"xs": {"shape": []}},
+            "graph": [
+                {
+                    "loop": {
+                        "_op": "for",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 3,
+                        "_step": 1,
+                        "_body": [
+                            {"pick": {"_op": "list_index", "_args": ["xs", "i"], "_bind": "x"}},
+                        ],
+                    }
+                }
+            ],
+            "outputs": {"x": "x"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert (
+        '"n_op::main::graph::0000_loop":"p_arg_i":s -> "n_op::main::graph.loop._body::0000_pick":"p_arg_index";'
+        in dot
+    )
+
+
+def test_render_synapse_spec_to_dot_routes_loop_carried_values_via_for_outputs() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [
+                {
+                    "loop": {
+                        "_op": "for",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 2,
+                        "_step": 1,
+                        "_body": [
+                            {"upd": {"_op": "_ir_alias", "_args": "x", "_bind": "x"}},
+                            {"scratch": {"_op": "_ir_alias", "_args": "x", "_bind": "tmp"}},
+                        ],
+                    }
+                },
+                {"after": {"_op": "_ir_alias", "_args": "x", "_bind": "y"}},
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert (
+        '"n_op::main::graph.loop._body::0000_upd":"p_out_x" -> "n_for_outputs::main::graph::0000_loop":"p_out_x":n;'
+        in dot
+    )
+    assert (
+        '"n_for_outputs::main::graph::0000_loop":"p_out_x":s -> "n_op::main::graph::0001_after":"p_arg_x";'
+        in dot
+    )
+    assert (
+        '"n_op::main::graph.loop._body::0000_upd":"p_out_x" -> "n_op::main::graph::0001_after":"p_arg_x";'
+        not in dot
+    )
+    assert '"n_for_outputs::main::graph::0000_loop":"p_out_tmp"' not in dot
+
+
+def test_render_synapse_spec_to_dot_routes_loop_inputs_via_for_header() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x0": {"shape": []}},
+            "graph": [
+                {"seed": {"_op": "_ir_alias", "_args": "x0", "_bind": "x"}},
+                {
+                    "loop": {
+                        "_op": "for",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 2,
+                        "_step": 1,
+                        "_body": [
+                            {"upd": {"_op": "_ir_alias", "_args": "x", "_bind": "x"}},
+                        ],
+                    }
+                },
+                {"after": {"_op": "_ir_alias", "_args": "x", "_bind": "y"}},
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert (
+        '"n_op::main::graph::0000_seed":"p_out_x" -> "n_op::main::graph::0001_loop":"p_arg_x":n;'
+        in dot
+    )
+    assert (
+        '"n_op::main::graph::0001_loop":"p_arg_x":s -> "n_op::main::graph.loop._body::0000_upd":"p_arg_x";'
+        in dot
+    )
+    assert (
+        '"n_op::main::graph::0000_seed":"p_out_x" -> "n_op::main::graph.loop._body::0000_upd":"p_arg_x";'
+        not in dot
+    )
+
+
+def test_render_synapse_spec_to_dot_uses_block_label_mapping() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [{"id": {"_op": "_ir_alias", "_args": "x", "_bind": "y"}}],
+            "outputs": {"y": "y"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec, block_label_by_block={"main": "pkg.main"})
+    assert 'label="block pkg.main"' in dot
+
+
+def test_render_synapse_spec_to_dot_shows_unique_call_scope_prefix_in_subblock_params() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "blocks": {
+                "sub": {
+                    "inputs": {"x": {"shape": []}},
+                    "graph": [
+                        {
+                            "proj": {
+                                "_op": "linear",
+                                "_args": "x",
+                                "_bind": "y",
+                                "_params": {"weight": "w"},
+                            }
+                        }
+                    ],
+                    "outputs": {"out_0": "y"},
+                }
+            },
+            "graph": [
+                {
+                    "c": {
+                        "_op": "call",
+                        "_target": "sub",
+                        "_scope": "foo",
+                        "_args": "x",
+                        "_bind": "y",
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "foo.w" in dot
+
+
+def test_render_synapse_spec_to_dot_infers_loop_scope_prefix_for_subblock_params() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "blocks": {
+                "sub": {
+                    "inputs": {"x": {"shape": []}},
+                    "graph": [
+                        {
+                            "proj": {
+                                "_op": "linear",
+                                "_args": "x",
+                                "_bind": "y",
+                                "_params": {"weight": "w"},
+                            }
+                        }
+                    ],
+                    "outputs": {"out_0": "y"},
+                }
+            },
+            "graph": [
+                {
+                    "lp": {
+                        "_op": "for",
+                        "_scope": "model.layers",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 2,
+                        "_body": [
+                            {
+                                "c": {
+                                    "_op": "call",
+                                    "_target": "sub",
+                                    "_scope": "model",
+                                    "_args": "x",
+                                    "_bind": "x",
+                                }
+                            },
+                        ],
+                    }
+                }
+            ],
+            "outputs": {"x": "x"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "model.layers.{i}.w" in dot
+
+
+def test_render_synapse_spec_to_dot_infers_nested_loop_scope_prefix_for_subblock_params() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "blocks": {
+                "sub": {
+                    "inputs": {"x": {"shape": []}},
+                    "graph": [
+                        {
+                            "proj": {
+                                "_op": "linear",
+                                "_args": "x",
+                                "_bind": "y",
+                                "_params": {"weight": "w"},
+                            }
+                        }
+                    ],
+                    "outputs": {"out_0": "y"},
+                }
+            },
+            "graph": [
+                {
+                    "outer": {
+                        "_op": "for",
+                        "_scope": "model.layers",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 2,
+                        "_body": [
+                            {
+                                "inner": {
+                                    "_op": "for",
+                                    "_scope": "model.layers.experts",
+                                    "_var": "e",
+                                    "_from": 0,
+                                    "_to": 2,
+                                    "_body": [
+                                        {
+                                            "c": {
+                                                "_op": "call",
+                                                "_target": "sub",
+                                                "_scope": "model",
+                                                "_args": "x",
+                                                "_bind": "x",
+                                            }
+                                        }
+                                    ],
+                                }
+                            }
+                        ],
+                    }
+                }
+            ],
+            "outputs": {"x": "x"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "model.layers.{i}.experts.{e}.w" in dot
+
+
+def test_render_synapse_spec_to_dot_infers_loop_scope_prefix_for_calls_without_scope() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "blocks": {
+                "sub": {
+                    "inputs": {"x": {"shape": []}},
+                    "graph": [
+                        {
+                            "proj": {
+                                "_op": "linear",
+                                "_args": "x",
+                                "_bind": "y",
+                                "_params": {"weight": "w"},
+                            }
+                        }
+                    ],
+                    "outputs": {"out_0": "y"},
+                }
+            },
+            "graph": [
+                {
+                    "lp": {
+                        "_op": "for",
+                        "_scope": "h",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 2,
+                        "_body": [
+                            {"c": {"_op": "call", "_target": "sub", "_args": "x", "_bind": "x"}},
+                        ],
+                    }
+                }
+            ],
+            "outputs": {"x": "x"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "h.{i}.w" in dot
+
+
+def test_render_synapse_spec_to_dot_renders_scope_subgraph_with_input_output_gateways() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "blocks": {
+                "blk": {
+                    "inputs": {"x": {"shape": []}},
+                    "graph": [{"id": {"_op": "_ir_alias", "_args": "x", "_bind": "out_0"}}],
+                    "outputs": {"out_0": "out_0"},
+                }
+            },
+            "graph": [
+                {
+                    "c": {
+                        "_op": "call",
+                        "_target": "blk",
+                        "_scope": "model.layer",
+                        "_args": "x",
+                        "_bind": "h",
+                    }
+                },
+                {"out": {"_op": "_ir_alias", "_args": "h", "_bind": "y"}},
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "subgraph cluster_scope_main__model_layer" in dot
+    assert 'label="scope model.layer"' in dot
+    assert '"n_block::main":"p_x":s -> "n_scope_in::main::model.layer":"p_in_x":n' in dot
+    assert (
+        '"n_scope_in::main::model.layer":"p_in_x":s -> "n_op::main::graph::0000_c":"p_arg_x"' in dot
+    )
+    assert (
+        '"n_op::main::graph::0000_c":"p_out_h" -> "n_scope_out::main::model.layer":"p_out_h"' in dot
+    )
+    assert (
+        '"n_scope_out::main::model.layer":"p_out_h":s -> "n_op::main::graph::0001_out":"p_arg_x"'
+        in dot
+    )
+
+
+def test_render_synapse_spec_to_dot_nests_loop_cluster_under_parent_scope() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [
+                {"a": {"_op": "_ir_alias", "_scope": "model", "_args": "x", "_bind": "x"}},
+                {
+                    "lp": {
+                        "_op": "for",
+                        "_scope": "model.layers",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 2,
+                        "_body": [
+                            {
+                                "b": {
+                                    "_op": "_ir_alias",
+                                    "_scope": "model",
+                                    "_args": "x",
+                                    "_bind": "x",
+                                }
+                            }
+                        ],
+                    }
+                },
+            ],
+            "outputs": {"x": "x"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "subgraph cluster_scope_main__model" in dot
+    assert 'label="scope model"' in dot
+    assert "subgraph cluster_loop_main__graph__0001_lp" in dot
+    scope_start = dot.index("subgraph cluster_scope_main__model")
+    scope_end = dot.index("\n  }", scope_start)
+    scope_body = dot[scope_start:scope_end]
+    assert "subgraph cluster_loop_main__graph__0001_lp" in scope_body
+
+
+def test_render_synapse_spec_to_dot_does_not_duplicate_scope_cluster_names() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [
+                {"a": {"_op": "_ir_alias", "_scope": "self_attn", "_args": "x", "_bind": "y"}}
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert dot.count("subgraph cluster_scope_main__self_attn") == 1
+
+
+def test_render_synapse_spec_to_dot_propagates_transitive_call_scope_prefixes() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "blocks": {
+                "decoder": {
+                    "inputs": {"x": {"shape": []}},
+                    "graph": [
+                        {
+                            "experts": {
+                                "_op": "for",
+                                "_scope": "mlp.experts",
+                                "_var": "e",
+                                "_from": 0,
+                                "_to": 2,
+                                "_body": [
+                                    {
+                                        "call_expert": {
+                                            "_op": "call",
+                                            "_target": "expert_ffn",
+                                            "_scope": "mlp",
+                                            "_args": "x",
+                                            "_bind": "x",
+                                        }
+                                    }
+                                ],
+                            }
+                        }
+                    ],
+                    "outputs": {"out_0": "x"},
+                },
+                "expert_ffn": {
+                    "inputs": {"x": {"shape": []}},
+                    "graph": [
+                        {
+                            "proj": {
+                                "_op": "linear",
+                                "_args": "x",
+                                "_bind": "y",
+                                "_params": {"weight": "w"},
+                            }
+                        }
+                    ],
+                    "outputs": {"out_0": "y"},
+                },
+            },
+            "graph": [
+                {
+                    "layers": {
+                        "_op": "for",
+                        "_scope": "model.layers",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": 2,
+                        "_body": [
+                            {
+                                "call_decoder": {
+                                    "_op": "call",
+                                    "_target": "decoder",
+                                    "_scope": "model",
+                                    "_args": "x",
+                                    "_bind": "x",
+                                }
+                            }
+                        ],
+                    }
+                }
+            ],
+            "outputs": {"x": "x"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "model.layers.{i}.mlp.experts.{e}.w" in dot
+
+
+def test_render_synapse_spec_to_dot_renders_slot_type_hints_when_provided() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [{"id": {"_op": "_ir_alias", "_args": "x", "_bind": "y"}}],
+            "outputs": {"y": "y"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(
+        spec,
+        block_io_types={
+            "main": {
+                "inputs": {"x": "Tensor[B,S,D]"},
+                "outputs": {"y": "Tensor[B,S,D]"},
+            }
+        },
+    )
+    assert "Tensor[B,S,D]" in dot
+    assert 'POINT-SIZE="6" COLOR="gray50"' in dot
+
+
+def test_render_synapse_spec_to_dot_reads_persisted_block_io_types_from_spec() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [{"id": {"_op": "_ir_alias", "_args": "x", "_bind": "y"}}],
+            "outputs": {"y": "y"},
+            "types": {
+                "block_io": {
+                    "main": {
+                        "inputs": {"x": "Tensor[B,S,D]"},
+                        "outputs": {"y": "Tensor[B,S,D]"},
+                    }
+                }
+            },
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "Tensor[B,S,D]" in dot
+
+
+def test_render_synapse_spec_to_dot_infers_linear_output_type_from_input_and_dim() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [{"proj": {"_op": "linear", "_args": "x", "_bind": "y", "dim": 64}}],
+            "outputs": {"y": "y"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(
+        spec,
+        block_io_types={
+            "main": {
+                "inputs": {"x": "Tensor[B,S,D]"},
+                "outputs": {},
+            }
+        },
+    )
+    assert "Tensor[B,S,64]" in dot
 
 
 def test_optional_input_defaults_to_none_in_emitted_code() -> None:
@@ -523,3 +1166,24 @@ def test_generated_clamp_and_sigmoid_ops() -> None:
     out = model(x=torch.tensor([[-2.0, 0.0, 2.0]], dtype=torch.float32))
     expected = torch.sigmoid(torch.tensor([[-1.0, 0.0, 1.0]], dtype=torch.float32))
     assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
+
+
+def test_generated_model_records_intermediates_to_runtime_state_dict() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}, "y": {}},
+            "graph": [{"sum_xy": {"_op": "add", "_args": ["x", "y"], "_bind": "z"}}],
+            "outputs": {"z": "z"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="RuntimeStateDictModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    runtime_state_dict = _InMemoryStateDict()
+    model = namespace["RuntimeStateDictModel"](runtime_state_dict=runtime_state_dict)
+    out = model(x=torch.tensor([1.0, 2.0]), y=torch.tensor([3.0, 4.0]))
+    expected = torch.tensor([4.0, 6.0])
+    assert torch.equal(out["z"], expected)
+    assert "sum_xy::z" in runtime_state_dict
+    assert torch.equal(runtime_state_dict["sum_xy::z"], expected)

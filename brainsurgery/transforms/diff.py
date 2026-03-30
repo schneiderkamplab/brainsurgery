@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 
@@ -48,7 +48,6 @@ class DiffTransform(TypedTransform[DiffSpec]):
     name = "diff"
     error_type = DiffTransformError
     spec_type = DiffSpec
-    allowed_keys = {"mode", "left", "right", "left_alias", "right_alias", "eps"}
     help_text = (
         "Compares two tensor sets and reports missing names on both sides plus tensors "
         "whose contents differ.\n"
@@ -82,19 +81,15 @@ class DiffTransform(TypedTransform[DiffSpec]):
 
     def compile(self, payload: Any, default_model: str | None) -> DiffSpec:
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_schema(
-            payload,
-            op_name=self.name,
-            schema=self.payload_schema(),
-            error_type=self.error_type,
+        mode = cast(
+            DiffMode,
+            validate_payload_schema(
+                payload,
+                op_name=self.name,
+                schema=self.payload_schema(),
+                error_type=self.error_type,
+            ),
         )
-
-        raw_mode = payload.get("mode", "refs")
-        if not isinstance(raw_mode, str) or not raw_mode:
-            raise DiffTransformError("diff.mode must be a non-empty string when provided")
-        mode = raw_mode.strip().lower()
-        if mode not in {"refs", "aliases"}:
-            raise DiffTransformError("diff.mode must be one of: refs, aliases")
 
         eps = _compile_eps(payload.get("eps"))
 

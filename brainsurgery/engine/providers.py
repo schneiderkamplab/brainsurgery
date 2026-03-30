@@ -1,6 +1,8 @@
 import logging
 from pathlib import Path
 
+import brainsurgery.engine.state_dicts as _state_dicts
+
 from ..core import StateDictLike
 from .arena import ProviderError, _SegmentedFileBackedArena
 from .checkpoint_io import _load_state_dict_from_path, persist_state_dict
@@ -17,6 +19,7 @@ class BaseStateDictProvider:
         self.model_paths = model_paths
         self.max_io_workers = max_io_workers
         self.state_dicts: dict[str, StateDictLike] = {}
+        self.model_runtime_metadata: dict[str, dict[str, object]] = {}
 
     def get_state_dict(self, model: str) -> StateDictLike:
         raise NotImplementedError
@@ -52,6 +55,13 @@ class BaseStateDictProvider:
         state_dict = self.create_state_dict()
         self.attach_state_dict(model, state_dict)
         return state_dict
+
+    def set_model_runtime_metadata(self, model: str, metadata: dict[str, object]) -> None:
+        self.model_runtime_metadata[model] = dict(metadata)
+
+    def get_model_runtime_metadata(self, model: str) -> dict[str, object] | None:
+        value = self.model_runtime_metadata.get(model)
+        return dict(value) if isinstance(value, dict) else None
 
     def _get_or_load_state_dict(
         self,
@@ -162,6 +172,108 @@ class ArenaStateDictProvider(BaseStateDictProvider):
         return _ArenaStateDict(self.arena)
 
 
+class GpuCachedStateDictProvider(BaseStateDictProvider):
+    def __init__(
+        self,
+        backing_provider: BaseStateDictProvider,
+        *,
+        cache_config: _state_dicts.GpuCacheConfig,
+    ):
+        super().__init__(
+            backing_provider.model_paths,
+            max_io_workers=backing_provider.max_io_workers,
+        )
+        self._backing_provider = backing_provider
+        # keep alias maps shared with the backing provider
+        self.model_paths = backing_provider.model_paths
+        self.state_dicts = backing_provider.state_dicts
+        self.model_runtime_metadata = backing_provider.model_runtime_metadata
+        self._cache_config = cache_config
+        self._wrapped_state_dicts: dict[str, _state_dicts.GpuCachedStateDict] = {}
+
+    def get_state_dict(self, model: str) -> _state_dicts.GpuCachedStateDict:
+        wrapped = self._wrapped_state_dicts.get(model)
+        if wrapped is not None:
+            return wrapped
+        raw_state_dict = self._backing_provider.get_state_dict(model)
+        wrapped = _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+        self._wrapped_state_dicts[model] = wrapped
+        return wrapped
+
+    def create_state_dict(self) -> _state_dicts.GpuCachedStateDict:
+        raw_state_dict = self._backing_provider.create_state_dict()
+        return _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+
+    def list_model_aliases(self) -> set[str]:
+        return self._backing_provider.list_model_aliases()
+
+    def has_model_alias(self, model: str) -> bool:
+        return self._backing_provider.has_model_alias(model)
+
+    def attach_state_dict(self, model: str, state_dict: StateDictLike) -> None:
+        if isinstance(state_dict, _state_dicts.GpuCachedStateDict):
+            raw_state_dict = state_dict.backing_state_dict
+            self._wrapped_state_dicts[model] = state_dict
+        else:
+            raw_state_dict = state_dict
+            self._wrapped_state_dicts.pop(model, None)
+        self._backing_provider.attach_state_dict(model, raw_state_dict)
+
+    def load_state_dict_from_checkpoint_path(self, path: Path) -> _state_dicts.GpuCachedStateDict:
+        raw_state_dict = self._backing_provider.load_state_dict_from_checkpoint_path(path)
+        return _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+
+    def load_alias_from_path(self, model: str, path: Path) -> _state_dicts.GpuCachedStateDict:
+        raw_state_dict = self._backing_provider.load_alias_from_path(model, path)
+        wrapped = _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+        self._wrapped_state_dicts[model] = wrapped
+        return wrapped
+
+    def get_or_create_alias_state_dict(self, model: str) -> _state_dicts.GpuCachedStateDict:
+        if model in self._wrapped_state_dicts:
+            return self._wrapped_state_dicts[model]
+        raw_state_dict = self._backing_provider.get_or_create_alias_state_dict(model)
+        wrapped = _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+        self._wrapped_state_dicts[model] = wrapped
+        return wrapped
+
+    def close(self) -> None:
+        self.flush()
+        self._backing_provider.close()
+
+    def flush(self) -> None:
+        for wrapped in self._wrapped_state_dicts.values():
+            wrapped.flush()
+
+    def save_output(
+        self,
+        plan: SurgeryPlan,
+        *,
+        default_shard_size: str,
+        max_io_workers: int,
+    ) -> Path:
+        self.flush()
+        return self._backing_provider.save_output(
+            plan,
+            default_shard_size=default_shard_size,
+            max_io_workers=max_io_workers,
+        )
+
+
+def wrap_provider_with_gpu_cache(
+    provider: BaseStateDictProvider,
+    *,
+    cache_config: _state_dicts.GpuCacheConfig,
+) -> GpuCachedStateDictProvider:
+    return GpuCachedStateDictProvider(
+        provider,
+        cache_config=cache_config,
+    )
+
+
+assert callable(wrap_provider_with_gpu_cache)
+
+
 def create_state_dict_provider(
     *,
     provider: str,
@@ -194,3 +306,13 @@ def create_state_dict_provider(
         )
 
     raise ProviderError("provider must be either 'inmemory' or 'arena'")
+
+
+__all__ = [
+    "BaseStateDictProvider",
+    "InMemoryStateDictProvider",
+    "ArenaStateDictProvider",
+    "GpuCachedStateDictProvider",
+    "create_state_dict_provider",
+    "wrap_provider_with_gpu_cache",
+]

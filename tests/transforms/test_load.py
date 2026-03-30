@@ -193,6 +193,10 @@ def test_load_apply_backend_axon_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     result = tr.apply(load_spec, provider)
     assert result.count == 1
     assert called["loaded"] is True
+    assert provider.get_model_runtime_metadata("axon_model") == {
+        "runtime": "synapse",
+        "program": "/tmp/model.axon",
+    }
 
     existing = provider.get_or_create_alias_state_dict("existing")
     existing["w"] = torch.zeros(1)
@@ -221,6 +225,31 @@ def test_load_apply_backend_axon_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     reuse_result = tr.apply(reuse_spec, provider)
     assert reuse_result.count == 0
+    assert provider.get_model_runtime_metadata("existing") == {
+        "runtime": "synapse",
+        "program": "/tmp/model.axon",
+    }
+
+
+def test_load_checkpoint_directory_sets_hf_runtime_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = InMemoryStateDictProvider({}, max_io_workers=1)
+    sd = _InMemoryStateDict()
+    sd["x"] = torch.ones(1)
+    monkeypatch.setattr(provider, "load_alias_from_path", lambda alias, path: sd)
+
+    model_dir = tmp_path / "hf_model"
+    model_dir.mkdir()
+    spec = LoadSpec(path=model_dir, alias="hf_alias", tensor_name=None, format="auto")
+    result = LoadTransform().apply(spec, provider)
+
+    assert result.count == 1
+    assert provider.get_model_runtime_metadata("hf_alias") == {
+        "runtime": "hf",
+        "program": str(model_dir),
+    }
 
 
 def test_load_apply_dry_run_uses_checkpoint_loader_and_tensor_alias_fallback(

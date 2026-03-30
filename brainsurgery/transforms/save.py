@@ -46,8 +46,6 @@ class SaveTransform(TypedTransform[SaveSpec]):
     name = "save"
     error_type = SaveTransformError
     spec_type = SaveSpec
-    allowed_keys = {"path", "alias", "target", "format", "shard"}
-    required_keys = {"path"}
     help_text = (
         "Saves either a full state_dict or a single tensor to disk.\n"
         "\n"
@@ -68,8 +66,8 @@ class SaveTransform(TypedTransform[SaveSpec]):
         return TransformPayloadSchema(
             mode_key=None,
             default_mode="default",
-            common_required=set(self.required_keys),
-            common_allowed=set(self.allowed_keys),
+            common_required={"path"},
+            common_allowed={"path", "alias", "target", "format", "shard"},
         )
 
     def completion_reference_keys(self) -> list[str]:

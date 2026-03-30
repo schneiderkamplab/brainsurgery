@@ -10,6 +10,7 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 
+from ..core import StateDictLike
 from .mxfp4 import materialize_mxfp4_aliases
 from .ops import get_op_module
 
@@ -24,10 +25,12 @@ class SynapseProgramModel(nn.Module):
         self,
         spec: dict[str, Any] | None = None,
         state_dict: dict[str, torch.Tensor] | None = None,
+        runtime_state_dict: StateDictLike | None = None,
     ) -> None:
         super().__init__()
         self.spec: dict[str, Any] = self._resolve_spec(spec)
         self._state: dict[str, torch.Tensor] = {}
+        self._runtime_state_dict = runtime_state_dict
         if state_dict is not None:
             self.load_state_dict_tensors(state_dict)
 
@@ -37,8 +40,9 @@ class SynapseProgramModel(nn.Module):
         state_dict: dict[str, torch.Tensor],
         *,
         spec: dict[str, Any] | None = None,
+        runtime_state_dict: StateDictLike | None = None,
     ) -> "SynapseProgramModel":
-        return cls(spec=spec, state_dict=state_dict)
+        return cls(spec=spec, state_dict=state_dict, runtime_state_dict=runtime_state_dict)
 
     @classmethod
     def from_spec(
@@ -46,8 +50,9 @@ class SynapseProgramModel(nn.Module):
         spec: dict[str, Any],
         *,
         state_dict: dict[str, torch.Tensor] | None = None,
+        runtime_state_dict: StateDictLike | None = None,
     ) -> "SynapseProgramModel":
-        return cls(spec=spec, state_dict=state_dict)
+        return cls(spec=spec, state_dict=state_dict, runtime_state_dict=runtime_state_dict)
 
     @classmethod
     def from_yaml(
@@ -55,12 +60,17 @@ class SynapseProgramModel(nn.Module):
         spec_path: str | Path,
         *,
         state_dict: dict[str, torch.Tensor] | None = None,
+        runtime_state_dict: StateDictLike | None = None,
     ) -> "SynapseProgramModel":
         loaded = OmegaConf.load(Path(spec_path))
         data = OmegaConf.to_container(loaded, resolve=True)
         if not isinstance(data, dict):
             raise ValueError(f"Expected YAML mapping at {spec_path}, got {type(data).__name__}")
-        return cls(spec={str(key): value for key, value in data.items()}, state_dict=state_dict)
+        return cls(
+            spec={str(key): value for key, value in data.items()},
+            state_dict=state_dict,
+            runtime_state_dict=runtime_state_dict,
+        )
 
     def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:
         loaded = dict(state_dict)
@@ -313,6 +323,11 @@ class SynapseProgramModel(nn.Module):
 
             if op == "call":
                 self._run_block_call(node_spec, env, scope=scope, symbols=symbols, blocks=blocks)
+                self._record_runtime_outputs(
+                    node_spec=node_spec,
+                    env=env,
+                    node_path=self._join(scope, node_name),
+                )
                 continue
 
             if "graph" in node_spec and op is None:
@@ -335,6 +350,7 @@ class SynapseProgramModel(nn.Module):
             self._execute_op(
                 op, exec_node_spec, env, node_path=node_path, scope=scope, symbols=symbols
             )
+            self._record_runtime_outputs(node_spec=node_spec, env=env, node_path=node_path)
 
     def _run_block_call(
         self,
@@ -415,6 +431,52 @@ class SynapseProgramModel(nn.Module):
             )
         for out_name, dst_name in zip(output_names, binds, strict=True):
             env[str(dst_name)] = block_env.get(out_name)
+
+    def _record_runtime_outputs(
+        self,
+        *,
+        node_spec: dict[str, Any],
+        env: dict[str, Any],
+        node_path: str,
+    ) -> None:
+        runtime_state_dict = self._runtime_state_dict
+        if runtime_state_dict is None:
+            return
+        for bind_name in self._node_output_names(node_spec):
+            if bind_name not in env:
+                continue
+            value = env[bind_name]
+            self._record_runtime_value(
+                runtime_state_dict=runtime_state_dict,
+                key=f"{node_path}::{bind_name}",
+                value=value,
+            )
+
+    def _record_runtime_value(
+        self,
+        *,
+        runtime_state_dict: StateDictLike,
+        key: str,
+        value: Any,
+    ) -> None:
+        if torch.is_tensor(value):
+            runtime_state_dict[key] = value.detach().clone()
+            return
+        if isinstance(value, (list, tuple)):
+            for idx, item in enumerate(value):
+                self._record_runtime_value(
+                    runtime_state_dict=runtime_state_dict,
+                    key=f"{key}[{idx}]",
+                    value=item,
+                )
+            return
+        if isinstance(value, dict):
+            for item_key, item_value in value.items():
+                self._record_runtime_value(
+                    runtime_state_dict=runtime_state_dict,
+                    key=f"{key}.{item_key}",
+                    value=item_value,
+                )
 
     def _node_output_names(self, node_spec: dict[str, Any]) -> list[str]:
         if node_spec.get("_op") == "call":

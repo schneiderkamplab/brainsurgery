@@ -17,5 +17,5 @@ append = List.append
 
 past_length :: ?Cache -> I
 past_length cache = do
-  first <- _list_index cache 0
+  first <- List.index cache 0
   return _cache_seq_len first

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from brainsurgery.engine.state_dicts import _InMemoryStateDict
 from brainsurgery.synapse.runtime import SynapseProgramModel
 
 
@@ -966,3 +967,21 @@ def test_runtime_generate_accepts_singleton_non_logits_output_dict() -> None:
     assert generated.ndim == 2
     assert generated.shape[0] == 1
     assert generated.shape[1] <= 6
+
+
+def test_runtime_records_intermediate_tensors_to_runtime_state_dict() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}, "y": {}},
+            "graph": [{"sum_xy": {"_op": "add", "_args": ["x", "y"], "_bind": "z"}}],
+            "outputs": {"z": "z"},
+        },
+    }
+    runtime_state_dict = _InMemoryStateDict()
+    model = SynapseProgramModel.from_spec(spec, runtime_state_dict=runtime_state_dict)
+    out = model(x=torch.tensor([1.0, 2.0]), y=torch.tensor([3.0, 4.0]))
+    expected = torch.tensor([4.0, 6.0])
+    assert torch.equal(out["z"], expected)
+    assert "sum_xy::z" in runtime_state_dict
+    assert torch.equal(runtime_state_dict["sum_xy::z"], expected)

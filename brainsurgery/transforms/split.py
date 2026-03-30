@@ -44,8 +44,6 @@ class SplitTransform(BaseTransform):
     name = "split"
     error_type = SplitTransformError
     spec_type = SplitSpec
-    allowed_keys = {"from", "to", "sizes", "dim"}
-    required_keys = {"from", "to", "sizes"}
     help_text = (
         "Splits one source tensor into multiple destination tensors.\n"
         "\n"
@@ -60,8 +58,8 @@ class SplitTransform(BaseTransform):
         return TransformPayloadSchema(
             mode_key=None,
             default_mode="default",
-            common_required=set(self.required_keys),
-            common_allowed=set(self.allowed_keys),
+            common_required={"from", "to", "sizes"},
+            common_allowed={"from", "to", "sizes", "dim"},
         )
 
     def completion_reference_keys(self) -> list[str]:

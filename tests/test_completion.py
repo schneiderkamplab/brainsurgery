@@ -77,6 +77,7 @@ _PREFERRED_KEYS = {
     "dump": "target",
     "fill": "from",
     "fill_": "target",
+    "infer": "input_ids",
     "load": "path",
     "matmul": "from_a",
     "move": "from",

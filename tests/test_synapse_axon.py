@@ -548,6 +548,30 @@ tiny x = do
     assert "linear" in ops
     assert "activations_gelu_new" in ops
     assert "_ir_alias" in ops
+    scoped_nodes = [
+        node_spec
+        for item in graph
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and isinstance(node_spec.get("_op"), str)
+    ]
+    assert any(node.get("_scope") == "attn" for node in scoped_nodes)
+
+
+def test_lowering_preserves_nested_scope_paths_on_ops() -> None:
+    source = """
+tiny :: Tensor -> Tensor
+tiny x = do
+  y <- scope@outer do
+    z <- scope@inner do
+      h <- _activations_gelu_new x
+      return h
+    return z
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert any(node.get("_scope") == "outer.inner" for node in node_specs if isinstance(node, dict))
 
 
 def test_parenthesized_expression_argument_is_lowered() -> None:
@@ -1542,6 +1566,42 @@ tiny x = do
         "_params": {"weight": "proj.weight"},
     }
     assert node_specs[1] == {"_op": "activations_gelu_new", "_args": "pipe_1", "_bind": "y"}
+
+
+def test_lower_axon_module_to_synapse_spec_persists_block_io_types() -> None:
+    source = """
+tiny :: Tensor[B,S,D] -> Tensor[B,S,D]
+tiny x = do
+  return x
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    block_io = spec["model"]["types"]["block_io"]
+    main_output_name = next(iter(spec["model"]["outputs"]))
+    assert block_io["main"]["inputs"]["x"] == "Tensor[B,S,D]"
+    assert block_io["main"]["outputs"][main_output_name] == "Tensor[B,S,D]"
+
+
+def test_lower_axon_program_to_synapse_spec_persists_block_io_types_for_blocks() -> None:
+    source = """
+blk :: Tensor[B,S,D] -> Tensor[B,S,D]
+blk x = do
+  return x
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- blk x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    block_io = spec["model"]["types"]["block_io"]
+    main_output_name = next(iter(spec["model"]["outputs"]))
+    blk_output_name = next(iter(spec["model"]["blocks"]["blk"]["outputs"]))
+    assert block_io["main"]["inputs"]["x"] == "Tensor[B,S,D]"
+    assert block_io["main"]["outputs"][main_output_name] == "Tensor[B,S,D]"
+    assert block_io["blk"]["inputs"]["x"] == "Tensor[B,S,D]"
+    assert block_io["blk"]["outputs"][blk_output_name] == "Tensor[B,S,D]"
 
 
 def test_lower_return_pipeline_expression_to_named_output() -> None:

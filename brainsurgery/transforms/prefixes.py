@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ..core import (
     StateDictProvider,
@@ -47,7 +47,6 @@ class PrefixesTransform(TypedTransform[PrefixesSpec]):
     error_type = PrefixesTransformError
     spec_type = PrefixesSpec
     completion_requires_payload = False
-    allowed_keys = {"mode", "alias", "from", "to"}
     help_text = (
         "Lists or edits the currently available model prefixes (aliases).\n"
         "\n"
@@ -89,18 +88,15 @@ class PrefixesTransform(TypedTransform[PrefixesSpec]):
             return PrefixesSpec(mode="list")
 
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_schema(
-            payload,
-            op_name=self.name,
-            schema=self.payload_schema(),
-            error_type=self.error_type,
+        mode = cast(
+            PrefixesMode,
+            validate_payload_schema(
+                payload,
+                op_name=self.name,
+                schema=self.payload_schema(),
+                error_type=self.error_type,
+            ),
         )
-
-        raw_mode = payload.get("mode", "list")
-        if not isinstance(raw_mode, str) or not raw_mode:
-            raise PrefixesTransformError("prefixes.mode must be a non-empty string when provided")
-
-        mode = raw_mode.strip().lower()
         if mode == "list":
             return PrefixesSpec(mode="list")
 
@@ -123,7 +119,7 @@ class PrefixesTransform(TypedTransform[PrefixesSpec]):
                 dest_alias=require_nonempty_string(payload, op_name=self.name, key="to"),
             )
 
-        raise PrefixesTransformError("prefixes.mode must be one of: list, add, remove, rename")
+        raise PrefixesTransformError(f"unsupported prefixes mode: {mode}")
 
     def apply(self, spec: object, provider: StateDictProvider) -> TransformResult:
         typed = self.require_spec(spec)

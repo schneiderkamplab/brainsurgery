@@ -41,7 +41,6 @@ class ExecuteTransform(TypedTransform[ExecuteSpec]):
     name = "execute"
     error_type = ExecuteTransformError
     spec_type = ExecuteSpec
-    allowed_keys = {"transforms", "plan", "plan-yaml", "path"}
     help_text = (
         "Executes a batch of transforms from payload data.\n"
         "\n"
@@ -64,7 +63,7 @@ class ExecuteTransform(TypedTransform[ExecuteSpec]):
             mode_key=None,
             default_mode="default",
             common_required=set(),
-            common_allowed=set(self.allowed_keys),
+            common_allowed={"transforms", "plan", "plan-yaml", "path"},
         )
 
     def compile(self, payload: Any, default_model: str | None) -> ExecuteSpec:

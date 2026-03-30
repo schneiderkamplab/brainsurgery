@@ -15,6 +15,12 @@ from .axon import (
 )
 from .codegen import emit_model_code_from_synapse_spec, load_synapse_torch_op_map
 from .runtime import SynapseProgramModel
+from .type_inference import (
+    annotate_spec_with_block_io_types,
+    extract_block_io_types_from_spec,
+    infer_block_io_types_from_modules,
+    infer_output_types_for_node,
+)
 from .visualize import render_synapse_spec_to_dot
 
 
@@ -60,7 +66,11 @@ __all__ = [
     "AxonReturn",
     "AxonScope",
     "SynapseProgramModel",
+    "annotate_spec_with_block_io_types",
     "emit_model_code_from_synapse_spec",
+    "extract_block_io_types_from_spec",
+    "infer_block_io_types_from_modules",
+    "infer_output_types_for_node",
     "run_axon_test",
     "run_axon_test_matrix",
     "run_axon_op_parity",

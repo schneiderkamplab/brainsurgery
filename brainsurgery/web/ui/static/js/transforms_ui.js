@@ -75,64 +75,63 @@ function createTransformsUI({
     }
     const meta = getTransformMeta(appState.selectedTransform);
     const cfg = getTransformConfig(appState.selectedTransform);
-    const allowed = Array.isArray(meta.allowed_keys) ? meta.allowed_keys : [];
-    const required = new Set(Array.isArray(meta.required_keys) ? meta.required_keys : []);
+    const modeKey = typeof meta.mode_key === "string" && meta.mode_key ? meta.mode_key : null;
+    const modeNames = Array.isArray(meta.modes) ? meta.modes.map((m) => String(m)) : [];
+    const defaultMode =
+      typeof meta.default_mode === "string" && meta.default_mode
+        ? String(meta.default_mode)
+        : (modeNames[0] || "default");
+    const rawMode = modeKey ? String(cfg.fields[modeKey] == null ? defaultMode : cfg.fields[modeKey]).trim().toLowerCase() : "";
+    const mode = modeKey
+      ? (modeNames.map((m) => m.toLowerCase()).includes(rawMode) ? rawMode : String(defaultMode).toLowerCase())
+      : null;
+    if (modeKey) cfg.fields[modeKey] = mode;
+    const allowedByMode = meta.mode_allowed_keys && typeof meta.mode_allowed_keys === "object"
+      ? meta.mode_allowed_keys
+      : {};
+    const requiredByMode = meta.mode_required_keys && typeof meta.mode_required_keys === "object"
+      ? meta.mode_required_keys
+      : {};
+    const allowed = modeKey
+      ? (Array.isArray(allowedByMode[mode]) ? allowedByMode[mode].map((k) => String(k)) : [])
+      : (Array.isArray(meta.allowed_keys) ? meta.allowed_keys : []);
+    const required = new Set(
+      modeKey
+        ? (Array.isArray(requiredByMode[mode]) ? requiredByMode[mode].map((k) => String(k)) : [])
+        : (Array.isArray(meta.required_keys) ? meta.required_keys : [])
+    );
     const refKeys = Array.isArray(meta.reference_keys) ? meta.reference_keys : [];
     const refSet = new Set(refKeys);
     const booleanKeys = new Set(Array.isArray(meta.boolean_keys) ? meta.boolean_keys : []);
-    const orderedKeys = [...refKeys, ...allowed.filter((k) => !refSet.has(k))];
+    const orderedKeys = [
+      ...refKeys.filter((k) => k !== modeKey),
+      ...allowed.filter((k) => !refSet.has(k) && k !== modeKey),
+    ];
     transformTitle.textContent = appState.selectedTransform;
     transformFields.innerHTML = "";
     transformRunBtn.textContent = "Run " + appState.selectedTransform;
 
-    if (appState.selectedTransform === "prefixes") {
+    if (modeKey) {
       const modeSelect = document.createElement("select");
-      modeSelect.innerHTML =
-        "<option value='list'>mode: list aliases</option>" +
-        "<option value='add'>mode: add alias</option>" +
-        "<option value='remove'>mode: remove alias</option>" +
-        "<option value='rename'>mode: rename alias</option>";
-      const rawMode = String(cfg.fields.mode == null ? "list" : cfg.fields.mode).toLowerCase();
-      modeSelect.value = ["list", "add", "remove", "rename"].includes(rawMode) ? rawMode : "list";
-      cfg.fields.mode = modeSelect.value;
+      const options = modeNames.length ? modeNames : [String(defaultMode)];
+      modeSelect.innerHTML = options
+        .map((name) => "<option value='" + String(name).toLowerCase() + "'>" + modeKey + ": " + String(name).toLowerCase() + "</option>")
+        .join("");
+      modeSelect.value = String(mode || defaultMode).toLowerCase();
       modeSelect.addEventListener("change", () => {
-        cfg.fields.mode = modeSelect.value;
-        if (modeSelect.value === "list") {
-          delete cfg.fields.alias;
-          delete cfg.fields.from;
-          delete cfg.fields.to;
-        } else if (modeSelect.value === "add" || modeSelect.value === "remove") {
-          delete cfg.fields.from;
-          delete cfg.fields.to;
-        } else if (modeSelect.value === "rename") {
-          delete cfg.fields.alias;
+        cfg.fields[modeKey] = modeSelect.value;
+        const nextAllowed = new Set(
+          Array.isArray(allowedByMode[modeSelect.value]) ? allowedByMode[modeSelect.value].map((k) => String(k)) : []
+        );
+        for (const key of Object.keys(cfg.fields)) {
+          if (key === modeKey) continue;
+          if (!nextAllowed.has(key)) {
+            delete cfg.fields[key];
+          }
         }
         renderTransformPanel();
       });
       transformFields.appendChild(modeSelect);
-
-      if (modeSelect.value === "add" || modeSelect.value === "remove") {
-        const aliasInput = document.createElement("input");
-        aliasInput.placeholder = "alias (required)";
-        aliasInput.value = cfg.fields.alias == null ? "" : String(cfg.fields.alias);
-        aliasInput.addEventListener("input", () => { cfg.fields.alias = aliasInput.value; });
-        transformFields.appendChild(aliasInput);
-      } else if (modeSelect.value === "rename") {
-        const fromInput = document.createElement("input");
-        fromInput.placeholder = "from (required)";
-        fromInput.value = cfg.fields.from == null ? "" : String(cfg.fields.from);
-        fromInput.addEventListener("input", () => { cfg.fields.from = fromInput.value; });
-        transformFields.appendChild(fromInput);
-
-        const toInput = document.createElement("input");
-        toInput.placeholder = "to (required)";
-        toInput.value = cfg.fields.to == null ? "" : String(cfg.fields.to);
-        toInput.addEventListener("input", () => { cfg.fields.to = toInput.value; });
-        transformFields.appendChild(toInput);
-      }
-
-      transformPanel.classList.remove("hidden");
-      return;
     }
 
     if (appState.selectedTransform === "set") {

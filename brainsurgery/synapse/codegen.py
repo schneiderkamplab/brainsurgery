@@ -77,9 +77,10 @@ class _Emitter:
                 "",
                 "",
                 f"class {self.class_name}(nn.Module):",
-                "    def __init__(self, state_dict: dict[str, torch.Tensor] | None = None) -> None:",
+                "    def __init__(self, state_dict: dict[str, torch.Tensor] | None = None, runtime_state_dict: Any | None = None) -> None:",
                 "        super().__init__()",
                 "        self._state: dict[str, torch.Tensor] = {}",
+                "        self._runtime_state_dict = runtime_state_dict",
                 f"        self._symbols: dict[str, int | float | bool] = {repr(self.symbols)}",
                 "        self._trace_enabled = False",
                 "        self.trace_ops: list[dict[str, Any]] = []",
@@ -87,10 +88,10 @@ class _Emitter:
                 "            self.load_state_dict_tensors(state_dict)",
                 "",
                 "    @classmethod",
-                '    def from_state_dict(cls, state_dict: dict[str, torch.Tensor]) -> "'
+                '    def from_state_dict(cls, state_dict: dict[str, torch.Tensor], runtime_state_dict: Any | None = None) -> "'
                 + self.class_name
                 + '":',
-                "        return cls(state_dict=state_dict)",
+                "        return cls(state_dict=state_dict, runtime_state_dict=runtime_state_dict)",
                 "",
                 "    def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:",
                 "        loaded = dict(state_dict)",
@@ -150,6 +151,21 @@ class _Emitter:
                 "            'dtype': str(tensor.dtype),",
                 "            'tensor': tensor.detach().float().cpu(),",
                 "        })",
+                "",
+                "    def _record_runtime_value(self, key: str, value: Any) -> None:",
+                "        runtime_state_dict = self._runtime_state_dict",
+                "        if runtime_state_dict is None:",
+                "            return",
+                "        if torch.is_tensor(value):",
+                "            runtime_state_dict[key] = value.detach().clone()",
+                "            return",
+                "        if isinstance(value, (list, tuple)):",
+                "            for idx, item in enumerate(value):",
+                '                self._record_runtime_value(f"{key}[{idx}]", item)',
+                "            return",
+                "        if isinstance(value, dict):",
+                "            for item_key, item_value in value.items():",
+                '                self._record_runtime_value(f"{key}.{item_key}", item_value)',
                 "",
                 "    def _prepare_env(self, input_ids: torch.Tensor | None, inputs: dict[str, Any], input_specs: dict[str, Any]) -> dict[str, Any]:",
                 "        env = {'input_ids': input_ids, **inputs} if input_ids is not None else dict(inputs)",
@@ -516,6 +532,9 @@ class _Emitter:
                 if isinstance(_out_var, str):
                     lines.append(
                         f"{inner_indent}self._trace_op({trace_node_path}, {op!r}, {out_name!r}, {_out_var})"
+                    )
+                    lines.append(
+                        f"{inner_indent}self._record_runtime_value(f'{{{trace_node_path}}}::{out_name}', {_out_var})"
                     )
         return lines
 

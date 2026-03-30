@@ -23,12 +23,14 @@ from .plan import (
 )
 from .provider_utils import (
     find_alias_mapping,
+    get_model_runtime_metadata,
     get_or_create_alias_state_dict,
     iter_alias_mappings,
     list_loaded_tensor_names,
     list_model_aliases,
     new_empty_state_dict,
     resolve_single_model_alias,
+    set_model_runtime_metadata,
 )
 from .providers import (
     BaseStateDictProvider,

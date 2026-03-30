@@ -20,9 +20,11 @@ from ..engine import (
     BaseStateDictProvider,
     ProviderError,
     emit_verbose_event,
+    get_model_runtime_metadata,
     get_or_create_alias_state_dict,
     get_runtime_flags,
     load_tensor_from_path,
+    set_model_runtime_metadata,
 )
 
 
@@ -52,8 +54,6 @@ class LoadTransform(TypedTransform[LoadSpec]):
     name = "load"
     error_type = LoadTransformError
     spec_type = LoadSpec
-    allowed_keys = {"path", "alias", "to", "format", "backend", "weights"}
-    required_keys: set[str] = {"path"}
     help_text = (
         "Loads either a full state_dict or a single tensor from disk.\n"
         "\n"
@@ -118,7 +118,7 @@ class LoadTransform(TypedTransform[LoadSpec]):
         if isinstance(payload, str):
             payload = {"path": payload}
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_schema(
+        backend = validate_payload_schema(
             payload,
             op_name=self.name,
             schema=self.payload_schema(),
@@ -130,13 +130,6 @@ class LoadTransform(TypedTransform[LoadSpec]):
         raw_alias = payload.get("alias")
         if raw_alias is not None and (not isinstance(raw_alias, str) or not raw_alias):
             raise LoadTransformError("load.alias must be a non-empty string when provided")
-
-        raw_backend = payload.get("backend", "auto")
-        if not isinstance(raw_backend, str) or not raw_backend:
-            raise LoadTransformError("load.backend must be a non-empty string when provided")
-        backend = raw_backend.strip().lower()
-        if backend not in {"auto", "axon", "checkpoint", "tensor"}:
-            raise LoadTransformError("load.backend must be one of: auto, axon, checkpoint, tensor")
 
         raw_format = payload.get("format", "auto")
         if not isinstance(raw_format, str) or not raw_format:
@@ -248,6 +241,12 @@ class LoadTransform(TypedTransform[LoadSpec]):
                 raise LoadTransformError(message) from exc
             except RuntimeError as exc:
                 raise LoadTransformError(str(exc)) from exc
+            if not dry_run:
+                self._set_runtime_metadata_for_checkpoint_load(
+                    provider=provider,
+                    alias=typed.alias,
+                    path=typed.path,
+                )
             emit_verbose_event(self.name, f"{typed.path} -> alias {typed.alias}")
             return TransformResult(name=self.name, count=len(loaded_state_dict))
 
@@ -300,6 +299,12 @@ class LoadTransform(TypedTransform[LoadSpec]):
                     "load.backend=axon received both an existing alias and load.weights; "
                     "omit load.weights or choose a new alias"
                 )
+            if not dry_run:
+                set_model_runtime_metadata(
+                    provider,
+                    typed.alias,
+                    {"runtime": "synapse", "program": str(typed.path)},
+                )
             emit_verbose_event(
                 self.name, f"{typed.path} -> reuse alias {typed.alias} (backend=axon)"
             )
@@ -322,11 +327,38 @@ class LoadTransform(TypedTransform[LoadSpec]):
             raise LoadTransformError(message) from exc
         except RuntimeError as exc:
             raise LoadTransformError(str(exc)) from exc
+        if not dry_run:
+            set_model_runtime_metadata(
+                provider,
+                typed.alias,
+                {"runtime": "synapse", "program": str(typed.path)},
+            )
         emit_verbose_event(
             self.name,
             f"{typed.path} + {typed.weights} -> alias {typed.alias} (backend=axon)",
         )
         return TransformResult(name=self.name, count=len(loaded_state_dict))
+
+    def _set_runtime_metadata_for_checkpoint_load(
+        self,
+        *,
+        provider: StateDictProvider,
+        alias: str,
+        path: Path,
+    ) -> None:
+        # Preserve explicit synapse/codegen metadata previously associated with this alias.
+        existing = get_model_runtime_metadata(provider, alias)
+        if isinstance(existing, dict):
+            runtime = existing.get("runtime")
+            program = existing.get("program")
+            if runtime in {"synapse", "codegen"} and isinstance(program, str) and program:
+                return
+        if path.is_dir():
+            set_model_runtime_metadata(
+                provider,
+                alias,
+                {"runtime": "hf", "program": str(path)},
+            )
 
     def _infer_output_model(self, spec: object) -> str:
         return self.require_spec(spec).alias

@@ -534,6 +534,11 @@ def axon_visualize(
         "--main-module",
         help="Main model module name when Axon file contains multiple modules (defaults to last).",
     ),
+    control_flow: bool = typer.Option(
+        True,
+        "--control-flow/--no-control-flow",
+        help="Show dashed gray control-flow edges between ops.",
+    ),
 ) -> None:
     """Lower an Axon program and write a DOT graph of blocks + ops + variable-flow edges."""
     _ensure_overwrite_allowed(output_path, force=force)
@@ -543,7 +548,12 @@ def axon_visualize(
     module = _synapse_module()
     run_fn = getattr(module, "run_axon_visualize")
     try:
-        written = run_fn(axon_file=axon_path, output_path=output_path, main_module=main_module)
+        written = run_fn(
+            axon_file=axon_path,
+            output_path=output_path,
+            main_module=main_module,
+            show_control_flow=control_flow,
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(f"Wrote Axon graph visualization to {written}")
