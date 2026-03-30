@@ -6,6 +6,7 @@ from ..core import (
     StateDictProvider,
     TransformControl,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     get_transform,
@@ -47,6 +48,14 @@ class HelpTransform(TypedTransform[HelpSpec]):
         "  OLY:  help: copy\n"
         "  OLY:  help: assert: equal"
     )
+
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(),
+            common_allowed={"help", "assert"},
+        )
 
     def compile(self, payload: Any, default_model: str | None) -> HelpSpec:
         del default_model
@@ -176,8 +185,10 @@ class HelpTransform(TypedTransform[HelpSpec]):
         except TransformError as exc:
             raise HelpTransformError(f"unknown command: {command_name}") from exc
 
-        allowed_keys = getattr(transform, "allowed_keys", None)
-        required_keys = getattr(transform, "required_keys", None)
+        schema = transform.payload_schema()
+        default_mode = str(schema.default_mode)
+        allowed_keys = schema.allowed_keys_for_mode(default_mode)
+        required_keys = schema.required_keys_for_mode(default_mode)
         help_text = getattr(transform, "help_text", None)
 
         lines: list[str] = [f"Command: {command_name}"]
@@ -195,6 +206,17 @@ class HelpTransform(TypedTransform[HelpSpec]):
                 allowed_keys=allowed_keys,
             )
         )
+        if schema.mode_key is not None:
+            lines.append("")
+            lines.append(f"Mode key: {schema.mode_key} (default: {default_mode})")
+            for mode_name in sorted(schema.modes()):
+                lines.append(f"  Mode '{mode_name}':")
+                mode_required = sorted(schema.required_keys_for_mode(mode_name))
+                mode_allowed = sorted(schema.allowed_keys_for_mode(mode_name))
+                lines.append(
+                    f"    required={mode_required if mode_required else []}, "
+                    f"allowed={mode_allowed if mode_allowed else []}"
+                )
         self._emit_help_panel(f"Help for {command_name}", lines)
 
     def _print_assert_help(self) -> None:

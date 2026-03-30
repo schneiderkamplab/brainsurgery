@@ -7,12 +7,13 @@ from ..core import (
     CompiledTransform,
     TransformControl,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     ensure_mapping_payload,
     get_transform,
     register_transform,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from ..engine import (
     emit_verbose_event,
@@ -58,11 +59,24 @@ class ExecuteTransform(TypedTransform[ExecuteSpec]):
         '  execute: { plan-yaml: "transforms:\\n  - dump: { target: model::.* }" }\n'
     )
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(),
+            common_allowed=set(self.allowed_keys),
+        )
+
     def compile(self, payload: Any, default_model: str | None) -> ExecuteSpec:
         del default_model
         try:
             payload = ensure_mapping_payload(payload, self.name)
-            validate_payload_keys(payload, op_name=self.name, allowed_keys=self.allowed_keys)
+            validate_payload_schema(
+                payload,
+                op_name=self.name,
+                schema=self.payload_schema(),
+                error_type=self.error_type,
+            )
         except TransformError as exc:
             raise ExecuteTransformError(str(exc)) from exc
 

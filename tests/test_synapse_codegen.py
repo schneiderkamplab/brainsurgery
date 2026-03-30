@@ -182,6 +182,9 @@ def test_render_synapse_spec_to_dot_has_variable_labeled_edges_and_block_calls()
     assert "digraph synapse" in dot
     assert "rankdir=TB;" in dot
     assert "subgraph cluster_blk" in dot
+    assert "sum_xy\\nadd" in dot
+    assert "sum_xy\\\\nadd" not in dot
+    assert 'style=dashed, color="gray65"' in dot
     assert 'label="x"' in dot
     assert 'label="y"' in dot
     assert 'label="z"' in dot
@@ -222,6 +225,50 @@ def test_cli_axon_visualize_requires_dot_output(tmp_path: Path) -> None:
     with pytest.raises(typer.BadParameter) as exc_info:
         axon_visualize(axon_path=axon_path, output_path=bad_output, force=False, main_module=None)
     assert ".dot" in str(exc_info.value)
+
+
+def test_render_synapse_spec_to_dot_includes_parameter_annotations() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {"shape": []}},
+            "graph": [
+                {"proj": {"_op": "linear", "_args": "x", "_bind": "y", "bias": True}},
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert "params: proj.weight" in dot
+
+
+def test_render_synapse_spec_to_dot_connects_when_condition_dependencies() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"use_cache": {"shape": []}},
+            "graph": [
+                {
+                    "init_cache": {
+                        "_op": "list_init",
+                        "_bind": "new_kv",
+                        "when": "use_cache",
+                    }
+                },
+                {
+                    "null_cache": {
+                        "_op": "_ir_const",
+                        "value": None,
+                        "_bind": "new_kv",
+                        "when": "not (use_cache)",
+                    }
+                },
+            ],
+            "outputs": {"new_kv": "new_kv"},
+        },
+    }
+    dot = render_synapse_spec_to_dot(spec)
+    assert 'label="use_cache"' in dot
 
 
 def test_optional_input_defaults_to_none_in_emitted_code() -> None:

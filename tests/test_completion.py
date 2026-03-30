@@ -500,6 +500,16 @@ def test_collect_payload_candidates_handles_get_transform_failure(
     assert "{ " in candidates
 
 
+def test_collect_payload_candidates_uses_mode_schema_hints_for_load() -> None:
+    candidates = _collect_payload_candidates(
+        active_transform="load",
+        state_dict_provider=None,
+        line_buffer="load: { backend: axon, ",
+    )
+    assert "weights: " in candidates
+    assert "to: " not in candidates
+
+
 def test_match_payload_candidates_covers_structural_prefix_and_any_context() -> None:
     matches = _match_payload_candidates(
         text="{",

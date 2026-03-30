@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from ..core import (
     StateDictLike,
     StateDictProvider,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     complete_filesystem_paths,
@@ -13,7 +14,7 @@ from ..core import (
     parse_model_expr,
     register_transform,
     require_nonempty_string,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from ..engine import (
     BaseStateDictProvider,
@@ -29,12 +30,18 @@ class LoadTransformError(TransformError):
     pass
 
 
+LoadFormat = Literal["auto", "torch", "safetensors", "numpy"]
+
+
 @dataclass(frozen=True)
 class LoadSpec:
     path: Path
     alias: str
     tensor_name: str | None
-    format: str
+    format: LoadFormat
+    backend: str = "auto"
+    mode: str = "checkpoint"
+    weights: Path | None = None
 
     def collect_models(self) -> set[str]:
         # load can introduce a new model alias
@@ -45,10 +52,15 @@ class LoadTransform(TypedTransform[LoadSpec]):
     name = "load"
     error_type = LoadTransformError
     spec_type = LoadSpec
-    allowed_keys = {"path", "alias", "to", "format"}
-    required_keys = {"path"}
+    allowed_keys = {"path", "alias", "to", "format", "backend", "weights"}
+    required_keys: set[str] = {"path"}
     help_text = (
         "Loads either a full state_dict or a single tensor from disk.\n"
+        "\n"
+        "With backend=auto (default), mode is inferred from path + to:\n"
+        "  - to present -> tensor load\n"
+        "  - path ends with .axon -> axon model load\n"
+        "  - otherwise -> checkpoint/state_dict load\n"
         "\n"
         "Without 'to', loads a full state_dict into 'alias'. With 'to', loads one tensor "
         "into a tensor name (optionally with alias in 'to', e.g. model::name).\n"
@@ -56,11 +68,27 @@ class LoadTransform(TypedTransform[LoadSpec]):
         "Examples:\n"
         "  load: { path: /tmp/a.safetensors, alias: a }\n"
         "  load: { path: /tmp/tensor.npy, to: model::embed.weight }\n"
-        "  load: /tmp/model.safetensors"
+        "  load: /tmp/model.safetensors\n"
+        "  load: { path: examples/gpt2.axon, backend: auto, weights: models/gpt2, alias: gpt2 }"
     )
 
     def completion_reference_keys(self) -> list[str]:
         return ["to"]
+
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key="backend",
+            default_mode="auto",
+            common_required={"path"},
+            common_allowed={"path", "alias", "backend"},
+            mode_required={},
+            mode_allowed_extra={
+                "auto": {"to", "format", "weights"},
+                "axon": {"weights", "format"},
+                "checkpoint": {"format"},
+                "tensor": {"to", "format"},
+            },
+        )
 
     def completion_value_candidates(
         self,
@@ -68,7 +96,7 @@ class LoadTransform(TypedTransform[LoadSpec]):
         prefix_text: str,
         model_aliases: list[str],
     ) -> list[str] | None:
-        if value_key == "path":
+        if value_key in {"path", "weights"}:
             return complete_filesystem_paths(prefix_text)
         if value_key == "alias":
             return [alias for alias in model_aliases if alias.startswith(prefix_text)]
@@ -78,30 +106,50 @@ class LoadTransform(TypedTransform[LoadSpec]):
                 for name in ("auto", "torch", "safetensors", "numpy")
                 if name.startswith(prefix_text)
             ]
+        if value_key == "backend":
+            return [
+                name
+                for name in ("auto", "axon", "checkpoint", "tensor")
+                if name.startswith(prefix_text)
+            ]
         return None
 
     def compile(self, payload: Any, default_model: str | None) -> LoadSpec:
         if isinstance(payload, str):
             payload = {"path": payload}
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=LoadTransformError,
         )
 
         path = Path(require_nonempty_string(payload, op_name=self.name, key="path"))
+
         raw_alias = payload.get("alias")
         if raw_alias is not None and (not isinstance(raw_alias, str) or not raw_alias):
             raise LoadTransformError("load.alias must be a non-empty string when provided")
 
+        raw_backend = payload.get("backend", "auto")
+        if not isinstance(raw_backend, str) or not raw_backend:
+            raise LoadTransformError("load.backend must be a non-empty string when provided")
+        backend = raw_backend.strip().lower()
+        if backend not in {"auto", "axon", "checkpoint", "tensor"}:
+            raise LoadTransformError("load.backend must be one of: auto, axon, checkpoint, tensor")
+
         raw_format = payload.get("format", "auto")
         if not isinstance(raw_format, str) or not raw_format:
             raise LoadTransformError("load.format must be a non-empty string when provided")
-        fmt = raw_format.strip().lower()
-        if fmt not in {"auto", "torch", "safetensors", "numpy"}:
+        fmt_raw = raw_format.strip().lower()
+        if fmt_raw not in {"auto", "torch", "safetensors", "numpy"}:
             raise LoadTransformError("load.format must be one of: auto, torch, safetensors, numpy")
+        fmt = cast(LoadFormat, fmt_raw)
+
+        raw_weights = payload.get("weights")
+        if raw_weights is not None and (not isinstance(raw_weights, str) or not raw_weights):
+            raise LoadTransformError("load.weights must be a non-empty string when provided")
+        weights = Path(raw_weights) if isinstance(raw_weights, str) else None
 
         alias_default = raw_alias or default_model or "model"
         tensor_name: str | None = None
@@ -119,16 +167,71 @@ class LoadTransform(TypedTransform[LoadSpec]):
             assert target_ref.model is not None
             alias_default = target_ref.model
             tensor_name = target_ref.expr
-        elif fmt != "auto":
-            raise LoadTransformError(
-                "load.format is only supported for tensor loads (with load.to)"
-            )
 
-        return LoadSpec(path=path, alias=alias_default, tensor_name=tensor_name, format=fmt)
+        mode = self._resolve_mode(
+            backend=backend,
+            path=path,
+            has_to=(tensor_name is not None),
+        )
+
+        if mode == "tensor":
+            if weights is not None:
+                raise LoadTransformError("load.weights is not supported for tensor load mode")
+        elif mode == "checkpoint":
+            if weights is not None:
+                raise LoadTransformError(
+                    "load.weights is only supported when load mode resolves to axon"
+                )
+            if fmt != "auto":
+                raise LoadTransformError(
+                    "load.format is only supported for tensor loads (with load.to)"
+                )
+        elif mode == "axon":
+            if tensor_name is not None:
+                raise LoadTransformError("load.to is not supported for axon model load mode")
+            if fmt != "auto":
+                raise LoadTransformError("load.format is not supported for axon model load mode")
+            if path.suffix.lower() != ".axon":
+                raise LoadTransformError(
+                    "axon model load mode requires load.path to point to a .axon file"
+                )
+        else:  # pragma: no cover
+            raise LoadTransformError(f"Unsupported load mode: {mode}")
+
+        return LoadSpec(
+            path=path,
+            alias=alias_default,
+            tensor_name=tensor_name,
+            format=fmt,
+            backend=backend,
+            mode=mode,
+            weights=weights,
+        )
+
+    def _resolve_mode(self, *, backend: str, path: Path, has_to: bool) -> str:
+        if backend == "tensor":
+            if not has_to:
+                raise LoadTransformError("load.backend=tensor requires load.to")
+            return "tensor"
+        if backend == "checkpoint":
+            if has_to:
+                raise LoadTransformError("load.backend=checkpoint does not support load.to")
+            return "checkpoint"
+        if backend == "axon":
+            return "axon"
+        # auto
+        if has_to:
+            return "tensor"
+        if path.suffix.lower() == ".axon":
+            return "axon"
+        return "checkpoint"
 
     def apply(self, spec: object, provider: StateDictProvider) -> TransformResult:
         typed = self.require_spec(spec)
         dry_run = get_runtime_flags().dry_run
+
+        if typed.mode == "axon":
+            return self._apply_axon_model_load(typed=typed, provider=provider, dry_run=dry_run)
 
         if typed.tensor_name is None:
             if not isinstance(provider, BaseStateDictProvider):
@@ -149,7 +252,7 @@ class LoadTransform(TypedTransform[LoadSpec]):
             return TransformResult(name=self.name, count=len(loaded_state_dict))
 
         try:
-            tensor = load_tensor_from_path(typed.path, format=typed.format)  # type: ignore[arg-type]
+            tensor = load_tensor_from_path(typed.path, format=typed.format)
         except RuntimeError as exc:
             raise LoadTransformError(str(exc)) from exc
         if (
@@ -173,6 +276,57 @@ class LoadTransform(TypedTransform[LoadSpec]):
             state_dict[typed.tensor_name] = tensor
         emit_verbose_event(self.name, f"{typed.path} -> {typed.alias}::{typed.tensor_name}")
         return TransformResult(name=self.name, count=1)
+
+    def _apply_axon_model_load(
+        self,
+        *,
+        typed: LoadSpec,
+        provider: StateDictProvider,
+        dry_run: bool,
+    ) -> TransformResult:
+        alias_exists = False
+        if isinstance(provider, BaseStateDictProvider):
+            alias_exists = provider.has_model_alias(typed.alias)
+        if not alias_exists:
+            aliases = getattr(provider, "list_model_aliases", None)
+            if callable(aliases):
+                try:
+                    alias_exists = typed.alias in {str(item) for item in aliases()}
+                except Exception:
+                    alias_exists = False
+        if alias_exists:
+            if typed.weights is not None:
+                raise LoadTransformError(
+                    "load.backend=axon received both an existing alias and load.weights; "
+                    "omit load.weights or choose a new alias"
+                )
+            emit_verbose_event(
+                self.name, f"{typed.path} -> reuse alias {typed.alias} (backend=axon)"
+            )
+            return TransformResult(name=self.name, count=0)
+        if typed.weights is None:
+            raise LoadTransformError(
+                "load.backend=axon requires load.weights when alias does not already exist"
+            )
+        if not isinstance(provider, BaseStateDictProvider):
+            raise LoadTransformError(
+                "load.backend=axon requires a provider that supports creating new aliases"
+            )
+        try:
+            if dry_run:
+                loaded_state_dict = provider.load_state_dict_from_checkpoint_path(typed.weights)
+            else:
+                loaded_state_dict = provider.load_alias_from_path(typed.alias, typed.weights)
+        except ProviderError as exc:
+            message = str(exc).replace("model alias", "load alias")
+            raise LoadTransformError(message) from exc
+        except RuntimeError as exc:
+            raise LoadTransformError(str(exc)) from exc
+        emit_verbose_event(
+            self.name,
+            f"{typed.path} + {typed.weights} -> alias {typed.alias} (backend=axon)",
+        )
+        return TransformResult(name=self.name, count=len(loaded_state_dict))
 
     def _infer_output_model(self, spec: object) -> str:
         return self.require_spec(spec).alias

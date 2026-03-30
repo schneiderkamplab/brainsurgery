@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from .axon import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
+from .ops import get_op_module
 
 _WORD_TOKEN_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+_PARAM_INFER_RE = re.compile(r"_infer_param_(?:expr|path)\([^)]*?[\"']([A-Za-z0-9_]+)[\"']\)")
+_INFER_PARAM_CALL_RE = re.compile(r"infer_param\([\"']([A-Za-z0-9_]+)[\"']\)")
 
 
 def _dot_escape(text: str) -> str:
-    return text.replace("\\", "\\\\").replace('"', '\\"')
+    # Keep Graphviz escapes like "\n" intact so labels can use multiline rendering.
+    return text.replace('"', '\\"').replace("\n", "\\n")
 
 
 def _dot_id(*parts: str) -> str:
@@ -37,6 +42,81 @@ def _append_edge(
     bucket.add(label)
 
 
+_OP_PARAM_FIELDS_CACHE: dict[str, tuple[str, ...]] = {}
+
+
+def _op_param_fields(op_name: str) -> tuple[str, ...]:
+    cached = _OP_PARAM_FIELDS_CACHE.get(op_name)
+    if cached is not None:
+        return cached
+    op_module = get_op_module(op_name)
+    if op_module is None:
+        _OP_PARAM_FIELDS_CACHE[op_name] = ()
+        return ()
+    fields: set[str] = set()
+    for fn_name in ("run", "compile"):
+        fn = getattr(op_module, fn_name, None)
+        if fn is None:
+            continue
+        try:
+            source = inspect.getsource(fn)
+        except (OSError, TypeError):
+            continue
+        fields.update(_PARAM_INFER_RE.findall(source))
+        fields.update(_INFER_PARAM_CALL_RE.findall(source))
+    result = tuple(sorted(fields))
+    _OP_PARAM_FIELDS_CACHE[op_name] = result
+    return result
+
+
+def _node_param_paths(
+    node_spec: Mapping[str, Any],
+    *,
+    op_name: str,
+    node_runtime_path: str,
+) -> list[str]:
+    paths: set[str] = set()
+    explicit_params = node_spec.get("_params")
+    explicit_param_map: dict[str, str] = {}
+    if isinstance(explicit_params, Mapping):
+        for key, value in explicit_params.items():
+            if not isinstance(value, str) or not value:
+                continue
+            paths.add(value)
+            if isinstance(key, str) and key:
+                explicit_param_map[key] = value
+
+    fields = _op_param_fields(op_name)
+    param_base = node_spec.get("param_base")
+    param_base_name = param_base if isinstance(param_base, str) and param_base else None
+    for field in fields:
+        explicit_field_value = node_spec.get(field)
+        if isinstance(explicit_field_value, str) and explicit_field_value:
+            paths.add(explicit_field_value)
+            continue
+        mapped_field_value = explicit_param_map.get(field)
+        if isinstance(mapped_field_value, str) and mapped_field_value:
+            paths.add(mapped_field_value)
+            continue
+        if param_base_name is not None:
+            paths.add(f"{param_base_name}.{field}")
+            continue
+        paths.add(f"{node_runtime_path}.{field}")
+    for key, value in node_spec.items():
+        if not isinstance(key, str) or not key.endswith("_param"):
+            continue
+        if not isinstance(value, str) or not value:
+            continue
+        if "." in value:
+            paths.add(value)
+            continue
+        if param_base_name is not None:
+            paths.add(f"{param_base_name}.{value}")
+            continue
+        paths.add(f"{node_runtime_path}.{value}")
+    return sorted(paths)
+
+
 def _collect_var_refs(value: Any, *, known_vars: set[str], out: set[str]) -> None:
     if isinstance(value, str):
         if value in known_vars:
@@ -60,8 +140,11 @@ def _node_input_vars(node_spec: Mapping[str, Any], *, known_vars: set[str]) -> l
     raw_args = node_spec.get("_args")
     if raw_args is not None:
         _collect_var_refs(raw_args, known_vars=known_vars, out=refs)
+    when_expr = node_spec.get("when")
+    if when_expr is not None:
+        _collect_var_refs(when_expr, known_vars=known_vars, out=refs)
     for key, value in node_spec.items():
-        if key.startswith("_") or key in {"when", "graph"}:
+        if key.startswith("_") or key in {"graph"}:
             continue
         _collect_var_refs(value, known_vars=known_vars, out=refs)
     return sorted(refs)
@@ -84,7 +167,10 @@ def _walk_graph(
     lines: list[str],
     var_sources: dict[str, str],
     edge_labels: dict[tuple[str, str], set[str]],
+    flow_edges: set[tuple[str, str]],
+    runtime_scope: str,
 ) -> None:
+    prev_node_id: str | None = None
     for index, item in enumerate(graph):
         if not isinstance(item, Mapping) or len(item) != 1:
             continue
@@ -94,11 +180,22 @@ def _walk_graph(
         node_id = _dot_id("op", block_name, scope, f"{index:04d}_{node_name}")
         op = node_spec.get("_op")
         op_name = op if isinstance(op, str) else "group"
+        node_runtime_path = f"{runtime_scope}.{node_name}" if runtime_scope else node_name
         node_label = f"{node_name}\\n{op_name}"
+        param_paths = _node_param_paths(
+            node_spec,
+            op_name=op_name,
+            node_runtime_path=node_runtime_path,
+        )
+        if param_paths:
+            node_label = f"{node_label}\\nparams: {', '.join(param_paths)}"
         lines.append(
             f'  "{node_id}" [shape=ellipse, style="filled", fillcolor="white", '
             f'label="{_dot_escape(node_label)}"];'
         )
+        if prev_node_id is not None:
+            flow_edges.add((prev_node_id, node_id))
+        prev_node_id = node_id
 
         known_vars = set(var_sources.keys())
         for var_name in _node_input_vars(node_spec, known_vars=known_vars):
@@ -125,6 +222,8 @@ def _walk_graph(
                 lines=lines,
                 var_sources=var_sources,
                 edge_labels=edge_labels,
+                flow_edges=flow_edges,
+                runtime_scope=node_runtime_path,
             )
 
         body_graph = node_spec.get("_body")
@@ -136,6 +235,8 @@ def _walk_graph(
                 lines=lines,
                 var_sources=var_sources,
                 edge_labels=edge_labels,
+                flow_edges=flow_edges,
+                runtime_scope=node_runtime_path,
             )
 
 
@@ -146,6 +247,7 @@ def _render_block(
     lines: list[str],
     edge_labels: dict[tuple[str, str], set[str]],
     block_clusters: dict[str, str],
+    flow_edges: set[tuple[str, str]],
 ) -> None:
     block_id = _dot_id("block", block_name)
     cluster_id = _cluster_id(block_name)
@@ -183,6 +285,8 @@ def _render_block(
             lines=lines,
             var_sources=var_sources,
             edge_labels=edge_labels,
+            flow_edges=flow_edges,
+            runtime_scope="",
         )
 
     outputs = block_spec.get("outputs")
@@ -222,6 +326,7 @@ def render_synapse_spec_to_dot(spec: Mapping[str, Any]) -> str:
     ]
     edge_labels: dict[tuple[str, str], set[str]] = {}
     block_clusters: dict[str, str] = {}
+    flow_edges: set[tuple[str, str]] = set()
 
     main_block: dict[str, Any] = {"graph": graph}
     model_inputs = model.get("inputs")
@@ -236,6 +341,7 @@ def render_synapse_spec_to_dot(spec: Mapping[str, Any]) -> str:
         lines=lines,
         edge_labels=edge_labels,
         block_clusters=block_clusters,
+        flow_edges=flow_edges,
     )
 
     blocks = model.get("blocks")
@@ -249,7 +355,11 @@ def render_synapse_spec_to_dot(spec: Mapping[str, Any]) -> str:
                 lines=lines,
                 edge_labels=edge_labels,
                 block_clusters=block_clusters,
+                flow_edges=flow_edges,
             )
+
+    for src, dst in sorted(flow_edges):
+        lines.append(f'  "{src}" -> "{dst}" [style=dashed, color="gray65", arrowhead=vee];')
 
     for (src, dst), labels in sorted(edge_labels.items()):
         label = ",".join(sorted(labels))

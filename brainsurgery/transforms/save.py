@@ -5,6 +5,7 @@ from typing import Any
 from ..core import (
     StateDictProvider,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     complete_filesystem_paths,
@@ -12,7 +13,7 @@ from ..core import (
     parse_model_expr,
     register_transform,
     require_nonempty_string,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from ..engine import (
     emit_verbose_event,
@@ -63,6 +64,14 @@ class SaveTransform(TypedTransform[SaveSpec]):
         "  save: { path: /tmp/emb.npy, target: model::embed.weight, format: numpy }"
     )
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(self.required_keys),
+            common_allowed=set(self.allowed_keys),
+        )
+
     def completion_reference_keys(self) -> list[str]:
         return ["target"]
 
@@ -88,11 +97,11 @@ class SaveTransform(TypedTransform[SaveSpec]):
         if isinstance(payload, str):
             payload = {"path": payload}
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
 
         path = Path(require_nonempty_string(payload, op_name=self.name, key="path"))

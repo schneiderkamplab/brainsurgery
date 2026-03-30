@@ -11,6 +11,7 @@ from brainsurgery.core import (
     TensorRef,
     TransformControl,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
 )
 from brainsurgery.engine import (
@@ -34,6 +35,14 @@ class _Transform(BaseTransform):
     def compile(self, payload: dict, default_model: str | None) -> object:
         del payload, default_model
         return object()
+
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(),
+            common_allowed=set(),
+        )
 
     def apply(self, spec: object, provider: object) -> TransformResult:
         del spec, provider
@@ -90,6 +99,14 @@ class _NamedNoopTransform(BaseTransform):
     def compile(self, payload: dict, default_model: str | None) -> object:
         del payload, default_model
         return object()
+
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(),
+            common_allowed=set(),
+        )
 
     def apply(self, spec: object, provider: object) -> TransformResult:
         del spec, provider

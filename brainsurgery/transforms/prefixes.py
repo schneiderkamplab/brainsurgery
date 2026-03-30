@@ -5,12 +5,13 @@ from typing import Any, Literal
 from ..core import (
     StateDictProvider,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     ensure_mapping_payload,
     register_transform,
     require_nonempty_string,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from ..engine import (
     emit_line,
@@ -64,6 +65,20 @@ class PrefixesTransform(TypedTransform[PrefixesSpec]):
         "  prefixes: { mode: rename, from: scratch, to: edited }"
     )
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key="mode",
+            default_mode="list",
+            common_required=set(),
+            common_allowed={"mode"},
+            mode_required={
+                "add": {"alias"},
+                "remove": {"alias"},
+                "rename": {"from", "to"},
+            },
+            mode_allowed_extra={},
+        )
+
     def compile(self, payload: Any, default_model: str | None) -> PrefixesSpec:
         del default_model
 
@@ -74,10 +89,11 @@ class PrefixesTransform(TypedTransform[PrefixesSpec]):
             return PrefixesSpec(mode="list")
 
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
 
         raw_mode = payload.get("mode", "list")
@@ -86,25 +102,21 @@ class PrefixesTransform(TypedTransform[PrefixesSpec]):
 
         mode = raw_mode.strip().lower()
         if mode == "list":
-            _require_only_keys(payload, allowed={"mode"})
             return PrefixesSpec(mode="list")
 
         if mode == "add":
-            _require_only_keys(payload, allowed={"mode", "alias"})
             return PrefixesSpec(
                 mode="add",
                 alias=require_nonempty_string(payload, op_name=self.name, key="alias"),
             )
 
         if mode == "remove":
-            _require_only_keys(payload, allowed={"mode", "alias"})
             return PrefixesSpec(
                 mode="remove",
                 alias=require_nonempty_string(payload, op_name=self.name, key="alias"),
             )
 
         if mode == "rename":
-            _require_only_keys(payload, allowed={"mode", "from", "to"})
             return PrefixesSpec(
                 mode="rename",
                 source_alias=require_nonempty_string(payload, op_name=self.name, key="from"),
@@ -202,12 +214,6 @@ class PrefixesTransform(TypedTransform[PrefixesSpec]):
 
     def completion_reference_keys(self) -> list[str]:
         return []
-
-
-def _require_only_keys(payload: dict[str, object], *, allowed: set[str]) -> None:
-    unexpected = set(payload) - allowed
-    if unexpected:
-        raise PrefixesTransformError(f"prefixes received unknown keys: {sorted(unexpected)}")
 
 
 def _prefixes_mode(before_cursor: str) -> str | None:

@@ -4,6 +4,7 @@ from typing import Any
 from ..core import (
     StateDictProvider,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     ensure_mapping_payload,
@@ -42,6 +43,14 @@ class AssertTransform(TypedTransform[AssertSpec]):
         "  assert: { dimensions: { of: '.*weight', ge: 2 } }\n"
         "  assert: { all: [ { exists: '.*weight' }, { dimensions: { of: ln_f.weight, is: 1 } } ] }"
     )
+
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(),
+            common_allowed=set(),
+        )
 
     def completion_payload_start_candidates(self, prefix_text: str) -> list[str] | None:
         candidates = [name for name in get_assert_expr_names() if name.startswith(prefix_text)]

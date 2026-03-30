@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass
 
 _KEY_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+_BARE_SCALAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 _TRANSFORM_LINE_RE = re.compile(
     r"^\s*(?:-\s*)?[A-Za-z_][A-Za-z0-9_-]*\s*:(.*)$",
     re.DOTALL,
@@ -195,6 +196,43 @@ def _payload_cursor_state(before_cursor: str) -> _PayloadCursorState:
     )
 
 
+def _parse_scalar_hint(raw_text: str) -> str | None:
+    value = raw_text.strip()
+    if not value:
+        return None
+    if _BARE_SCALAR_RE.fullmatch(value):
+        return value
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return None
+
+
+def _payload_value_hints(before_cursor: str) -> dict[str, str]:
+    transform_match = _TRANSFORM_LINE_RE.match(before_cursor)
+    if transform_match is None:
+        return {}
+    payload = transform_match.group(1)
+    if not payload.strip():
+        return {}
+    completed_segments, current_segment = _split_top_level_segments(payload)
+    segments = list(completed_segments)
+    if current_segment.strip():
+        segments.append(current_segment)
+
+    hints: dict[str, str] = {}
+    for segment in segments:
+        key = _parse_key_from_segment(segment)
+        if key is None:
+            continue
+        colon_index = _find_top_level_colon(segment)
+        if colon_index is None:
+            continue
+        value_hint = _parse_scalar_hint(segment[colon_index + 1 :])
+        if value_hint is not None:
+            hints[key] = value_hint
+    return hints
+
+
 def _payload_context(before_cursor: str) -> str:
     return _payload_cursor_state(before_cursor).context
 
@@ -216,4 +254,5 @@ __all__ = [
     "_payload_context",
     "_current_value_key",
     "_current_value_fragment",
+    "_payload_value_hints",
 ]

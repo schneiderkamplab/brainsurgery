@@ -15,6 +15,7 @@ from .payload_scan import (
     _current_value_key,
     _payload_context,
     _payload_cursor_state,
+    _payload_value_hints,
 )
 
 logger = logging.getLogger("brainsurgery")
@@ -78,14 +79,22 @@ def _collect_payload_candidates(
     *,
     active_transform: str | None,
     state_dict_provider: Any | None,
+    line_buffer: str = "",
 ) -> list[str]:
     candidates: set[str] = {"{ ", "}", "[ ", "]", ", "}
 
     if active_transform:
         try:
             transform = get_transform(active_transform)
-            required_keys = set(getattr(transform, "required_keys", set()) or set())
-            allowed_keys = set(getattr(transform, "allowed_keys", set()) or set())
+            payload_hints = _payload_value_hints(line_buffer) if line_buffer else {}
+            mode = None
+            if payload_hints:
+                try:
+                    mode = transform.resolve_payload_mode(payload_hints)
+                except Exception:
+                    mode = None
+            required_keys = set(transform.payload_required_keys(payload=payload_hints, mode=mode))
+            allowed_keys = set(transform.payload_allowed_keys(payload=payload_hints, mode=mode))
             for key in sorted(required_keys | allowed_keys):
                 candidates.add(f"{key}: ")
         except Exception:

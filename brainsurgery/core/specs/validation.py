@@ -1,3 +1,5 @@
+from dataclasses import dataclass, field
+
 import torch
 
 from .refs import _Expr
@@ -25,6 +27,73 @@ _DTYPE_ALIASES: dict[str, torch.dtype] = {
     "long": torch.int64,
     "bool": torch.bool,
 }
+
+
+@dataclass(frozen=True)
+class TransformPayloadSchema:
+    mode_key: str | None = None
+    default_mode: str = "default"
+    common_required: set[str] = field(default_factory=set)
+    common_allowed: set[str] = field(default_factory=set)
+    mode_required: dict[str, set[str]] = field(default_factory=dict)
+    mode_allowed_extra: dict[str, set[str]] = field(default_factory=dict)
+
+    def _ordered_modes(self) -> list[str]:
+        ordered: list[str] = []
+        for name in (
+            str(self.default_mode),
+            *(str(item) for item in self.mode_required.keys()),
+            *(str(item) for item in self.mode_allowed_extra.keys()),
+        ):
+            normalized = name.strip().lower()
+            if normalized and normalized not in ordered:
+                ordered.append(normalized)
+        return ordered
+
+    def modes(self) -> set[str]:
+        return set(self._ordered_modes())
+
+    def resolve_mode(
+        self,
+        payload: dict,
+        *,
+        op_name: str,
+        error_type: type[TransformError] = TransformError,
+    ) -> str:
+        if self.mode_key is None:
+            return str(self.default_mode)
+        raw_mode = payload.get(self.mode_key, self.default_mode)
+        if not isinstance(raw_mode, str) or not raw_mode.strip():
+            raise error_type(f"{op_name}.{self.mode_key} must be a non-empty string")
+        mode = raw_mode.strip().lower()
+        known_ordered = self._ordered_modes()
+        known = set(known_ordered)
+        if mode not in known:
+            raise error_type(
+                f"{op_name}.{self.mode_key} must be one of: {', '.join(known_ordered)}"
+            )
+        return mode
+
+    def required_keys_for_mode(self, mode: str) -> set[str]:
+        normalized = str(mode).lower()
+        required = set(self.common_required)
+        mode_required = {
+            str(name).lower(): set(values) for name, values in self.mode_required.items()
+        }
+        required.update(mode_required.get(normalized, set()))
+        return required
+
+    def allowed_keys_for_mode(self, mode: str) -> set[str]:
+        normalized = str(mode).lower()
+        allowed = set(self.common_allowed)
+        mode_allowed_extra = {
+            str(name).lower(): set(values) for name, values in self.mode_allowed_extra.items()
+        }
+        allowed.update(mode_allowed_extra.get(normalized, set()))
+        allowed.update(self.required_keys_for_mode(normalized))
+        if self.mode_key is not None:
+            allowed.add(self.mode_key)
+        return allowed
 
 
 def parse_torch_dtype(
@@ -70,6 +139,36 @@ def validate_payload_keys(
         if len(missing_list) == 1:
             raise TransformError(f"{op_name}.{missing_list[0]} is required")
         raise TransformError(f"{op_name} is missing required keys: {missing_list}")
+
+
+def validate_payload_schema(
+    payload: dict,
+    *,
+    op_name: str,
+    schema: TransformPayloadSchema,
+    mode: str | None = None,
+    error_type: type[TransformError] = TransformError,
+) -> str:
+    resolved_mode = (
+        schema.resolve_mode(payload, op_name=op_name, error_type=error_type)
+        if mode is None
+        else str(mode).lower()
+    )
+    unknown = set(payload) - schema.allowed_keys_for_mode(resolved_mode)
+    if unknown:
+        if schema.mode_key is not None:
+            raise error_type(
+                f"{op_name} received unknown keys for this mode ({resolved_mode}): {sorted(unknown)}"
+            )
+        raise error_type(f"{op_name} received unknown keys: {sorted(unknown)}")
+
+    missing = schema.required_keys_for_mode(resolved_mode) - set(payload)
+    if missing:
+        missing_list = sorted(missing)
+        if len(missing_list) == 1:
+            raise error_type(f"{op_name}.{missing_list[0]} is required")
+        raise error_type(f"{op_name} is missing required keys: {missing_list}")
+    return resolved_mode
 
 
 def require_nonempty_string(payload: dict, *, op_name: str, key: str) -> str:
@@ -170,10 +269,12 @@ def require_same_shape_dtype_device3(
 __all__ = [
     "ensure_mapping_payload",
     "parse_torch_dtype",
+    "TransformPayloadSchema",
     "require_expr",
     "require_nonempty_string",
     "require_numeric",
     "require_same_shape_dtype_device",
     "require_same_shape_dtype_device3",
+    "validate_payload_schema",
     "validate_payload_keys",
 ]
