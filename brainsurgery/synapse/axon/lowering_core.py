@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ast
 import copy
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,7 +59,56 @@ from .types import (
     AxonStatement,
 )
 
-_LAMBDA_RE = re.compile(r"^\\([A-Za-z_][A-Za-z0-9_]*)\s*->\s*(.+)$")
+
+def _is_identifier(token: str) -> bool:
+    if not token:
+        return False
+    if not (token[0].isalpha() or token[0] == "_"):
+        return False
+    return all(ch.isalnum() or ch == "_" for ch in token[1:])
+
+
+def _is_int_literal(token: str) -> bool:
+    if not token:
+        return False
+    if token[0] == "-":
+        return token[1:].isdigit()
+    return token.isdigit()
+
+
+def _is_number_literal(token: str) -> bool:
+    try:
+        parsed = ast.literal_eval(token)
+    except Exception:
+        return False
+    return isinstance(parsed, (int, float)) and not isinstance(parsed, bool)
+
+
+def _sanitize_token(token: str, *, default: str) -> str:
+    out_chars: list[str] = []
+    for ch in token:
+        if ch.isalnum() or ch == "_":
+            out_chars.append(ch)
+        else:
+            out_chars.append("_")
+    normalized = "".join(out_chars).strip("_")
+    return normalized or default
+
+
+def _parse_bind_lambda(text: str) -> tuple[str, str] | None:
+    stripped = text.strip()
+    if not stripped.startswith("\\"):
+        return None
+    body = stripped[1:].strip()
+    if "->" not in body:
+        return None
+    var_part, expr_part = body.split("->", 1)
+    var_name = var_part.strip()
+    expr = expr_part.strip()
+    if not _is_identifier(var_name) or not expr:
+        return None
+    return var_name, expr
+
 
 _IMPLICIT_ACTIVATION_ALIASES: dict[str, tuple[str, int]] = {
     "gelu": ("_activations_gelu", 0),
@@ -127,7 +175,7 @@ def _canonical_op_name(callee: str) -> str:
 def _normalize_dim_token(value: Any) -> Any:
     if isinstance(value, str):
         token = value.strip()
-        if re.fullmatch(r"-?[0-9]+", token):
+        if _is_int_literal(token):
             return int(token)
         return token
     return value
@@ -141,7 +189,7 @@ def _is_symbolic_dim_token(value: Any) -> bool:
     if not isinstance(value, str):
         return False
     token = value.strip()
-    return re.fullmatch(r"-?[0-9]+", token) is None
+    return not _is_int_literal(token)
 
 
 def _is_kind(value: Any, kind: str) -> bool:
@@ -436,7 +484,7 @@ def _lower_simple_call(
         ):
             # Keep structured literals (e.g., split sizes) inline for op normalizers.
             return False
-        if re.fullmatch(r"-?[0-9]+(\.[0-9]+([eE][+-]?[0-9]+)?)?", stripped):
+        if _is_number_literal(stripped):
             return False
         if stripped.lower() in {"true", "false", "null"}:
             return False
@@ -471,7 +519,7 @@ def _lower_simple_call(
         if isinstance(value, str):
             stripped_value = _strip_wrapping_parens(value)
             if _looks_like_call(stripped_value):
-                key_token = re.sub(r"[^A-Za-z0-9_]+", "_", key).strip("_") or "kwarg"
+                key_token = _sanitize_token(key, default="kwarg")
                 tmp = ctx.fresh(f"kwarg_{key_token}")
                 pre_graph.extend(_lower_expr(stripped_value, tmp, ctx, when=when))
                 resolved_kwargs[key] = tmp
@@ -642,11 +690,7 @@ def _lower_alias_or_const(
     token = expr.strip()
     node_name = f"n_{ctx.fresh('op')}"
     scalar = _parse_scalar(token)
-    if (
-        isinstance(scalar, str)
-        and scalar == token
-        and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)
-    ):
+    if isinstance(scalar, str) and scalar == token and _is_identifier(token):
         node = {"_op": "_ir_alias", "_args": token, "_bind": out}
         if token in ctx.tensor_last_dim:
             ctx.tensor_last_dim[out] = ctx.tensor_last_dim[token]
@@ -872,11 +916,11 @@ def _lower_expr(
             bind_ref = ctx.fresh("bind")
             bind_graph.extend(_lower_expr(first_bind, bind_ref, ctx, when=when))
         for idx, part in enumerate(bind_parts[1:], start=1):
-            match = _LAMBDA_RE.match(part.strip())
-            if match is None:
+            parsed_lambda = _parse_bind_lambda(part)
+            if parsed_lambda is None:
                 raise ValueError(f"expected lambda after >>=, got: {part!r}")
-            var_name = match.group(1)
-            body = _substitute_var(match.group(2), var_name, bind_ref)
+            var_name, lambda_body = parsed_lambda
+            body = _substitute_var(lambda_body, var_name, bind_ref)
             bind_next_out: str | list[str] = (
                 out if idx == len(bind_parts) - 1 else ctx.fresh("bind")
             )
@@ -1388,8 +1432,7 @@ def _as_concrete_path(value: Any) -> str | None:
 
 
 def _sanitize_path_suffix(value: str) -> str:
-    sanitized = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_")
-    return sanitized or "path"
+    return _sanitize_token(value, default="path")
 
 
 def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:

@@ -1,9 +1,18 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
+from .ast_validation import validate_axon_program
 from .call_parser import split_top_level as _split_top_level_shared
+from .lark_statements import (
+    ParsedBind,
+    ParsedFor,
+    ParsedReturn,
+    ParsedScope,
+    ParsedScopeBind,
+    parse_statement_head,
+)
+from .lark_toplevel import parse_import_line, parse_padding_side_pragma, parse_signature_line
 from .types import (
     AxonBind,
     AxonModule,
@@ -14,26 +23,88 @@ from .types import (
     AxonStatement,
 )
 
-_HEADER_RE = re.compile(r"^module\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*->\s*\((.*?)\)\s*do\s*$")
-_MOD_NAME_RE = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
-_SIG_RE = re.compile(rf"^({_MOD_NAME_RE}(?:@[A-Za-z_][A-Za-z0-9_]*)*)\s*::\s*(.+)\s*$")
-_DEF_DO_RE = re.compile(rf"^({_MOD_NAME_RE}(?:@[A-Za-z_][A-Za-z0-9_]*)*)\s*(.*?)\s*=\s*do\s*$")
-_DEF_EXPR_RE = re.compile(rf"^({_MOD_NAME_RE}(?:@[A-Za-z_][A-Za-z0-9_]*)*)\s*(.*?)\s*=\s*(.+?)\s*$")
-_FOR_AT_RANGE_RE = re.compile(
-    r"^for(?:@([A-Za-z_][A-Za-z0-9_.]*))?\s+([A-Za-z_][A-Za-z0-9_]*)\s*<-\s*([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)\[])(?:\s+step\s*=\s*(.+?))?\s+do\s*$"
-)
-_SCOPE_RE = re.compile(r"^scope(?:@|\s+)([A-Za-z_][A-Za-z0-9_.]*)\s+do\s*$")
-_BIND_SCOPE_RE = re.compile(r"^(.+?)<-\s*scope(?:@|\s+)([A-Za-z_][A-Za-z0-9_.]*)\s+do\s*$")
-_TOP_CONST_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
-_TYPE_SHAPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[(.+)\]$")
-_PATH_SIG_ARG_RE = re.compile(r"^@([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)$")
-_PATH_SIG_SHORT_RE = re.compile(r"^@([A-Za-z_][A-Za-z0-9_]*)$")
-_IMPORT_RE = re.compile(rf"^import\s+({_MOD_NAME_RE})(?:\s+(.*))?$")
-_IMPORT_MEMBER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_SIMPLE_CALLEE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_:.@]*$")
-_PADDING_SIDE_PRAGMA_RE = re.compile(
-    r"""^\{-#\s*PADDING_SIDE\s+(['"])(left|right)\1\s*#-\}\s*$""", re.IGNORECASE
-)
+
+def _is_ident(token: str) -> bool:
+    if not token:
+        return False
+    if not (token[0].isalpha() or token[0] == "_"):
+        return False
+    return all(ch.isalnum() or ch == "_" for ch in token[1:])
+
+
+def _is_mod_name(token: str) -> bool:
+    parts = token.split(".")
+    return bool(parts) and all(_is_ident(part) for part in parts)
+
+
+def _is_mod_decl(token: str) -> bool:
+    parts = token.split("@")
+    if not parts:
+        return False
+    if not _is_mod_name(parts[0]):
+        return False
+    return all(_is_ident(part) for part in parts[1:])
+
+
+def _is_simple_callee(token: str) -> bool:
+    if not token:
+        return False
+    if not _is_ident(token[0]):
+        if not (token[0].isalpha() or token[0] == "_"):
+            return False
+    for ch in token:
+        if not (ch.isalnum() or ch in "_.:@"):
+            return False
+    return True
+
+
+def _parse_top_const_line(line: str) -> tuple[str, str] | None:
+    if "=" not in line:
+        return None
+    left, right = line.split("=", 1)
+    name = left.strip()
+    value = right.strip()
+    if not _is_ident(name) or not value:
+        return None
+    return name, value
+
+
+def _parse_def_line(line: str) -> tuple[str, list[str], str | None]:
+    if "=" not in line:
+        raise ValueError(f"invalid Axon definition line: {line!r}")
+    left, right = line.split("=", 1)
+    rhs = right.strip()
+    left_parts = [part for part in left.strip().split() if part]
+    if not left_parts:
+        raise ValueError(f"invalid Axon definition line: {line!r}")
+    decl = left_parts[0]
+    if not _is_mod_decl(decl):
+        raise ValueError(f"invalid Axon definition name: {decl!r}")
+    args = left_parts[1:]
+    if rhs == "do":
+        return decl, args, None
+    if not rhs:
+        raise ValueError(f"invalid Axon definition line: {line!r}")
+    return decl, args, rhs
+
+
+def _parse_path_sig_annotation(token: str) -> tuple[str, str] | None:
+    stripped = token.strip()
+    if not stripped.startswith("@"):
+        return None
+    body = stripped[1:].strip()
+    if not body:
+        return None
+    if ":" in body:
+        left, right = body.split(":", 1)
+        name = left.strip()
+        type_name = right.strip()
+        if not _is_ident(name) or not _is_ident(type_name):
+            return None
+        return name, type_name
+    if not _is_ident(body):
+        return None
+    return body, body
 
 
 def _strip_haskell_comment(line: str) -> str:
@@ -88,12 +159,14 @@ def _parse_params(raw: str) -> tuple[AxonParam, ...]:
 
 
 def _shape_dims_from_type(type_expr: str) -> tuple[str, ...] | None:
-    match = _TYPE_SHAPE_RE.match(type_expr.strip())
-    if match is None:
+    text = type_expr.strip()
+    if "[" not in text or not text.endswith("]"):
         return None
-    dims = tuple(
-        part.strip() for part in _split_top_level_csv(match.group(1).strip()) if part.strip()
-    )
+    base, inner = text.split("[", 1)
+    if not _is_ident(base.strip()):
+        return None
+    inner = inner[:-1].strip()
+    dims = tuple(part.strip() for part in _split_top_level_csv(inner) if part.strip())
     if not dims:
         return None
     return dims
@@ -109,10 +182,15 @@ def _parse_const_scalar(token: str) -> object:
         return None
     if value and ((value[0] == value[-1] == '"') or (value[0] == value[-1] == "'")):
         return value[1:-1]
-    if re.fullmatch(r"-?[0-9]+", value):
+    try:
         return int(value)
-    if re.fullmatch(r"-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?", value):
-        return float(value)
+    except ValueError:
+        pass
+    try:
+        if "." in value or "e" in value.lower():
+            return float(value)
+    except ValueError:
+        pass
     return value
 
 
@@ -126,13 +204,14 @@ def _extract_top_level_constants(lines: list[str]) -> tuple[list[str], dict[str,
             prev_was_sig = False
             continue
         stripped = line.strip()
-        if _SIG_RE.match(stripped) is not None:
+        if parse_signature_line(stripped) is not None:
             body.append(line)
             prev_was_sig = True
             continue
-        match = _TOP_CONST_RE.match(stripped)
-        if match is not None and not prev_was_sig:
-            constants[match.group(1)] = _parse_const_scalar(match.group(2))
+        parsed = _parse_top_const_line(stripped)
+        if parsed is not None and not prev_was_sig:
+            key, raw_value = parsed
+            constants[key] = _parse_const_scalar(raw_value)
             prev_was_sig = False
             continue
         body.append(line)
@@ -148,9 +227,8 @@ def _extract_top_level_pragmas(lines: list[str]) -> tuple[list[str], dict[str, o
             body.append(line)
             continue
         stripped = line.strip()
-        padding_match = _PADDING_SIDE_PRAGMA_RE.match(stripped)
-        if padding_match is not None:
-            value = padding_match.group(2).lower()
+        value = parse_padding_side_pragma(stripped)
+        if value is not None:
             prev = pragmas.get("padding_side")
             if prev is not None and prev != value:
                 raise ValueError(
@@ -212,10 +290,10 @@ def _split_module_path_params(name: str) -> tuple[str, tuple[str, ...]]:
     parts = name.split("@")
     base = parts[0]
     path_params = tuple(parts[1:])
-    if not re.fullmatch(_MOD_NAME_RE, base):
+    if not _is_mod_name(base):
         raise ValueError(f"invalid module name: {name!r}")
     for path_param in path_params:
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", path_param):
+        if not _is_ident(path_param):
             raise ValueError(f"invalid module path parameter: {name!r}")
     if len(set(path_params)) != len(path_params):
         raise ValueError(f"duplicate module path parameter in {name!r}")
@@ -239,7 +317,7 @@ def _parse_import_members(raw: str) -> tuple[str, ...]:
     if not tokens:
         return ()
     for token in tokens:
-        if _IMPORT_MEMBER_RE.fullmatch(token) is None:
+        if not _is_ident(token):
             raise ValueError(f"invalid imported member name: {token!r}")
     deduped = tuple(dict.fromkeys(tokens))
     return deduped
@@ -255,11 +333,11 @@ def _extract_top_level_imports(
         if len(line) != len(line.lstrip(" ")):
             body.append(line)
             continue
-        match = _IMPORT_RE.match(line.strip())
-        if match is not None:
-            namespace = match.group(1)
+        parsed = parse_import_line(line.strip())
+        if parsed is not None:
+            namespace = parsed.namespace
             imports.append(namespace)
-            raw_members = match.group(2) or ""
+            raw_members = parsed.members_tail
             members = _parse_import_members(raw_members)
             if members:
                 prev = imported_members.get(namespace, ())
@@ -289,17 +367,15 @@ def _parse_haskell_header(
 ):
     if len(lines) < 2:
         return None
-    sig_match = _SIG_RE.match(lines[0])
-    if sig_match is None:
+    parsed_sig = parse_signature_line(lines[0])
+    if parsed_sig is None:
         return None
-    def_do_match = _DEF_DO_RE.match(lines[1])
-    def_expr_match = None if def_do_match is not None else _DEF_EXPR_RE.match(lines[1])
-    def_match = def_do_match if def_do_match is not None else def_expr_match
-    if def_match is None:
+    try:
+        name_def_raw, arg_names, inline_expr = _parse_def_line(lines[1])
+    except ValueError:
         return None
 
-    name_sig_raw = sig_match.group(1)
-    name_def_raw = def_match.group(1)
+    name_sig_raw = parsed_sig.module_decl
     name_sig, path_params_sig = _split_module_path_params(name_sig_raw)
     name_def, path_params_def = _split_module_path_params(name_def_raw)
     if name_sig != name_def:
@@ -313,7 +389,7 @@ def _parse_haskell_header(
     path_params = path_params_sig if path_params_sig else path_params_def
     path_param = path_params[0] if path_params else None
 
-    sig_expr = sig_match.group(2).strip()
+    sig_expr = parsed_sig.type_expr.strip()
     parts = _split_top_level(sig_expr, "->")
     if len(parts) < 1:
         raise ValueError("invalid Axon type signature")
@@ -321,15 +397,11 @@ def _parse_haskell_header(
     consumed_path_types = 0
     while consumed_path_types < len(arg_types):
         current = arg_types[consumed_path_types].strip()
-        path_sig_match = _PATH_SIG_ARG_RE.match(current)
-        path_sig_short = _PATH_SIG_SHORT_RE.match(current)
-        if path_sig_match is None and path_sig_short is None:
+        parsed_path_sig = _parse_path_sig_annotation(current)
+        if parsed_path_sig is None:
             break
-        if path_sig_match is not None:
-            path_sig_name = path_sig_match.group(1)
-            path_sig_type = path_sig_match.group(2)
-        else:
-            path_sig_type = path_sig_short.group(1) if path_sig_short is not None else ""
+        path_sig_name, path_sig_type = parsed_path_sig
+        if path_sig_type == path_sig_name:
             if consumed_path_types >= len(path_params):
                 raise ValueError(
                     "path signature annotation count exceeds module path parameters in definition"
@@ -358,14 +430,12 @@ def _parse_haskell_header(
     raw_return_type = parts[-1].strip()
     opt_flags = [arg.strip().startswith("?") for arg in arg_types]
 
-    arg_names = [p for p in def_match.group(2).strip().split() if p]
-    inline_expr = def_expr_match.group(3).strip() if def_expr_match is not None else None
     if len(arg_names) != len(opt_flags):
         allow_pointfree_eta = (
             len(arg_names) == 0
             and len(opt_flags) > 0
             and inline_expr is not None
-            and _SIMPLE_CALLEE_RE.fullmatch(inline_expr) is not None
+            and _is_simple_callee(inline_expr)
         )
         if not allow_pointfree_eta:
             raise ValueError(
@@ -450,11 +520,13 @@ def parse_axon_module(source: str) -> AxonModule:
         )
         module = _inject_pragmas(module, top_pragmas)
         module = _inject_symbols_meta(module, annotation_symbols)
-        return _inject_symbols_meta(module, top_constants)
+        module = _inject_symbols_meta(module, top_constants)
+        validate_axon_program((module,), main_module=module.name)
+        return module
 
     entries = _line_entries(lines[body_start:])
     if not entries:
-        return AxonModule(
+        module = AxonModule(
             name=module_name,
             path_param=module_path_param,
             path_params=module_path_params,
@@ -468,6 +540,8 @@ def parse_axon_module(source: str) -> AxonModule:
             return_type_expr=return_type_expr,
             return_shape=return_shape,
         )
+        validate_axon_program((module,), main_module=module.name)
+        return module
     base_indent = min(indent for indent, _ in entries)
     statements, index = _parse_statements(entries, 0, base_indent)
     if index != len(entries):
@@ -489,17 +563,19 @@ def parse_axon_module(source: str) -> AxonModule:
     )
     module = _inject_pragmas(module, top_pragmas)
     module = _inject_symbols_meta(module, annotation_symbols)
-    return _inject_symbols_meta(module, top_constants)
+    module = _inject_symbols_meta(module, top_constants)
+    validate_axon_program((module,), main_module=module.name)
+    return module
 
 
 def _parse_simple_line(line: str) -> AxonBind | AxonReturn:
-    if line.startswith("return "):
-        values = tuple(_split_top_level_csv(line[len("return ") :].strip()))
+    parsed = parse_statement_head(line)
+    if isinstance(parsed, ParsedReturn):
+        values = tuple(_split_top_level_csv(parsed.raw_values))
         return AxonReturn(values=values)
-    if "<-" in line:
-        left, right = line.split("<-", 1)
-        targets = tuple(part.strip() for part in _split_top_level_csv(left.strip()))
-        return AxonBind(targets=targets, expr=right.strip())
+    if isinstance(parsed, ParsedBind):
+        targets = tuple(part.strip() for part in _split_top_level_csv(parsed.raw_targets))
+        return AxonBind(targets=targets, expr=parsed.expr)
     raise ValueError(f"unsupported Axon statement: {line!r}")
 
 
@@ -527,20 +603,26 @@ def _parse_statements(
         if indent > current_indent:
             raise ValueError(f"unexpected indentation at line: {line!r}")
 
-        for_at_match = _FOR_AT_RANGE_RE.match(line)
-        scope_match = _SCOPE_RE.match(line)
-        bind_scope_match = _BIND_SCOPE_RE.match(line)
-        if for_at_match is not None:
-            repeat_name = for_at_match.group(1).strip() if for_at_match.group(1) else None
-            var = for_at_match.group(2).strip()
-            start_delim = for_at_match.group(3)
-            start_raw = for_at_match.group(4).strip()
-            end_raw = for_at_match.group(5).strip()
-            end_delim = for_at_match.group(6)
+        parsed_head: ParsedFor | ParsedScopeBind | ParsedScope | ParsedReturn | ParsedBind | None
+        try:
+            parsed_head = parse_statement_head(line)
+        except ValueError:
+            parsed_head = None
 
-            start_expr = start_raw if start_delim == "[" else f"({start_raw}) + 1"
-            end_exclusive = f"({end_raw}) + 1" if end_delim == "]" else end_raw
-            step_expr = for_at_match.group(7).strip() if for_at_match.group(7) else "1"
+        if isinstance(parsed_head, ParsedFor):
+            repeat_name = parsed_head.name
+            var = parsed_head.var
+            start_expr = (
+                parsed_head.start_expr
+                if parsed_head.start_delim == "["
+                else f"({parsed_head.start_expr}) + 1"
+            )
+            end_exclusive = (
+                f"({parsed_head.end_expr}) + 1"
+                if parsed_head.end_delim == "]"
+                else parsed_head.end_expr
+            )
+            step_expr = parsed_head.step_expr if parsed_head.step_expr else "1"
             if i + 1 >= len(lines):
                 raise ValueError("for@ requires indented body")
             next_indent, _ = lines[i + 1]
@@ -559,12 +641,12 @@ def _parse_statements(
             )
             i = new_i
             continue
-        if bind_scope_match is not None:
-            raw_targets = bind_scope_match.group(1).strip()
+        if isinstance(parsed_head, ParsedScopeBind):
+            raw_targets = parsed_head.raw_targets
             targets = tuple(part.strip() for part in _split_top_level_csv(raw_targets))
             if not targets:
                 raise ValueError("scope bind requires one or more targets")
-            prefix = bind_scope_match.group(2).strip()
+            prefix = parsed_head.prefix
             if i + 1 >= len(lines):
                 raise ValueError("scope bind requires indented body")
             next_indent, _ = lines[i + 1]
@@ -574,8 +656,7 @@ def _parse_statements(
             out.append(AxonScopeBind(targets=targets, prefix=prefix, body=tuple(body)))
             i = new_i
             continue
-        if scope_match is not None:
-            del scope_match
+        if isinstance(parsed_head, ParsedScope):
             raise ValueError(
                 "scope statement form is not supported; use '<target> <- scope@name do ... return ...'"
             )
@@ -607,12 +688,14 @@ def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
         if len(line) != len(line.lstrip(" ")):
             continue
         stripped = line.strip()
-        if _SIG_RE.match(stripped) is not None:
+        if parse_signature_line(stripped) is not None:
             module_starts.append(idx)
     if not module_starts:
-        return (parse_axon_module(source),)
+        parsed_modules = (parse_axon_module(source),)
+        validate_axon_program(parsed_modules)
+        return parsed_modules
 
-    modules: list[AxonModule] = []
+    modules_list: list[AxonModule] = []
     for i, start in enumerate(module_starts):
         end = module_starts[i + 1] if i + 1 < len(module_starts) else len(raw_lines)
         chunk = "\n".join(raw_lines[start:end]).strip()
@@ -625,7 +708,7 @@ def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
             for namespace, members in module.imported_members.items():
                 prev = merged_imported_members.get(namespace, ())
                 merged_imported_members[namespace] = tuple(dict.fromkeys([*prev, *members]))
-        modules.append(
+        modules_list.append(
             AxonModule(
                 name=module.name,
                 path_param=module.path_param,
@@ -641,10 +724,12 @@ def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
                 return_shape=module.return_shape,
             )
         )
-        modules[-1] = _inject_pragmas(modules[-1], top_pragmas)
-    if modules:
-        modules[-1] = _inject_symbols_meta(modules[-1], top_constants)
-    return tuple(modules)
+        modules_list[-1] = _inject_pragmas(modules_list[-1], top_pragmas)
+    if modules_list:
+        modules_list[-1] = _inject_symbols_meta(modules_list[-1], top_constants)
+    out = tuple(modules_list)
+    validate_axon_program(out)
+    return out
 
 
 def parse_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
@@ -724,7 +809,9 @@ def parse_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
     if prelude_file.exists() and prelude_file != root:
         _load_file(prelude_file, namespace="Prelude")
     _load_file(root)
-    return tuple(ordered_modules)
+    out = tuple(ordered_modules)
+    validate_axon_program(out)
+    return out
 
 
 __all__ = ["parse_axon_module", "parse_axon_program", "parse_axon_program_from_path"]

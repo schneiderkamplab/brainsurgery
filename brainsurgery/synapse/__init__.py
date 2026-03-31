@@ -12,7 +12,12 @@ from .axon import (
     parse_axon_module,
     parse_axon_program,
     parse_axon_program_from_path,
+    parse_import_line,
+    parse_padding_side_pragma,
+    parse_signature_line,
+    parse_statement_head,
     synapse_spec_to_axon_module_text,
+    validate_axon_program,
 )
 from .codegen import emit_model_code_from_synapse_spec, load_synapse_torch_op_map
 from .runtime import SynapseProgramModel
@@ -87,6 +92,11 @@ __all__ = [
     "parse_axon_module",
     "parse_axon_program",
     "parse_axon_program_from_path",
+    "parse_import_line",
+    "parse_padding_side_pragma",
+    "parse_signature_line",
+    "parse_statement_head",
     "render_synapse_spec_to_dot",
     "synapse_spec_to_axon_module_text",
+    "validate_axon_program",
 ]
