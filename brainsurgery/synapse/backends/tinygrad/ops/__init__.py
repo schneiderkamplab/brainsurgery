@@ -79,6 +79,8 @@ def get_op_module(op_name: str) -> Any | None:
     module = OP_MODULES.get(op_name)
     if module is not None:
         return module
+    if op_name.startswith("activations_"):
+        return OP_MODULES.get("activation")
     return None
 
 
