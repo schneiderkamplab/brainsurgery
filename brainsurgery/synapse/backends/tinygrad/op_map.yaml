@@ -1,0 +1,220 @@
+version: 1
+name: synapse_tinygrad_default
+
+defaults:
+  module_namespace: tinygrad.nn
+  functional_namespace: tinygrad.nn.functional
+  tensor_namespace: tinygrad.tensor.Tensor
+
+ops:
+  embedding:
+    kind: tensor_method
+    target: embedding
+    stateful: false
+
+  linear:
+    kind: tensor_method
+    target: linear
+    stateful: false
+
+  layernorm:
+    kind: tensor_method
+    target: layernorm
+    stateful: false
+
+  rmsnorm:
+    kind: tensor_method
+    target: rmsnorm
+    stateful: false
+
+  dropout:
+    kind: module
+    target: tinygrad.nn.Dropout
+    stateful: false
+    constructor:
+      p: optional
+
+  gelu:
+    kind: tensor_method
+    target: gelu
+    stateful: false
+
+  relu:
+    kind: tensor_method
+    target: relu
+    stateful: false
+
+  silu:
+    kind: tensor_method
+    target: silu
+    stateful: false
+
+  sigmoid:
+    kind: tensor_method
+    target: sigmoid
+    stateful: false
+
+  tanh:
+    kind: tensor_method
+    target: tanh
+    stateful: false
+
+  softmax:
+    kind: tensor_method
+    target: softmax
+    stateful: false
+    call:
+      axis: optional
+      dtype: optional
+
+  topk:
+    kind: tensor_method
+    target: topk
+    stateful: false
+    call:
+      k: required
+      axis: optional
+      largest: optional
+      sorted: optional
+
+  zeros_like:
+    kind: tensor_method
+    target: zeros_like
+    stateful: false
+
+  attention:
+    kind: tensor_method
+    target: scaled_dot_product_attention
+    stateful: false
+    call:
+      attn_mask: optional
+      dropout_p: optional
+      is_causal: optional
+      scale: optional
+
+  add:
+    kind: tensor_fn
+    target: tinygrad.tensor.Tensor.__add__
+    stateful: false
+
+  mul:
+    kind: tensor_fn
+    target: tinygrad.tensor.Tensor.__mul__
+    stateful: false
+
+  concat:
+    kind: tensor_method
+    target: cat
+    stateful: false
+    call:
+      axis: optional
+
+  split:
+    kind: tensor_method
+    target: split
+    stateful: false
+    call:
+      split_size_or_sections: required
+      axis: optional
+
+  reshape:
+    kind: tensor_method
+    target: reshape
+    stateful: false
+
+  permute:
+    kind: tensor_method
+    target: permute
+    stateful: false
+
+  clamp:
+    kind: tensor_method
+    target: clip
+    stateful: false
+    call:
+      min: optional
+      max: optional
+
+  repeat:
+    kind: tensor_method
+    target: repeat
+    stateful: false
+    call:
+      repeats: required
+
+  reshape_heads:
+    kind: tensor_method
+    target: reshape_heads
+    stateful: false
+
+  merge_heads:
+    kind: tensor_method
+    target: merge_heads
+    stateful: false
+
+  split_qkv_heads:
+    kind: tensor_method
+    target: split_qkv_heads
+    stateful: false
+
+  rope_pair:
+    kind: adapter
+    target: synapse.backends.tinygrad.rope_pair
+    stateful: false
+
+  causal_mask:
+    kind: adapter
+    target: synapse.backends.tinygrad.causal_mask
+    stateful: false
+
+  position_ids:
+    kind: adapter
+    target: synapse.backends.tinygrad.position_ids
+    stateful: false
+
+  cache_update:
+    kind: adapter
+    target: synapse.backends.tinygrad.cache_update
+    stateful: false
+
+  cache_seq_len:
+    kind: adapter
+    target: synapse.backends.tinygrad.cache_seq_len
+    stateful: false
+
+  linear_position_bias:
+    kind: adapter
+    target: synapse.backends.tinygrad.linear_position_bias
+    stateful: false
+
+  mamba_scan:
+    kind: adapter
+    target: synapse.backends.tinygrad.mamba_scan
+    stateful: false
+
+  causal_conv1d:
+    kind: adapter
+    target: synapse.backends.tinygrad.causal_conv1d
+    stateful: false
+
+  moe_grouped_ffn:
+    kind: adapter
+    target: synapse.backends.tinygrad.moe_grouped_ffn
+    stateful: false
+
+  moe_scatter_add:
+    kind: adapter
+    target: synapse.backends.tinygrad.moe_scatter_add
+    stateful: false
+
+  moe_select:
+    kind: adapter
+    target: synapse.backends.tinygrad.moe_select
+    stateful: false
+
+profiles:
+  gpt2:
+    overrides:
+      activation_default: gelu
+      attention_op: attention
+      projection_op: linear

@@ -23,10 +23,10 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     return {str(key): value for key, value in data.items()}
 
 
-def _emit_model_code(spec: dict[str, Any], class_name: str) -> str:
+def _emit_model_code(spec: dict[str, Any], class_name: str, backend: str="pytorch") -> str:
     module = _synapse_module()
     emit_fn = getattr(module, "emit_model_code_from_synapse_spec")
-    return emit_fn(spec, class_name=class_name)
+    return emit_fn(spec, class_name=class_name, backend=backend)
 
 
 def _parse_axon_to_synapse_spec(
@@ -77,6 +77,11 @@ def emit_generic(
         "-f",
         help="Overwrite output file if it already exists.",
     ),
+    backend: str = typer.Option(
+        "pytorch",
+        "--backend",
+        help="Target backend for emitted code (e.g. pytorch).",
+    ),
 ) -> None:
     """Generate standalone PyTorch model code from any Synapse YAML spec."""
     _ensure_overwrite_allowed(output_path, force=force)
@@ -85,7 +90,7 @@ def emit_generic(
 
     spec = _load_yaml_mapping(spec_path)
     try:
-        source = _emit_model_code(spec, class_name)
+        source = _emit_model_code(spec, class_name, backend=backend)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 

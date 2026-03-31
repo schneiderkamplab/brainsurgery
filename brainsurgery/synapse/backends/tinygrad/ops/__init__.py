@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+from collections import Counter
+from importlib import import_module
+from pkgutil import iter_modules
+from types import ModuleType
+from typing import Any
+
+_REQUIRED_EXPORTS: tuple[str, ...] = ("OP_NAME", "interpret", "compile", "uses_node_path")
+
+
+def _discovered_module_names() -> list[str]:
+    package_path = globals().get("__path__", [])
+    module_names = sorted(
+        module_info.name
+        for module_info in iter_modules(package_path)
+        if not module_info.name.startswith("_")
+    )
+    duplicates = sorted(name for name, count in Counter(module_names).items() if count > 1)
+    if duplicates:
+        names = ", ".join(duplicates)
+        raise RuntimeError(f"Duplicate tinygrad op module names discovered in {__name__}: {names}")
+    return module_names
+
+
+def _require_module_export(module: ModuleType, name: str) -> Any:
+    if not hasattr(module, name):
+        raise RuntimeError(
+            f"TinyGrad op module {module.__name__!r} is missing required export {name!r}"
+        )
+    return getattr(module, name)
+
+
+def _load_discovered_op_modules() -> dict[str, Any]:
+    loaded_modules: dict[str, Any] = {}
+    for module_name in _discovered_module_names():
+        qualified_name = f"{__name__}.{module_name}"
+        try:
+            module = import_module(qualified_name)
+        except ModuleNotFoundError:
+            # Skip modules whose dependencies (e.g., tinygrad) are not installed.
+            continue
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to import discovered tinygrad op module: {qualified_name}"
+            ) from exc
+
+        for export_name in _REQUIRED_EXPORTS:
+            _require_module_export(module, export_name)
+
+        op_name = _require_module_export(module, "OP_NAME")
+        if not isinstance(op_name, str) or not op_name:
+            raise RuntimeError(
+                f"TinyGrad op module {qualified_name!r} has invalid OP_NAME: {op_name!r}"
+            )
+
+        for callable_name in ("interpret", "compile", "uses_node_path"):
+            exported = _require_module_export(module, callable_name)
+            if not callable(exported):
+                raise RuntimeError(
+                    f"TinyGrad op module {qualified_name!r} export {callable_name!r} must be callable"
+                )
+
+        existing = loaded_modules.get(op_name)
+        if existing is not None:
+            raise RuntimeError(
+                f"Duplicate tinygrad OP_NAME registered: {op_name!r} in "
+                f"{existing.__name__!r} and {qualified_name!r}"
+            )
+        loaded_modules[op_name] = module
+
+    return loaded_modules
+
+
+OP_MODULES: dict[str, Any] = _load_discovered_op_modules()
+
+
+def get_op_module(op_name: str) -> Any | None:
+    module = OP_MODULES.get(op_name)
+    if module is not None:
+        return module
+    return None
+
+
+__all__ = [
+    "OP_MODULES",
+    "get_op_module",
+]
