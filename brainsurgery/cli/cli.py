@@ -3,8 +3,10 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from typer.models import ArgumentInfo, OptionInfo
 
 from ..engine import (
+    GpuCacheConfig,
     ProviderError,
     RuntimeFlagLifecycleScope,
     apply_log_level,
@@ -15,6 +17,7 @@ from ..engine import (
     normalize_raw_plan,
     reset_runtime_flags_for_scope,
     use_output_emitter,
+    wrap_provider_with_gpu_cache,
 )
 from .config import _load_cli_config
 from .history import _configure_history
@@ -33,6 +36,12 @@ def configure_logging(log_level: str) -> None:
         apply_log_level(log_level)
     except ValueError:
         raise typer.BadParameter("log-level must be one of: critical, debug, error, info, warning")
+
+
+def _resolve_typer_default(value: Any) -> Any:
+    if isinstance(value, (OptionInfo, ArgumentInfo)):
+        return value.default
+    return value
 
 
 def _execute_configured_transforms(
@@ -134,18 +143,67 @@ def run(
         "--log-level",
         help="Logging verbosity (debug, info, warning, error, critical).",
     ),
+    gpu_cache_device: str | None = typer.Option(
+        None,
+        "--gpu-cache-device",
+        help=(
+            "Enable GPU tensor cache for state dicts on this device (e.g. mps, cuda, cuda:0). "
+            "When omitted, GPU caching is disabled."
+        ),
+    ),
+    gpu_cache_fraction: float = typer.Option(
+        0.8,
+        "--gpu-cache-fraction",
+        help=(
+            "Fraction of detected device memory used as cache budget when --gpu-cache-bytes "
+            "is not set."
+        ),
+    ),
+    gpu_cache_bytes: int | None = typer.Option(
+        None,
+        "--gpu-cache-bytes",
+        help=("Explicit GPU cache budget in bytes. Overrides --gpu-cache-fraction when provided."),
+    ),
+    gpu_cache_non_blocking: bool = typer.Option(
+        False,
+        "--gpu-cache-non-blocking/--no-gpu-cache-non-blocking",
+        help="Use non-blocking device transfers in GPU cache operations when possible.",
+    ),
+    gpu_cache_debug: bool = typer.Option(
+        False,
+        "--gpu-cache-debug/--no-gpu-cache-debug",
+        help="Emit detailed GPU cache lifecycle logs (hits/misses, transfers, dirty/write-back, evictions).",
+    ),
 ) -> None:
     """Load a plan, execute it, and save the rewritten output checkpoint."""
+    config_items = _resolve_typer_default(config_items)
+    shard_size = _resolve_typer_default(shard_size)
+    num_workers = _resolve_typer_default(num_workers)
+    provider = _resolve_typer_default(provider)
+    arena_root = _resolve_typer_default(arena_root)
+    arena_segment_size = _resolve_typer_default(arena_segment_size)
+    interactive = _resolve_typer_default(interactive)
+    summarize = _resolve_typer_default(summarize)
+    summarize_path = _resolve_typer_default(summarize_path)
+    summary_mode = _resolve_typer_default(summary_mode)
+    log_level = _resolve_typer_default(log_level)
+    gpu_cache_device = _resolve_typer_default(gpu_cache_device)
+    gpu_cache_fraction = _resolve_typer_default(gpu_cache_fraction)
+    gpu_cache_bytes = _resolve_typer_default(gpu_cache_bytes)
+    gpu_cache_non_blocking = _resolve_typer_default(gpu_cache_non_blocking)
+    gpu_cache_debug = _resolve_typer_default(gpu_cache_debug)
+    config_items = config_items or []
+
     configure_logging(log_level)
     _configure_history()
     reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
 
-    raw_plan = _load_cli_config(config_items or [])
+    raw_plan = _load_cli_config(config_items)
     planned_raw = normalize_raw_plan(raw_plan)
 
     logger.info(
         "Scrubbing in. Surgical plan assembled from %d config item(s)",
-        len(config_items or []),
+        len(config_items),
     )
     surgery_plan = compile_plan(planned_raw)
     logger.info(
@@ -163,6 +221,26 @@ def run(
             arena_root=arena_root,
             arena_segment_size=arena_segment_size,
         )
+        if gpu_cache_device is not None:
+            cache_config = GpuCacheConfig(
+                device=gpu_cache_device,
+                max_cache_bytes=gpu_cache_bytes,
+                memory_fraction=gpu_cache_fraction,
+                non_blocking=gpu_cache_non_blocking,
+                debug=gpu_cache_debug,
+            )
+            state_dict_provider = wrap_provider_with_gpu_cache(
+                state_dict_provider,
+                cache_config=cache_config,
+            )
+            logger.info(
+                "GPU state-dict cache enabled on device=%s budget=%s fraction=%.3f non_blocking=%s debug=%s",
+                gpu_cache_device,
+                gpu_cache_bytes if gpu_cache_bytes is not None else "auto",
+                gpu_cache_fraction,
+                gpu_cache_non_blocking,
+                gpu_cache_debug,
+            )
     except ProviderError as exc:
         raise typer.BadParameter(str(exc)) from exc
 

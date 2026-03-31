@@ -35,12 +35,14 @@ from .provider_utils import (
 from .providers import (
     BaseStateDictProvider,
     create_state_dict_provider,
+    wrap_provider_with_gpu_cache,
 )
 from .render import render_tree, summarize_tensor
 from .runtime_flags_policy import (
     RuntimeFlagLifecycleScope,
     reset_runtime_flags_for_scope,
 )
+from .state_dicts import GpuCacheConfig
 from .summary import (
     executed_plan_summary_doc,
     executed_plan_summary_yaml,

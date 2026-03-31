@@ -196,13 +196,21 @@ class GpuCachedStateDictProvider(BaseStateDictProvider):
         if wrapped is not None:
             return wrapped
         raw_state_dict = self._backing_provider.get_state_dict(model)
-        wrapped = _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+        wrapped = _state_dicts.GpuCachedStateDict(
+            raw_state_dict,
+            config=self._cache_config,
+            cache_name=model,
+        )
         self._wrapped_state_dicts[model] = wrapped
         return wrapped
 
     def create_state_dict(self) -> _state_dicts.GpuCachedStateDict:
         raw_state_dict = self._backing_provider.create_state_dict()
-        return _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+        return _state_dicts.GpuCachedStateDict(
+            raw_state_dict,
+            config=self._cache_config,
+            cache_name="anonymous",
+        )
 
     def list_model_aliases(self) -> set[str]:
         return self._backing_provider.list_model_aliases()
@@ -221,11 +229,19 @@ class GpuCachedStateDictProvider(BaseStateDictProvider):
 
     def load_state_dict_from_checkpoint_path(self, path: Path) -> _state_dicts.GpuCachedStateDict:
         raw_state_dict = self._backing_provider.load_state_dict_from_checkpoint_path(path)
-        return _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+        return _state_dicts.GpuCachedStateDict(
+            raw_state_dict,
+            config=self._cache_config,
+            cache_name=path.name,
+        )
 
     def load_alias_from_path(self, model: str, path: Path) -> _state_dicts.GpuCachedStateDict:
         raw_state_dict = self._backing_provider.load_alias_from_path(model, path)
-        wrapped = _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+        wrapped = _state_dicts.GpuCachedStateDict(
+            raw_state_dict,
+            config=self._cache_config,
+            cache_name=model,
+        )
         self._wrapped_state_dicts[model] = wrapped
         return wrapped
 
@@ -233,7 +249,11 @@ class GpuCachedStateDictProvider(BaseStateDictProvider):
         if model in self._wrapped_state_dicts:
             return self._wrapped_state_dicts[model]
         raw_state_dict = self._backing_provider.get_or_create_alias_state_dict(model)
-        wrapped = _state_dicts.GpuCachedStateDict(raw_state_dict, config=self._cache_config)
+        wrapped = _state_dicts.GpuCachedStateDict(
+            raw_state_dict,
+            config=self._cache_config,
+            cache_name=model,
+        )
         self._wrapped_state_dicts[model] = wrapped
         return wrapped
 

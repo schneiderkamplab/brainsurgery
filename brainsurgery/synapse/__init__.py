@@ -5,6 +5,7 @@ from .axon import (
     AxonRepeat,
     AxonReturn,
     AxonScope,
+    load_tokenizer,
     lower_axon_module_to_synapse_block,
     lower_axon_module_to_synapse_spec,
     lower_axon_program_to_synapse_spec,
@@ -21,7 +22,9 @@ from .type_inference import (
     infer_block_io_types_from_modules,
     infer_output_types_for_node,
 )
-from .visualize import render_synapse_spec_to_dot
+from .visualize import (
+    render_synapse_spec_to_dot,
+)
 
 
 def run_axon_test(*args, **kwargs):
@@ -79,6 +82,7 @@ __all__ = [
     "lower_axon_module_to_synapse_block",
     "lower_axon_module_to_synapse_spec",
     "lower_axon_program_to_synapse_spec",
+    "load_tokenizer",
     "load_synapse_torch_op_map",
     "parse_axon_module",
     "parse_axon_program",

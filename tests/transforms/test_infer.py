@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import brainsurgery.transforms.infer as infer_module
+import brainsurgery.transforms.infer_runtime as infer_runtime_module
 from brainsurgery.transforms.infer import InferTransform, InferTransformError
 
 
@@ -130,3 +131,15 @@ def test_load_runtime_model_dispatches() -> None:
     finally:
         infer_module._load_infer_runtime_model = original_loader  # type: ignore[assignment]
     assert captured == {"runtime": "codegen", "program": "a.axon", "state_dict": {}}
+
+
+def test_adapt_hf_state_dict_keys_for_gpt2_normalized_names() -> None:
+    state_dict = {
+        "wte.weight": torch.ones((2, 2)),
+        "h.0.attn.c_attn.weight": torch.ones((2, 2)),
+        "h.0.attn.bias": torch.ones((1, 1, 2, 2)),
+    }
+    adapted = infer_runtime_module._adapt_hf_state_dict_keys(state_dict)
+    assert "transformer.wte.weight" in adapted
+    assert "transformer.h.0.attn.c_attn.weight" in adapted
+    assert "transformer.h.0.attn.bias" not in adapted

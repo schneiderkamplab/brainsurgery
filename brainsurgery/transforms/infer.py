@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 import torch
 
@@ -28,13 +28,13 @@ class InferTransformError(TransformError):
     pass
 
 
-InferRuntime = Literal["auto", "synapse", "codegen", "hf"]
+_InferRuntime = Literal["auto", "synapse", "codegen", "hf"]
 ResolvedInferRuntime = Literal["synapse", "codegen", "hf"]
 
 
 @dataclass(frozen=True)
 class InferSpec:
-    runtime: InferRuntime
+    runtime: _InferRuntime
     model_alias: str
     tmp_alias: str | None
     input_ids_ref: TensorRef
@@ -55,6 +55,14 @@ class InferSpec:
         if self.attn_mask_ref is not None:
             models.add(must_model(self.attn_mask_ref))
         return models
+
+
+class _RuntimeProgramSpec(Protocol):
+    @property
+    def runtime(self) -> _InferRuntime: ...
+
+    @property
+    def model_alias(self) -> str: ...
 
 
 class InferTransform(TypedTransform[InferSpec]):
@@ -120,7 +128,7 @@ class InferTransform(TypedTransform[InferSpec]):
         del default_model
         payload = ensure_mapping_payload(payload, self.name)
         runtime = cast(
-            InferRuntime,
+            _InferRuntime,
             validate_payload_schema(
                 payload,
                 op_name=self.name,
@@ -305,7 +313,7 @@ def _extract_logits(output: Any) -> torch.Tensor:
 def _resolve_runtime_and_program(
     *,
     provider: StateDictProvider,
-    spec: InferSpec,
+    spec: _RuntimeProgramSpec,
 ) -> tuple[ResolvedInferRuntime, str]:
     metadata = get_model_runtime_metadata(provider, spec.model_alias)
     if metadata is None:

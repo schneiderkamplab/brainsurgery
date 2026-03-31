@@ -2412,7 +2412,7 @@ def run_axon_visualize(
                 ):
                     current_outputs[name] = type_expr
 
-    dot_text = render_synapse_spec_to_dot(
+    rendered = render_synapse_spec_to_dot(
         spec,
         block_label_by_block=block_label_by_block,
         block_io_types=block_io_types,
@@ -2420,8 +2420,11 @@ def run_axon_visualize(
         direction=direction,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(dot_text, encoding="utf-8")
+    output_path.write_text(rendered, encoding="utf-8")
     return output_path
 
 
-__all__ = ["render_synapse_spec_to_dot", "run_axon_visualize"]
+__all__ = [
+    "render_synapse_spec_to_dot",
+    "run_axon_visualize",
+]

@@ -89,12 +89,41 @@ def _load_hf_runtime(
 
     config = AutoConfig.from_pretrained(program, trust_remote_code=True)
     model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    hf_state_dict = _adapt_hf_state_dict_keys(state_dict)
+    missing, unexpected = model.load_state_dict(hf_state_dict, strict=False)
+    missing_filtered = [key for key in missing if key not in {"lm_head.weight"}]
     if unexpected:
         raise ValueError(f"infer runtime=hf got unexpected state_dict keys: {unexpected[:3]}")
-    if missing:
-        raise ValueError(f"infer runtime=hf missing required state_dict keys: {missing[:3]}")
+    if missing_filtered:
+        raise ValueError(
+            f"infer runtime=hf missing required state_dict keys: {missing_filtered[:3]}"
+        )
+    model.tie_weights()
     return model
+
+
+def _adapt_hf_state_dict_keys(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    # The checkpoint loader can normalize GPT-2 names to bare keys (e.g. h.0..., wte...).
+    # HF GPT-2 expects these under transformer.* and does not load attn bias buffers.
+    keys = tuple(state_dict.keys())
+    if not _looks_like_gpt2_stripped_state_dict(keys):
+        return state_dict
+    adapted: dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        next_key = key
+        if not key.startswith("transformer.") and not key.startswith("lm_head."):
+            next_key = f"transformer.{key}"
+        if next_key.endswith(".attn.bias") or next_key.endswith(".attn.masked_bias"):
+            continue
+        adapted[next_key] = value
+    return adapted
+
+
+def _looks_like_gpt2_stripped_state_dict(keys: tuple[str, ...]) -> bool:
+    has_h_blocks = any(key.startswith("h.") for key in keys)
+    has_embed = any(key.startswith("wte.") for key in keys)
+    has_already_prefixed = any(key.startswith("transformer.") for key in keys)
+    return has_h_blocks and has_embed and not has_already_prefixed
 
 
 def _load_synapse_spec(*, program: str) -> dict[str, Any]:

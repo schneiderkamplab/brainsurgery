@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 import torch
 
@@ -81,3 +83,31 @@ def test_gpu_cached_provider_rejects_unavailable_cuda_backend() -> None:
     )
     with pytest.raises(ProviderError, match="not available"):
         cached_provider.get_state_dict("model")
+
+
+def test_gpu_cached_provider_debug_logs_timing_by_model_part(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    base_provider = InMemoryStateDictProvider({}, max_io_workers=1)
+    base_sd = base_provider.get_or_create_alias_state_dict("model")
+    base_sd["model.layers.0.mlp.experts.1.gate_proj.weight"] = torch.ones(32, dtype=torch.float32)
+    base_sd["model.layers.0.self_attn.q_proj.weight"] = torch.ones(32, dtype=torch.float32)
+
+    cached_provider = wrap_provider_with_gpu_cache(
+        base_provider,
+        cache_config=GpuCacheConfig(device="cpu", max_cache_bytes=1 << 20, debug=True),
+    )
+    cached_sd = cached_provider.get_state_dict("model")
+
+    with caplog.at_level(logging.INFO, logger="brainsurgery"):
+        _ = cached_sd["model.layers.0.mlp.experts.1.gate_proj.weight"]
+        _ = cached_sd["model.layers.0.self_attn.q_proj.weight"]
+        cached_sd.flush()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("timing-total timing_event=clone_local_device" in message for message in messages)
+    assert any(
+        "timing-top-parts timing_event=clone_local_device" in message
+        and "part=model.layers.0.mlp.experts" in message
+        for message in messages
+    )
