@@ -132,18 +132,35 @@ def substitute_var(expr: str, name: str, value: str) -> str:
 
 
 def split_binary(expr: str, operator: str) -> tuple[str, str] | None:
+    if not operator:
+        return None
     depth = 0
-    for i in range(len(expr) - 1, -1, -1):
+    op_len = len(operator)
+    last_match = -1
+    i = 0
+    limit = len(expr) - op_len
+    while i <= limit:
         ch = expr[i]
         if ch in ")]":
-            depth += 1
-        elif ch in "([":
             depth -= 1
-        elif ch == operator and depth == 0:
-            left = expr[:i].strip()
-            right = expr[i + 1 :].strip()
-            if left and right:
-                return left, right
+            i += 1
+            continue
+        if ch in "([":
+            depth += 1
+            i += 1
+            continue
+        if depth == 0 and expr.startswith(operator, i):
+            # Keep scientific-notation exponents intact (e.g. 1e-05).
+            if not (operator == "-" and i > 0 and expr[i - 1] in {"e", "E"}):
+                last_match = i
+            i += op_len
+            continue
+        i += 1
+    if last_match >= 0:
+        left = expr[:last_match].strip()
+        right = expr[last_match + op_len :].strip()
+        if left and right:
+            return left, right
     return None
 
 

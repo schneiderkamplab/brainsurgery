@@ -55,6 +55,35 @@ inc x = x + 1
     assert "add" in ops
 
 
+def test_bind_rhs_do_expression_parses_and_lowers() -> None:
+    source = """
+main :: Tensor -> Tensor
+main x = do
+  y <- do
+    z <- x + 1
+    return z
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    ops = [node["_op"] for node in node_specs]
+    assert "add" in ops
+    assert spec["model"]["outputs"] == {"y": "y"}
+
+
+def test_bind_rhs_do_expression_requires_return_in_block() -> None:
+    source = """
+main :: Tensor -> Tensor
+main x = do
+  y <- do
+    z <- x + 1
+  return y
+"""
+    with pytest.raises(ValueError, match=r"scope bind requires a reachable return"):
+        parse_axon_module(source)
+
+
 def test_primitive_activation_alias_lowering() -> None:
     source = """
 tiny :: Tensor -> Tensor

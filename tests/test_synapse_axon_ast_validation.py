@@ -4,7 +4,6 @@ import pytest
 
 from brainsurgery.synapse import (
     AxonModule,
-    AxonScope,
     parse_axon_program,
     validate_axon_program,
 )
@@ -53,14 +52,14 @@ tiny x = do
         parse_axon_program(source)
 
 
-def test_ast_validation_rejects_legacy_scope_statement_in_ast() -> None:
+def test_ast_validation_rejects_unknown_main_module() -> None:
     module = AxonModule(
         name="tiny",
         path_param=None,
         path_params=(),
         params=(),
         returns=(),
-        statements=(AxonScope(prefix="attn", body=()),),
+        statements=(),
     )
-    with pytest.raises(ValueError, match="scope statement form is not supported"):
-        validate_axon_program((module,), main_module=module.name)
+    with pytest.raises(ValueError, match="unknown main module"):
+        validate_axon_program((module,), main_module="missing")

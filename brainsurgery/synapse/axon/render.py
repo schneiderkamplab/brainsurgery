@@ -153,7 +153,6 @@ def _render_module(
     outputs: dict[str, Any],
     graph: list[Any],
     symbols: dict[str, Any],
-    signatures: dict[str, tuple[list[str], list[str]]],
 ) -> list[str]:
     params: list[str] = []
     for name, input_spec in inputs.items():
@@ -251,6 +250,10 @@ def _render_module(
         ordered = [str(value) for value in outputs.values() if isinstance(value, str)]
         if len(ordered) == len(outputs):
             lines.append(f"  return {', '.join(ordered)}")
+        else:
+            lines.append("  return null")
+    else:
+        lines.append("  return null")
 
     return lines
 
@@ -274,16 +277,8 @@ def synapse_spec_to_axon_module_text(spec: dict[str, Any], *, module_name: str =
     symbols = model.get("symbols", {})
     if not isinstance(symbols, dict):
         symbols = {}
-    signatures: dict[str, tuple[list[str], list[str]]] = {}
-    signatures[module_name] = (list(inputs.keys()), list(outputs.keys()))
     blocks = model.get("blocks")
     if isinstance(blocks, dict):
-        for block_name, block_spec in blocks.items():
-            if isinstance(block_spec, dict):
-                b_inputs = block_spec.get("inputs", {})
-                b_outputs = block_spec.get("outputs", {})
-                if isinstance(b_inputs, dict) and isinstance(b_outputs, dict):
-                    signatures[str(block_name)] = (list(b_inputs.keys()), list(b_outputs.keys()))
         for block_name, block_spec in blocks.items():
             if not isinstance(block_spec, dict):
                 raise ValueError(f"invalid block spec: {block_name!r}")
@@ -303,7 +298,6 @@ def synapse_spec_to_axon_module_text(spec: dict[str, Any], *, module_name: str =
                     outputs=block_outputs,
                     graph=block_graph,
                     symbols=symbols,
-                    signatures=signatures,
                 )
             )
             lines.append("")
@@ -314,7 +308,6 @@ def synapse_spec_to_axon_module_text(spec: dict[str, Any], *, module_name: str =
             outputs=outputs,
             graph=graph,
             symbols=symbols,
-            signatures=signatures,
         )
     )
     return "\n".join(lines) + "\n"

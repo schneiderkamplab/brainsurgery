@@ -6,10 +6,21 @@ from typing import Iterable
 from .call_parser import split_top_level
 from .types import (
     AxonBind,
+    AxonExpr,
+    AxonExprBinary,
+    AxonExprBind,
+    AxonExprCall,
+    AxonExprIf,
+    AxonExprLambda,
+    AxonExprLiteral,
+    AxonExprName,
+    AxonExprParen,
+    AxonExprPipe,
+    AxonExprTernary,
+    AxonExprTuple,
     AxonModule,
     AxonRepeat,
     AxonReturn,
-    AxonScope,
     AxonScopeBind,
     AxonStatement,
 )
@@ -33,8 +44,6 @@ def _iter_nested(stmt: AxonStatement) -> Iterable[AxonStatement]:
     if isinstance(stmt, AxonRepeat):
         return stmt.body
     if isinstance(stmt, AxonScopeBind):
-        return stmt.body
-    if isinstance(stmt, AxonScope):
         return stmt.body
     return ()
 
@@ -77,14 +86,105 @@ def _has_duplicate_non_discard(names: tuple[str, ...]) -> bool:
     return len(set(non_discard)) != len(non_discard)
 
 
-def _validate_statement(stmt: AxonStatement, module: AxonModule, path: tuple[int, ...]) -> None:
-    if isinstance(stmt, AxonScope):
-        raise _error(
-            module,
-            path,
-            "scope statement form is not supported; use '<target> <- scope@name do ... return ...'",
-        )
+def _expr_non_empty(expr: AxonExpr) -> bool:
+    if isinstance(expr, AxonExprName):
+        return bool(expr.name.strip())
+    if isinstance(expr, AxonExprLiteral):
+        return True
+    if isinstance(expr, AxonExprTuple):
+        return bool(expr.items)
+    if isinstance(expr, AxonExprCall):
+        return bool(expr.callee.strip())
+    if isinstance(expr, AxonExprPipe):
+        return bool(expr.stages)
+    if isinstance(expr, AxonExprBind):
+        return bool(expr.var.strip())
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        return True
+    if isinstance(expr, AxonExprBinary):
+        return expr.op in {"+", "*"}
+    if isinstance(expr, AxonExprLambda):
+        return bool(expr.var.strip())
+    if isinstance(expr, AxonExprParen):
+        return _expr_non_empty(expr.inner)
+    return False
 
+
+def _validate_expr(expr: AxonExpr, module: AxonModule, path: tuple[int, ...]) -> None:
+    if isinstance(expr, AxonExprName):
+        _validate_name(expr.name, module=module, path=path, field="expression name")
+        return
+    if isinstance(expr, AxonExprLiteral):
+        return
+    if isinstance(expr, AxonExprTuple):
+        if not expr.items:
+            raise _error(module, path, "tuple expression cannot be empty")
+        for i, item in enumerate(expr.items):
+            _validate_expr(item, module, (*path, i))
+        return
+    if isinstance(expr, AxonExprCall):
+        if not expr.callee.strip():
+            raise _error(module, path, "call expression callee cannot be empty")
+        for i, arg in enumerate(expr.args):
+            _validate_expr(arg, module, (*path, i))
+        for key, value in expr.kwargs.items():
+            if _NAME_RE.fullmatch(key) is None:
+                raise _error(module, path, f"invalid call kwarg name {key!r}")
+            if isinstance(value, AxonExpr):
+                _validate_expr(value, module, (*path, len(expr.args)))
+        return
+    if isinstance(expr, AxonExprPipe):
+        if not expr.stages:
+            raise _error(module, path, "pipe expression must contain at least one stage")
+        _validate_expr(expr.value, module, (*path, 0))
+        for i, stage in enumerate(expr.stages, start=1):
+            _validate_expr(stage, module, (*path, i))
+        return
+    if isinstance(expr, AxonExprBind):
+        _validate_name(expr.var, module=module, path=path, field="bind variable")
+        _validate_expr(expr.value, module, (*path, 0))
+        _validate_expr(expr.body, module, (*path, 1))
+        return
+    if isinstance(expr, AxonExprIf):
+        _validate_expr(expr.cond, module, (*path, 0))
+        _validate_expr(expr.true_expr, module, (*path, 1))
+        _validate_expr(expr.false_expr, module, (*path, 2))
+        return
+    if isinstance(expr, AxonExprTernary):
+        _validate_expr(expr.cond, module, (*path, 0))
+        _validate_expr(expr.true_expr, module, (*path, 1))
+        _validate_expr(expr.false_expr, module, (*path, 2))
+        return
+    if isinstance(expr, AxonExprBinary):
+        if expr.op not in {
+            "+",
+            "-",
+            "*",
+            "/",
+            "%",
+            "==",
+            "!=",
+            "<",
+            "<=",
+            ">",
+            ">=",
+            "and",
+            "or",
+        }:
+            raise _error(module, path, f"unsupported binary operator {expr.op!r}")
+        _validate_expr(expr.left, module, (*path, 0))
+        _validate_expr(expr.right, module, (*path, 1))
+        return
+    if isinstance(expr, AxonExprLambda):
+        _validate_name(expr.var, module=module, path=path, field="lambda variable")
+        _validate_expr(expr.body, module, (*path, 0))
+        return
+    if isinstance(expr, AxonExprParen):
+        _validate_expr(expr.inner, module, (*path, 0))
+        return
+
+
+def _validate_statement(stmt: AxonStatement, module: AxonModule, path: tuple[int, ...]) -> None:
     if isinstance(stmt, AxonBind):
         if not stmt.targets:
             raise _error(module, path, "binding must contain at least one target")
@@ -92,25 +192,30 @@ def _validate_statement(stmt: AxonStatement, module: AxonModule, path: tuple[int
             raise _error(module, path, "binding contains duplicate targets")
         for name in stmt.targets:
             _validate_name(name, module=module, path=path, field="binding target")
-        if not stmt.expr.strip():
+        _validate_expr(stmt.expr, module, (*path, 0))
+        if not _expr_non_empty(stmt.expr):
             raise _error(module, path, "binding expression cannot be empty")
         return
 
     if isinstance(stmt, AxonReturn):
         if not stmt.values:
             raise _error(module, path, "return must contain at least one value")
-        for value in stmt.values:
-            if not str(value).strip():
+        for i, value in enumerate(stmt.values):
+            _validate_expr(value, module, (*path, i))
+            if not _expr_non_empty(value):
                 raise _error(module, path, "return values must be non-empty")
         return
 
     if isinstance(stmt, AxonRepeat):
         _validate_name(stmt.var, module=module, path=path, field="loop variable")
-        if not stmt.to_expr.strip():
+        _validate_expr(stmt.to_expr, module, (*path, 0))
+        _validate_expr(stmt.from_expr, module, (*path, 1))
+        _validate_expr(stmt.step_expr, module, (*path, 2))
+        if not _expr_non_empty(stmt.to_expr):
             raise _error(module, path, "for-loop upper bound cannot be empty")
-        if not stmt.from_expr.strip():
+        if not _expr_non_empty(stmt.from_expr):
             raise _error(module, path, "for-loop lower bound cannot be empty")
-        if not stmt.step_expr.strip():
+        if not _expr_non_empty(stmt.step_expr):
             raise _error(module, path, "for-loop step cannot be empty")
         if not stmt.body:
             raise _error(module, path, "for-loop body cannot be empty")
@@ -160,6 +265,10 @@ def _validate_module(module: AxonModule) -> None:
                 f"Axon AST validation failed in module '{module.name}': path parameter(s) conflict with value parameter(s): {names}"
             )
     expected_arity = _expected_return_arity(module.return_type_expr)
+    if not _has_compatible_return(module.statements, 0):
+        raise ValueError(
+            f"Axon AST validation failed in module '{module.name}': module body must contain at least one return statement"
+        )
     for i, stmt in enumerate(module.statements):
         _validate_statement(stmt, module, (i,))
         if expected_arity is not None and isinstance(stmt, AxonReturn):

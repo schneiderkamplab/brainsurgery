@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from brainsurgery.synapse.axon.lark_statements import (
+from brainsurgery.synapse.axon.grammar import (
     ParsedBind,
     ParsedFor,
     ParsedReturn,

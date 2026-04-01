@@ -1,6 +1,4 @@
 from .ast_validation import validate_axon_program
-from .lark_statements import parse_statement_head
-from .lark_toplevel import parse_import_line, parse_padding_side_pragma, parse_signature_line
 from .lowering import (
     lower_axon_module_to_synapse_block,
     lower_axon_module_to_synapse_spec,
@@ -22,7 +20,6 @@ from .types import (
     AxonParam,
     AxonRepeat,
     AxonReturn,
-    AxonScope,
     AxonStatement,
 )
 
@@ -32,15 +29,10 @@ __all__ = [
     "AxonParam",
     "AxonRepeat",
     "AxonReturn",
-    "AxonScope",
     "AxonStatement",
     "parse_axon_module",
     "parse_axon_program",
     "parse_axon_program_from_path",
-    "parse_import_line",
-    "parse_padding_side_pragma",
-    "parse_signature_line",
-    "parse_statement_head",
     "validate_axon_program",
     "lower_axon_module_to_synapse_block",
     "lower_axon_module_to_synapse_spec",

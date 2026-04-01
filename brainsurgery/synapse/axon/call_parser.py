@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 from typing import Any
 
@@ -48,8 +49,15 @@ def parse_scalar(token: str) -> Any:
         return value[1:-1]
     if re.fullmatch(r"-?[0-9]+", value):
         return int(value)
-    if re.fullmatch(r"-?[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?", value):
+    if re.fullmatch(r"-?[0-9]+\.[0-9]+", value):
         return float(value)
+    if value.startswith("[") and value.endswith("]"):
+        try:
+            parsed = ast.literal_eval(value)
+        except Exception:
+            return value
+        if isinstance(parsed, list):
+            return parsed
     return value
 
 
@@ -61,11 +69,14 @@ def parse_call(expr: str) -> tuple[str, list[str], dict[str, Any]]:
         raw_args = match.group(2).strip()
         tokens = split_csv(raw_args) if raw_args else []
     else:
-        callee_match = re.match(r"^([A-Za-z_][A-Za-z0-9_:.@]*)\b(.*)$", text)
+        # Point-free calls require whitespace between callee and first argument.
+        # Without this guard, tokens like `x+1` were misclassified as calls.
+        callee_match = re.match(r"^([A-Za-z_][A-Za-z0-9_:.@]*)(?:\s+(.*))?$", text)
         if callee_match is None:
             raise ValueError(f"expected call expression, got: {expr!r}")
         callee = callee_match.group(1).strip()
-        rest = callee_match.group(2).strip()
+        raw_rest = callee_match.group(2)
+        rest = raw_rest.strip() if isinstance(raw_rest, str) else ""
         if not rest and "@" not in callee and "::" not in callee and callee not in _ZERO_ARG_CALLS:
             raise ValueError(f"expected call expression, got: {expr!r}")
         if not rest:

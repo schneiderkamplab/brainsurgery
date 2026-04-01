@@ -4,17 +4,23 @@ from pathlib import Path
 
 from .ast_validation import validate_axon_program
 from .call_parser import split_top_level as _split_top_level_shared
-from .lark_statements import (
+from .expression_parser import parse_expression
+from .grammar import (
     ParsedBind,
     ParsedFor,
+    ParsedModuleSource,
+    ParsedProgramSource,
     ParsedReturn,
     ParsedScope,
     ParsedScopeBind,
+    ParsedSignature,
+    parse_program_source,
     parse_statement_head,
 )
-from .lark_toplevel import parse_import_line, parse_padding_side_pragma, parse_signature_line
+from .syntax_validation import validate_parsed_program_source
 from .types import (
     AxonBind,
+    AxonExpr,
     AxonModule,
     AxonParam,
     AxonRepeat,
@@ -58,17 +64,6 @@ def _is_simple_callee(token: str) -> bool:
     return True
 
 
-def _parse_top_const_line(line: str) -> tuple[str, str] | None:
-    if "=" not in line:
-        return None
-    left, right = line.split("=", 1)
-    name = left.strip()
-    value = right.strip()
-    if not _is_ident(name) or not value:
-        return None
-    return name, value
-
-
 def _parse_def_line(line: str) -> tuple[str, list[str], str | None]:
     if "=" not in line:
         raise ValueError(f"invalid Axon definition line: {line!r}")
@@ -105,37 +100,6 @@ def _parse_path_sig_annotation(token: str) -> tuple[str, str] | None:
     if not _is_ident(body):
         return None
     return body, body
-
-
-def _strip_haskell_comment(line: str) -> str:
-    in_single = False
-    in_double = False
-    for idx, ch in enumerate(line):
-        prev = line[idx - 1] if idx > 0 else ""
-        if ch == "'" and not in_double and prev != "\\":
-            in_single = not in_single
-            continue
-        if ch == '"' and not in_single and prev != "\\":
-            in_double = not in_double
-            continue
-        if (
-            ch == "-"
-            and not in_single
-            and not in_double
-            and idx + 1 < len(line)
-            and line[idx + 1] == "-"
-        ):
-            return line[:idx]
-    return line
-
-
-def _normalized_source_lines(source: str) -> list[str]:
-    out: list[str] = []
-    for raw in source.splitlines():
-        line = _strip_haskell_comment(raw).rstrip()
-        if line.strip():
-            out.append(line)
-    return out
 
 
 def _split_top_level_csv(text: str) -> list[str]:
@@ -192,52 +156,6 @@ def _parse_const_scalar(token: str) -> object:
     except ValueError:
         pass
     return value
-
-
-def _extract_top_level_constants(lines: list[str]) -> tuple[list[str], dict[str, object]]:
-    body: list[str] = []
-    constants: dict[str, object] = {}
-    prev_was_sig = False
-    for line in lines:
-        if len(line) != len(line.lstrip(" ")):
-            body.append(line)
-            prev_was_sig = False
-            continue
-        stripped = line.strip()
-        if parse_signature_line(stripped) is not None:
-            body.append(line)
-            prev_was_sig = True
-            continue
-        parsed = _parse_top_const_line(stripped)
-        if parsed is not None and not prev_was_sig:
-            key, raw_value = parsed
-            constants[key] = _parse_const_scalar(raw_value)
-            prev_was_sig = False
-            continue
-        body.append(line)
-        prev_was_sig = False
-    return body, constants
-
-
-def _extract_top_level_pragmas(lines: list[str]) -> tuple[list[str], dict[str, object]]:
-    body: list[str] = []
-    pragmas: dict[str, object] = {}
-    for line in lines:
-        if len(line) != len(line.lstrip(" ")):
-            body.append(line)
-            continue
-        stripped = line.strip()
-        value = parse_padding_side_pragma(stripped)
-        if value is not None:
-            prev = pragmas.get("padding_side")
-            if prev is not None and prev != value:
-                raise ValueError(
-                    "conflicting PADDING_SIDE pragmas; expected a single consistent value"
-                )
-            pragmas["padding_side"] = value
-            continue
-        body.append(line)
-    return body, pragmas
 
 
 def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> AxonModule:
@@ -300,56 +218,10 @@ def _split_module_path_params(name: str) -> tuple[str, tuple[str, ...]]:
     return base, path_params
 
 
-def _parse_import_members(raw: str) -> tuple[str, ...]:
-    text = raw.strip()
-    if not text:
-        return ()
-    if text.startswith("("):
-        if not text.endswith(")"):
-            raise ValueError(f"invalid import member list: {raw!r}")
-        inner = text[1:-1].strip()
-        if not inner:
-            return ()
-        tokens = _split_top_level_csv(inner)
-    else:
-        normalized = text.replace(",", " ")
-        tokens = [part.strip() for part in normalized.split() if part.strip()]
-    if not tokens:
-        return ()
-    for token in tokens:
-        if not _is_ident(token):
-            raise ValueError(f"invalid imported member name: {token!r}")
-    deduped = tuple(dict.fromkeys(tokens))
-    return deduped
-
-
-def _extract_top_level_imports(
-    lines: list[str],
-) -> tuple[list[str], tuple[str, ...], dict[str, tuple[str, ...]]]:
-    body: list[str] = []
-    imports: list[str] = []
-    imported_members: dict[str, tuple[str, ...]] = {}
-    for line in lines:
-        if len(line) != len(line.lstrip(" ")):
-            body.append(line)
-            continue
-        parsed = parse_import_line(line.strip())
-        if parsed is not None:
-            namespace = parsed.namespace
-            imports.append(namespace)
-            raw_members = parsed.members_tail
-            members = _parse_import_members(raw_members)
-            if members:
-                prev = imported_members.get(namespace, ())
-                imported_members[namespace] = tuple(dict.fromkeys([*prev, *members]))
-            continue
-        body.append(line)
-    deduped = tuple(dict.fromkeys(imports))
-    return body, deduped, imported_members
-
-
 def _parse_haskell_header(
-    lines: list[str],
+    *,
+    signature: ParsedSignature,
+    definition_line: str,
 ) -> (
     tuple[
         str,
@@ -358,24 +230,19 @@ def _parse_haskell_header(
         tuple[AxonParam, ...],
         tuple[str, ...],
         int,
-        str | None,
+        AxonExpr | None,
         dict[str, object],
         str | None,
         tuple[str, ...] | None,
     ]
     | None
 ):
-    if len(lines) < 2:
-        return None
-    parsed_sig = parse_signature_line(lines[0])
-    if parsed_sig is None:
-        return None
     try:
-        name_def_raw, arg_names, inline_expr = _parse_def_line(lines[1])
+        name_def_raw, arg_names, inline_expr = _parse_def_line(definition_line)
     except ValueError:
         return None
 
-    name_sig_raw = parsed_sig.module_decl
+    name_sig_raw = signature.module_decl
     name_sig, path_params_sig = _split_module_path_params(name_sig_raw)
     name_def, path_params_def = _split_module_path_params(name_def_raw)
     if name_sig != name_def:
@@ -389,7 +256,7 @@ def _parse_haskell_header(
     path_params = path_params_sig if path_params_sig else path_params_def
     path_param = path_params[0] if path_params else None
 
-    sig_expr = parsed_sig.type_expr.strip()
+    sig_expr = signature.type_expr.strip()
     parts = _split_top_level(sig_expr, "->")
     if len(parts) < 1:
         raise ValueError("invalid Axon type signature")
@@ -466,28 +333,37 @@ def _parse_haskell_header(
             annotation_symbols.setdefault(dim, None)
     params = tuple(params_out)
     # Haskell-style signatures carry output types, not names. Return names will be inferred from `return`.
+    parsed_inline_expr = parse_expression(inline_expr) if inline_expr is not None else None
     return (
         name_sig,
         path_param,
         path_params,
         params,
         (),
-        2,
-        inline_expr,
+        0,
+        parsed_inline_expr,
         annotation_symbols,
         raw_return_type,
         ret_shape,
     )
 
 
-def parse_axon_module(source: str) -> AxonModule:
-    lines, top_pragmas = _extract_top_level_pragmas(_normalized_source_lines(source))
-    lines, top_constants = _extract_top_level_constants(lines)
-    lines, imports, imported_members = _extract_top_level_imports(lines)
-    if not lines:
+def _build_module_from_lines(
+    *,
+    module_source: ParsedModuleSource,
+    top_pragmas: dict[str, object],
+    top_constants: dict[str, object],
+    imports: tuple[str, ...],
+    imported_members: dict[str, tuple[str, ...]],
+) -> AxonModule:
+    lines = list(module_source.body_lines)
+    if not module_source.signature.module_decl:
         raise ValueError("empty Axon source")
 
-    parsed = _parse_haskell_header(lines)
+    parsed = _parse_haskell_header(
+        signature=module_source.signature,
+        definition_line=module_source.definition_line,
+    )
     if parsed is None:
         raise ValueError("expected haskell-style pair: '<name> :: ...' + '<name> ... = do|<expr>'")
     (
@@ -521,7 +397,6 @@ def parse_axon_module(source: str) -> AxonModule:
         module = _inject_pragmas(module, top_pragmas)
         module = _inject_symbols_meta(module, annotation_symbols)
         module = _inject_symbols_meta(module, top_constants)
-        validate_axon_program((module,), main_module=module.name)
         return module
 
     entries = _line_entries(lines[body_start:])
@@ -540,7 +415,6 @@ def parse_axon_module(source: str) -> AxonModule:
             return_type_expr=return_type_expr,
             return_shape=return_shape,
         )
-        validate_axon_program((module,), main_module=module.name)
         return module
     base_indent = min(indent for indent, _ in entries)
     statements, index = _parse_statements(entries, 0, base_indent)
@@ -564,18 +438,50 @@ def parse_axon_module(source: str) -> AxonModule:
     module = _inject_pragmas(module, top_pragmas)
     module = _inject_symbols_meta(module, annotation_symbols)
     module = _inject_symbols_meta(module, top_constants)
-    validate_axon_program((module,), main_module=module.name)
     return module
+
+
+def build_axon_modules_from_parsed_source(
+    parsed_source: "ParsedProgramSource", *, validate: bool = True
+) -> tuple[AxonModule, ...]:
+    top_pragmas = parsed_source.pragmas
+    top_constants = {k: _parse_const_scalar(v) for k, v in parsed_source.constants.items()}
+    top_imports = parsed_source.imports
+    top_imported_members = parsed_source.imported_members
+    modules_list: list[AxonModule] = []
+    for chunk_source in parsed_source.modules:
+        modules_list.append(
+            _build_module_from_lines(
+                module_source=chunk_source,
+                top_pragmas=top_pragmas,
+                top_constants=top_constants,
+                imports=top_imports,
+                imported_members=top_imported_members,
+            )
+        )
+    out = tuple(modules_list)
+    if validate:
+        validate_axon_program(out)
+    return out
+
+
+def parse_axon_module(source: str) -> AxonModule:
+    parsed_source = parse_program_source(source)
+    validate_parsed_program_source(parsed_source)
+    if len(parsed_source.modules) != 1:
+        raise ValueError("expected exactly one module in Axon source")
+    modules = build_axon_modules_from_parsed_source(parsed_source, validate=True)
+    return modules[0]
 
 
 def _parse_simple_line(line: str) -> AxonBind | AxonReturn:
     parsed = parse_statement_head(line)
     if isinstance(parsed, ParsedReturn):
-        values = tuple(_split_top_level_csv(parsed.raw_values))
+        values = tuple(parse_expression(part) for part in _split_top_level_csv(parsed.raw_values))
         return AxonReturn(values=values)
     if isinstance(parsed, ParsedBind):
         targets = tuple(part.strip() for part in _split_top_level_csv(parsed.raw_targets))
-        return AxonBind(targets=targets, expr=parsed.expr)
+        return AxonBind(targets=targets, expr=parse_expression(parsed.expr))
     raise ValueError(f"unsupported Axon statement: {line!r}")
 
 
@@ -603,8 +509,10 @@ def _parse_statements(
         if indent > current_indent:
             raise ValueError(f"unexpected indentation at line: {line!r}")
 
-        parsed_head: ParsedFor | ParsedScopeBind | ParsedScope | ParsedReturn | ParsedBind | None
         try:
+            parsed_head: (
+                ParsedFor | ParsedScopeBind | ParsedScope | ParsedReturn | ParsedBind | None
+            )
             parsed_head = parse_statement_head(line)
         except ValueError:
             parsed_head = None
@@ -633,9 +541,9 @@ def _parse_statements(
                 AxonRepeat(
                     name=repeat_name,
                     var=var,
-                    to_expr=end_exclusive,
-                    from_expr=start_expr,
-                    step_expr=step_expr,
+                    to_expr=parse_expression(end_exclusive),
+                    from_expr=parse_expression(start_expr),
+                    step_expr=parse_expression(step_expr),
                     body=tuple(body),
                 )
             )
@@ -660,6 +568,19 @@ def _parse_statements(
             raise ValueError(
                 "scope statement form is not supported; use '<target> <- scope@name do ... return ...'"
             )
+        if isinstance(parsed_head, ParsedBind) and parsed_head.expr.strip() == "do":
+            targets = tuple(part.strip() for part in _split_top_level_csv(parsed_head.raw_targets))
+            if not targets:
+                raise ValueError("do-expression bind requires one or more targets")
+            if i + 1 >= len(lines):
+                raise ValueError("do-expression bind requires indented body")
+            next_indent, _ = lines[i + 1]
+            if next_indent <= indent:
+                raise ValueError("do-expression bind requires indented body")
+            body, new_i = _parse_statements(lines, i + 1, next_indent)
+            out.append(AxonScopeBind(targets=targets, prefix=f"__do_expr_{i}", body=tuple(body)))
+            i = new_i
+            continue
 
         while i + 1 < len(lines):
             nxt_indent, nxt = lines[i + 1]
@@ -680,138 +601,20 @@ def _parse_statements(
 
 
 def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
-    raw_lines, top_pragmas = _extract_top_level_pragmas(_normalized_source_lines(source))
-    raw_lines, top_constants = _extract_top_level_constants(raw_lines)
-    raw_lines, top_imports, top_imported_members = _extract_top_level_imports(raw_lines)
-    module_starts: list[int] = []
-    for idx, line in enumerate(raw_lines):
-        if len(line) != len(line.lstrip(" ")):
-            continue
-        stripped = line.strip()
-        if parse_signature_line(stripped) is not None:
-            module_starts.append(idx)
-    if not module_starts:
-        parsed_modules = (parse_axon_module(source),)
-        validate_axon_program(parsed_modules)
-        return parsed_modules
-
-    modules_list: list[AxonModule] = []
-    for i, start in enumerate(module_starts):
-        end = module_starts[i + 1] if i + 1 < len(module_starts) else len(raw_lines)
-        chunk = "\n".join(raw_lines[start:end]).strip()
-        if not chunk:
-            continue
-        module = parse_axon_module(chunk)
-        merged_imports = tuple(dict.fromkeys([*top_imports, *module.imports]))
-        merged_imported_members: dict[str, tuple[str, ...]] = dict(top_imported_members)
-        if module.imported_members:
-            for namespace, members in module.imported_members.items():
-                prev = merged_imported_members.get(namespace, ())
-                merged_imported_members[namespace] = tuple(dict.fromkeys([*prev, *members]))
-        modules_list.append(
-            AxonModule(
-                name=module.name,
-                path_param=module.path_param,
-                path_params=module.path_params,
-                params=module.params,
-                returns=module.returns,
-                statements=module.statements,
-                imports=merged_imports,
-                imported_members=merged_imported_members or None,
-                symbols=module.symbols,
-                pragmas=module.pragmas,
-                return_type_expr=module.return_type_expr,
-                return_shape=module.return_shape,
-            )
-        )
-        modules_list[-1] = _inject_pragmas(modules_list[-1], top_pragmas)
-    if modules_list:
-        modules_list[-1] = _inject_symbols_meta(modules_list[-1], top_constants)
-    out = tuple(modules_list)
-    validate_axon_program(out)
-    return out
+    parsed_source = parse_program_source(source)
+    validate_parsed_program_source(parsed_source)
+    return build_axon_modules_from_parsed_source(parsed_source, validate=True)
 
 
-def parse_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
-    root = path.resolve()
-    if not root.exists():
-        raise FileNotFoundError(f"Axon file not found: {root}")
-    if not root.is_file():
-        raise ValueError(f"Axon import root must be a file: {root}")
+def parse_axon_program_from_path(path: "Path") -> tuple[AxonModule, ...]:
+    from .import_loader import load_axon_program_from_path
 
-    seen_paths: set[Path] = set()
-    visiting: list[Path] = []
-    ordered_modules: list[AxonModule] = []
-
-    builtins_dir = (Path(__file__).resolve().parents[1] / "builtins").resolve()
-    prelude_file = (builtins_dir / "Prelude.axon").resolve()
-
-    def _apply_namespace(
-        modules: tuple[AxonModule, ...], namespace: str | None
-    ) -> tuple[AxonModule, ...]:
-        if not namespace:
-            return modules
-        namespaced: list[AxonModule] = []
-        for module in modules:
-            if "." in module.name:
-                namespaced.append(module)
-                continue
-            namespaced.append(
-                AxonModule(
-                    name=f"{namespace}.{module.name}",
-                    path_param=module.path_param,
-                    path_params=module.path_params,
-                    params=module.params,
-                    returns=module.returns,
-                    statements=module.statements,
-                    imports=module.imports,
-                    imported_members=module.imported_members,
-                    symbols=module.symbols,
-                    pragmas=module.pragmas,
-                    return_type_expr=module.return_type_expr,
-                    return_shape=module.return_shape,
-                )
-            )
-        return tuple(namespaced)
-
-    def _resolve_import_path(base_file: Path, import_name: str) -> Path:
-        rel = Path(*import_name.split(".")).with_suffix(".axon")
-        local_candidate = (base_file.parent / rel).resolve()
-        if local_candidate.exists():
-            return local_candidate
-        builtin_candidate = (builtins_dir / rel).resolve()
-        if builtin_candidate.exists():
-            return builtin_candidate
-        raise FileNotFoundError(
-            f"Axon import {import_name!r} not found from {base_file}: "
-            f"tried {local_candidate} and {builtin_candidate}"
-        )
-
-    def _load_file(file_path: Path, *, namespace: str | None = None) -> None:
-        resolved = file_path.resolve()
-        if resolved in seen_paths:
-            return
-        if resolved in visiting:
-            cycle = " -> ".join(str(p) for p in [*visiting, resolved])
-            raise ValueError(f"Cyclic Axon imports detected: {cycle}")
-        visiting.append(resolved)
-        source = resolved.read_text(encoding="utf-8")
-        modules = _apply_namespace(parse_axon_program(source), namespace)
-        import_names: set[str] = set()
-        for module in modules:
-            import_names.update(module.imports)
-        for import_name in sorted(import_names):
-            _load_file(_resolve_import_path(resolved, import_name), namespace=import_name)
-        ordered_modules.extend(modules)
-        seen_paths.add(resolved)
-        visiting.pop()
-
-    if prelude_file.exists() and prelude_file != root:
-        _load_file(prelude_file, namespace="Prelude")
-    _load_file(root)
-    out = tuple(ordered_modules)
-    validate_axon_program(out)
-    return out
+    return load_axon_program_from_path(path)
 
 
-__all__ = ["parse_axon_module", "parse_axon_program", "parse_axon_program_from_path"]
+__all__ = [
+    "build_axon_modules_from_parsed_source",
+    "parse_axon_module",
+    "parse_axon_program",
+    "parse_axon_program_from_path",
+]
