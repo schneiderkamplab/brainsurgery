@@ -88,6 +88,8 @@ def emit_generic(
     if output_path.suffix != ".py":
         raise typer.BadParameter("Output path must end with .py")
 
+    if isinstance(backend, OptionInfo):
+        backend = "pytorch"
     spec = _load_yaml_mapping(spec_path)
     try:
         source = _emit_model_code(spec, class_name, backend=backend)
