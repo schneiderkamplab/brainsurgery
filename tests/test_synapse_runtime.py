@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from brainsurgery.engine.state_dicts import _InMemoryStateDict
+from brainsurgery.synapse import lower_axon_program_to_synapse_spec, parse_axon_program
 from brainsurgery.synapse.runtime import SynapseProgramModel
 
 
@@ -461,6 +462,31 @@ def test_runtime_infer_param_path_uses_scope_for_undotted_explicit_param_name() 
     assert model._infer_param_path(node_spec, node_path=node_path, param_name="D") == (
         "backbone.layers.0.mixer.D"
     )
+
+
+def test_runtime_scope_path_bound_calls_do_not_double_apply_local_scope() -> None:
+    modules = parse_axon_program(
+        """
+D = 2
+lin :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+lin@path x = linear@path x dim=D bias=true
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  y <- scope@attn do
+    return lin@proj x
+  return y
+"""
+    )
+    spec = lower_axon_program_to_synapse_spec(modules)
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors(
+        {
+            "attn.proj.weight": torch.eye(2, dtype=torch.float32),
+            "attn.proj.bias": torch.zeros(2, dtype=torch.float32),
+        }
+    )
+    out = model(x=torch.tensor([[[1.0, 2.0]]], dtype=torch.float32))
+    assert torch.equal(out["y"], torch.tensor([[[1.0, 2.0]]], dtype=torch.float32))
 
 
 def test_runtime_from_spec_and_from_yaml(tmp_path: Path) -> None:

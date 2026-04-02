@@ -27,23 +27,6 @@ def _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(plan: dict[str, object]) ->
     if isinstance(inputs, list):
         patched["inputs"] = [model_file if item == "models/gpt2" else item for item in inputs]
 
-    transforms = patched.get("transforms")
-    if isinstance(transforms, list):
-        updated_transforms: list[object] = []
-        for item in transforms:
-            if (
-                isinstance(item, dict)
-                and "load" in item
-                and isinstance(item["load"], dict)
-                and item["load"].get("path") == "models/gpt2"
-            ):
-                load_payload = dict(item["load"])
-                load_payload["path"] = model_file
-                updated_transforms.append({"load": load_payload})
-            else:
-                updated_transforms.append(item)
-        patched["transforms"] = updated_transforms
-
     return patched
 
 

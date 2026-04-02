@@ -55,9 +55,9 @@ def repo_root() -> Path:
 
 @pytest.fixture(scope="session")
 def gpt2_local_paths(repo_root: Path, pytestconfig: pytest.Config) -> tuple[Path, Path]:
-    ensure_model_downloaded(repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gpt2.old"])
+    ensure_model_downloaded(repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gpt2"])
     synapse_weights = ensure_gpt2_weights_alias(repo_root, pytestconfig)
-    hf_model_dir = repo_root / "models" / "gpt2.old"
+    hf_model_dir = repo_root / "models" / "gpt2"
     return synapse_weights, hf_model_dir
 
 

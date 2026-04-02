@@ -89,18 +89,21 @@ def _parse_args() -> argparse.Namespace:
         help="Do not capture per-run output; stream run_axon_test output directly.",
     )
     parser.add_argument(
-        "--exclude-axon",
-        action="append",
-        default=None,
-        help="Exclude specific .axon files by name (repeatable, e.g. gpt2.axon).",
-    )
-    parser.add_argument(
-        "--force-include-axon",
+        "--include",
         action="append",
         default=None,
         help=(
-            "Force include specific .axon files by name, even if a model dir would otherwise "
-            "be skipped as duplicate (repeatable, e.g. gpt2_kv.axon)."
+            "Only run pairs matching these selectors (repeatable). "
+            "Selectors are model directory names or .axon file names."
+        ),
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=None,
+        help=(
+            "Exclude pairs matching these selectors (repeatable). "
+            "Selectors are model directory names or .axon file names."
         ),
     )
     parser.add_argument(
@@ -147,33 +150,67 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _normalize_axon_names(values: list[str] | None) -> set[str]:
+def _normalize_selectors(values: list[str] | None) -> set[str]:
     out: set[str] = set()
     if not values:
         return out
     for value in values:
-        name = str(value).strip()
-        if not name:
+        raw = str(value).strip().lower()
+        if not raw:
             continue
-        if not name.endswith(".axon"):
-            name = f"{name}.axon"
-        out.add(name)
+        out.add(Path(raw).name)
     return out
+
+
+def _pair_matches_selector(pair: _Pair, selectors: set[str]) -> bool:
+    if not selectors:
+        return False
+    axon_name = pair.axon_path.name.lower()
+    model_name = pair.model_dir.name.lower()
+    for selector in selectors:
+        if selector.endswith(".axon"):
+            if selector == axon_name:
+                return True
+            continue
+        if selector == model_name:
+            return True
+    return False
+
+
+def _apply_pair_filters(
+    pairs: list[_Pair],
+    *,
+    include: set[str],
+    exclude: set[str],
+) -> list[_Pair]:
+    if include and exclude:
+        raise ValueError("axon-test-matrix accepts either include or exclude selectors, not both")
+    if include:
+        return [pair for pair in pairs if _pair_matches_selector(pair, include)]
+    if exclude:
+        return [pair for pair in pairs if not _pair_matches_selector(pair, exclude)]
+    return pairs
 
 
 def _resolve_pairs(
     examples_dir: Path,
     models_dir: Path,
-    *,
-    excluded_axons: set[str] | None = None,
-    force_included_axons: set[str] | None = None,
 ) -> list[_Pair]:
     if not examples_dir.is_dir():
         raise FileNotFoundError(f"Examples directory not found: {examples_dir}")
     if not models_dir.is_dir():
         raise FileNotFoundError(f"Models directory not found: {models_dir}")
 
-    model_dirs = sorted(path for path in models_dir.iterdir() if path.is_dir())
+    excluded_model_dir_names = {
+        "glm_4_5_air",
+        "nemotron3",
+        "nemotron-3",
+    }
+    model_dirs = sorted(
+        path
+        for path in models_dir.iterdir()
+        if path.is_dir() and path.name not in excluded_model_dir_names
+    )
     model_by_name = {path.name: path for path in model_dirs}
     explicit_model_aliases = {
         "flexolmo": "flexmath",
@@ -181,6 +218,9 @@ def _resolve_pairs(
         "mamba": "mamba_tiny_random",
         "mamba_2_8b": "mamba_2_8b_hf",
         "jamba": "jamba_tiny_random",
+        "gemma_1b": "gemma3_1b",
+        "gemma3_270m": "gemma3",
+        "gemma3_config": "gemma3",
     }
     excluded_stems = {
         "glm_4_5_air",
@@ -188,36 +228,82 @@ def _resolve_pairs(
         "nemotron3",
     }
 
-    excluded = set() if excluded_axons is None else set(excluded_axons)
-    forced = set() if force_included_axons is None else set(force_included_axons)
+    def _resolve_model_dir_for_axon_stem(stem: str) -> Path | None:
+        model_dir = model_by_name.get(explicit_model_aliases.get(stem, stem))
+        if model_dir is not None:
+            return model_dir
+        parts = stem.split("_")
+        for cut in range(len(parts) - 1, 0, -1):
+            candidate = "_".join(parts[:cut])
+            model_dir = model_by_name.get(candidate)
+            if model_dir is not None:
+                return model_dir
+        return None
+
+    axon_paths = sorted(examples_dir.glob("*.axon"))
+    axon_by_stem = {path.stem: path for path in axon_paths}
 
     pairs: list[_Pair] = []
-    seen_model_dirs: set[Path] = set()
-    for axon_path in sorted(examples_dir.glob("*.axon")):
-        if axon_path.name in excluded:
-            continue
+    covered_model_dirs: set[Path] = set()
+
+    # Pass 1: include every resolvable Axon example exactly once.
+    for axon_path in axon_paths:
         stem = axon_path.stem
         if stem in excluded_stems:
             continue
-        model_dir = model_by_name.get(explicit_model_aliases.get(stem, stem))
-        if model_dir is None:
-            parts = stem.split("_")
-            for cut in range(len(parts) - 1, 0, -1):
-                candidate = "_".join(parts[:cut])
-                model_dir = model_by_name.get(candidate)
-                if model_dir is not None:
-                    break
+        model_dir = _resolve_model_dir_for_axon_stem(stem)
 
         if model_dir is not None:
-            if model_dir in seen_model_dirs and axon_path.name not in forced:
-                print(
-                    f"Skipping {axon_path.name} because model dir {model_dir.name} is already covered"
-                )
-                continue
-            seen_model_dirs.add(model_dir)
             pairs.append(_Pair(axon_path=axon_path, model_dir=model_dir))
+            covered_model_dirs.add(model_dir)
         else:
-            print(f"Igoring {axon_path} as I did not locate model_dir from stem {stem}")
+            print(f"Ignoring {axon_path} as I did not locate model_dir from stem {stem}")
+
+    # Pass 2: ensure every model dir has at least one Axon file assigned.
+    explicit_axon_aliases = {
+        "flexmath": "flexolmo",
+        "black_mamba_2_8b": "black_mamba",
+        "mamba_tiny_random": "mamba",
+        "mamba_2_8b_hf": "mamba_2_8b",
+        "jamba_tiny_random": "jamba",
+        "jamba_3b": "jamba_3b",
+        "gpt2": "gpt2",
+        "gemma3": "gemma3",
+        "gemma3_1b": "gemma_1b",
+        "gemma3_4b": "gemma3",
+        "gemma3_12b": "gemma3",
+    }
+
+    for model_dir in model_dirs:
+        if model_dir in covered_model_dirs:
+            continue
+        model_name = model_dir.name
+        candidate_stems: list[str] = []
+        alias = explicit_axon_aliases.get(model_name)
+        if alias is not None:
+            candidate_stems.append(alias)
+        candidate_stems.append(model_name)
+        parts = model_name.split("_")
+        for cut in range(len(parts) - 1, 0, -1):
+            candidate_stems.append("_".join(parts[:cut]))
+        resolved_axon: Path | None = None
+        for candidate in candidate_stems:
+            resolved_axon = axon_by_stem.get(candidate)
+            if resolved_axon is not None:
+                break
+        if resolved_axon is None:
+            print(f"Ignoring model dir {model_dir} as I did not locate matching .axon file")
+            continue
+        if resolved_axon.stem in excluded_stems:
+            continue
+        # Avoid accidental duplicate model+axon pair.
+        duplicate = any(
+            pair.axon_path == resolved_axon and pair.model_dir == model_dir for pair in pairs
+        )
+        if duplicate:
+            continue
+        pairs.append(_Pair(axon_path=resolved_axon, model_dir=model_dir))
+        covered_model_dirs.add(model_dir)
 
     return pairs
 
@@ -391,19 +477,19 @@ def run_axon_test_matrix(
     compile_mode: str | None = None,
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
-    exclude_axon: list[str] | None = None,
-    force_include_axon: list[str] | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> int:
     if table_format not in {"plain", "markdown"}:
         raise ValueError("table_format must be 'plain' or 'markdown'")
 
     prompts = text if text else ["The future of AI is"]
-    pairs = _resolve_pairs(
-        examples_dir.resolve(),
-        models_dir.resolve(),
-        excluded_axons=_normalize_axon_names(exclude_axon),
-        force_included_axons=_normalize_axon_names(force_include_axon),
-    )
+    include_selectors = _normalize_selectors(include)
+    exclude_selectors = _normalize_selectors(exclude)
+    if include_selectors and exclude_selectors:
+        raise ValueError("axon-test-matrix accepts either include or exclude selectors, not both")
+    pairs = _resolve_pairs(examples_dir.resolve(), models_dir.resolve())
+    pairs = _apply_pair_filters(pairs, include=include_selectors, exclude=exclude_selectors)
     if not pairs:
         print("No matching .axon/model directory pairs found.")
         return 1
@@ -583,8 +669,8 @@ def main() -> int:
         compile_mode=str(args.compile_mode) if args.compile_mode is not None else None,
         compile_fullgraph=bool(args.compile_fullgraph),
         compile_dynamic=bool(args.compile_dynamic),
-        exclude_axon=args.exclude_axon,
-        force_include_axon=args.force_include_axon,
+        include=args.include,
+        exclude=args.exclude,
     )
 
 

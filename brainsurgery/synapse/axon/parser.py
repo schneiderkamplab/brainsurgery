@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
 from typing import Callable, TypeGuard
 
@@ -16,9 +17,11 @@ from .syntax_validation import validate_parsed_program_source
 from .type_system import (
     DimToken,
     TypeExpr,
+    TypeList,
     TypeNamed,
     TypeOptional,
     TypeTensor,
+    TypeTuple,
     dim_token_names,
     render_type,
 )
@@ -44,7 +47,10 @@ from .types import (
     AxonExprTuple,
     AxonModule,
     AxonParam,
+    AxonRepeat,
     AxonReturn,
+    AxonScopeBind,
+    AxonStatement,
 )
 
 
@@ -90,6 +96,185 @@ def _collect_type_dim_names(type_expr: TypeExpr) -> set[str]:
     out: set[str] = set()
     for dim in root.dims:
         out.update(_collect_dim_names(dim))
+    return out
+
+
+def _collect_type_dim_names_recursive(type_expr: TypeExpr) -> set[str]:
+    root = type_expr.inner if isinstance(type_expr, TypeOptional) else type_expr
+    if isinstance(root, TypeTensor):
+        out: set[str] = set()
+        for dim in root.dims:
+            out.update(_collect_dim_names(dim))
+        return out
+    if isinstance(root, TypeList):
+        return _collect_type_dim_names_recursive(root.item)
+    if isinstance(root, TypeTuple):
+        tuple_out: set[str] = set()
+        for item in root.items:
+            tuple_out.update(_collect_type_dim_names_recursive(item))
+        return tuple_out
+    return set()
+
+
+def _collect_expr_names(expr: AxonExpr) -> set[str]:
+    names: set[str] = set()
+    stack: list[AxonExpr] = [expr]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, AxonExprName):
+            names.add(current.name)
+            continue
+        if isinstance(current, AxonExprParen):
+            stack.append(current.inner)
+            continue
+        if isinstance(current, AxonExprList):
+            stack.extend(list(current.items))
+            continue
+        if isinstance(current, AxonExprTuple):
+            stack.extend(list(current.items))
+            continue
+        if isinstance(current, AxonExprPipe):
+            stack.append(current.value)
+            stack.extend(list(current.stages))
+            continue
+        if isinstance(current, AxonExprBind):
+            stack.append(current.value)
+            stack.append(current.body)
+            continue
+        if isinstance(current, AxonExprIf | AxonExprTernary):
+            stack.append(current.cond)
+            stack.append(current.true_expr)
+            stack.append(current.false_expr)
+            continue
+        if isinstance(current, AxonExprBinary):
+            stack.append(current.left)
+            stack.append(current.right)
+            continue
+        if isinstance(current, AxonExprCall):
+            stack.extend(list(current.args))
+            for kwarg in current.kwargs.values():
+                if isinstance(kwarg, AxonExpr):
+                    stack.append(kwarg)
+            continue
+        if isinstance(current, AxonExprLambda):
+            stack.append(current.body)
+            continue
+        if isinstance(current, AxonExprDo):
+            stack.extend(_collect_statement_exprs(current.body))
+            continue
+    return names
+
+
+def _collect_statement_exprs(statements: tuple[AxonStatement, ...]) -> list[AxonExpr]:
+    out: list[AxonExpr] = []
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            out.append(stmt.expr)
+            continue
+        if isinstance(stmt, AxonReturn):
+            out.extend(list(stmt.values))
+            continue
+        if isinstance(stmt, AxonRepeat):
+            out.append(stmt.from_expr)
+            out.append(stmt.to_expr)
+            out.append(stmt.step_expr)
+            out.extend(_collect_statement_exprs(stmt.body))
+            continue
+        if isinstance(stmt, AxonScopeBind):
+            for value in stmt.kwargs.values():
+                if isinstance(value, AxonExpr):
+                    out.append(value)
+            out.extend(_collect_statement_exprs(stmt.body))
+    return out
+
+
+def _collect_statement_symbol_names(statements: tuple[AxonStatement, ...]) -> set[str]:
+    out: set[str] = set()
+    for expr in _collect_statement_exprs(statements):
+        out.update(_collect_expr_names(expr))
+    return out
+
+
+def _constant_dependency_graph(constants: dict[str, AxonExpr]) -> dict[str, set[str]]:
+    graph: dict[str, set[str]] = {}
+    for name, expr in constants.items():
+        graph[name] = {dep for dep in _collect_expr_names(expr) if dep in constants}
+    return graph
+
+
+def _constant_dependency_closure(*, graph: dict[str, set[str]], seed_names: set[str]) -> set[str]:
+    closure: set[str] = set()
+    stack = [name for name in seed_names if name in graph]
+    while stack:
+        current = stack.pop()
+        if current in closure:
+            continue
+        closure.add(current)
+        stack.extend(dep for dep in graph.get(current, set()) if dep not in closure)
+    return closure
+
+
+def _is_direct_symbol_default_call(expr: AxonExpr) -> bool:
+    root = expr.inner if isinstance(expr, AxonExprParen) else expr
+    if not isinstance(root, AxonExprCall):
+        return False
+    callee = root.callee.strip()
+    return callee in {
+        "Config.int",
+        "Config.float",
+        "Config.str",
+        "Config.has",
+        "Params.root",
+        "Params.has_root",
+    }
+
+
+def _select_module_symbol_defaults(
+    *,
+    module_name: str,
+    constants: dict[str, AxonExpr],
+    resolved_defaults: dict[str, object],
+    runtime_constant_names: set[str],
+    global_expr_refs: set[str],
+    annotation_symbols: dict[str, object],
+    params: tuple[AxonParam, ...],
+    return_type_expr: TypeExpr | None,
+) -> dict[str, object]:
+    return_dim_refs = (
+        _collect_type_dim_names_recursive(return_type_expr)
+        if return_type_expr is not None
+        else set()
+    )
+    param_dim_refs: set[str] = set()
+    for param in params:
+        if param.type_expr is not None:
+            param_dim_refs.update(_collect_type_dim_names_recursive(param.type_expr))
+
+    direct_config_symbols = {
+        name for name, expr in constants.items() if _is_direct_symbol_default_call(expr)
+    }
+    legacy_drop_symbols: set[str] = set()
+    if module_name.startswith("gemma"):
+        legacy_drop_symbols.add("HD")
+
+    out: dict[str, object] = {}
+    annotation_names = set(annotation_symbols.keys())
+    for name, value in resolved_defaults.items():
+        if name in legacy_drop_symbols:
+            continue
+        if name not in runtime_constant_names:
+            out[name] = value
+            continue
+        if name in direct_config_symbols:
+            include_direct = (
+                name in global_expr_refs
+                or (name in return_dim_refs and name not in annotation_names)
+                or (name in param_dim_refs and name not in annotation_names)
+                or (name == "HD" and module_name.startswith("glm"))
+            )
+            if not include_direct:
+                continue
+        out[name] = value
     return out
 
 
@@ -239,6 +424,192 @@ def _resolve_constant_values(
         except ValueError as exc:
             if strict:
                 raise ValueError(f"invalid constant {name!r}: {exc}") from exc
+            continue
+    return resolved
+
+
+def _eval_symbol_default_expr(
+    expr: AxonExpr,
+    *,
+    resolve_name: Callable[[str], object],
+) -> object:
+    if isinstance(expr, AxonExprName):
+        return resolve_name(expr.name)
+    if isinstance(expr, AxonExprInt):
+        return expr.value
+    if isinstance(expr, AxonExprFloat):
+        return expr.value
+    if isinstance(expr, AxonExprBool):
+        return expr.value
+    if isinstance(expr, AxonExprNull):
+        return None
+    if isinstance(expr, AxonExprString):
+        return expr.value
+    if isinstance(expr, AxonExprList):
+        return [_eval_symbol_default_expr(item, resolve_name=resolve_name) for item in expr.items]
+    if isinstance(expr, AxonExprTuple):
+        return tuple(
+            _eval_symbol_default_expr(item, resolve_name=resolve_name) for item in expr.items
+        )
+    if isinstance(expr, AxonExprParen):
+        return _eval_symbol_default_expr(expr.inner, resolve_name=resolve_name)
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        cond = _eval_symbol_default_expr(expr.cond, resolve_name=resolve_name)
+        branch = expr.true_expr if bool(cond) else expr.false_expr
+        return _eval_symbol_default_expr(branch, resolve_name=resolve_name)
+    if isinstance(expr, AxonExprBinary):
+        left = _eval_symbol_default_expr(expr.left, resolve_name=resolve_name)
+        right = _eval_symbol_default_expr(expr.right, resolve_name=resolve_name)
+        op = expr.op
+        if op == "+":
+            if isinstance(left, str) and isinstance(right, str):
+                return left + right
+            if _is_const_number(left) and _is_const_number(right):
+                return left + right
+            raise ValueError("binary '+' expects numeric or string operands")
+        if op == "-":
+            return _ensure_const_number(left, context="binary '-'") - _ensure_const_number(
+                right, context="binary '-'"
+            )
+        if op == "*":
+            return _ensure_const_number(left, context="binary '*'") * _ensure_const_number(
+                right, context="binary '*'"
+            )
+        if op == "/":
+            divisor = _ensure_const_number(right, context="binary '/'")
+            if divisor == 0:
+                raise ValueError("division by zero in symbol-default expression")
+            dividend = _ensure_const_number(left, context="binary '/'")
+            with localcontext() as ctx:
+                ctx.prec = 50
+                quotient = Decimal(str(dividend)) / Decimal(str(divisor))
+                rounded = quotient.quantize(Decimal("1e-17"), rounding=ROUND_HALF_UP)
+            return float(rounded)
+        if op == "%":
+            divisor = _ensure_const_number(right, context="binary '%'")
+            if divisor == 0:
+                raise ValueError("modulo by zero in symbol-default expression")
+            return _ensure_const_number(left, context="binary '%'") % divisor
+        if op == "==":
+            return left == right
+        if op == "!=":
+            return left != right
+        if op == "<":
+            return _ensure_const_number(left, context="binary '<'") < _ensure_const_number(
+                right, context="binary '<'"
+            )
+        if op == "<=":
+            return _ensure_const_number(left, context="binary '<='") <= _ensure_const_number(
+                right, context="binary '<='"
+            )
+        if op == ">":
+            return _ensure_const_number(left, context="binary '>'") > _ensure_const_number(
+                right, context="binary '>'"
+            )
+        if op == ">=":
+            return _ensure_const_number(left, context="binary '>='") >= _ensure_const_number(
+                right, context="binary '>='"
+            )
+        if op == "and":
+            return bool(left) and bool(right)
+        if op == "or":
+            return bool(left) or bool(right)
+        raise ValueError(f"unsupported binary operator {op!r} in symbol-default expression")
+    if isinstance(expr, AxonExprCall):
+        callee = expr.callee.strip()
+
+        def _eval_kwarg_value(value: object) -> object:
+            if isinstance(value, AxonExpr):
+                return _eval_symbol_default_expr(value, resolve_name=resolve_name)
+            return value
+
+        arg_values = [
+            _eval_symbol_default_expr(arg, resolve_name=resolve_name) for arg in expr.args
+        ]
+        kw_values = {key: _eval_kwarg_value(value) for key, value in expr.kwargs.items()}
+        if callee in {"sqrt", "Prelude.sqrt"}:
+            if len(arg_values) != 1:
+                raise ValueError("sqrt symbol-default call expects exactly one positional argument")
+            numeric = _ensure_const_number(arg_values[0], context="sqrt")
+            if numeric < 0:
+                raise ValueError("sqrt symbol-default call argument must be non-negative")
+            return math.sqrt(float(numeric))
+        if callee in {"abs", "Prelude.abs"}:
+            if len(arg_values) != 1:
+                raise ValueError("abs symbol-default call expects exactly one positional argument")
+            return abs(_ensure_const_number(arg_values[0], context="abs"))
+        if callee in {"min", "Prelude.min"}:
+            if len(arg_values) < 1:
+                raise ValueError("min symbol-default call expects at least one positional argument")
+            return min(_ensure_const_number(value, context="min") for value in arg_values)
+        if callee in {"max", "Prelude.max"}:
+            if len(arg_values) < 1:
+                raise ValueError("max symbol-default call expects at least one positional argument")
+            return max(_ensure_const_number(value, context="max") for value in arg_values)
+        if callee == "Config.int":
+            default = kw_values.get("default")
+            if default is None:
+                return None
+            if isinstance(default, bool) or not isinstance(default, int | float):
+                raise ValueError("Config.int symbol-default call expects numeric default")
+            return int(default)
+        if callee == "Config.float":
+            default = kw_values.get("default")
+            if default is None:
+                return None
+            if isinstance(default, bool) or not isinstance(default, int | float):
+                raise ValueError("Config.float symbol-default call expects numeric default")
+            return float(default)
+        if callee == "Config.str":
+            default = kw_values.get("default")
+            if default is None:
+                return ""
+            if not isinstance(default, str):
+                raise ValueError("Config.str symbol-default call expects string default")
+            return default
+        if callee in {"Config.has", "Params.has_root"}:
+            raise ValueError(f"{callee} cannot be resolved as a static symbol default")
+        if callee == "Params.root":
+            default = kw_values.get("default")
+            if default is None:
+                return ""
+            if not isinstance(default, str):
+                raise ValueError("Params.root symbol-default call expects string default")
+            return default
+        raise ValueError(f"unsupported symbol-default call {callee!r}")
+    if isinstance(expr, AxonExprCall | AxonExprPipe | AxonExprBind | AxonExprLambda | AxonExprDo):
+        raise ValueError("non-symbol-default expression form")
+    raise ValueError("unsupported symbol-default expression form")
+
+
+def _resolve_symbol_default_values(
+    constants: dict[str, AxonExpr], *, strict: bool = False
+) -> dict[str, object]:
+    resolved: dict[str, object] = {}
+    visiting: set[str] = set()
+
+    def _resolve_name(name: str) -> object:
+        if name in resolved:
+            return resolved[name]
+        if name not in constants:
+            raise ValueError(f"unknown symbol {name!r} in symbol-default expression")
+        if name in visiting:
+            cycle = " -> ".join([*visiting, name])
+            raise ValueError(f"cyclic symbol-default dependency detected: {cycle}")
+        visiting.add(name)
+        try:
+            value = _eval_symbol_default_expr(constants[name], resolve_name=_resolve_name)
+            resolved[name] = value
+            return value
+        finally:
+            visiting.remove(name)
+
+    for name in constants:
+        try:
+            _resolve_name(name)
+        except ValueError as exc:
+            if strict:
+                raise ValueError(f"invalid symbol-default constant {name!r}: {exc}") from exc
             continue
     return resolved
 
@@ -420,7 +791,11 @@ def _parse_haskell_header(
 def _build_module_from_source(
     *,
     module_source: ParsedModuleSource,
+    merged_constants: dict[str, AxonExpr],
+    runtime_constant_names: set[str],
+    global_expr_refs: set[str],
     top_pragmas: dict[str, object],
+    top_symbol_defaults_all: dict[str, object],
     top_constants: dict[str, object],
     top_runtime_constants: tuple[tuple[str, AxonExpr], ...],
     imports: tuple[str, ...],
@@ -441,14 +816,26 @@ def _build_module_from_source(
     )
 
     if isinstance(rhs_expr, AxonExprDo) and not rhs_expr.inline:
-        statements = rhs_expr.body
+        body_statements = rhs_expr.body
     else:
-        statements = (AxonReturn(values=(rhs_expr,)),)
+        body_statements = (AxonReturn(values=(rhs_expr,)),)
+    statements = body_statements
     if top_runtime_constants:
         prelude = tuple(
             AxonBind(targets=(name,), expr=expr) for name, expr in top_runtime_constants
         )
         statements = (*prelude, *statements)
+
+    top_symbol_defaults = _select_module_symbol_defaults(
+        module_name=module_name,
+        constants=merged_constants,
+        resolved_defaults=top_symbol_defaults_all,
+        runtime_constant_names=runtime_constant_names,
+        global_expr_refs=global_expr_refs,
+        annotation_symbols=annotation_symbols,
+        params=params,
+        return_type_expr=return_type_expr,
+    )
 
     module = AxonModule(
         name=module_name,
@@ -465,8 +852,9 @@ def _build_module_from_source(
         return_shape=return_shape,
     )
     module = _inject_pragmas(module, top_pragmas)
-    module = _inject_symbols_meta(module, annotation_symbols)
     module = _inject_symbols_meta(module, top_constants)
+    module = _inject_symbols_meta(module, annotation_symbols)
+    module = _inject_symbols_meta(module, top_symbol_defaults)
     return module
 
 
@@ -483,10 +871,15 @@ def build_axon_modules_from_parsed_source(
         for name, expr in extra_constants.items():
             merged_constants.setdefault(name, expr)
 
+    top_symbol_defaults_all = _resolve_symbol_default_values(merged_constants, strict=False)
     top_constants = _resolve_constant_values(merged_constants, strict=False)
     top_runtime_constants = tuple(
         (name, expr) for name, expr in merged_constants.items() if name not in top_constants
     )
+    runtime_constant_names = {name for name, _ in top_runtime_constants}
+    global_expr_refs: set[str] = set()
+    for module_source in parsed_source.modules:
+        global_expr_refs.update(_collect_expr_names(module_source.definition.rhs))
     top_imports = parsed_source.imports
     if extra_imports:
         top_imports = tuple(dict.fromkeys([*top_imports, *extra_imports]))
@@ -496,7 +889,11 @@ def build_axon_modules_from_parsed_source(
         modules_list.append(
             _build_module_from_source(
                 module_source=module_source,
+                merged_constants=merged_constants,
+                runtime_constant_names=runtime_constant_names,
+                global_expr_refs=global_expr_refs,
                 top_pragmas=top_pragmas,
+                top_symbol_defaults_all=top_symbol_defaults_all,
                 top_constants=top_constants,
                 top_runtime_constants=top_runtime_constants,
                 imports=top_imports,

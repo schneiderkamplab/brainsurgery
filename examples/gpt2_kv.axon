@@ -1,11 +1,12 @@
-T   = 1024   -- max sequence length
-D   = 768    -- hidden dimensions
-L   = 12     -- number of layers
-H   = 12     -- number of attention heads
-V   = 520257 -- vocab size
-
+import Config
 import Activations gelu_new
 import Cache past_length
+
+T   = Config.int "n_positions" default=1024   -- max sequence length
+D   = Config.int "n_embd" default=768         -- hidden dimensions
+L   = Config.int "n_layer" default=12         -- number of layers
+H   = Config.int "n_head" default=12          -- number of attention heads
+V   = Config.int "vocab_size" default=520257  -- vocab size
 
 lin :: @Path -> Tensor[B,S,Din] -> Int -> Tensor[B,S,dim]
 lin@path x dim = linear@path x dim=dim bias=true transpose=true

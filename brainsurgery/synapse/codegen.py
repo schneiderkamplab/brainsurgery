@@ -771,17 +771,7 @@ class _Emitter:
         if isinstance(raw_scope, str) and raw_scope:
             scoped_var = self._fresh("scope")
             lines = [
-                (
-                    f"{indent}if ("
-                    f"{scope_var} == {raw_scope!r} or "
-                    f"{scope_var}.startswith({raw_scope!r} + '.') or "
-                    f"{scope_var}.endswith('.' + {raw_scope!r}) or "
-                    f"('.' + {raw_scope!r} + '.') in {scope_var}"
-                    f"):"
-                ),
-                f"{indent}    {scoped_var} = {scope_var}",
-                f"{indent}else:",
-                f"{indent}    {scoped_var} = self._join_scope({scope_var}, {raw_scope!r})",
+                f"{indent}{scoped_var} = self._join_scope({scope_var}, {raw_scope!r})",
             ]
             call_scope_var = scoped_var
         else:

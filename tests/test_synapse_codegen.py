@@ -12,6 +12,8 @@ from brainsurgery.engine.state_dicts import _InMemoryStateDict
 from brainsurgery.synapse import (
     emit_model_code_from_synapse_spec,
     infer_output_types_for_node,
+    lower_axon_program_to_synapse_spec,
+    parse_axon_program,
     render_synapse_spec_to_dot,
 )
 
@@ -1438,6 +1440,33 @@ def test_generated_model_prefers_existing_param_candidate_path() -> None:
     )
     out = model(x=torch.tensor([[1.0, 2.0]], dtype=torch.float32))
     assert torch.equal(out["y"], torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+
+
+def test_generated_scope_path_bound_calls_do_not_double_apply_local_scope() -> None:
+    modules = parse_axon_program(
+        """
+D = 2
+lin :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+lin@path x = linear@path x dim=D bias=true
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  y <- scope@attn do
+    return lin@proj x
+  return y
+"""
+    )
+    spec = lower_axon_program_to_synapse_spec(modules)
+    source = emit_model_code_from_synapse_spec(spec, class_name="ScopedExplicitParamModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["ScopedExplicitParamModel"](
+        state_dict={
+            "attn.proj.weight": torch.eye(2, dtype=torch.float32),
+            "attn.proj.bias": torch.zeros(2, dtype=torch.float32),
+        }
+    )
+    out = model(x=torch.tensor([[[1.0, 2.0]]], dtype=torch.float32))
+    assert torch.equal(out["y"], torch.tensor([[[1.0, 2.0]]], dtype=torch.float32))
 
 
 def test_generated_select_is_lazy_and_value_producing() -> None:

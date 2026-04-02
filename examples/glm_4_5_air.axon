@@ -1,24 +1,26 @@
-D    = 4096       -- hidden dimension
-V    = 151552     -- vocabulary size
-L    = 46         -- number of decoder layers
-H    = 96         -- number of query attention heads
-KVH  = 8          -- number of key/value heads
-HD   = 128        -- per-head dimension
-QD   = 12288      -- query projection dimension (H * HD)
-KVD  = 1024       -- key/value projection dimension (KVH * HD)
-FFN  = 10944      -- dense feed-forward intermediate dimension
-E    = 128        -- routed experts
-EPT  = 8          -- routed experts selected per token
-EM   = 1408       -- routed expert intermediate dimension
-EPS  = 1e-05      -- RMSNorm epsilon
-THETA = 1000000.0 -- RoPE theta
-C    = 131072     -- max context window
-FIRST_DENSE = 1   -- number of initial dense-only layers
-
+import Config
 import Activations silu
 import Cache past_length
 import Cache
 import MoE
+
+-- GLM-4.5-Air architecture constants.
+D    = Config.int "hidden_size" default=4096                       -- residual hidden size
+V    = Config.int "vocab_size" default=151552                      -- tokenizer vocabulary size
+L    = Config.int "num_hidden_layers" default=46                   -- decoder depth
+H    = Config.int "num_attention_heads" default=96                 -- query heads
+KVH  = Config.int "num_key_value_heads" default=8                  -- key/value heads
+HD   = Config.int "head_dim" default=128                           -- per-head hidden size
+QD   = H * HD                                                       -- query projection width
+KVD  = KVH * HD                                                     -- key/value projection width
+FFN  = Config.int "intermediate_size" default=10944                -- dense MLP width
+E    = Config.int "n_routed_experts" default=128                   -- routed expert count
+EPT  = Config.int "num_experts_per_tok" default=8                  -- top-k experts per token
+EM   = Config.int "moe_intermediate_size" default=1408             -- routed expert MLP width
+EPS  = Config.float "rms_norm_eps" default=1e-05                   -- RMSNorm epsilon
+THETA = Config.float "rope_theta" default=1000000.0                -- RoPE theta
+C    = Config.int "max_position_embeddings" default=131072         -- causal window cap
+FIRST_DENSE = Config.int "first_k_dense_replace" default=1         -- initial dense-only layers
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS

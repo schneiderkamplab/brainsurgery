@@ -88,7 +88,7 @@ transforms:
   - reshape: { from: demo.expected_generated_ids, to: demo.expected_generated_ids_batched, shape: [1, -1] }
   - assert: { equal: { left: demo.generated_ids, right: demo.expected_generated_ids_batched } }
   # Compare infer outputs across synapse runtime, codegen runtime, and HF runtime.
-  - load: { path: models/gpt2.old, alias: model_hf }
+  - load: { path: models/gpt2, alias: model_hf }
   - infer:
       model: model
       runtime: synapse

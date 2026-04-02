@@ -590,6 +590,41 @@ main x = do
     assert node_specs[1]["default"] == ""
 
 
+def test_imported_constant_includes_transitive_constant_dependencies(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "cfg.axon"
+    cfg_path.write_text(
+        """
+import Config
+
+CFG = (Config.has "text_config") ? "text_config" : ""
+D = Config.int "hidden_size" root=CFG default=640
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import cfg (D)
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- linear@proj x dim=D
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    cfg_nodes = [node for node in node_specs if node.get("_op") in {"config_has", "config_int"}]
+    assert [node["_op"] for node in cfg_nodes] == ["config_has", "config_int"]
+    assert cfg_nodes[1]["_args"] == "hidden_size"
+    assert cfg_nodes[1]["root"] == "CFG"
+    assert cfg_nodes[1]["default"] == 640
+
+
 def test_multi_path_parameters_support_triple_at_call_syntax() -> None:
     source = """
 expert_ffn :: @Path -> @Path -> @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
@@ -832,6 +867,92 @@ tiny input_ids = do
     ]
     assert len(linear_nodes) == 1
     assert linear_nodes[0]["_params"]["weight"] == "model.lm_head.weight"
+
+
+def test_path_bound_block_call_keeps_single_scope_source_of_truth() -> None:
+    source = """
+D = 2
+lin2 :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+lin2@path x = do
+  y <- linear@path x dim=D bias=true
+  z <- add y y
+  return z
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  y <- scope@attn do
+    return lin2@proj x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    graph = spec["model"]["graph"]
+    call_nodes = [
+        node_spec
+        for item in graph
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "call"
+    ]
+    assert len(call_nodes) == 1
+    call_node = call_nodes[0]
+    assert call_node.get("_scope") is None
+    assert "path" not in call_node
+
+    target = call_node.get("_target")
+    assert isinstance(target, str)
+    assert target != "lin2"
+
+    blocks = spec["model"].get("blocks")
+    assert isinstance(blocks, dict)
+    assert target in blocks
+    block_graph = blocks[target]["graph"]
+    linear_nodes = [
+        node_spec
+        for item in block_graph
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "linear"
+    ]
+    assert len(linear_nodes) == 1
+    linear_node = linear_nodes[0]
+    assert linear_node["_params"]["weight"] == "attn.proj.weight"
+    assert linear_node["_params"]["bias"] == "attn.proj.bias"
+    assert "param_base" not in linear_node
+
+
+def test_block_call_scope_is_relative_inside_loop_scopes() -> None:
+    source = """
+D = 2
+L = 2
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = linear@proj x dim=D bias=true
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- scope@model do
+    for@layers i <- [0..L) do
+      x <- blk x
+    return x
+  return y
+"""
+    spec = lower_axon_program_to_synapse_spec(parse_axon_program(source))
+    graph = spec["model"]["graph"]
+    for_nodes = [
+        node_spec
+        for item in graph
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "for"
+    ]
+    assert len(for_nodes) == 1
+    for_node = for_nodes[0]
+    assert for_node["_scope"] == "model.layers"
+    body = for_node.get("_body")
+    assert isinstance(body, list)
+    body_calls = [
+        node_spec
+        for item in body
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "call"
+    ]
+    assert len(body_calls) == 1
+    assert body_calls[0].get("_scope") is None
 
 
 def test_scope_root_candidates_are_applied_to_param_paths() -> None:

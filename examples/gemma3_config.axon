@@ -1,21 +1,35 @@
 import Config
 import Params
 
-CFG = (Config.has "text_config") ? "text_config" : ""
-PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
+-- `CFG` selects where textual model settings live in config.json:
+-- - Gemma 3 text-only configs: root keys (CFG = "")
+-- - Gemma 3 multimodal-ish layouts: under `text_config` (CFG = "text_config")
+CFG = (Config.has "text_config") ? "text_config" : ""              -- config namespace root: top-level ("") or nested ("text_config")
 
-D = Config.int "hidden_size" root=CFG default=640
-V = Config.int "vocab_size" root=CFG default=262208
-L = Config.int "num_hidden_layers" root=CFG default=18
-H = Config.int "num_attention_heads" root=CFG default=8
-KVH = Config.int "num_key_value_heads" root=CFG default=4
-HD = Config.int "head_dim" root=CFG default=256
-FFN = Config.int "intermediate_size" root=CFG default=2048
-ROPE_PERIOD = Config.int "_sliding_window_pattern" root=CFG default=6
-THETA_BASE = Config.float "rope_local_base_freq" root=CFG default=10000.0
-THETA_LONG = Config.float "rope_theta" root=CFG default=1000000.0
-ROPE_LONG_SCALE = Config.float "rope_scaling.factor" root=CFG default=1.0
-WIN_LOCAL = Config.int "sliding_window" root=CFG default=512
-WIN_LONG = Config.int "max_position_embeddings" root=CFG default=131072
-ATTN_SCALE = 1.0 / sqrt (Config.float "query_pre_attn_scalar" root=CFG default=256.0)
-EMB_SCALE = (Config.float "embedding_scale" root=CFG default=1.0) * sqrt D
+-- `HAS_CFG` gates fallback defaults. Defaults are only used when no usable
+-- model config is available for this Axon run.
+HAS_CFG = Config.has "hidden_size" root=CFG                        -- guard: true when selected config root contains text model fields
+
+-- Parameter root for checkpoint key lookup.
+-- Some checkpoints namespace everything under `language_model.*`.
+PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : "" -- checkpoint parameter prefix for scope@... root=...
+
+-- Gemma 3 uses either `_sliding_window_pattern` or `sliding_window_pattern`
+-- depending on checkpoint/config exporter version.
+ROPE_PERIOD_KEY = (Config.has "_sliding_window_pattern" root=CFG) ? "_sliding_window_pattern" : "sliding_window_pattern" -- schema switch: old vs new period key name
+
+D = HAS_CFG ? (Config.int "hidden_size" root=CFG) : 640            -- D from config key `hidden_size`, fallback 640
+V = HAS_CFG ? (Config.int "vocab_size" root=CFG) : 262208          -- V from `vocab_size`, fallback 262208
+L = HAS_CFG ? (Config.int "num_hidden_layers" root=CFG) : 18       -- L from `num_hidden_layers`, fallback 18
+H = HAS_CFG ? (Config.int "num_attention_heads" root=CFG) : 8      -- H from `num_attention_heads`, fallback 8
+KVH = HAS_CFG ? (Config.int "num_key_value_heads" root=CFG) : 4    -- KVH from `num_key_value_heads`, fallback 4
+HD = HAS_CFG ? (Config.int "head_dim" root=CFG) : 256              -- HD from `head_dim`, fallback 256
+FFN = HAS_CFG ? (Config.int "intermediate_size" root=CFG) : 2048   -- FFN from `intermediate_size`, fallback 2048
+ROPE_PERIOD = HAS_CFG ? (Config.int ROPE_PERIOD_KEY root=CFG) : 6  -- long-window period from selected key, fallback 6
+THETA_BASE = HAS_CFG ? (Config.float "rope_local_base_freq" root=CFG) : 10000.0 -- local theta from `rope_local_base_freq`, fallback 1e4
+THETA_LONG = HAS_CFG ? (Config.float "rope_theta" root=CFG) : 1000000.0 -- long theta from `rope_theta`, fallback 1e6
+ROPE_LONG_SCALE = (HAS_CFG and (Config.has "rope_scaling.factor" root=CFG)) ? (Config.float "rope_scaling.factor" root=CFG) : 1.0 -- optional long-scale from `rope_scaling.factor`, fallback 1.0
+WIN_LOCAL = HAS_CFG ? (Config.int "sliding_window" root=CFG) : 512 -- local window from `sliding_window`, fallback 512
+WIN_LONG = HAS_CFG ? (Config.int "max_position_embeddings" root=CFG) : 131072 -- long window from `max_position_embeddings`, fallback 131072
+ATTN_SCALE = HAS_CFG ? (1.0 / sqrt (Config.float "query_pre_attn_scalar" root=CFG)) : (1.0 / sqrt 256.0) -- qk scale from `query_pre_attn_scalar`, fallback 1/sqrt(256)
+EMB_SCALE = sqrt D                                                  -- embedding multiplier as sqrt(D)

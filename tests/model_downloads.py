@@ -37,7 +37,7 @@ class ModelDownloadSpec:
 
 
 MODEL_SPECS: dict[str, ModelDownloadSpec] = {
-    "gpt2.old": ModelDownloadSpec(local_dir="gpt2.old", repo_id="openai-community/gpt2"),
+    "gpt2": ModelDownloadSpec(local_dir="gpt2", repo_id="openai-community/gpt2"),
     "gemma3": ModelDownloadSpec(local_dir="gemma3", repo_id="google/gemma-3-270m"),
     "gemma3_1b": ModelDownloadSpec(local_dir="gemma3_1b", repo_id="google/gemma-3-1b-pt"),
     "gemma3_4b": ModelDownloadSpec(local_dir="gemma3_4b", repo_id="google/gemma-3-4b-pt"),
@@ -86,8 +86,8 @@ MATRIX_AXON_TO_MODEL_DIR: dict[str, str] = {
     "falcon_rw_1b": "falcon_rw_1b",
     "flexolmo": "flexmath",
     "gemma3_270m": "gemma3",
-    "gpt2": "gpt2.old",
-    "gpt2_kv": "gpt2.old",
+    "gpt2": "gpt2",
+    "gpt2_kv": "gpt2",
     "jamba_3b": "jamba_3b",
     "black_mamba": "black_mamba_2_8b",
     "llama3_2_1b": "llama3_2_1b",
@@ -226,6 +226,15 @@ def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
     index_path = model_dir / "model.safetensors.index.json"
     single_path = model_dir / "model.safetensors"
     pytorch_bin_path = model_dir / "pytorch_model.bin"
+    pt_files = (
+        sorted(model_dir.glob("*.pt"))
+        + sorted(model_dir.glob("*.pth"))
+        + sorted(model_dir.glob("*.bin"))
+    )
+    safetensor_files = sorted(model_dir.glob("*.safetensors"))
+
+    if pt_files and safetensor_files:
+        return False
 
     has_weights = False
     if index_path.exists():
@@ -294,6 +303,18 @@ def _normalize_config_rope_numeric_fields(model_dir: Path) -> None:
         )
 
 
+def _normalize_local_weight_format(model_dir: Path) -> None:
+    safetensor_files = sorted(model_dir.glob("*.safetensors"))
+    pt_files = (
+        sorted(model_dir.glob("*.pt"))
+        + sorted(model_dir.glob("*.pth"))
+        + sorted(model_dir.glob("*.bin"))
+    )
+    if safetensor_files and pt_files:
+        for stale in pt_files:
+            stale.unlink(missing_ok=True)
+
+
 def ensure_model_downloaded(
     *,
     repo_root: Path,
@@ -305,6 +326,7 @@ def ensure_model_downloaded(
 
     model_dir = repo_root / "models" / spec.local_dir
     model_dir.mkdir(parents=True, exist_ok=True)
+    _normalize_local_weight_format(model_dir)
 
     if _is_complete_model_dir(model_dir, require_tokenizer=spec.require_tokenizer):
         _normalize_config_rope_numeric_fields(model_dir)
@@ -317,7 +339,16 @@ def ensure_model_downloaded(
     shard_files = sorted(name for name in siblings if name.endswith(".safetensors"))
     pytorch_bin_files = sorted(name for name in siblings if name.endswith(".bin"))
     index_files = [name for name in siblings if name == "model.safetensors.index.json"]
-    selected_files = set(index_files + shard_files + pytorch_bin_files)
+    if shard_files:
+        selected_weight_files = [*index_files, *shard_files]
+        # Prefer safetensors whenever available to avoid ambiguous mixed-format directories.
+        for stale in [*model_dir.glob("*.pt"), *model_dir.glob("*.pth"), *model_dir.glob("*.bin")]:
+            stale.unlink(missing_ok=True)
+    else:
+        selected_weight_files = pytorch_bin_files
+        for stale in [*model_dir.glob("*.safetensors"), model_dir / "model.safetensors.index.json"]:
+            stale.unlink(missing_ok=True)
+    selected_files = set(selected_weight_files)
     selected_files.update(name for name in siblings if name in _ESSENTIAL_TEXT_FILES)
 
     headers = _auth_headers()
@@ -430,19 +461,11 @@ def ensure_model_downloaded(
 
 
 def ensure_gpt2_weights_alias(repo_root: Path, config: pytest.Config) -> Path:
-    src = repo_root / "models" / "gpt2.old" / "model.safetensors"
-    if not src.exists():
-        raise RuntimeError(f"Missing source GPT-2 model.safetensors at {src}")
-
-    dst = repo_root / "models" / "gpt2" / "model.safetensors"
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        _status(config, "gpt2/model.safetensors already present, skipping")
-        return dst
-
-    _status(config, "creating gpt2/model.safetensors alias from gpt2.old/model.safetensors")
-    shutil.copy2(src, dst)
-    return dst
+    # Legacy helper name kept for call sites; we now consume GPT-2 directly from models/gpt2.
+    weights = repo_root / "models" / "gpt2" / "model.safetensors"
+    if not weights.exists():
+        raise RuntimeError(f"Missing GPT-2 model.safetensors at {weights}")
+    return weights
 
 
 def ensure_matrix_models(repo_root: Path, config: pytest.Config) -> None:
@@ -453,5 +476,5 @@ def ensure_matrix_models(repo_root: Path, config: pytest.Config) -> None:
             raise RuntimeError(f"No download spec registered for matrix model dir: {model_dir}")
         ensure_model_downloaded(repo_root=repo_root, config=config, spec=spec)
 
-    # Keep legacy GPT-2 single-file path working for tests that use models/gpt2/model.safetensors.
+    # Keep GPT-2 single-file path validation in one place for test setup.
     ensure_gpt2_weights_alias(repo_root, config)

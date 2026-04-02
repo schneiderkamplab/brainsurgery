@@ -353,11 +353,12 @@ class LoadTransform(TypedTransform[LoadSpec]):
             program = existing.get("program")
             if runtime in {"synapse", "codegen"} and isinstance(program, str) and program:
                 return
-        if path.is_dir():
+        hf_program = _infer_hf_program_path(path)
+        if hf_program is not None:
             set_model_runtime_metadata(
                 provider,
                 alias,
-                {"runtime": "hf", "program": str(path)},
+                {"runtime": "hf", "program": str(hf_program)},
             )
 
     def _infer_output_model(self, spec: object) -> str:
@@ -365,3 +366,13 @@ class LoadTransform(TypedTransform[LoadSpec]):
 
 
 register_transform(LoadTransform())
+
+
+def _infer_hf_program_path(path: Path) -> Path | None:
+    if path.is_dir():
+        return path
+    if path.is_file():
+        candidate = path.parent
+        if (candidate / "config.json").is_file():
+            return candidate
+    return None

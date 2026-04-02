@@ -413,15 +413,7 @@ class SynapseProgramModel(nn.Module):
         call_scope = scope
         raw_scope = node_spec.get("_scope")
         if isinstance(raw_scope, str) and raw_scope:
-            if (
-                scope == raw_scope
-                or scope.startswith(f"{raw_scope}.")
-                or scope.endswith(f".{raw_scope}")
-                or f".{raw_scope}." in scope
-            ):
-                call_scope = scope
-            else:
-                call_scope = self._join(scope, raw_scope)
+            call_scope = self._join(scope, raw_scope)
         raw_param_roots = node_spec.get("_param_roots")
         raw_param_root_expr = node_spec.get("_param_root_expr")
         pushed_roots: list[str] | None = None
@@ -551,6 +543,8 @@ class SynapseProgramModel(nn.Module):
     ) -> str:
         def _join_root(root: str, scoped: str) -> str:
             if root:
+                if scoped == root or scoped.startswith(f"{root}."):
+                    return scoped
                 return self._join(root, scoped)
             return scoped
 
@@ -569,11 +563,20 @@ class SynapseProgramModel(nn.Module):
                 roots = composed
             return roots
 
+        def _explicit_candidates(raw_path: str) -> list[str]:
+            scope_prefix = self._scope_of(node_path)
+            roots = _current_roots()
+            scoped = self._join(scope_prefix, raw_path)
+            scoped = scoped if scoped else raw_path
+            out: list[str] = []
+            for candidate in [_join_root(root, scoped) for root in roots]:
+                if candidate not in out:
+                    out.append(candidate)
+            return out
+
         def _pick_explicit_candidate(raw: Any) -> str | None:
             if isinstance(raw, str):
-                scoped = self._join(self._scope_of(node_path), raw)
-                scoped = scoped if scoped else raw
-                candidates = [_join_root(root, scoped) for root in _current_roots()]
+                candidates = _explicit_candidates(raw)
                 for candidate in candidates:
                     if candidate in self._state:
                         return candidate
@@ -583,10 +586,7 @@ class SynapseProgramModel(nn.Module):
                 for item in raw:
                     if not isinstance(item, str):
                         continue
-                    scoped = self._join(self._scope_of(node_path), item)
-                    scoped = scoped if scoped else item
-                    for root in _current_roots():
-                        list_candidates.append(_join_root(root, scoped))
+                    list_candidates.extend(_explicit_candidates(item))
                 if not list_candidates:
                     return None
                 for candidate in list_candidates:

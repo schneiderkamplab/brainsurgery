@@ -364,6 +364,7 @@ class _LowerCtx:
     tensor_heads: dict[str, Any] = field(default_factory=dict)
     tensor_shape: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     scope_stack: list[str] = field(default_factory=list)
+    loop_scope_cover_prefixes: list[str] = field(default_factory=list)
     param_root_stack: list[tuple[str, ...]] = field(default_factory=list)
     dynamic_param_root_stack: list[Any] = field(default_factory=list)
     path_param_names: set[str] = field(default_factory=set)
@@ -433,6 +434,20 @@ def _current_dynamic_param_root(ctx: _LowerCtx) -> Any | None:
         if item is not None:
             return item
     return None
+
+
+def _normalize_call_scope_for_runtime(ctx: _LowerCtx, call_scope: str) -> str:
+    if not call_scope:
+        return ""
+    cover_prefixes = [p for p in ctx.loop_scope_cover_prefixes if isinstance(p, str) and p]
+    if not cover_prefixes:
+        return call_scope
+    longest = max(cover_prefixes, key=len)
+    if call_scope == longest:
+        return ""
+    if call_scope.startswith(f"{longest}."):
+        return call_scope[len(longest) + 1 :]
+    return call_scope
 
 
 def _op_name_from_callee(callee: str) -> str:
@@ -1109,9 +1124,19 @@ def _lower_simple_call(
             node_spec["_args"] = (
                 positional_args[0] if len(positional_args) == 1 else positional_args
             )
-        call_scope = ".".join(part for part in ctx.scope_stack if part)
-        if call_scope and not path_bindings:
+        call_scope = _normalize_call_scope_for_runtime(
+            ctx, ".".join(part for part in ctx.scope_stack if part)
+        )
+        if path_bindings:
+            # Path-bound calls already carry concrete path context in bound path args;
+            # avoid injecting an extra call scope layer that would double-prefix params.
+            node_spec["_scope"] = None
+        elif call_scope:
             node_spec["_scope"] = call_scope
+        else:
+            # Preserve explicit "no extra call scope" intent so _with_scope does not
+            # re-inject lexical scope for this node.
+            node_spec["_scope"] = None
         root_candidates = _current_param_roots(ctx)
         dynamic_root_expr = _current_dynamic_param_root(ctx)
         if root_candidates != ("",):
@@ -1730,14 +1755,19 @@ def _lower_statements(
     for stmt in statements:
         if isinstance(stmt, AxonRepeat):
             body_graph: list[dict[str, Any]] = []
-            _lower_statements(
-                statements=stmt.body,
-                graph=body_graph,
-                outputs={},
-                returns=(),
-                ctx=ctx,
-                guard=guard,
-            )
+            loop_cover_prefix = ".".join(part for part in ctx.scope_stack if part)
+            ctx.loop_scope_cover_prefixes.append(loop_cover_prefix)
+            try:
+                _lower_statements(
+                    statements=stmt.body,
+                    graph=body_graph,
+                    outputs={},
+                    returns=(),
+                    ctx=ctx,
+                    guard=guard,
+                )
+            finally:
+                ctx.loop_scope_cover_prefixes.pop()
             node_name = f"n_{ctx.fresh('for')}"
             base_loop_scope = stmt.name if isinstance(stmt.name, str) and stmt.name else node_name
             loop_scope = base_loop_scope

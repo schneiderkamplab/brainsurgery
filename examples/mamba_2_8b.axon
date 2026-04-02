@@ -1,13 +1,15 @@
 {-# PADDING_SIDE "right" #-}
-D = 2560
-I = 5120
-N = 16
-R = 160
-L = 64
-V = 50280
-EPS = 1e-5
-
+import Config
 import Activations silu
+
+-- Mamba-2.8B architecture constants.
+D = Config.int "hidden_size" default=2560                          -- residual hidden size
+I = Config.int "intermediate_size" default=5120                    -- mixer inner width
+N = Config.int "state_size" default=16                             -- state-space width
+R = Config.int "time_step_rank" default=160                        -- delta rank
+L = Config.int "n_layer" default=64                                -- mixer block count
+V = Config.int "vocab_size" default=50280                          -- tokenizer vocabulary size
+EPS = Config.float "layer_norm_epsilon" default=1e-5               -- RMSNorm epsilon
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS cast_float=true
@@ -15,10 +17,10 @@ rms@path x = rmsnorm@path x eps=EPS cast_float=true
 mamba_mixer :: Tensor[B,S,D] -> Tensor[B,S,D]
 mamba_mixer x = do
   in_proj <- linear@in_proj x dim=2*I
-  u, gate <- split in_proj sizes=[5120, 5120]
+  u, gate <- split in_proj sizes=[I, I]
   u_conv <- causal_conv1d@conv1d u activation=silu
   params <- linear@x_proj u_conv dim=R + 2*N
-  dt, b, c <- split params sizes=[160, 16, 16]
+  dt, b, c <- split params sizes=[R, N, N]
   delta <- linear@dt_proj dt dim=I bias=true
   y_scan <- mamba_scan u_conv delta b c A=A_log D=D a_is_log=true
   return y_scan |> mul (silu gate) |> linear@out_proj dim=D

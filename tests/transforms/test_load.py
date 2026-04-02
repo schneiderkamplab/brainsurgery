@@ -252,6 +252,50 @@ def test_load_checkpoint_directory_sets_hf_runtime_metadata(
     }
 
 
+def test_load_checkpoint_file_in_hf_directory_sets_hf_runtime_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = InMemoryStateDictProvider({}, max_io_workers=1)
+    sd = _InMemoryStateDict()
+    sd["x"] = torch.ones(1)
+    monkeypatch.setattr(provider, "load_alias_from_path", lambda alias, path: sd)
+
+    model_dir = tmp_path / "hf_model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    checkpoint = model_dir / "model.safetensors"
+    checkpoint.write_bytes(b"fake")
+
+    spec = LoadSpec(path=checkpoint, alias="hf_alias", tensor_name=None, format="auto")
+    result = LoadTransform().apply(spec, provider)
+
+    assert result.count == 1
+    assert provider.get_model_runtime_metadata("hf_alias") == {
+        "runtime": "hf",
+        "program": str(model_dir),
+    }
+
+
+def test_load_checkpoint_file_without_hf_config_does_not_set_runtime_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = InMemoryStateDictProvider({}, max_io_workers=1)
+    sd = _InMemoryStateDict()
+    sd["x"] = torch.ones(1)
+    monkeypatch.setattr(provider, "load_alias_from_path", lambda alias, path: sd)
+
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.write_bytes(b"fake")
+
+    spec = LoadSpec(path=checkpoint, alias="plain_alias", tensor_name=None, format="auto")
+    result = LoadTransform().apply(spec, provider)
+
+    assert result.count == 1
+    assert provider.get_model_runtime_metadata("plain_alias") is None
+
+
 def test_load_apply_dry_run_uses_checkpoint_loader_and_tensor_alias_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

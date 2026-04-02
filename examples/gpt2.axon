@@ -1,36 +1,57 @@
-T   = 1024   -- max sequence length
-D   = 768    -- hidden dimensions
-L   = 12     -- number of layers
-H   = 12     -- number of attention heads
-V   = 520257 -- vocab size
-
+import Config
 import Activations gelu_new
 
+-- GPT-2 architecture constants from config.
+T   = Config.int "n_positions" default=1024   -- max sequence length / attention window
+D   = Config.int "n_embd" default=768         -- model hidden size
+L   = Config.int "n_layer" default=12         -- decoder block count
+H   = Config.int "n_head" default=12          -- attention head count
+V   = Config.int "vocab_size" default=520257  -- tokenizer vocabulary size
+
+-- Helper for GPT-2 style Conv1D weights (stored transposed with bias).
 lin :: @Path -> Tensor[B,S,Din] -> Int -> Tensor[B,S,dim]
 lin@path x dim = linear@path x dim=dim bias=true transpose=true
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 gpt2_block x attn_mask = do
+  -- Pre-attention layernorm.
   x1 <- layernorm@ln_1 x
+  -- Self-attention sublayer.
   a <- scope@attn do
+    -- Project once to QKV and split into three D-sized tensors.
     q_lin, k_lin, v_lin <- lin@c_attn x1 3*D |> split parts=3
+    -- Reshape to [B,H,S,HD] for multi-head attention.
     q <- reshape_heads q_lin heads=H
+    -- Reshape keys to attention-head layout.
     k <- reshape_heads k_lin heads=H
+    -- Reshape values to attention-head layout.
     v <- reshape_heads v_lin heads=H
-    mask <- causal_mask q k window=768 padding_mask=attn_mask
+    -- Build causal+padding mask bounded by the configured context length.
+    mask <- causal_mask q k window=T padding_mask=attn_mask
+    -- Run attention, merge heads, and project back to D.
     return attention q k v mask=mask |> merge_heads |> lin@c_proj D
+  -- Attention residual connection.
   x <- x + a
+  -- Pre-MLP layernorm.
   x3 <- layernorm@ln_2 x
+  -- MLP sublayer (fc -> GELU -> projection).
   m <- scope@mlp do
+    -- Use fp32 GELU accumulation to better match HF numerics.
     return lin@c_fc x3 4*D |> gelu_new fp32_accum=true |> lin@c_proj D
+  -- MLP residual connection.
   return x + m
 
 gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 gpt2 input_ids attn_mask = do
+  -- Token embedding lookup.
   tok <- embedding@wte input_ids dim=D
+  -- Position ids with left-padding compatibility, then positional embedding.
   pos <- position_ids input_ids attn_mask pad_fill=1 |> embedding@wpe
+  -- Combine token and positional embeddings.
   x <- tok + pos
+  -- Apply decoder blocks sequentially.
   for@h i <- [0..L) do
     x <- gpt2_block x attn_mask
+  -- Final norm and tied output projection to vocabulary logits.
   logits <- layernorm@ln_f x |> linear@wte
   return logits

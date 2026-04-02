@@ -230,6 +230,7 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
     }
     for loaded in ordered_files:
         imported_constants: dict[str, AxonExpr] = {}
+        imported_constant_imports: list[str] = []
         for namespace, members in loaded.parsed_source.imported_members.items():
             dep = loaded_by_namespace.get(namespace)
             if dep is None:
@@ -237,6 +238,10 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
             dep_constants = dep.parsed_source.constants
             requested = {member for member in members if member in dep_constants}
             closure = _collect_constant_closure(constants=dep_constants, seed_names=requested)
+            if closure:
+                for dep_import in dep.parsed_source.imports:
+                    if dep_import not in imported_constant_imports:
+                        imported_constant_imports.append(dep_import)
             for name, expr in closure.items():
                 imported_constants.setdefault(name, expr)
 
@@ -244,6 +249,7 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
             loaded.parsed_source,
             validate=False,
             extra_constants=imported_constants if imported_constants else None,
+            extra_imports=tuple(imported_constant_imports) if imported_constant_imports else None,
         )
         ordered_modules.extend(_apply_namespace(modules, loaded.namespace))
 

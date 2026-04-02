@@ -442,6 +442,27 @@ def axon_test_matrix(
         "--verbose",
         help="Show per-run output from synapse axon-test.",
     ),
+    no_capture_output: bool = typer.Option(
+        False,
+        "--no-capture-output",
+        help="Do not capture per-run output; stream synapse axon-test output directly.",
+    ),
+    include: list[str] = typer.Option(
+        [],
+        "--include",
+        help=(
+            "Only run pairs matching these selectors (repeatable). "
+            "Selectors are model directory names or .axon file names."
+        ),
+    ),
+    exclude: list[str] = typer.Option(
+        [],
+        "--exclude",
+        help=(
+            "Exclude pairs matching these selectors (repeatable). "
+            "Selectors are model directory names or .axon file names."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -495,6 +516,7 @@ def axon_test_matrix(
             max_len=max_len,
             text=text or None,
             verbose=verbose,
+            no_capture_output=no_capture_output,
             dry_run=dry_run,
             table_format=table_format,
             compile_hf=compile_hf,
@@ -503,6 +525,8 @@ def axon_test_matrix(
             compile_mode=compile_mode,
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
+            include=include or None,
+            exclude=exclude or None,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
