@@ -161,7 +161,7 @@ def _normalize_root_token(value: Any) -> str:
     return token
 
 
-def _scope_root_values_from_kwarg(raw: AxonKwargValue, ctx: "_LowerCtx") -> tuple[str, ...]:
+def _scope_root_values_from_kwarg(raw: AxonKwargValue, ctx: "_LowerCtx") -> tuple[str, ...] | None:
     def _resolve_atom(value: Any) -> Any:
         if isinstance(value, AxonExprString):
             return value.value
@@ -172,20 +172,22 @@ def _scope_root_values_from_kwarg(raw: AxonKwargValue, ctx: "_LowerCtx") -> tupl
                 raise ValueError(
                     f"scope root symbol {value.name!r} is not a concrete constant value"
                 )
-            return value.name
+            return None
         if isinstance(value, AxonExprList):
-            return [_resolve_atom(item) for item in value.items]
+            items = [_resolve_atom(item) for item in value.items]
+            return None if any(item is None for item in items) else items
         if isinstance(value, AxonExprTuple):
-            return tuple(_resolve_atom(item) for item in value.items)
+            tuple_items = tuple(_resolve_atom(item) for item in value.items)
+            return None if any(item is None for item in tuple_items) else tuple_items
         if isinstance(value, AxonExprParen):
             return _resolve_atom(value.inner)
         if isinstance(value, AxonExpr):
-            raise ValueError(
-                "scope root must be a string, list/tuple of strings, or a symbol with concrete value"
-            )
+            return None
         return value
 
     resolved = _resolve_atom(raw)
+    if resolved is None:
+        return None
     values: list[str] = []
     if isinstance(resolved, str):
         values.append(_normalize_root_token(resolved))
@@ -202,6 +204,17 @@ def _scope_root_values_from_kwarg(raw: AxonKwargValue, ctx: "_LowerCtx") -> tupl
         seen.add(item)
         dedup.append(item)
     return tuple(dedup if dedup else [""])
+
+
+def _scope_root_expr_from_kwarg(raw: AxonKwargValue) -> Any:
+    if isinstance(raw, AxonExpr):
+        expr_value = _expr_to_runtime_value(raw)
+        if isinstance(expr_value, (str, dict)):
+            return expr_value
+        raise ValueError("dynamic scope root expression must resolve to string")
+    if isinstance(raw, str):
+        return raw
+    raise ValueError("scope root must be string or expression resolving to string")
 
 
 def _current_param_roots(ctx: "_LowerCtx") -> tuple[str, ...]:
@@ -352,6 +365,7 @@ class _LowerCtx:
     tensor_shape: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     scope_stack: list[str] = field(default_factory=list)
     param_root_stack: list[tuple[str, ...]] = field(default_factory=list)
+    dynamic_param_root_stack: list[Any] = field(default_factory=list)
     path_param_names: set[str] = field(default_factory=set)
     imported_namespaces: set[str] = field(default_factory=set)
     imported_member_namespaces: dict[str, set[str]] = field(default_factory=dict)
@@ -410,6 +424,15 @@ def _with_scope(nodes: list[dict[str, Any]], scope: str | None) -> list[dict[str
         return out_items
 
     return _annotate_items(nodes)
+
+
+def _current_dynamic_param_root(ctx: _LowerCtx) -> Any | None:
+    if not ctx.dynamic_param_root_stack:
+        return None
+    for item in reversed(ctx.dynamic_param_root_stack):
+        if item is not None:
+            return item
+    return None
 
 
 def _op_name_from_callee(callee: str) -> str:
@@ -1090,8 +1113,13 @@ def _lower_simple_call(
         if call_scope and not path_bindings:
             node_spec["_scope"] = call_scope
         root_candidates = _current_param_roots(ctx)
+        dynamic_root_expr = _current_dynamic_param_root(ctx)
         if root_candidates != ("",):
-            node_spec["_param_roots"] = list(root_candidates)
+            node_spec["_param_roots"] = (
+                root_candidates[0] if len(root_candidates) == 1 else list(root_candidates)
+            )
+        if dynamic_root_expr is not None:
+            node_spec["_param_root_expr"] = dynamic_root_expr
         node_spec["_bind"] = out_values[0] if len(out_values) == 1 else out_values
         for key, value in extra_kwargs.items():
             node_spec[key] = value
@@ -1127,6 +1155,7 @@ def _lower_simple_call(
                 raise ValueError(f"invalid @ path in Axon call: {callee!r}")
             node_name = f"n_{ctx.fresh('op')}"
             root_candidates = _current_param_roots(ctx)
+            dynamic_root_expr = _current_dynamic_param_root(ctx)
             params: dict[str, str | list[str]] = {}
             for param_name in bound_params:
                 suffix = f"{param_path}.{param_name}"
@@ -1136,6 +1165,8 @@ def _lower_simple_call(
                 else:
                     params[param_name] = candidates
             concrete_node["_params"] = params
+            if dynamic_root_expr is not None:
+                concrete_node["_param_root_expr"] = dynamic_root_expr
             nodes = _with_guard([{node_name: concrete_node}], effective_when)
             _record_last_dim_for_call(
                 callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx
@@ -1527,7 +1558,7 @@ def _ensure_outputs_from_returns(outputs: dict[str, str], returns: tuple[str, ..
 
 
 def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple[str, int]]:
-    allowed_namespaces = {"Prelude", "Activations", "Cache", "List", "MoE", "Config"}
+    allowed_namespaces = {"Prelude", "Activations", "Cache", "List", "MoE", "Config", "Params"}
     direct_aliases: dict[str, tuple[str, int]] = {}
     for module in modules:
         if not isinstance(module.name, str) or "." not in module.name:
@@ -1734,10 +1765,16 @@ def _lower_statements(
 
         if isinstance(stmt, AxonScopeBind):
             root_values: tuple[str, ...] = ("",)
+            dynamic_root_expr: Any | None = None
             if "root" in stmt.kwargs:
-                root_values = _scope_root_values_from_kwarg(stmt.kwargs["root"], ctx)
+                resolved_root_values = _scope_root_values_from_kwarg(stmt.kwargs["root"], ctx)
+                if resolved_root_values is None:
+                    dynamic_root_expr = _scope_root_expr_from_kwarg(stmt.kwargs["root"])
+                else:
+                    root_values = resolved_root_values
             ctx.scope_stack.append(stmt.prefix)
             ctx.param_root_stack.append(root_values)
+            ctx.dynamic_param_root_stack.append(dynamic_root_expr)
             scoped_outputs: dict[str, str] = {}
             try:
                 _lower_statements(
@@ -1749,6 +1786,7 @@ def _lower_statements(
                     guard=guard,
                 )
             finally:
+                ctx.dynamic_param_root_stack.pop()
                 ctx.param_root_stack.pop()
                 ctx.scope_stack.pop()
             for idx, target in enumerate(stmt.targets):

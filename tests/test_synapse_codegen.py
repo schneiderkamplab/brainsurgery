@@ -1338,6 +1338,74 @@ def test_generated_config_primitives_support_root_kwarg() -> None:
     assert out["h"] == 4096
 
 
+def test_generated_params_primitives_detect_and_select_param_root() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {
+                    "h": {
+                        "_op": "params_has_root",
+                        "_args": "language_model",
+                        "_bind": "has_lm",
+                    }
+                },
+                {
+                    "r": {
+                        "_op": "params_root",
+                        "_args": "language_model",
+                        "_bind": "root",
+                        "default": "",
+                    }
+                },
+            ],
+            "outputs": {"has_lm": "has_lm", "root": "root"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="ParamsRootModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["ParamsRootModel"](
+        state_dict={"language_model.embed_tokens.weight": torch.randn(8, 4)}
+    )
+    out = model()
+    assert out["has_lm"] is True
+    assert out["root"] == "language_model"
+
+
+def test_generated_param_root_expr_guides_parameter_resolution() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {"r": {"_op": "_ir_expr", "_bind": "root", "value": "'language_model'"}},
+                {
+                    "n": {
+                        "_op": "linear",
+                        "_args": "x",
+                        "_bind": "y",
+                        "_params": {"weight": "proj.weight", "bias": "proj.bias"},
+                        "_param_root_expr": {"_expr": "name", "id": "root"},
+                    }
+                },
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="ParamRootExprModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["ParamRootExprModel"](
+        state_dict={
+            "language_model.proj.weight": torch.eye(2, dtype=torch.float32),
+            "language_model.proj.bias": torch.zeros(2, dtype=torch.float32),
+        }
+    )
+    out = model(x=torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+    assert torch.equal(out["y"], torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+
+
 def test_generated_model_prefers_existing_param_candidate_path() -> None:
     spec = {
         "synapse": 1,
@@ -1435,3 +1503,37 @@ def test_generated_ir_expr_supports_inline_sqrt_with_config_call() -> None:
     model = namespace["IRExprConfigCallModel"]()
     out = model()
     assert out["attn_scale"] == pytest.approx(0.0625)
+
+
+def test_generated_ir_expr_supports_inline_params_root_call() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {
+                    "x": {
+                        "_op": "_ir_expr",
+                        "_bind": "chosen",
+                        "value": 'Params.root "language_model" default=""',
+                    }
+                },
+                {
+                    "h": {
+                        "_op": "_ir_expr",
+                        "_bind": "has",
+                        "value": 'Params.has_root "language_model"',
+                    }
+                },
+            ],
+            "outputs": {"chosen": "chosen", "has": "has"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="IRExprParamsCallModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["IRExprParamsCallModel"](
+        state_dict={"language_model.embed_tokens.weight": torch.randn(8, 4)}
+    )
+    out = model()
+    assert out["chosen"] == "language_model"
+    assert out["has"] is True

@@ -346,6 +346,14 @@ class SynapseProgramModel(nn.Module):
             if isinstance(param_base, str) and isinstance(env.get(param_base), str):
                 exec_node_spec = dict(node_spec)
                 exec_node_spec[param_base] = env[param_base]
+            param_root_expr = node_spec.get("_param_root_expr")
+            if param_root_expr is not None:
+                if exec_node_spec is node_spec:
+                    exec_node_spec = dict(node_spec)
+                resolved_param_root = self._eval_expr(param_root_expr, env, symbols)
+                exec_node_spec["_param_root"] = (
+                    resolved_param_root if isinstance(resolved_param_root, str) else ""
+                )
             self._execute_op(
                 op, exec_node_spec, env, node_path=node_path, scope=scope, symbols=symbols
             )
@@ -415,8 +423,17 @@ class SynapseProgramModel(nn.Module):
             else:
                 call_scope = self._join(scope, raw_scope)
         raw_param_roots = node_spec.get("_param_roots")
+        raw_param_root_expr = node_spec.get("_param_root_expr")
         pushed_roots: list[str] | None = None
-        if (
+        if raw_param_root_expr is not None:
+            resolved_root = self._eval_expr(raw_param_root_expr, env, symbols)
+            if isinstance(resolved_root, str):
+                pushed_roots = [resolved_root]
+                self._param_roots_stack.append(pushed_roots)
+        elif isinstance(raw_param_roots, str):
+            pushed_roots = [raw_param_roots]
+            self._param_roots_stack.append(pushed_roots)
+        elif (
             isinstance(raw_param_roots, list)
             and bool(raw_param_roots)
             and all(isinstance(item, str) for item in raw_param_roots)
@@ -538,9 +555,19 @@ class SynapseProgramModel(nn.Module):
             return scoped
 
         def _current_roots() -> list[str]:
-            if self._param_roots_stack:
-                return list(self._param_roots_stack[-1])
-            return [""]
+            roots = list(self._param_roots_stack[-1]) if self._param_roots_stack else [""]
+            direct_root = node_spec.get("_param_root")
+            if isinstance(direct_root, str):
+                composed: list[str] = []
+                for root in roots:
+                    if not direct_root:
+                        composed.append(root)
+                    elif root == direct_root or root.startswith(f"{direct_root}."):
+                        composed.append(root)
+                    else:
+                        composed.append(_join_root(root, direct_root))
+                roots = composed
+            return roots
 
         def _pick_explicit_candidate(raw: Any) -> str | None:
             if isinstance(raw, str):
@@ -796,6 +823,17 @@ class SynapseProgramModel(nn.Module):
             value = value[part]
         return True, value
 
+    def _expr_params_has_root(self, root: str) -> bool:
+        if root == "":
+            return True
+        prefix = f"{root}."
+        for key in self._state.keys():
+            if not isinstance(key, str):
+                continue
+            if key == root or key.startswith(prefix):
+                return True
+        return False
+
     def _eval_expr_call(self, callee: str, args: list[Any], kwargs: dict[str, Any]) -> Any:
         if callee in {"sqrt", "Prelude.sqrt"}:
             if kwargs:
@@ -873,6 +911,20 @@ class SynapseProgramModel(nn.Module):
                 if not isinstance(value, str):
                     raise ValueError("Config.str expression call expected string")
                 return value
+        if callee in {"Params.has_root", "Params.root"}:
+            if len(args) != 1 or not isinstance(args[0], str):
+                raise ValueError(f"{callee} expression call expects one string root argument")
+            root = args[0]
+            if callee == "Params.has_root":
+                if "default" in kwargs:
+                    raise ValueError(
+                        "Params.has_root expression call does not support default kwarg"
+                    )
+                return bool(self._expr_params_has_root(root))
+            default_value = kwargs.get("default", "")
+            if not isinstance(default_value, str):
+                raise ValueError("Params.root expression call default must resolve to string")
+            return root if self._expr_params_has_root(root) else default_value
         raise ValueError(f"Unsupported call expression: {callee!r}")
 
     def _join(self, left: str, right: str) -> str:

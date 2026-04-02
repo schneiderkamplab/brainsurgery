@@ -1,12 +1,14 @@
 import Activations gelu_pytorch_tanh
 import Cache
 import Cache past_length
-import gemma3_config (CFG, PARAM_ROOTS, D, V, L, H, KVH, HD, FFN, ROPE_PERIOD, THETA_BASE, THETA_LONG, ROPE_LONG_SCALE, WIN_LOCAL, WIN_LONG, ATTN_SCALE, EMB_SCALE)
+import Config
+import Params
+import gemma3_config (PARAM_ROOT, D, V, L, H, KVH, HD, FFN, ROPE_PERIOD, THETA_BASE, THETA_LONG, ROPE_LONG_SCALE, WIN_LOCAL, WIN_LONG, ATTN_SCALE, EMB_SCALE)
 
 gemma3_block :: Tensor -> Int -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
 gemma3_block x i pos_ids attn_mask past_kv = do
   xn <- rmsnorm@input_layernorm x cast_float=true unit_offset=true
-  a, new_kv <- scope@self_attn root=PARAM_ROOTS do
+  a, new_kv <- scope@self_attn do
     q <- linear@q_proj xn dim=(H * HD) |> reshape_heads heads=H |> rmsnorm@q_norm cast_float=true unit_offset=true
     k <- linear@k_proj xn dim=(KVH * HD) |> reshape_heads heads=KVH |> rmsnorm@k_norm cast_float=true unit_offset=true
     v <- linear@v_proj xn dim=(KVH * HD) |> reshape_heads heads=KVH
@@ -24,17 +26,17 @@ gemma3_block x i pos_ids attn_mask past_kv = do
   a <- rmsnorm@post_attention_layernorm a cast_float=true unit_offset=true
   x <- x + a
   xn <- rmsnorm@pre_feedforward_layernorm x cast_float=true unit_offset=true
-  m <- scope@mlp root=PARAM_ROOTS do
+  m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN
     u <- linear@up_proj xn dim=FFN
     return gelu_pytorch_tanh g |> mul u |> linear@down_proj dim=D
   m <- rmsnorm@post_feedforward_layernorm m cast_float=true unit_offset=true
   return x + m, new_kv
 
-gemma3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor, ?Cache)
+gemma3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gemma3 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
-  logits, new_kv <- scope@model root=PARAM_ROOTS do
+  logits, new_kv <- scope@model root=PARAM_ROOT do
     x <- embedding@embed_tokens input_ids dim=D scale=EMB_SCALE
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do

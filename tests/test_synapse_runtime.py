@@ -1132,6 +1132,93 @@ def test_runtime_config_int_missing_key_without_default_raises() -> None:
         model()
 
 
+def test_runtime_params_primitives_detect_and_select_param_root() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {
+                    "h": {
+                        "_op": "params_has_root",
+                        "_args": "language_model",
+                        "_bind": "has_lm",
+                    }
+                },
+                {
+                    "r": {
+                        "_op": "params_root",
+                        "_args": "language_model",
+                        "_bind": "root",
+                        "default": "",
+                    }
+                },
+            ],
+            "outputs": {"has_lm": "has_lm", "root": "root"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors({"language_model.embed_tokens.weight": torch.randn(8, 4)})
+    out = model()
+    assert out["has_lm"] is True
+    assert out["root"] == "language_model"
+
+
+def test_runtime_params_primitives_fallback_when_root_missing() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {"h": {"_op": "params_has_root", "_args": "language_model", "_bind": "has_lm"}},
+                {
+                    "r": {
+                        "_op": "params_root",
+                        "_args": "language_model",
+                        "_bind": "root",
+                        "default": "",
+                    }
+                },
+            ],
+            "outputs": {"has_lm": "has_lm", "root": "root"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors({"embed_tokens.weight": torch.randn(8, 4)})
+    out = model()
+    assert out["has_lm"] is False
+    assert out["root"] == ""
+
+
+def test_runtime_param_root_expr_guides_parameter_resolution() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {"r": {"_op": "_ir_expr", "_bind": "root", "value": "'language_model'"}},
+                {
+                    "n": {
+                        "_op": "linear",
+                        "_args": "x",
+                        "_bind": "y",
+                        "_params": {"weight": "proj.weight", "bias": "proj.bias"},
+                        "_param_root_expr": {"_expr": "name", "id": "root"},
+                    }
+                },
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors(
+        {
+            "language_model.proj.weight": torch.eye(2, dtype=torch.float32),
+            "language_model.proj.bias": torch.zeros(2, dtype=torch.float32),
+        }
+    )
+    out = model(x=torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+    assert torch.equal(out["y"], torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+
+
 def test_runtime_prefers_existing_param_candidate_path() -> None:
     spec = {
         "synapse": 1,
@@ -1201,3 +1288,33 @@ def test_runtime_ir_expr_supports_inline_sqrt_with_config_call() -> None:
     model = SynapseProgramModel.from_spec(spec)
     out = model()
     assert out["attn_scale"] == pytest.approx(0.0625)
+
+
+def test_runtime_ir_expr_supports_inline_params_root_call() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {
+                    "x": {
+                        "_op": "_ir_expr",
+                        "_bind": "chosen",
+                        "value": 'Params.root "language_model" default=""',
+                    }
+                },
+                {
+                    "h": {
+                        "_op": "_ir_expr",
+                        "_bind": "has",
+                        "value": 'Params.has_root "language_model"',
+                    }
+                },
+            ],
+            "outputs": {"chosen": "chosen", "has": "has"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors({"language_model.embed_tokens.weight": torch.randn(8, 4)})
+    out = model()
+    assert out["chosen"] == "language_model"
+    assert out["has"] is True

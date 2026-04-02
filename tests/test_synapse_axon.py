@@ -565,6 +565,31 @@ main x = do
     assert node_specs[1]["dim"] == "dim"
 
 
+def test_params_builtin_import_resolves_and_lowers_root_primitives(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Params
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  has_lm <- Params.has_root "language_model"
+  root <- Params.root "language_model" default=""
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "params_has_root"
+    assert node_specs[0]["_args"] == "language_model"
+    assert node_specs[1]["_op"] == "params_root"
+    assert node_specs[1]["_args"] == "language_model"
+    assert node_specs[1]["default"] == ""
+
+
 def test_multi_path_parameters_support_triple_at_call_syntax() -> None:
     source = """
 expert_ffn :: @Path -> @Path -> @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
@@ -826,6 +851,46 @@ tiny input_ids = do
         "model.embed_tokens.weight",
         "language_model.model.embed_tokens.weight",
     ]
+
+
+def test_scope_single_root_prefix_is_applied_to_param_paths() -> None:
+    source = """
+tiny :: TokenIds[B,T] -> Tensor[B,T,D]
+tiny input_ids = do
+  y <- scope@model root="language_model" do
+    x <- embedding@embed_tokens input_ids dim=D
+    return x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    embedding_node = next(node for node in node_specs if node.get("_op") == "embedding")
+    assert embedding_node["_params"]["weight"] == "language_model.model.embed_tokens.weight"
+
+
+def test_scope_dynamic_root_expression_emits_param_root_expr(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Params
+ROOT = (Params.has_root "language_model") ? "language_model" : ""
+tiny :: TokenIds[B,T] -> Tensor[B,T,D]
+tiny input_ids = do
+  y <- scope@model root=ROOT do
+    x <- embedding@embed_tokens input_ids dim=D
+    return x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    embedding_node = next(node for node in node_specs if node.get("_op") == "embedding")
+    assert embedding_node["_params"]["weight"] == "model.embed_tokens.weight"
+    assert "_param_root_expr" in embedding_node
 
 
 def test_double_at_path_is_absolute_inside_scope_bind() -> None:

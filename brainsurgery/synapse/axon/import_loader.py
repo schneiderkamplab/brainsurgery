@@ -6,7 +6,26 @@ from pathlib import Path
 from .ast_validation import validate_axon_program
 from .grammar import ParsedProgramSource, parse_program_source
 from .syntax_validation import validate_parsed_program_source
-from .types import AxonExpr, AxonModule
+from .types import (
+    AxonBind,
+    AxonExpr,
+    AxonExprBinary,
+    AxonExprBind,
+    AxonExprCall,
+    AxonExprDo,
+    AxonExprIf,
+    AxonExprLambda,
+    AxonExprList,
+    AxonExprName,
+    AxonExprParen,
+    AxonExprPipe,
+    AxonExprTernary,
+    AxonExprTuple,
+    AxonModule,
+    AxonRepeat,
+    AxonReturn,
+    AxonScopeBind,
+)
 
 
 @dataclass(frozen=True)
@@ -14,6 +33,110 @@ class _LoadedSyntaxFile:
     path: Path
     namespace: str | None
     parsed_source: ParsedProgramSource
+
+
+def _collect_expr_names(expr: AxonExpr) -> set[str]:
+    names: set[str] = set()
+    stack: list[AxonExpr] = [expr]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, AxonExprName):
+            names.add(current.name)
+            continue
+        if isinstance(current, AxonExprParen):
+            stack.append(current.inner)
+            continue
+        if isinstance(current, AxonExprList):
+            stack.extend(list(current.items))
+            continue
+        if isinstance(current, AxonExprTuple):
+            stack.extend(list(current.items))
+            continue
+        if isinstance(current, AxonExprPipe):
+            stack.append(current.value)
+            stack.extend(list(current.stages))
+            continue
+        if isinstance(current, AxonExprBind):
+            stack.append(current.value)
+            stack.append(current.body)
+            continue
+        if isinstance(current, AxonExprIf | AxonExprTernary):
+            stack.append(current.cond)
+            stack.append(current.true_expr)
+            stack.append(current.false_expr)
+            continue
+        if isinstance(current, AxonExprBinary):
+            stack.append(current.left)
+            stack.append(current.right)
+            continue
+        if isinstance(current, AxonExprCall):
+            stack.extend(list(current.args))
+            for kwarg in current.kwargs.values():
+                if isinstance(kwarg, AxonExpr):
+                    stack.append(kwarg)
+            continue
+        if isinstance(current, AxonExprLambda):
+            stack.append(current.body)
+            continue
+        if isinstance(current, AxonExprDo):
+            for stmt in current.body:
+                if isinstance(stmt, AxonBind):
+                    stack.append(stmt.expr)
+                elif isinstance(stmt, AxonReturn):
+                    stack.extend(list(stmt.values))
+                elif isinstance(stmt, AxonRepeat):
+                    stack.append(stmt.from_expr)
+                    stack.append(stmt.to_expr)
+                    stack.append(stmt.step_expr)
+                    for body_stmt in stmt.body:
+                        if isinstance(body_stmt, AxonBind):
+                            stack.append(body_stmt.expr)
+                        elif isinstance(body_stmt, AxonReturn):
+                            stack.extend(list(body_stmt.values))
+                elif isinstance(stmt, AxonScopeBind):
+                    for kwarg in stmt.kwargs.values():
+                        if isinstance(kwarg, AxonExpr):
+                            stack.append(kwarg)
+                    for body_stmt in stmt.body:
+                        if isinstance(body_stmt, AxonBind):
+                            stack.append(body_stmt.expr)
+                        elif isinstance(body_stmt, AxonReturn):
+                            stack.extend(list(body_stmt.values))
+            continue
+    return names
+
+
+def _collect_constant_closure(
+    *,
+    constants: dict[str, AxonExpr],
+    seed_names: set[str],
+) -> dict[str, AxonExpr]:
+    closure: dict[str, AxonExpr] = {}
+    order_index = {name: idx for idx, name in enumerate(constants.keys())}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def _visit(name: str) -> None:
+        if name in visited:
+            return
+        if name in visiting:
+            return
+        expr = constants.get(name)
+        if expr is None:
+            return
+        visiting.add(name)
+        deps = [dep for dep in _collect_expr_names(expr) if dep in constants]
+        deps.sort(key=lambda dep: order_index.get(dep, 10**9))
+        for dep in deps:
+            _visit(dep)
+        visiting.remove(name)
+        visited.add(name)
+        closure[name] = expr
+
+    ordered_seeds = [name for name in constants.keys() if name in seed_names]
+    for name in ordered_seeds:
+        _visit(name)
+    return closure
 
 
 def _apply_namespace(
@@ -107,24 +230,20 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
     }
     for loaded in ordered_files:
         imported_constants: dict[str, AxonExpr] = {}
-        imported_constant_imports: list[str] = []
         for namespace, members in loaded.parsed_source.imported_members.items():
             dep = loaded_by_namespace.get(namespace)
             if dep is None:
                 continue
             dep_constants = dep.parsed_source.constants
-            for member in members:
-                if member in dep_constants:
-                    imported_constants.setdefault(member, dep_constants[member])
-                    imported_constant_imports.extend(dep.parsed_source.imports)
+            requested = {member for member in members if member in dep_constants}
+            closure = _collect_constant_closure(constants=dep_constants, seed_names=requested)
+            for name, expr in closure.items():
+                imported_constants.setdefault(name, expr)
 
         modules = build_axon_modules_from_parsed_source(
             loaded.parsed_source,
             validate=False,
             extra_constants=imported_constants if imported_constants else None,
-            extra_imports=tuple(dict.fromkeys(imported_constant_imports))
-            if imported_constant_imports
-            else None,
         )
         ordered_modules.extend(_apply_namespace(modules, loaded.namespace))
 
