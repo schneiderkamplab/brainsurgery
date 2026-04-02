@@ -1,4 +1,6 @@
 from .ast_validation import validate_axon_program
+from .expression_codec import axon_expr_to_runtime_value, parse_expression_to_runtime_value
+from .grammar import parse_expression_source
 from .lowering import (
     lower_axon_module_to_synapse_block,
     lower_axon_module_to_synapse_spec,
@@ -14,6 +16,7 @@ from .tokenization import (
     spec_padding_side,
     tokenize_prompts,
 )
+from .typecheck import TYPING_RULES, typecheck_axon_module, typecheck_axon_program
 from .types import (
     AxonBind,
     AxonModule,
@@ -30,10 +33,16 @@ __all__ = [
     "AxonRepeat",
     "AxonReturn",
     "AxonStatement",
+    "parse_expression_source",
+    "parse_expression_to_runtime_value",
+    "axon_expr_to_runtime_value",
     "parse_axon_module",
     "parse_axon_program",
     "parse_axon_program_from_path",
     "validate_axon_program",
+    "typecheck_axon_module",
+    "typecheck_axon_program",
+    "TYPING_RULES",
     "lower_axon_module_to_synapse_block",
     "lower_axon_module_to_synapse_spec",
     "lower_axon_program_to_synapse_spec",

@@ -6,7 +6,7 @@ V   = 520257 -- vocab size
 
 import Activations gelu_new
 
-lin :: @Path -> Tensor[B,S,Din] -> I -> Tensor[B,S,dim]
+lin :: @Path -> Tensor[B,S,Din] -> Int -> Tensor[B,S,dim]
 lin@path x dim = linear@path x dim=dim bias=true transpose=true
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]

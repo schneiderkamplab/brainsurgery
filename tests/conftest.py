@@ -69,6 +69,20 @@ def gemma3_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
 
 
 @pytest.fixture(scope="session")
+def gemma3_1b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gemma3_1b"]
+    )
+
+
+@pytest.fixture(scope="session")
+def gemma3_4b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gemma3_4b"]
+    )
+
+
+@pytest.fixture(scope="session")
 def olmoe_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
     return ensure_model_downloaded(
         repo_root=repo_root,

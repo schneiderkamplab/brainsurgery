@@ -126,6 +126,36 @@ def _arange_positions_with_mask_spec() -> dict[str, object]:
     }
 
 
+def _select_spec(*, else_uses_missing_ref: bool = False) -> dict[str, object]:
+    else_graph: list[dict[str, object]]
+    if else_uses_missing_ref:
+        else_graph = [{"else_ref": {"_op": "_ir_alias", "_args": "missing", "_bind": "else_v"}}]
+    else:
+        else_graph = [{"else_const": {"_op": "_ir_expr", "value": 2, "_bind": "else_v"}}]
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"flag": {}},
+            "graph": [
+                {
+                    "pick": {
+                        "_op": "select",
+                        "cond": "flag",
+                        "_bind": "y",
+                        "_then_bind": "then_v",
+                        "_else_bind": "else_v",
+                        "_then": [
+                            {"then_const": {"_op": "_ir_expr", "value": 1, "_bind": "then_v"}}
+                        ],
+                        "_else": else_graph,
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+
+
 def _moe_select_spec(*, expert: object = 1) -> dict[str, object]:
     return {
         "synapse": 1,
@@ -149,6 +179,23 @@ def _moe_select_spec(*, expert: object = 1) -> dict[str, object]:
             },
         },
     }
+
+
+def test_runtime_select_returns_then_or_else_value() -> None:
+    model = SynapseProgramModel.from_spec(_select_spec())
+    out_true = model.forward(flag=True)
+    out_false = model.forward(flag=False)
+    assert isinstance(out_true, dict)
+    assert isinstance(out_false, dict)
+    assert out_true["y"] == 1
+    assert out_false["y"] == 2
+
+
+def test_runtime_select_is_lazy_and_skips_non_selected_branch() -> None:
+    model = SynapseProgramModel.from_spec(_select_spec(else_uses_missing_ref=True))
+    out = model.forward(flag=True)
+    assert isinstance(out, dict)
+    assert out["y"] == 1
 
 
 def _moe_scatter_add_spec() -> dict[str, object]:
@@ -985,3 +1032,172 @@ def test_runtime_records_intermediate_tensors_to_runtime_state_dict() -> None:
     assert torch.equal(out["z"], expected)
     assert "sum_xy::z" in runtime_state_dict
     assert torch.equal(runtime_state_dict["sum_xy::z"], expected)
+
+
+def test_runtime_config_primitives_resolve_config_values_and_defaults() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "config": {
+                "hidden_size": 640,
+                "name": "gemma3",
+                "text_config": {"sliding_window": 512},
+            },
+            "graph": [
+                {"k": {"_op": "_ir_expr", "_bind": "k", "value": "'text_config.sliding_window'"}},
+                {"h": {"_op": "config_has", "_args": "k", "_bind": "has_key"}},
+                {"s": {"_op": "config_int", "_args": "k", "_bind": "window"}},
+                {
+                    "d": {
+                        "_op": "config_int",
+                        "_args": "missing.value",
+                        "_bind": "defaulted",
+                        "default": 7,
+                    }
+                },
+                {"f": {"_op": "config_float", "_args": "hidden_size", "_bind": "hidden_f"}},
+                {"n": {"_op": "config_str", "_args": "name", "_bind": "name"}},
+            ],
+            "outputs": {
+                "has_key": "has_key",
+                "window": "window",
+                "defaulted": "defaulted",
+                "hidden_f": "hidden_f",
+                "name": "name",
+            },
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    out = model()
+    assert out["has_key"] is True
+    assert out["window"] == 512
+    assert out["defaulted"] == 7
+    assert out["hidden_f"] == 640.0
+    assert out["name"] == "gemma3"
+
+
+def test_runtime_config_primitives_support_root_kwarg() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "config": {"text_config": {"hidden_size": 4096}},
+            "graph": [
+                {
+                    "h": {
+                        "_op": "config_has",
+                        "_args": "hidden_size",
+                        "_bind": "has_h",
+                        "root": "text_config",
+                    }
+                },
+                {
+                    "i": {
+                        "_op": "config_int",
+                        "_args": "hidden_size",
+                        "_bind": "h",
+                        "root": "text_config",
+                    }
+                },
+                {
+                    "d": {
+                        "_op": "config_int",
+                        "_args": "missing",
+                        "_bind": "d",
+                        "root": "text_config",
+                        "default": 7,
+                    }
+                },
+            ],
+            "outputs": {"has_h": "has_h", "h": "h", "d": "d"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    out = model()
+    assert out["has_h"] is True
+    assert out["h"] == 4096
+    assert out["d"] == 7
+
+
+def test_runtime_config_int_missing_key_without_default_raises() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "config": {},
+            "graph": [{"n": {"_op": "config_int", "_args": "hidden_size", "_bind": "h"}}],
+            "outputs": {"h": "h"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    with pytest.raises(KeyError, match="config_int missing required config key"):
+        model()
+
+
+def test_runtime_prefers_existing_param_candidate_path() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "n": {
+                        "_op": "linear",
+                        "_args": "x",
+                        "_bind": "y",
+                        "_params": {
+                            "weight": ["missing.weight", "live.weight"],
+                            "bias": ["missing.bias", "live.bias"],
+                        },
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors(
+        {
+            "live.weight": torch.eye(2, dtype=torch.float32),
+            "live.bias": torch.zeros(2, dtype=torch.float32),
+        }
+    )
+    out = model(x=torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+    assert torch.equal(out["y"], torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+
+
+def test_runtime_sqrt_promotes_int_scalar_to_float() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {"d": {"_op": "_ir_expr", "_bind": "d", "value": 16}},
+                {"s": {"_op": "sqrt", "_args": "d", "_bind": "s"}},
+            ],
+            "outputs": {"s": "s"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    out = model()
+    assert isinstance(out["s"], float)
+    assert out["s"] == 4.0
+
+
+def test_runtime_ir_expr_supports_inline_sqrt_with_config_call() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "config": {"text_config": {"query_pre_attn_scalar": 256}},
+            "graph": [
+                {
+                    "a": {
+                        "_op": "_ir_expr",
+                        "_bind": "attn_scale",
+                        "value": '1.0 / sqrt (Config.float "query_pre_attn_scalar" root="text_config" default=256.0)',
+                    }
+                }
+            ],
+            "outputs": {"attn_scale": "attn_scale"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    out = model()
+    assert out["attn_scale"] == pytest.approx(0.0625)

@@ -42,7 +42,7 @@ tiny x cache = do
 
 def test_parse_axon_module_expression_definition_without_do() -> None:
     source = """
-inc :: I -> I
+inc :: Int -> Int
 inc x = x + 1
 """
     module = parse_axon_module(source)
@@ -72,6 +72,66 @@ main x = do
     assert spec["model"]["outputs"] == {"y": "y"}
 
 
+def test_bind_rhs_inline_do_expression_parses_and_lowers() -> None:
+    source = """
+main :: Tensor -> Tensor
+main x = do
+  y <- do z <- x + 1; return z
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    ops = [node["_op"] for node in node_specs]
+    assert "add" in ops
+    assert spec["model"]["outputs"] == {"y": "y"}
+
+
+def test_module_rhs_inline_do_expression_parses_and_lowers() -> None:
+    source = """
+main :: Tensor -> Tensor
+main x = do y <- x + 1; k <- y * y; return k + y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    ops = [node["_op"] for node in node_specs]
+    assert "add" in ops
+    assert spec["model"]["outputs"] == {"out_0": "out_0"}
+
+
+def test_module_rhs_do_expression_supports_mixed_inline_and_newline_statements() -> None:
+    source = """
+main :: Tensor -> Tensor
+main x = do y <- x + 1;
+  k <- y + 2
+  return k
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    ops = [node["_op"] for node in node_specs]
+    assert "add" in ops
+    assert spec["model"]["outputs"] == {"out_0": "out_0"}
+
+
+def test_bind_rhs_do_expression_supports_mixed_inline_and_newline_statements() -> None:
+    source = """
+main :: Tensor -> Tensor
+main x = do
+  y <- do z <- x + 1;
+    k <- z + 2
+    return k
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    ops = [node["_op"] for node in node_specs]
+    assert "add" in ops
+    assert spec["model"]["outputs"] == {"y": "y"}
+
+
 def test_bind_rhs_do_expression_requires_return_in_block() -> None:
     source = """
 main :: Tensor -> Tensor
@@ -80,7 +140,7 @@ main x = do
     z <- x + 1
   return y
 """
-    with pytest.raises(ValueError, match=r"scope bind requires a reachable return"):
+    with pytest.raises(ValueError, match=r"do expression requires a reachable return"):
         parse_axon_module(source)
 
 
@@ -197,7 +257,7 @@ def test_builtin_cache_import_resolves_from_builtin_file(tmp_path: Path) -> None
         """
 import Cache
 
-main :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> ?Bool -> ?Cache
+main :: ?CacheLayer -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> ?Bool -> ?Cache
 main past k v use_cache = do
   k_ctx, v_ctx, present <- Cache.update past k v
   cache <- Cache.init
@@ -221,7 +281,16 @@ main past k v use_cache = do
     else:
         assert second["_op"] == "list_init"
     third = node_specs[2]
-    if third["_op"] == "call":
+    if third["_op"] == "select":
+        assert third["cond"] == "use_cache"
+        then_specs = _node_specs(third["_then"])
+        assert len(then_specs) == 1
+        then_spec = then_specs[0]
+        if then_spec["_op"] == "call":
+            assert then_spec["_target"] == "Cache.append"
+        else:
+            assert then_spec["_op"] == "list_append"
+    elif third["_op"] == "call":
         assert third["_target"] == "Cache.append"
     else:
         assert third["_op"] == "list_append"
@@ -405,7 +474,7 @@ def test_cache_builtin_import_resolves_from_builtin_file(tmp_path: Path) -> None
         """
 import Cache
 
-main :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> ?Bool -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?Cache)
+main :: ?CacheLayer -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> ?Bool -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?CacheLayer)
 main past k v use_cache = do
   k_ctx, v_ctx, present <- Cache.update past k v
   return k_ctx, v_ctx, present
@@ -429,7 +498,7 @@ def test_moe_builtin_import_resolves_from_builtin_file(tmp_path: Path) -> None:
         """
 import MoE
 
-main :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> I -> (Tensor[N,D], Tensor[N], Tensor[N], Tensor[N])
+main :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Int -> (Tensor[N,D], Tensor[N], Tensor[N], Tensor[N])
 main hidden topk_scores topk_indices expert = do
   selected_hidden, token_idx, topk_pos, selected_scores <- MoE.select hidden topk_scores topk_indices expert
   return selected_hidden, token_idx, topk_pos, selected_scores
@@ -471,9 +540,34 @@ main hidden topk_scores topk_indices = do
         assert first["_op"] in {"moe_grouped_ffn", "_moe_grouped_ffn"}
 
 
+def test_config_builtin_import_resolves_and_lowers_default_kwarg(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Config
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  dim <- Config.int "hidden_size" default=640
+  y <- linear@proj x dim=dim
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "config_int"
+    assert node_specs[0]["_args"] == "hidden_size"
+    assert node_specs[0]["default"] == 640
+    assert node_specs[1]["_op"] == "linear"
+    assert node_specs[1]["dim"] == "dim"
+
+
 def test_multi_path_parameters_support_triple_at_call_syntax() -> None:
     source = """
-expert_ffn@gate@up@down :: @Path -> @Path -> @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+expert_ffn :: @Path -> @Path -> @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
 expert_ffn@gate@up@down x = do
   g <- linear@gate x
   u <- linear@up x
@@ -503,7 +597,7 @@ main x = do
 def test_top_level_constant_stays_symbol_with_expression_module_definition() -> None:
     source = """
 D = 7
-inc :: I -> I
+inc :: Int -> Int
 inc x = x + D
 """
     modules = parse_axon_program(source)
@@ -511,12 +605,59 @@ inc x = x + D
     assert spec["model"]["symbols"]["D"] == 7
 
 
+def test_top_level_constant_supports_inline_sqrt_call_without_parentheses() -> None:
+    source = """
+D = 640
+E = sqrt D
+
+main :: Int -> Int
+main x = x
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    symbols = spec["model"]["symbols"]
+    assert symbols["D"] == 640
+    assert symbols["E"] == pytest.approx(25.298221281347036)
+
+
+def test_top_level_constant_supports_composed_inline_expressions() -> None:
+    source = """
+D = 640
+E = 1.0 / sqrt D
+F = (D / 64) + 3
+
+main :: Int -> Int
+main x = x
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    symbols = spec["model"]["symbols"]
+    assert symbols["D"] == 640
+    assert symbols["E"] == pytest.approx(0.03952847075210474)
+    assert symbols["F"] == 13
+
+
+def test_top_level_constant_sqrt_negative_argument_is_not_resolved_as_symbol() -> None:
+    source = """
+N = -1
+E = sqrt N
+
+main :: Int -> Int
+main x = x
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    symbols = spec["model"]["symbols"]
+    assert symbols["N"] == -1
+    assert "E" not in symbols
+
+
 def test_parse_repeat_block_statements() -> None:
     source = """
 tiny :: Tensor -> Tensor
 tiny x = do
   for@loop i <- [0..3) do
-    y <- add(x, x)
+    y <- add x x
   return y
 """
     module = parse_axon_module(source)
@@ -530,7 +671,7 @@ tiny x = do
   node n1 = {"_op":"add","_args":["x","x"],"_bind":"y"}
   return y
 """
-    with pytest.raises(ValueError, match="unsupported Axon statement"):
+    with pytest.raises(ValueError, match="invalid Axon source syntax"):
         parse_axon_module(source)
 
 
@@ -541,7 +682,7 @@ tiny x = do
   meta symbols = {"D":768}
   return x
 """
-    with pytest.raises(ValueError, match="unsupported Axon statement"):
+    with pytest.raises(ValueError, match="invalid Axon source syntax"):
         parse_axon_module(source)
 
 
@@ -607,7 +748,7 @@ def test_parenthesized_expression_argument_is_lowered() -> None:
     source = """
 tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
 tiny x = do
-  y <- add((zeros_like x), x)
+  y <- add (zeros_like x) x
   return y
 """
     module = parse_axon_module(source)
@@ -666,6 +807,25 @@ tiny input_ids = do
     ]
     assert len(linear_nodes) == 1
     assert linear_nodes[0]["_params"]["weight"] == "model.lm_head.weight"
+
+
+def test_scope_root_candidates_are_applied_to_param_paths() -> None:
+    source = """
+tiny :: TokenIds[B,T] -> Tensor[B,T,D]
+tiny input_ids = do
+  y <- scope@model root=["", "language_model"] do
+    x <- embedding@embed_tokens input_ids dim=D
+    return x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    embedding_node = next(node for node in node_specs if node.get("_op") == "embedding")
+    assert embedding_node["_params"]["weight"] == [
+        "model.embed_tokens.weight",
+        "language_model.model.embed_tokens.weight",
+    ]
 
 
 def test_double_at_path_is_absolute_inside_scope_bind() -> None:
@@ -793,7 +953,7 @@ tiny x = do
     return y
   return x
 """
-    with pytest.raises(ValueError, match="scope statement form is not supported"):
+    with pytest.raises(ValueError, match="invalid Axon source syntax"):
         parse_axon_module(source)
 
 
@@ -802,7 +962,7 @@ def test_parse_for_at_range_loop_sugar() -> None:
 tiny :: Tensor -> Tensor
 tiny x = do
   for@model.layers i <- [0..3] do
-    y <- add(x, x)
+    y <- add x x
   return y
 """
     module = parse_axon_module(source)
@@ -817,7 +977,7 @@ tiny x = do
     assert repeat_node["_op"] == "for"
     assert repeat_node["_scope"] == "model.layers"
     assert repeat_node["_var"] == "i"
-    assert repeat_node["_to"] == "(3) + 1"
+    assert repeat_node["_to"] == {"_expr": "binary", "op": "+", "left": 3, "right": 1}
 
 
 def test_parse_for_at_range_loop_sugar_with_nonzero_start() -> None:
@@ -825,7 +985,7 @@ def test_parse_for_at_range_loop_sugar_with_nonzero_start() -> None:
 tiny :: Tensor -> Tensor
 tiny x = do
   for@model.layers i <- [1..4] do
-    y <- add(x, x)
+    y <- add x x
   return y
 """
     module = parse_axon_module(source)
@@ -840,8 +1000,8 @@ tiny x = do
     assert repeat_node["_op"] == "for"
     assert repeat_node["_scope"] == "model.layers"
     assert repeat_node["_var"] == "i"
-    assert repeat_node["_from"] == "1"
-    assert repeat_node["_to"] == "(4) + 1"
+    assert repeat_node["_from"] == 1
+    assert repeat_node["_to"] == {"_expr": "binary", "op": "+", "left": 4, "right": 1}
 
 
 def test_parse_for_at_range_loop_sugar_half_open_with_paren() -> None:
@@ -849,7 +1009,7 @@ def test_parse_for_at_range_loop_sugar_half_open_with_paren() -> None:
 tiny :: Tensor -> Tensor
 tiny x = do
   for@model.layers i <- [1..4) do
-    y <- add(x, x)
+    y <- add x x
   return y
 """
     module = parse_axon_module(source)
@@ -864,8 +1024,8 @@ tiny x = do
     assert repeat_node["_op"] == "for"
     assert repeat_node["_scope"] == "model.layers"
     assert repeat_node["_var"] == "i"
-    assert repeat_node["_from"] == "1"
-    assert repeat_node["_to"] == "4"
+    assert repeat_node["_from"] == 1
+    assert repeat_node["_to"] == 4
 
 
 def test_parse_for_at_range_loop_sugar_left_open_right_closed() -> None:
@@ -873,7 +1033,7 @@ def test_parse_for_at_range_loop_sugar_left_open_right_closed() -> None:
 tiny :: Tensor -> Tensor
 tiny x = do
   for@model.layers i <- (0..4] do
-    y <- add(x, x)
+    y <- add x x
   return y
 """
     module = parse_axon_module(source)
@@ -888,8 +1048,8 @@ tiny x = do
     assert repeat_node["_op"] == "for"
     assert repeat_node["_scope"] == "model.layers"
     assert repeat_node["_var"] == "i"
-    assert repeat_node["_from"] == "(0) + 1"
-    assert repeat_node["_to"] == "(4) + 1"
+    assert repeat_node["_from"] == {"_expr": "binary", "op": "+", "left": 0, "right": 1}
+    assert repeat_node["_to"] == {"_expr": "binary", "op": "+", "left": 4, "right": 1}
 
 
 def test_parse_for_at_range_loop_sugar_with_step() -> None:
@@ -897,7 +1057,7 @@ def test_parse_for_at_range_loop_sugar_with_step() -> None:
 tiny :: Tensor -> Tensor
 tiny x = do
   for@model.layers i <- [1..8) step=2 do
-    y <- add(x, x)
+    y <- add x x
   return y
 """
     module = parse_axon_module(source)
@@ -912,9 +1072,9 @@ tiny x = do
     assert repeat_node["_op"] == "for"
     assert repeat_node["_scope"] == "model.layers"
     assert repeat_node["_var"] == "i"
-    assert repeat_node["_from"] == "1"
-    assert repeat_node["_to"] == "8"
-    assert repeat_node["_step"] == "2"
+    assert repeat_node["_from"] == 1
+    assert repeat_node["_to"] == 8
+    assert repeat_node["_step"] == 2
 
 
 def test_parse_top_level_haskell_constants_across_modules() -> None:
@@ -987,7 +1147,11 @@ blk x = do
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[1]["_op"] == "split"
-    assert node_specs[1]["sizes"] == ["D", "D", "D"]
+    assert node_specs[1]["sizes"] == [
+        {"_expr": "name", "id": "D"},
+        {"_expr": "name", "id": "D"},
+        {"_expr": "name", "id": "D"},
+    ]
 
 
 def test_split_rejects_parts_and_sizes_together() -> None:
@@ -1010,7 +1174,13 @@ blk x = do
   return q
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match=r"split parts=3 requires 3 outputs, got 2"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"split parts=3 requires 3 outputs, got 2|"
+            r"tuple bind arity mismatch: 2 target\(s\), 3 value\(s\)"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1046,7 +1216,13 @@ blk x = do
   return vals
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="topk requires exactly two outputs: values, indices"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "topk requires exactly two outputs: values, indices|"
+            "cannot bind multi-value expression to a single target"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1074,13 +1250,14 @@ blk x scores idx = do
         ValueError,
         match=(
             "moe_select requires exactly four outputs: "
-            "selected_hidden, token_idx, topk_pos, selected_scores"
+            "selected_hidden, token_idx, topk_pos, selected_scores|"
+            "cannot bind multi-value expression to a single target"
         ),
     ):
         lower_axon_program_to_synapse_spec(modules)
 
 
-def test_moe_select_accepts_positional_expert_compat() -> None:
+def test_moe_select_rejects_positional_expert_compat() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,EPT] -> Tensor[B,T,EPT] -> Tensor[B,T,D]
 blk x scores idx = do
@@ -1088,11 +1265,8 @@ blk x scores idx = do
   return x_sel
 """
     modules = parse_axon_program(source)
-    spec = lower_axon_program_to_synapse_spec(modules)
-    node_specs = _node_specs(spec["model"]["graph"])
-    assert node_specs[0]["_op"] == "moe_select"
-    assert node_specs[0]["_args"] == ["x", "scores", "idx"]
-    assert node_specs[0]["expert"] == 0
+    with pytest.raises(ValueError, match=r"moe_select expects 3 positional args, got 4"):
+        lower_axon_program_to_synapse_spec(modules)
 
 
 def test_moe_scatter_add_requires_single_output() -> None:
@@ -1103,7 +1277,13 @@ blk m idx upd scores = do
   return a
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="moe_scatter_add requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "moe_scatter_add requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1115,7 +1295,13 @@ blk q k v = do
   return y
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="attention requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "attention requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1138,12 +1324,16 @@ def test_cache_update_requires_three_outputs() -> None:
     source = """
 blk :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,D]
 blk past k v = do
-  k_ctx, v_ctx <- _cache_update(past, k, v)
+  k_ctx, v_ctx <- _cache_update past k v
   return k_ctx
 """
     modules = parse_axon_program(source)
     with pytest.raises(
-        ValueError, match="cache_update requires exactly three outputs: k_ctx, v_ctx, present"
+        ValueError,
+        match=(
+            "cache_update requires exactly three outputs: k_ctx, v_ctx, present|"
+            r"tuple bind arity mismatch: 2 target\(s\), 3 value\(s\)"
+        ),
     ):
         lower_axon_program_to_synapse_spec(modules)
 
@@ -1152,7 +1342,7 @@ def test_cache_update_rejects_unknown_kwarg() -> None:
     source = """
 blk :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> Tensor[B,H,T,D]
 blk past k v = do
-  k_ctx, v_ctx, present <- _cache_update(past, k, v, foo=1)
+  k_ctx, v_ctx, present <- _cache_update past k v foo=1
   return k_ctx
 """
     modules = parse_axon_program(source)
@@ -1162,13 +1352,19 @@ blk past k v = do
 
 def test_list_append_requires_single_output() -> None:
     source = """
-blk :: ?Cache -> ?Cache -> ?Cache
+blk :: ?Cache -> ?CacheLayer -> ?Cache
 blk cache present = do
-  a, b <- _list_append(cache, present)
+  a, b <- _list_append cache present
   return cache
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="list_append requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "list_append requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1176,7 +1372,7 @@ def test_list_append_rejects_unknown_kwarg() -> None:
     source = """
 blk :: ?Cache -> ?Cache -> ?Cache
 blk cache present = do
-  out <- _list_append(cache, present, foo=1)
+  out <- _list_append cache present foo=1
   return out
 """
     modules = parse_axon_program(source)
@@ -1186,13 +1382,19 @@ blk cache present = do
 
 def test_cache_seq_len_requires_single_output() -> None:
     source = """
-blk :: ?Cache -> I
+blk :: ?Cache -> Int
 blk kv = do
-  a, b <- _cache_seq_len(kv)
+  a, b <- _cache_seq_len kv
   return a
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="cache_seq_len requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "cache_seq_len requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1204,7 +1406,13 @@ blk q k = do
   return m
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="causal_mask requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "causal_mask requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1217,7 +1425,11 @@ blk attention_mask = do
 """
     modules = parse_axon_program(source)
     with pytest.raises(
-        ValueError, match="linear_position_bias requires a single scalar output binding"
+        ValueError,
+        match=(
+            "linear_position_bias requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
     ):
         lower_axon_program_to_synapse_spec(modules)
 
@@ -1226,11 +1438,17 @@ def test_list_index_requires_single_output() -> None:
     source = """
 blk :: ?Cache -> ?Cache
 blk cache = do
-  a, b <- _list_index(cache, 0)
+  a, b <- _list_index cache 0
   return a
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="list_index requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "list_index requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1238,11 +1456,17 @@ def test_list_init_requires_single_output() -> None:
     source = """
 blk :: ?Cache
 blk = do
-  a, b <- _list_init()
+  a, b <- _list_init
   return a
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="list_init requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "list_init requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1254,7 +1478,13 @@ blk input_ids attn_mask = do
   return a
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="position_ids requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "position_ids requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1281,7 +1511,13 @@ blk x = do
   return y
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="softmax requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "softmax requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1320,7 +1556,13 @@ blk x = do
   return y
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="zeros_like requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "zeros_like requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1332,7 +1574,13 @@ blk x y = do
   return a
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="add requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "add requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1344,7 +1592,13 @@ blk x y = do
   return a
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="mul requires a single scalar output binding"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "mul requires a single scalar output binding|"
+            "multi-target bind requires a tuple-valued expression"
+        ),
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1416,7 +1670,9 @@ emb ids = do
   return x
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match="embedding does not support embedding_dim; use dim"):
+    with pytest.raises(
+        ValueError, match="embedding unsupported kwargs: embedding_dim; allowed: dim, scale"
+    ):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1436,7 +1692,7 @@ emb ids = do
 
 def test_path_parameterized_block_call_binds_param_base() -> None:
     source = """
-lin_bt :: @Path -> Tensor -> I -> Tensor
+lin_bt :: @Path -> Tensor -> Int -> Tensor
 lin_bt@path x d = do
   return linear@path x dim=d bias=true transpose=true
 
@@ -1456,7 +1712,7 @@ blk x = do
 
 def test_path_parameter_annotation_rejects_non_path_type() -> None:
     source = """
-lin_bt :: @ParamPath -> Tensor -> I -> Tensor
+lin_bt :: @ParamPath -> Tensor -> Int -> Tensor
 lin_bt@path x d = do
   return linear@path x dim=d bias=true transpose=true
 
@@ -1503,7 +1759,7 @@ blk x = do
 
 def test_block_signature_propagates_output_last_dim_from_scalar_param() -> None:
     source = """
-lin :: @Path -> Tensor[B,T,Din] -> I -> Tensor[B,T,dim]
+lin :: @Path -> Tensor[B,T,Din] -> Int -> Tensor[B,T,dim]
 lin@path x dim = linear@path x dim=dim bias=true transpose=true
 
 blk :: Tensor[B,T,D] -> Tensor[B,T,16]
@@ -1539,7 +1795,7 @@ def test_parse_axon_ignores_haskell_style_comments() -> None:
 tiny :: Tensor -> ?Tensor -> Tensor -- signature comment
 tiny x cache = do -- def comment
   -- statement comment
-  y <- x |> linear@proj(dim=4, bias=false) -- inline comment
+  y <- x |> linear@proj dim=4 bias=false -- inline comment
   return y -- trailing comment
 """
     module = parse_axon_module(source)
@@ -1556,8 +1812,8 @@ def test_parse_and_lower_pipeline_with_trailing_operator_continuations() -> None
 tiny :: Tensor -> Tensor
 tiny x = do
   qkv <- x |>
-    layernorm@ln_1(x, dim=768, eps=1e-05) |>
-    linear@attn.c_attn(dim=2304, transpose=true, bias=true)
+    layernorm@ln_1 dim=768 eps=1e-05 |>
+    linear@attn.c_attn dim=2304 transpose=true bias=true
   return qkv
 """
     module = parse_axon_module(source)
@@ -1637,7 +1893,7 @@ def test_lower_return_pipeline_expression_to_named_output() -> None:
     source = """
 tiny :: Tensor -> Tensor -> Tensor
 tiny x wte = do
-  return layernorm@ln_f(x, dim=768, eps=1e-05) |> linear@wte(dim=50257)
+  return layernorm@ln_f x dim=768 eps=1e-05 |> linear@wte dim=50257
 """
     module = parse_axon_module(source)
     spec = lower_axon_module_to_synapse_spec(module)
@@ -1665,7 +1921,7 @@ def test_lower_bind_operator_to_synapse_spec() -> None:
     source = """
 tiny :: Tensor -> Tensor
 tiny x = do
-  y <- linear@p1(x) >>= \\z -> _activations_gelu_new(z)
+  y <- linear@p1 x >>= \\z -> _activations_gelu_new z
   return y
 """
     module = parse_axon_module(source)
@@ -1700,8 +1956,8 @@ def test_reshape_heads_triplet_is_rejected_as_obsolete_compat() -> None:
     source = """
 tiny :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor
 tiny q k v bias = do
-  ctx_heads <- reshape_heads_triplet(q, k, v, heads=12, head_dim=64) |>
-    attention(mask=bias)
+  ctx_heads <- reshape_heads_triplet q k v heads=12 head_dim=64 |>
+    attention mask=bias
   return ctx_heads
 """
     module = parse_axon_module(source)
@@ -1709,33 +1965,36 @@ tiny q k v bias = do
         lower_axon_module_to_synapse_spec(module)
 
 
-def test_lower_ternary_to_when_guards() -> None:
+def test_lower_ternary_to_lazy_select_op() -> None:
     source = """
 tiny :: Tensor -> ?Tensor -> (Tensor, Tensor)
 tiny x use_cache = do
-  k, v <- use_cache ? _cache_update(past, k0, v0) : k0, v0
+  k, v <- use_cache ? _cache_update past k0 v0 : k0, v0
   return k, v
 """
     module = parse_axon_module(source)
     spec = lower_axon_module_to_synapse_spec(module)
     node_specs = _node_specs(spec["model"]["graph"])
-    assert len(node_specs) == 3
-    assert node_specs[0]["when"] == "use_cache"
-    assert node_specs[1]["when"] == "not (use_cache)"
-    assert node_specs[2]["when"] == "not (use_cache)"
+    assert len(node_specs) == 1
+    select_spec = node_specs[0]
+    assert select_spec["_op"] == "select"
+    assert select_spec["cond"] == "use_cache"
+    assert select_spec["_bind"] == ["k", "v"]
+    assert isinstance(select_spec["_then"], list)
+    assert isinstance(select_spec["_else"], list)
 
 
 def test_lower_if_then_else_matches_ternary_lowering() -> None:
     ternary_source = """
 tiny :: Tensor -> ?Tensor -> (Tensor, Tensor)
 tiny x use_cache = do
-  k, v <- use_cache ? _cache_update(past, k0, v0) : k0, v0
+  k, v <- use_cache ? _cache_update past k0 v0 : k0, v0
   return k, v
 """
     if_source = """
 tiny :: Tensor -> ?Tensor -> (Tensor, Tensor)
 tiny x use_cache = do
-  k, v <- if use_cache then _cache_update(past, k0, v0) else k0, v0
+  k, v <- if use_cache then _cache_update past k0 v0 else k0, v0
   return k, v
 """
 
@@ -1812,7 +2071,6 @@ def test_synapse_to_axon_roundtrip_with_meta_and_control_nodes() -> None:
                         "_bind": "y",
                         "dim": 4,
                         "eps": 1e-5,
-                        "when": "true",
                     }
                 },
             ],
@@ -1841,7 +2099,7 @@ def test_synapse_to_axon_readable_omits_meta_lines() -> None:
     }
     axon = synapse_spec_to_axon_module_text(spec, module_name="tiny")
     assert "meta " not in axon
-    assert "y <- _activations_gelu_new(x)" in axon
+    assert "y <- _activations_gelu_new x" in axon
 
 
 def test_synapse_to_axon_readable_blocks_lower_back_via_program() -> None:

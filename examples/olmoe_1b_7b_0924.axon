@@ -43,7 +43,7 @@ olmoe_decoder_block x pos_ids attn_mask past_kv = do
       softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1
     m <- zeros_like xn
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices expert=e
+      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
       x_upd <- expert_ffn x_sel
       m <- MoE.scatter_add m token_idx x_upd sel_scores
     return m

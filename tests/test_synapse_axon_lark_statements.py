@@ -1,48 +1,112 @@
 from __future__ import annotations
 
-from brainsurgery.synapse.axon.grammar import (
-    ParsedBind,
-    ParsedFor,
-    ParsedReturn,
-    ParsedScope,
-    ParsedScopeBind,
-    parse_statement_head,
+import pytest
+
+from brainsurgery.synapse.axon.grammar import parse_program_source
+from brainsurgery.synapse.axon.types import (
+    AxonBind,
+    AxonExprCall,
+    AxonExprDo,
+    AxonExprInt,
+    AxonExprList,
+    AxonExprString,
+    AxonRepeat,
+    AxonReturn,
+    AxonScopeBind,
 )
 
 
-def test_parse_statement_head_for_range_with_step() -> None:
-    parsed = parse_statement_head("for@layers i <- [1..8) step=2 do")
-    assert isinstance(parsed, ParsedFor)
-    assert parsed.name == "layers"
-    assert parsed.var == "i"
-    assert parsed.start_delim == "["
-    assert parsed.start_expr == "1"
-    assert parsed.end_expr == "8"
-    assert parsed.end_delim == ")"
-    assert parsed.step_expr == "2"
+def _parse_rhs_do(source: str) -> AxonExprDo:
+    parsed = parse_program_source(source)
+    assert len(parsed.modules) == 1
+    rhs = parsed.modules[0].definition.rhs
+    assert isinstance(rhs, AxonExprDo)
+    return rhs
 
 
-def test_parse_statement_head_scope_bind_without_at() -> None:
-    parsed = parse_statement_head("x, y <- scope model.layers do")
-    assert isinstance(parsed, ParsedScopeBind)
-    assert parsed.raw_targets == "x, y"
-    assert parsed.prefix == "model.layers"
+def test_parse_for_statement_with_step() -> None:
+    source = """
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = do
+  for@layers i <- [1..8) step=2 do return i
+  return x
+"""
+    rhs = _parse_rhs_do(source)
+    assert len(rhs.body) == 2
+    stmt = rhs.body[0]
+    assert isinstance(stmt, AxonRepeat)
+    assert stmt.name == "layers"
+    assert stmt.var == "i"
+    assert stmt.from_expr == AxonExprInt(value=1)
+    assert stmt.to_expr == AxonExprInt(value=8)
+    assert stmt.step_expr == AxonExprInt(value=2)
 
 
-def test_parse_statement_head_scope_statement() -> None:
-    parsed = parse_statement_head("scope@attn do")
-    assert isinstance(parsed, ParsedScope)
-    assert parsed.prefix == "attn"
+def test_parse_scope_bind_statement_without_at() -> None:
+    source = """
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = do
+  y, z <- scope model.layers do return x, x
+  return y
+"""
+    rhs = _parse_rhs_do(source)
+    stmt = rhs.body[0]
+    assert isinstance(stmt, AxonScopeBind)
+    assert stmt.targets == ("y", "z")
+    assert stmt.prefix == "model.layers"
 
 
-def test_parse_statement_head_return_statement() -> None:
-    parsed = parse_statement_head("return x, y")
-    assert isinstance(parsed, ParsedReturn)
-    assert parsed.raw_values == "x, y"
+def test_parse_scope_bind_statement_with_root_kwarg() -> None:
+    source = """
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = do
+  y <- scope model.layers root=["model", "language_model.model"] do return x
+  return y
+"""
+    rhs = _parse_rhs_do(source)
+    stmt = rhs.body[0]
+    assert isinstance(stmt, AxonScopeBind)
+    assert stmt.prefix == "model.layers"
+    root = stmt.kwargs.get("root")
+    assert isinstance(root, AxonExprList)
+    assert root.items == (
+        AxonExprString(value="model"),
+        AxonExprString(value="language_model.model"),
+    )
 
 
-def test_parse_statement_head_bind_statement() -> None:
-    parsed = parse_statement_head("x, y <- split qkv parts=2")
-    assert isinstance(parsed, ParsedBind)
-    assert parsed.raw_targets == "x, y"
-    assert parsed.expr == "split qkv parts=2"
+def test_parse_scope_statement_is_rejected() -> None:
+    source = """
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = do
+  scope@attn do
+    return x
+"""
+    with pytest.raises(ValueError, match="invalid Axon source syntax"):
+        parse_program_source(source)
+
+
+def test_parse_return_statement() -> None:
+    source = """
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = do return x, x
+"""
+    rhs = _parse_rhs_do(source)
+    stmt = rhs.body[0]
+    assert isinstance(stmt, AxonReturn)
+    assert len(stmt.values) == 2
+
+
+def test_parse_bind_statement() -> None:
+    source = """
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = do
+  a, b <- split qkv parts=2
+  return a
+"""
+    rhs = _parse_rhs_do(source)
+    stmt = rhs.body[0]
+    assert isinstance(stmt, AxonBind)
+    assert stmt.targets == ("a", "b")
+    assert isinstance(stmt.expr, AxonExprCall)
+    assert stmt.expr.callee == "split"

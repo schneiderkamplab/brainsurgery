@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import ast
 import importlib.resources
-import re
 from typing import Any
 
 from omegaconf import OmegaConf
 
 from .ops import get_op_module
+from .spec_normalize import normalize_synapse_spec_expressions
 
 
 def load_synapse_torch_op_map() -> dict[str, Any]:
@@ -31,20 +30,21 @@ def emit_model_code_from_synapse_spec(
 ) -> str:
     if not class_name.isidentifier():
         raise ValueError(f"Invalid class name: {class_name!r}")
-    if spec.get("synapse") != 1:
+    normalized_spec = normalize_synapse_spec_expressions(spec)
+    if normalized_spec.get("synapse") != 1:
         raise ValueError("Only synapse: 1 specs are supported")
 
     resolved_op_map = load_synapse_torch_op_map() if op_map is None else op_map
-    _validate_spec_ops(spec, resolved_op_map)
+    _validate_spec_ops(normalized_spec, resolved_op_map)
 
-    model = spec.get("model")
+    model = normalized_spec.get("model")
     if not isinstance(model, dict):
         raise ValueError("spec.model must be a mapping")
 
     symbols_raw = model.get("symbols", {})
     symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, (int, float, bool))}
 
-    emitter = _Emitter(class_name=class_name, spec=spec, symbols=symbols)
+    emitter = _Emitter(class_name=class_name, spec=normalized_spec, symbols=symbols)
     return emitter.render()
 
 
@@ -81,6 +81,7 @@ class _Emitter:
                 "        super().__init__()",
                 "        self._state: dict[str, torch.Tensor] = {}",
                 "        self._runtime_state_dict = runtime_state_dict",
+                "        self._param_roots_stack: list[list[str]] = []",
                 f"        self._symbols: dict[str, int | float | bool] = {repr(self.symbols)}",
                 "        self._trace_enabled = False",
                 "        self.trace_ops: list[dict[str, Any]] = []",
@@ -112,6 +113,133 @@ class _Emitter:
                 "        if '.' not in node_path:",
                 "            return ''",
                 "        return node_path.rsplit('.', 1)[0]",
+                "",
+                "    def _pick_param_path(self, scope: str, candidates: list[str]) -> str:",
+                "        scoped: list[str] = []",
+                "        for candidate in candidates:",
+                "            if not isinstance(candidate, str):",
+                "                continue",
+                "            base = self._join_scope(scope, candidate)",
+                "            for root in self._current_param_roots():",
+                "                scoped.append(self._join_scope(root, base))",
+                "        if not scoped:",
+                "            raise ValueError('parameter candidate list is empty')",
+                "        for candidate in scoped:",
+                "            if candidate in self._state:",
+                "                return candidate",
+                "        return scoped[0]",
+                "",
+                "    def _current_param_roots(self) -> list[str]:",
+                "        if self._param_roots_stack:",
+                "            roots = self._param_roots_stack[-1]",
+                "            if isinstance(roots, list) and roots:",
+                "                return roots",
+                "        return ['']",
+                "",
+                "    def _pick_param_from_single(self, scope: str, candidate: str) -> str:",
+                "        resolved: list[str] = []",
+                "        base = self._join_scope(scope, candidate)",
+                "        for root in self._current_param_roots():",
+                "            resolved.append(self._join_scope(root, base))",
+                "        for item in resolved:",
+                "            if item in self._state:",
+                "                return item",
+                "        return resolved[0]",
+                "",
+                "    def _expr_config_root(self) -> dict[str, Any]:",
+                f"        model = {repr(self.model)}",
+                "        cfg = model.get('config') if isinstance(model, dict) else None",
+                "        return cfg if isinstance(cfg, dict) else {}",
+                "",
+                "    def _expr_config_lookup(self, key: str, *, root: str = '') -> tuple[bool, Any]:",
+                "        value: Any = self._expr_config_root()",
+                "        if root:",
+                "            for part in root.split('.'):",
+                "                if not isinstance(value, dict) or part not in value:",
+                "                    return False, None",
+                "                value = value[part]",
+                "        for part in key.split('.'):",
+                "            if not isinstance(value, dict) or part not in value:",
+                "                return False, None",
+                "            value = value[part]",
+                "        return True, value",
+                "",
+                "    def _eval_expr_call(self, callee: str, args: list[Any], kwargs: dict[str, Any]) -> Any:",
+                "        if callee in {'sqrt', 'Prelude.sqrt'}:",
+                "            if kwargs:",
+                "                raise ValueError('sqrt expression call does not support kwargs')",
+                "            if len(args) != 1:",
+                "                raise ValueError('sqrt expression call expects exactly one positional argument')",
+                "            arg = args[0]",
+                "            if isinstance(arg, bool) or not isinstance(arg, (int, float)):",
+                "                raise ValueError('sqrt expression call expects numeric argument')",
+                "            return math.sqrt(float(arg))",
+                "        if callee in {'abs', 'Prelude.abs'}:",
+                "            if kwargs:",
+                "                raise ValueError('abs expression call does not support kwargs')",
+                "            if len(args) != 1:",
+                "                raise ValueError('abs expression call expects exactly one positional argument')",
+                "            arg = args[0]",
+                "            if isinstance(arg, bool) or not isinstance(arg, (int, float)):",
+                "                raise ValueError('abs expression call expects numeric argument')",
+                "            return abs(arg)",
+                "        if callee in {'min', 'Prelude.min'}:",
+                "            if kwargs:",
+                "                raise ValueError('min expression call does not support kwargs')",
+                "            if len(args) < 1:",
+                "                raise ValueError('min expression call expects at least one positional argument')",
+                "            if any(isinstance(arg, bool) or not isinstance(arg, (int, float)) for arg in args):",
+                "                raise ValueError('min expression call expects numeric arguments')",
+                "            return min(args)",
+                "        if callee in {'max', 'Prelude.max'}:",
+                "            if kwargs:",
+                "                raise ValueError('max expression call does not support kwargs')",
+                "            if len(args) < 1:",
+                "                raise ValueError('max expression call expects at least one positional argument')",
+                "            if any(isinstance(arg, bool) or not isinstance(arg, (int, float)) for arg in args):",
+                "                raise ValueError('max expression call expects numeric arguments')",
+                "            return max(args)",
+                "        if callee in {'Config.has', 'Config.int', 'Config.float', 'Config.str'}:",
+                "            if len(args) != 1 or not isinstance(args[0], str) or not args[0]:",
+                "                raise ValueError(f'{callee} expression call expects one non-empty string key')",
+                "            key = args[0]",
+                "            root_raw = kwargs.get('root', '')",
+                "            root = root_raw if isinstance(root_raw, str) else ''",
+                "            found, value = self._expr_config_lookup(key, root=root)",
+                "            if callee == 'Config.has':",
+                "                if 'default' in kwargs:",
+                "                    raise ValueError('Config.has expression call does not support default kwarg')",
+                "                return bool(found)",
+                "            if not found:",
+                "                if 'default' not in kwargs:",
+                "                    full_key = f'{root}.{key}' if root else key",
+                "                    raise KeyError(f'{callee} expression call missing required config key: {full_key}')",
+                "                value = kwargs['default']",
+                "            if callee == 'Config.int':",
+                "                if isinstance(value, bool):",
+                "                    raise ValueError('Config.int expression call expected int')",
+                "                if isinstance(value, int):",
+                "                    return int(value)",
+                "                if isinstance(value, str):",
+                "                    raw = value.strip()",
+                "                    if raw and (raw.isdigit() or (raw[0] in ('+', '-') and raw[1:].isdigit())):",
+                "                        return int(raw)",
+                "                raise ValueError('Config.int expression call expected int')",
+                "            if callee == 'Config.float':",
+                "                if isinstance(value, bool):",
+                "                    raise ValueError('Config.float expression call expected float')",
+                "                if isinstance(value, (int, float)):",
+                "                    return float(value)",
+                "                if isinstance(value, str):",
+                "                    raw = value.strip()",
+                "                    if raw:",
+                "                        return float(raw)",
+                "                raise ValueError('Config.float expression call expected float')",
+                "            if callee == 'Config.str':",
+                "                if not isinstance(value, str):",
+                "                    raise ValueError('Config.str expression call expected string')",
+                "                return value",
+                "        raise ValueError(f'Unsupported call expression: {callee!r}')",
                 "",
                 "    def _safe_get(self, env: dict[str, Any], name: str) -> Any:",
                 "        if name not in env:",
@@ -427,21 +555,7 @@ class _Emitter:
             if not isinstance(node_spec, dict):
                 raise ValueError(f"Invalid node spec: {node_spec!r}")
 
-            when = node_spec.get("when")
             inner_indent = indent
-            if when is not None:
-                produced_names = self._node_output_names(node_spec)
-                for produced_name in produced_names:
-                    existing = env.get(produced_name)
-                    if isinstance(existing, str):
-                        # Preserve the previously bound value when the conditional does not execute.
-                        continue
-                    out_var = self._fresh(self._py_name(produced_name))
-                    lines.append(f"{indent}{out_var} = None")
-                    env[produced_name] = out_var
-                cond = self._expr_code(when, env)
-                lines.append(f"{indent}if {cond}:")
-                inner_indent = indent + "    "
 
             op = node_spec.get("_op")
             if op == "for":
@@ -590,7 +704,7 @@ class _Emitter:
             else:
                 arg_codes.append(f"{block_input_name}={self._expr_code(src, env)}")
         for key, value in node_spec.items():
-            if key.startswith("_") or key in {"when", "graph"}:
+            if key.startswith("_") or key == "graph":
                 continue
             if key not in block_inputs:
                 continue
@@ -644,7 +758,20 @@ class _Emitter:
         else:
             call_line = f"{indent}{', '.join(tmp_vars)} = self._block_{self._py_name(block_name)}({call_args})"
 
-        lines.append(call_line)
+        raw_param_roots = node_spec.get("_param_roots")
+        push_roots = (
+            isinstance(raw_param_roots, list)
+            and bool(raw_param_roots)
+            and all(isinstance(item, str) for item in raw_param_roots)
+        )
+        if push_roots:
+            lines.append(f"{indent}self._param_roots_stack.append({raw_param_roots!r})")
+            lines.append(f"{indent}try:")
+            lines.append(f"{indent}    {call_line[len(indent) :]}")
+            lines.append(f"{indent}finally:")
+            lines.append(f"{indent}    self._param_roots_stack.pop()")
+        else:
+            lines.append(call_line)
         for dst_name, tmp in zip(binds, tmp_vars, strict=True):
             existing = env.get(dst_name)
             dst_var = (
@@ -697,24 +824,25 @@ class _Emitter:
             scope_expr = f"self._scope_of({node_path_var})"
             if param_base in self._active_env:
                 base_expr = self._active_env[param_base]
-                return (
-                    f"self._join_scope(self._join_scope({scope_expr}, {base_expr}), {param_name!r})"
-                )
+                return f"self._pick_param_from_single({scope_expr}, self._join_scope({base_expr}, {param_name!r}))"
             if isinstance(node_spec.get(param_base), str):
                 base_expr = repr(node_spec[param_base])
-                return (
-                    f"self._join_scope(self._join_scope({scope_expr}, {base_expr}), {param_name!r})"
-                )
+                return f"self._pick_param_from_single({scope_expr}, self._join_scope({base_expr}, {param_name!r}))"
             base_expr = repr(param_base)
-            return f"self._join_scope(self._join_scope({scope_expr}, {base_expr}), {param_name!r})"
+            return f"self._pick_param_from_single({scope_expr}, self._join_scope({base_expr}, {param_name!r}))"
         explicit_params = node_spec.get("_params")
-        if isinstance(explicit_params, dict) and isinstance(explicit_params.get(param_name), str):
-            scoped_explicit = f"self._join_scope(self._scope_of({node_path_var}), {explicit_params[param_name]!r})"
-            return scoped_explicit
+        if isinstance(explicit_params, dict):
+            explicit = explicit_params.get(param_name)
+            if isinstance(explicit, str):
+                return (
+                    f"self._pick_param_from_single(self._scope_of({node_path_var}), {explicit!r})"
+                )
+            if isinstance(explicit, list) and all(isinstance(item, str) for item in explicit):
+                return f"self._pick_param_path(self._scope_of({node_path_var}), {explicit!r})"
         if isinstance(node_spec.get(param_name), str):
             candidate = node_spec[param_name]
-            return f"self._join_scope(self._scope_of({node_path_var}), {candidate!r})"
-        return f"self._join_scope({node_path_var}, {param_name!r})"
+            return f"self._pick_param_from_single(self._scope_of({node_path_var}), {candidate!r})"
+        return f"self._pick_param_from_single({node_path_var}, {param_name!r})"
 
     def _read_env_var(self, env: dict[str, str], name: str) -> str:
         if name not in env:
@@ -726,67 +854,92 @@ class _Emitter:
             return "None"
         if isinstance(expr, (int, float, bool)):
             return repr(expr)
+        if isinstance(expr, list):
+            items = ", ".join(self._expr_code(item, env) for item in expr)
+            return f"[{items}]"
+        if isinstance(expr, tuple):
+            items = ", ".join(self._expr_code(item, env) for item in expr)
+            if len(expr) == 1:
+                return f"({items},)"
+            return f"({items})"
+        if isinstance(expr, dict):
+            kind = expr.get("_expr")
+            if kind == "name":
+                ident = expr.get("id")
+                if isinstance(ident, str):
+                    if ident in env:
+                        return env[ident]
+                    if ident in self.symbols:
+                        return repr(self.symbols[ident])
+                    raise ValueError(f"Unknown symbol in expression: {ident}")
+            if kind == "tuple":
+                items_raw = expr.get("items")
+                if isinstance(items_raw, list):
+                    items = ", ".join(self._expr_code(item, env) for item in items_raw)
+                    if len(items_raw) == 1:
+                        return f"({items},)"
+                    return f"({items})"
+            if kind == "if":
+                cond_code = self._expr_code(expr.get("cond"), env)
+                then_code = self._expr_code(expr.get("then"), env)
+                else_code = self._expr_code(expr.get("else"), env)
+                return f"({then_code} if {cond_code} else {else_code})"
+            if kind == "binary":
+                op = expr.get("op")
+                left_code = self._expr_code(expr.get("left"), env)
+                right_code = self._expr_code(expr.get("right"), env)
+                if isinstance(op, str) and op in {
+                    "+",
+                    "-",
+                    "*",
+                    "/",
+                    "%",
+                    "==",
+                    "!=",
+                    "<",
+                    "<=",
+                    ">",
+                    ">=",
+                    "and",
+                    "or",
+                }:
+                    return f"({left_code} {op} {right_code})"
+            if kind == "string":
+                value = expr.get("value")
+                if isinstance(value, str):
+                    return repr(value)
+                raise ValueError(f"Invalid string expression payload: {expr!r}")
+            if kind == "call":
+                callee = expr.get("callee")
+                args_raw = expr.get("args", [])
+                kwargs_raw = expr.get("kwargs", {})
+                if (
+                    not isinstance(callee, str)
+                    or not isinstance(args_raw, list)
+                    or not isinstance(kwargs_raw, dict)
+                ):
+                    raise ValueError(f"Invalid call expression payload: {expr!r}")
+                args_code = ", ".join(self._expr_code(item, env) for item in args_raw)
+                kwargs_parts = [
+                    f"{key!r}: {self._expr_code(value, env)}" for key, value in kwargs_raw.items()
+                ]
+                kwargs_code = ", ".join(kwargs_parts)
+                return f"self._eval_expr_call({callee!r}, [{args_code}], {{{kwargs_code}}})"
+            return repr(expr)
         if isinstance(expr, str):
             token = expr.strip()
             if token in env:
                 return env[token]
             if token in self.symbols:
                 return repr(self.symbols[token])
-            if token.lower() in {"true", "false", "null"}:
-                return {"true": "True", "false": "False", "null": "None"}[token.lower()]
-            numeric = self._try_eval_numeric(token)
-            if numeric is not None:
-                return repr(numeric)
-            return self._substitute_expr_names(token, env)
+            return repr(token)
         return repr(expr)
 
-    def _substitute_expr_names(self, text: str, env: dict[str, str]) -> str:
-        rewritten = text
-        for name, py_name in sorted(env.items(), key=lambda kv: len(kv[0]), reverse=True):
-            rewritten = re.sub(rf"\b{re.escape(name)}\b", py_name, rewritten)
-        for name, value in sorted(self.symbols.items(), key=lambda kv: len(kv[0]), reverse=True):
-            rewritten = re.sub(rf"\b{re.escape(name)}\b", repr(value), rewritten)
-        return rewritten
-
-    def _try_eval_numeric(self, text: str) -> int | float | None:
-        names = dict(self.symbols)
-        try:
-            parsed = ast.parse(text, mode="eval")
-        except SyntaxError:
-            return None
-
-        allowed_nodes = (
-            ast.Expression,
-            ast.BinOp,
-            ast.UnaryOp,
-            ast.Add,
-            ast.Sub,
-            ast.Mult,
-            ast.Div,
-            ast.FloorDiv,
-            ast.Mod,
-            ast.Pow,
-            ast.USub,
-            ast.UAdd,
-            ast.Constant,
-            ast.Name,
-            ast.Load,
-        )
-        for node in ast.walk(parsed):
-            if not isinstance(node, allowed_nodes):
-                return None
-            if isinstance(node, ast.Name) and node.id not in names:
-                return None
-        try:
-            value = eval(compile(parsed, "<synapse-expr>", "eval"), {"__builtins__": {}}, names)
-        except Exception:
-            return None
-        if isinstance(value, (int, float)):
-            return value
-        return None
-
     def _py_name(self, value: str) -> str:
-        name = re.sub(r"[^0-9A-Za-z_]", "_", value)
+        out_chars: list[str] = []
+        for ch in value:
+            out_chars.append(ch if (ch.isalnum() or ch == "_") else "_")
+        name = "".join(out_chars)
         if not name:
             name = "v"
         if name[0].isdigit():
@@ -830,6 +983,16 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
                 if not isinstance(nested, list):
                     raise ValueError("node 'graph' must be a list")
                 _walk_graph(nested)
+            then_graph = node_spec.get("_then")
+            if then_graph is not None:
+                if not isinstance(then_graph, list):
+                    raise ValueError("node '_then' must be a list")
+                _walk_graph(then_graph)
+            else_graph = node_spec.get("_else")
+            if else_graph is not None:
+                if not isinstance(else_graph, list):
+                    raise ValueError("node '_else' must be a list")
+                _walk_graph(else_graph)
 
             if op == "for":
                 body = node_spec.get("_body")

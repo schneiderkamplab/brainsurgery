@@ -84,6 +84,12 @@ def compile(
     return [f"{indent}{out} = torch.cat([{x}, {y}], dim=int({dim_expr}))"]
 
 
+LOWERING_TYPE_SIGNATURE = {
+    "args": ("Any", "Any"),
+    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "returns": "dynamic",
+}
+
 __all__ = [
     "OP_NAME",
     "LOWERING_ARITY",
@@ -95,4 +101,5 @@ __all__ = [
     "interpret",
     "compile",
     "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
 ]

@@ -42,14 +42,20 @@ model:
       - tok
       - pos
   - n_op_8:
-      _op: list_init
+      _op: select
       _bind: new_kv
-      when: use_cache
-  - n_op_9:
-      _op: _ir_const
-      value: null
-      _bind: new_kv
-      when: not (use_cache)
+      cond: use_cache
+      _then_bind: then_new_kv
+      _else_bind: else_new_kv
+      _then:
+      - n_op_8_then:
+          _op: list_init
+          _bind: then_new_kv
+      _else:
+      - n_op_8_else:
+          _op: _ir_const
+          value: null
+          _bind: else_new_kv
   - n_for_13:
       _op: for
       _scope: h

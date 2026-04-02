@@ -39,6 +39,8 @@ class ModelDownloadSpec:
 MODEL_SPECS: dict[str, ModelDownloadSpec] = {
     "gpt2.old": ModelDownloadSpec(local_dir="gpt2.old", repo_id="openai-community/gpt2"),
     "gemma3": ModelDownloadSpec(local_dir="gemma3", repo_id="google/gemma-3-270m"),
+    "gemma3_1b": ModelDownloadSpec(local_dir="gemma3_1b", repo_id="google/gemma-3-1b-pt"),
+    "gemma3_4b": ModelDownloadSpec(local_dir="gemma3_4b", repo_id="google/gemma-3-4b-pt"),
     "olmoe_1b_7b_0924": ModelDownloadSpec(
         local_dir="olmoe_1b_7b_0924", repo_id="allenai/OLMoE-1B-7B-0924"
     ),

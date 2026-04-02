@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 OP_NAME = "repeat"
-LOWERING_ARITY = (1, 2)
+LOWERING_ARITY = (1, 3)
 LOWERING_ALLOWED_KWARGS: set[str] = {"repeats", "dim"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {
@@ -120,6 +120,12 @@ def compile(
     return lines
 
 
+LOWERING_TYPE_SIGNATURE = {
+    "args": ("Any", "Any"),
+    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "returns": ("Tensor",),
+}
+
 __all__ = [
     "OP_NAME",
     "LOWERING_ARITY",
@@ -131,4 +137,5 @@ __all__ = [
     "interpret",
     "compile",
     "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
 ]

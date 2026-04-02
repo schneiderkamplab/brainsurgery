@@ -1,13 +1,13 @@
-linear@path :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+linear :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
 linear@path = _linear@path
 
-embedding@path :: @Path -> TokenIds[B,T] -> Tensor[B,T,D]
+embedding :: @Path -> TokenIds[B,T] -> Tensor[B,T,D]
 embedding@path = _embedding@path
 
-layernorm@path :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+layernorm :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
 layernorm@path = _layernorm@path
 
-rmsnorm@path :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+rmsnorm :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
 rmsnorm@path = _rmsnorm@path
 
 split :: Tensor[B,T,D] -> Tensor[B,T,D]
@@ -37,11 +37,14 @@ rope_pair = _rope_pair
 linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
 linear_position_bias = _linear_position_bias
 
-repeat :: Tensor[B,KVH,T,HD] -> I -> ?I -> Tensor[B,H,T,HD]
+repeat :: Tensor[B,KVH,T,HD] -> Int -> ?Int -> Tensor[B,H,T,HD]
 repeat = _repeat
 
 mul :: Tensor[B,T,D] -> Tensor[B,T,D] -> Tensor[B,T,D]
 mul = _mul
+
+sqrt :: Float -> Float
+sqrt = _sqrt
 
 softmax :: Tensor[B,T,D] -> Tensor[B,T,D]
 softmax = _softmax

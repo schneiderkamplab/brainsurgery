@@ -18,14 +18,20 @@ model:
       _params:
         weight: transformer.word_embeddings.weight
   - n_op_2:
-      _op: list_init
+      _op: select
       _bind: new_kv
-      when: use_cache
-  - n_op_3:
-      _op: _ir_const
-      value: null
-      _bind: new_kv
-      when: not (use_cache)
+      cond: use_cache
+      _then_bind: then_new_kv
+      _else_bind: else_new_kv
+      _then:
+      - n_op_2_then:
+          _op: list_init
+          _bind: then_new_kv
+      _else:
+      - n_op_2_else:
+          _op: _ir_const
+          value: null
+          _bind: else_new_kv
   - n_for_7:
       _op: for
       _scope: transformer.h

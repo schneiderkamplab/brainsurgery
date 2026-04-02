@@ -1,21 +1,21 @@
 import List
 
-update :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?Cache)
+update :: ?CacheLayer -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?CacheLayer)
 update past k v = _cache_update past k v
 
-seq_len :: ?Tensor[B,H,T,D] -> I
+seq_len :: ?Tensor[B,H,T,D] -> Int
 seq_len k = _cache_seq_len k
 
 init :: Cache
 init = List.init
 
-index :: ?Cache -> I -> ?CacheLayer
+index :: ?Cache -> Int -> ?CacheLayer
 index = List.index
 
-append :: ?Cache -> CacheLayer -> ?Cache
+append :: ?Cache -> ?CacheLayer -> ?Cache
 append = List.append
 
-past_length :: ?Cache -> I
+past_length :: ?Cache -> Int
 past_length cache = do
   first <- List.index cache 0
   return _cache_seq_len first

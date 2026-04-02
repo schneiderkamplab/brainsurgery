@@ -6,7 +6,7 @@ from pathlib import Path
 from .ast_validation import validate_axon_program
 from .grammar import ParsedProgramSource, parse_program_source
 from .syntax_validation import validate_parsed_program_source
-from .types import AxonModule
+from .types import AxonExpr, AxonModule
 
 
 @dataclass(frozen=True)
@@ -102,8 +102,30 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
     from .parser import build_axon_modules_from_parsed_source
 
     ordered_modules: list[AxonModule] = []
+    loaded_by_namespace: dict[str, _LoadedSyntaxFile] = {
+        loaded.namespace: loaded for loaded in ordered_files if loaded.namespace is not None
+    }
     for loaded in ordered_files:
-        modules = build_axon_modules_from_parsed_source(loaded.parsed_source, validate=False)
+        imported_constants: dict[str, AxonExpr] = {}
+        imported_constant_imports: list[str] = []
+        for namespace, members in loaded.parsed_source.imported_members.items():
+            dep = loaded_by_namespace.get(namespace)
+            if dep is None:
+                continue
+            dep_constants = dep.parsed_source.constants
+            for member in members:
+                if member in dep_constants:
+                    imported_constants.setdefault(member, dep_constants[member])
+                    imported_constant_imports.extend(dep.parsed_source.imports)
+
+        modules = build_axon_modules_from_parsed_source(
+            loaded.parsed_source,
+            validate=False,
+            extra_constants=imported_constants if imported_constants else None,
+            extra_imports=tuple(dict.fromkeys(imported_constant_imports))
+            if imported_constant_imports
+            else None,
+        )
         ordered_modules.extend(_apply_namespace(modules, loaded.namespace))
 
     out = tuple(ordered_modules)

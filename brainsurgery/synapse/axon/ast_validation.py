@@ -1,21 +1,26 @@
 from __future__ import annotations
 
-import re
 from typing import Iterable
 
-from .call_parser import split_top_level
+from .type_system import TypeExpr, TypeOptional, TypeTuple
 from .types import (
     AxonBind,
     AxonExpr,
     AxonExprBinary,
     AxonExprBind,
+    AxonExprBool,
     AxonExprCall,
+    AxonExprDo,
+    AxonExprFloat,
     AxonExprIf,
+    AxonExprInt,
     AxonExprLambda,
-    AxonExprLiteral,
+    AxonExprList,
     AxonExprName,
+    AxonExprNull,
     AxonExprParen,
     AxonExprPipe,
+    AxonExprString,
     AxonExprTernary,
     AxonExprTuple,
     AxonModule,
@@ -24,8 +29,6 @@ from .types import (
     AxonScopeBind,
     AxonStatement,
 )
-
-_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _stmt_path(path: tuple[int, ...]) -> str:
@@ -58,24 +61,29 @@ def _has_compatible_return(stmts: tuple[AxonStatement, ...], min_arity: int) -> 
     return False
 
 
-def _expected_return_arity(return_type_expr: str | None) -> int | None:
-    if not isinstance(return_type_expr, str):
+def _is_identifier(value: str) -> bool:
+    if not value:
+        return False
+    if not (value[0].isalpha() or value[0] == "_"):
+        return False
+    return all(ch.isalnum() or ch == "_" for ch in value[1:])
+
+
+def _expected_return_arity(return_type_expr: TypeExpr | None) -> int | None:
+    if return_type_expr is None:
         return None
-    text = return_type_expr.strip()
-    if not text:
-        return None
-    if text.startswith("(") and text.endswith(")"):
-        inner = text[1:-1].strip()
-        if not inner:
-            return 0
-        return len(split_top_level(inner, ","))
+    current = return_type_expr
+    if isinstance(current, TypeOptional):
+        current = current.inner
+    if isinstance(current, TypeTuple):
+        return len(current.items)
     return 1
 
 
 def _validate_name(name: str, *, module: AxonModule, path: tuple[int, ...], field: str) -> None:
     if name == "_":
         return
-    if _NAME_RE.fullmatch(name) is None:
+    if not _is_identifier(name):
         raise _error(
             module, path, f"invalid {field} name {name!r}; expected [A-Za-z_][A-Za-z0-9_]*"
         )
@@ -89,7 +97,9 @@ def _has_duplicate_non_discard(names: tuple[str, ...]) -> bool:
 def _expr_non_empty(expr: AxonExpr) -> bool:
     if isinstance(expr, AxonExprName):
         return bool(expr.name.strip())
-    if isinstance(expr, AxonExprLiteral):
+    if isinstance(expr, AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString):
+        return True
+    if isinstance(expr, AxonExprList):
         return True
     if isinstance(expr, AxonExprTuple):
         return bool(expr.items)
@@ -102,11 +112,13 @@ def _expr_non_empty(expr: AxonExpr) -> bool:
     if isinstance(expr, AxonExprIf | AxonExprTernary):
         return True
     if isinstance(expr, AxonExprBinary):
-        return expr.op in {"+", "*"}
+        return _expr_non_empty(expr.left) and _expr_non_empty(expr.right)
     if isinstance(expr, AxonExprLambda):
         return bool(expr.var.strip())
     if isinstance(expr, AxonExprParen):
         return _expr_non_empty(expr.inner)
+    if isinstance(expr, AxonExprDo):
+        return bool(expr.body)
     return False
 
 
@@ -114,7 +126,15 @@ def _validate_expr(expr: AxonExpr, module: AxonModule, path: tuple[int, ...]) ->
     if isinstance(expr, AxonExprName):
         _validate_name(expr.name, module=module, path=path, field="expression name")
         return
-    if isinstance(expr, AxonExprLiteral):
+    if isinstance(expr, AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull):
+        return
+    if isinstance(expr, AxonExprString):
+        if not isinstance(expr.value, str):
+            raise _error(module, path, "string literal must be a string")
+        return
+    if isinstance(expr, AxonExprList):
+        for i, item in enumerate(expr.items):
+            _validate_expr(item, module, (*path, i))
         return
     if isinstance(expr, AxonExprTuple):
         if not expr.items:
@@ -128,10 +148,18 @@ def _validate_expr(expr: AxonExpr, module: AxonModule, path: tuple[int, ...]) ->
         for i, arg in enumerate(expr.args):
             _validate_expr(arg, module, (*path, i))
         for key, value in expr.kwargs.items():
-            if _NAME_RE.fullmatch(key) is None:
+            if not _is_identifier(key):
                 raise _error(module, path, f"invalid call kwarg name {key!r}")
             if isinstance(value, AxonExpr):
                 _validate_expr(value, module, (*path, len(expr.args)))
+                continue
+            if isinstance(value, bool | int | float | str) or value is None:
+                continue
+            if isinstance(value, list) and all(
+                type(item) is int or isinstance(item, str) for item in value
+            ):
+                continue
+            raise _error(module, path, f"unsupported call kwarg value type for {key!r}")
         return
     if isinstance(expr, AxonExprPipe):
         if not expr.stages:
@@ -181,6 +209,16 @@ def _validate_expr(expr: AxonExpr, module: AxonModule, path: tuple[int, ...]) ->
         return
     if isinstance(expr, AxonExprParen):
         _validate_expr(expr.inner, module, (*path, 0))
+        return
+    if isinstance(expr, AxonExprDo):
+        if not expr.body:
+            raise _error(module, path, "do expression body cannot be empty")
+        for i, stmt in enumerate(expr.body):
+            _validate_statement(stmt, module, (*path, i))
+        if not _has_compatible_return(expr.body, 1):
+            raise _error(
+                module, path, "do expression requires a reachable return with at least 1 value"
+            )
         return
 
 
@@ -232,6 +270,25 @@ def _validate_statement(stmt: AxonStatement, module: AxonModule, path: tuple[int
             _validate_name(name, module=module, path=path, field="scope bind target")
         if not stmt.prefix.strip():
             raise _error(module, path, "scope bind prefix cannot be empty")
+        unsupported = sorted(set(stmt.kwargs) - {"root"})
+        if unsupported:
+            raise _error(
+                module,
+                path,
+                "scope bind supports only `root` kwarg, got: " + ", ".join(unsupported),
+            )
+        if "root" in stmt.kwargs:
+            root_value = stmt.kwargs["root"]
+            if isinstance(root_value, AxonExpr):
+                _validate_expr(root_value, module, (*path, len(stmt.targets)))
+            elif isinstance(root_value, bool | int | float | str) or root_value is None:
+                pass
+            elif isinstance(root_value, list) and all(
+                type(item) is int or isinstance(item, str) for item in root_value
+            ):
+                pass
+            else:
+                raise _error(module, path, "scope bind root must be scalar, list, or expression")
         if not stmt.body:
             raise _error(module, path, "scope bind body cannot be empty")
         for i, child in enumerate(stmt.body):

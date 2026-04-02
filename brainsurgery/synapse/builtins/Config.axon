@@ -1,0 +1,11 @@
+has :: String -> Bool
+has key = _config_has key
+
+int :: String -> Int
+int key = _config_int key
+
+float :: String -> Float
+float key = _config_float key
+
+str :: String -> String
+str key = _config_str key

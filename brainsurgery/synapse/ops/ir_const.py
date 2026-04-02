@@ -34,10 +34,7 @@ def interpret(
     del node_path, scope
     out_name = model._require_name(node_spec.get("_bind"), field="_ir_expr._bind")
     value = node_spec.get("value")
-    if isinstance(value, str):
-        env[out_name] = model._eval_expr(value, env, symbols)
-    else:
-        env[out_name] = value
+    env[out_name] = model._eval_expr(value, env, symbols)
     return
 
 
@@ -54,12 +51,15 @@ def compile(
     out_name = str(node_spec.get("_bind"))
     out_var = emitter._assign_out_var(env, out_name)
     value = node_spec.get("value")
-    if isinstance(value, str):
-        value_code = emitter._expr_code(value, env)
-    else:
-        value_code = repr(value)
+    value_code = emitter._expr_code(value, env)
     return [f"{indent}{out_var} = {value_code}"]
 
+
+LOWERING_TYPE_SIGNATURE = {
+    "args": (),
+    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "returns": ("Any",),
+}
 
 __all__ = [
     "LOWERING_ARITY",
@@ -71,4 +71,5 @@ __all__ = [
     "interpret",
     "compile",
     "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
 ]

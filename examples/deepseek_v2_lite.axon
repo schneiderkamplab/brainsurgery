@@ -114,7 +114,7 @@ deepseek_v2_lite_moe_block x pos_ids attn_mask past_kv = do
       softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1 sorted=false
     routed <- zeros_like xn
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices expert=e
+      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
       gate <- _linear@@gate_proj x_sel dim=EM bias=false
       up <- _linear@@up_proj x_sel dim=EM bias=false
       x_upd <- gate |> silu |> mul up |> _linear@@down_proj dim=D bias=false
@@ -144,7 +144,7 @@ deepseek_v2_lite_moe_mlp xn = do
   topk_scores, topk_indices <- deepseek_v2_lite_moe_topk xn
   routed <- zeros_like xn
   for@experts e <- [0..E) do
-    x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices expert=e
+    x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
     gate <- _linear@@gate_proj x_sel dim=EM bias=false
     up <- _linear@@up_proj x_sel dim=EM bias=false
     x_upd <- gate |> silu |> mul up |> _linear@@down_proj dim=D bias=false
@@ -390,7 +390,7 @@ deepseek_v2_lite_layer26_moe_output_stage input_ids attn_mask past_kv = do
         softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1 sorted=false
       routed <- zeros_like xn
       for@mlp.experts e <- [0..E) do
-        x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices expert=e
+        x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
         gate <- linear@gate_proj x_sel dim=EM bias=false
         up <- linear@up_proj x_sel dim=EM bias=false
         x_upd <- gate |> silu |> mul up |> linear@down_proj dim=D bias=false

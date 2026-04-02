@@ -30,14 +30,20 @@ model:
       _params:
         weight: model.embed_tokens.weight
   - n_op_5:
-      _op: list_init
+      _op: select
       _bind: new_kv
-      when: use_cache
-  - n_op_6:
-      _op: _ir_const
-      value: null
-      _bind: new_kv
-      when: not (use_cache)
+      cond: use_cache
+      _then_bind: then_new_kv
+      _else_bind: else_new_kv
+      _then:
+      - n_op_5_then:
+          _op: list_init
+          _bind: then_new_kv
+      _else:
+      - n_op_5_else:
+          _op: _ir_const
+          value: null
+          _bind: else_new_kv
   - n_for_10:
       _op: for
       _scope: model.layers

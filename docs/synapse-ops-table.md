@@ -27,7 +27,7 @@ Lowering now validates op arity and kwarg names/types using this contract.
 | `apply_rope_pair` | `apply_rope_pair(q, k)` | `position_ids: Str`, `theta: Num` |
 | `repeat_kv` | `repeat_kv(x)` | `heads: Dim`, `kv_heads: Dim` |
 | `arange_positions` | `arange_positions(input_ids)` | `attention_mask: Str` |
-| `kv_cache_update` | `cache::update(past, k, v)` | no op kwargs (`when` is control-flow guard syntax) |
+| `kv_cache_update` | `cache::update(past, k, v)` | no op kwargs (conditional composition via lazy `select`) |
 | `coalesce` | `cache::coalesce(a, b, ...)` | no kwargs; input count must be divisible by output count |
 | `kv_seq_len` | `cache::seq_len(cache)` | none |
 | `topk` | `topk(x)` | `k: Dim` (required), `dim: Int` (default `-1`); requires exactly two outputs |
@@ -37,7 +37,8 @@ Lowering now validates op arity and kwarg names/types using this contract.
 | `moe_scatter_add` | `moe_scatter_add(acc, idx, upd, w)` | none |
 | `index` | `index(container, idx)` | none |
 | `init_list` | `init_list()` | none |
-| `append` | `append(xs, x)` | none (`when` is parsed as control-flow guard, not op kwarg) |
+| `append` | `append(xs, x)` | none |
+| `select` | conditional expression lowering (`cond ? then : else`) | lazy branch execution via `_then`/`_else` branch graphs |
 | `add` | `add(x, y)` | single output only; no kwargs |
 | `mul` | `mul(x, y)` | single output only; no kwargs |
 | `merge_heads` | `merge_heads(x)` | none |
@@ -57,7 +58,7 @@ Lowering now validates op arity and kwarg names/types using this contract.
 | `apply_rope_pair` | Rotary transform on Q/K pair using positions and $\theta$ | Keep | `examples/gemma3_270m.axon:30: qr, kr <- apply_rope_pair qn kn position_ids=pos_ids theta=THETA_BASE + (THETA_LONG - THETA_BASE) * (((i + 1) % ROPE_PERIOD) == 0)`<br>`examples/olmoe_1b_7b_0924.axon:20: qr, kr <- apply_rope_pair q k position_ids=pos_ids theta=THETA` | - |
 | `repeat_kv` | Expand KV heads from $H_{kv}$ to $H$ | Keep | `examples/gemma3_270m.axon:33: k_ctx <- repeat_kv k_ctx_raw heads=H kv_heads=KVH`<br>`examples/gemma3_270m.axon:34: v_ctx <- repeat_kv v_ctx_raw heads=H kv_heads=KVH` | - |
 | `arange_positions` | Build position ids from token stream/mask | Keep | `examples/gemma3_270m.axon:51: pos_ids <- arange_positions input_ids attention_mask=attn_mask`<br>`examples/gpt2.axon:26: pos <- arange_positions input_ids attention_mask=attn_mask |>`<br>`examples/gpt2_kv.axon:30: pos_ids <- arange_positions input_ids attention_mask=attn_mask`<br>`examples/olmoe_1b_7b_0924.axon:45: pos_ids <- arange_positions input_ids attention_mask=attn_mask` |
-| `kv_cache_update` | $(K_{\text{all}},V_{\text{all}})=\begin{cases}(K,V)&\text{if no past}\\(\mathrm{concat}(K_{past},K),\mathrm{concat}(V_{past},V))&\text{otherwise}\end{cases}$ | Keep | `examples/gemma3_270m.axon:31: k_all, v_all, present_kv <- cache::update past_kv kr v when=use_cache`<br>`examples/gpt2_kv.axon:15: k_all, v_all, present_kv <- cache::update past_kv k v when=use_cache`<br>`examples/olmoe_1b_7b_0924.axon:21: k_all, v_all, present_kv <- cache::update past_kv kr v when=use_cache` | - |
+| `kv_cache_update` | $(K_{\text{all}},V_{\text{all}})=\begin{cases}(K,V)&\text{if no past}\\(\mathrm{concat}(K_{past},K),\mathrm{concat}(V_{past},V))&\text{otherwise}\end{cases}$ | Keep | `examples/gemma3_270m.axon:31: k_all, v_all, present_kv <- if use_cache then Cache.update past_kv kr v else kr, v, null`<br>`examples/gpt2_kv.axon:15: k_all, v_all, present_kv <- if use_cache then Cache.update past_kv k v else k, v, null`<br>`examples/olmoe_1b_7b_0924.axon:21: k_all, v_all, present_kv <- if use_cache then Cache.update past_kv kr v else kr, v, null` | - |
 | `coalesce` | Grouped first-non-`None` fallback. For `out=[o_0,...,o_{n-1}]` and flattened `in=[c_0,...,c_{m-1}]` with `m % n == 0`, each output uses its strided group:<br>$o_j=\text{first non-None}(c_j,c_{j+n},c_{j+2n},...)$ | Keep as generic replacement; no need for `coalesce_triplet` | `examples/gemma3_270m.axon:32: k_ctx_raw, v_ctx_raw <- cache::coalesce k_all v_all kr v`<br>`examples/gpt2_kv.axon:16: k_ctx, v_ctx <- cache::coalesce k_all v_all k v`<br>`examples/olmoe_1b_7b_0924.axon:22: k_coalesced, v_coalesced <- cache::coalesce k_all v_all kr v` | - |
 | `topk` | Return top-$k$ values and indices along axis | Keep | `examples/olmoe_1b_7b_0924.axon:32: topk k=EPT dim=-1` | - |
 | `softmax` | $\mathrm{softmax}(x)_i=\frac{e^{x_i}}{\sum_j e^{x_j}}$ | Keep | `examples/olmoe_1b_7b_0924.axon:31: softmax dim=-1 dtype=float32 |>` |
@@ -66,7 +67,7 @@ Lowering now validates op arity and kwarg names/types using this contract.
 | `moe_scatter_add` | Generic weighted sparse accumulation. Applies `accum[token_idx] += updates * scores` (with accumulation for repeated indices). Empty `token_idx` is a no-op returning `accum` unchanged. | Keep; generic weighted sparse accumulation | `examples/olmoe_1b_7b_0924.axon:39: m <- moe_scatter_add m token_idx x_upd sel_scores` | - |
 | `index` | Positional indexing into tensor/list/tuple | Keep | `examples/gemma3_270m.axon:55: past_i <- index past_key_values i`<br>`examples/gpt2_kv.axon:35: past_i <- index past_key_values i`<br>`examples/olmoe_1b_7b_0924.axon:49: past_i <- index past_key_values i` | - |
 | `init_list` | Create empty list container | Keep | `examples/gemma3_270m.axon:53: present_key_values <- init_list()`<br>`examples/gpt2_kv.axon:33: present_key_values <- init_list()`<br>`examples/olmoe_1b_7b_0924.axon:47: present_key_values <- init_list()` | - |
-| `append` | List append: $L' = L \mathbin{\|} [x]$ | Keep | `examples/gemma3_270m.axon:57: present_key_values <- append present_key_values present_i when=use_cache`<br>`examples/gpt2_kv.axon:37: present_key_values <- append present_key_values present_i when=use_cache`<br>`examples/olmoe_1b_7b_0924.axon:51: present_key_values <- append present_key_values present_i when=use_cache` |
+| `append` | List append: $L' = L \mathbin{\|} [x]$ | Keep | `examples/gemma3_270m.axon:57: present_key_values <- use_cache ? append present_key_values present_i : present_key_values`<br>`examples/gpt2_kv.axon:37: present_key_values <- use_cache ? append present_key_values present_i : present_key_values`<br>`examples/olmoe_1b_7b_0924.axon:51: present_key_values <- use_cache ? append present_key_values present_i : present_key_values` |
 | `add` | Elementwise/broadcast $x+y$ | Keep | `examples/gemma3_270m.axon:39: x2 <- x + attn`<br>`examples/gemma3_270m.axon:46: y <- x2 + m`<br>`examples/gpt2.axon:17: x <- x + a`<br>`examples/gpt2.axon:21: return x + m`<br>`examples/gpt2.axon:28: x <- tok + pos`<br>`examples/gpt2_kv.axon:20: x <- x + a`<br>`examples/gpt2_kv.axon:24: y <- x + m`<br>`examples/gpt2_kv.axon:32: x <- tok + pos`<br>`examples/olmoe_1b_7b_0924.axon:27: x <- x + a`<br>`examples/olmoe_1b_7b_0924.axon:40: y <- x + m` | - |
 | `mul` | Elementwise/broadcast product $x\odot y$ | Keep | `examples/gemma3_270m.axon:44: m <- g |> act::gelu_pytorch_tanh |> mul u |> linear@down_proj dim=D`<br>`examples/olmoe_1b_7b_0924.axon:38: x_upd <- gate |> act::silu |> mul up |> linear@down_proj` |
 | `kv_seq_len` | Return cache sequence axis length | Keep | *(no current Axon instance)* | - |

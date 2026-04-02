@@ -21,19 +21,19 @@ import Cache past_length
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x cast_float=true unit_offset=true
 
-gemma3_block :: Tensor[B,S,D] -> I -> Tensor[B,S] -> ?Tensor[B,S] -> ?Cache -> (Tensor[B,S,D], ?Cache)
+gemma3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gemma3_block x i pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
     q <- linear@q_proj xn dim=QD |> reshape_heads heads=H |> rms@q_norm
     k <- linear@k_proj xn dim=KVD |> reshape_heads heads=KVH |> rms@k_norm
     v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
-    theta <- THETA_BASE + (THETA_LONG - THETA_BASE) * (((i + 1) % ROPE_PERIOD) == 0)
+    theta <- ((i + 1) % ROPE_PERIOD) == 0 ? THETA_LONG : THETA_BASE
     q, k <- rope_pair q k position_ids=pos_ids theta=theta
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k (H / KVH)
     v <- repeat v (H / KVH)
-    window <- WIN_LOCAL + (WIN_LONG - WIN_LOCAL) * (((i + 1) % ROPE_PERIOD) == 0)
+    window <- ((i + 1) % ROPE_PERIOD) == 0 ? WIN_LONG : WIN_LOCAL
     mask <- causal_mask q k window=window padding_mask=attn_mask
     a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads |> linear@o_proj dim=D
     return a, new_kv

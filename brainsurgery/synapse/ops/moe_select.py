@@ -24,16 +24,8 @@ def lowering_known_output_arity(*, kwargs: dict[str, Any]) -> int:
 def lowering_normalize_kwargs(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
-    del out, ctx
-    if "expert" in kwargs:
-        return
-    if len(args) >= 4:
-        expert_token = str(args[3]).strip()
-        if expert_token and expert_token.lstrip("-").isdigit():
-            kwargs["expert"] = int(expert_token)
-        else:
-            kwargs["expert"] = expert_token
-        del args[3:]
+    del args, out, kwargs, ctx
+    return
 
 
 def lowering_validate_signature(
@@ -176,6 +168,12 @@ def compile(
     return lines
 
 
+LOWERING_TYPE_SIGNATURE = {
+    "args": ("Any", "Any", "Any"),
+    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "returns": ("Tensor", "IdxTensor", "IdxTensor", "Tensor"),
+}
+
 __all__ = [
     "LOWERING_ARITY",
     "LOWERING_ALLOWED_KWARGS",
@@ -188,4 +186,5 @@ __all__ = [
     "interpret",
     "compile",
     "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
 ]

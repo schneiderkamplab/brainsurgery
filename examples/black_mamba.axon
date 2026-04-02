@@ -30,7 +30,7 @@ moe_ffn x = do
   m <- zeros_like x_norm
   x_upd <- scope@mixer do
     for@local_experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select x_norm topk_scores topk_indices expert=e
+      x_sel, token_idx, topk_pos, sel_scores <- MoE.select x_norm topk_scores topk_indices e
       x_expert <- expert_ffn x_sel
       m <- MoE.scatter_add m token_idx x_expert sel_scores
     return m

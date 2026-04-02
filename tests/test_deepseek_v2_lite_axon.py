@@ -26,9 +26,9 @@ def test_deepseek_v2_lite_axon_lowers_with_expected_symbols(repo_root: Path) -> 
     assert symbols.get("QKNOPE") == 128
     assert symbols.get("QKROPE") == 64
     assert symbols.get("VHD") == 128
-    assert symbols.get("QHD") in (192, "QKNOPE + QKROPE")
+    assert symbols.get("QHD") in (192, "QKNOPE + QKROPE", "QKNOPE+QKROPE")
     assert symbols.get("KVR") == 512
-    assert symbols.get("KVPROJ") in (4096, "H * (QKNOPE + VHD)")
+    assert symbols.get("KVPROJ") in (4096, "H * (QKNOPE + VHD)", "H*(QKNOPE+VHD)")
     assert symbols.get("FFN") == 10944
     assert symbols.get("E") == 64
     assert symbols.get("EPT") == 6

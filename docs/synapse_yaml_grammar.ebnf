@@ -50,28 +50,24 @@ ControlRepeat      = Mapping(
                       "op" ":" "repeat",
                       "var" ":" VarName,
                       "range" ":" Expr,
-                      "body" ":" Graph,
-                      ["when" ":" Expr]
+                      "body" ":" Graph
                     ) ;
 
 BlockUse           = Mapping(
                       "use" ":" BlockName,
                       ["in" ":" BindingIn],
-                      ["out" ":" BindingOut],
-                      ["when" ":" Expr]
+                      ["out" ":" BindingOut]
                     ) ;
 
 NestedGraph        = Mapping(
-                      "graph" ":" Graph,
-                      ["when" ":" Expr]
+                      "graph" ":" Graph
                     ) ;
 
 OpNode             = Mapping(
                       "op" ":" OpName,
                       ["in" ":" InputRef],
                       ["out" ":" OutputRefField],
-                      { OpAttrKey ":" OpAttrValue },
-                      ["when" ":" Expr]
+                      { OpAttrKey ":" OpAttrValue }
                     ) ;
 
 BindingIn          = Mapping({ VarName ":" ExprOrVar }) ;
@@ -92,7 +88,7 @@ OpName             = "embedding" | "linear" | "layernorm" | "rmsnorm"
                    | "kv_seq_len" | "repeat_kv" | "merge_heads" | "attention"
                    | "causal_mask" | "moe_select_tokens"
                    | "moe_scatter_add" | "index" | "init_list" | "append"
-                   | "kv_cache_update" | "coalesce" ;
+                   | "kv_cache_update" | "coalesce" | "select" ;
 
 Expr               = Int | Float | Bool | Null | SymbolName | VarName | ExprString ;
 ExprOrVar          = Expr ;

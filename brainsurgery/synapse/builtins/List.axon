@@ -1,8 +1,8 @@
-init :: List
+init :: List[Any]
 init = _list_init
 
-index :: ?List -> I -> ?Any
+index :: ?List[Any] -> Int -> ?Any
 index values i = _list_index values i
 
-append :: List -> Any -> List
+append :: ?List[Any] -> Any -> ?List[Any]
 append values value = _list_append values value

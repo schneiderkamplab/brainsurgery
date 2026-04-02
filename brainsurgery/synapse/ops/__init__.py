@@ -6,7 +6,13 @@ from pkgutil import iter_modules
 from types import ModuleType
 from typing import Any
 
-_REQUIRED_EXPORTS: tuple[str, ...] = ("OP_NAME", "interpret", "compile", "uses_node_path")
+_REQUIRED_EXPORTS: tuple[str, ...] = (
+    "OP_NAME",
+    "interpret",
+    "compile",
+    "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
+)
 
 
 def _discovered_module_names() -> list[str]:
@@ -44,6 +50,17 @@ def _load_discovered_op_modules() -> dict[str, Any]:
 
         for export_name in _REQUIRED_EXPORTS:
             _require_module_export(module, export_name)
+
+        type_signature = _require_module_export(module, "LOWERING_TYPE_SIGNATURE")
+        if not isinstance(type_signature, dict):
+            raise RuntimeError(
+                f"Synapse op module {qualified_name!r} export 'LOWERING_TYPE_SIGNATURE' must be a dict"
+            )
+        for key in ("args", "kwargs", "returns"):
+            if key not in type_signature:
+                raise RuntimeError(
+                    f"Synapse op module {qualified_name!r} LOWERING_TYPE_SIGNATURE must contain key {key!r}"
+                )
 
         op_name = _require_module_export(module, "OP_NAME")
         if not isinstance(op_name, str) or not op_name:
@@ -99,6 +116,16 @@ def get_op_lowering_signature(op_name: str) -> dict[str, Any] | None:
     return signature or None
 
 
+def get_op_lowering_type_signature(op_name: str) -> dict[str, Any] | None:
+    module = get_op_module(op_name)
+    if module is None:
+        return None
+    signature = getattr(module, "LOWERING_TYPE_SIGNATURE", None)
+    if isinstance(signature, dict):
+        return signature
+    return None
+
+
 def get_op_lowering_normalizer(op_name: str) -> Any | None:
     module = get_op_module(op_name)
     if module is None:
@@ -143,6 +170,7 @@ __all__ = [
     "OP_MODULES",
     "get_op_module",
     "get_op_lowering_signature",
+    "get_op_lowering_type_signature",
     "get_op_lowering_normalizer",
     "get_op_lowering_infer_metadata",
     "get_op_lowering_known_output_arity",

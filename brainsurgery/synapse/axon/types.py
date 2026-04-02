@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TypeAlias
 
-_NUMERIC_TOKEN_RE = re.compile(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
+from .type_system import DimToken, TypeExpr
 
 
 @dataclass(frozen=True)
 class AxonParam:
     name: str
     optional: bool = False
-    type_expr: str | None = None
-    shape: tuple[str, ...] | None = None
+    type_expr: TypeExpr | None = None
+    shape: tuple[DimToken, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -20,8 +20,34 @@ class AxonExprName:
 
 
 @dataclass(frozen=True)
-class AxonExprLiteral:
-    value: object
+class AxonExprInt:
+    value: int
+
+
+@dataclass(frozen=True)
+class AxonExprFloat:
+    value: float
+    lexeme: str | None = None
+
+
+@dataclass(frozen=True)
+class AxonExprBool:
+    value: bool
+
+
+@dataclass(frozen=True)
+class AxonExprNull:
+    pass
+
+
+@dataclass(frozen=True)
+class AxonExprString:
+    value: str
+
+
+@dataclass(frozen=True)
+class AxonExprList:
+    items: tuple["AxonExpr", ...]
 
 
 @dataclass(frozen=True)
@@ -33,7 +59,7 @@ class AxonExprTuple:
 class AxonExprCall:
     callee: str
     args: tuple["AxonExpr", ...]
-    kwargs: dict[str, "AxonExpr | object"]
+    kwargs: dict[str, "AxonKwargValue"]
 
 
 @dataclass(frozen=True)
@@ -81,9 +107,20 @@ class AxonExprParen:
     inner: "AxonExpr"
 
 
+@dataclass(frozen=True)
+class AxonExprDo:
+    body: tuple["AxonStatement", ...]
+    inline: bool = False
+
+
 AxonExpr = (
     AxonExprName
-    | AxonExprLiteral
+    | AxonExprInt
+    | AxonExprFloat
+    | AxonExprBool
+    | AxonExprNull
+    | AxonExprString
+    | AxonExprList
     | AxonExprTuple
     | AxonExprCall
     | AxonExprPipe
@@ -93,69 +130,12 @@ AxonExpr = (
     | AxonExprBinary
     | AxonExprLambda
     | AxonExprParen
+    | AxonExprDo
 )
 
-
-def render_axon_expr(expr: AxonExpr) -> str:
-    if isinstance(expr, AxonExprName):
-        return expr.name
-    if isinstance(expr, AxonExprLiteral):
-        value = expr.value
-        if isinstance(value, str):
-            if _NUMERIC_TOKEN_RE.fullmatch(value):
-                return value
-            return repr(value)
-        if value is True:
-            return "true"
-        if value is False:
-            return "false"
-        if value is None:
-            return "null"
-        return str(value)
-    if isinstance(expr, AxonExprTuple):
-        return ", ".join(render_axon_expr(item) for item in expr.items)
-    if isinstance(expr, AxonExprCall):
-        args = [render_axon_expr(arg) for arg in expr.args]
-        kwargs = []
-        for key, value in expr.kwargs.items():
-            if isinstance(
-                value,
-                (
-                    AxonExprName,
-                    AxonExprLiteral,
-                    AxonExprTuple,
-                    AxonExprCall,
-                    AxonExprPipe,
-                    AxonExprBind,
-                    AxonExprIf,
-                    AxonExprTernary,
-                    AxonExprBinary,
-                    AxonExprLambda,
-                    AxonExprParen,
-                ),
-            ):
-                kwargs.append(f"{key}={render_axon_expr(value)}")
-            else:
-                kwargs.append(f"{key}={value!r}" if isinstance(value, str) else f"{key}={value}")
-        all_args = [*args, *kwargs]
-        return f"{expr.callee}({', '.join(all_args)})"
-    if isinstance(expr, AxonExprPipe):
-        return " |> ".join(
-            [render_axon_expr(expr.value), *[render_axon_expr(s) for s in expr.stages]]
-        )
-    if isinstance(expr, AxonExprBind):
-        return f"{render_axon_expr(expr.value)} >>= \\{expr.var} -> {render_axon_expr(expr.body)}"
-    if isinstance(expr, AxonExprIf):
-        return f"if {render_axon_expr(expr.cond)} then {render_axon_expr(expr.true_expr)} else {render_axon_expr(expr.false_expr)}"
-    if isinstance(expr, AxonExprTernary):
-        return f"{render_axon_expr(expr.cond)} ? {render_axon_expr(expr.true_expr)} : {render_axon_expr(expr.false_expr)}"
-    if isinstance(expr, AxonExprBinary):
-        if expr.op in {"and", "or"}:
-            return f"{render_axon_expr(expr.left)} {expr.op} {render_axon_expr(expr.right)}"
-        return f"{render_axon_expr(expr.left)}{expr.op}{render_axon_expr(expr.right)}"
-    if isinstance(expr, AxonExprLambda):
-        return f"\\{expr.var} -> {render_axon_expr(expr.body)}"
-    return f"({render_axon_expr(expr.inner)})"
+AxonScalarValue: TypeAlias = bool | int | float | str | None
+AxonListScalarValue: TypeAlias = list[int | str]
+AxonKwargValue: TypeAlias = AxonExpr | AxonScalarValue | AxonListScalarValue
 
 
 @dataclass(frozen=True)
@@ -184,6 +164,7 @@ class AxonScopeBind:
     targets: tuple[str, ...]
     prefix: str
     body: tuple["AxonStatement", ...]
+    kwargs: dict[str, "AxonKwargValue"] = field(default_factory=dict)
 
 
 AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonScopeBind
@@ -201,15 +182,23 @@ class AxonModule:
     imported_members: dict[str, tuple[str, ...]] | None = None
     symbols: dict[str, object] | None = None
     pragmas: dict[str, object] | None = None
-    return_type_expr: str | None = None
-    return_shape: tuple[str, ...] | None = None
+    return_type_expr: TypeExpr | None = None
+    return_shape: tuple[DimToken, ...] | None = None
 
 
 __all__ = [
     "AxonParam",
     "AxonExpr",
     "AxonExprName",
-    "AxonExprLiteral",
+    "AxonExprInt",
+    "AxonExprFloat",
+    "AxonExprBool",
+    "AxonExprNull",
+    "AxonExprString",
+    "AxonExprList",
+    "AxonScalarValue",
+    "AxonListScalarValue",
+    "AxonKwargValue",
     "AxonExprTuple",
     "AxonExprCall",
     "AxonExprPipe",
@@ -219,7 +208,7 @@ __all__ = [
     "AxonExprBinary",
     "AxonExprLambda",
     "AxonExprParen",
-    "render_axon_expr",
+    "AxonExprDo",
     "AxonBind",
     "AxonReturn",
     "AxonRepeat",

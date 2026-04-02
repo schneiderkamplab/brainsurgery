@@ -145,7 +145,7 @@ The current Synapse runtime/compiler supports these model-domain ops:
 ### 6.1 Clarified Semantics (Stability-Critical)
 - `kv_cache_update`:
   - operation contract is `(past, k, v) -> (k_all, v_all, present)`
-  - no op kwargs; conditional execution is represented by graph control flow (`when` guards), not op kwargs
+  - no op kwargs; conditional execution is represented by lazy `select` nodes, not op kwargs
 - `coalesce`:
   - generic grouped fallback, not KV-specific
   - if output arity is `n`, inputs are partitioned as strided groups:
@@ -164,6 +164,7 @@ Control/build graph constructs:
 - `repeat` (control node, not an op module)
 - `use` block invocation
 - nested `graph` scopes
+- lazy `select` value nodes for conditional expressions
 
 Internal IR-only nodes (lowering artifacts, not public DSL surface):
 - `_ir_alias`

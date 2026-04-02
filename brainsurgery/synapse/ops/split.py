@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 OP_NAME = "split"
@@ -37,6 +36,65 @@ def _maybe_int_list(value: Any) -> list[int] | None:
     return None
 
 
+def _is_int_token(value: str) -> bool:
+    token = value.strip()
+    return bool(token) and (token.isdigit() or (token[0] in {"+", "-"} and token[1:].isdigit()))
+
+
+def _name_expr(name: str) -> dict[str, Any]:
+    return {"_expr": "name", "id": name}
+
+
+def _binary_expr(op: str, left: Any, right: Any) -> dict[str, Any]:
+    return {"_expr": "binary", "op": op, "left": left, "right": right}
+
+
+def _split_scaled_dim(value: Any) -> tuple[int, Any] | None:
+    if isinstance(value, int):
+        return value, 1
+    if isinstance(value, str):
+        token = value.strip().replace(" ", "")
+        if not token:
+            return None
+        if _is_int_token(token):
+            return int(token), 1
+        parts = token.split("*")
+        if len(parts) == 1:
+            return 1, token
+        if len(parts) == 2:
+            a, b = parts
+            if _is_int_token(a):
+                return int(a), b if b else None
+            if _is_int_token(b):
+                return int(b), a if a else None
+        return None
+    if isinstance(value, dict):
+        kind = value.get("_expr")
+        if kind == "name":
+            ident = value.get("id")
+            if isinstance(ident, str) and ident:
+                return 1, _name_expr(ident)
+            return None
+        if kind == "binary" and value.get("op") == "*":
+            left = value.get("left")
+            right = value.get("right")
+            if isinstance(left, int) and not isinstance(left, bool):
+                return left, right
+            if isinstance(right, int) and not isinstance(right, bool):
+                return right, left
+    return None
+
+
+def _scale_term(term: Any, factor: int) -> Any:
+    if factor == 1:
+        return term
+    if isinstance(term, int):
+        return factor * term
+    if isinstance(term, str):
+        return f"{factor}*{term}"
+    return _binary_expr("*", factor, term)
+
+
 def _infer_split_sizes_from_last_dim(last_dim: Any, parts: int) -> list[Any] | None:
     if parts <= 0:
         return None
@@ -44,30 +102,18 @@ def _infer_split_sizes_from_last_dim(last_dim: Any, parts: int) -> list[Any] | N
         if last_dim % parts != 0:
             return None
         return [last_dim // parts for _ in range(parts)]
-    if not isinstance(last_dim, str):
+    scaled = _split_scaled_dim(last_dim)
+    if scaled is None:
         return None
-    token = last_dim.strip().replace(" ", "")
-    if not token:
+    factor, term = scaled
+    if not isinstance(factor, int) or isinstance(factor, bool):
         return None
-    if re.fullmatch(r"-?[0-9]+", token):
-        value = int(token)
-        if value % parts != 0:
-            return None
-        return [value // parts for _ in range(parts)]
-    match = re.fullmatch(r"([0-9]+)\*(.+)", token)
-    if match is None:
-        match = re.fullmatch(r"(.+)\*([0-9]+)", token)
-        if match is None:
-            return None
-        term = match.group(1)
-        factor = int(match.group(2))
-    else:
-        factor = int(match.group(1))
-        term = match.group(2)
+    if term is None:
+        return None
     if factor % parts != 0:
         return None
     each = factor // parts
-    piece: Any = term if each == 1 else f"{each}*{term}"
+    piece: Any = _scale_term(term, each)
     return [piece for _ in range(parts)]
 
 
@@ -118,7 +164,9 @@ def lowering_normalize_kwargs(
         if not isinstance(sizes_raw, list) or len(sizes_raw) == 0:
             raise ValueError("split sizes must be a non-empty list")
         if not all(
-            (isinstance(v, int) and not isinstance(v, bool)) or isinstance(v, str)
+            (isinstance(v, int) and not isinstance(v, bool))
+            or isinstance(v, str)
+            or (isinstance(v, dict) and v.get("_expr") in {"name", "binary", "if", "tuple"})
             for v in sizes_raw
         ):
             raise ValueError("split sizes must contain only ints or symbolic dims")
@@ -142,7 +190,7 @@ def lowering_known_output_arity(*, kwargs: dict[str, Any]) -> int | None:
     parts = kwargs.get("parts")
     if isinstance(parts, int):
         return parts
-    if isinstance(parts, str) and re.fullmatch(r"-?[0-9]+", parts.strip()):
+    if isinstance(parts, str) and _is_int_token(parts):
         return int(parts.strip())
     return None
 
@@ -245,6 +293,12 @@ def compile(
     return lines
 
 
+LOWERING_TYPE_SIGNATURE = {
+    "args": ("Any",),
+    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "returns": "dynamic",
+}
+
 __all__ = [
     "OP_NAME",
     "LOWERING_ARITY",
@@ -257,4 +311,5 @@ __all__ = [
     "interpret",
     "compile",
     "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
 ]

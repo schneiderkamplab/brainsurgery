@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ast
 import math
-import re
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +11,11 @@ from torch import nn
 from ..core import StateDictLike
 from .mxfp4 import materialize_mxfp4_aliases
 from .ops import get_op_module
+from .spec_normalize import normalize_synapse_spec_expressions
+
+
+def _is_int_token(token: str) -> bool:
+    return bool(token) and (token.isdigit() or (token[0] in {"+", "-"} and token[1:].isdigit()))
 
 
 class SynapseProgramModel(nn.Module):
@@ -31,6 +34,7 @@ class SynapseProgramModel(nn.Module):
         self.spec: dict[str, Any] = self._resolve_spec(spec)
         self._state: dict[str, torch.Tensor] = {}
         self._runtime_state_dict = runtime_state_dict
+        self._param_roots_stack: list[list[str]] = []
         if state_dict is not None:
             self.load_state_dict_tensors(state_dict)
 
@@ -103,6 +107,8 @@ class SynapseProgramModel(nn.Module):
 
     def _resolve_spec(self, spec: dict[str, Any] | None) -> dict[str, Any]:
         resolved = self.SPEC if spec is None else spec
+        if isinstance(resolved, dict):
+            resolved = normalize_synapse_spec_expressions(resolved)
         if not isinstance(resolved, dict):
             raise ValueError("Synapse spec must be a mapping")
         if resolved.get("synapse") != 1:
@@ -291,13 +297,6 @@ class SynapseProgramModel(nn.Module):
             if not isinstance(node_spec, dict):
                 raise ValueError(f"Node spec for {node_name!r} must be mapping")
 
-            when_expr = node_spec.get("when")
-            if when_expr is not None:
-                for produced_name in self._node_output_names(node_spec):
-                    env.setdefault(produced_name, None)
-                if not self._check_when(when_expr, env, symbols):
-                    continue
-
             op = node_spec.get("_op")
             if op == "for":
                 scope_name = node_spec.get("_scope")
@@ -391,7 +390,7 @@ class SynapseProgramModel(nn.Module):
                 block_env[block_input_name] = self._eval_expr(src_name, env, symbols)
 
         for key, value in node_spec.items():
-            if key.startswith("_") or key in {"when", "graph"}:
+            if key.startswith("_") or key == "graph":
                 continue
             if key not in block_inputs:
                 continue
@@ -415,7 +414,22 @@ class SynapseProgramModel(nn.Module):
                 call_scope = scope
             else:
                 call_scope = self._join(scope, raw_scope)
-        self._run_graph(block_graph, block_env, scope=call_scope, symbols=symbols, blocks=blocks)
+        raw_param_roots = node_spec.get("_param_roots")
+        pushed_roots: list[str] | None = None
+        if (
+            isinstance(raw_param_roots, list)
+            and bool(raw_param_roots)
+            and all(isinstance(item, str) for item in raw_param_roots)
+        ):
+            pushed_roots = list(raw_param_roots)
+            self._param_roots_stack.append(pushed_roots)
+        try:
+            self._run_graph(
+                block_graph, block_env, scope=call_scope, symbols=symbols, blocks=blocks
+            )
+        finally:
+            if pushed_roots is not None:
+                self._param_roots_stack.pop()
 
         block_outputs = block_spec.get("outputs", {})
         if not isinstance(block_outputs, dict):
@@ -518,23 +532,68 @@ class SynapseProgramModel(nn.Module):
     def _infer_param_path(
         self, node_spec: dict[str, Any], *, node_path: str, param_name: str
     ) -> str:
+        def _join_root(root: str, scoped: str) -> str:
+            if root:
+                return self._join(root, scoped)
+            return scoped
+
+        def _current_roots() -> list[str]:
+            if self._param_roots_stack:
+                return list(self._param_roots_stack[-1])
+            return [""]
+
+        def _pick_explicit_candidate(raw: Any) -> str | None:
+            if isinstance(raw, str):
+                scoped = self._join(self._scope_of(node_path), raw)
+                scoped = scoped if scoped else raw
+                candidates = [_join_root(root, scoped) for root in _current_roots()]
+                for candidate in candidates:
+                    if candidate in self._state:
+                        return candidate
+                return candidates[0]
+            if isinstance(raw, list | tuple):
+                list_candidates: list[str] = []
+                for item in raw:
+                    if not isinstance(item, str):
+                        continue
+                    scoped = self._join(self._scope_of(node_path), item)
+                    scoped = scoped if scoped else item
+                    for root in _current_roots():
+                        list_candidates.append(_join_root(root, scoped))
+                if not list_candidates:
+                    return None
+                for candidate in list_candidates:
+                    if candidate in self._state:
+                        return candidate
+                return list_candidates[0]
+            return None
+
+        def _pick_scoped_candidate(scoped: str) -> str:
+            candidates = [_join_root(root, scoped) for root in _current_roots()]
+            for candidate in candidates:
+                if candidate in self._state:
+                    return candidate
+            return candidates[0]
+
         param_base = node_spec.get("param_base")
         if isinstance(param_base, str):
             base_resolved = node_spec.get(param_base)
             base = base_resolved if isinstance(base_resolved, str) else param_base
             scoped_base = self._join(self._scope_of(node_path), base)
-            return f"{scoped_base}.{param_name}" if scoped_base else param_name
+            scoped_param = f"{scoped_base}.{param_name}" if scoped_base else param_name
+            return _pick_scoped_candidate(scoped_param)
         explicit_params = node_spec.get("_params")
         if isinstance(explicit_params, dict):
-            explicit = explicit_params.get(param_name)
+            explicit = _pick_explicit_candidate(explicit_params.get(param_name))
             if isinstance(explicit, str):
-                scoped_explicit = self._join(self._scope_of(node_path), explicit)
-                return f"{scoped_explicit}" if scoped_explicit else explicit
+                return explicit
         if param_name in node_spec and isinstance(node_spec[param_name], str):
             candidate = node_spec[param_name]
-            scoped_candidate = self._join(self._scope_of(node_path), candidate)
-            return f"{scoped_candidate}" if scoped_candidate else candidate
-        return f"{node_path}.{param_name}" if node_path else param_name
+            explicit = _pick_explicit_candidate(candidate)
+            if isinstance(explicit, str):
+                return explicit
+        fallback = f"{node_path}.{param_name}" if node_path else param_name
+        return _pick_scoped_candidate(fallback)
 
     def _resolve_output_ref(self, ref: Any, env: dict[str, Any]) -> Any:
         if isinstance(ref, str):
@@ -586,7 +645,7 @@ class SynapseProgramModel(nn.Module):
                 token = dim_token.strip()
                 if not token:
                     continue
-                if re.fullmatch(r"-?[0-9]+", token):
+                if _is_int_token(token):
                     expected = int(token)
                     if actual != expected:
                         raise ValueError(
@@ -623,14 +682,6 @@ class SynapseProgramModel(nn.Module):
             raise ValueError(f"Input reference {ref!r} does not resolve to tensor")
         return value
 
-    def _check_when(
-        self, when_expr: Any, env: dict[str, Any], symbols: dict[str, int | float | bool]
-    ) -> bool:
-        if when_expr is None:
-            return True
-        value = self._eval_expr(when_expr, env, symbols)
-        return bool(value)
-
     def _eval_expr(
         self, expr: Any, env: dict[str, Any], symbols: dict[str, int | float | bool]
     ) -> Any:
@@ -638,68 +689,191 @@ class SynapseProgramModel(nn.Module):
             return None
         if isinstance(expr, (int, float, bool)):
             return expr
+        if isinstance(expr, list):
+            return [self._eval_expr(item, env, symbols) for item in expr]
+        if isinstance(expr, tuple):
+            return tuple(self._eval_expr(item, env, symbols) for item in expr)
+        if isinstance(expr, dict):
+            kind = expr.get("_expr")
+            if kind == "name":
+                ident = expr.get("id")
+                if not isinstance(ident, str) or not ident:
+                    raise ValueError(f"Invalid name expression payload: {expr!r}")
+                if ident in env:
+                    return env[ident]
+                if ident in symbols:
+                    return symbols[ident]
+                raise ValueError(f"Unknown symbol in expression: {ident}")
+            if kind == "tuple":
+                items = expr.get("items")
+                if not isinstance(items, list):
+                    raise ValueError(f"Invalid tuple expression payload: {expr!r}")
+                return tuple(self._eval_expr(item, env, symbols) for item in items)
+            if kind == "if":
+                cond = bool(self._eval_expr(expr.get("cond"), env, symbols))
+                branch = expr.get("then") if cond else expr.get("else")
+                return self._eval_expr(branch, env, symbols)
+            if kind == "binary":
+                op = expr.get("op")
+                left = self._eval_expr(expr.get("left"), env, symbols)
+                right = self._eval_expr(expr.get("right"), env, symbols)
+                if op == "+":
+                    return left + right
+                if op == "-":
+                    return left - right
+                if op == "*":
+                    return left * right
+                if op == "/":
+                    return left / right
+                if op == "%":
+                    return left % right
+                if op == "==":
+                    return left == right
+                if op == "!=":
+                    return left != right
+                if op == "<":
+                    return left < right
+                if op == "<=":
+                    return left <= right
+                if op == ">":
+                    return left > right
+                if op == ">=":
+                    return left >= right
+                if op == "and":
+                    return bool(left) and bool(right)
+                if op == "or":
+                    return bool(left) or bool(right)
+                raise ValueError(f"Unsupported binary operator in expression: {op!r}")
+            if kind == "string":
+                value = expr.get("value")
+                if not isinstance(value, str):
+                    raise ValueError(f"Invalid string expression payload: {expr!r}")
+                return value
+            if kind == "call":
+                callee = expr.get("callee")
+                args_raw = expr.get("args", [])
+                kwargs_raw = expr.get("kwargs", {})
+                if not isinstance(callee, str) or not callee:
+                    raise ValueError(f"Invalid call expression payload: {expr!r}")
+                if not isinstance(args_raw, list):
+                    raise ValueError(f"Invalid call expression args payload: {expr!r}")
+                if not isinstance(kwargs_raw, dict):
+                    raise ValueError(f"Invalid call expression kwargs payload: {expr!r}")
+                args_eval = [self._eval_expr(item, env, symbols) for item in args_raw]
+                kwargs_eval = {
+                    str(key): self._eval_expr(value, env, symbols)
+                    for key, value in kwargs_raw.items()
+                }
+                return self._eval_expr_call(callee, args_eval, kwargs_eval)
+            return {key: self._eval_expr(value, env, symbols) for key, value in expr.items()}
         if isinstance(expr, str):
             token = expr.strip()
             if token in env:
                 return env[token]
             if token in symbols:
                 return symbols[token]
-            if token.lower() == "true":
-                return True
-            if token.lower() == "false":
-                return False
-            if token.lower() == "null":
-                return None
-            return self._safe_eval_numeric(token, env, symbols)
+            return token
         return expr
 
-    def _safe_eval_numeric(
-        self, text: str, env: dict[str, Any], symbols: dict[str, int | float | bool]
-    ) -> Any:
-        names: dict[str, Any] = {}
-        for key, value in symbols.items():
-            names[key] = value
-        for key, value in env.items():
-            if isinstance(value, (int, float, bool)) or value is None:
-                names[key] = value
+    def _expr_config_root(self) -> dict[str, Any]:
+        model = self.spec.get("model", {})
+        if isinstance(model, dict):
+            cfg = model.get("config")
+            if isinstance(cfg, dict):
+                return cfg
+        return {}
 
-        parsed = ast.parse(text, mode="eval")
-        allowed_nodes = (
-            ast.Expression,
-            ast.BinOp,
-            ast.UnaryOp,
-            ast.Add,
-            ast.Sub,
-            ast.Mult,
-            ast.Div,
-            ast.FloorDiv,
-            ast.Mod,
-            ast.Pow,
-            ast.USub,
-            ast.UAdd,
-            ast.Constant,
-            ast.Name,
-            ast.Load,
-            ast.Compare,
-            ast.Eq,
-            ast.NotEq,
-            ast.Lt,
-            ast.LtE,
-            ast.Gt,
-            ast.GtE,
-            ast.BoolOp,
-            ast.And,
-            ast.Or,
-            ast.Not,
-        )
-        for node in ast.walk(parsed):
-            if not isinstance(node, allowed_nodes):
-                raise ValueError(f"Unsupported expression: {text!r}")
-            if isinstance(node, ast.Name) and node.id not in names:
-                raise ValueError(f"Unknown symbol in expression: {node.id}")
+    def _expr_config_lookup(self, key: str, *, root: str = "") -> tuple[bool, Any]:
+        value: Any = self._expr_config_root()
+        if root:
+            for part in root.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    return False, None
+                value = value[part]
+        for part in key.split("."):
+            if not isinstance(value, dict) or part not in value:
+                return False, None
+            value = value[part]
+        return True, value
 
-        code = compile(parsed, "<synapse-expr>", "eval")
-        return eval(code, {"__builtins__": {}, "math": math}, names)
+    def _eval_expr_call(self, callee: str, args: list[Any], kwargs: dict[str, Any]) -> Any:
+        if callee in {"sqrt", "Prelude.sqrt"}:
+            if kwargs:
+                raise ValueError("sqrt expression call does not support kwargs")
+            if len(args) != 1:
+                raise ValueError("sqrt expression call expects exactly one positional argument")
+            arg = args[0]
+            if isinstance(arg, bool) or not isinstance(arg, (int, float)):
+                raise ValueError("sqrt expression call expects numeric argument")
+            return math.sqrt(float(arg))
+        if callee in {"abs", "Prelude.abs"}:
+            if kwargs:
+                raise ValueError("abs expression call does not support kwargs")
+            if len(args) != 1:
+                raise ValueError("abs expression call expects exactly one positional argument")
+            arg = args[0]
+            if isinstance(arg, bool) or not isinstance(arg, (int, float)):
+                raise ValueError("abs expression call expects numeric argument")
+            return abs(arg)
+        if callee in {"min", "Prelude.min"}:
+            if kwargs:
+                raise ValueError("min expression call does not support kwargs")
+            if len(args) < 1:
+                raise ValueError("min expression call expects at least one positional argument")
+            if any(isinstance(arg, bool) or not isinstance(arg, (int, float)) for arg in args):
+                raise ValueError("min expression call expects numeric arguments")
+            return min(args)
+        if callee in {"max", "Prelude.max"}:
+            if kwargs:
+                raise ValueError("max expression call does not support kwargs")
+            if len(args) < 1:
+                raise ValueError("max expression call expects at least one positional argument")
+            if any(isinstance(arg, bool) or not isinstance(arg, (int, float)) for arg in args):
+                raise ValueError("max expression call expects numeric arguments")
+            return max(args)
+        if callee in {"Config.has", "Config.int", "Config.float", "Config.str"}:
+            if len(args) != 1 or not isinstance(args[0], str) or not args[0]:
+                raise ValueError(f"{callee} expression call expects one non-empty string key")
+            key = args[0]
+            root_raw = kwargs.get("root", "")
+            root = root_raw if isinstance(root_raw, str) else ""
+            found, value = self._expr_config_lookup(key, root=root)
+            if callee == "Config.has":
+                if "default" in kwargs:
+                    raise ValueError("Config.has expression call does not support default kwarg")
+                return bool(found)
+            if not found:
+                if "default" not in kwargs:
+                    full_key = f"{root}.{key}" if root else key
+                    raise KeyError(
+                        f"{callee} expression call missing required config key: {full_key}"
+                    )
+                value = kwargs["default"]
+            if callee == "Config.int":
+                if isinstance(value, bool):
+                    raise ValueError("Config.int expression call expected int")
+                if isinstance(value, int):
+                    return int(value)
+                if isinstance(value, str):
+                    raw = value.strip()
+                    if raw and (raw.isdigit() or (raw[0] in {"+", "-"} and raw[1:].isdigit())):
+                        return int(raw)
+                raise ValueError("Config.int expression call expected int")
+            if callee == "Config.float":
+                if isinstance(value, bool):
+                    raise ValueError("Config.float expression call expected float")
+                if isinstance(value, (int, float)):
+                    return float(value)
+                if isinstance(value, str):
+                    raw = value.strip()
+                    if raw:
+                        return float(raw)
+                raise ValueError("Config.float expression call expected float")
+            if callee == "Config.str":
+                if not isinstance(value, str):
+                    raise ValueError("Config.str expression call expected string")
+                return value
+        raise ValueError(f"Unsupported call expression: {callee!r}")
 
     def _join(self, left: str, right: str) -> str:
         if not left:

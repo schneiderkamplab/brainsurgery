@@ -1,4 +1,5 @@
 from .axon import (
+    TYPING_RULES,
     AxonBind,
     AxonModule,
     AxonParam,
@@ -12,6 +13,8 @@ from .axon import (
     parse_axon_program,
     parse_axon_program_from_path,
     synapse_spec_to_axon_module_text,
+    typecheck_axon_module,
+    typecheck_axon_program,
     validate_axon_program,
 )
 from .codegen import emit_model_code_from_synapse_spec, load_synapse_torch_op_map
@@ -88,5 +91,8 @@ __all__ = [
     "parse_axon_program_from_path",
     "render_synapse_spec_to_dot",
     "synapse_spec_to_axon_module_text",
+    "typecheck_axon_module",
+    "typecheck_axon_program",
+    "TYPING_RULES",
     "validate_axon_program",
 ]

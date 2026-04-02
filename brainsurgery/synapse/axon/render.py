@@ -97,7 +97,7 @@ def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = N
 
     kwargs: list[str] = []
     for key, value in node_spec.items():
-        if key in {"_op", "_args", "_bind", "_target", "_params"}:
+        if key.startswith("_") or key in {"_op", "_args", "_bind", "_target", "_params"}:
             continue
         kwargs.append(f"{key}={_format_scalar(value)}")
 
@@ -132,7 +132,9 @@ def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = N
         return f"{in_args[0]} * {in_args[1]}"
 
     all_args = [*in_args, *kwargs]
-    return f"{callee}({', '.join(all_args)})"
+    if not all_args:
+        return callee
+    return f"{callee} {' '.join(all_args)}"
 
 
 def _can_render_as_bind(node_spec: dict[str, Any]) -> bool:
@@ -159,9 +161,11 @@ def _render_module(
         optional = isinstance(input_spec, dict) and bool(input_spec.get("optional", False))
         params.append(f"{name}?" if optional else str(name))
 
-    return_names = list(outputs.keys()) if outputs else ["out"]
+    return_names = list(outputs.keys()) if outputs else []
     arg_types = ["?Tensor" if p.endswith("?") else "Tensor" for p in params]
-    if len(return_names) == 1:
+    if not return_names:
+        ret_type = "Null"
+    elif len(return_names) == 1:
         ret_type = "Tensor"
     else:
         ret_type = "(" + ", ".join("Tensor" for _ in return_names) + ")"
@@ -215,13 +219,13 @@ def _render_module(
                     raise ValueError(f"invalid call bind: {node_spec!r}")
                 kwargs_parts: list[str] = []
                 for key, value in node_spec.items():
-                    if key.startswith("_") or key in {"when", "graph"}:
+                    if key.startswith("_") or key == "graph":
                         continue
                     kwargs_parts.append(f"{key}={value}")
                 args_parts = [str(v) for v in args_values] + kwargs_parts
                 lhs = ", ".join(out_values)
-                args = ", ".join(args_parts)
-                lines.append(f"{indent}{lhs} <- {callee}({args})")
+                rhs = callee if not args_parts else f"{callee} {' '.join(args_parts)}"
+                lines.append(f"{indent}{lhs} <- {rhs}")
                 continue
 
             if "graph" in node_spec and "_op" not in node_spec:

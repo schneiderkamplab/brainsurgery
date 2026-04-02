@@ -105,10 +105,9 @@ Top-level constants define symbols used by module signatures and args:
   - `Cache.init_list()`
   - `Cache.index(cache, i)`
   - `Cache.append(cache, present_i)`
-  - `Cache.append_when(cache, present_i, use_cache)`
 
 Semantics notes:
-- `cache::update` has no op-level kwargs; `when=...` is treated as control-flow guard syntax during lowering.
+- `cache::update` has no op-level kwargs.
 - `cache::coalesce` is grouped first-non-`None` fallback over strided candidate groups (generic, not KV-specific).
 
 KV remains optional at spec level; codegen/runtime may use hints to optimize decoding.
@@ -123,7 +122,7 @@ import Cache
 decoder :: Tensor[B,S,D] -> ?Cache -> ?Bool -> (Tensor[B,S,D], ?Cache)
 decoder x past_kv use_cache = do
   q, k, v <- ...
-  k_all, v_all, present <- Cache.update past_kv k v when=use_cache
+  k_all, v_all, present <- if use_cache then Cache.update past_kv k v else k, v, null
   k_ctx, v_ctx <- Cache.coalesce k_all v_all k v
   y <- attention q k_ctx v_ctx ...
   return y, present
@@ -135,12 +134,12 @@ model input_ids past_key_values use_cache = do
   for@layers i <- [0..L) do
     past_i <- Cache.index past_key_values i
     x, present_i <- decoder x past_i use_cache
-    present_key_values <- Cache.append_when present_key_values present_i use_cache
+    present_key_values <- use_cache ? Cache.append present_key_values present_i : present_key_values
   return x, present_key_values
 ```
 
 Notes:
-- `Cache.append_when` is the canonical conditional-append form and is equivalent to
+- Conditional append is expressed directly as
   `use_cache ? Cache.append(cache, present_i) : cache`.
 - `Cache.init_list()` must be called with `()`; without it, Axon treats it as a value expression.
 
@@ -195,7 +194,7 @@ Lowering is mechanical:
 - `<-` bindings map to graph node outputs,
 - `op@path(...)` maps to Synapse op + inferred parameter path,
 - `for@...` maps to Synapse `op: repeat`,
-- `if/then/else` and ternary shorthand map to conditional graph nodes / `when`-guarded assignments,
+- `if/then/else` and ternary shorthand map to lazy `select` value nodes,
 - annotations map to planner metadata.
 
 Synapse YAML remains the canonical machine-readable format. Axon is the readable authoring/rendering format.

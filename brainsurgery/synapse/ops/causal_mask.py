@@ -250,6 +250,12 @@ def compile(
     return lines
 
 
+LOWERING_TYPE_SIGNATURE = {
+    "args": ("Any", "Any"),
+    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "returns": ("Tensor",),
+}
+
 __all__ = [
     "LOWERING_ARITY",
     "LOWERING_ALLOWED_KWARGS",
@@ -261,4 +267,5 @@ __all__ = [
     "interpret",
     "compile",
     "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
 ]

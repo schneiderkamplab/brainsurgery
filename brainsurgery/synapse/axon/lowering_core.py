@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import copy
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,32 +12,34 @@ from ..ops import (
     get_op_lowering_validator,
 )
 from ..type_inference import annotate_spec_with_block_io_types, infer_block_io_types_from_modules
-from .call_parser import (
-    parse_scalar as _parse_scalar,
-)
-from .expressions import (
-    is_name_token as _is_name_token,
-)
+from .expression_codec import axon_expr_to_runtime_value as _expr_to_runtime_value
+from .typecheck import typecheck_axon_program
 from .types import (
     AxonBind,
     AxonExpr,
     AxonExprBinary,
     AxonExprBind,
+    AxonExprBool,
     AxonExprCall,
+    AxonExprDo,
+    AxonExprFloat,
     AxonExprIf,
+    AxonExprInt,
     AxonExprLambda,
-    AxonExprLiteral,
+    AxonExprList,
     AxonExprName,
+    AxonExprNull,
     AxonExprParen,
     AxonExprPipe,
+    AxonExprString,
     AxonExprTernary,
     AxonExprTuple,
+    AxonKwargValue,
     AxonModule,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
     AxonStatement,
-    render_axon_expr,
 )
 
 
@@ -48,6 +49,10 @@ def _is_identifier(token: str) -> bool:
     if not (token[0].isalpha() or token[0] == "_"):
         return False
     return all(ch.isalnum() or ch == "_" for ch in token[1:])
+
+
+def _is_name_token(token: str) -> bool:
+    return _is_identifier(token.strip())
 
 
 def _expr_name(expr: AxonExpr) -> str | None:
@@ -75,16 +80,22 @@ def _sanitize_token(token: str, *, default: str) -> str:
     return normalized or default
 
 
-def _render_expr(expr: AxonExpr) -> str:
-    return render_axon_expr(expr).strip()
-
-
-def _render_loop_expr(expr: AxonExpr) -> str:
-    if isinstance(expr, AxonExprParen):
-        return f"({_render_loop_expr(expr.inner)})"
-    if isinstance(expr, AxonExprBinary):
-        return f"{_render_loop_expr(expr.left)} {expr.op} {_render_loop_expr(expr.right)}"
-    return _render_expr(expr)
+def _parse_scalar_token(token: str) -> Any:
+    value = token.strip()
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    if value.lower() == "null":
+        return None
+    if value and ((value[0] == value[-1] == '"') or (value[0] == value[-1] == "'")):
+        return value[1:-1]
+    if value and (value.isdigit() or (value[0] in {"+", "-"} and value[1:].isdigit())):
+        return int(value)
+    try:
+        return float(value)
+    except ValueError:
+        return value
 
 
 _IMPLICIT_ACTIVATION_ALIASES: dict[str, tuple[str, int]] = {
@@ -133,6 +144,86 @@ def _to_synapse_op(
     return default_op
 
 
+def _join_dot(left: str, right: str) -> str:
+    if not left:
+        return right
+    if not right:
+        return left
+    return f"{left}.{right}"
+
+
+def _normalize_root_token(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("scope root values must resolve to strings")
+    token = value.strip()
+    if token.startswith(".") or token.endswith(".") or ".." in token:
+        raise ValueError(f"invalid scope root path {value!r}")
+    return token
+
+
+def _scope_root_values_from_kwarg(raw: AxonKwargValue, ctx: "_LowerCtx") -> tuple[str, ...]:
+    def _resolve_atom(value: Any) -> Any:
+        if isinstance(value, AxonExprString):
+            return value.value
+        if isinstance(value, AxonExprName):
+            if value.name in ctx.symbol_values:
+                return ctx.symbol_values[value.name]
+            if value.name in ctx.symbol_names:
+                raise ValueError(
+                    f"scope root symbol {value.name!r} is not a concrete constant value"
+                )
+            return value.name
+        if isinstance(value, AxonExprList):
+            return [_resolve_atom(item) for item in value.items]
+        if isinstance(value, AxonExprTuple):
+            return tuple(_resolve_atom(item) for item in value.items)
+        if isinstance(value, AxonExprParen):
+            return _resolve_atom(value.inner)
+        if isinstance(value, AxonExpr):
+            raise ValueError(
+                "scope root must be a string, list/tuple of strings, or a symbol with concrete value"
+            )
+        return value
+
+    resolved = _resolve_atom(raw)
+    values: list[str] = []
+    if isinstance(resolved, str):
+        values.append(_normalize_root_token(resolved))
+    elif isinstance(resolved, list | tuple):
+        for item in resolved:
+            values.append(_normalize_root_token(item))
+    else:
+        raise ValueError("scope root must resolve to string or list/tuple of strings")
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if item in seen:
+            continue
+        seen.add(item)
+        dedup.append(item)
+    return tuple(dedup if dedup else [""])
+
+
+def _current_param_roots(ctx: "_LowerCtx") -> tuple[str, ...]:
+    if not ctx.param_root_stack:
+        return ("",)
+    combined: list[str] = [""]
+    for frame in ctx.param_root_stack:
+        next_values: list[str] = []
+        for base in combined:
+            for suffix in frame:
+                next_values.append(_join_dot(base, suffix))
+        combined = next_values if next_values else combined
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for item in combined:
+        if item in seen:
+            continue
+        seen.add(item)
+        dedup.append(item)
+    return tuple(dedup if dedup else [""])
+
+
 def _canonical_op_name(callee: str) -> str:
     base = callee.split("@", 1)[0] if "@" in callee else callee
     if base.startswith("_cache_"):
@@ -170,27 +261,40 @@ def _is_symbolic_dim_token(value: Any) -> bool:
 
 
 def _is_kind(value: Any, kind: str) -> bool:
+    is_expr_payload = isinstance(value, dict) and value.get("_expr") in {
+        "name",
+        "binary",
+        "if",
+        "tuple",
+    }
     if kind == "bool":
-        return isinstance(value, bool)
+        return isinstance(value, bool | str) or is_expr_payload
     if kind == "int":
-        return isinstance(value, int) and not isinstance(value, bool)
+        return (
+            (isinstance(value, int) and not isinstance(value, bool))
+            or isinstance(value, str)
+            or is_expr_payload
+        )
     if kind == "number":
         if isinstance(value, bool):
             return False
-        return isinstance(value, (int, float, str))
+        return isinstance(value, (int, float, str)) or is_expr_payload
     if kind == "str":
-        return isinstance(value, str)
+        return isinstance(value, str) or is_expr_payload
     if kind == "dim":
         if isinstance(value, bool):
             return False
-        return isinstance(value, (int, str))
+        return isinstance(value, (int, str)) or is_expr_payload
     if kind == "list_int":
         return isinstance(value, list) and all(
             isinstance(v, int) and not isinstance(v, bool) for v in value
         )
     if kind == "list_dim":
         return isinstance(value, list) and all(
-            (isinstance(v, int) and not isinstance(v, bool)) or isinstance(v, str) for v in value
+            (isinstance(v, int) and not isinstance(v, bool))
+            or isinstance(v, str)
+            or (isinstance(v, dict) and v.get("_expr") in {"name", "binary", "if", "tuple"})
+            for v in value
         )
     return True
 
@@ -234,24 +338,6 @@ def _validate_op_signature(op_name: str, args: list[str], kwargs: dict[str, Any]
             )
 
 
-def _merge_when(outer: str | None, inner: Any) -> str | None:
-    if inner is None:
-        return outer
-    if isinstance(inner, bool):
-        inner_text = "true" if inner else "false"
-    else:
-        inner_text = str(inner).strip()
-    if not inner_text or inner_text == "true":
-        return outer
-    if inner_text == "false":
-        return "false"
-    if outer is None or not outer.strip() or outer.strip() == "true":
-        return inner_text
-    if outer.strip() == "false":
-        return "false"
-    return f"({outer}) and ({inner_text})"
-
-
 @dataclass
 class _LowerCtx:
     counter: int = 0
@@ -259,12 +345,13 @@ class _LowerCtx:
     block_path_params: dict[str, tuple[str, ...]] | None = None
     block_param_last_dims: dict[str, dict[str, Any]] | None = None
     block_output_last_dims: dict[str, dict[str, Any]] | None = None
-    block_param_shapes: dict[str, dict[str, tuple[str, ...]]] | None = None
-    block_output_shapes: dict[str, dict[str, tuple[str, ...]]] | None = None
+    block_param_shapes: dict[str, dict[str, tuple[Any, ...]]] | None = None
+    block_output_shapes: dict[str, dict[str, tuple[Any, ...]]] | None = None
     tensor_last_dim: dict[str, Any] = field(default_factory=dict)
     tensor_heads: dict[str, Any] = field(default_factory=dict)
     tensor_shape: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     scope_stack: list[str] = field(default_factory=list)
+    param_root_stack: list[tuple[str, ...]] = field(default_factory=list)
     path_param_names: set[str] = field(default_factory=set)
     imported_namespaces: set[str] = field(default_factory=set)
     imported_member_namespaces: dict[str, set[str]] = field(default_factory=dict)
@@ -273,22 +360,17 @@ class _LowerCtx:
     current_module: str | None = None
     param_names: set[str] = field(default_factory=set)
     symbol_names: set[str] = field(default_factory=set)
+    symbol_values: dict[str, Any] = field(default_factory=dict)
 
     def fresh(self, base: str = "t") -> str:
         self.counter += 1
         return f"{base}_{self.counter}"
 
 
-def _with_when(nodes: list[dict[str, Any]], when: str | None) -> list[dict[str, Any]]:
-    if when is None:
-        return nodes
-    out: list[dict[str, Any]] = []
-    for item in nodes:
-        name, node_spec = next(iter(item.items()))
-        spec = dict(node_spec)
-        spec["when"] = when
-        out.append({name: spec})
-    return out
+def _with_guard(nodes: list[dict[str, Any]], guard: str | None) -> list[dict[str, Any]]:
+    if guard is not None:
+        raise ValueError("internal lowering error: guard-based lowering is no longer supported")
+    return nodes
 
 
 def _with_scope(nodes: list[dict[str, Any]], scope: str | None) -> list[dict[str, Any]]:
@@ -306,6 +388,12 @@ def _with_scope(nodes: list[dict[str, Any]], scope: str | None) -> list[dict[str
         body = spec.get("_body")
         if isinstance(body, list):
             spec["_body"] = _annotate_items(body)
+        then_branch = spec.get("_then")
+        if isinstance(then_branch, list):
+            spec["_then"] = _annotate_items(then_branch)
+        else_branch = spec.get("_else")
+        if isinstance(else_branch, list):
+            spec["_else"] = _annotate_items(else_branch)
         return spec
 
     def _annotate_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -354,7 +442,7 @@ def _record_last_dim_for_call(
                 else:
                     symbol_bindings[param_name] = raw
                 continue
-            parsed = _parse_scalar(raw)
+            parsed = _parse_scalar_token(raw)
             symbol_bindings[param_name] = parsed
 
         param_last_dims = (
@@ -414,27 +502,6 @@ def _normalize_call_kwargs(
 
 def _validate_normalized_kwargs(op_name: str, kwargs: dict[str, Any], args: list[str]) -> None:
     _validate_op_signature(op_name, args, kwargs)
-
-
-def _reject_obsolete_namespace_call(callee: str) -> None:
-    if _op_name_from_callee(callee) == "reshape_heads_triplet":
-        raise ValueError(
-            "obsolete compatibility call 'reshape_heads_triplet'; "
-            "call reshape_heads on q/k/v individually"
-        )
-    if callee.startswith("_act_"):
-        raise ValueError(f"obsolete activation primitive {callee!r}; use _activations_<kind>")
-    if callee.startswith("activations_"):
-        raise ValueError(f"obsolete activation call {callee!r}; use _activations_<kind>")
-    if "::" not in callee:
-        return
-    if callee.startswith("act::"):
-        raise ValueError(
-            f"obsolete call syntax {callee!r}; use _activations_<kind> primitive calls"
-        )
-    if callee.startswith("cache::"):
-        raise ValueError(f"obsolete call syntax {callee!r}; use _cache_update/_cache_seq_len")
-    raise ValueError(f"obsolete namespaced call syntax {callee!r}; '::' is not supported in calls")
 
 
 def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str]] | None:
@@ -615,15 +682,28 @@ def _expand_call_outputs_for_ternary(
     return [*out, *[ctx.fresh("discard") for _ in range(arity - len(out))]]
 
 
-def _render_kwargs_for_call(kwargs: dict[str, AxonExpr | object]) -> dict[str, Any]:
+def _render_kwargs_for_call(kwargs: dict[str, AxonKwargValue]) -> dict[str, Any]:
     rendered: dict[str, Any] = {}
     for key, value in kwargs.items():
-        if isinstance(value, AxonExprLiteral):
+        if isinstance(value, AxonExprInt):
             rendered[key] = value.value
+        elif isinstance(value, AxonExprFloat):
+            rendered[key] = value.lexeme if value.lexeme else value.value
+        elif isinstance(value, AxonExprBool):
+            rendered[key] = value.value
+        elif isinstance(value, AxonExprNull):
+            rendered[key] = None
+        elif isinstance(value, AxonExprString):
+            rendered[key] = value.value
+        elif isinstance(value, AxonExprList):
+            rendered[key] = _expr_to_runtime_value(value)
         elif isinstance(value, AxonExprName):
             rendered[key] = value.name
         elif isinstance(value, AxonExpr):
-            rendered[key] = _render_expr(value)
+            try:
+                rendered[key] = _expr_to_runtime_value(value)
+            except ValueError:
+                rendered[key] = None
         else:
             rendered[key] = value
     return rendered
@@ -634,14 +714,21 @@ def _substitute_expr(expr: AxonExpr, var_name: str, replacement: AxonExpr) -> Ax
         if expr.name == var_name:
             return replacement
         return expr
-    if isinstance(expr, AxonExprLiteral):
+    if isinstance(
+        expr,
+        AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString,
+    ):
         return expr
     if isinstance(expr, AxonExprTuple):
         return AxonExprTuple(
             items=tuple(_substitute_expr(item, var_name, replacement) for item in expr.items)
         )
+    if isinstance(expr, AxonExprList):
+        return AxonExprList(
+            items=tuple(_substitute_expr(item, var_name, replacement) for item in expr.items)
+        )
     if isinstance(expr, AxonExprCall):
-        new_kwargs: dict[str, AxonExpr | object] = {}
+        new_kwargs: dict[str, AxonKwargValue] = {}
         for key, value in expr.kwargs.items():
             if isinstance(value, AxonExpr):
                 new_kwargs[key] = _substitute_expr(value, var_name, replacement)
@@ -693,11 +780,49 @@ def _substitute_expr(expr: AxonExpr, var_name: str, replacement: AxonExpr) -> Ax
         return AxonExprLambda(var=expr.var, body=_substitute_expr(expr.body, var_name, replacement))
     if isinstance(expr, AxonExprParen):
         return AxonExprParen(inner=_substitute_expr(expr.inner, var_name, replacement))
+    if isinstance(expr, AxonExprDo):
+        body_out: list[AxonStatement] = []
+        for stmt in expr.body:
+            if isinstance(stmt, AxonBind):
+                body_out.append(
+                    AxonBind(
+                        targets=stmt.targets,
+                        expr=_substitute_expr(stmt.expr, var_name, replacement),
+                    )
+                )
+                continue
+            if isinstance(stmt, AxonReturn):
+                body_out.append(
+                    AxonReturn(
+                        values=tuple(
+                            _substitute_expr(value, var_name, replacement) for value in stmt.values
+                        )
+                    )
+                )
+                continue
+            if isinstance(stmt, AxonRepeat):
+                body_out.append(
+                    AxonRepeat(
+                        name=stmt.name,
+                        var=stmt.var,
+                        to_expr=_substitute_expr(stmt.to_expr, var_name, replacement),
+                        from_expr=_substitute_expr(stmt.from_expr, var_name, replacement),
+                        step_expr=_substitute_expr(stmt.step_expr, var_name, replacement),
+                        body=stmt.body,
+                    )
+                )
+                continue
+            if isinstance(stmt, AxonScopeBind):
+                body_out.append(stmt)
+                continue
+        return AxonExprDo(body=tuple(body_out))
     return expr
 
 
 def _expr_is_tensorish(expr: AxonExpr, ctx: _LowerCtx) -> bool:
-    if isinstance(expr, AxonExprCall | AxonExprPipe | AxonExprBind | AxonExprIf | AxonExprTernary):
+    if isinstance(
+        expr, AxonExprCall | AxonExprPipe | AxonExprBind | AxonExprIf | AxonExprTernary | AxonExprDo
+    ):
         return True
     if isinstance(expr, AxonExprName):
         token = expr.name
@@ -715,77 +840,135 @@ def _expr_is_tensorish(expr: AxonExpr, ctx: _LowerCtx) -> bool:
         return _expr_is_tensorish(expr.inner, ctx)
     if isinstance(expr, AxonExprTuple):
         return any(_expr_is_tensorish(item, ctx) for item in expr.items)
+    if isinstance(expr, AxonExprList):
+        return any(_expr_is_tensorish(item, ctx) for item in expr.items)
     return False
 
 
-def _kwarg_should_materialize(expr: AxonExpr, ctx: _LowerCtx) -> bool:
-    if isinstance(expr, AxonExprCall | AxonExprPipe | AxonExprBind | AxonExprIf | AxonExprTernary):
-        return True
-    if isinstance(expr, AxonExprBinary):
-        return _expr_is_tensorish(expr, ctx)
+def _list_item_literal_value(expr: AxonExpr) -> Any:
+    if isinstance(expr, AxonExprInt):
+        return expr.value
+    if isinstance(expr, AxonExprFloat):
+        return expr.lexeme if expr.lexeme else expr.value
+    if isinstance(expr, AxonExprBool):
+        return expr.value
+    if isinstance(expr, AxonExprNull):
+        return None
+    if isinstance(expr, AxonExprString):
+        return expr.value
+    if isinstance(expr, AxonExprName):
+        return expr.name
     if isinstance(expr, AxonExprParen):
-        return _kwarg_should_materialize(expr.inner, ctx)
+        return _list_item_literal_value(expr.inner)
+    if isinstance(expr, AxonExprList):
+        return [_list_item_literal_value(item) for item in expr.items]
+    raise ValueError(f"list literal item must be scalar/name/list, got {type(expr).__name__}")
+
+
+def _kwarg_needs_temp_binding(expr: AxonExpr, ctx: _LowerCtx) -> bool:
+    if _expr_is_tensorish(expr, ctx):
+        return True
+    if isinstance(expr, AxonExprCall | AxonExprPipe | AxonExprBind | AxonExprDo | AxonExprLambda):
+        return True
+    if isinstance(expr, AxonExprParen):
+        return _kwarg_needs_temp_binding(expr.inner, ctx)
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        return (
+            _kwarg_needs_temp_binding(expr.cond, ctx)
+            or _kwarg_needs_temp_binding(expr.true_expr, ctx)
+            or _kwarg_needs_temp_binding(expr.false_expr, ctx)
+        )
+    if isinstance(expr, AxonExprBinary):
+        return _kwarg_needs_temp_binding(expr.left, ctx) or _kwarg_needs_temp_binding(
+            expr.right, ctx
+        )
+    if isinstance(expr, AxonExprTuple):
+        return any(_kwarg_needs_temp_binding(item, ctx) for item in expr.items)
+    if isinstance(expr, AxonExprList):
+        return any(_kwarg_needs_temp_binding(item, ctx) for item in expr.items)
     return False
 
 
 def _lower_simple_call(
     callee: str,
     args: tuple[AxonExpr, ...],
-    kwargs_expr: dict[str, AxonExpr | object],
+    kwargs_expr: dict[str, AxonKwargValue],
     out: str | list[str],
     ctx: _LowerCtx,
     *,
-    when: str | None = None,
+    guard: str | None = None,
 ) -> list[dict[str, Any]]:
     callee = callee.strip()
+    _validate_namespaced_block_call(callee, ctx)
     callee = _rewrite_prelude_alias_callee(callee, kwargs_expr, ctx)
     callee = _rewrite_primitive_alias_callee(callee, kwargs_expr, ctx)
-    _reject_obsolete_namespace_call(callee)
     pre_graph: list[dict[str, Any]] = []
     kwargs = _render_kwargs_for_call(kwargs_expr)
-    effective_when = _merge_when(when, kwargs.pop("when", None))
+    effective_when = guard
     effective_scope = ".".join(part for part in ctx.scope_stack if part)
 
     resolved_args: list[str] = []
-    raw_op_name = _op_name_from_callee(callee)
-    for idx, arg in enumerate(args):
+    for arg in args:
         if isinstance(arg, AxonExprName):
             resolved_args.append(arg.name)
             continue
-        if isinstance(arg, AxonExprLiteral):
-            if isinstance(arg.value, bool):
-                resolved_args.append("true" if arg.value else "false")
-            elif arg.value is None:
-                resolved_args.append("null")
-            else:
-                resolved_args.append(str(arg.value))
+        if isinstance(arg, AxonExprInt):
+            resolved_args.append(str(arg.value))
             continue
-        if raw_op_name in {"repeat", "_repeat"} and idx >= 1:
-            resolved_args.append(_render_expr(arg))
+        if isinstance(arg, AxonExprFloat):
+            resolved_args.append(arg.lexeme if arg.lexeme else str(arg.value))
+            continue
+        if isinstance(arg, AxonExprBool):
+            resolved_args.append("true" if arg.value else "false")
+            continue
+        if isinstance(arg, AxonExprNull):
+            resolved_args.append("null")
+            continue
+        if isinstance(arg, AxonExprString):
+            resolved_args.append(arg.value)
             continue
         tmp = ctx.fresh("arg")
-        pre_graph.extend(_lower_expr(arg, tmp, ctx, when=when))
+        pre_graph.extend(_lower_expr(arg, tmp, ctx, guard=guard))
         resolved_args.append(tmp)
     args_text = resolved_args
 
     resolved_kwargs: dict[str, Any] = {}
     for key, value_expr in kwargs_expr.items():
-        if key == "when":
-            continue
         if isinstance(value_expr, AxonExprName):
             resolved_kwargs[key] = value_expr.name
             continue
-        if isinstance(value_expr, AxonExprLiteral):
+        if isinstance(value_expr, AxonExprInt):
             resolved_kwargs[key] = value_expr.value
             continue
-        if isinstance(value_expr, AxonExpr):
-            if _kwarg_should_materialize(value_expr, ctx):
+        if isinstance(value_expr, AxonExprFloat):
+            resolved_kwargs[key] = value_expr.lexeme if value_expr.lexeme else value_expr.value
+            continue
+        if isinstance(value_expr, AxonExprBool):
+            resolved_kwargs[key] = value_expr.value
+            continue
+        if isinstance(value_expr, AxonExprNull):
+            resolved_kwargs[key] = None
+            continue
+        if isinstance(value_expr, AxonExprString):
+            resolved_kwargs[key] = value_expr.value
+            continue
+        if isinstance(value_expr, AxonExprList):
+            if _kwarg_needs_temp_binding(value_expr, ctx):
                 key_token = _sanitize_token(key, default="kwarg")
                 tmp = ctx.fresh(f"kwarg_{key_token}")
-                pre_graph.extend(_lower_expr(value_expr, tmp, ctx, when=when))
+                pre_graph.extend(_lower_expr(value_expr, tmp, ctx, guard=guard))
                 resolved_kwargs[key] = tmp
             else:
-                resolved_kwargs[key] = _render_expr(value_expr)
+                resolved_kwargs[key] = _expr_to_runtime_value(value_expr)
+            continue
+        if isinstance(value_expr, AxonExpr):
+            if _kwarg_needs_temp_binding(value_expr, ctx):
+                key_token = _sanitize_token(key, default="kwarg")
+                tmp = ctx.fresh(f"kwarg_{key_token}")
+                pre_graph.extend(_lower_expr(value_expr, tmp, ctx, guard=guard))
+                resolved_kwargs[key] = tmp
+            else:
+                resolved_kwargs[key] = _expr_to_runtime_value(value_expr)
             continue
         resolved_kwargs[key] = value_expr
     kwargs = resolved_kwargs
@@ -820,6 +1003,7 @@ def _lower_simple_call(
     op_validate = get_op_lowering_validator(op_name)
     if callable(op_validate):
         op_validate(args=args_text, out=out, kwargs=kwargs, ctx=ctx)
+    _validate_namespaced_block_call(callee, ctx)
     resolved_block = _resolve_block_call(callee, ctx)
     if resolved_block is None and "." in callee and "@" not in callee and "::" not in callee:
         namespace = callee.split(".", 1)[0]
@@ -852,7 +1036,7 @@ def _lower_simple_call(
             if _is_name_token(token) and token in ctx.tensor_last_dim:
                 symbol_bindings[param_name] = ctx.tensor_last_dim[token]
             elif not _is_name_token(token):
-                symbol_bindings[param_name] = _parse_scalar(token)
+                symbol_bindings[param_name] = _parse_scalar_token(token)
         for param_name, param_shape in param_shapes.items():
             if param_name not in provided:
                 continue
@@ -905,10 +1089,13 @@ def _lower_simple_call(
         call_scope = ".".join(part for part in ctx.scope_stack if part)
         if call_scope and not path_bindings:
             node_spec["_scope"] = call_scope
+        root_candidates = _current_param_roots(ctx)
+        if root_candidates != ("",):
+            node_spec["_param_roots"] = list(root_candidates)
         node_spec["_bind"] = out_values[0] if len(out_values) == 1 else out_values
         for key, value in extra_kwargs.items():
             node_spec[key] = value
-        nodes = _with_when([{node_name: node_spec}], effective_when)
+        nodes = _with_guard([{node_name: node_spec}], effective_when)
         _record_last_dim_for_call(
             callee=block_name,
             args=args_text,
@@ -925,7 +1112,7 @@ def _lower_simple_call(
             node_name = f"n_{ctx.fresh('op')}"
             templated_node = _to_synapse_op(op_name, args_text, kwargs, out)
             templated_node["param_base"] = param_path
-            nodes = _with_when([{node_name: templated_node}], effective_when)
+            nodes = _with_guard([{node_name: templated_node}], effective_when)
             _record_last_dim_for_call(
                 callee=op_name, args=args_text, kwargs=kwargs, out=out, ctx=ctx
             )
@@ -939,9 +1126,17 @@ def _lower_simple_call(
             if not param_path.strip():
                 raise ValueError(f"invalid @ path in Axon call: {callee!r}")
             node_name = f"n_{ctx.fresh('op')}"
-            params = {param_name: f"{param_path}.{param_name}" for param_name in bound_params}
+            root_candidates = _current_param_roots(ctx)
+            params: dict[str, str | list[str]] = {}
+            for param_name in bound_params:
+                suffix = f"{param_path}.{param_name}"
+                candidates = [_join_dot(root, suffix) for root in root_candidates]
+                if len(candidates) == 1:
+                    params[param_name] = candidates[0]
+                else:
+                    params[param_name] = candidates
             concrete_node["_params"] = params
-            nodes = _with_when([{node_name: concrete_node}], effective_when)
+            nodes = _with_guard([{node_name: concrete_node}], effective_when)
             _record_last_dim_for_call(
                 callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx
             )
@@ -952,17 +1147,17 @@ def _lower_simple_call(
         item: dict[str, Any] = {segments[-1]: node_spec}
         for segment in reversed(segments[:-1]):
             item = {segment: {"graph": [item]}}
-        nodes = _with_when([item], effective_when)
+        nodes = _with_guard([item], effective_when)
         _record_last_dim_for_call(callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx)
         return [*pre_graph, *_with_scope(nodes, effective_scope)]
     node_name = f"n_{ctx.fresh('op')}"
-    nodes = _with_when([{node_name: node_spec}], effective_when)
+    nodes = _with_guard([{node_name: node_spec}], effective_when)
     _record_last_dim_for_call(callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx)
     return [*pre_graph, *_with_scope(nodes, effective_scope)]
 
 
 def _lower_alias_or_const(
-    expr: AxonExpr, out: str | list[str], ctx: _LowerCtx, *, when: str | None = None
+    expr: AxonExpr, out: str | list[str], ctx: _LowerCtx, *, guard: str | None = None
 ) -> list[dict[str, Any]]:
     if isinstance(out, list):
         raise ValueError("alias/const lowering expects scalar out")
@@ -975,14 +1170,77 @@ def _lower_alias_or_const(
             node = {"_op": "_ir_alias", "_args": expr.name, "_bind": out}
             if expr.name in ctx.tensor_last_dim:
                 ctx.tensor_last_dim[out] = ctx.tensor_last_dim[expr.name]
-    elif isinstance(expr, AxonExprLiteral):
+    elif isinstance(expr, AxonExprInt):
         node = {"_op": "_ir_expr", "value": expr.value, "_bind": out}
+    elif isinstance(expr, AxonExprFloat):
+        node = {
+            "_op": "_ir_expr",
+            "value": expr.lexeme if expr.lexeme else expr.value,
+            "_bind": out,
+        }
+    elif isinstance(expr, AxonExprBool):
+        node = {"_op": "_ir_expr", "value": expr.value, "_bind": out}
+    elif isinstance(expr, AxonExprNull):
+        node = {"_op": "_ir_expr", "value": None, "_bind": out}
+    elif isinstance(expr, AxonExprString):
+        node = {"_op": "_ir_expr", "value": _expr_to_runtime_value(expr), "_bind": out}
+    elif isinstance(expr, AxonExprList):
+        node = {
+            "_op": "_ir_expr",
+            "value": _expr_to_runtime_value(expr),
+            "_bind": out,
+        }
     else:
-        node = {"_op": "_ir_expr", "value": _render_expr(expr), "_bind": out}
+        node = {"_op": "_ir_expr", "value": _expr_to_runtime_value(expr), "_bind": out}
     effective_scope = ".".join(part for part in ctx.scope_stack if part)
     if effective_scope:
         node["_scope"] = effective_scope
-    return _with_when([{node_name: node}], when)
+    return _with_guard([{node_name: node}], guard)
+
+
+def _bind_names(out: str | list[str]) -> list[str]:
+    return [out] if isinstance(out, str) else list(out)
+
+
+def _bind_field(names: list[str]) -> str | list[str]:
+    return names[0] if len(names) == 1 else names
+
+
+def _lower_select_branch(
+    *,
+    branch_expr: AxonExpr,
+    branch_binds: list[str],
+    ctx: _LowerCtx,
+) -> list[dict[str, Any]]:
+    branch_graph: list[dict[str, Any]] = []
+    if len(branch_binds) > 1 and isinstance(branch_expr, AxonExprCall | AxonExprName):
+        expanded = _expand_call_outputs_for_ternary(branch_expr, list(branch_binds), ctx)
+        branch_graph.extend(_lower_expr(branch_expr, expanded, ctx))
+        return branch_graph
+    branch_out: str | list[str] = _bind_field(branch_binds)
+    branch_graph.extend(_lower_expr(branch_expr, branch_out, ctx))
+    return branch_graph
+
+
+def _lower_select_cond(
+    cond_expr: AxonExpr,
+    *,
+    ctx: _LowerCtx,
+) -> tuple[list[dict[str, Any]], Any]:
+    if isinstance(cond_expr, AxonExprName):
+        return [], cond_expr.name
+    if isinstance(cond_expr, AxonExprBool):
+        return [], cond_expr.value
+    if isinstance(cond_expr, AxonExprInt):
+        return [], cond_expr.value
+    if isinstance(cond_expr, AxonExprFloat):
+        return [], cond_expr.lexeme if cond_expr.lexeme else cond_expr.value
+    if isinstance(cond_expr, AxonExprNull):
+        return [], None
+    if isinstance(cond_expr, AxonExprParen):
+        return _lower_select_cond(cond_expr.inner, ctx=ctx)
+    cond_ref = ctx.fresh("cond")
+    return _lower_expr(cond_expr, cond_ref, ctx), cond_ref
 
 
 def _lower_expr(
@@ -990,7 +1248,7 @@ def _lower_expr(
     out: str | list[str],
     ctx: _LowerCtx,
     *,
-    when: str | None = None,
+    guard: str | None = None,
 ) -> list[dict[str, Any]]:
     if isinstance(expr, AxonExprBind):
         bind_graph: list[dict[str, Any]] = []
@@ -999,56 +1257,81 @@ def _lower_expr(
             bind_ref = expr.value.name
         else:
             bind_ref = ctx.fresh("bind")
-            bind_graph.extend(_lower_expr(expr.value, bind_ref, ctx, when=when))
+            bind_graph.extend(_lower_expr(expr.value, bind_ref, ctx, guard=guard))
         body = _substitute_expr(expr.body, expr.var, AxonExprName(name=bind_ref))
-        bind_graph.extend(_lower_expr(body, out, ctx, when=when))
+        bind_graph.extend(_lower_expr(body, out, ctx, guard=guard))
         return bind_graph
 
-    if isinstance(expr, AxonExprIf | AxonExprTernary):
-        cond = _render_expr(expr.cond)
-        true_expr = expr.true_expr
-        false_expr = expr.false_expr
+    if isinstance(expr, AxonExprDo):
+        do_graph: list[dict[str, Any]] = []
+        do_outputs: dict[str, str] = {}
+        _lower_statements(
+            statements=expr.body,
+            graph=do_graph,
+            outputs=do_outputs,
+            returns=(),
+            ctx=ctx,
+            guard=guard,
+        )
         if isinstance(out, list):
-            true_items = true_expr.items if isinstance(true_expr, AxonExprTuple) else (true_expr,)
-            false_items = (
-                false_expr.items if isinstance(false_expr, AxonExprTuple) else (false_expr,)
-            )
-            ternary_graph: list[dict[str, Any]] = []
-            if len(true_items) == 1 and isinstance(true_items[0], AxonExprCall | AxonExprName):
-                ternary_out = _expand_call_outputs_for_ternary(true_items[0], out, ctx)
-                ternary_graph.extend(_lower_expr(true_items[0], ternary_out, ctx, when=cond))
-            elif len(true_items) == len(out):
-                for name, item in zip(out, true_items, strict=True):
-                    ternary_graph.extend(_lower_expr(item, name, ctx, when=cond))
-            else:
-                raise ValueError("ternary true-branch arity must match binding targets")
+            for idx, target in enumerate(out):
+                output_name = f"out_{idx}"
+                source = do_outputs.get(output_name)
+                if source is None:
+                    raise ValueError(f"do expression must return value {idx} via `return`")
+                if target != source:
+                    do_graph.extend(
+                        _lower_expr(AxonExprName(name=source), target, ctx, guard=guard)
+                    )
+            return do_graph
+        source0 = do_outputs.get("out_0")
+        if source0 is None:
+            raise ValueError("do expression must return value 0 via `return`")
+        if out != source0:
+            do_graph.extend(_lower_expr(AxonExprName(name=source0), out, ctx, guard=guard))
+        return do_graph
 
-            if len(false_items) == 1 and isinstance(false_items[0], AxonExprCall | AxonExprName):
-                ternary_out = _expand_call_outputs_for_ternary(false_items[0], out, ctx)
-                ternary_graph.extend(
-                    _lower_expr(false_items[0], ternary_out, ctx, when=f"not ({cond})")
-                )
-            elif len(false_items) == len(out):
-                for name, item in zip(out, false_items, strict=True):
-                    ternary_graph.extend(_lower_expr(item, name, ctx, when=f"not ({cond})"))
-            else:
-                raise ValueError("ternary tuple arity must match binding targets")
-            return ternary_graph
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        out_names = _bind_names(out)
+        cond_graph, cond_value = _lower_select_cond(expr.cond, ctx=ctx)
 
-        cond_graph: list[dict[str, Any]] = []
-        cond_graph.extend(_lower_expr(true_expr, out, ctx, when=cond))
-        cond_graph.extend(_lower_expr(false_expr, out, ctx, when=f"not ({cond})"))
-        return cond_graph
+        then_binds = [
+            ctx.fresh(f"then_{_sanitize_token(name, default='out')}") for name in out_names
+        ]
+        else_binds = [
+            ctx.fresh(f"else_{_sanitize_token(name, default='out')}") for name in out_names
+        ]
+        then_graph = _lower_select_branch(
+            branch_expr=expr.true_expr, branch_binds=then_binds, ctx=ctx
+        )
+        else_graph = _lower_select_branch(
+            branch_expr=expr.false_expr, branch_binds=else_binds, ctx=ctx
+        )
+
+        node_name = f"n_{ctx.fresh('select')}"
+        node_spec: dict[str, Any] = {
+            "_op": "select",
+            "_bind": _bind_field(out_names),
+            "cond": cond_value,
+            "_then": then_graph,
+            "_else": else_graph,
+            "_then_bind": _bind_field(then_binds),
+            "_else_bind": _bind_field(else_binds),
+        }
+        effective_scope = ".".join(part for part in ctx.scope_stack if part)
+        if effective_scope:
+            node_spec["_scope"] = effective_scope
+        return [*cond_graph, *(_with_scope([{node_name: node_spec}], effective_scope))]
 
     if isinstance(expr, AxonExprPipe):
         pipe_graph: list[dict[str, Any]] = []
         if len(expr.stages) == 0:
-            return _lower_expr(expr.value, out, ctx, when=when)
+            return _lower_expr(expr.value, out, ctx, guard=guard)
         if isinstance(expr.value, AxonExprName):
             pipe_ref: str | list[str] = expr.value.name
         else:
             first_out: str | list[str] = _pipeline_temp_out(expr.value, ctx)
-            pipe_graph.extend(_lower_expr(expr.value, first_out, ctx, when=when))
+            pipe_graph.extend(_lower_expr(expr.value, first_out, ctx, guard=guard))
             pipe_ref = first_out
 
         for idx, stage in enumerate(expr.stages, start=1):
@@ -1079,29 +1362,31 @@ def _lower_expr(
                     stage_args = stage_args[len(piped_refs) :]
             call_args = tuple([*piped_args, *stage_args])
             pipe_graph.extend(
-                _lower_simple_call(stage_callee, call_args, stage_kwargs, next_out, ctx, when=when)
+                _lower_simple_call(
+                    stage_callee, call_args, stage_kwargs, next_out, ctx, guard=guard
+                )
             )
             pipe_ref = next_out
         return pipe_graph
 
     if isinstance(expr, AxonExprCall):
-        return _lower_simple_call(expr.callee, expr.args, expr.kwargs, out, ctx, when=when)
+        return _lower_simple_call(expr.callee, expr.args, expr.kwargs, out, ctx, guard=guard)
 
     if isinstance(expr, AxonExprBinary) and expr.op in {"+", "*"}:
         if not (_expr_is_tensorish(expr.left, ctx) or _expr_is_tensorish(expr.right, ctx)):
-            return _lower_alias_or_const(expr, out, ctx, when=when)
+            return _lower_alias_or_const(expr, out, ctx, guard=guard)
         op_name = "add" if expr.op == "+" else "mul"
         binary_graph: list[dict[str, Any]] = []
         if isinstance(expr.left, AxonExprName) and expr.left.name not in ctx.symbol_names:
             left_ref = expr.left.name
         else:
             left_ref = ctx.fresh("bin")
-            binary_graph.extend(_lower_expr(expr.left, left_ref, ctx, when=when))
+            binary_graph.extend(_lower_expr(expr.left, left_ref, ctx, guard=guard))
         if isinstance(expr.right, AxonExprName) and expr.right.name not in ctx.symbol_names:
             right_ref = expr.right.name
         else:
             right_ref = ctx.fresh("bin")
-            binary_graph.extend(_lower_expr(expr.right, right_ref, ctx, when=when))
+            binary_graph.extend(_lower_expr(expr.right, right_ref, ctx, guard=guard))
         binary_graph.extend(
             _lower_simple_call(
                 op_name,
@@ -1109,7 +1394,7 @@ def _lower_expr(
                 {},
                 out,
                 ctx,
-                when=when,
+                guard=guard,
             )
         )
         return binary_graph
@@ -1119,15 +1404,15 @@ def _lower_expr(
             raise ValueError("tuple expression arity must match binding targets")
         tuple_graph: list[dict[str, Any]] = []
         for name, item in zip(out, expr.items, strict=True):
-            tuple_graph.extend(_lower_expr(item, name, ctx, when=when))
+            tuple_graph.extend(_lower_expr(item, name, ctx, guard=guard))
         return tuple_graph
 
     if isinstance(expr, AxonExprParen):
-        return _lower_expr(expr.inner, out, ctx, when=when)
+        return _lower_expr(expr.inner, out, ctx, guard=guard)
 
     if isinstance(expr, AxonExprLambda):
         raise ValueError("lambda expression cannot be lowered directly")
-    return _lower_alias_or_const(expr, out, ctx, when=when)
+    return _lower_alias_or_const(expr, out, ctx, guard=guard)
 
 
 def _module_return_names(module: AxonModule) -> tuple[str, ...]:
@@ -1161,8 +1446,8 @@ def _module_param_last_dims(module: AxonModule) -> dict[str, Any]:
     return out
 
 
-def _module_param_shapes(module: AxonModule) -> dict[str, tuple[str, ...]]:
-    out: dict[str, tuple[str, ...]] = {}
+def _module_param_shapes(module: AxonModule) -> dict[str, tuple[Any, ...]]:
+    out: dict[str, tuple[Any, ...]] = {}
     for param in module.params:
         if param.shape is None:
             continue
@@ -1172,7 +1457,7 @@ def _module_param_shapes(module: AxonModule) -> dict[str, tuple[str, ...]]:
 
 def _module_return_shapes(
     module: AxonModule, returns: tuple[str, ...]
-) -> dict[str, tuple[str, ...]]:
+) -> dict[str, tuple[Any, ...]]:
     if not returns or module.return_shape is None:
         return {}
     if len(returns) != 1:
@@ -1242,9 +1527,13 @@ def _ensure_outputs_from_returns(outputs: dict[str, str], returns: tuple[str, ..
 
 
 def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple[str, int]]:
+    allowed_namespaces = {"Prelude", "Activations", "Cache", "List", "MoE", "Config"}
     direct_aliases: dict[str, tuple[str, int]] = {}
     for module in modules:
         if not isinstance(module.name, str) or "." not in module.name:
+            continue
+        namespace, _ = module.name.split(".", 1)
+        if namespace not in allowed_namespaces:
             continue
         if len(module.statements) != 1:
             continue
@@ -1298,8 +1587,8 @@ def _new_lower_ctx(
     block_path_params: dict[str, tuple[str, ...]] | None,
     block_param_last_dims: dict[str, dict[str, Any]] | None,
     block_output_last_dims: dict[str, dict[str, Any]] | None,
-    block_param_shapes: dict[str, dict[str, tuple[str, ...]]] | None = None,
-    block_output_shapes: dict[str, dict[str, tuple[str, ...]]] | None = None,
+    block_param_shapes: dict[str, dict[str, tuple[Any, ...]]] | None = None,
+    block_output_shapes: dict[str, dict[str, tuple[Any, ...]]] | None = None,
     implicit_prelude_members: set[str] | None = None,
     prelude_aliases: dict[str, tuple[str, int]] | None = None,
     primitive_aliases: dict[str, tuple[str, int]] | None = None,
@@ -1334,10 +1623,12 @@ def _new_lower_ctx(
         current_module=module.name,
         param_names={param.name for param in module.params},
         symbol_names=set(module.symbols.keys()) if isinstance(module.symbols, dict) else set(),
+        symbol_values=dict(module.symbols) if isinstance(module.symbols, dict) else {},
     )
 
 
 def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
+    typecheck_axon_program((module,), main_module=module.name)
     inputs = _module_inputs(module)
     graph: list[dict[str, Any]] = []
     outputs: dict[str, str] = {}
@@ -1403,6 +1694,7 @@ def _lower_statements(
     outputs: dict[str, str],
     returns: tuple[str, ...],
     ctx: _LowerCtx,
+    guard: str | None = None,
 ) -> None:
     for stmt in statements:
         if isinstance(stmt, AxonRepeat):
@@ -1413,6 +1705,7 @@ def _lower_statements(
                 outputs={},
                 returns=(),
                 ctx=ctx,
+                guard=guard,
             )
             node_name = f"n_{ctx.fresh('for')}"
             base_loop_scope = stmt.name if isinstance(stmt.name, str) and stmt.name else node_name
@@ -1426,21 +1719,25 @@ def _lower_statements(
                     "_op": "for",
                     "_scope": loop_scope,
                     "_var": stmt.var,
-                    "_to": _render_loop_expr(stmt.to_expr),
+                    "_to": _expr_to_runtime_value(stmt.to_expr),
                     "_body": body_graph,
                 }
             }
-            from_expr = _render_loop_expr(stmt.from_expr)
-            step_expr = _render_loop_expr(stmt.step_expr)
-            if from_expr != "0":
+            from_expr = _expr_to_runtime_value(stmt.from_expr)
+            step_expr = _expr_to_runtime_value(stmt.step_expr)
+            if from_expr != 0:
                 repeat_item[node_name]["_from"] = from_expr
-            if step_expr != "1":
+            if step_expr != 1:
                 repeat_item[node_name]["_step"] = step_expr
             graph.append(repeat_item)
             continue
 
         if isinstance(stmt, AxonScopeBind):
+            root_values: tuple[str, ...] = ("",)
+            if "root" in stmt.kwargs:
+                root_values = _scope_root_values_from_kwarg(stmt.kwargs["root"], ctx)
             ctx.scope_stack.append(stmt.prefix)
+            ctx.param_root_stack.append(root_values)
             scoped_outputs: dict[str, str] = {}
             try:
                 _lower_statements(
@@ -1449,8 +1746,10 @@ def _lower_statements(
                     outputs=scoped_outputs,
                     returns=(),
                     ctx=ctx,
+                    guard=guard,
                 )
             finally:
+                ctx.param_root_stack.pop()
                 ctx.scope_stack.pop()
             for idx, target in enumerate(stmt.targets):
                 output_name = f"out_{idx}"
@@ -1461,12 +1760,12 @@ def _lower_statements(
                 source_name = scoped_outputs[output_name]
                 if target == source_name:
                     continue
-                graph.extend(_lower_expr(AxonExprName(name=source_name), target, ctx))
+                graph.extend(_lower_expr(AxonExprName(name=source_name), target, ctx, guard=guard))
             continue
 
         if isinstance(stmt, AxonBind):
             out: str | list[str] = stmt.targets[0] if len(stmt.targets) == 1 else list(stmt.targets)
-            graph.extend(_lower_expr(stmt.expr, out, ctx))
+            graph.extend(_lower_expr(stmt.expr, out, ctx, guard=guard))
             continue
 
         if isinstance(stmt, AxonReturn):
@@ -1476,7 +1775,7 @@ def _lower_statements(
                 if maybe_name is not None:
                     outputs[output_name] = maybe_name
                     continue
-                graph.extend(_lower_expr(value, output_name, ctx))
+                graph.extend(_lower_expr(value, output_name, ctx, guard=guard))
                 outputs[output_name] = output_name
             continue
 
@@ -1487,13 +1786,10 @@ def _as_concrete_path(value: Any) -> str | None:
     token = value.strip()
     if not token:
         return None
-    try:
-        parsed = ast.literal_eval(token)
-    except Exception:
-        parsed = token
-    if isinstance(parsed, str) and parsed.strip():
-        return parsed.strip()
-    return None
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
+        inner = token[1:-1].strip()
+        return inner or None
+    return token
 
 
 def _sanitize_path_suffix(value: str) -> str:
@@ -1723,6 +2019,12 @@ def _resolve_paths_at_lowering_time(
             body = node_spec.get("_body")
             if isinstance(body, list):
                 rewrite_graph(body, inherited_path_bindings=inherited_path_bindings)
+            then_branch = node_spec.get("_then")
+            if isinstance(then_branch, list):
+                rewrite_graph(then_branch, inherited_path_bindings=inherited_path_bindings)
+            else_branch = node_spec.get("_else")
+            if isinstance(else_branch, list):
+                rewrite_graph(else_branch, inherited_path_bindings=inherited_path_bindings)
 
     rewrite_graph(model.get("graph"), inherited_path_bindings={})
     for block_spec in list(all_blocks.values()):
@@ -1748,6 +2050,12 @@ def _resolve_paths_at_lowering_time(
             body = node_spec.get("_body")
             if isinstance(body, list):
                 called.extend(collect_called_blocks(body))
+            then_branch = node_spec.get("_then")
+            if isinstance(then_branch, list):
+                called.extend(collect_called_blocks(then_branch))
+            else_branch = node_spec.get("_else")
+            if isinstance(else_branch, list):
+                called.extend(collect_called_blocks(else_branch))
         return called
 
     worklist = collect_called_blocks(model.get("graph"))
@@ -1761,14 +2069,25 @@ def _resolve_paths_at_lowering_time(
         reachable.add(target)
         worklist.extend(collect_called_blocks(block_spec.get("graph")))
 
-    for block_name in sorted(reachable):
-        block_spec = all_blocks[block_name]
-        for item in block_spec.get("graph", []):
+    def _assert_no_unresolved_param_base(graph: Any, *, block_name: str) -> None:
+        if not isinstance(graph, list):
+            return
+        for item in graph:
             if not isinstance(item, dict) or len(item) != 1:
                 continue
             _, node_spec = next(iter(item.items()))
-            if isinstance(node_spec, dict) and "param_base" in node_spec:
+            if not isinstance(node_spec, dict):
+                continue
+            if "param_base" in node_spec:
                 raise ValueError(f"unresolved param_base in reachable block {block_name!r}")
+            for key in ("graph", "_body", "_then", "_else"):
+                nested = node_spec.get(key)
+                if isinstance(nested, list):
+                    _assert_no_unresolved_param_base(nested, block_name=block_name)
+
+    for block_name in sorted(reachable):
+        block_spec = all_blocks[block_name]
+        _assert_no_unresolved_param_base(block_spec.get("graph"), block_name=block_name)
 
     if reachable:
         model["blocks"] = {name: all_blocks[name] for name in all_blocks if name in reachable}
@@ -1813,6 +2132,7 @@ def _finalize_block_io_types_for_model(
 def lower_axon_program_to_synapse_spec(
     modules: tuple[AxonModule, ...], *, main_module: str | None = None
 ) -> dict[str, Any]:
+    typecheck_axon_program(modules, main_module=main_module)
     if not modules:
         raise ValueError("Axon program must contain at least one module")
 
@@ -1828,8 +2148,8 @@ def lower_axon_program_to_synapse_spec(
     block_path_params: dict[str, tuple[str, ...]] = {}
     block_param_last_dims: dict[str, dict[str, Any]] = {}
     block_output_last_dims: dict[str, dict[str, Any]] = {}
-    block_param_shapes: dict[str, dict[str, tuple[str, ...]]] = {}
-    block_output_shapes: dict[str, dict[str, tuple[str, ...]]] = {}
+    block_param_shapes: dict[str, dict[str, tuple[Any, ...]]] = {}
+    block_output_shapes: dict[str, dict[str, tuple[Any, ...]]] = {}
     for module in modules:
         input_names = [param.name for param in module.params]
         path_params = module.path_params

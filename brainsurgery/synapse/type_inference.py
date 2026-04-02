@@ -3,8 +3,36 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .axon.type_system import (
+    TypeAny,
+    TypeBool,
+    TypeFloat,
+    TypeInt,
+    TypeList,
+    TypeNamed,
+    TypeNull,
+    TypeOptional,
+    TypeString,
+    TypeTensor,
+    TypeTuple,
+    render_type,
+)
+
 _MODEL_TYPES_KEY = "types"
 _BLOCK_IO_TYPES_KEY = "block_io"
+_TYPE_EXPR_CLASSES = (
+    TypeAny,
+    TypeInt,
+    TypeFloat,
+    TypeBool,
+    TypeNull,
+    TypeString,
+    TypeNamed,
+    TypeOptional,
+    TypeTensor,
+    TypeList,
+    TypeTuple,
+)
 
 
 def normalize_type_expr(type_expr: str, *, optional: bool = False) -> str:
@@ -224,11 +252,20 @@ def module_io_types(
         optional = bool(getattr(param, "optional", False))
         if isinstance(type_expr, str) and type_expr:
             input_types[name] = normalize_type_expr(type_expr, optional=optional)
+        elif isinstance(type_expr, _TYPE_EXPR_CLASSES):
+            input_types[name] = normalize_type_expr(render_type(type_expr), optional=optional)
         else:
             input_types[name] = "?Any" if optional else "Any"
 
     ret_expr = getattr(module, "return_type_expr", None)
-    out_type_tokens = split_top_level_types(ret_expr) if isinstance(ret_expr, str) else []
+    if isinstance(ret_expr, str):
+        out_type_tokens = split_top_level_types(ret_expr)
+    elif isinstance(ret_expr, TypeTuple):
+        out_type_tokens = [render_type(item) for item in ret_expr.items]
+    elif isinstance(ret_expr, _TYPE_EXPR_CLASSES):
+        out_type_tokens = [render_type(ret_expr)]
+    else:
+        out_type_tokens = []
     output_types: dict[str, str] = {}
     if len(output_names) == 1:
         if out_type_tokens:

@@ -334,6 +334,11 @@ def interpret(
                 high_freq_factor=high_freq_factor,
                 original_context=original_context,
             )
+    elif "scale_factor" in node_spec:
+        scale_factor = float(model._eval_expr(node_spec["scale_factor"], env, symbols))
+        if scale_factor <= 0.0:
+            raise ValueError("rope_pair.scale_factor must be > 0")
+        inv_freq = inv_freq / float(scale_factor)
     pos = pos_ids.to(device=q.device, dtype=torch.float32)
     ang = pos.unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
     cos_half = (torch.cos(ang) * float(rope_attention_factor)).to(dtype=q.dtype)
@@ -598,6 +603,10 @@ def compile(
                 f"{indent}{is_medium} = (~({wavelen} < {high_freq_wavelen})) & (~({wavelen} > {low_freq_wavelen}))"
             )
             lines.append(f"{indent}{inv_freq} = torch.where({is_medium}, {smoothed}, {inv_scaled})")
+    elif "scale_factor" in node_spec:
+        lines.append(f"{indent}if float({scale_factor}) <= 0.0:")
+        lines.append(f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0')")
+        lines.append(f"{indent}{inv_freq} = {inv_freq} / float({scale_factor})")
     lines.append(f"{indent}if {pos_ids} is None:")
     lines.append(f"{indent}    raise ValueError('rope_pair.position_ids must not be null')")
     lines.append(f"{indent}if {pos_ids}.ndim != 2:")
@@ -661,6 +670,12 @@ def compile(
     return lines
 
 
+LOWERING_TYPE_SIGNATURE = {
+    "args": ("Any", "Any"),
+    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "returns": ("Tensor", "Tensor"),
+}
+
 __all__ = [
     "LOWERING_ARITY",
     "LOWERING_ALLOWED_KWARGS",
@@ -671,4 +686,5 @@ __all__ = [
     "interpret",
     "compile",
     "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
 ]

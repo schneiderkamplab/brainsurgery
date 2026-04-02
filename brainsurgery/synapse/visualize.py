@@ -414,7 +414,7 @@ def _node_input_slots(
     for key, value in node_spec.items():
         if not isinstance(key, str):
             continue
-        if key.startswith("_") or key in {"graph", "when"}:
+        if key.startswith("_") or key == "graph":
             continue
         kw_refs: set[str] = set()
         _collect_var_refs(value, known_vars=known_vars, out=kw_refs)
@@ -448,7 +448,7 @@ def _node_input_slot_kinds(node_spec: Mapping[str, Any], *, op_name: str) -> dic
     for key in node_spec:
         if not isinstance(key, str):
             continue
-        if key.startswith("_") or key in {"graph", "when"}:
+        if key.startswith("_") or key == "graph":
             continue
         previous = kinds.get(key)
         if previous == "pos":
@@ -496,7 +496,7 @@ def _node_input_slot_expr_hints(
     for key, value in node_spec.items():
         if not isinstance(key, str):
             continue
-        if key.startswith("_") or key in {"graph", "when"}:
+        if key.startswith("_") or key == "graph":
             continue
         hint = _value_expr_hint(value)
         if isinstance(hint, str) and hint:
@@ -510,7 +510,7 @@ def _node_input_vars(node_spec: Mapping[str, Any], *, known_vars: set[str]) -> l
     if raw_args is not None:
         _collect_var_refs(raw_args, known_vars=known_vars, out=refs)
     for key, value in node_spec.items():
-        if key.startswith("_") or key in {"graph", "when"}:
+        if key.startswith("_") or key == "graph":
             continue
         _collect_var_refs(value, known_vars=known_vars, out=refs)
     return sorted(refs)
@@ -522,6 +522,18 @@ def _node_output_vars(node_spec: Mapping[str, Any]) -> list[str]:
         return [bound]
     if isinstance(bound, list):
         return [str(item) for item in bound]
+    return []
+
+
+def _as_name_list(value: Any) -> list[str]:
+    if isinstance(value, str) and value:
+        return [value]
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item:
+                out.append(item)
+        return out
     return []
 
 
@@ -553,6 +565,20 @@ def _collect_graph_bound_vars(graph: list[Any]) -> list[str]:
                     continue
                 ordered.append(out_name)
                 seen.add(out_name)
+        then_graph = node_spec.get("_then")
+        if isinstance(then_graph, list):
+            for out_name in _collect_graph_bound_vars(then_graph):
+                if out_name in seen:
+                    continue
+                ordered.append(out_name)
+                seen.add(out_name)
+        else_graph = node_spec.get("_else")
+        if isinstance(else_graph, list):
+            for out_name in _collect_graph_bound_vars(else_graph):
+                if out_name in seen:
+                    continue
+                ordered.append(out_name)
+                seen.add(out_name)
     return ordered
 
 
@@ -568,7 +594,7 @@ def _collect_graph_var_refs(graph: list[Any], *, known_vars: set[str]) -> list[s
         for key, value in node_spec.items():
             if not isinstance(key, str):
                 continue
-            if key.startswith("_") or key in {"graph", "when"}:
+            if key.startswith("_") or key == "graph":
                 continue
             _collect_var_refs(value, known_vars=known_vars, out=refs)
         nested_graph = node_spec.get("graph")
@@ -577,6 +603,12 @@ def _collect_graph_var_refs(graph: list[Any], *, known_vars: set[str]) -> list[s
         body_graph = node_spec.get("_body")
         if isinstance(body_graph, list):
             refs.update(_collect_graph_var_refs(body_graph, known_vars=known_vars))
+        then_graph = node_spec.get("_then")
+        if isinstance(then_graph, list):
+            refs.update(_collect_graph_var_refs(then_graph, known_vars=known_vars))
+        else_graph = node_spec.get("_else")
+        if isinstance(else_graph, list):
+            refs.update(_collect_graph_var_refs(else_graph, known_vars=known_vars))
     return sorted(refs)
 
 
@@ -663,21 +695,24 @@ def _collect_call_scope_hints(
                 current_block=current_block,
                 loop_scopes=next_loop_scopes,
             )
-
-
-def _normalize_expr(expr: str) -> str:
-    return " ".join(expr.strip().split())
-
-
-def _split_when_polarity(expr: str) -> tuple[bool, str]:
-    normalized = _normalize_expr(expr)
-    match = re.match(r"^not\s*\((.+)\)$", normalized)
-    if match is not None:
-        return False, _normalize_expr(match.group(1))
-    match = re.match(r"^not\s+(.+)$", normalized)
-    if match is not None:
-        return False, _normalize_expr(match.group(1))
-    return True, normalized
+        then_graph = node_spec.get("_then")
+        if isinstance(then_graph, list):
+            _collect_call_scope_hints(
+                then_graph,
+                by_target=by_target,
+                by_edge=by_edge,
+                current_block=current_block,
+                loop_scopes=next_loop_scopes,
+            )
+        else_graph = node_spec.get("_else")
+        if isinstance(else_graph, list):
+            _collect_call_scope_hints(
+                else_graph,
+                by_target=by_target,
+                by_edge=by_edge,
+                current_block=current_block,
+                loop_scopes=next_loop_scopes,
+            )
 
 
 def _ordered_rows(rows: list[str], *, top_down: bool) -> list[str]:
@@ -818,6 +853,12 @@ def _walk_graph(
                 body_graph = node_spec.get("_body")
                 if isinstance(body_graph, list):
                     _collect_scope_prepass(body_graph, item_scope=f"{item_scope}.{node_name}._body")
+                then_graph = node_spec.get("_then")
+                if isinstance(then_graph, list):
+                    _collect_scope_prepass(then_graph, item_scope=f"{item_scope}.{node_name}._then")
+                else_graph = node_spec.get("_else")
+                if isinstance(else_graph, list):
+                    _collect_scope_prepass(else_graph, item_scope=f"{item_scope}.{node_name}._else")
 
         _collect_scope_prepass(graph, item_scope=scope)
 
@@ -846,6 +887,12 @@ def _walk_graph(
                 body_graph = node_spec.get("_body")
                 if isinstance(body_graph, list):
                     out.update(_loop_vars_under_scope(body_graph, scope_name=scope_name))
+                then_graph = node_spec.get("_then")
+                if isinstance(then_graph, list):
+                    out.update(_loop_vars_under_scope(then_graph, scope_name=scope_name))
+                else_graph = node_spec.get("_else")
+                if isinstance(else_graph, list):
+                    out.update(_loop_vars_under_scope(else_graph, scope_name=scope_name))
             return out
 
         for scope_name in scope_order:
@@ -1004,8 +1051,38 @@ def _walk_graph(
         runtime_var_scope = scope_context["runtime_var_scope"]
         scope_out_latest_source = scope_context["scope_out_latest_source"]
 
+    def _copy_scope_context(source: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(source, dict):
+            return None
+        copied: dict[str, Any] = dict(source)
+        for key in (
+            "scope_node_ids",
+            "scope_consumed",
+            "scope_produced_forward",
+            "node_scope_by_id",
+            "scope_in_node",
+            "scope_out_node",
+            "scope_in_ports",
+            "scope_out_ports",
+        ):
+            value = copied.get(key)
+            if isinstance(value, dict):
+                copied[key] = dict(value)
+        for key in ("scope_order",):
+            value = copied.get(key)
+            if isinstance(value, list):
+                copied[key] = list(value)
+        for key in ("scope_in_linked",):
+            value = copied.get(key)
+            if isinstance(value, set):
+                copied[key] = set(value)
+        for key in ("runtime_var_scope", "scope_out_latest_source"):
+            value = copied.get(key)
+            if isinstance(value, dict):
+                copied[key] = dict(value)
+        return copied
+
     prev_node_id: str | None = None
-    pending_ternary: dict[str, tuple[_Endpoint, bool, str, str | None]] = {}
     for index, item in enumerate(graph):
         if not isinstance(item, Mapping) or len(item) != 1:
             continue
@@ -1022,6 +1099,25 @@ def _walk_graph(
         input_slot_expr_hints = _node_input_slot_expr_hints(node_spec, op_name=op_name)
         input_slot_names = [slot for slot, _ in input_slots]
         output_vars = _node_output_vars(node_spec)
+        select_then_bind_names = _as_name_list(node_spec.get("_then_bind"))
+        select_else_bind_names = _as_name_list(node_spec.get("_else_bind"))
+        if op_name == "select":
+            select_slot_map: dict[str, set[str]] = {
+                slot_name: set(refs) for slot_name, refs in input_slots
+            }
+            cond_refs: set[str] = set()
+            _collect_var_refs(node_spec.get("cond"), known_vars=known_vars, out=cond_refs)
+            select_slot_map["cond"] = cond_refs
+            select_slot_map["then"] = set(select_then_bind_names)
+            select_slot_map["else"] = set(select_else_bind_names)
+            ordered = ["cond", "then", "else"]
+            for slot in input_slot_names:
+                if slot not in ordered:
+                    ordered.append(slot)
+            input_slots = [(slot, select_slot_map.get(slot, set())) for slot in ordered]
+            input_slot_names = [slot for slot, _ in input_slots]
+            for slot in ("cond", "then", "else"):
+                input_slot_kinds[slot] = "kw"
         input_slot_display: dict[str, str] = {name: name for name in input_slot_names}
         output_slot_display: dict[str, str] = {name: name for name in output_vars}
         body_graph = node_spec.get("_body")
@@ -1359,11 +1455,67 @@ def _walk_graph(
                     if candidate in scope_node_ids:
                         routing_scope = candidate
                         break
+        select_branch_sources: dict[str, dict[str, _Endpoint]] = {"then": {}, "else": {}}
+        if op_name == "select":
+            branch_specs: list[tuple[str, str, list[str], str]] = [
+                ("then", "_then", select_then_bind_names, "_then"),
+                ("else", "_else", select_else_bind_names, "_else"),
+            ]
+            for branch_name, graph_key, bind_names, scope_suffix in branch_specs:
+                branch_graph = node_spec.get(graph_key)
+                if not isinstance(branch_graph, list):
+                    continue
+                branch_var_sources = dict(var_sources)
+                branch_var_types = dict(var_types)
+                branch_scope_context = _copy_scope_context(scope_context)
+                branch_created = _walk_graph(
+                    branch_graph,
+                    block_name=block_name,
+                    scope=f"{scope}.{node_name}.{scope_suffix}",
+                    lines=lines,
+                    var_sources=branch_var_sources,
+                    edge_labels=edge_labels,
+                    flow_edges=flow_edges,
+                    loop_control_edges=loop_control_edges,
+                    call_return_edges=call_return_edges,
+                    loop_subgraphs=loop_subgraphs,
+                    scope_subgraphs=scope_subgraphs,
+                    scope_nodes_emitted=scope_nodes_emitted,
+                    scope_in_emitted_ports=scope_in_emitted_ports,
+                    scope_out_emitted_ports=scope_out_emitted_ports,
+                    blocks_by_name=blocks_by_name,
+                    runtime_scope=f"{node_runtime_path}.{scope_suffix}",
+                    required_downstream_vars=set(bind_names),
+                    var_types=branch_var_types,
+                    block_io_types=block_io_types,
+                    block_scope_prefixes=block_scope_prefixes,
+                    current_block_name=current_block_name,
+                    top_down=top_down,
+                    transpose_layout=transpose_layout,
+                    scope_context=branch_scope_context,
+                    input_gateway_node_ids=input_gateway_node_ids,
+                    output_gateway_node_ids=output_gateway_node_ids,
+                )
+                created_nodes.extend(branch_created)
+                for bind_name in bind_names:
+                    endpoint = branch_var_sources.get(bind_name)
+                    if endpoint is not None:
+                        select_branch_sources[branch_name][bind_name] = endpoint
         for slot_name, refs in input_slots:
             dst_port = arg_ports.get(slot_name)
             if dst_port is None:
                 continue
             for var_name in sorted(refs):
+                if op_name == "select" and slot_name in {"then", "else"}:
+                    src_endpoint = select_branch_sources.get(slot_name, {}).get(var_name)
+                    if src_endpoint is not None:
+                        _append_edge(
+                            edge_labels,
+                            src=src_endpoint,
+                            dst=(node_id, dst_port),
+                            label=var_name,
+                        )
+                    continue
                 src_endpoint = var_sources.get(var_name)
                 if src_endpoint is None:
                     continue
@@ -1471,144 +1623,6 @@ def _walk_graph(
                 out_type = output_slot_types.get(out_var)
                 if isinstance(out_type, str):
                     var_types[out_var] = out_type
-                when_expr = node_spec.get("when")
-                if not isinstance(when_expr, str) or not when_expr.strip():
-                    pending_ternary.pop(out_var, None)
-                    continue
-                is_positive, cond_expr = _split_when_polarity(when_expr)
-                current_out_endpoint: _Endpoint = (output_source_node_id, out_ports.get(out_var))
-                current_out_type = output_slot_types.get(out_var) or var_types.get(out_var)
-                previous = pending_ternary.get(out_var)
-                if previous is None:
-                    pending_ternary[out_var] = (
-                        current_out_endpoint,
-                        is_positive,
-                        cond_expr,
-                        current_out_type,
-                    )
-                    continue
-                prev_out_endpoint, prev_is_positive, prev_cond_expr, prev_out_type = previous
-                if prev_cond_expr != cond_expr or prev_is_positive == is_positive:
-                    pending_ternary[out_var] = (
-                        current_out_endpoint,
-                        is_positive,
-                        cond_expr,
-                        current_out_type,
-                    )
-                    continue
-
-                select_id = _dot_id("ternary", block_name, scope, f"{index:04d}_{out_var}")
-                cond_port = _port_id("arg_cond")
-                then_port = _port_id("arg_then")
-                else_port = _port_id("arg_else")
-                out_port = _port_id(f"out_{out_var}")
-                if transpose_layout:
-                    select_rows_cells = [
-                        '<TR><TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
-                        '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
-                        '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD></TR>\n',
-                        "<TR>"
-                        f'<TD PORT="{cond_port}" BGCOLOR="lightyellow" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>cond</B></FONT></TD>'
-                        '<TD BGCOLOR="seashell2" ALIGN="LEFT" ROWSPAN="3"><FONT POINT-SIZE="10"><B>?:</B></FONT>'
-                        f'<BR ALIGN="LEFT"/><FONT POINT-SIZE="8" COLOR="gray35">{_html_escape(out_var)}</FONT></TD>'
-                        f'<TD PORT="{out_port}" BGCOLOR="honeydew" ALIGN="CENTER" ROWSPAN="3"><FONT POINT-SIZE="7">{_html_escape(out_var)}</FONT></TD>'
-                        "</TR>\n",
-                        "<TR>"
-                        f'<TD PORT="{then_port}" BGCOLOR="honeydew" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>then</B></FONT></TD>'
-                        "</TR>\n",
-                        "<TR>"
-                        f'<TD PORT="{else_port}" BGCOLOR="mistyrose" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>else</B></FONT></TD>'
-                        "</TR>\n",
-                    ]
-                    select_table = (
-                        '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3" COLOR="deeppink4" BGCOLOR="lavenderblush">\n'
-                        f"{''.join(select_rows_cells)}"
-                        "    </TABLE>"
-                    )
-                else:
-                    select_rows = [
-                        (
-                            "      <TR>"
-                            '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>IN</B></FONT></TD>'
-                            f'<TD PORT="{cond_port}" BGCOLOR="lightyellow" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>cond</B></FONT></TD>'
-                            f'<TD PORT="{then_port}" BGCOLOR="honeydew" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>then</B></FONT></TD>'
-                            f'<TD PORT="{else_port}" BGCOLOR="mistyrose" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>else</B></FONT></TD>'
-                            "</TR>\n"
-                        ),
-                        (
-                            "      <TR>"
-                            '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OP</B></FONT></TD>'
-                            '<TD BGCOLOR="seashell2" ALIGN="LEFT" COLSPAN="3"><FONT POINT-SIZE="10"><B>?:</B></FONT>'
-                            f'<BR ALIGN="LEFT"/><FONT POINT-SIZE="8" COLOR="gray35">{_html_escape(out_var)}</FONT></TD>'
-                            "</TR>\n"
-                        ),
-                        (
-                            "      <TR>"
-                            '<TD BGCOLOR="lightpink" ALIGN="CENTER"><FONT POINT-SIZE="7"><B>OUT</B></FONT></TD>'
-                            f'<TD PORT="{out_port}" BGCOLOR="honeydew" ALIGN="CENTER" COLSPAN="3">'
-                            f'<FONT POINT-SIZE="7">{_html_escape(out_var)}</FONT></TD>'
-                            "</TR>\n"
-                        ),
-                    ]
-                    select_table = (
-                        '    <TABLE BORDER="2" CELLBORDER="1" CELLSPACING="0" CELLPADDING="3" COLOR="deeppink4" BGCOLOR="lavenderblush">\n'
-                        f"{''.join(_ordered_rows(select_rows, top_down=top_down))}"
-                        "    </TABLE>"
-                    )
-                lines.append(f'  "{select_id}" [shape=plain, label=<{select_table}>];')
-                created_nodes.append(select_id)
-                if isinstance(node_scope, str):
-                    node_scope_by_id[select_id] = node_scope
-                    if select_id not in scope_node_ids.setdefault(node_scope, []):
-                        scope_node_ids[node_scope].append(select_id)
-                    scope_cluster = _scope_cluster_id(block_name, node_scope)
-                    for i, (cluster_name, cluster_label, cluster_nodes, parent_scope) in enumerate(
-                        scope_subgraphs
-                    ):
-                        if cluster_name != scope_cluster:
-                            continue
-                        if select_id in cluster_nodes:
-                            break
-                        scope_subgraphs[i] = (
-                            cluster_name,
-                            cluster_label,
-                            tuple([*cluster_nodes, select_id]),
-                            parent_scope,
-                        )
-                        break
-                if prev_is_positive:
-                    true_src = prev_out_endpoint
-                    false_src = current_out_endpoint
-                else:
-                    true_src = current_out_endpoint
-                    false_src = prev_out_endpoint
-                _append_edge(
-                    edge_labels,
-                    src=true_src,
-                    dst=(select_id, then_port),
-                    label=f"{out_var}_then",
-                )
-                _append_edge(
-                    edge_labels,
-                    src=false_src,
-                    dst=(select_id, else_port),
-                    label=f"{out_var}_else",
-                )
-
-                condition_refs: set[str] = set()
-                _collect_var_refs(cond_expr, known_vars=set(var_sources.keys()), out=condition_refs)
-                for cond_var in sorted(condition_refs):
-                    cond_src = var_sources.get(cond_var)
-                    if cond_src is None:
-                        continue
-                    _append_edge(
-                        edge_labels, src=cond_src, dst=(select_id, cond_port), label=cond_var
-                    )
-
-                var_sources[out_var] = (select_id, out_port)
-                if isinstance(prev_out_type, str) and prev_out_type == current_out_type:
-                    var_types[out_var] = prev_out_type
-                pending_ternary.pop(out_var, None)
 
         nested_graph = node_spec.get("graph")
         if isinstance(nested_graph, list):

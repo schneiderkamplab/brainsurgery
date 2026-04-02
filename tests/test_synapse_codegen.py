@@ -313,25 +313,29 @@ def test_render_synapse_spec_to_dot_includes_parameter_annotations() -> None:
     assert "proj.weight" in dot
 
 
-def test_render_synapse_spec_to_dot_connects_when_condition_dependencies() -> None:
+def test_render_synapse_spec_to_dot_connects_select_condition_dependencies() -> None:
     spec: dict[str, object] = {
         "synapse": 1,
         "model": {
             "inputs": {"use_cache": {"shape": []}},
             "graph": [
                 {
-                    "init_cache": {
-                        "_op": "list_init",
+                    "init_or_null_cache": {
+                        "_op": "select",
                         "_bind": "new_kv",
-                        "when": "use_cache",
-                    }
-                },
-                {
-                    "null_cache": {
-                        "_op": "_ir_expr",
-                        "value": None,
-                        "_bind": "new_kv",
-                        "when": "not (use_cache)",
+                        "cond": "use_cache",
+                        "_then_bind": "then_new_kv",
+                        "_else_bind": "else_new_kv",
+                        "_then": [{"then_node": {"_op": "list_init", "_bind": "then_new_kv"}}],
+                        "_else": [
+                            {
+                                "else_node": {
+                                    "_op": "_ir_expr",
+                                    "value": None,
+                                    "_bind": "else_new_kv",
+                                }
+                            }
+                        ],
                     }
                 },
             ],
@@ -343,24 +347,16 @@ def test_render_synapse_spec_to_dot_connects_when_condition_dependencies() -> No
     assert 'PORT="p_arg_then"' in dot
     assert 'PORT="p_arg_else"' in dot
     assert (
-        '"n_block::main":"p_use_cache":s -> "n_ternary::main::graph::0001_new_kv":"p_arg_cond"'
+        '"n_block::main":"p_use_cache":s -> "n_op::main::graph::0000_init_or_null_cache":"p_arg_cond"'
         in dot
     )
     assert (
-        '"n_op::main::graph::0000_init_cache":"p_out_new_kv" -> "n_ternary::main::graph::0001_new_kv":"p_arg_then"'
-        in dot
+        '"n_op::main::graph.init_or_null_cache._then::0000_then_node":"p_out_then_new_kv"'
+        ' -> "n_op::main::graph::0000_init_or_null_cache":"p_arg_then"' in dot
     )
     assert (
-        '"n_op::main::graph::0001_null_cache":"p_out_new_kv" -> "n_ternary::main::graph::0001_new_kv":"p_arg_else"'
-        in dot
-    )
-    assert (
-        '"n_block::main":"p_use_cache" -> "n_op::main::graph::0000_init_cache" [label="use_cache"]'
-        not in dot
-    )
-    assert (
-        '"n_block::main":"p_use_cache" -> "n_op::main::graph::0001_null_cache" [label="use_cache"]'
-        not in dot
+        '"n_op::main::graph.init_or_null_cache._else::0000_else_node":"p_out_else_new_kv"'
+        ' -> "n_op::main::graph::0000_init_or_null_cache":"p_arg_else"' in dot
     )
 
 
@@ -1260,3 +1256,182 @@ def test_generated_model_records_intermediates_to_runtime_state_dict() -> None:
     assert torch.equal(out["z"], expected)
     assert "sum_xy::z" in runtime_state_dict
     assert torch.equal(runtime_state_dict["sum_xy::z"], expected)
+
+
+def test_generated_config_primitives_read_model_config_and_defaults() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "config": {
+                "hidden_size": 640,
+                "name": "gemma3",
+                "text_config": {"sliding_window": 512},
+            },
+            "graph": [
+                {"k": {"_op": "_ir_expr", "_bind": "k", "value": "'text_config.sliding_window'"}},
+                {"h": {"_op": "config_has", "_args": "k", "_bind": "has_key"}},
+                {"s": {"_op": "config_int", "_args": "k", "_bind": "window"}},
+                {
+                    "d": {
+                        "_op": "config_int",
+                        "_args": "missing.value",
+                        "_bind": "defaulted",
+                        "default": 9,
+                    }
+                },
+                {"f": {"_op": "config_float", "_args": "hidden_size", "_bind": "hidden_f"}},
+                {"n": {"_op": "config_str", "_args": "name", "_bind": "name"}},
+            ],
+            "outputs": {
+                "has_key": "has_key",
+                "window": "window",
+                "defaulted": "defaulted",
+                "hidden_f": "hidden_f",
+                "name": "name",
+            },
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="ConfigPrimModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["ConfigPrimModel"]()
+    out = model()
+    assert out["has_key"] is True
+    assert out["window"] == 512
+    assert out["defaulted"] == 9
+    assert out["hidden_f"] == 640.0
+    assert out["name"] == "gemma3"
+
+
+def test_generated_config_primitives_support_root_kwarg() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "config": {"text_config": {"hidden_size": 4096}},
+            "graph": [
+                {
+                    "h": {
+                        "_op": "config_has",
+                        "_args": "hidden_size",
+                        "_bind": "has_h",
+                        "root": "text_config",
+                    }
+                },
+                {
+                    "i": {
+                        "_op": "config_int",
+                        "_args": "hidden_size",
+                        "_bind": "h",
+                        "root": "text_config",
+                    }
+                },
+            ],
+            "outputs": {"has_h": "has_h", "h": "h"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="ConfigRootModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["ConfigRootModel"]()
+    out = model()
+    assert out["has_h"] is True
+    assert out["h"] == 4096
+
+
+def test_generated_model_prefers_existing_param_candidate_path() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "n": {
+                        "_op": "linear",
+                        "_args": "x",
+                        "_bind": "y",
+                        "_params": {
+                            "weight": ["missing.weight", "live.weight"],
+                            "bias": ["missing.bias", "live.bias"],
+                        },
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="ParamCandidateModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["ParamCandidateModel"](
+        state_dict={
+            "live.weight": torch.eye(2, dtype=torch.float32),
+            "live.bias": torch.zeros(2, dtype=torch.float32),
+        }
+    )
+    out = model(x=torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+    assert torch.equal(out["y"], torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+
+
+def test_generated_select_is_lazy_and_value_producing() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"flag": {"optional": False}, "zero": {"optional": True}},
+            "graph": [
+                {
+                    "pick": {
+                        "_op": "select",
+                        "cond": "flag",
+                        "_bind": "y",
+                        "_then_bind": "then_v",
+                        "_else_bind": "else_v",
+                        "_then": [
+                            {"then_node": {"_op": "_ir_expr", "value": 1, "_bind": "then_v"}}
+                        ],
+                        "_else": [
+                            {
+                                "else_node": {
+                                    "_op": "_ir_expr",
+                                    "value": "1 / zero",
+                                    "_bind": "else_v",
+                                }
+                            }
+                        ],
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="SelectModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["SelectModel"]()
+    out = model(flag=True)
+    assert isinstance(out, dict)
+    assert out["y"] == 1
+
+
+def test_generated_ir_expr_supports_inline_sqrt_with_config_call() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "config": {"text_config": {"query_pre_attn_scalar": 256}},
+            "graph": [
+                {
+                    "a": {
+                        "_op": "_ir_expr",
+                        "_bind": "attn_scale",
+                        "value": '1.0 / sqrt (Config.float "query_pre_attn_scalar" root="text_config" default=256.0)',
+                    }
+                }
+            ],
+            "outputs": {"attn_scale": "attn_scale"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="IRExprConfigCallModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["IRExprConfigCallModel"]()
+    out = model()
+    assert out["attn_scale"] == pytest.approx(0.0625)

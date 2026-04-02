@@ -141,6 +141,16 @@ def _resolve_safetensors_paths(weights: Path) -> list[Path]:
     )
 
 
+def _load_model_config(model_dir: Path) -> dict[str, Any] | None:
+    config_path = model_dir / "config.json"
+    if not config_path.exists():
+        return None
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected mapping in {config_path}, got {type(payload).__name__}")
+    return {str(key): value for key, value in payload.items()}
+
+
 def _normalize_rope_numeric_fields(config: Any) -> Any:
     def _normalize_dict(mapping: Any) -> None:
         if not isinstance(mapping, dict):
@@ -302,6 +312,7 @@ def run_axon_test(
     safetensors_files = _resolve_safetensors_paths(weights_path)
     default_hf_dir = weights_path if weights_path.is_dir() else safetensors_files[0].parent
     resolved_hf_model_dir = (hf_model_dir or default_hf_dir).resolve()
+    model_config = _load_model_config(resolved_hf_model_dir)
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:
         for candidate in candidate_tokenizer_dirs(resolved_hf_model_dir):
@@ -318,6 +329,11 @@ def run_axon_test(
 
         modules = parse_axon_program_from_path(axon_file)
         synapse_spec = lower_axon_program_to_synapse_spec(modules, main_module=main_module)
+        if model_config is not None:
+            model_section = synapse_spec.get("model")
+            if not isinstance(model_section, dict):
+                raise ValueError("Lowered synapse spec has invalid model section")
+            model_section["config"] = model_config
 
         synapse_yaml_path.write_text(
             OmegaConf.to_yaml(synapse_spec, resolve=True), encoding="utf-8"
@@ -327,6 +343,10 @@ def run_axon_test(
         if not isinstance(loaded_dict, dict):
             raise ValueError("Lowered synapse YAML did not produce a mapping")
         lowered_spec: dict[str, Any] = {str(key): value for key, value in loaded_dict.items()}
+        if model_config is not None:
+            lowered_model = lowered_spec.get("model")
+            if isinstance(lowered_model, dict):
+                lowered_model["config"] = model_config
 
         code = emit_model_code_from_synapse_spec(lowered_spec, class_name=class_name)
         generated_py_path.write_text(code, encoding="utf-8")

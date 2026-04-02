@@ -1,47 +1,87 @@
 from __future__ import annotations
 
-from brainsurgery.synapse.axon.grammar import (
-    ParsedImport,
-    ParsedSignature,
-    parse_import_line,
-    parse_padding_side_pragma,
-    parse_signature_line,
-)
+import pytest
+
+from brainsurgery.synapse.axon.grammar import ParsedSignature, parse_program_source
+from brainsurgery.synapse.axon.parser import parse_axon_program
+from brainsurgery.synapse.axon.type_system import render_type
 
 
-def test_parse_signature_line() -> None:
-    parsed = parse_signature_line("lin@path :: @Path -> Tensor[B,S,Din] -> I -> Tensor[B,S,dim]")
-    assert isinstance(parsed, ParsedSignature)
-    assert parsed.module_decl == "lin@path"
-    assert parsed.type_expr == "@Path -> Tensor[B,S,Din] -> I -> Tensor[B,S,dim]"
+def test_parse_program_source_extracts_signature_type() -> None:
+    source = """
+lin :: @Path -> Tensor[B,S,Din] -> Int -> Tensor[B,S,dim]
+lin@path x dim = linear@path x dim=dim bias=true transpose=true
+"""
+    parsed = parse_program_source(source)
+    assert len(parsed.modules) == 1
+    signature = parsed.modules[0].signature
+    assert isinstance(signature, ParsedSignature)
+    assert signature.module_decl == "lin"
+    sig = signature.type_signature
+    assert len(sig.path_params) == 1
+    assert sig.path_params[0].name is None
+    assert render_type(sig.path_params[0].type_expr) == "Path"
+    assert tuple(render_type(arg) for arg in sig.arg_types) == ("Tensor[B,S,Din]", "Int")
+    assert render_type(sig.return_type) == "Tensor[B,S,dim]"
 
 
-def test_parse_import_line_with_parenthesized_members() -> None:
-    parsed = parse_import_line("import Activations (gelu_new, silu)")
-    assert isinstance(parsed, ParsedImport)
-    assert parsed.namespace == "Activations"
-    assert parsed.members_tail == "(gelu_new, silu)"
+def test_parse_program_source_import_parenthesized_members() -> None:
+    source = """
+import Activations (gelu_new, silu)
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    parsed = parse_program_source(source)
+    assert parsed.imports == ("Activations",)
+    assert parsed.imported_members == {"Activations": ("gelu_new", "silu")}
 
 
-def test_parse_import_line_with_shorthand_members() -> None:
-    parsed = parse_import_line("import Activations gelu_new silu")
-    assert isinstance(parsed, ParsedImport)
-    assert parsed.namespace == "Activations"
-    assert parsed.members_tail == "gelu_new silu"
+def test_parse_program_source_import_shorthand_members() -> None:
+    source = """
+import Activations gelu_new silu
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    parsed = parse_program_source(source)
+    assert parsed.imports == ("Activations",)
+    assert parsed.imported_members == {"Activations": ("gelu_new", "silu")}
 
 
-def test_parse_padding_side_pragma_left_and_right() -> None:
-    assert parse_padding_side_pragma('{-# PADDING_SIDE "left" #-}') == "left"
-    assert parse_padding_side_pragma("{-# PADDING_SIDE 'right' #-}") == "right"
+def test_parse_program_source_padding_side_pragma_left_and_right() -> None:
+    left = """
+{-# PADDING_SIDE "left" #-}
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    right = """
+{-# PADDING_SIDE 'right' #-}
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    assert parse_program_source(left).pragmas["padding_side"] == "left"
+    assert parse_program_source(right).pragmas["padding_side"] == "right"
 
 
-def test_parse_padding_side_pragma_rejects_non_padding_pragma() -> None:
-    assert parse_padding_side_pragma("{-# SOMETHING_ELSE 1 #-}") is None
+def test_parse_program_source_rejects_invalid_import_member_token() -> None:
+    source = """
+import Activations (gelu-new)
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    with pytest.raises(ValueError, match="invalid Axon source syntax"):
+        parse_program_source(source)
 
 
-def test_parse_import_line_rejects_invalid_member_token() -> None:
-    assert parse_import_line("import Activations (gelu-new)") is None
+def test_parse_program_source_rejects_invalid_type_expr() -> None:
+    source = """
+lin :: Tensor -> -> Tensor
+lin x = x
+"""
+    with pytest.raises(ValueError):
+        parse_axon_program(source)
 
 
-def test_parse_signature_line_rejects_invalid_type_expr() -> None:
-    assert parse_signature_line("lin :: Tensor -> -> Tensor") is None
+def test_parse_program_source_rejects_definition_without_signature() -> None:
+    source = "lin@path x = linear@path x dim=4\n"
+    with pytest.raises(ValueError, match="invalid Axon source syntax"):
+        parse_program_source(source)

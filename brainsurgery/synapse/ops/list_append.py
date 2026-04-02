@@ -4,7 +4,7 @@ from typing import Any
 
 OP_NAME = "list_append"
 LOWERING_ARITY = (2, 2)
-LOWERING_ALLOWED_KWARGS: set[str] = {"when"}
+LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
@@ -77,6 +77,12 @@ def compile(
     return lines
 
 
+LOWERING_TYPE_SIGNATURE = {
+    "args": ("Any", "Any"),
+    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "returns": ("List[Any]",),
+}
+
 __all__ = [
     "LOWERING_ARITY",
     "LOWERING_ALLOWED_KWARGS",
@@ -87,4 +93,5 @@ __all__ = [
     "interpret",
     "compile",
     "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
 ]

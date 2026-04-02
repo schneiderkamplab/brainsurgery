@@ -26,7 +26,7 @@ tiny x = do
   1y <- x
   return x
 """
-    with pytest.raises(ValueError, match="invalid binding target name"):
+    with pytest.raises(ValueError, match="invalid Axon source syntax"):
         parse_axon_program(source)
 
 
