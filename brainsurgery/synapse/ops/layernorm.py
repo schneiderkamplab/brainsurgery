@@ -7,9 +7,14 @@ from torch.nn import functional as F
 
 OP_NAME = "layernorm"
 LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"eps", "dim"}
+LOWERING_ALLOWED_KWARGS: set[str] = {"eps", "dim", "weight", "bias"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"dim": "dim", "eps": "number"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {
+    "dim": "dim",
+    "eps": "number",
+    "weight": "str",
+    "bias": "str_or_bool_or_null",
+}
 
 
 def _dims_compatible(left: Any, right: Any) -> bool:
@@ -21,10 +26,28 @@ def _dims_compatible(left: Any, right: Any) -> bool:
 
 
 def _validate_layernorm_keys(node_spec: dict[str, Any]) -> None:
-    if "weight" in node_spec:
-        raise ValueError("layernorm does not support explicit weight binding")
+    if "weight" in node_spec and not isinstance(node_spec.get("weight"), str):
+        raise ValueError("layernorm weight must be a string when provided")
     if "bias" in node_spec:
-        raise ValueError("layernorm does not support explicit bias binding")
+        bias = node_spec.get("bias")
+        if isinstance(bias, str):
+            return
+        if bias is None:
+            return
+        if isinstance(bias, bool):
+            return
+        raise ValueError("layernorm bias must be a string, bool, or null when provided")
+
+
+def _layernorm_has_bias(node_spec: dict[str, Any]) -> bool:
+    if "bias" not in node_spec:
+        return True
+    bias = node_spec.get("bias")
+    if bias is None:
+        return False
+    if isinstance(bias, bool):
+        return bool(bias)
+    return True
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -90,7 +113,12 @@ def interpret(
     weight = model._state[
         model._infer_param_path(node_spec, node_path=node_path, param_name="weight")
     ]
-    bias = model._state[model._infer_param_path(node_spec, node_path=node_path, param_name="bias")]
+    has_bias = _layernorm_has_bias(node_spec)
+    bias = (
+        model._state[model._infer_param_path(node_spec, node_path=node_path, param_name="bias")]
+        if has_bias
+        else None
+    )
     eps_value = model._eval_expr(node_spec.get("eps", 1e-5), env, symbols)
     out = model._require_name(node_spec.get("_bind"), field="layernorm._bind")
     align_norm_fp32 = bool(getattr(model, "_hf_align_norm_fp32", False))
@@ -99,7 +127,7 @@ def interpret(
             x.float(),
             (x.shape[-1],),
             weight=weight.float(),
-            bias=bias.float(),
+            bias=(bias.float() if bias is not None else None),
             eps=float(eps_value),
         ).to(dtype=x.dtype)
     else:
@@ -130,12 +158,17 @@ def compile(
     out_var = assign_out_var(out_name)
     eps = emitter._expr_code(node_spec.get("eps", 1e-5), env)
     w = f"emitter._param({emitter._infer_param_expr(node_spec, node_path_var, 'weight')})"
-    b = f"emitter._param({emitter._infer_param_expr(node_spec, node_path_var, 'bias')})"
+    if _layernorm_has_bias(node_spec):
+        b = f"emitter._param({emitter._infer_param_expr(node_spec, node_path_var, 'bias')})"
+        b_fp32 = f"{b}.float()"
+    else:
+        b = "None"
+        b_fp32 = "None"
     lines.append(
         f"{indent}if getattr(self, '_hf_align_norm_fp32', False) and {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
     )
     lines.append(
-        f"{indent}    {out_var} = F.layer_norm({src}.float(), ({src}.shape[-1],), weight={w}.float(), bias={b}.float(), eps=float({eps})).to(dtype={src}.dtype)"
+        f"{indent}    {out_var} = F.layer_norm({src}.float(), ({src}.shape[-1],), weight={w}.float(), bias={b_fp32}, eps=float({eps})).to(dtype={src}.dtype)"
     )
     lines.append(f"{indent}else:")
     lines.append(

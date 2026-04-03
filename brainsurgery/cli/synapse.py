@@ -239,6 +239,11 @@ def axon_test(
         "--dtype",
         help="Floating-point dtype for loaded safetensors parameters (float32/bfloat16/float16).",
     ),
+    model_task: str = typer.Option(
+        "causal_lm",
+        "--model-task",
+        help="Model execution task (causal_lm, masked_lm, or seq2seq_lm).",
+    ),
     hf_align_bf16_profile: bool = typer.Option(
         False,
         "--hf-align-bf16-profile/--no-hf-align-bf16-profile",
@@ -315,6 +320,7 @@ def axon_test(
             class_name=class_name,
             main_module=main_module,
             dtype=dtype,
+            model_task=model_task,
             hf_align_bf16_profile=hf_align_bf16_profile,
             hf_align_mask_contract=hf_align_mask_contract,
             hf_align_position_ids=hf_align_position_ids,
@@ -503,6 +509,11 @@ def axon_test_matrix(
         "--compile-dynamic/--no-compile-dynamic",
         help="Set torch.compile(dynamic=True).",
     ),
+    model_task: str = typer.Option(
+        "auto",
+        "--model-task",
+        help="Execution task override: auto/causal_lm/masked_lm/seq2seq_lm.",
+    ),
 ) -> None:
     """Run synapse axon-test across matching examples/*.axon and models/* directories."""
     module = _synapse_module()
@@ -525,6 +536,7 @@ def axon_test_matrix(
             compile_mode=compile_mode,
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
+            model_task_override=None if model_task == "auto" else model_task,
             include=include or None,
             exclude=exclude or None,
         )

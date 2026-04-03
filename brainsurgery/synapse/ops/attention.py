@@ -7,13 +7,26 @@ from torch.nn import functional as F
 
 OP_NAME = "attention"
 LOWERING_ARITY = (3, 3)
-LOWERING_ALLOWED_KWARGS: set[str] = {"scale", "mask", "causal", "eager", "sink", "sink_path"}
+LOWERING_ALLOWED_KWARGS: set[str] = {
+    "scale",
+    "mask",
+    "padding_mask",
+    "causal",
+    "eager",
+    "float_mask_additive",
+    "float_mask_floor_keep",
+    "sink",
+    "sink_path",
+}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {
     "causal": "bool",
     "mask": "str",
+    "padding_mask": "bool",
     "scale": "number",
     "eager": "bool",
+    "float_mask_additive": "bool",
+    "float_mask_floor_keep": "bool",
     "sink": "str",
     "sink_path": "str",
 }
@@ -61,6 +74,46 @@ def _normalize_mask_contract(model: Any, mask: torch.Tensor | None) -> torch.Ten
     return mask
 
 
+def _mask_to_keep(mask: torch.Tensor) -> torch.Tensor:
+    if mask.dtype == torch.bool:
+        return mask
+    if mask.is_floating_point():
+        if mask.numel() == 0:
+            return mask.to(torch.bool)
+        mask_max = float(mask.max())
+        mask_min = float(mask.min())
+        mask_floor = float(torch.finfo(mask.dtype).min)
+        if mask_max == 0.0 and mask_min <= (0.5 * mask_floor):
+            return mask == 0
+        return mask != 0
+    return mask.to(torch.bool)
+
+
+def _expand_padding_mask(
+    mask: torch.Tensor,
+    *,
+    q: torch.Tensor,
+    k_tensor: torch.Tensor,
+) -> torch.Tensor:
+    if mask.ndim != 2:
+        raise ValueError("attention padding_mask expects rank-2 [batch, seq] mask tensor")
+    if int(mask.shape[0]) != int(q.shape[0]):
+        raise ValueError("attention padding_mask batch size must match query batch size")
+    k_len = int(k_tensor.shape[-2])
+    if int(mask.shape[1]) < k_len:
+        raise ValueError("attention padding_mask width must be >= key sequence length")
+    keep = _mask_to_keep(mask[:, -k_len:]).to(device=q.device).unsqueeze(1).unsqueeze(1)
+    q_len = int(q.shape[-2])
+    if q_len != 1:
+        keep = keep.expand(-1, 1, q_len, -1)
+    floor = torch.finfo(q.dtype).min
+    return torch.where(
+        keep,
+        torch.zeros((), dtype=q.dtype, device=q.device),
+        torch.full((), floor, dtype=q.dtype, device=q.device),
+    )
+
+
 def interpret(
     model: Any,
     node_spec: dict[str, Any],
@@ -84,6 +137,11 @@ def interpret(
         mask = env.get(mask_name)
     if torch.is_tensor(mask):
         mask = _normalize_mask_contract(model, mask)
+    if bool(node_spec.get("padding_mask", False)):
+        if mask is not None and not torch.is_tensor(mask):
+            raise ValueError("attention padding_mask expects tensor or null mask input")
+        if torch.is_tensor(mask):
+            mask = _expand_padding_mask(mask, q=q, k_tensor=k_tensor)
 
     sink_name = node_spec.get("sink")
     sink = env.get(sink_name) if isinstance(sink_name, str) else None
@@ -99,6 +157,8 @@ def interpret(
 
     causal_flag = bool(node_spec.get("causal", True))
     eager_kw = node_spec.get("eager")
+    float_mask_additive = bool(node_spec.get("float_mask_additive", False))
+    float_mask_floor_keep = bool(node_spec.get("float_mask_floor_keep", False))
     use_eager = (
         bool(eager_kw)
         if eager_kw is not None
@@ -139,15 +199,26 @@ def interpret(
             if torch.is_tensor(mask):
                 if mask.dtype == torch.bool:
                     keep_from_mask = mask
+                    floor = torch.finfo(attn_scores.dtype).min
+                    attn_scores = attn_scores.masked_fill(~mask, floor)
                 elif mask.is_floating_point():
-                    keep_from_mask = mask == 0
+                    if float_mask_additive:
+                        keep_from_mask = None
+                    elif float_mask_floor_keep and mask.numel() > 0:
+                        mask_floor = float(torch.finfo(mask.dtype).min)
+                        keep_from_mask = mask > (0.5 * mask_floor)
+                    else:
+                        keep_from_mask = mask == 0
+                    attn_scores = attn_scores + mask
                 else:
                     keep_from_mask = None
+                    attn_scores = attn_scores + mask
                 if torch.is_tensor(keep_from_mask):
                     keep_mask = (
                         keep_from_mask if keep_mask is None else (keep_mask & keep_from_mask)
                     )
-            attn_scores = attn_scores + mask
+            else:
+                attn_scores = attn_scores + mask
         attn_probs = F.softmax(attn_scores, dim=-1, dtype=torch.float32).to(q.dtype)
         if torch.is_tensor(keep_mask):
             has_valid = keep_mask.any(dim=-1, keepdim=True)
@@ -221,6 +292,66 @@ def compile(
         )
         lines.append(f"{indent}            {normalized_mask} = ({normalized_mask} == 0)")
         mask_for_sdpa = normalized_mask
+    if bool(node_spec.get("padding_mask", False)) and mask_for_sdpa != "None":
+        padding_mask = emitter._fresh("padding_mask")
+        padding_keep = emitter._fresh("padding_keep")
+        padding_mask_max = emitter._fresh("padding_mask_max")
+        padding_mask_min = emitter._fresh("padding_mask_min")
+        padding_mask_floor = emitter._fresh("padding_mask_floor")
+        padding_q_len = emitter._fresh("padding_q_len")
+        padding_k_len = emitter._fresh("padding_k_len")
+        padding_fill = emitter._fresh("padding_fill")
+        lines.append(f"{indent}{padding_mask} = {mask_for_sdpa}")
+        lines.append(f"{indent}if not torch.is_tensor({padding_mask}):")
+        lines.append(
+            f"{indent}    raise ValueError('attention padding_mask expects tensor or null mask input')"
+        )
+        lines.append(f"{indent}if {padding_mask}.ndim != 2:")
+        lines.append(
+            f"{indent}    raise ValueError('attention padding_mask expects rank-2 [batch, seq] mask tensor')"
+        )
+        lines.append(f"{indent}if int({padding_mask}.shape[0]) != int({q}.shape[0]):")
+        lines.append(
+            f"{indent}    raise ValueError('attention padding_mask batch size must match query batch size')"
+        )
+        lines.append(f"{indent}{padding_k_len} = int({k}.shape[-2])")
+        lines.append(f"{indent}if int({padding_mask}.shape[1]) < {padding_k_len}:")
+        lines.append(
+            f"{indent}    raise ValueError('attention padding_mask width must be >= key sequence length')"
+        )
+        lines.append(f"{indent}{padding_keep} = {padding_mask}[:, -{padding_k_len}:]")
+        lines.append(f"{indent}if {padding_keep}.dtype == torch.bool:")
+        lines.append(f"{indent}    {padding_keep} = {padding_keep}")
+        lines.append(f"{indent}elif {padding_keep}.is_floating_point():")
+        lines.append(f"{indent}    if {padding_keep}.numel() == 0:")
+        lines.append(f"{indent}        {padding_keep} = {padding_keep}.to(torch.bool)")
+        lines.append(f"{indent}    else:")
+        lines.append(f"{indent}        {padding_mask_max} = float({padding_keep}.max())")
+        lines.append(f"{indent}        {padding_mask_min} = float({padding_keep}.min())")
+        lines.append(
+            f"{indent}        {padding_mask_floor} = float(torch.finfo({padding_keep}.dtype).min)"
+        )
+        lines.append(
+            f"{indent}        if {padding_mask_max} == 0.0 and {padding_mask_min} <= (0.5 * {padding_mask_floor}):"
+        )
+        lines.append(f"{indent}            {padding_keep} = ({padding_keep} == 0)")
+        lines.append(f"{indent}        else:")
+        lines.append(f"{indent}            {padding_keep} = ({padding_keep} != 0)")
+        lines.append(f"{indent}else:")
+        lines.append(f"{indent}    {padding_keep} = ({padding_keep} != 0)")
+        lines.append(
+            f"{indent}{padding_keep} = {padding_keep}.to({q}.device).unsqueeze(1).unsqueeze(1)"
+        )
+        lines.append(f"{indent}{padding_q_len} = int({q}.shape[-2])")
+        lines.append(f"{indent}if {padding_q_len} != 1:")
+        lines.append(
+            f"{indent}    {padding_keep} = {padding_keep}.expand(-1, 1, {padding_q_len}, -1)"
+        )
+        lines.append(f"{indent}{padding_fill} = torch.finfo({q}.dtype).min")
+        lines.append(
+            f"{indent}{padding_mask} = torch.where({padding_keep}, torch.zeros((), dtype={q}.dtype, device={q}.device), torch.full((), {padding_fill}, dtype={q}.dtype, device={q}.device))"
+        )
+        mask_for_sdpa = padding_mask
 
     sink_name = node_spec.get("sink")
     sink_expr = env[sink_name] if isinstance(sink_name, str) and sink_name in env else None
@@ -232,7 +363,13 @@ def compile(
     scale_value = node_spec.get("scale")
     scale_expr = "None" if scale_value is None else emitter._expr_code(scale_value, env)
     use_eager = emitter._fresh("use_eager_attn")
+    float_mask_additive = emitter._fresh("float_mask_additive")
+    float_mask_floor_keep = emitter._fresh("float_mask_floor_keep")
     eager_kw = node_spec.get("eager")
+    float_mask_additive_expr = emitter._expr_code(node_spec.get("float_mask_additive", False), env)
+    float_mask_floor_keep_expr = emitter._expr_code(
+        node_spec.get("float_mask_floor_keep", False), env
+    )
     if eager_kw is None:
         lines.append(
             f"{indent}{use_eager} = bool(getattr(self, '_hf_align_attention_eager', False))"
@@ -240,6 +377,8 @@ def compile(
     else:
         eager_expr = emitter._expr_code(eager_kw, env)
         lines.append(f"{indent}{use_eager} = bool({eager_expr})")
+    lines.append(f"{indent}{float_mask_additive} = bool({float_mask_additive_expr})")
+    lines.append(f"{indent}{float_mask_floor_keep} = bool({float_mask_floor_keep_expr})")
 
     if bool(node_spec.get("causal", True)):
         is_causal = f"({q}.shape[-2] > 1 and {mask_for_sdpa} is None)"
@@ -252,6 +391,7 @@ def compile(
         keep_mask = emitter._fresh("keep_mask")
         keep_from_mask = emitter._fresh("keep_from_mask")
         has_valid = emitter._fresh("has_valid")
+        mask_floor = emitter._fresh("mask_floor")
         lines.append(f"{indent}if {use_eager}:")
         lines.append(f"{indent}    _scale = {scale_expr}")
         lines.append(f"{indent}    if _scale is None:")
@@ -279,15 +419,31 @@ def compile(
         lines.append(f"{indent}        if torch.is_tensor({mask_for_sdpa}):")
         lines.append(f"{indent}            if {mask_for_sdpa}.dtype == torch.bool:")
         lines.append(f"{indent}                {keep_from_mask} = {mask_for_sdpa}")
+        lines.append(
+            f"{indent}                {attn_scores} = {attn_scores}.masked_fill(~{mask_for_sdpa}, torch.finfo({attn_scores}.dtype).min)"
+        )
         lines.append(f"{indent}            elif {mask_for_sdpa}.is_floating_point():")
-        lines.append(f"{indent}                {keep_from_mask} = ({mask_for_sdpa} == 0)")
+        lines.append(f"{indent}                if {float_mask_additive}:")
+        lines.append(f"{indent}                    {keep_from_mask} = None")
+        lines.append(f"{indent}                elif {float_mask_floor_keep}:")
+        lines.append(
+            f"{indent}                    {mask_floor} = float(torch.finfo({mask_for_sdpa}.dtype).min)"
+        )
+        lines.append(
+            f"{indent}                    {keep_from_mask} = ({mask_for_sdpa} > (0.5 * {mask_floor}))"
+        )
+        lines.append(f"{indent}                else:")
+        lines.append(f"{indent}                    {keep_from_mask} = ({mask_for_sdpa} == 0)")
+        lines.append(f"{indent}                {attn_scores} = {attn_scores} + {mask_for_sdpa}")
         lines.append(f"{indent}            else:")
         lines.append(f"{indent}                {keep_from_mask} = None")
+        lines.append(f"{indent}                {attn_scores} = {attn_scores} + {mask_for_sdpa}")
         lines.append(f"{indent}            if torch.is_tensor({keep_from_mask}):")
         lines.append(
             f"{indent}                {keep_mask} = {keep_from_mask} if {keep_mask} is None else ({keep_mask} & {keep_from_mask})"
         )
-        lines.append(f"{indent}        {attn_scores} = {attn_scores} + {mask_for_sdpa}")
+        lines.append(f"{indent}        else:")
+        lines.append(f"{indent}            {attn_scores} = {attn_scores} + {mask_for_sdpa}")
         lines.append(
             f"{indent}    {attn_probs} = F.softmax({attn_scores}, dim=-1, dtype=torch.float32).to({q}.dtype)"
         )

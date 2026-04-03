@@ -16,6 +16,7 @@ from brainsurgery.synapse import (
     parse_axon_program,
     render_synapse_spec_to_dot,
 )
+from brainsurgery.synapse.ops import linear as linear_op
 
 
 def _spec_dict() -> dict[str, object]:
@@ -102,6 +103,45 @@ def test_emit_model_code_from_synapse_spec_generic() -> None:
     source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="GenericSynapse")
     assert "class GenericSynapse(nn.Module):" in source
     assert "def generate(self, input_ids: torch.Tensor" in source
+
+
+def test_generated_model_resolves_double_at_params_under_current_param_root() -> None:
+    source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="RootedDoubleAt")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)
+    model_cls = namespace["RootedDoubleAt"]
+    model = model_cls(  # type: ignore[operator]
+        state_dict={"mlp.experts.0.gate_proj.weight": torch.ones(1, 1, dtype=torch.float32)}
+    )
+    model._param_roots_stack.append(["mlp.experts.0"])
+
+    assert (
+        model._pick_param_from_single("", "@@gate_proj.weight") == "mlp.experts.0.gate_proj.weight"
+    )
+    assert model._pick_param_path("", ["@@gate_proj.weight"]) == "mlp.experts.0.gate_proj.weight"
+
+
+def test_generated_model_resolves_double_at_params_from_scope_when_absolute_missing() -> None:
+    source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="ScopedDoubleAt")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)
+    model_cls = namespace["ScopedDoubleAt"]
+    model = model_cls(  # type: ignore[operator]
+        state_dict={"mlp.experts.0.gate_proj.weight": torch.ones(1, 1, dtype=torch.float32)}
+    )
+
+    assert (
+        model._pick_param_from_single("mlp.experts.0", "@@gate_proj.weight")
+        == "mlp.experts.0.gate_proj.weight"
+    )
+    assert (
+        model._pick_param_path("mlp.experts.0", ["@@gate_proj.weight"])
+        == "mlp.experts.0.gate_proj.weight"
+    )
+
+
+def test_linear_op_keeps_node_path_for_double_at_weights() -> None:
+    assert linear_op.uses_node_path(None, {"bias": False, "weight": "@@gate_proj.weight"}) is True
 
 
 def test_infer_output_types_for_node_linear_uses_input_shape_and_dim() -> None:
@@ -1239,6 +1279,55 @@ def test_generated_clamp_and_sigmoid_ops() -> None:
     assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
 
 
+def test_generated_xielu_reads_learned_activation_parameters() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "xielu": {
+                        "_op": "activations_xielu",
+                        "_args": "x",
+                        "_bind": "y",
+                        "_params": {
+                            "alpha_p": "act.alpha_p",
+                            "alpha_n": "act.alpha_n",
+                            "beta": "act.beta",
+                            "eps": "act.eps",
+                        },
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="XieluModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["XieluModel"]()
+    state_dict = {
+        "act.alpha_p": torch.tensor([0.2], dtype=torch.float32),
+        "act.alpha_n": torch.tensor([-0.4], dtype=torch.float32),
+        "act.beta": torch.tensor([0.6], dtype=torch.float32),
+        "act.eps": torch.tensor([-1.0e-4], dtype=torch.float32),
+    }
+    model.load_state_dict_tensors(state_dict)
+    x = torch.tensor([[-1.25, -0.25, 0.5, 1.75]], dtype=torch.float32)
+    out = model(x=x)
+
+    alpha_p = torch.nn.functional.softplus(state_dict["act.alpha_p"])
+    beta = state_dict["act.beta"]
+    alpha_n = beta + torch.nn.functional.softplus(state_dict["act.alpha_n"])
+    eps = state_dict["act.eps"]
+    expected = torch.where(
+        x > 0,
+        alpha_p * x * x + beta * x,
+        (torch.expm1(torch.minimum(x, eps)) - x) * alpha_n + beta * x,
+    )
+    assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
+
+
 def test_generated_model_records_intermediates_to_runtime_state_dict() -> None:
     spec = {
         "synapse": 1,
@@ -1303,6 +1392,48 @@ def test_generated_config_primitives_read_model_config_and_defaults() -> None:
     assert out["defaulted"] == 9
     assert out["hidden_f"] == 640.0
     assert out["name"] == "gemma3"
+
+
+def test_generated_config_value_and_expression_default() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "config": {
+                "hidden_size": 640,
+                "rope_scaling": {"long_factor": [1.0, 2.0, 3.0]},
+            },
+            "graph": [
+                {
+                    "v": {
+                        "_op": "config_value",
+                        "_args": "rope_scaling.long_factor",
+                        "_bind": "vals",
+                    }
+                },
+                {
+                    "d": {
+                        "_op": "config_int",
+                        "_args": "missing.hidden_size",
+                        "_bind": "fallback_hidden",
+                        "default": {
+                            "_expr": "call",
+                            "callee": "Config.int",
+                            "args": ["hidden_size"],
+                            "kwargs": {},
+                        },
+                    }
+                },
+            ],
+            "outputs": {"vals": "vals", "fallback_hidden": "fallback_hidden"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="ConfigValueModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["ConfigValueModel"]()
+    out = model()
+    assert out["vals"] == [1.0, 2.0, 3.0]
+    assert out["fallback_hidden"] == 640
 
 
 def test_generated_config_primitives_support_root_kwarg() -> None:
@@ -1467,6 +1598,57 @@ tiny x = do
     )
     out = model(x=torch.tensor([[[1.0, 2.0]]], dtype=torch.float32))
     assert torch.equal(out["y"], torch.tensor([[[1.0, 2.0]]], dtype=torch.float32))
+
+
+def test_generated_layernorm_allows_explicit_weight_and_bias_names() -> None:
+    modules = parse_axon_program(
+        """
+D = 2
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  y <- layernorm@norm x eps=1e-05 weight=gamma bias=beta
+  return y
+"""
+    )
+    spec = lower_axon_program_to_synapse_spec(modules)
+    source = emit_model_code_from_synapse_spec(spec, class_name="ExplicitLayerNormParamModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    gamma = torch.tensor([1.5, 0.5], dtype=torch.float32)
+    beta = torch.tensor([-0.25, 0.75], dtype=torch.float32)
+    model = namespace["ExplicitLayerNormParamModel"](
+        state_dict={
+            "norm.gamma": gamma,
+            "norm.beta": beta,
+        }
+    )
+    x = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.float32)
+    out = model(x=x)["y"]
+    expected = torch.nn.functional.layer_norm(x, (2,), weight=gamma, bias=beta, eps=1.0e-5)
+    assert torch.allclose(out, expected, atol=1.0e-6, rtol=0.0)
+
+
+@pytest.mark.parametrize("bias_literal", ["false", "null"])
+def test_generated_layernorm_allows_disabling_bias_via_literal(bias_literal: str) -> None:
+    modules = parse_axon_program(
+        f"""
+D = 2
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  y <- layernorm@norm x eps=1e-05 weight=gamma bias={bias_literal}
+  return y
+"""
+    )
+    spec = lower_axon_program_to_synapse_spec(modules)
+    source = emit_model_code_from_synapse_spec(spec, class_name="NoBiasLayerNormModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    gamma = torch.tensor([1.5, 0.5], dtype=torch.float32)
+    model = namespace["NoBiasLayerNormModel"](state_dict={"norm.gamma": gamma})
+    x = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.float32)
+    out = model(x=x)["y"]
+    expected = torch.nn.functional.layer_norm(x, (2,), weight=gamma, bias=None, eps=1.0e-5)
+    assert torch.allclose(out, expected, atol=1.0e-6, rtol=0.0)
 
 
 def test_generated_select_is_lazy_and_value_producing() -> None:

@@ -92,6 +92,42 @@ def olmoe_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
 
 
 @pytest.fixture(scope="session")
+def olmo3_1025_7b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["olmo3_1025_7b"],
+    )
+
+
+@pytest.fixture(scope="session")
+def olmo3_7b_instruct_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["olmo3_7b_instruct"],
+    )
+
+
+@pytest.fixture(scope="session")
+def olmo3_7b_think_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["olmo3_7b_think"],
+    )
+
+
+@pytest.fixture(scope="session")
+def olmo_2_1b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["olmo_2_1b"],
+    )
+
+
+@pytest.fixture(scope="session")
 def glm4_5_air_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
     return ensure_model_downloaded(
         repo_root=repo_root,
@@ -110,11 +146,272 @@ def deepseek_v2_lite_local_path(repo_root: Path, pytestconfig: pytest.Config) ->
 
 
 @pytest.fixture(scope="session")
+def comma_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["comma"],
+    )
+
+
+@pytest.fixture(scope="session")
+def dfm_decoder_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["dfm_decoder"],
+    )
+
+
+@pytest.fixture(scope="session")
+def phi3_mini_4k_instruct_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["phi3_mini_4k_instruct"],
+    )
+
+
+@pytest.fixture(scope="session")
+def smollm_135m_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["smollm_135m"],
+    )
+
+
+@pytest.fixture(scope="session")
+def smollm_360m_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["smollm_360m"],
+    )
+
+
+@pytest.fixture(scope="session")
+def smollm_1_7b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["smollm_1_7b"],
+    )
+
+
+@pytest.fixture(scope="session")
+def smollm2_135m_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["smollm2_135m"],
+    )
+
+
+@pytest.fixture(scope="session")
+def smollm2_360m_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["smollm2_360m"],
+    )
+
+
+@pytest.fixture(scope="session")
+def smollm2_1_7b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["smollm2_1_7b"],
+    )
+
+
+@pytest.fixture(scope="session")
+def smollm3_3b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["smollm3_3b"],
+    )
+
+
+@pytest.fixture(scope="session")
+def smollm3_3b_base_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["smollm3_3b_base"],
+    )
+
+
+@pytest.fixture(scope="session")
 def black_mamba_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
     return ensure_model_downloaded(
         repo_root=repo_root,
         config=pytestconfig,
         spec=MODEL_SPECS["black_mamba"],
+    )
+
+
+@pytest.fixture(scope="session")
+def apertus_8b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["apertus_8b"],
+    )
+
+
+@pytest.fixture(scope="session")
+def bert_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["bert"],
+    )
+
+
+@pytest.fixture(scope="session")
+def roberta_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["roberta"],
+    )
+
+
+@pytest.fixture(scope="session")
+def camembert_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["camembert"],
+    )
+
+
+@pytest.fixture(scope="session")
+def xlm_roberta_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["xlm_roberta"],
+    )
+
+
+@pytest.fixture(scope="session")
+def distilbert_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["distilbert"],
+    )
+
+
+@pytest.fixture(scope="session")
+def electra_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["electra"],
+    )
+
+
+@pytest.fixture(scope="session")
+def albert_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["albert"],
+    )
+
+
+@pytest.fixture(scope="session")
+def deberta_v2_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["deberta_v2"],
+    )
+
+
+@pytest.fixture(scope="session")
+def longformer_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["longformer"],
+    )
+
+
+@pytest.fixture(scope="session")
+def modernbert_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["modernbert"],
+    )
+
+
+@pytest.fixture(scope="session")
+def t5_small_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["t5_small"],
+    )
+
+
+@pytest.fixture(scope="session")
+def mt5_small_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["mt5_small"],
+    )
+
+
+@pytest.fixture(scope="session")
+def bart_base_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["bart_base"],
+    )
+
+
+@pytest.fixture(scope="session")
+def mbart_large_50_m2m_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["mbart_large_50_m2m"],
+    )
+
+
+@pytest.fixture(scope="session")
+def marian_en_de_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["marian_en_de"],
+    )
+
+
+@pytest.fixture(scope="session")
+def t5gemma_s_s_ul2_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["t5gemma_s_s_ul2"],
+    )
+
+
+@pytest.fixture(scope="session")
+def t5gemma2_270m_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root,
+        config=pytestconfig,
+        spec=MODEL_SPECS["t5gemma2_270m"],
     )
 
 

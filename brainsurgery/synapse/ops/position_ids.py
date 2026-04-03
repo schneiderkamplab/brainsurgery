@@ -100,9 +100,8 @@ def interpret(
         return
 
     offset = _resolve_past_length(model, node_spec, env, symbols)
-    env[out] = torch.arange(offset, offset + seq_len, device=x.device, dtype=torch.long).unsqueeze(
-        0
-    )
+    base = torch.arange(offset, offset + seq_len, device=x.device, dtype=torch.long).unsqueeze(0)
+    env[out] = base.expand(int(x.shape[0]), -1)
     return
 
 
@@ -167,9 +166,11 @@ def compile(
         lines.append(
             f"{indent}        raise ValueError('position_ids.past_length must resolve to non-negative int')"
         )
+        base = emitter._fresh("pos_base")
         lines.append(
-            f"{indent}    {out_var} = torch.arange({offset}, {offset} + {src}.shape[1], device={src}.device, dtype=torch.long).unsqueeze(0)"
+            f"{indent}    {base} = torch.arange({offset}, {offset} + {src}.shape[1], device={src}.device, dtype=torch.long).unsqueeze(0)"
         )
+        lines.append(f"{indent}    {out_var} = {base}.expand(int({src}.shape[0]), -1)")
         return lines
 
     lines.append(f"{indent}{offset} = int({past_expr})")
@@ -177,9 +178,11 @@ def compile(
     lines.append(
         f"{indent}    raise ValueError('position_ids.past_length must resolve to non-negative int')"
     )
+    base = emitter._fresh("pos_base")
     lines.append(
-        f"{indent}{out_var} = torch.arange({offset}, {offset} + {src}.shape[1], device={src}.device, dtype=torch.long).unsqueeze(0)"
+        f"{indent}{base} = torch.arange({offset}, {offset} + {src}.shape[1], device={src}.device, dtype=torch.long).unsqueeze(0)"
     )
+    lines.append(f"{indent}{out_var} = {base}.expand(int({src}.shape[0]), -1)")
     return lines
 
 

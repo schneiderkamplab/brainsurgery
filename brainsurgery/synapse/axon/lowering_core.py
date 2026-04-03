@@ -102,6 +102,7 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, tuple[str, int]] = {
     "gelu": ("_activations_gelu", 0),
     "gelu_new": ("_activations_gelu_new", 0),
     "gelu_pytorch_tanh": ("_activations_gelu_pytorch_tanh", 0),
+    "gegelu": ("_activations_gegelu", 0),
     "relu": ("_activations_relu", 0),
     "sigmoid": ("_activations_sigmoid", 0),
     "silu": ("_activations_silu", 0),
@@ -294,6 +295,8 @@ def _is_kind(value: Any, kind: str) -> bool:
         return isinstance(value, (int, float, str)) or is_expr_payload
     if kind == "str":
         return isinstance(value, str) or is_expr_payload
+    if kind == "str_or_bool_or_null":
+        return isinstance(value, (str, bool)) or value is None or is_expr_payload
     if kind == "dim":
         if isinstance(value, bool):
             return False
@@ -1183,8 +1186,20 @@ def _lower_simple_call(
             dynamic_root_expr = _current_dynamic_param_root(ctx)
             params: dict[str, str | list[str]] = {}
             for param_name in bound_params:
-                suffix = f"{param_path}.{param_name}"
-                candidates = [_join_dot(root, suffix) for root in root_candidates]
+                explicit_name = concrete_node.get(param_name)
+                if isinstance(explicit_name, str) and explicit_name.strip():
+                    explicit_token = explicit_name.strip()
+                    suffix = (
+                        explicit_token
+                        if "." in explicit_token
+                        else f"{param_path}.{explicit_token}"
+                    )
+                else:
+                    suffix = f"{param_path}.{param_name}"
+                if is_absolute_path:
+                    candidates = [suffix]
+                else:
+                    candidates = [_join_dot(root, suffix) for root in root_candidates]
                 if len(candidates) == 1:
                     params[param_name] = candidates[0]
                 else:
@@ -1583,7 +1598,16 @@ def _ensure_outputs_from_returns(outputs: dict[str, str], returns: tuple[str, ..
 
 
 def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple[str, int]]:
-    allowed_namespaces = {"Prelude", "Activations", "Cache", "List", "MoE", "Config", "Params"}
+    allowed_namespaces = {
+        "Prelude",
+        "Activations",
+        "Cache",
+        "List",
+        "MoE",
+        "Config",
+        "Params",
+        "Position",
+    }
     direct_aliases: dict[str, tuple[str, int]] = {}
     for module in modules:
         if not isinstance(module.name, str) or "." not in module.name:
@@ -1876,7 +1900,16 @@ def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
     if op == "rmsnorm":
         return ["weight"]
     if op == "layernorm":
-        return ["weight", "bias"]
+        names = ["weight"]
+        raw_bias = node_spec.get("bias", True)
+        has_bias = not (raw_bias is None or raw_bias is False)
+        if has_bias:
+            names.append("bias")
+        return names
+    if op == "activations_xielu":
+        return ["alpha_p", "alpha_n", "beta", "eps"]
+    if op == "t5_relative_position_bias":
+        return ["weight"]
     raise ValueError(f"unsupported param_base resolution for op {op!r}")
 
 

@@ -79,6 +79,7 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, str] = {
     "gelu": "_activations_gelu",
     "gelu_new": "_activations_gelu_new",
     "gelu_pytorch_tanh": "_activations_gelu_pytorch_tanh",
+    "gegelu": "_activations_gegelu",
     "relu": "_activations_relu",
     "sigmoid": "_activations_sigmoid",
     "silu": "_activations_silu",
@@ -566,6 +567,10 @@ def _kwarg_matches_kind(value: Any, expected: str) -> bool:
         if isinstance(expr_type, TypeString):
             return True
         return isinstance(raw, str)
+    if expected == "str_or_bool_or_null":
+        if isinstance(expr_type, (TypeString, TypeBool, TypeNull)):
+            return True
+        return isinstance(raw, (str, bool)) or raw is None
     if expected == "dim":
         if expr_dim is not None:
             return True
@@ -1202,18 +1207,14 @@ def _call_return_type(
         return "@".join([alias_base, *alias_path_parts]) if alias_path_parts else alias_base
 
     callee = _apply_primitive_alias(callee)
-    if (
-        "." not in base
-        and "@" not in callee
-        and isinstance(module.imported_members, dict)
-        and base not in signatures
-    ):
+    if "." not in base and isinstance(module.imported_members, dict) and base not in signatures:
+        path_suffix = callee.split("@")[1:]
         for namespace, members in module.imported_members.items():
             if base not in members:
                 continue
             qualified = f"{namespace}.{base}"
             if qualified in signatures:
-                callee = qualified
+                callee = "@".join([qualified, *path_suffix]) if path_suffix else qualified
                 base = qualified
                 break
     callee = _apply_primitive_alias(callee)

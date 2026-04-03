@@ -19,6 +19,7 @@ _ESSENTIAL_TEXT_FILES = {
     "generation_config.json",
     "tokenizer_config.json",
     "tokenizer.json",
+    "tokenizer.model",
     "special_tokens_map.json",
     "vocab.json",
     "merges.txt",
@@ -37,19 +38,114 @@ class ModelDownloadSpec:
 
 
 MODEL_SPECS: dict[str, ModelDownloadSpec] = {
+    "albert": ModelDownloadSpec(local_dir="albert", repo_id="albert/albert-base-v2"),
+    "apertus_8b": ModelDownloadSpec(local_dir="apertus_8b", repo_id="swiss-ai/Apertus-8B-2509"),
+    "bert": ModelDownloadSpec(local_dir="bert", repo_id="google-bert/bert-base-uncased"),
+    "camembert": ModelDownloadSpec(local_dir="camembert", repo_id="camembert-base"),
+    "deberta_v2": ModelDownloadSpec(
+        local_dir="deberta_v2",
+        repo_id="microsoft/deberta-v3-xsmall",
+    ),
+    "distilbert": ModelDownloadSpec(
+        local_dir="distilbert",
+        repo_id="distilbert/distilbert-base-uncased",
+    ),
+    "electra": ModelDownloadSpec(
+        local_dir="electra",
+        repo_id="google/electra-base-generator",
+    ),
+    "longformer": ModelDownloadSpec(
+        local_dir="longformer",
+        repo_id="allenai/longformer-base-4096",
+    ),
+    "modernbert": ModelDownloadSpec(local_dir="modernbert", repo_id="answerdotai/ModernBERT-base"),
+    "roberta": ModelDownloadSpec(local_dir="roberta", repo_id="FacebookAI/roberta-base"),
     "gpt2": ModelDownloadSpec(local_dir="gpt2", repo_id="openai-community/gpt2"),
+    "t5_small": ModelDownloadSpec(local_dir="t5_small", repo_id="google-t5/t5-small"),
+    "mt5_small": ModelDownloadSpec(local_dir="mt5_small", repo_id="google/mt5-small"),
+    "bart_base": ModelDownloadSpec(local_dir="bart_base", repo_id="facebook/bart-base"),
+    "mbart_large_50_m2m": ModelDownloadSpec(
+        local_dir="mbart_large_50_m2m", repo_id="facebook/mbart-large-50-many-to-many-mmt"
+    ),
+    "marian_en_de": ModelDownloadSpec(
+        local_dir="marian_en_de", repo_id="Helsinki-NLP/opus-mt-en-de"
+    ),
+    "t5gemma_s_s_ul2": ModelDownloadSpec(
+        local_dir="t5gemma_s_s_ul2", repo_id="google/t5gemma-s-s-ul2"
+    ),
+    "t5gemma2_270m": ModelDownloadSpec(
+        local_dir="t5gemma2_270m", repo_id="google/t5gemma-2-270m-270m"
+    ),
     "gemma3": ModelDownloadSpec(local_dir="gemma3", repo_id="google/gemma-3-270m"),
     "gemma3_1b": ModelDownloadSpec(local_dir="gemma3_1b", repo_id="google/gemma-3-1b-pt"),
     "gemma3_4b": ModelDownloadSpec(local_dir="gemma3_4b", repo_id="google/gemma-3-4b-pt"),
     "olmoe_1b_7b_0924": ModelDownloadSpec(
         local_dir="olmoe_1b_7b_0924", repo_id="allenai/OLMoE-1B-7B-0924"
     ),
+    "olmo3_1025_7b": ModelDownloadSpec(
+        local_dir="olmo3_1025_7b",
+        repo_id="allenai/Olmo-3-1025-7B",
+    ),
+    "olmo3_7b_instruct": ModelDownloadSpec(
+        local_dir="olmo3_7b_instruct",
+        repo_id="allenai/Olmo-3-7B-Instruct",
+    ),
+    "olmo3_7b_think": ModelDownloadSpec(
+        local_dir="olmo3_7b_think",
+        repo_id="allenai/Olmo-3-7B-Think",
+    ),
+    "olmo_2_1b": ModelDownloadSpec(local_dir="olmo_2_1b", repo_id="allenai/OLMo-2-0425-1B"),
     "falcon_rw_1b": ModelDownloadSpec(local_dir="falcon_rw_1b", repo_id="tiiuae/falcon-rw-1b"),
     "llama3_2_1b": ModelDownloadSpec(local_dir="llama3_2_1b", repo_id="meta-llama/Llama-3.2-1B"),
     "mistral_7b_v0_1": ModelDownloadSpec(
         local_dir="mistral_7b_v0_1", repo_id="mistralai/Mistral-7B-v0.1"
     ),
     "qwen2_5_0_5b": ModelDownloadSpec(local_dir="qwen2_5_0_5b", repo_id="Qwen/Qwen2.5-0.5B"),
+    "comma": ModelDownloadSpec(local_dir="comma", repo_id="common-pile/comma-v0.1-1t"),
+    "dfm_decoder": ModelDownloadSpec(
+        local_dir="dfm_decoder",
+        repo_id="danish-foundation-models/dfm-decoder-open-v0-7b-pt",
+    ),
+    "smollm_135m": ModelDownloadSpec(
+        local_dir="smollm_135m",
+        repo_id="HuggingFaceTB/SmolLM-135M",
+    ),
+    "smollm_360m": ModelDownloadSpec(
+        local_dir="smollm_360m",
+        repo_id="HuggingFaceTB/SmolLM-360M",
+    ),
+    "smollm_1_7b": ModelDownloadSpec(
+        local_dir="smollm_1_7b",
+        repo_id="HuggingFaceTB/SmolLM-1.7B",
+    ),
+    "smollm2_135m": ModelDownloadSpec(
+        local_dir="smollm2_135m",
+        repo_id="HuggingFaceTB/SmolLM2-135M",
+    ),
+    "smollm2_360m": ModelDownloadSpec(
+        local_dir="smollm2_360m",
+        repo_id="HuggingFaceTB/SmolLM2-360M",
+    ),
+    "smollm2_1_7b": ModelDownloadSpec(
+        local_dir="smollm2_1_7b",
+        repo_id="HuggingFaceTB/SmolLM2-1.7B",
+    ),
+    "smollm3_3b": ModelDownloadSpec(
+        local_dir="smollm3_3b",
+        repo_id="HuggingFaceTB/SmolLM3-3B",
+    ),
+    "smollm3_3b_base": ModelDownloadSpec(
+        local_dir="smollm3_3b_base",
+        repo_id="HuggingFaceTB/SmolLM3-3B-Base",
+    ),
+    "xlm_roberta": ModelDownloadSpec(
+        local_dir="xlm_roberta",
+        repo_id="FacebookAI/xlm-roberta-base",
+    ),
+    "phi3_mini_4k_instruct": ModelDownloadSpec(
+        local_dir="phi3_mini_4k_instruct",
+        repo_id="microsoft/Phi-3-mini-4k-instruct",
+    ),
     "mamba_tiny_random": ModelDownloadSpec(
         local_dir="mamba_tiny_random", repo_id="yujiepan/mamba-tiny-random"
     ),
@@ -83,6 +179,14 @@ MODEL_SPECS: dict[str, ModelDownloadSpec] = {
 }
 
 MATRIX_AXON_TO_MODEL_DIR: dict[str, str] = {
+    "albert": "albert",
+    "apertus_8b": "apertus_8b",
+    "bert": "bert",
+    "deberta_v2": "deberta_v2",
+    "distilbert": "distilbert",
+    "electra": "electra",
+    "longformer": "longformer",
+    "modernbert": "modernbert",
     "falcon_rw_1b": "falcon_rw_1b",
     "flexolmo": "flexmath",
     "gemma3_270m": "gemma3",
@@ -90,12 +194,33 @@ MATRIX_AXON_TO_MODEL_DIR: dict[str, str] = {
     "gpt2_kv": "gpt2",
     "jamba_3b": "jamba_3b",
     "black_mamba": "black_mamba_2_8b",
+    "dfm_decoder": "dfm_decoder",
     "llama3_2_1b": "llama3_2_1b",
     "mamba_2_8b": "mamba_2_8b_hf",
     "mistral_7b_v0_1": "mistral_7b_v0_1",
+    "olmo3": "olmo3_1025_7b",
     "olmoe_1b_7b_0924": "olmoe_1b_7b_0924",
+    "olmo_2_1b": "olmo_2_1b",
     "qwen2_5_0_5b": "qwen2_5_0_5b",
+    "roberta": "roberta",
+    "smollm": "smollm_135m",
+    "smollm3": "smollm3_3b_base",
+    "t5_small": "t5_small",
+    "mt5": "mt5_small",
+    "bart": "bart_base",
+    "mbart": "mbart_large_50_m2m",
+    "marian": "marian_en_de",
+    "t5gemma": "t5gemma_s_s_ul2",
+    "t5gemma2": "t5gemma2_270m",
 }
+
+# Matrix pairs allow multiple model dirs to share one Axon file stem.
+MATRIX_AXON_MODEL_DIR_PAIRS: list[tuple[str, str]] = [
+    *sorted(MATRIX_AXON_TO_MODEL_DIR.items()),
+    ("roberta", "camembert"),
+    ("roberta", "xlm_roberta"),
+    ("dfm_decoder", "comma"),
+]
 
 
 def _status(config: pytest.Config, message: str) -> None:
@@ -262,8 +387,13 @@ def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
     if require_tokenizer and not (model_dir / "tokenizer_config.json").exists():
         return False
     if require_tokenizer:
-        has_tokenizer = (model_dir / "tokenizer.json").exists() or (
-            (model_dir / "vocab.json").exists() and (model_dir / "merges.txt").exists()
+        has_tokenizer = (
+            (model_dir / "tokenizer.json").exists()
+            or (model_dir / "tokenizer.model").exists()
+            or (model_dir / "spm.model").exists()
+            or ((model_dir / "vocab.json").exists() and (model_dir / "merges.txt").exists())
+            or any(model_dir.glob("*.tiktoken"))
+            or any(model_dir.glob("tokenization*.py"))
         )
         if not has_tokenizer:
             return False
@@ -296,6 +426,18 @@ def _normalize_config_rope_numeric_fields(model_dir: Path) -> None:
 
     _normalize(payload.get("rope_scaling"))
     _normalize(payload.get("rope_parameters"))
+    original_ctx = payload.get("original_max_position_embeddings")
+    if isinstance(original_ctx, int) and not isinstance(original_ctx, bool):
+        for field_name in ("rope_scaling", "rope_parameters"):
+            field = payload.get(field_name)
+            if not isinstance(field, dict):
+                continue
+            rope_type = field.get("rope_type", field.get("type"))
+            if rope_type not in {"longrope", "su"}:
+                continue
+            if "original_max_position_embeddings" not in field:
+                field["original_max_position_embeddings"] = original_ctx
+                changed = True
 
     if changed:
         config_path.write_text(
@@ -349,7 +491,18 @@ def ensure_model_downloaded(
         for stale in [*model_dir.glob("*.safetensors"), model_dir / "model.safetensors.index.json"]:
             stale.unlink(missing_ok=True)
     selected_files = set(selected_weight_files)
-    selected_files.update(name for name in siblings if name in _ESSENTIAL_TEXT_FILES)
+    selected_files.update(
+        name
+        for name in siblings
+        if (
+            Path(name).name in _ESSENTIAL_TEXT_FILES
+            or Path(name).name.endswith(".tiktoken")
+            or (
+                Path(name).name.endswith(".py")
+                and Path(name).name.startswith(("configuration_", "modeling_", "tokenization_"))
+            )
+        )
+    )
 
     headers = _auth_headers()
     pending_files: list[str] = []
@@ -469,7 +622,7 @@ def ensure_gpt2_weights_alias(repo_root: Path, config: pytest.Config) -> Path:
 
 
 def ensure_matrix_models(repo_root: Path, config: pytest.Config) -> None:
-    required_dirs = sorted(set(MATRIX_AXON_TO_MODEL_DIR.values()))
+    required_dirs = sorted({model_dir for _, model_dir in MATRIX_AXON_MODEL_DIR_PAIRS})
     for model_dir in required_dirs:
         spec = MODEL_SPECS.get(model_dir)
         if spec is None:

@@ -1,0 +1,15 @@
+import Config
+
+-- mBART-50 defaults.
+D = Config.int "d_model" default=1024                            -- hidden size
+V = Config.int "vocab_size" default=250054                       -- vocab size
+L_ENC = Config.int "encoder_layers" default=12                   -- encoder layers
+L_DEC = Config.int "decoder_layers" default=12                   -- decoder layers
+H_ENC = Config.int "encoder_attention_heads" default=16          -- encoder heads
+H_DEC = Config.int "decoder_attention_heads" default=16          -- decoder heads
+FFN_ENC = Config.int "encoder_ffn_dim" default=4096              -- encoder MLP width
+FFN_DEC = Config.int "decoder_ffn_dim" default=4096              -- decoder MLP width
+EPS = Config.float "layernorm_embedding_eps" default=1e-05       -- layernorm epsilon
+POS_OFFSET = Config.int "learned_pos_offset" default=2           -- learned position embedding offset
+EMB_SCALE_DERIVED = sqrt D                                         -- scale_embedding=true default
+EMB_SCALE = Config.float "embed_scale" default=EMB_SCALE_DERIVED -- token embedding scale

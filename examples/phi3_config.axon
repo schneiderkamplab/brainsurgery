@@ -1,0 +1,49 @@
+import Config
+import Params
+
+-- Like gemma3_config, allow nested text config layouts.
+CFG = (Config.has "text_config") ? "text_config" : ""               -- config namespace root
+PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : "" -- optional parameter namespace root
+
+MODEL_TYPE = Config.str "model_type" root=CFG default="phi3"        -- `phi3` (mini/medium) or `phi3small`
+IS_SMALL = MODEL_TYPE == "phi3small"                                 -- switch for Phi-3-small architecture variant
+
+D = Config.int "hidden_size" root=CFG default=3072                  -- hidden width
+V = Config.int "vocab_size" root=CFG default=32064                  -- vocab size
+L = Config.int "num_hidden_layers" root=CFG default=32              -- layer count
+H = Config.int "num_attention_heads" root=CFG default=32            -- query heads
+KVH = Config.int "num_key_value_heads" root=CFG default=32          -- key/value heads
+
+-- Some checkpoints expose `head_dim`; otherwise infer from known Phi-3 family defaults.
+HD = (Config.has "head_dim" root=CFG) ? (Config.int "head_dim" root=CFG default=128) : ((D == 5120) ? 128 : ((D == 3072) ? 96 : 128))
+QD = H * HD                                                          -- query projection width
+KVD = KVH * HD                                                       -- key/value projection width
+
+FFN = IS_SMALL ? (Config.int "ff_intermediate_size" root=CFG default=14336) : (Config.int "intermediate_size" root=CFG default=8192)
+
+EPS = IS_SMALL ? (Config.float "layer_norm_epsilon" root=CFG default=1e-05) : (Config.float "rms_norm_eps" root=CFG default=1e-05)
+
+THETA = IS_SMALL ? (Config.float "rope_embedding_base" root=CFG default=1000000.0) : (Config.float "rope_theta" root=CFG default=10000.0)
+ROPE_MODE = Config.str "type" root="rope_scaling" default=(Config.str "rope_type" root="rope_scaling" default="default")
+ROPE_ORIGINAL_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=(Config.int "original_max_position_embeddings" root=CFG default=4096)
+ROPE_MAX_CONTEXT = Config.int "max_position_embeddings" root=CFG default=4096
+ROPE_LONG_FACTOR = Config.value "long_factor" root="rope_scaling" default=[]
+ROPE_SHORT_FACTOR = Config.value "short_factor" root="rope_scaling" default=[]
+HAS_LONGROPE = Config.has "long_factor" root="rope_scaling"
+GEGELU_LIMIT = Config.float "gegelu_limit" root=CFG default=20.0
+MUP_ATTN_MULT = Config.float "mup_attn_multiplier" root=CFG default=1.0
+MUP_EMBED_MULT = Config.float "mup_embedding_multiplier" root=CFG default=10.0
+MUP_WIDTH_MULT = Config.float "mup_width_multiplier" root=CFG default=8.0
+ATTN_SCALE = MUP_ATTN_MULT / HD
+
+HAS_SLIDING_WINDOW = Config.has "sliding_window" root=CFG
+BS_LOCAL_BLOCKS = Config.int "blocksparse_num_local_blocks" root=CFG default=16
+BS_BLOCK_SIZE = Config.int "blocksparse_block_size" root=CFG default=64
+BS_VERT_STRIDE = Config.int "blocksparse_vert_stride" root=CFG default=8
+BS_HOMO_HEAD = (Config.value "blocksparse_homo_head_pattern" root=CFG default=false) == true
+WINDOW_LOCAL = HAS_SLIDING_WINDOW ? (Config.int "sliding_window" root=CFG default=2047) : (BS_LOCAL_BLOCKS * BS_BLOCK_SIZE)
+WINDOW_GLOBAL = Config.int "max_position_embeddings" root=CFG default=4096
+DENSE_EVERY = Config.int "dense_attention_every_n_layers" root=CFG default=1 -- Phi-3-small dense-attn cadence
+
+-- Small checkpoints commonly tie output projection to embeddings.
+HAS_LM_HEAD = Params.has_root "lm_head"

@@ -564,15 +564,30 @@ class SynapseProgramModel(nn.Module):
             return roots
 
         def _explicit_candidates(raw_path: str) -> list[str]:
-            scope_prefix = self._scope_of(node_path)
             roots = _current_roots()
+            if raw_path.startswith("@@"):
+                absolute = raw_path[2:]
+                if not absolute:
+                    return []
+                absolute_candidates: list[str] = []
+                for candidate in [_join_root(root, absolute) for root in roots]:
+                    if candidate not in absolute_candidates:
+                        absolute_candidates.append(candidate)
+                if absolute not in absolute_candidates:
+                    absolute_candidates.append(absolute)
+                scope_prefix = self._scope_of(node_path)
+                scoped_absolute = self._join(scope_prefix, absolute)
+                if scoped_absolute and scoped_absolute not in absolute_candidates:
+                    absolute_candidates.append(scoped_absolute)
+                return absolute_candidates
+            scope_prefix = self._scope_of(node_path)
             scoped = self._join(scope_prefix, raw_path)
             scoped = scoped if scoped else raw_path
-            out: list[str] = []
+            scoped_candidates: list[str] = []
             for candidate in [_join_root(root, scoped) for root in roots]:
-                if candidate not in out:
-                    out.append(candidate)
-            return out
+                if candidate not in scoped_candidates:
+                    scoped_candidates.append(candidate)
+            return scoped_candidates
 
         def _pick_explicit_candidate(raw: Any) -> str | None:
             if isinstance(raw, str):
@@ -869,7 +884,7 @@ class SynapseProgramModel(nn.Module):
             if any(isinstance(arg, bool) or not isinstance(arg, (int, float)) for arg in args):
                 raise ValueError("max expression call expects numeric arguments")
             return max(args)
-        if callee in {"Config.has", "Config.int", "Config.float", "Config.str"}:
+        if callee in {"Config.has", "Config.int", "Config.float", "Config.str", "Config.value"}:
             if len(args) != 1 or not isinstance(args[0], str) or not args[0]:
                 raise ValueError(f"{callee} expression call expects one non-empty string key")
             key = args[0]
@@ -910,6 +925,8 @@ class SynapseProgramModel(nn.Module):
             if callee == "Config.str":
                 if not isinstance(value, str):
                     raise ValueError("Config.str expression call expected string")
+                return value
+            if callee == "Config.value":
                 return value
         if callee in {"Params.has_root", "Params.root"}:
             if len(args) != 1 or not isinstance(args[0], str):

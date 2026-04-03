@@ -87,6 +87,27 @@ def _reshape_heads_spec(
     }
 
 
+def _split_qkv_grouped_spec(*, heads: int, kv_heads: int) -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "split": {
+                        "_op": "split_qkv_grouped",
+                        "_args": "x",
+                        "_bind": ["q", "k", "v"],
+                        "heads": heads,
+                        "kv_heads": kv_heads,
+                    }
+                }
+            ],
+            "outputs": {"q": "q", "k": "k", "v": "v"},
+        },
+    }
+
+
 def _causal_mask_with_padding_spec() -> dict[str, object]:
     return {
         "synapse": 1,
@@ -99,6 +120,32 @@ def _causal_mask_with_padding_spec() -> dict[str, object]:
                         "_args": ["q", "k"],
                         "padding_mask": "padding_mask",
                         "window": 8,
+                        "_bind": "mask",
+                    }
+                }
+            ],
+            "outputs": {"mask": "mask"},
+        },
+    }
+
+
+def _blocksparse_mask_spec(
+    *, block_size: int = 2, local_blocks: int = 1, vert_stride: int = 2, homo_head: bool = False
+) -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"q": {}, "k": {}, "padding_mask": {"optional": True}},
+            "graph": [
+                {
+                    "m": {
+                        "_op": "blocksparse_mask",
+                        "_args": ["q", "k"],
+                        "padding_mask": "padding_mask",
+                        "block_size": block_size,
+                        "local_blocks": local_blocks,
+                        "vert_stride": vert_stride,
+                        "homo_head": homo_head,
                         "_bind": "mask",
                     }
                 }
@@ -123,6 +170,26 @@ def _arange_positions_with_mask_spec() -> dict[str, object]:
                 }
             ],
             "outputs": {"pos": "pos"},
+        },
+    }
+
+
+def _rope_pair_spec(*, inv_freq_dtype: str | None = None) -> dict[str, object]:
+    node: dict[str, object] = {
+        "_op": "rope_pair",
+        "_args": ["q", "k"],
+        "_bind": ["q_rot", "k_rot"],
+        "position_ids": "position_ids",
+        "theta": 1_000_000.0,
+    }
+    if inv_freq_dtype is not None:
+        node["inv_freq_dtype"] = inv_freq_dtype
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"q": {}, "k": {}, "position_ids": {}},
+            "graph": [{"rope": node}],
+            "outputs": {"q_rot": "q_rot", "k_rot": "k_rot"},
         },
     }
 
@@ -255,6 +322,28 @@ def _attention_with_sink_spec() -> dict[str, object]:
                         "_args": ["q", "k", "v"],
                         "_bind": "out",
                         "sink": "sink",
+                    }
+                }
+            ],
+            "outputs": {"out": "out"},
+        },
+    }
+
+
+def _attention_with_padding_mask_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"q": {}, "k": {}, "v": {}, "padding_mask": {}},
+            "graph": [
+                {
+                    "attn": {
+                        "_op": "attention",
+                        "_args": ["q", "k", "v"],
+                        "_bind": "out",
+                        "mask": "padding_mask",
+                        "padding_mask": True,
+                        "causal": False,
                     }
                 }
             ],
@@ -423,6 +512,31 @@ def _clamp_sigmoid_spec() -> dict[str, object]:
     }
 
 
+def _xielu_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "xielu": {
+                        "_op": "activations_xielu",
+                        "_args": "x",
+                        "_bind": "y",
+                        "_params": {
+                            "alpha_p": "act.alpha_p",
+                            "alpha_n": "act.alpha_n",
+                            "beta": "act.beta",
+                            "eps": "act.eps",
+                        },
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+
+
 def _mxfp4_linear_state_dict() -> dict[str, torch.Tensor]:
     blocks = torch.tensor(
         [
@@ -464,6 +578,39 @@ def test_runtime_infer_param_path_uses_scope_for_undotted_explicit_param_name() 
     )
 
 
+def test_runtime_infer_param_path_resolves_double_at_under_param_root() -> None:
+    model = SynapseProgramModel.from_spec({"synapse": 1, "model": {"graph": [], "outputs": {}}})
+    model.load_state_dict_tensors(
+        {"mlp.experts.0.gate_proj.weight": torch.ones(1, 1, dtype=torch.float32)}
+    )
+    model._param_roots_stack.append(["mlp.experts.0"])
+
+    assert (
+        model._infer_param_path(
+            {"_params": {"weight": "@@gate_proj.weight"}},
+            node_path="layers.0.mlp.experts.0.n_op_0",
+            param_name="weight",
+        )
+        == "mlp.experts.0.gate_proj.weight"
+    )
+
+
+def test_runtime_infer_param_path_resolves_double_at_from_scope_when_absolute_missing() -> None:
+    model = SynapseProgramModel.from_spec({"synapse": 1, "model": {"graph": [], "outputs": {}}})
+    model.load_state_dict_tensors(
+        {"mlp.experts.0.gate_proj.weight": torch.ones(1, 1, dtype=torch.float32)}
+    )
+
+    assert (
+        model._infer_param_path(
+            {"_params": {"weight": "@@gate_proj.weight"}},
+            node_path="mlp.experts.0.n_op_0",
+            param_name="weight",
+        )
+        == "mlp.experts.0.gate_proj.weight"
+    )
+
+
 def test_runtime_scope_path_bound_calls_do_not_double_apply_local_scope() -> None:
     modules = parse_axon_program(
         """
@@ -487,6 +634,53 @@ tiny x = do
     )
     out = model(x=torch.tensor([[[1.0, 2.0]]], dtype=torch.float32))
     assert torch.equal(out["y"], torch.tensor([[[1.0, 2.0]]], dtype=torch.float32))
+
+
+def test_runtime_layernorm_allows_explicit_weight_and_bias_names() -> None:
+    modules = parse_axon_program(
+        """
+D = 2
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  y <- layernorm@norm x eps=1e-05 weight=gamma bias=beta
+  return y
+"""
+    )
+    spec = lower_axon_program_to_synapse_spec(modules)
+    model = SynapseProgramModel.from_spec(spec)
+    gamma = torch.tensor([1.5, 0.5], dtype=torch.float32)
+    beta = torch.tensor([-0.25, 0.75], dtype=torch.float32)
+    model.load_state_dict_tensors(
+        {
+            "norm.gamma": gamma,
+            "norm.beta": beta,
+        }
+    )
+    x = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.float32)
+    out = model(x=x)["y"]
+    expected = torch.nn.functional.layer_norm(x, (2,), weight=gamma, bias=beta, eps=1.0e-5)
+    assert torch.allclose(out, expected, atol=1.0e-6, rtol=0.0)
+
+
+@pytest.mark.parametrize("bias_literal", ["false", "null"])
+def test_runtime_layernorm_allows_disabling_bias_via_literal(bias_literal: str) -> None:
+    modules = parse_axon_program(
+        f"""
+D = 2
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  y <- layernorm@norm x eps=1e-05 weight=gamma bias={bias_literal}
+  return y
+"""
+    )
+    spec = lower_axon_program_to_synapse_spec(modules)
+    model = SynapseProgramModel.from_spec(spec)
+    gamma = torch.tensor([1.5, 0.5], dtype=torch.float32)
+    model.load_state_dict_tensors({"norm.gamma": gamma})
+    x = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.float32)
+    out = model(x=x)["y"]
+    expected = torch.nn.functional.layer_norm(x, (2,), weight=gamma, bias=None, eps=1.0e-5)
+    assert torch.allclose(out, expected, atol=1.0e-6, rtol=0.0)
 
 
 def test_runtime_from_spec_and_from_yaml(tmp_path: Path) -> None:
@@ -595,6 +789,25 @@ def test_runtime_reshape_heads_requires_heads_or_head_dim() -> None:
         model(x=x)
 
 
+def test_runtime_split_qkv_grouped_matches_reference_layout() -> None:
+    spec = _split_qkv_grouped_spec(heads=4, kv_heads=2)
+    model = SynapseProgramModel.from_spec(spec)
+    x = torch.arange(1 * 2 * 24, dtype=torch.float32).view(1, 2, 24)
+    out = model(x=x)
+
+    grouped = x.view(1, 2, 2, 4, 3)
+    q_ref = grouped[:, :, :, :2, :].reshape(1, 2, 4, 3).permute(0, 2, 1, 3)
+    k_ref = grouped[:, :, :, -2, :].reshape(1, 2, 2, 3).permute(0, 2, 1, 3)
+    v_ref = grouped[:, :, :, -1, :].reshape(1, 2, 2, 3).permute(0, 2, 1, 3)
+
+    assert out["q"].shape == (1, 4, 2, 3)
+    assert out["k"].shape == (1, 2, 2, 3)
+    assert out["v"].shape == (1, 2, 2, 3)
+    assert torch.equal(out["q"], q_ref)
+    assert torch.equal(out["k"], k_ref)
+    assert torch.equal(out["v"], v_ref)
+
+
 def test_runtime_causal_mask_combines_padding_mask() -> None:
     spec = _causal_mask_with_padding_spec()
     model = SynapseProgramModel.from_spec(spec)
@@ -612,6 +825,45 @@ def test_runtime_causal_mask_combines_padding_mask() -> None:
     assert torch.all(mask[1, :, :, :2] < -1.0e20)
 
 
+def test_runtime_blocksparse_mask_combines_pattern_with_padding_mask() -> None:
+    spec = _blocksparse_mask_spec(block_size=2, local_blocks=1, vert_stride=2, homo_head=False)
+    model = SynapseProgramModel.from_spec(spec)
+    q = torch.randn(1, 4, 8, 16)
+    k = torch.randn(1, 4, 8, 16)
+    padding_mask = torch.tensor([[0, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.long)
+    out = model(q=q, k=k, padding_mask=padding_mask)
+    mask = out["mask"]
+    assert mask.shape == (1, 4, 8, 8)
+    assert torch.all(mask[..., 0] < -1.0e20)
+    assert torch.isfinite(mask[..., 1:]).any()
+
+
+def test_runtime_rope_pair_inv_freq_dtype_bfloat16_matches_quantized_reference() -> None:
+    q = torch.randn(1, 2, 12, 8, dtype=torch.float32)
+    k = torch.randn(1, 2, 12, 8, dtype=torch.float32)
+    pos_ids = torch.arange(12, dtype=torch.long).unsqueeze(0)
+
+    model_fp32 = SynapseProgramModel.from_spec(_rope_pair_spec(inv_freq_dtype=None))
+    out_fp32 = model_fp32(q=q, k=k, position_ids=pos_ids)
+
+    model_bf16 = SynapseProgramModel.from_spec(_rope_pair_spec(inv_freq_dtype="bfloat16"))
+    out_bf16 = model_bf16(q=q, k=k, position_ids=pos_ids)
+
+    half = q.shape[-1] // 2
+    theta = 1_000_000.0
+    inv_freq = 1.0 / (theta ** (torch.arange(0, half, dtype=torch.float32) / float(half)))
+    inv_freq = inv_freq.to(torch.bfloat16).to(torch.float32)
+    pos = pos_ids.to(torch.float32)
+    ang = pos.unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
+    cos = torch.cos(ang).to(q.dtype).unsqueeze(1)
+    sin = torch.sin(ang).to(q.dtype).unsqueeze(1)
+    q1, q2 = q[..., :half], q[..., half:]
+    q_ref = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
+
+    assert torch.allclose(out_bf16["q_rot"], q_ref, atol=1.0e-6, rtol=1.0e-6)
+    assert float((out_bf16["q_rot"] - out_fp32["q_rot"]).abs().max()) > 0.0
+
+
 def test_runtime_arange_positions_uses_attention_mask_for_left_padding() -> None:
     spec = _arange_positions_with_mask_spec()
     model = SynapseProgramModel.from_spec(spec)
@@ -621,6 +873,17 @@ def test_runtime_arange_positions_uses_attention_mask_for_left_padding() -> None
     pos = out["pos"]
     assert torch.equal(pos[0], torch.tensor([0, 1, 2, 3], dtype=torch.long))
     assert torch.equal(pos[1], torch.tensor([0, 0, 0, 1], dtype=torch.long))
+
+
+def test_runtime_arange_positions_without_mask_preserves_batch_dimension() -> None:
+    spec = _arange_positions_with_mask_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    input_ids = torch.tensor([[10, 11, 12, 13], [20, 21, 22, 23]], dtype=torch.long)
+    out = model(input_ids=input_ids, attention_mask=None)
+    pos = out["pos"]
+    expected = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long)
+    assert pos.shape == (2, 4)
+    assert torch.equal(pos, expected)
 
 
 def test_runtime_moe_select_selects_routed_rows() -> None:
@@ -927,6 +1190,18 @@ def test_runtime_attention_supports_sink_logits_path() -> None:
     assert torch.isfinite(out["out"]).all()
 
 
+def test_runtime_attention_padding_mask_blocks_masked_keys() -> None:
+    spec = _attention_with_padding_mask_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    q = torch.zeros((1, 1, 2, 2), dtype=torch.float32)
+    k = torch.zeros((1, 1, 2, 2), dtype=torch.float32)
+    v = torch.tensor([[[[1.0, 0.0], [10.0, 0.0]]]], dtype=torch.float32)
+    padding_mask = torch.tensor([[1, 0]], dtype=torch.long)
+    out = model(q=q, k=k, v=v, padding_mask=padding_mask)
+    expected = torch.tensor([[[[1.0, 0.0], [1.0, 0.0]]]], dtype=torch.float32)
+    assert torch.allclose(out["out"], expected, atol=1e-6, rtol=0.0)
+
+
 def test_runtime_linear_expert_materializes_mxfp4_aliases() -> None:
     spec = _linear_expert_spec()
     model = SynapseProgramModel.from_spec(spec)
@@ -952,6 +1227,32 @@ def test_runtime_clamp_and_sigmoid_ops() -> None:
     x = torch.tensor([[-2.0, 0.0, 2.0]], dtype=torch.float32)
     out = model(x=x)
     expected = torch.sigmoid(torch.tensor([[-1.0, 0.0, 1.0]], dtype=torch.float32))
+    assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
+
+
+def test_runtime_xielu_reads_learned_activation_parameters() -> None:
+    spec = _xielu_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    state_dict = {
+        "act.alpha_p": torch.tensor([0.2], dtype=torch.float32),
+        "act.alpha_n": torch.tensor([-0.4], dtype=torch.float32),
+        "act.beta": torch.tensor([0.6], dtype=torch.float32),
+        "act.eps": torch.tensor([-1.0e-4], dtype=torch.float32),
+    }
+    model.load_state_dict_tensors(state_dict)
+
+    x = torch.tensor([[-1.25, -0.25, 0.5, 1.75]], dtype=torch.float32)
+    out = model(x=x)
+
+    alpha_p = torch.nn.functional.softplus(state_dict["act.alpha_p"])
+    beta = state_dict["act.beta"]
+    alpha_n = beta + torch.nn.functional.softplus(state_dict["act.alpha_n"])
+    eps = state_dict["act.eps"]
+    expected = torch.where(
+        x > 0,
+        alpha_p * x * x + beta * x,
+        (torch.expm1(torch.minimum(x, eps)) - x) * alpha_n + beta * x,
+    )
     assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
 
 
@@ -1100,6 +1401,45 @@ def test_runtime_config_primitives_resolve_config_values_and_defaults() -> None:
     assert out["defaulted"] == 7
     assert out["hidden_f"] == 640.0
     assert out["name"] == "gemma3"
+
+
+def test_runtime_config_value_and_expression_default() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "config": {
+                "hidden_size": 640,
+                "rope_scaling": {"long_factor": [1.0, 2.0, 3.0]},
+            },
+            "graph": [
+                {
+                    "v": {
+                        "_op": "config_value",
+                        "_args": "rope_scaling.long_factor",
+                        "_bind": "vals",
+                    }
+                },
+                {
+                    "d": {
+                        "_op": "config_int",
+                        "_args": "missing.hidden_size",
+                        "_bind": "fallback_hidden",
+                        "default": {
+                            "_expr": "call",
+                            "callee": "Config.int",
+                            "args": ["hidden_size"],
+                            "kwargs": {},
+                        },
+                    }
+                },
+            ],
+            "outputs": {"vals": "vals", "fallback_hidden": "fallback_hidden"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    out = model()
+    assert out["vals"] == [1.0, 2.0, 3.0]
+    assert out["fallback_hidden"] == 640
 
 
 def test_runtime_config_primitives_support_root_kwarg() -> None:

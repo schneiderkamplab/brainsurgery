@@ -9,3 +9,6 @@ float key = _config_float key
 
 str :: String -> String
 str key = _config_str key
+
+value :: String -> Any
+value key = _config_value key

@@ -22,6 +22,10 @@ LOWERING_ALLOWED_KWARGS: set[str] = {
     "attention_factor",
     "rope_mode",
     "truncate",
+    "long_factor",
+    "short_factor",
+    "max_context",
+    "inv_freq_dtype",
 }
 LOWERING_REQUIRED_KWARGS: set[str] = {"position_ids"}
 LOWERING_KWARG_KINDS: dict[str, Any] = {
@@ -39,6 +43,10 @@ LOWERING_KWARG_KINDS: dict[str, Any] = {
     "attention_factor": "number",
     "rope_mode": "str",
     "truncate": "bool",
+    "long_factor": "any",
+    "short_factor": "any",
+    "max_context": "dim",
+    "inv_freq_dtype": "str",
 }
 
 
@@ -228,6 +236,26 @@ def _yarn_attention_factor(
     return float(_get_mscale(scale_factor))
 
 
+def _quantize_inv_freq(inv_freq: torch.Tensor, raw_dtype: Any) -> torch.Tensor:
+    if raw_dtype is None:
+        return inv_freq
+    value = str(raw_dtype).strip().lower()
+    if not value or value in {"none", "null", "default"}:
+        return inv_freq
+    target_dtype: torch.dtype
+    if value in {"bf16", "bfloat16"}:
+        target_dtype = torch.bfloat16
+    elif value in {"fp16", "float16", "half"}:
+        target_dtype = torch.float16
+    elif value in {"fp32", "float32", "single"}:
+        target_dtype = torch.float32
+    else:
+        raise ValueError(
+            "rope_pair.inv_freq_dtype must be one of: bfloat16, float16, float32, or empty"
+        )
+    return inv_freq.to(dtype=target_dtype).to(dtype=torch.float32)
+
+
 def interpret(
     model: Any,
     node_spec: dict[str, Any],
@@ -277,7 +305,54 @@ def interpret(
     )
     rope_mode = str(node_spec.get("rope_mode", "")).strip().lower()
     rope_attention_factor = attention_factor
-    if all(
+    if rope_mode in {"longrope", "su"} and all(
+        key in node_spec
+        for key in ("long_factor", "short_factor", "original_context", "max_context")
+    ):
+        long_factor_raw = model._eval_expr(node_spec["long_factor"], env, symbols)
+        short_factor_raw = model._eval_expr(node_spec["short_factor"], env, symbols)
+        original_context = int(model._eval_expr(node_spec["original_context"], env, symbols))
+        max_context = int(model._eval_expr(node_spec["max_context"], env, symbols))
+        if not isinstance(long_factor_raw, (list, tuple)) or any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) for v in long_factor_raw
+        ):
+            raise ValueError("rope_pair.long_factor must resolve to a list of numbers")
+        if not isinstance(short_factor_raw, (list, tuple)) or any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) for v in short_factor_raw
+        ):
+            raise ValueError("rope_pair.short_factor must resolve to a list of numbers")
+        if original_context <= 1:
+            raise ValueError("rope_pair.original_context must be > 1 for longrope/su")
+        if max_context <= 0:
+            raise ValueError("rope_pair.max_context must be > 0 for longrope/su")
+        seq_len = int(pos_ids.max().item()) + 1 if pos_ids.numel() > 0 else 0
+        ext_factors_raw = long_factor_raw if seq_len > original_context else short_factor_raw
+        if len(ext_factors_raw) != int(half):
+            raise ValueError(
+                "rope_pair longrope/su factor length must match head_dim/2: "
+                f"expected {int(half)}, got {len(ext_factors_raw)}"
+            )
+        ext_factors = torch.tensor(ext_factors_raw, dtype=torch.float32, device=q.device)
+        inv_shape = torch.arange(0, int(half), dtype=torch.float32, device=q.device) / float(half)
+        inv_freq = 1.0 / (ext_factors * (theta**inv_shape))
+        if "attention_factor" in node_spec:
+            rope_attention_factor = float(
+                model._eval_expr(node_spec["attention_factor"], env, symbols)
+            )
+        else:
+            if "scale_factor" in node_spec:
+                scale_factor = float(model._eval_expr(node_spec["scale_factor"], env, symbols))
+            else:
+                scale_factor = float(max_context) / float(original_context)
+            if scale_factor <= 0.0:
+                raise ValueError("rope_pair.scale_factor must be > 0 for longrope/su")
+            if scale_factor <= 1.0:
+                rope_attention_factor = 1.0
+            else:
+                rope_attention_factor = float(
+                    math.sqrt(1.0 + (math.log(scale_factor) / math.log(float(original_context))))
+                )
+    elif all(
         key in node_spec for key in ("scale_factor", "beta_fast", "beta_slow", "original_context")
     ):
         scale_factor = float(model._eval_expr(node_spec["scale_factor"], env, symbols))
@@ -339,6 +414,12 @@ def interpret(
         if scale_factor <= 0.0:
             raise ValueError("rope_pair.scale_factor must be > 0")
         inv_freq = inv_freq / float(scale_factor)
+    inv_freq = _quantize_inv_freq(
+        inv_freq,
+        model._eval_expr(node_spec.get("inv_freq_dtype"), env, symbols)
+        if "inv_freq_dtype" in node_spec
+        else None,
+    )
     pos = pos_ids.to(device=q.device, dtype=torch.float32)
     ang = pos.unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
     cos_half = (torch.cos(ang) * float(rope_attention_factor)).to(dtype=q.dtype)
@@ -408,6 +489,9 @@ def compile(
     low_freq_factor = emitter._expr_code(node_spec.get("low_freq_factor"), env)
     high_freq_factor = emitter._expr_code(node_spec.get("high_freq_factor"), env)
     original_context = emitter._expr_code(node_spec.get("original_context"), env)
+    long_factor_expr = emitter._expr_code(node_spec.get("long_factor"), env)
+    short_factor_expr = emitter._expr_code(node_spec.get("short_factor"), env)
+    max_context_expr = emitter._expr_code(node_spec.get("max_context"), env)
     rope_mode = str(node_spec.get("rope_mode", "")).strip().lower()
     truncate = bool(node_spec.get("truncate", True))
     pos_name = node_spec.get("position_ids")
@@ -427,6 +511,7 @@ def compile(
     k1 = emitter._fresh("k1")
     k2 = emitter._fresh("k2")
     rope_attention_factor = emitter._fresh("rope_attention_factor")
+    inv_freq_dtype = emitter._fresh("inv_freq_dtype")
     interleaved = bool(node_spec.get("interleaved", False))
     lines.append(f"{indent}if {q}.ndim != 4 or {k}.ndim != 4:")
     lines.append(
@@ -451,7 +536,83 @@ def compile(
         f"{indent}{inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype=torch.float32) / float({half})))"
     )
     lines.append(f"{indent}{rope_attention_factor} = float({attention_factor_expr})")
-    if all(
+    if rope_mode in {"longrope", "su"} and all(
+        key in node_spec
+        for key in ("long_factor", "short_factor", "original_context", "max_context")
+    ):
+        seq_len = emitter._fresh("seq_len")
+        ext_raw = emitter._fresh("ext_raw")
+        ext_factors = emitter._fresh("ext_factors")
+        inv_shape = emitter._fresh("inv_shape")
+        scale_factor_long = emitter._fresh("scale_factor_long")
+        lines.append(
+            f"{indent}if not isinstance({long_factor_expr}, (list, tuple)) or any((isinstance(_v, bool) or not isinstance(_v, (int, float))) for _v in {long_factor_expr}):"
+        )
+        lines.append(
+            f"{indent}    raise ValueError('rope_pair.long_factor must resolve to a list of numbers')"
+        )
+        lines.append(
+            f"{indent}if not isinstance({short_factor_expr}, (list, tuple)) or any((isinstance(_v, bool) or not isinstance(_v, (int, float))) for _v in {short_factor_expr}):"
+        )
+        lines.append(
+            f"{indent}    raise ValueError('rope_pair.short_factor must resolve to a list of numbers')"
+        )
+        lines.append(f"{indent}if int({original_context}) <= 1:")
+        lines.append(
+            f"{indent}    raise ValueError('rope_pair.original_context must be > 1 for longrope/su')"
+        )
+        lines.append(f"{indent}if int({max_context_expr}) <= 0:")
+        lines.append(
+            f"{indent}    raise ValueError('rope_pair.max_context must be > 0 for longrope/su')"
+        )
+        lines.append(
+            f"{indent}{seq_len} = int({pos_ids}.max().item()) + 1 if {pos_ids}.numel() > 0 else 0"
+        )
+        lines.append(
+            f"{indent}{ext_raw} = {long_factor_expr} if {seq_len} > int({original_context}) else {short_factor_expr}"
+        )
+        lines.append(f"{indent}if len({ext_raw}) != int({half}):")
+        lines.append(
+            f"{indent}    raise ValueError('rope_pair longrope/su factor length must match head_dim/2')"
+        )
+        lines.append(
+            f"{indent}{ext_factors} = torch.tensor({ext_raw}, dtype=torch.float32, device={q}.device)"
+        )
+        lines.append(
+            f"{indent}{inv_shape} = torch.arange(0, int({half}), dtype=torch.float32, device={q}.device) / float({half})"
+        )
+        lines.append(
+            f"{indent}{inv_freq} = 1.0 / ({ext_factors} * (float({theta}) ** {inv_shape}))"
+        )
+        if "attention_factor" in node_spec:
+            lines.append(f"{indent}{rope_attention_factor} = float({attention_factor_expr})")
+        elif "scale_factor" in node_spec:
+            lines.append(f"{indent}{scale_factor_long} = float({scale_factor})")
+            lines.append(f"{indent}if {scale_factor_long} <= 0.0:")
+            lines.append(
+                f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0 for longrope/su')"
+            )
+            lines.append(f"{indent}if {scale_factor_long} <= 1.0:")
+            lines.append(f"{indent}    {rope_attention_factor} = 1.0")
+            lines.append(f"{indent}else:")
+            lines.append(
+                f"{indent}    {rope_attention_factor} = float(math.sqrt(1.0 + (math.log({scale_factor_long}) / math.log(float({original_context})))))"
+            )
+        else:
+            lines.append(
+                f"{indent}{scale_factor_long} = float({max_context_expr}) / float({original_context})"
+            )
+            lines.append(f"{indent}if {scale_factor_long} <= 0.0:")
+            lines.append(
+                f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0 for longrope/su')"
+            )
+            lines.append(f"{indent}if {scale_factor_long} <= 1.0:")
+            lines.append(f"{indent}    {rope_attention_factor} = 1.0")
+            lines.append(f"{indent}else:")
+            lines.append(
+                f"{indent}    {rope_attention_factor} = float(math.sqrt(1.0 + (math.log({scale_factor_long}) / math.log(float({original_context})))))"
+            )
+    elif all(
         key in node_spec for key in ("scale_factor", "beta_fast", "beta_slow", "original_context")
     ):
         dim = emitter._fresh("dim")
@@ -607,6 +768,29 @@ def compile(
         lines.append(f"{indent}if float({scale_factor}) <= 0.0:")
         lines.append(f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0')")
         lines.append(f"{indent}{inv_freq} = {inv_freq} / float({scale_factor})")
+    inv_freq_dtype_expr = emitter._expr_code(node_spec.get("inv_freq_dtype"), env)
+    lines.append(
+        f"{indent}{inv_freq_dtype} = ({inv_freq_dtype_expr}) if {'inv_freq_dtype' in node_spec} else None"
+    )
+    lines.append(f"{indent}if {inv_freq_dtype} is not None:")
+    lines.append(f"{indent}    {inv_freq_dtype} = str({inv_freq_dtype}).strip().lower()")
+    lines.append(
+        f"{indent}    if {inv_freq_dtype} and {inv_freq_dtype} not in ('none', 'null', 'default'):"
+    )
+    lines.append(f"{indent}        if {inv_freq_dtype} in ('bf16', 'bfloat16'):")
+    lines.append(
+        f"{indent}            {inv_freq} = {inv_freq}.to(dtype=torch.bfloat16).to(dtype=torch.float32)"
+    )
+    lines.append(f"{indent}        elif {inv_freq_dtype} in ('fp16', 'float16', 'half'):")
+    lines.append(
+        f"{indent}            {inv_freq} = {inv_freq}.to(dtype=torch.float16).to(dtype=torch.float32)"
+    )
+    lines.append(f"{indent}        elif {inv_freq_dtype} in ('fp32', 'float32', 'single'):")
+    lines.append(f"{indent}            {inv_freq} = {inv_freq}.to(dtype=torch.float32)")
+    lines.append(f"{indent}        else:")
+    lines.append(
+        f"{indent}            raise ValueError('rope_pair.inv_freq_dtype must be one of: bfloat16, float16, float32, or empty')"
+    )
     lines.append(f"{indent}if {pos_ids} is None:")
     lines.append(f"{indent}    raise ValueError('rope_pair.position_ids must not be null')")
     lines.append(f"{indent}if {pos_ids}.ndim != 2:")

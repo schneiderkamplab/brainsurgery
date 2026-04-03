@@ -7,33 +7,60 @@ import torch
 from transformers import AutoTokenizer
 
 
-def load_tokenizer(tokenizer_source: str, *, fallback_repo_id: str | None = None) -> Any:
+def load_tokenizer(
+    tokenizer_source: str,
+    *,
+    fallback_repo_id: str | None = None,
+    trust_remote_code: bool = False,
+) -> Any:
     candidate = Path(tokenizer_source).expanduser()
     if candidate.exists():
         source = str(candidate.resolve())
         try:
-            return AutoTokenizer.from_pretrained(source, local_files_only=True)
+            return AutoTokenizer.from_pretrained(
+                source, local_files_only=True, trust_remote_code=trust_remote_code
+            )
         except Exception:
-            return AutoTokenizer.from_pretrained(source, local_files_only=True, use_fast=False)
+            return AutoTokenizer.from_pretrained(
+                source,
+                local_files_only=True,
+                use_fast=False,
+                trust_remote_code=trust_remote_code,
+            )
 
     try:
-        return AutoTokenizer.from_pretrained(tokenizer_source, local_files_only=False)
+        return AutoTokenizer.from_pretrained(
+            tokenizer_source, local_files_only=False, trust_remote_code=trust_remote_code
+        )
     except Exception:
         if fallback_repo_id and fallback_repo_id != tokenizer_source:
             try:
-                return AutoTokenizer.from_pretrained(fallback_repo_id, local_files_only=False)
+                return AutoTokenizer.from_pretrained(
+                    fallback_repo_id,
+                    local_files_only=False,
+                    trust_remote_code=trust_remote_code,
+                )
             except Exception:
                 pass
         return AutoTokenizer.from_pretrained(
-            tokenizer_source, local_files_only=False, use_fast=False
+            tokenizer_source,
+            local_files_only=False,
+            use_fast=False,
+            trust_remote_code=trust_remote_code,
         )
 
 
 def looks_like_tokenizer_dir(path: Path) -> bool:
-    return (
+    if (
         (path / "tokenizer.json").exists()
         or (path / "tokenizer.model").exists()
         or ((path / "vocab.json").exists() and (path / "merges.txt").exists())
+    ):
+        return True
+    # Some custom-code tokenizers (for example Phi-3-small) rely on
+    # tokenization_*.py plus a companion tokenizer config / .tiktoken asset.
+    return (path / "tokenizer_config.json").exists() and (
+        any(path.glob("tokenization*.py")) or any(path.glob("*.tiktoken"))
     )
 
 
@@ -86,8 +113,13 @@ def tokenize_prompts(
     device: torch.device,
     lowered_spec: dict[str, Any] | None = None,
     tokenizer_fallback: str | None = None,
+    trust_remote_code: bool = False,
 ) -> tuple[Any, torch.Tensor, torch.Tensor | None]:
-    tokenizer_obj = load_tokenizer(tokenizer_source, fallback_repo_id=tokenizer_fallback)
+    tokenizer_obj = load_tokenizer(
+        tokenizer_source,
+        fallback_repo_id=tokenizer_fallback,
+        trust_remote_code=trust_remote_code,
+    )
     if len(prompts) > 1:
         tokenizer_obj.padding_side = (
             preferred_padding_side(lowered_spec) if lowered_spec is not None else "left"

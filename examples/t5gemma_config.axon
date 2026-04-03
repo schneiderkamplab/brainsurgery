@@ -1,0 +1,25 @@
+import Config
+
+-- Shared T5Gemma family settings (encoder-decoder text models).
+D = Config.int "hidden_size" root="encoder" default=512                  -- residual hidden size
+V = Config.int "vocab_size" root="decoder" default=256000               -- decoder vocab size
+L_ENC = Config.int "num_hidden_layers" root="encoder" default=8         -- encoder layer count
+L_DEC = Config.int "num_hidden_layers" root="decoder" default=8         -- decoder layer count
+H = Config.int "num_attention_heads" root="decoder" default=8           -- query head count
+KVH = Config.int "num_key_value_heads" root="decoder" default=8         -- key/value head count
+HD = Config.int "head_dim" root="decoder" default=64                    -- per-head dimension
+QD = H * HD                                                         -- q projection width
+KVD = KVH * HD                                                      -- k/v projection width
+FFN_ENC = Config.int "intermediate_size" root="encoder" default=1024    -- encoder MLP width
+FFN_DEC = Config.int "intermediate_size" root="decoder" default=1024    -- decoder MLP width
+EPS = Config.float "rms_norm_eps" root="decoder" default=1e-06          -- RMSNorm epsilon
+THETA = Config.float "rope_theta" root="decoder" default=10000.0        -- RoPE base theta
+WIN_SLIDE_ENC = Config.int "sliding_window" root="encoder" default=4096 -- encoder sliding window
+WIN_SLIDE_DEC = Config.int "sliding_window" root="decoder" default=4096 -- decoder sliding window
+WIN_FULL_ENC = Config.int "max_position_embeddings" root="encoder" default=8192 -- encoder full window
+WIN_FULL_DEC = Config.int "max_position_embeddings" root="decoder" default=8192 -- decoder full window
+ROPE_PERIOD_ENC = Config.int "sliding_window_pattern" root="encoder" default=2 -- full-attn cadence (encoder)
+ROPE_PERIOD_DEC = Config.int "sliding_window_pattern" root="decoder" default=2 -- full-attn cadence (decoder)
+ATTN_SCALE = 1.0 / sqrt (Config.float "query_pre_attn_scalar" root="decoder" default=64.0) -- qk scaling
+EMB_SCALE = sqrt D                                                  -- scaled token embeddings
+LOGIT_SOFTCAP = Config.float "final_logit_softcapping" root="decoder" default=30.0 -- tanh logits cap

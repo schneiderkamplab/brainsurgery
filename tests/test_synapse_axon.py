@@ -251,6 +251,90 @@ main x = do
         assert first["_op"] == "activations_swiglu"
 
 
+def test_builtin_xielu_path_binding_lowers_to_activation_params(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Activations xielu
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- xielu@act_fn x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    first = node_specs[0]
+    if first["_op"] == "call":
+        assert first["_target"] == "Activations.xielu"
+    else:
+        assert first["_op"] == "activations_xielu"
+        params = first.get("_params")
+        assert isinstance(params, dict)
+        assert params.get("alpha_p") == "act_fn.alpha_p"
+        assert params.get("alpha_n") == "act_fn.alpha_n"
+        assert params.get("beta") == "act_fn.beta"
+        assert params.get("eps") == "act_fn.eps"
+
+
+def test_builtin_position_import_resolves_relative_bias_alias(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Position
+
+main :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[1,H,T,TK]
+main q k = do
+  bias <- Position.relative_bias_t5 q k num_buckets=32 max_distance=128 bidirectional=true
+  return bias
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    first = node_specs[0]
+    if first["_op"] == "call":
+        assert first["_target"] == "Position.relative_bias_t5"
+    else:
+        assert first["_op"] == "t5_relative_position_bias"
+        assert first["num_buckets"] == 32
+        assert first["max_distance"] == 128
+        assert first["bidirectional"] is True
+
+
+def test_builtin_position_member_import_resolves_disentangled_relative_bias(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Position (relative_bias_disentangled)
+
+main :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,TK]
+main q k = do
+  bias <- relative_bias_disentangled q k share_att_key=true c2p=true p2c=true
+  return bias
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    first = node_specs[0]
+    if first["_op"] == "call":
+        assert first["_target"] == "Position.relative_bias_disentangled"
+    else:
+        assert first["_op"] == "disentangled_relative_bias"
+        assert first["share_att_key"] is True
+        assert first["c2p"] is True
+        assert first["p2c"] is True
+
+
 def test_builtin_cache_import_resolves_from_builtin_file(tmp_path: Path) -> None:
     main_path = tmp_path / "main.axon"
     main_path.write_text(
@@ -563,6 +647,28 @@ main x = do
     assert node_specs[0]["default"] == 640
     assert node_specs[1]["_op"] == "linear"
     assert node_specs[1]["dim"] == "dim"
+
+
+def test_config_builtin_import_resolves_and_lowers_value_primitive(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Config
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  factors <- Config.value "rope_scaling.long_factor" default=[]
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "config_value"
+    assert node_specs[0]["_args"] == "rope_scaling.long_factor"
+    assert node_specs[0]["default"] == []
 
 
 def test_params_builtin_import_resolves_and_lowers_root_primitives(tmp_path: Path) -> None:
@@ -1306,6 +1412,23 @@ gpt2_block x = do
     assert node_specs[0]["dim"] == "D"
 
 
+def test_layernorm_accepts_bias_false_and_null_literals() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  a <- layernorm@ln_a x eps=1e-05 bias=false
+  b <- layernorm@ln_b a eps=1e-05 bias=null
+  return b
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "layernorm"
+    assert node_specs[0]["bias"] is False
+    assert node_specs[1]["_op"] == "layernorm"
+    assert node_specs[1]["bias"] is None
+
+
 def test_type_shape_annotations_infer_rmsnorm_dim() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]
@@ -1501,7 +1624,11 @@ blk q k v = do
     modules = parse_axon_program(source)
     with pytest.raises(
         ValueError,
-        match=r"attention unsupported kwargs: foo; allowed: causal, eager, mask, scale",
+        match=(
+            r"attention unsupported kwargs: foo; allowed: causal, eager, "
+            r"float_mask_additive, float_mask_floor_keep, mask, padding_mask, "
+            r"scale, sink, sink_path"
+        ),
     ):
         lower_axon_program_to_synapse_spec(modules)
 

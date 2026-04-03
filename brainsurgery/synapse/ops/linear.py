@@ -47,6 +47,8 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter
     has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
     explicit_weight = node_spec.get("weight")
+    if isinstance(explicit_weight, str) and explicit_weight.startswith("@@"):
+        return True
     has_explicit_weight = isinstance(explicit_weight, str) and "." in explicit_weight
     if not has_bias and has_explicit_weight:
         return False

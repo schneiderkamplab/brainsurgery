@@ -16,6 +16,9 @@ split = _split
 split_qkv_heads :: Tensor[B,T,D] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD], Tensor[B,H,T,HD])
 split_qkv_heads = _split_qkv_heads
 
+split_qkv_grouped :: Tensor[B,T,D] -> (Tensor[B,H,T,HD], Tensor[B,KVH,T,HD], Tensor[B,KVH,T,HD])
+split_qkv_grouped = _split_qkv_grouped
+
 reshape_heads :: Tensor[B,T,D] -> Tensor[B,H,T,HD]
 reshape_heads = _reshape_heads
 
@@ -24,6 +27,12 @@ merge_heads = _merge_heads
 
 causal_mask :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,1,T,TK]
 causal_mask = _causal_mask
+
+blocksparse_mask :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,TK]
+blocksparse_mask = _blocksparse_mask
+
+bidirectional_mask :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,1,T,TK]
+bidirectional_mask = _bidirectional_mask
 
 attention :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,HD]
 attention = _attention

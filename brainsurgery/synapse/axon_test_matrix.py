@@ -147,6 +147,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Set torch.compile(dynamic=True).",
     )
+    parser.add_argument(
+        "--model-task",
+        default="auto",
+        choices=["auto", "causal_lm", "masked_lm", "seq2seq_lm"],
+        help=(
+            "Execution task for run_axon_test. "
+            "'auto' picks per model (encoder-only masked LM models -> masked_lm, "
+            "t5_small=seq2seq_lm, others=causal_lm)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -192,6 +202,63 @@ def _apply_pair_filters(
     return pairs
 
 
+def _resolve_model_task_for_pair(pair: _Pair) -> str:
+    masked_lm_stems = {
+        "albert",
+        "bert",
+        "deberta_v2",
+        "distilbert",
+        "electra",
+        "longformer",
+        "modernbert",
+        "roberta",
+    }
+    masked_lm_model_dirs = {
+        "albert",
+        "bert",
+        "camembert",
+        "deberta_v2",
+        "distilbert",
+        "electra",
+        "longformer",
+        "modernbert",
+        "roberta",
+        "xlm_roberta",
+    }
+    seq2seq_lm_stems = {
+        "t5",
+        "t5_small",
+        "mt5",
+        "bart",
+        "mbart",
+        "marian",
+        "t5gemma",
+        "t5gemma2",
+    }
+    seq2seq_lm_model_dirs = {
+        "t5_small",
+        "t5_base",
+        "t5_large",
+        "t5_3b",
+        "t5_11b",
+        "mt5_small",
+        "bart_base",
+        "mbart_large_50_m2m",
+        "marian_en_de",
+        "t5gemma_s_s_ul2",
+        "t5gemma2_270m",
+    }
+    if pair.axon_path.stem in masked_lm_stems or pair.model_dir.name in masked_lm_model_dirs:
+        return "masked_lm"
+    if (
+        pair.axon_path.stem in seq2seq_lm_stems
+        or pair.model_dir.name in seq2seq_lm_model_dirs
+        or pair.model_dir.name.startswith("t5gemma")
+    ):
+        return "seq2seq_lm"
+    return "causal_lm"
+
+
 def _resolve_pairs(
     examples_dir: Path,
     models_dir: Path,
@@ -202,14 +269,19 @@ def _resolve_pairs(
         raise FileNotFoundError(f"Models directory not found: {models_dir}")
 
     excluded_model_dir_names = {
+        "flexolmo",
         "glm_4_5_air",
+        "jamba_tiny_random",
         "nemotron3",
         "nemotron-3",
+        "test",
     }
     model_dirs = sorted(
         path
         for path in models_dir.iterdir()
-        if path.is_dir() and path.name not in excluded_model_dir_names
+        if path.is_dir()
+        and not path.name.startswith(".")
+        and path.name not in excluded_model_dir_names
     )
     model_by_name = {path.name: path for path in model_dirs}
     explicit_model_aliases = {
@@ -217,10 +289,26 @@ def _resolve_pairs(
         "black_mamba": "black_mamba_2_8b",
         "mamba": "mamba_tiny_random",
         "mamba_2_8b": "mamba_2_8b_hf",
-        "jamba": "jamba_tiny_random",
+        "jamba": "jamba_3b",
         "gemma_1b": "gemma3_1b",
         "gemma3_270m": "gemma3",
         "gemma3_config": "gemma3",
+        "olmo3": "olmo3_7b_instruct",
+        "phi3": "phi3_mini_4k_instruct",
+        "smollm": "smollm_135m",
+        "smollm3": "smollm3_3b_base",
+        "smollm3_config": "smollm3_3b_base",
+        "t5": "t5_base",
+        "phi3minimedium": "phi3_mini_4k_instruct",
+        "phi3small": "phi3_small_8k_instruct",
+        "olmo2": "olmo_2_1b",
+        "olmo2_config": "olmo_2_1b",
+        "mt5": "mt5_small",
+        "bart": "bart_base",
+        "mbart": "mbart_large_50_m2m",
+        "marian": "marian_en_de",
+        "t5gemma": "t5gemma_s_s_ul2",
+        "t5gemma2": "t5gemma2_270m",
     }
     excluded_stems = {
         "glm_4_5_air",
@@ -240,7 +328,9 @@ def _resolve_pairs(
                 return model_dir
         return None
 
-    axon_paths = sorted(examples_dir.glob("*.axon"))
+    axon_paths = sorted(
+        path for path in examples_dir.glob("*.axon") if not path.stem.endswith("_config")
+    )
     axon_by_stem = {path.stem: path for path in axon_paths}
 
     pairs: list[_Pair] = []
@@ -263,15 +353,40 @@ def _resolve_pairs(
     explicit_axon_aliases = {
         "flexmath": "flexolmo",
         "black_mamba_2_8b": "black_mamba",
+        "camembert": "roberta",
+        "comma": "dfm_decoder",
         "mamba_tiny_random": "mamba",
         "mamba_2_8b_hf": "mamba_2_8b",
-        "jamba_tiny_random": "jamba",
         "jamba_3b": "jamba_3b",
         "gpt2": "gpt2",
         "gemma3": "gemma3",
         "gemma3_1b": "gemma_1b",
         "gemma3_4b": "gemma3",
         "gemma3_12b": "gemma3",
+        "smollm_135m": "smollm",
+        "smollm_360m": "smollm",
+        "smollm_1_7b": "smollm",
+        "smollm2_135m": "smollm",
+        "smollm2_360m": "smollm",
+        "smollm2_1_7b": "smollm",
+        "smollm3_3b": "smollm3",
+        "smollm3_3b_base": "smollm3",
+        "phi3_mini_4k_instruct": "phi3minimedium",
+        "phi3_mini_128k_instruct": "phi3minimedium",
+        "phi3_medium_4k_instruct": "phi3minimedium",
+        "phi3_medium_128k_instruct": "phi3minimedium",
+        "phi3_small_8k_instruct": "phi3small",
+        "phi3_small_128k_instruct": "phi3small",
+        "olmo_2_1b": "olmo2",
+        "olmo_2_7b": "olmo2",
+        "olmo_2_13b": "olmo2",
+        "xlm_roberta": "roberta",
+        "mt5_small": "mt5",
+        "bart_base": "bart",
+        "mbart_large_50_m2m": "mbart",
+        "marian_en_de": "marian",
+        "t5gemma_s_s_ul2": "t5gemma",
+        "t5gemma2_270m": "t5gemma2",
     }
 
     for model_dir in model_dirs:
@@ -422,6 +537,7 @@ def _format_table_markdown(rows: list[_SummaryRow]) -> str:
 def _run_pair(
     pair: _Pair,
     *,
+    model_task: str,
     device: str,
     dtype: str,
     max_len: int,
@@ -441,6 +557,7 @@ def _run_pair(
         "hf_model_dir": pair.model_dir,
         "device": device,
         "dtype": dtype,
+        "model_task": model_task,
         "max_len": max_len,
         "text": text,
         "compile_hf": compile_hf,
@@ -477,6 +594,7 @@ def run_axon_test_matrix(
     compile_mode: str | None = None,
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
+    model_task_override: str | None = None,
     include: list[str] | None = None,
     exclude: list[str] | None = None,
 ) -> int:
@@ -486,6 +604,12 @@ def run_axon_test_matrix(
     prompts = text if text else ["The future of AI is"]
     include_selectors = _normalize_selectors(include)
     exclude_selectors = _normalize_selectors(exclude)
+    if model_task_override is not None and model_task_override not in {
+        "causal_lm",
+        "masked_lm",
+        "seq2seq_lm",
+    }:
+        raise ValueError("model_task_override must be one of: causal_lm, masked_lm, seq2seq_lm")
     if include_selectors and exclude_selectors:
         raise ValueError("axon-test-matrix accepts either include or exclude selectors, not both")
     pairs = _resolve_pairs(examples_dir.resolve(), models_dir.resolve())
@@ -531,8 +655,10 @@ def run_axon_test_matrix(
     for pair in pairs:
         progress.set_postfix_str(pair.axon_path.name)
         try:
+            model_task = model_task_override or _resolve_model_task_for_pair(pair)
             result = _run_pair(
                 pair,
+                model_task=model_task,
                 device=device,
                 dtype=dtype,
                 max_len=max_len,
@@ -652,6 +778,7 @@ def run_axon_test_matrix(
 
 def main() -> int:
     args = _parse_args()
+    model_task_override = None if args.model_task == "auto" else str(args.model_task)
     return run_axon_test_matrix(
         examples_dir=args.examples_dir,
         models_dir=args.models_dir,
@@ -669,6 +796,7 @@ def main() -> int:
         compile_mode=str(args.compile_mode) if args.compile_mode is not None else None,
         compile_fullgraph=bool(args.compile_fullgraph),
         compile_dynamic=bool(args.compile_dynamic),
+        model_task_override=model_task_override,
         include=args.include,
         exclude=args.exclude,
     )

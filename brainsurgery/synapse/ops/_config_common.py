@@ -35,13 +35,17 @@ def _resolve_key(
 
 def _resolve_default(
     *,
+    model: Any,
     node_spec: dict[str, Any],
     env: dict[str, Any],
     symbols: Mapping[str, int | float | bool],
 ) -> tuple[bool, Any]:
     if "default" not in node_spec:
         return False, None
-    return True, _resolve_scalar_ref(node_spec.get("default"), env, symbols)
+    raw_default = _resolve_scalar_ref(node_spec.get("default"), env, symbols)
+    if isinstance(raw_default, dict) and "_expr" in raw_default:
+        return True, model._eval_expr(raw_default, env, symbols)
+    return True, raw_default
 
 
 def _resolve_root(
@@ -136,20 +140,19 @@ def _resolve_config_value(
         found, value = _config_lookup(config, key)
     if found:
         return full_key, found, value
-    has_default, default_value = _resolve_default(node_spec=node_spec, env=env, symbols=symbols)
+    has_default, default_value = _resolve_default(
+        model=model,
+        node_spec=node_spec,
+        env=env,
+        symbols=symbols,
+    )
     if has_default:
         return full_key, True, default_value
     raise KeyError(f"{op_name} missing required config key: {full_key}")
 
 
 def _compile_value_expr(*, emitter: Any, value: Any, env: dict[str, str]) -> str:
-    if isinstance(value, str):
-        if value in env:
-            return env[value]
-        symbols = getattr(emitter, "symbols", {})
-        if isinstance(symbols, dict) and value in symbols:
-            return repr(symbols[value])
-    return repr(value)
+    return emitter._expr_code(value, env)
 
 
 def _compile_lookup_lines(
