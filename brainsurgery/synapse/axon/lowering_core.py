@@ -391,15 +391,39 @@ def _with_guard(nodes: list[dict[str, Any]], guard: str | None) -> list[dict[str
     return nodes
 
 
-def _with_scope(nodes: list[dict[str, Any]], scope: str | None) -> list[dict[str, Any]]:
+def _param_root_payload(ctx: _LowerCtx) -> Any | None:
+    dynamic_root_expr = _current_dynamic_param_root(ctx)
+    if dynamic_root_expr is not None:
+        return dynamic_root_expr
+    root_candidates = _current_param_roots(ctx)
+    if root_candidates != ("",):
+        return root_candidates[0] if len(root_candidates) == 1 else list(root_candidates)
+    return None
+
+
+def _with_scope(
+    nodes: list[dict[str, Any]], scope: str | None, *, param_root: Any | None = None
+) -> list[dict[str, Any]]:
     if not isinstance(scope, str) or not scope:
-        return nodes
+        scope = None
 
     def _annotate_node_spec(node_spec: dict[str, Any]) -> dict[str, Any]:
         spec = dict(node_spec)
         op = spec.get("_op")
-        if isinstance(op, str) and "_scope" not in spec and "_abs_path" not in spec:
+        if (
+            isinstance(op, str)
+            and scope is not None
+            and "_scope" not in spec
+            and "_abs_path" not in spec
+        ):
             spec["_scope"] = scope
+        if (
+            isinstance(op, str)
+            and param_root is not None
+            and "_param_root" not in spec
+            and "_abs_path" not in spec
+        ):
+            spec["_param_root"] = copy.deepcopy(param_root)
         nested = spec.get("graph")
         if isinstance(nested, list):
             spec["graph"] = _annotate_items(nested)
@@ -1148,7 +1172,7 @@ def _lower_simple_call(
             out=out,
             ctx=ctx,
         )
-        return [*pre_graph, *_with_scope(nodes, effective_scope)]
+        return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
 
     node_spec = _to_synapse_op(callee, args_text, kwargs, out)
     if "@" in callee:
@@ -1161,7 +1185,7 @@ def _lower_simple_call(
             _record_last_dim_for_call(
                 callee=op_name, args=args_text, kwargs=kwargs, out=out, ctx=ctx
             )
-            return [*pre_graph, *_with_scope(nodes, effective_scope)]
+            return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
         concrete_node = _to_synapse_op(op_name, args_text, kwargs, out)
         try:
             bound_params = _path_bound_param_names(concrete_node)
@@ -1202,7 +1226,7 @@ def _lower_simple_call(
             _record_last_dim_for_call(
                 callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx
             )
-            return [*pre_graph, *_with_scope(nodes, effective_scope)]
+            return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
         if not segments:
             raise ValueError(f"invalid @ path in Axon call: {callee!r}")
@@ -1211,11 +1235,11 @@ def _lower_simple_call(
             item = {segment: {"graph": [item]}}
         nodes = _with_guard([item], effective_when)
         _record_last_dim_for_call(callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx)
-        return [*pre_graph, *_with_scope(nodes, effective_scope)]
+        return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
     node_name = f"n_{ctx.fresh('op')}"
     nodes = _with_guard([{node_name: node_spec}], effective_when)
     _record_last_dim_for_call(callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx)
-    return [*pre_graph, *_with_scope(nodes, effective_scope)]
+    return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
 
 
 def _lower_alias_or_const(
@@ -1257,9 +1281,11 @@ def _lower_alias_or_const(
     effective_scope = _normalize_call_scope_for_runtime(
         ctx, ".".join(part for part in ctx.scope_stack if part)
     )
-    if effective_scope:
-        node["_scope"] = effective_scope
-    return _with_guard([{node_name: node}], guard)
+    return _with_scope(
+        _with_guard([{node_name: node}], guard),
+        effective_scope,
+        param_root=_param_root_payload(ctx),
+    )
 
 
 def _bind_names(out: str | list[str]) -> list[str]:
@@ -1387,7 +1413,16 @@ def _lower_expr(
         )
         if effective_scope:
             node_spec["_scope"] = effective_scope
-        return [*cond_graph, *(_with_scope([{node_name: node_spec}], effective_scope))]
+        return [
+            *cond_graph,
+            *(
+                _with_scope(
+                    [{node_name: node_spec}],
+                    effective_scope,
+                    param_root=_param_root_payload(ctx),
+                )
+            ),
+        ]
 
     if isinstance(expr, AxonExprPipe):
         pipe_graph: list[dict[str, Any]] = []
@@ -2067,6 +2102,13 @@ def _resolve_paths_at_lowering_time(
         caller_scope = call_spec.get("_scope")
         if isinstance(caller_scope, str) and caller_scope and "_scope" not in inlined:
             inlined["_scope"] = caller_scope
+        caller_param_root = call_spec.get("_param_root")
+        if (
+            caller_param_root is not None
+            and "_param_root" not in inlined
+            and "_abs_path" not in inlined
+        ):
+            inlined["_param_root"] = copy.deepcopy(caller_param_root)
 
         param_base = inlined.get("param_base")
         if isinstance(param_base, str):

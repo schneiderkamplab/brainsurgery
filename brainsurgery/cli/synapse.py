@@ -193,11 +193,7 @@ def axon_test(
     ),
     weights: Path = typer.Argument(
         ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=True,
-        readable=True,
-        help="Path to a .safetensors file or a model directory containing safetensors.",
+        help="Path to a .safetensors file or model directory.",
     ),
     device: str = typer.Option(
         "cpu",
@@ -205,7 +201,7 @@ def axon_test(
         help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
     ),
     text: list[str] = typer.Option(
-        ["The future of AI is"],
+        ["The future of AI is", "Hello World"],
         "--text",
         help="Prompt text to complete. Repeat --text for batched prompts.",
     ),
@@ -240,9 +236,9 @@ def axon_test(
         help="Floating-point dtype for loaded safetensors parameters (float32/bfloat16/float16).",
     ),
     model_task: str = typer.Option(
-        "causal_lm",
+        "auto",
         "--model-task",
-        help="Model execution task (causal_lm, masked_lm, or seq2seq_lm).",
+        help="Model execution task (auto, causal_lm, masked_lm, or seq2seq_lm).",
     ),
     hf_align_bf16_profile: bool = typer.Option(
         False,
@@ -308,6 +304,8 @@ def axon_test(
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
     run_fn = getattr(module, "run_axon_test")
+    if not weights.exists():
+        raise typer.BadParameter(f"Weights path not found: {weights}")
     try:
         run_fn(
             axon_file=axon_path,
@@ -333,6 +331,154 @@ def axon_test(
             compile_mode=compile_mode,
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@app.command("axon-benchmark")
+def axon_benchmark(
+    axon_paths: list[Path] = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="One or more Axon source files.",
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
+    ),
+    text: list[str] = typer.Option(
+        ["The future of AI is", "Hello World"],
+        "--text",
+        help="Prompt text to complete. Repeat --text for batched prompts.",
+    ),
+    max_len: int = typer.Option(
+        32,
+        "--max-len",
+        help="Total sequence length target for generation.",
+    ),
+    tokenizer: str | None = typer.Option(
+        None,
+        "--tokenizer",
+        help="Tokenizer source override (local path or HF repo id).",
+    ),
+    class_name: str = typer.Option(
+        "AxonGeneratedModel",
+        "--class-name",
+        help="Generated PyTorch class name.",
+    ),
+    main_module: str | None = typer.Option(
+        None,
+        "--main-module",
+        help="Main Axon module name (defaults to last module in file).",
+    ),
+    dtype: str = typer.Option(
+        "float32",
+        "--dtype",
+        help="Floating-point dtype for loaded safetensors parameters (float32/bfloat16/float16).",
+    ),
+    model_task: str = typer.Option(
+        "auto",
+        "--model-task",
+        help="Model execution task (auto, causal_lm, masked_lm, or seq2seq_lm).",
+    ),
+    hf_align_bf16_profile: bool = typer.Option(
+        False,
+        "--hf-align-bf16-profile/--no-hf-align-bf16-profile",
+        help="Enable a general HF-BF16 alignment profile (mask, posids, add/linear/norm fp32-accum paths).",
+    ),
+    hf_align_mask_contract: bool = typer.Option(
+        False,
+        "--hf-align-mask-contract/--no-hf-align-mask-contract",
+        help="When enabled, normalize additive attention masks to HF-like SDPA bool masks.",
+    ),
+    hf_align_position_ids: bool = typer.Option(
+        False,
+        "--hf-align-position-ids/--no-hf-align-position-ids",
+        help="When enabled, use HF-like padding fill behavior for position_ids.",
+    ),
+    hf_align_add_fp32_accum: bool = typer.Option(
+        False,
+        "--hf-align-add-fp32-accum/--no-hf-align-add-fp32-accum",
+        help="When enabled, compute low-precision add in fp32 and cast back.",
+    ),
+    hf_align_linear_fp32_accum: bool = typer.Option(
+        False,
+        "--hf-align-linear-fp32-accum/--no-hf-align-linear-fp32-accum",
+        help="When enabled, compute low-precision linear in fp32 and cast back.",
+    ),
+    hf_align_norm_fp32: bool = typer.Option(
+        False,
+        "--hf-align-norm-fp32/--no-hf-align-norm-fp32",
+        help="When enabled, run low-precision norm ops through fp32 compute paths.",
+    ),
+    compile_hf: bool = typer.Option(
+        False,
+        "--compile-hf/--no-compile-hf",
+        help="Compile the HF reference model with torch.compile.",
+    ),
+    compile_axon: bool = typer.Option(
+        False,
+        "--compile-axon/--no-compile-axon",
+        help="Compile the Axon-derived model with torch.compile.",
+    ),
+    compile_backend: str | None = typer.Option(
+        None,
+        "--compile-backend",
+        help="Optional torch.compile backend (e.g. inductor).",
+    ),
+    compile_mode: str | None = typer.Option(
+        None,
+        "--compile-mode",
+        help="Optional torch.compile mode (e.g. default/reduce-overhead/max-autotune).",
+    ),
+    compile_fullgraph: bool = typer.Option(
+        False,
+        "--compile-fullgraph/--no-compile-fullgraph",
+        help="Set torch.compile(fullgraph=True).",
+    ),
+    compile_dynamic: bool = typer.Option(
+        False,
+        "--compile-dynamic/--no-compile-dynamic",
+        help="Set torch.compile(dynamic=True).",
+    ),
+    table_format: str = typer.Option(
+        "markdown",
+        "--table-format",
+        help="Summary table format (plain/markdown).",
+    ),
+) -> None:
+    """Run benchmark across declared CHECKPOINTS for one or more Axon files."""
+    module = _synapse_module()
+    run_fn = getattr(module, "run_axon_benchmark")
+    try:
+        run_fn(
+            axon_files=axon_paths,
+            device=device,
+            text=text,
+            max_len=max_len,
+            tokenizer=tokenizer,
+            class_name=class_name,
+            main_module=main_module,
+            dtype=dtype,
+            model_task=model_task,
+            hf_align_bf16_profile=hf_align_bf16_profile,
+            hf_align_mask_contract=hf_align_mask_contract,
+            hf_align_position_ids=hf_align_position_ids,
+            hf_align_add_fp32_accum=hf_align_add_fp32_accum,
+            hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
+            hf_align_norm_fp32=hf_align_norm_fp32,
+            compile_hf=compile_hf,
+            compile_axon=compile_axon,
+            compile_backend=compile_backend,
+            compile_mode=compile_mode,
+            compile_fullgraph=compile_fullgraph,
+            compile_dynamic=compile_dynamic,
+            table_format=table_format,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -618,6 +764,48 @@ def axon_test_log(
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(output)
+
+
+@app.command("axon-materialize")
+def axon_materialize(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to a config-driven Axon source file to materialize.",
+    ),
+    checkpoint: list[str] = typer.Option(
+        [],
+        "--checkpoint",
+        help=(
+            "Checkpoint repo id to materialize. Repeatable. If omitted, the materializer uses "
+            "its default checkpoint set."
+        ),
+    ),
+    models_root: Path = typer.Option(
+        Path("models"),
+        "--models-root",
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Root directory containing local model checkpoint directories.",
+    ),
+) -> None:
+    """Materialize checkpoint-specific Axon files with config values baked in."""
+    module = _synapse_module()
+    run_fn = getattr(module, "run_axon_materialize")
+    try:
+        written = run_fn(
+            axon_path=axon_path,
+            checkpoints=checkpoint or None,
+            models_root=models_root,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    for path in written:
+        typer.echo(path)
 
 
 @app.command("axon-visualize")

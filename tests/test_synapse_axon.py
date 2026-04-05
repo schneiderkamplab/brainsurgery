@@ -14,6 +14,7 @@ from brainsurgery.synapse import (
     parse_axon_program_from_path,
     synapse_spec_to_axon_module_text,
 )
+from brainsurgery.synapse.axon.types import AxonBind
 
 
 def _node_specs(graph: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -861,6 +862,71 @@ main x = x
     assert symbols["D"] == 640
     assert symbols["E"] == pytest.approx(0.03952847075210474)
     assert symbols["F"] == 13
+
+
+def test_top_level_runtime_constants_are_pruned_per_module() -> None:
+    source = """
+A = Config.int "a" default=1
+B = Config.int "b" default=2
+
+uses_a :: Tensor[B,S,D] -> Tensor[B,S,D]
+uses_a x = do
+  y <- mul x A
+  return y
+
+uses_b :: Tensor[B,S,D] -> Tensor[B,S,D]
+uses_b x = do
+  y <- mul x B
+  return y
+"""
+    modules = parse_axon_program(source)
+    by_name = {module.name: module for module in modules}
+
+    uses_a_binds = [stmt.targets[0] for stmt in by_name["uses_a"].statements if isinstance(stmt, AxonBind)]
+    uses_b_binds = [stmt.targets[0] for stmt in by_name["uses_b"].statements if isinstance(stmt, AxonBind)]
+
+    assert "A" in uses_a_binds
+    assert "B" not in uses_a_binds
+    assert "B" in uses_b_binds
+    assert "A" not in uses_b_binds
+
+
+def test_scope_root_propagates_to_plain_relative_ops() -> None:
+    modules = parse_axon_program(
+        """main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- scope@foo root="model" do
+    z <- rmsnorm@bar x
+    return z
+  return y
+"""
+    )
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    graph = spec["model"]["graph"]
+    rms_nodes = []
+    for item in graph:
+        name, node = next(iter(item.items()))
+        if node.get("_op") == "rmsnorm":
+            rms_nodes.append(node)
+    assert len(rms_nodes) == 1
+    assert rms_nodes[0].get("_scope") == "foo"
+    assert rms_nodes[0].get("_param_root") == "model"
+
+
+def test_top_level_runtime_constants_are_dependency_ordered_per_module() -> None:
+    modules = parse_axon_program(
+        """USE = (Config.value "use" default=false) == true
+DEP = Config.int "dep" default=(USE ? 5 : 6)
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- mul x DEP
+  return y
+"""
+    )
+    main = next(module for module in modules if module.name == "main")
+    bind_targets = [stmt.targets[0] for stmt in main.statements if isinstance(stmt, AxonBind)]
+    assert bind_targets[:2] == ["USE", "DEP"]
 
 
 def test_top_level_constant_sqrt_negative_argument_is_not_resolved_as_symbol() -> None:
@@ -2567,3 +2633,20 @@ tiny x = do
 """
     with pytest.raises(ValueError, match="conflicting PADDING_SIDE pragmas"):
         parse_axon_module(source)
+
+
+def test_parse_axon_checkpoints_pragma_is_preserved() -> None:
+    source = """
+{-# CHECKPOINTS ["google/gemma-3-270m", "google/gemma-3-270m-it"] #-}
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  return x
+"""
+    module = parse_axon_module(source)
+    assert module.pragmas == {
+        "checkpoints": ("google/gemma-3-270m", "google/gemma-3-270m-it")
+    }
+    spec = lower_axon_module_to_synapse_spec(module)
+    assert spec["model"]["meta"] == {
+        "checkpoints": ("google/gemma-3-270m", "google/gemma-3-270m-it")
+    }

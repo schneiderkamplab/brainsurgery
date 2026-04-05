@@ -32,5 +32,7 @@ PER_LAYER_INPUT_SCALE = 0.7071067811865476
 PER_LAYER_PROJ_SCALE = 1.0 / sqrt D
 NUM_KV_SHARED = Config.int "num_kv_shared_layers" root=CFG default=0
 USE_DOUBLE_WIDE_MLP = (Config.value "use_double_wide_mlp" root=CFG default=false) == true
-TOPK_EXPERTS = Config.int "top_k_experts" root=CFG default=8
-NUM_EXPERTS = Config.int "num_experts" root=CFG default=128
+RAW_TOPK_EXPERTS = Config.value "top_k_experts" root=CFG default=null
+TOPK_EXPERTS = (RAW_TOPK_EXPERTS == null) ? 8 : (Config.int "top_k_experts" root=CFG default=8)
+RAW_NUM_EXPERTS = Config.value "num_experts" root=CFG default=null
+NUM_EXPERTS = (RAW_NUM_EXPERTS == null) ? 128 : (Config.int "num_experts" root=CFG default=128)

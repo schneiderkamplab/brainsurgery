@@ -1,0 +1,112 @@
+{-# CHECKPOINTS "google/gemma-4-E2B" #-}
+
+import Activations
+import Activations (gelu_pytorch_tanh, tanh)
+import Cache
+import Cache (past_length)
+
+D = 1536
+L = 35
+H = 8
+KVH = 1
+HD = 256
+GHD = 512
+FFN = 6144
+PLI = 256
+WIN_LOCAL = 512
+WIN_FULL = 131072
+EPS = 1e-06
+THETA_LOCAL = 10000.0
+THETA_FULL = 1000000.0
+ROPE_SCALE_FULL = 1.0
+ROTARY_PARTIAL_FULL = 0.25
+ROPE_PERIOD = 5
+LOGIT_SOFTCAP = 30.0
+PER_LAYER_INPUT_SCALE = 0.7071067811865476
+PER_LAYER_PROJ_SCALE = 0.025515518153991442
+NUM_KV_SHARED = 20
+USE_DOUBLE_WIDE_MLP = true
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x cast_float=true
+
+gemma4_kv :: Tensor[B,S,D] -> Int -> Int -> (Tensor, Tensor)
+gemma4_kv xn kv_dim hd = do
+  k <- linear@k_proj xn dim=kv_dim bias=false |> reshape_heads heads=KVH |> rmsnorm@k_norm dim=hd cast_float=true
+  v <- linear@v_proj xn dim=kv_dim bias=false |> reshape_heads heads=KVH |> rmsnorm@v_norm dim=hd cast_float=true with_scale=false
+  return k, v
+
+gemma4_apply_per_layer_input :: Tensor[B,S,D] -> Tensor -> Int -> Tensor[B,S,D]
+gemma4_apply_per_layer_input x per_layer_inputs i = do
+  p_i <- gemma4_per_layer_input_at per_layer_inputs i
+  g <- linear@per_layer_input_gate x dim=PLI bias=false
+  p <- gelu_pytorch_tanh g |> mul p_i |> linear@per_layer_projection dim=D bias=false
+  p <- rms@post_per_layer_input_norm p
+  return x + p
+
+gemma4_shared_qk :: Tensor -> Tensor -> Tensor[B,S] -> Bool -> (Tensor, Tensor)
+gemma4_shared_qk q k pos_ids full = do
+  q_rot, _ <- rope_pair q q position_ids=pos_ids theta=(full ? THETA_FULL : THETA_LOCAL) scale_factor=(full ? ROPE_SCALE_FULL : 1.0) rope_mode=(full ? "proportional" : "") partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0)
+  return q_rot, k
+
+gemma4_e_block :: Tensor[B,S,D] -> Tensor -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> ?Tensor -> ?Tensor -> ?Tensor -> ?Tensor -> ?Bool -> (Tensor[B,S,D], ?CacheLayer, ?Tensor, ?Tensor, ?Tensor, ?Tensor)
+gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shared_full_v shared_sliding_k shared_sliding_v use_cache = do
+  full <- ((i + 1) % ROPE_PERIOD) == 0
+  shared_layer <- use_cache and (i >= (L - NUM_KV_SHARED))
+  hd <- full ? GHD : HD
+  q_dim <- H * hd
+  kv_dim <- KVH * hd
+  theta <- full ? THETA_FULL : THETA_LOCAL
+  window <- full ? WIN_FULL : WIN_LOCAL
+  ffn_dim <- (USE_DOUBLE_WIDE_MLP and (i >= (L - NUM_KV_SHARED))) ? (FFN * 2) : FFN
+  xn <- rms@input_layernorm x
+  a, new_kv, shared_k, shared_v <- scope@self_attn do
+    q <- linear@q_proj xn dim=q_dim bias=false |> reshape_heads heads=H |> rmsnorm@q_norm dim=hd cast_float=true
+    k, v <- if shared_layer then (full ? (shared_full_k, shared_full_v) : (shared_sliding_k, shared_sliding_v)) else gemma4_kv xn kv_dim hd
+    q, k <- shared_layer ? (gemma4_shared_qk q k pos_ids full) : (rope_pair q k position_ids=pos_ids theta=theta scale_factor=(full ? ROPE_SCALE_FULL : 1.0) rope_mode=(full ? "proportional" : "") partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0))
+    k, v, new_kv <- if shared_layer then (k, v, null) else Cache.update past_kv k v
+    shared_k <- k
+    shared_v <- v
+    k <- repeat k (H / KVH)
+    v <- repeat v (H / KVH)
+    mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
+    a <- attention q k v mask=mask scale=1.0 |> merge_heads |> linear@o_proj dim=D bias=false
+    return a, new_kv, shared_k, shared_v
+  a <- rms@post_attention_layernorm a
+  x <- x + a
+  xn <- rms@pre_feedforward_layernorm x
+  m <- scope@mlp do
+    g <- linear@gate_proj xn dim=ffn_dim bias=false
+    u <- linear@up_proj xn dim=ffn_dim bias=false
+    return gelu_pytorch_tanh g |> mul u |> linear@down_proj dim=D bias=false
+  m <- rms@post_feedforward_layernorm m
+  x <- x + m
+  x <- gemma4_apply_per_layer_input x per_layer_inputs i
+  x <- param_scale x scale="layer_scalar"
+  shared_full_k <- (use_cache and (shared_layer == false) and full) ? shared_k : shared_full_k
+  shared_full_v <- (use_cache and (shared_layer == false) and full) ? shared_v : shared_full_v
+  shared_sliding_k <- (use_cache and (shared_layer == false) and (full == false)) ? shared_k : shared_sliding_k
+  shared_sliding_v <- (use_cache and (shared_layer == false) and (full == false)) ? shared_v : shared_sliding_v
+  return x, new_kv, shared_full_k, shared_full_v, shared_sliding_k, shared_sliding_v
+
+gemma4_e :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gemma4_e input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv) use_attention_mask=false
+  logits, new_kv <- scope@language_model root="model" do
+    x <- embedding@embed_tokens input_ids dim=D scale=(sqrt D)
+    per_layer_inputs <- gemma4_per_layer_inputs input_ids x num_layers=L per_layer_dim=PLI embed_scale=(sqrt PLI) projection_scale=PER_LAYER_PROJ_SCALE combine_scale=PER_LAYER_INPUT_SCALE rms_eps=EPS
+    new_kv <- use_cache ? Cache.init : null
+    shared_full_k <- null
+    shared_full_v <- null
+    shared_sliding_k <- null
+    shared_sliding_v <- null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i, shared_full_k, shared_full_v, shared_sliding_k, shared_sliding_v <- gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_i shared_full_k shared_full_v shared_sliding_k shared_sliding_v use_cache
+      new_kv <- Cache.append new_kv new_i
+    logits <- rms@norm x |> linear@embed_tokens
+    logits <- logits / LOGIT_SOFTCAP
+    logits <- tanh logits
+    logits <- logits * LOGIT_SOFTCAP
+    return logits, new_kv
+  return logits, new_kv

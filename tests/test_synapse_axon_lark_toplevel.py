@@ -62,6 +62,29 @@ lin x = x
     assert parse_program_source(right).pragmas["padding_side"] == "right"
 
 
+def test_parse_program_source_checkpoints_pragma_string_normalizes_to_tuple() -> None:
+    source = """
+{-# CHECKPOINTS "google/gemma-3-270m" #-}
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    parsed = parse_program_source(source)
+    assert parsed.pragmas["checkpoints"] == ("google/gemma-3-270m",)
+
+
+def test_parse_program_source_checkpoints_pragma_list_preserved() -> None:
+    source = """
+{-# CHECKPOINTS ["google/gemma-3-270m", "google/gemma-3-270m-it"] #-}
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    parsed = parse_program_source(source)
+    assert parsed.pragmas["checkpoints"] == (
+        "google/gemma-3-270m",
+        "google/gemma-3-270m-it",
+    )
+
+
 def test_parse_program_source_rejects_invalid_import_member_token() -> None:
     source = """
 import Activations (gelu-new)

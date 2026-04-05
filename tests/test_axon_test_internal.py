@@ -133,3 +133,23 @@ def test_rebuild_hf_phi3small_longrope_buffers_skips_valid_buffers() -> None:
     rebuilt = axon_test_mod._rebuild_hf_phi3small_longrope_buffers(model)
 
     assert rebuilt == 0
+
+
+def test_rebuild_hf_phi3small_longrope_buffers_repairs_finite_garbage() -> None:
+    model = _FakePhi3Wrapper()
+    model.rotary.range_vector = torch.full((8,), 123.0, dtype=torch.float32)
+    model.rotary.short_factors = torch.tensor([9.0, 9.0, 9.0, 9.0], dtype=torch.float32)
+    model.rotary.long_factors = torch.tensor([8.0, 8.0, 8.0, 8.0], dtype=torch.float32)
+
+    rebuilt = axon_test_mod._rebuild_hf_phi3small_longrope_buffers(model)
+
+    assert rebuilt == 1
+    assert torch.equal(model.rotary.range_vector, torch.arange(8, dtype=torch.float32))
+    assert torch.equal(
+        model.rotary.short_factors,
+        torch.tensor([1.0, 1.5, 2.0, 2.5], dtype=torch.float32),
+    )
+    assert torch.equal(
+        model.rotary.long_factors,
+        torch.tensor([3.0, 3.5, 4.0, 4.5], dtype=torch.float32),
+    )

@@ -145,6 +145,7 @@ def tokenize_prompts(
     prompts: list[str],
     tokenizer_source: str,
     device: torch.device,
+    max_len: int,
     lowered_spec: dict[str, Any] | None = None,
     tokenizer_fallback: str | None = None,
     trust_remote_code: bool = False,
@@ -164,7 +165,13 @@ def tokenize_prompts(
                     "Tokenizer has no pad token and no eos token; cannot batch prompts"
                 )
             tokenizer_obj.pad_token = tokenizer_obj.eos_token
-    inputs = tokenizer_obj(prompts, return_tensors="pt", padding=(len(prompts) > 1)).to(device)
+    inputs = tokenizer_obj(
+        prompts,
+        return_tensors="pt",
+        padding=(len(prompts) > 1),
+        truncation=True,
+        max_length=int(max_len),
+    ).to(device)
     input_ids = inputs["input_ids"]
     attention_mask = inputs.get("attention_mask")
     return tokenizer_obj, input_ids, attention_mask

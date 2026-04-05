@@ -37,6 +37,13 @@ def run_axon_test(*args, **kwargs):
     return _run_axon_test(*args, **kwargs)
 
 
+def run_axon_benchmark(*args, **kwargs):
+    # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
+    from .axon_test import run_axon_benchmark as _run_axon_benchmark
+
+    return _run_axon_benchmark(*args, **kwargs)
+
+
 def run_axon_test_matrix(*args, **kwargs):
     # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
     from .axon_test_matrix import run_axon_test_matrix as _run_axon_test_matrix
@@ -70,6 +77,12 @@ def render_axon_test_log(*args, **kwargs):
     return _render_axon_test_log(*args, **kwargs)
 
 
+def run_axon_materialize(*args, **kwargs):
+    from .axon_materialize import run_axon_materialize as _run_axon_materialize
+
+    return _run_axon_materialize(*args, **kwargs)
+
+
 __all__ = [
     "AxonBind",
     "AxonModule",
@@ -82,7 +95,9 @@ __all__ = [
     "extract_block_io_types_from_spec",
     "infer_block_io_types_from_modules",
     "infer_output_types_for_node",
+    "run_axon_benchmark",
     "run_axon_test",
+    "run_axon_materialize",
     "render_axon_test_log",
     "run_axon_test_matrix",
     "run_axon_op_parity",

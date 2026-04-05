@@ -51,9 +51,19 @@ def test_tokenize_prompts_sets_padding_side_and_pad_token(monkeypatch: pytest.Mo
             self.eos_token = "</s>"
             self.pad_token: str | None = None
 
-        def __call__(self, prompts: list[str], *, return_tensors: str, padding: bool) -> _FakeBatch:
+        def __call__(
+            self,
+            prompts: list[str],
+            *,
+            return_tensors: str,
+            padding: bool,
+            truncation: bool,
+            max_length: int,
+        ) -> _FakeBatch:
             assert return_tensors == "pt"
             assert padding is True
+            assert truncation is True
+            assert max_length == 16
             assert prompts == ["a", "b"]
             return _FakeBatch(
                 {
@@ -74,6 +84,7 @@ def test_tokenize_prompts_sets_padding_side_and_pad_token(monkeypatch: pytest.Mo
         prompts=["a", "b"],
         tokenizer_source="local-tokenizer",
         device=torch.device("cpu"),
+        max_len=16,
         lowered_spec={"model": {"meta": {"padding_side": "left"}}},
     )
 

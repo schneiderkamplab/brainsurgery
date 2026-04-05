@@ -20,6 +20,8 @@ LOWERING_ALLOWED_KWARGS: set[str] = {
     "high_freq_factor",
     "original_context",
     "attention_factor",
+    "short_mscale",
+    "long_mscale",
     "rope_mode",
     "truncate",
     "long_factor",
@@ -42,6 +44,8 @@ LOWERING_KWARG_KINDS: dict[str, Any] = {
     "high_freq_factor": "number",
     "original_context": "dim",
     "attention_factor": "number",
+    "short_mscale": "number",
+    "long_mscale": "number",
     "rope_mode": "str",
     "truncate": "bool",
     "long_factor": "any",
@@ -399,18 +403,33 @@ def interpret(
                 model._eval_expr(node_spec["attention_factor"], env, symbols)
             )
         else:
-            if "scale_factor" in node_spec:
-                scale_factor = float(model._eval_expr(node_spec["scale_factor"], env, symbols))
-            else:
-                scale_factor = float(max_context) / float(original_context)
-            if scale_factor <= 0.0:
-                raise ValueError("rope_pair.scale_factor must be > 0 for longrope/su")
-            if scale_factor <= 1.0:
-                rope_attention_factor = 1.0
-            else:
-                rope_attention_factor = float(
-                    math.sqrt(1.0 + (math.log(scale_factor) / math.log(float(original_context))))
+            if seq_len > original_context:
+                explicit_mscale = (
+                    float(model._eval_expr(node_spec["long_mscale"], env, symbols))
+                    if "long_mscale" in node_spec
+                    else None
                 )
+            else:
+                explicit_mscale = (
+                    float(model._eval_expr(node_spec["short_mscale"], env, symbols))
+                    if "short_mscale" in node_spec
+                    else None
+                )
+            if explicit_mscale is not None and explicit_mscale > 0.0:
+                rope_attention_factor = explicit_mscale
+            else:
+                if "scale_factor" in node_spec:
+                    scale_factor = float(model._eval_expr(node_spec["scale_factor"], env, symbols))
+                else:
+                    scale_factor = float(max_context) / float(original_context)
+                if scale_factor <= 0.0:
+                    raise ValueError("rope_pair.scale_factor must be > 0 for longrope/su")
+                if seq_len <= original_context or scale_factor <= 1.0:
+                    rope_attention_factor = 1.0
+                else:
+                    rope_attention_factor = float(
+                        math.sqrt(1.0 + (math.log(scale_factor) / math.log(float(original_context))))
+                    )
     elif all(
         key in node_spec for key in ("scale_factor", "beta_fast", "beta_slow", "original_context")
     ):
@@ -566,6 +585,8 @@ def compile(
     k_dst = k_out if k_out != k else emitter._fresh("k_rot")
     theta = emitter._expr_code(node_spec.get("theta", 10000.0), env)
     attention_factor_expr = emitter._expr_code(node_spec.get("attention_factor", 1.0), env)
+    short_mscale_expr = emitter._expr_code(node_spec.get("short_mscale"), env)
+    long_mscale_expr = emitter._expr_code(node_spec.get("long_mscale"), env)
     scale_factor = emitter._expr_code(node_spec.get("scale_factor"), env)
     beta_fast = emitter._expr_code(node_spec.get("beta_fast"), env)
     beta_slow = emitter._expr_code(node_spec.get("beta_slow"), env)
@@ -716,6 +737,7 @@ def compile(
         ext_factors = emitter._fresh("ext_factors")
         inv_shape = emitter._fresh("inv_shape")
         scale_factor_long = emitter._fresh("scale_factor_long")
+        explicit_mscale = emitter._fresh("explicit_mscale")
         lines.append(
             f"{indent}if not isinstance({long_factor_expr}, (list, tuple)) or any((isinstance(_v, bool) or not isinstance(_v, (int, float))) for _v in {long_factor_expr}):"
         )
@@ -757,31 +779,39 @@ def compile(
         )
         if "attention_factor" in node_spec:
             lines.append(f"{indent}{rope_attention_factor} = float({attention_factor_expr})")
-        elif "scale_factor" in node_spec:
-            lines.append(f"{indent}{scale_factor_long} = float({scale_factor})")
-            lines.append(f"{indent}if {scale_factor_long} <= 0.0:")
-            lines.append(
-                f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0 for longrope/su')"
-            )
-            lines.append(f"{indent}if {scale_factor_long} <= 1.0:")
-            lines.append(f"{indent}    {rope_attention_factor} = 1.0")
-            lines.append(f"{indent}else:")
-            lines.append(
-                f"{indent}    {rope_attention_factor} = float(math.sqrt(1.0 + (math.log({scale_factor_long}) / math.log(float({original_context})))))"
-            )
         else:
-            lines.append(
-                f"{indent}{scale_factor_long} = float({max_context_expr}) / float({original_context})"
-            )
-            lines.append(f"{indent}if {scale_factor_long} <= 0.0:")
-            lines.append(
-                f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0 for longrope/su')"
-            )
-            lines.append(f"{indent}if {scale_factor_long} <= 1.0:")
-            lines.append(f"{indent}    {rope_attention_factor} = 1.0")
+            lines.append(f"{indent}if {seq_len} > int({original_context}):")
+            if "long_mscale" in node_spec:
+                lines.append(f"{indent}    {explicit_mscale} = float({long_mscale_expr})")
+            else:
+                lines.append(f"{indent}    {explicit_mscale} = None")
             lines.append(f"{indent}else:")
+            if "short_mscale" in node_spec:
+                lines.append(f"{indent}    {explicit_mscale} = float({short_mscale_expr})")
+            else:
+                lines.append(f"{indent}    {explicit_mscale} = None")
             lines.append(
-                f"{indent}    {rope_attention_factor} = float(math.sqrt(1.0 + (math.log({scale_factor_long}) / math.log(float({original_context})))))"
+                f"{indent}if {explicit_mscale} is not None and float({explicit_mscale}) > 0.0:"
+            )
+            lines.append(f"{indent}    {rope_attention_factor} = float({explicit_mscale})")
+            lines.append(f"{indent}else:")
+            if "scale_factor" in node_spec:
+                lines.append(f"{indent}    {scale_factor_long} = float({scale_factor})")
+            else:
+                lines.append(
+                    f"{indent}    {scale_factor_long} = float({max_context_expr}) / float({original_context})"
+                )
+            lines.append(f"{indent}    if {scale_factor_long} <= 0.0:")
+            lines.append(
+                f"{indent}        raise ValueError('rope_pair.scale_factor must be > 0 for longrope/su')"
+            )
+            lines.append(
+                f"{indent}    if {seq_len} <= int({original_context}) or {scale_factor_long} <= 1.0:"
+            )
+            lines.append(f"{indent}        {rope_attention_factor} = 1.0")
+            lines.append(f"{indent}    else:")
+            lines.append(
+                f"{indent}        {rope_attention_factor} = float(math.sqrt(1.0 + (math.log({scale_factor_long}) / math.log(float({original_context})))))"
             )
     elif all(
         key in node_spec for key in ("scale_factor", "beta_fast", "beta_slow", "original_context")

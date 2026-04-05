@@ -7,6 +7,7 @@ import pytest
 
 import tests.conftest as test_fixtures
 from brainsurgery.synapse import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
+from brainsurgery.synapse.axon_test import _infer_model_task
 from brainsurgery.synapse.axon_test_matrix import (
     _Pair,
     _resolve_model_task_for_pair,
@@ -46,6 +47,65 @@ def test_t5_small_is_registered_in_download_specs_and_matrix() -> None:
     assert ("marian", "marian_en_de") in MATRIX_AXON_MODEL_DIR_PAIRS
     assert ("t5gemma", "t5gemma_s_s_ul2") in MATRIX_AXON_MODEL_DIR_PAIRS
     assert ("t5gemma2", "t5gemma2_270m") in MATRIX_AXON_MODEL_DIR_PAIRS
+
+
+def test_t5gemma_family_files_are_split_by_checkpoint_family(repo_root: Path) -> None:
+    t5gemma = (repo_root / "brainsurgery/synapse/models/gemma/generic-t5gemma-ul2.axon").read_text(
+        encoding="utf-8"
+    )
+    t5gemma_prefixlm = (
+        repo_root / "brainsurgery/synapse/models/gemma/generic-t5gemma-prefixlm.axon"
+    ).read_text(encoding="utf-8")
+    t5gemma2 = (repo_root / "brainsurgery/synapse/models/gemma/generic-t5gemma2.axon").read_text(
+        encoding="utf-8"
+    )
+
+    assert "prefixlm" not in t5gemma
+    assert "ul2" not in t5gemma_prefixlm
+    assert 'google/t5gemma-2-270m-270m' in t5gemma2
+    assert 'google/t5gemma-2-1b-1b' in t5gemma2
+    assert 'google/t5gemma-2-4b-4b' in t5gemma2
+
+
+def test_generic_t5gemma_ul2_uses_mask_independent_position_ids(repo_root: Path) -> None:
+    t5gemma = (repo_root / "brainsurgery/synapse/models/gemma/generic-t5gemma-ul2.axon").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "enc_pos_ids <- position_ids input_ids attention_mask use_attention_mask=false"
+        in t5gemma
+    )
+    assert (
+        "dec_pos_ids <- position_ids decoder_input_ids decoder_attention_mask use_attention_mask=false"
+        in t5gemma
+    )
+
+
+def test_axon_test_auto_infers_seq2seq_for_generic_t5gemma(repo_root: Path) -> None:
+    axon = repo_root / "brainsurgery/synapse/models/gemma/generic-t5gemma-ul2.axon"
+    weights = repo_root / "models/google/t5gemma-s-s-ul2"
+    assert _infer_model_task(axon_file=axon, weights=weights) == "seq2seq_lm"
+
+
+def test_axon_test_task_pragma_overrides_heuristic(tmp_path: Path) -> None:
+    axon = tmp_path / "weird_name.axon"
+    axon.write_text(
+        '\n'.join(
+            [
+                '{-# CHECKPOINTS "google/t5gemma-s-s-ul2" #-}',
+                '{-# TASK "masked_lm" #-}',
+                "",
+                "main :: Tensor[B,S,D] -> Tensor[B,S,D]",
+                "main x = do",
+                "  return x",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    weights = Path("/work/training/brainsurgery/models/google/t5gemma-s-s-ul2")
+    assert _infer_model_task(axon_file=axon, weights=weights) == "masked_lm"
 
 
 def test_matrix_resolves_t5_small_to_t5_small_axon(

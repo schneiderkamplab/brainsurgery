@@ -23,6 +23,8 @@ ROPE_ORIGINAL_CONTEXT = Config.int "original_max_position_embeddings" root="rope
 ROPE_MAX_CONTEXT = Config.int "max_position_embeddings" root=CFG default=8192
 ROPE_LONG_FACTOR = Config.value "long_factor" root="rope_scaling" default=[]
 ROPE_SHORT_FACTOR = Config.value "short_factor" root="rope_scaling" default=[]
+ROPE_LONG_MSCALE = Config.float "long_mscale" root="rope_scaling" default=-1.0
+ROPE_SHORT_MSCALE = Config.float "short_mscale" root="rope_scaling" default=-1.0
 HAS_LONGROPE = Config.has "long_factor" root="rope_scaling"
 GEGELU_LIMIT = Config.float "gegelu_limit" root=CFG default=20.0
 MUP_ATTN_MULT = Config.float "mup_attn_multiplier" root=CFG default=1.0

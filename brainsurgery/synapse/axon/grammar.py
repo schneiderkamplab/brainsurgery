@@ -194,7 +194,7 @@ program: _NL* top_item (_NL+ top_item)* _NL*
 
 top_item: module_decl
     | import_decl
-    | padding_pragma
+    | pragma
     | constant
 
 module_decl: signature _NL definition
@@ -234,7 +234,10 @@ import_members: import_members_paren | import_members_bare
 import_members_paren: LPAR [NAME ("," NAME)*] RPAR
 import_members_bare: NAME+
 
-padding_pragma: "{-#" "PADDING_SIDE" QUOTED_SIDE "#-}"
+pragma: "{-#" NAME pragma_value "#-}"
+?pragma_value: tuple_expr
+    | list_expr
+    | literal
 constant: NAME "=" expr
 
 ?statement: for_statement
@@ -354,7 +357,6 @@ callable: NAME
 
 nl_gap: (_NL | INDENT | DEDENT)+
 
-QUOTED_SIDE: /"(?:left|right)"|'(?:left|right)'/
 NAME: /[A-Za-z_](?:[A-Za-z0-9_:@]|\.(?!\.))*(?=[ \t\r\n]|$|[),;?:|+\-*\/%<>=\[\]]|\.\.)/
 INT: /-?[0-9]+/
 FLOAT: /-?(?:[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?|[0-9]+(?:[eE][+-]?[0-9]+))/
@@ -439,6 +441,43 @@ class _ProgramTransformer(Transformer[Token, object]):
             raise ValueError("expected expression node")
         return cast(AxonExpr, value)
 
+    @classmethod
+    def _pragma_literal_to_python(cls, value: object) -> object:
+        expr = cls._as_expr(value)
+        if isinstance(expr, AxonExprString):
+            return expr.value
+        if isinstance(expr, AxonExprInt):
+            return expr.value
+        if isinstance(expr, AxonExprFloat):
+            return expr.value
+        if isinstance(expr, AxonExprBool):
+            return expr.value
+        if isinstance(expr, AxonExprNull):
+            return None
+        if isinstance(expr, AxonExprList):
+            return [cls._pragma_literal_to_python(item) for item in expr.items]
+        if isinstance(expr, AxonExprTuple):
+            return tuple(cls._pragma_literal_to_python(item) for item in expr.items)
+        raise ValueError("pragma values must be literals, lists, or tuples of literals")
+
+    @staticmethod
+    def _normalize_pragma_value(name: str, value: object) -> object:
+        if name == "padding_side":
+            side = str(value).strip().lower()
+            if side not in {"left", "right"}:
+                raise ValueError("PADDING_SIDE must be 'left' or 'right'")
+            return side
+        if name == "checkpoints":
+            if isinstance(value, str):
+                return (value,)
+            if isinstance(value, list | tuple):
+                items = tuple(str(item) for item in value)
+                if not all(isinstance(item, str) and item for item in items):
+                    raise ValueError("CHECKPOINTS entries must be strings")
+                return items
+            raise ValueError("CHECKPOINTS must be a string or a list/tuple of strings")
+        return value
+
     @staticmethod
     def _is_stmt(value: object) -> bool:
         return isinstance(value, AxonBind | AxonReturn | AxonRepeat | AxonScopeBind)
@@ -495,14 +534,19 @@ class _ProgramTransformer(Transformer[Token, object]):
                 prev_members = imported_members.get(namespace, ())
                 imported_members[namespace] = tuple(dict.fromkeys([*prev_members, *members]))
                 continue
-            if isinstance(child, tuple) and len(child) == 2 and child[0] == "padding_side":
-                side = cast(str, child[1])
-                prev_side = pragmas.get("padding_side")
-                if isinstance(prev_side, str) and prev_side != side:
+            if isinstance(child, tuple) and len(child) == 3 and child[0] == "pragma":
+                pragma_name = cast(str, child[1])
+                pragma_value = child[2]
+                prev_value = pragmas.get(pragma_name)
+                if (
+                    pragma_name == "padding_side"
+                    and isinstance(prev_value, str)
+                    and prev_value != pragma_value
+                ):
                     raise ValueError(
                         "conflicting PADDING_SIDE pragmas; expected a single consistent value"
                     )
-                pragmas["padding_side"] = side
+                pragmas[pragma_name] = pragma_value
                 continue
             if isinstance(child, tuple) and len(child) == 3 and child[0] == "constant":
                 name = cast(str, child[1])
@@ -716,9 +760,17 @@ class _ProgramTransformer(Transformer[Token, object]):
         members = cast(tuple[str, ...], values[1])
         return ("import_members", namespace, members)
 
-    def padding_pragma(self, children: list[object]) -> tuple[str, str]:
-        side = str(cast(Token, children[0]))
-        return ("padding_side", side[1:-1].lower())
+    def pragma(self, children: list[object]) -> tuple[str, str, object]:
+        if len(children) != 2:
+            raise ValueError("invalid pragma syntax")
+        name_token = children[0]
+        assert isinstance(name_token, Token)
+        pragma_name = str(name_token).strip().lower()
+        pragma_value = self._normalize_pragma_value(
+            pragma_name,
+            self._pragma_literal_to_python(children[1]),
+        )
+        return ("pragma", pragma_name, pragma_value)
 
     def constant(self, children: list[object]) -> tuple[str, str, AxonExpr]:
         name = str(cast(Token, children[0]))

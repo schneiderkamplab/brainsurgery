@@ -22,6 +22,7 @@ from .axon import (
 )
 from .axon_test import (
     _augment_model_config_from_checkpoint,
+    _ensure_einops_import_compat,
     _ensure_transformers_import_compat,
     _extract_logits,
     _load_auto_config_with_compat_fallback,
@@ -30,6 +31,7 @@ from .axon_test import (
     _load_model_config,
     _load_state_dict,
     _normalize_rope_numeric_fields,
+    _refresh_hf_rotary_caches_if_needed,
     _resolve_device,
     _resolve_safetensors_paths,
     _should_trust_remote_code,
@@ -551,12 +553,14 @@ def _build_inputs(
     tokenizer_source: str,
     tokenizer_fallback: str | None,
     device: torch.device,
+    max_len: int,
 ) -> tuple[Any, torch.Tensor, torch.Tensor | None]:
     return tokenize_prompts(
         prompts=prompts,
         tokenizer_source=tokenizer_source,
         tokenizer_fallback=tokenizer_fallback,
         device=device,
+        max_len=max_len,
         lowered_spec=lowered_spec,
     )
 
@@ -598,6 +602,7 @@ def _run_single_dtype(
     hf_config: Any,
     hf_loader_kind: str,
     trust_remote_code: bool,
+    max_len: int,
 ) -> dict[str, Any]:
     trace_kinds = {"linear", "layernorm", "rmsnorm", "attention", "embedding", "add"}
     model_input_names = set(lowered_spec.get("model", {}).get("inputs", {}).keys())
@@ -607,6 +612,7 @@ def _run_single_dtype(
         tokenizer_source=tokenizer_source,
         tokenizer_fallback=tokenizer_fallback,
         device=device,
+        max_len=max_len,
     )
     del tokenizer_obj
     hf_kwargs = _forward_kwargs(
@@ -739,6 +745,7 @@ def run_axon_layer_op_parity(
     text: str | Sequence[str] = ("Hello world",),
     device: str = "cpu",
     dtype: str = "float32",
+    max_len: int | None = None,
     class_name: str = "AxonLayerParityModel",
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
@@ -798,6 +805,7 @@ def run_axon_layer_op_parity(
             tokenizer_source=tokenizer_source,
             tokenizer_fallback=tokenizer_fallback,
             device=resolved_device,
+            max_len=max_len,
         )
         del tokenizer_obj
         hf_kwargs = _forward_kwargs(
@@ -814,10 +822,16 @@ def run_axon_layer_op_parity(
         )
 
         _ensure_transformers_import_compat()
+        if effective_trust_remote_code:
+            _ensure_einops_import_compat()
         hf_model: Any = AutoModelForCausalLM.from_pretrained(
-            str(resolved_hf_model_dir), local_files_only=True, dtype=resolved_dtype
+            str(resolved_hf_model_dir),
+            local_files_only=True,
+            dtype=resolved_dtype,
+            trust_remote_code=effective_trust_remote_code,
         )
         hf = hf_model.to(resolved_device).eval()
+        _refresh_hf_rotary_caches_if_needed(hf, dtype=resolved_dtype)
         hooks: list[Any] = []
         hf_trace: dict[str, list[torch.Tensor]] = defaultdict(list)
         hf_trace_meta: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1006,6 +1020,7 @@ def run_axon_op_parity(
                 hf_config=hf_config,
                 hf_loader_kind=hf_loader_kind,
                 trust_remote_code=effective_trust_remote_code,
+                max_len=max_len,
             )
             results.append(result)
             logits = result.get("logits")
@@ -1087,6 +1102,7 @@ def run_codegen_runtime_parity(
             tokenizer_source=tokenizer_source,
             tokenizer_fallback=tokenizer_fallback,
             device=resolved_device,
+            max_len=max_len,
         )
         del tokenizer_obj
         syn_kwargs = _forward_kwargs(

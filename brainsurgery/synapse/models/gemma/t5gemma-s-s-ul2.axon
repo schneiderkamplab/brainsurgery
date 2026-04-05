@@ -1,0 +1,107 @@
+{-# CHECKPOINTS "google/t5gemma-s-s-ul2" #-}
+
+import Activations
+import Activations (gelu_pytorch_tanh, sigmoid)
+
+D = 512
+V = 256000
+L_ENC = 8
+L_DEC = 8
+H = 8
+KVH = 8
+HD = 64
+QD = 512
+KVD = 512
+FFN_ENC = 1024
+FFN_DEC = 1024
+EPS = 1e-06
+THETA = 10000.0
+WIN_SLIDE_ENC = 4096
+WIN_SLIDE_DEC = 4096
+WIN_FULL_ENC = 8192
+WIN_FULL_DEC = 8192
+ROPE_PERIOD_ENC = 2
+ROPE_PERIOD_DEC = 2
+ATTN_SCALE = 0.125
+EMB_SCALE = 22.627416997969522
+LOGIT_SOFTCAP = 30.0
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=1e-06 cast_float=true unit_offset=true
+
+t5gemma_encoder_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> Tensor[B,S,D]
+t5gemma_encoder_block x i pos_ids attention_mask = do
+  xn <- rms@pre_self_attn_layernorm x
+  a <- scope@self_attn do
+    q <- linear@q_proj xn dim=512 bias=false |> reshape_heads heads=8
+    k <- linear@k_proj xn dim=512 bias=false |> reshape_heads heads=8
+    v <- linear@v_proj xn dim=512 bias=false |> reshape_heads heads=8
+    q, k <- rope_pair q k position_ids=pos_ids theta=10000.0
+    k <- repeat k repeats=1.0
+    v <- repeat v repeats=1.0
+    full_attn <- ((i + 1) % 2) == 0
+    window <- full_attn ? 8192 : 4096
+    mask <- bidirectional_mask q k window=window padding_mask=attention_mask
+    return attention q k v mask=mask causal=false scale=0.125 |> merge_heads |> linear@o_proj dim=512 bias=false
+  a <- rms@post_self_attn_layernorm a
+  x <- x + a
+  xn <- rms@pre_feedforward_layernorm x
+  m <- scope@mlp do
+    g <- linear@gate_proj xn dim=1024 bias=false |> gelu_pytorch_tanh
+    u <- linear@up_proj xn dim=1024 bias=false
+    return g |> mul u |> linear@down_proj dim=512 bias=false
+  m <- rms@post_feedforward_layernorm m
+  return x + m
+
+t5gemma_decoder_block :: Tensor[B,SDEC,D] -> Tensor[B,SENC,D] -> Int -> Tensor[B,SDEC] -> ?Tensor[B,S] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,D]
+t5gemma_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_attention_mask = do
+  xn <- rms@pre_self_attn_layernorm x
+  a <- scope@self_attn do
+    q <- linear@q_proj xn dim=512 bias=false |> reshape_heads heads=8
+    k <- linear@k_proj xn dim=512 bias=false |> reshape_heads heads=8
+    v <- linear@v_proj xn dim=512 bias=false |> reshape_heads heads=8
+    q, k <- rope_pair q k position_ids=pos_ids theta=10000.0
+    k <- repeat k repeats=1.0
+    v <- repeat v repeats=1.0
+    full_attn <- ((i + 1) % 2) == 0
+    window <- full_attn ? 8192 : 4096
+    mask <- causal_mask q k window=window padding_mask=decoder_attention_mask
+    return attention q k v mask=mask causal=false scale=0.125 |> merge_heads |> linear@o_proj dim=512 bias=false
+  a <- rms@post_self_attn_layernorm a
+  x <- x + a
+  xn <- rms@pre_cross_attn_layernorm x
+  a <- scope@cross_attn do
+    q <- linear@q_proj xn dim=512 bias=false |> reshape_heads heads=8
+    k <- linear@k_proj enc_hidden dim=512 bias=false |> reshape_heads heads=8
+    v <- linear@v_proj enc_hidden dim=512 bias=false |> reshape_heads heads=8
+    k <- repeat k repeats=1.0
+    v <- repeat v repeats=1.0
+    mask <- bidirectional_mask q k padding_mask=encoder_attention_mask
+    return attention q k v mask=mask causal=false scale=0.125 |> merge_heads |> linear@o_proj dim=512 bias=false
+  a <- rms@post_cross_attn_layernorm a
+  x <- x + a
+  xn <- rms@pre_feedforward_layernorm x
+  m <- scope@mlp do
+    g <- linear@gate_proj xn dim=1024 bias=false |> gelu_pytorch_tanh
+    u <- linear@up_proj xn dim=1024 bias=false
+    return g |> mul u |> linear@down_proj dim=512 bias=false
+  m <- rms@post_feedforward_layernorm m
+  return x + m
+
+t5gemma :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
+t5gemma input_ids attention_mask decoder_input_ids decoder_attention_mask = do
+  enc_pos_ids <- position_ids input_ids attention_mask
+  enc_hidden <- embedding@model.encoder.embed_tokens input_ids dim=512 scale=22.627416997969522
+  for@model.encoder.layers i <- [0..8) do
+    enc_hidden <- t5gemma_encoder_block enc_hidden i enc_pos_ids attention_mask
+  enc_hidden <- rms@model.encoder.norm enc_hidden
+  dec_pos_ids <- position_ids decoder_input_ids decoder_attention_mask
+  dec_hidden <- embedding@model.decoder.embed_tokens decoder_input_ids dim=512 scale=22.627416997969522
+  for@model.decoder.layers i <- [0..8) do
+    dec_hidden <- t5gemma_decoder_block dec_hidden enc_hidden i dec_pos_ids attention_mask decoder_attention_mask
+  dec_hidden <- rms@model.decoder.norm dec_hidden
+  logits <- linear@model.decoder.embed_tokens dec_hidden dim=256000 bias=false
+  logits <- logits / 30.0
+  logits <- logits * 2.0 |> sigmoid
+  logits <- (logits * 2.0) - 1.0
+  return logits * 30.0

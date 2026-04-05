@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -110,3 +111,61 @@ def test_gemma4_moe_axon_lowers_with_expected_structure(repo_root: Path) -> None
     assert any(
         node.get("_op") == "rmsnorm" and node.get("with_scale") is False for node in all_block_nodes
     )
+
+
+def test_gemma4_e_inline_config_lowers_equivalently_to_imported_form(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    inline_path = (
+        repo_root / "brainsurgery" / "synapse" / "models" / "gemma" / "gemma4" / "gemma4_e.axon"
+    )
+    inline_text = inline_path.read_text(encoding="utf-8")
+    config_start = inline_text.index("CFG = ")
+    model_start = inline_text.index("\nrms :: @Path")
+    config_text = inline_text[config_start:model_start].strip()
+    imported_cfg_path = tmp_path / "gemma4_config.axon"
+    imported_cfg_path.write_text(config_text + "\n", encoding="utf-8")
+
+    imported_text = inline_text[:config_start]
+    imported_text += (
+        "import gemma4_config (D, V, L, H, KVH, HD, GHD, FFN, PLI, EPS, WIN_LOCAL, WIN_FULL, "
+        "THETA_LOCAL, THETA_FULL, ROPE_SCALE_FULL, ROTARY_PARTIAL_FULL, ROPE_PERIOD, "
+        "LOGIT_SOFTCAP, PER_LAYER_INPUT_SCALE, PER_LAYER_PROJ_SCALE, NUM_KV_SHARED, "
+        "USE_DOUBLE_WIDE_MLP)\n\n"
+    )
+    imported_text += inline_text[model_start + 1 :]
+    imported_path = tmp_path / "gemma4_e_imported.axon"
+    imported_path.write_text(imported_text, encoding="utf-8")
+
+    inline_spec = _load_axon_spec(inline_path)
+    imported_spec = _load_axon_spec(imported_path)
+
+    inline_blocks = inline_spec["model"]["blocks"]
+    imported_blocks = imported_spec["model"]["blocks"]
+    assert (
+        json.dumps(
+            inline_blocks["gemma4_apply_per_layer_input"]["graph"],
+            sort_keys=True,
+        )
+        == json.dumps(
+            imported_blocks["gemma4_apply_per_layer_input"]["graph"],
+            sort_keys=True,
+        )
+    )
+
+    imported_main = imported_spec["model"]["graph"]
+    inline_main = inline_spec["model"]["graph"]
+    imported_norm = next(
+        node_spec
+        for item in imported_main
+        for node_spec in item.values()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "rmsnorm"
+    )
+    inline_norm = next(
+        node_spec
+        for item in inline_main
+        for node_spec in item.values()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "rmsnorm"
+    )
+    assert imported_norm.get("_param_root") == "model"
+    assert inline_norm.get("_param_root") == "model"

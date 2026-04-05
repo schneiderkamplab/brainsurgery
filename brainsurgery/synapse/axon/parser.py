@@ -214,6 +214,32 @@ def _constant_dependency_closure(*, graph: dict[str, set[str]], seed_names: set[
     return closure
 
 
+def _ordered_runtime_constant_items(
+    runtime_constants: tuple[tuple[str, AxonExpr], ...],
+    *,
+    graph: dict[str, set[str]],
+    selected_names: set[str],
+) -> tuple[tuple[str, AxonExpr], ...]:
+    by_name = {name: expr for name, expr in runtime_constants}
+    ordered_names = [name for name, _ in runtime_constants if name in selected_names]
+    emitted: set[str] = set()
+    out: list[tuple[str, AxonExpr]] = []
+
+    def _visit(name: str) -> None:
+        if name in emitted or name not in selected_names:
+            return
+        for dep in graph.get(name, ()):
+            _visit(dep)
+        emitted.add(name)
+        expr = by_name.get(name)
+        if expr is not None:
+            out.append((name, expr))
+
+    for name in ordered_names:
+        _visit(name)
+    return tuple(out)
+
+
 def _is_direct_symbol_default_call(expr: AxonExpr) -> bool:
     root = expr.inner if isinstance(expr, AxonExprParen) else expr
     if not isinstance(root, AxonExprCall):
@@ -821,8 +847,19 @@ def _build_module_from_source(
         body_statements = (AxonReturn(values=(rhs_expr,)),)
     statements = body_statements
     if top_runtime_constants:
+        runtime_graph = _constant_dependency_graph(dict(top_runtime_constants))
+        module_runtime_refs = _collect_statement_symbol_names(body_statements)
+        needed_runtime_names = _constant_dependency_closure(
+            graph=runtime_graph,
+            seed_names=module_runtime_refs,
+        )
+        ordered_runtime_constants = _ordered_runtime_constant_items(
+            top_runtime_constants,
+            graph=runtime_graph,
+            selected_names=needed_runtime_names,
+        )
         prelude = tuple(
-            AxonBind(targets=(name,), expr=expr) for name, expr in top_runtime_constants
+            AxonBind(targets=(name,), expr=expr) for name, expr in ordered_runtime_constants
         )
         statements = (*prelude, *statements)
 
