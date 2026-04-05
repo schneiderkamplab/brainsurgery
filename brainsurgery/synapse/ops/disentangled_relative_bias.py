@@ -180,16 +180,6 @@ def _resolve_param_path(
     candidate = node_spec.get(param_name)
     if not isinstance(candidate, str):
         candidate = default_candidate
-    node_scope = str(model._scope_of(node_path)) if hasattr(model, "_scope_of") else ""
-    scope_hint_raw = node_spec.get("_scope")
-    scope_hint = str(scope_hint_raw).strip() if isinstance(scope_hint_raw, str) else ""
-    if (
-        scope_hint
-        and not node_scope
-        and isinstance(candidate, str)
-        and not candidate.startswith("@@")
-    ):
-        candidate = f"{scope_hint}.{candidate}"
     if hasattr(model, "_infer_param_path"):
         local_spec = dict(node_spec)
         local_spec[param_name] = candidate

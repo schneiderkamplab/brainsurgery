@@ -108,10 +108,10 @@ def interpret(
     hidden_flat, topk_scores_flat, topk_indices_flat = _flatten_routing_inputs(
         hidden, topk_scores, topk_indices
     )
-    # Match HF GptOssExperts ordering:
-    # expert_mask has layout [expert, top_k, tokens], and torch.where iterates
-    # with top_k as the major axis before token_idx.
-    expert_pos = (topk_indices_flat.transpose(0, 1) == expert).nonzero(as_tuple=False)
+    # Match HF MoE implementations that materialize an expert mask with
+    # layout [expert, top_k, tokens] and then call torch.where(mask).
+    # That preserves top-k-major ordering for each expert.
+    expert_pos = (topk_indices_flat == expert).transpose(0, 1).nonzero(as_tuple=False)
     topk_pos = expert_pos[:, 0]
     token_idx = expert_pos[:, 1]
     selected_hidden = hidden_flat[token_idx]
@@ -159,7 +159,7 @@ def compile(
         f"{indent}{topk_indices_flat} = {topk_indices}.reshape(-1, {topk_indices}.shape[-1])"
     )
     lines.append(
-        f"{indent}{expert_pos} = ({topk_indices_flat}.transpose(0, 1) == int({expert})).nonzero(as_tuple=False)"
+        f"{indent}{expert_pos} = ({topk_indices_flat} == int({expert})).transpose(0, 1).nonzero(as_tuple=False)"
     )
     lines.append(f"{indent}{topk_pos} = {expert_pos}[:, 0]")
     lines.append(f"{indent}{token_idx} = {expert_pos}[:, 1]")

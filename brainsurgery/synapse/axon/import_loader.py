@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -168,17 +169,44 @@ def _apply_namespace(
     return tuple(namespaced)
 
 
-def _resolve_import_path(base_file: Path, import_name: str, builtins_dir: Path) -> Path:
+def _axon_search_paths() -> tuple[Path, ...]:
+    raw = os.environ.get("AXON_PATH", "")
+    if not raw:
+        return ()
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for part in raw.split(os.pathsep):
+        stripped = part.strip()
+        if not stripped:
+            continue
+        candidate = Path(stripped).expanduser().resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        out.append(candidate)
+    return tuple(out)
+
+
+def _resolve_import_path(
+    base_file: Path, import_name: str, builtins_dir: Path, search_paths: tuple[Path, ...]
+) -> Path:
     rel = Path(*import_name.split(".")).with_suffix(".axon")
     local_candidate = (base_file.parent / rel).resolve()
     if local_candidate.exists():
         return local_candidate
+    search_candidates: list[Path] = []
+    for search_root in search_paths:
+        candidate = (search_root / rel).resolve()
+        search_candidates.append(candidate)
+        if candidate.exists():
+            return candidate
     builtin_candidate = (builtins_dir / rel).resolve()
     if builtin_candidate.exists():
         return builtin_candidate
+    tried = [str(local_candidate), *(str(path) for path in search_candidates), str(builtin_candidate)]
     raise FileNotFoundError(
         f"Axon import {import_name!r} not found from {base_file}: "
-        f"tried {local_candidate} and {builtin_candidate}"
+        f"tried {', '.join(tried)}"
     )
 
 
@@ -195,6 +223,7 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
 
     builtins_dir = (Path(__file__).resolve().parents[1] / "builtins").resolve()
     prelude_file = (builtins_dir / "Prelude.axon").resolve()
+    search_paths = _axon_search_paths()
 
     def _load_file_syntax(file_path: Path, *, namespace: str | None = None) -> None:
         resolved = file_path.resolve()
@@ -209,7 +238,7 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
         parsed_source = parse_program_source(source)
         validate_parsed_program_source(parsed_source)
         for import_name in sorted(parsed_source.imports):
-            dep = _resolve_import_path(resolved, import_name, builtins_dir)
+            dep = _resolve_import_path(resolved, import_name, builtins_dir, search_paths)
             _load_file_syntax(dep, namespace=import_name)
         ordered_files.append(
             _LoadedSyntaxFile(path=resolved, namespace=namespace, parsed_source=parsed_source)

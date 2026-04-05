@@ -54,7 +54,7 @@ gpt_oss_block x i pos_ids attn_mask past_kv = do
     router_topk, topk_indices <- linear@router xn dim=E bias=true |>
       topk k=EPT dim=-1
     topk_scores <- softmax router_topk dim=-1
-    return MoE.grouped_ffn xn topk_scores topk_indices gate_up_weight="mlp.experts.gate_up_proj.weight" gate_up_bias="mlp.experts.gate_up_proj.bias" alpha=SWIGLU_ALPHA limit=SWIGLU_LIMIT
+    return MoE.grouped_ffn xn topk_scores topk_indices gate_up_weight="experts.gate_up_proj.weight" gate_up_bias="experts.gate_up_proj.bias" alpha=SWIGLU_ALPHA limit=SWIGLU_LIMIT
 
   return x + m, new_kv
 

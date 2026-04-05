@@ -16,8 +16,14 @@ gegelu_limit x limit = _activations_gegelu x limit=limit
 relu :: Tensor[B,T,D] -> Tensor[B,T,D]
 relu = _activations_relu
 
+relu2 :: Tensor[B,T,D] -> Tensor[B,T,D]
+relu2 = _activations_relu2
+
 sigmoid :: Tensor[B,T,D] -> Tensor[B,T,D]
 sigmoid = _activations_sigmoid
+
+tanh :: Tensor[B,T,D] -> Tensor[B,T,D]
+tanh = _activations_tanh
 
 silu :: Tensor[B,T,D] -> Tensor[B,T,D]
 silu = _activations_silu

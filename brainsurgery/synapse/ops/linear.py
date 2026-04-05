@@ -193,33 +193,40 @@ def compile(
     def assign_out_var(out_name: str) -> str:
         return emitter._assign_out_var(env, out_name)
 
-    def infer_param(param_name: str) -> str:
-        return emitter._infer_param_expr(node_spec, node_path_var, param_name)
-
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
     src = read(str(node_spec.get("_args")))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
-    weight_expr = infer_param("weight")
     has_bias = bool(node_spec["bias"]) if "bias" in node_spec else False
-    bias_expr = "None"
-    if has_bias:
-        bias_param = "bias_path" if isinstance(node_spec.get("bias_path"), str) else "bias"
-        bias_expr = f"self._state.get({infer_param(bias_param)})"
     expert_expr = node_spec.get("expert")
     expert_code = emitter._expr_code(expert_expr, env) if expert_expr is not None else None
     transpose = _resolve_transpose(node_spec)
-    selected_weight = f"self._param({weight_expr})"
-    selected_bias = bias_expr
+    selected_weight = emitter._hoisted_param(
+        node_spec=node_spec,
+        node_path_var=node_path_var,
+        param_name="weight",
+        lines=lines,
+        indent=indent,
+    )
+    selected_bias = "None"
+    if has_bias:
+        bias_param = "bias_path" if isinstance(node_spec.get("bias_path"), str) else "bias"
+        selected_bias = emitter._hoisted_optional_param(
+            node_spec=node_spec,
+            node_path_var=node_path_var,
+            param_name=bias_param,
+            lines=lines,
+            indent=indent,
+        )
     if expert_code is not None:
         selected_weight = f"{selected_weight}[int({expert_code})]"
         if has_bias:
             selected_bias = (
-                f"(({bias_expr})[int({expert_code})] "
-                f"if ({bias_expr}) is not None and ({bias_expr}).ndim >= 2 "
-                f"else ({bias_expr}))"
+                f"(({selected_bias})[int({expert_code})] "
+                f"if ({selected_bias}) is not None and ({selected_bias}).ndim >= 2 "
+                f"else ({selected_bias}))"
             )
     out_dim_expr = f"{selected_weight}.shape[-1]" if transpose else f"{selected_weight}.shape[0]"
     weight_var = emitter._fresh("weight")

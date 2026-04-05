@@ -35,7 +35,7 @@ apertus_block x pos_ids attn_mask past_kv = do
     k <- repeat k (H / KVH)
     v <- repeat v (H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D bias=false
+    a <- attention q k v mask=mask eager=true |> merge_heads |> linear@o_proj dim=D bias=false
     return a, new_kv
   x <- x + a
   xn <- rms@feedforward_layernorm x

@@ -155,7 +155,8 @@ def interpret(
     if scale_value is None:
         scale_value = float(q.shape[-1]) ** -0.5
 
-    causal_flag = bool(node_spec.get("causal", True))
+    causal_expr = node_spec.get("causal", True)
+    causal_flag = bool(model._eval_expr(causal_expr, env, symbols))
     eager_kw = node_spec.get("eager")
     float_mask_additive = bool(node_spec.get("float_mask_additive", False))
     float_mask_floor_keep = bool(node_spec.get("float_mask_floor_keep", False))
@@ -358,7 +359,20 @@ def compile(
     if sink_expr is None and isinstance(node_spec.get("sink_path"), str):
         sink_scope_expr = f"self._scope_of({node_path_var})"
         sink_path_expr = f"self._join_scope({sink_scope_expr}, {node_spec['sink_path']!r})"
-        sink_expr = f"self._state.get({sink_path_expr})"
+        sink_path_var = emitter._hoist_expr(
+            kind="param_path",
+            key=f"sink:{sink_path_expr}",
+            expr=sink_path_expr,
+            lines=lines,
+            indent=indent,
+        )
+        sink_expr = emitter._hoist_expr(
+            kind="param_tensor_opt",
+            key=f"optional:{sink_path_var}",
+            expr=f"self._state.get({sink_path_var})",
+            lines=lines,
+            indent=indent,
+        )
 
     scale_value = node_spec.get("scale")
     scale_expr = "None" if scale_value is None else emitter._expr_code(scale_value, env)
@@ -380,10 +394,8 @@ def compile(
     lines.append(f"{indent}{float_mask_additive} = bool({float_mask_additive_expr})")
     lines.append(f"{indent}{float_mask_floor_keep} = bool({float_mask_floor_keep_expr})")
 
-    if bool(node_spec.get("causal", True)):
-        is_causal = f"({q}.shape[-2] > 1 and {mask_for_sdpa} is None)"
-    else:
-        is_causal = "False"
+    causal_expr = emitter._expr_code(node_spec.get("causal", True), env)
+    is_causal = f"(bool({causal_expr}) and {q}.shape[-2] > 1 and {mask_for_sdpa} is None)"
 
     if sink_expr is None:
         attn_scores = emitter._fresh("attn_scores")
@@ -400,21 +412,22 @@ def compile(
             f"{indent}    {attn_scores} = torch.matmul({q}, {k}.transpose(-2, -1)) * float(_scale)"
         )
         lines.append(f"{indent}    {keep_mask} = None")
-        if bool(node_spec.get("causal", True)):
-            q_len = emitter._fresh("q_len")
-            k_len = emitter._fresh("k_len")
-            causal_mask = emitter._fresh("causal_mask")
-            floor = emitter._fresh("score_floor")
-            lines.append(f"{indent}    {q_len} = int({q}.shape[-2])")
-            lines.append(f"{indent}    {k_len} = int({k}.shape[-2])")
-            lines.append(
-                f"{indent}    {causal_mask} = torch.ones(({q_len}, {k_len}), dtype=torch.bool, device={q}.device).tril(diagonal={k_len} - {q_len})"
-            )
-            lines.append(f"{indent}    {keep_mask} = {causal_mask}")
-            lines.append(f"{indent}    {floor} = torch.finfo({attn_scores}.dtype).min")
-            lines.append(
-                f"{indent}    {attn_scores} = {attn_scores}.masked_fill(~{causal_mask}, {floor})"
-            )
+        lines.append(f"{indent}    _causal = bool({causal_expr})")
+        lines.append(f"{indent}    if _causal:")
+        q_len = emitter._fresh("q_len")
+        k_len = emitter._fresh("k_len")
+        causal_mask = emitter._fresh("causal_mask")
+        floor = emitter._fresh("score_floor")
+        lines.append(f"{indent}        {q_len} = int({q}.shape[-2])")
+        lines.append(f"{indent}        {k_len} = int({k}.shape[-2])")
+        lines.append(
+            f"{indent}        {causal_mask} = torch.ones(({q_len}, {k_len}), dtype=torch.bool, device={q}.device).tril(diagonal={k_len} - {q_len})"
+        )
+        lines.append(f"{indent}        {keep_mask} = {causal_mask}")
+        lines.append(f"{indent}        {floor} = torch.finfo({attn_scores}.dtype).min")
+        lines.append(
+            f"{indent}        {attn_scores} = {attn_scores}.masked_fill(~{causal_mask}, {floor})"
+        )
         lines.append(f"{indent}    if {mask_for_sdpa} is not None:")
         lines.append(f"{indent}        if torch.is_tensor({mask_for_sdpa}):")
         lines.append(f"{indent}            if {mask_for_sdpa}.dtype == torch.bool:")

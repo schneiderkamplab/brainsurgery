@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -249,6 +250,65 @@ main x = do
         assert first["_target"] == "Activations.swiglu"
     else:
         assert first["_op"] == "activations_swiglu"
+
+
+def test_relative_import_beats_builtin_file(tmp_path: Path) -> None:
+    (tmp_path / "Activations.axon").write_text(
+        """
+swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
+swiglu x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Activations
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- Activations.swiglu x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    names = {module.name for module in modules}
+    assert "Activations.swiglu" in names
+
+
+def test_import_uses_axon_path_before_builtins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    extra_dir = tmp_path / "axon_path"
+    extra_dir.mkdir()
+    (extra_dir / "Lib.axon").write_text(
+        """
+swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
+swiglu x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AXON_PATH", str(extra_dir))
+    main_path = tmp_path / "main.axon"
+    main_path.write_text(
+        """
+import Lib
+
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  y <- Lib.swiglu x
+  return y
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(main_path)
+    names = {module.name for module in modules}
+    assert "Lib.swiglu" in names
 
 
 def test_builtin_xielu_path_binding_lowers_to_activation_params(tmp_path: Path) -> None:
@@ -964,7 +1024,9 @@ tiny input_ids = do
         if isinstance(node_spec, dict) and node_spec.get("_op") == "embedding"
     ]
     assert len(embedding_nodes) == 1
-    assert embedding_nodes[0]["_params"]["weight"] == "model.embed_tokens.weight"
+    assert embedding_nodes[0]["_params"]["weight"] == "embed_tokens.weight"
+    assert embedding_nodes[0]["_scope"] == "model"
+    assert "_abs_path" not in embedding_nodes[0]
     linear_nodes = [
         node_spec
         for item in graph
@@ -972,7 +1034,9 @@ tiny input_ids = do
         if isinstance(node_spec, dict) and node_spec.get("_op") == "linear"
     ]
     assert len(linear_nodes) == 1
-    assert linear_nodes[0]["_params"]["weight"] == "model.lm_head.weight"
+    assert linear_nodes[0]["_params"]["weight"] == "lm_head.weight"
+    assert linear_nodes[0]["_scope"] == "model"
+    assert "_abs_path" not in linear_nodes[0]
 
 
 def test_path_bound_block_call_keeps_single_scope_source_of_truth() -> None:
@@ -1000,7 +1064,7 @@ tiny x = do
     ]
     assert len(call_nodes) == 1
     call_node = call_nodes[0]
-    assert call_node.get("_scope") is None
+    assert call_node.get("_scope") == "attn"
     assert "path" not in call_node
 
     target = call_node.get("_target")
@@ -1019,8 +1083,8 @@ tiny x = do
     ]
     assert len(linear_nodes) == 1
     linear_node = linear_nodes[0]
-    assert linear_node["_params"]["weight"] == "attn.proj.weight"
-    assert linear_node["_params"]["bias"] == "attn.proj.bias"
+    assert linear_node["_params"]["weight"] == "proj.weight"
+    assert linear_node["_params"]["bias"] == "proj.bias"
     assert "param_base" not in linear_node
 
 
@@ -1074,10 +1138,9 @@ tiny input_ids = do
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     embedding_node = next(node for node in node_specs if node.get("_op") == "embedding")
-    assert embedding_node["_params"]["weight"] == [
-        "model.embed_tokens.weight",
-        "language_model.model.embed_tokens.weight",
-    ]
+    assert embedding_node["_params"]["weight"] == "embed_tokens.weight"
+    assert embedding_node["_scope"] == "model"
+    assert embedding_node["_param_root"] == ["", "language_model"]
 
 
 def test_scope_single_root_prefix_is_applied_to_param_paths() -> None:
@@ -1093,10 +1156,12 @@ tiny input_ids = do
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     embedding_node = next(node for node in node_specs if node.get("_op") == "embedding")
-    assert embedding_node["_params"]["weight"] == "language_model.model.embed_tokens.weight"
+    assert embedding_node["_params"]["weight"] == "embed_tokens.weight"
+    assert embedding_node["_scope"] == "model"
+    assert embedding_node["_param_root"] == "language_model"
 
 
-def test_scope_dynamic_root_expression_emits_param_root_expr(tmp_path: Path) -> None:
+def test_scope_dynamic_root_expression_emits_param_root(tmp_path: Path) -> None:
     main_path = tmp_path / "main.axon"
     main_path.write_text(
         """
@@ -1116,8 +1181,9 @@ tiny input_ids = do
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     embedding_node = next(node for node in node_specs if node.get("_op") == "embedding")
-    assert embedding_node["_params"]["weight"] == "model.embed_tokens.weight"
-    assert "_param_root_expr" in embedding_node
+    assert embedding_node["_params"]["weight"] == "embed_tokens.weight"
+    assert embedding_node["_scope"] == "model"
+    assert "_param_root" in embedding_node
 
 
 def test_double_at_path_is_absolute_inside_scope_bind() -> None:
@@ -1159,7 +1225,9 @@ tiny input_ids = do
         if isinstance(node_spec, dict) and node_spec.get("_op") == "embedding"
     ]
     assert len(embedding_nodes) == 1
-    assert embedding_nodes[0]["_params"]["weight"] == "model.embed_tokens.weight"
+    assert embedding_nodes[0]["_params"]["weight"] == "embed_tokens.weight"
+    assert embedding_nodes[0]["_scope"] == "model"
+    assert "_abs_path" not in embedding_nodes[0]
     linear_nodes = [
         node_spec
         for item in graph
@@ -1167,7 +1235,9 @@ tiny input_ids = do
         if isinstance(node_spec, dict) and node_spec.get("_op") == "linear"
     ]
     assert len(linear_nodes) == 1
-    assert linear_nodes[0]["_params"]["weight"] == "lm_head.weight"
+    assert linear_nodes[0]["_params"]["weight"] == "weight"
+    assert linear_nodes[0]["_abs_path"] == "lm_head"
+    assert "_scope" not in linear_nodes[0]
 
 
 def test_mamba_scan_param_overrides_are_scoped_inside_scope_bind() -> None:

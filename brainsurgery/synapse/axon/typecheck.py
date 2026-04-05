@@ -1298,6 +1298,29 @@ def _call_return_type(
             return call_sig.returns[0]
         return TypeTuple(items=call_sig.returns)
 
+    if callee in {"sqrt", "Prelude.sqrt"}:
+        if kwargs:
+            raise _error(module, path, f"{callee!r} does not support kwargs")
+        if len(args) != 1:
+            raise _error(module, path, f"{callee!r} expects exactly one positional argument")
+        arg_type = _infer_expr_type(
+            args[0],
+            env=env,
+            signatures=signatures,
+            primitive_aliases=primitive_aliases,
+            module=module,
+            path=(*path, 0),
+            dim_symbols=dim_symbols,
+            rigid_symbols=rigid_symbols,
+        )
+        if not isinstance(arg_type, TypeInt | TypeFloat):
+            raise _error(
+                module,
+                path,
+                f"{callee!r} expects numeric argument, got {render_type(arg_type)}",
+            )
+        return TypeFloat()
+
     op_name = _canonical_primitive_name(callee)
     if (
         get_op_lowering_signature(op_name) is None

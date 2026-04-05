@@ -175,7 +175,6 @@ def compile(
     q = read(str(ins[0]))
     k = read(str(ins[1]))
     out_var = assign_out_var(str(node_spec.get("_bind")))
-    weight_expr = emitter._infer_param_expr(node_spec, node_path_var, "weight")
     num_buckets_expr = emitter._expr_code(node_spec.get("num_buckets", 32), env)
     max_distance_expr = emitter._expr_code(node_spec.get("max_distance", 128), env)
     bidirectional_expr = emitter._expr_code(node_spec.get("bidirectional", True), env)
@@ -215,7 +214,14 @@ def compile(
     lines.append(
         f"{indent}    raise ValueError('t5_relative_position_bias.max_distance must be > 0')"
     )
-    lines.append(f"{indent}{weight} = emitter._param({weight_expr})")
+    weight_value = emitter._hoisted_param(
+        node_spec=node_spec,
+        node_path_var=node_path_var,
+        param_name="weight",
+        lines=lines,
+        indent=indent,
+    )
+    lines.append(f"{indent}{weight} = {weight_value}")
     lines.append(f"{indent}if {weight}.ndim != 2:")
     lines.append(
         f"{indent}    raise ValueError('t5_relative_position_bias weight must be rank-2 [num_buckets, heads]')"

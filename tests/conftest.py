@@ -83,6 +83,34 @@ def gemma3_4b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
 
 
 @pytest.fixture(scope="session")
+def gemma4_e2b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gemma4_e2b"]
+    )
+
+
+@pytest.fixture(scope="session")
+def gemma4_e4b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gemma4_e4b"]
+    )
+
+
+@pytest.fixture(scope="session")
+def gemma4_26b_a4b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gemma4_26b_a4b"]
+    )
+
+
+@pytest.fixture(scope="session")
+def gemma4_31b_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
+    return ensure_model_downloaded(
+        repo_root=repo_root, config=pytestconfig, spec=MODEL_SPECS["gemma4_31b"]
+    )
+
+
+@pytest.fixture(scope="session")
 def olmoe_local_path(repo_root: Path, pytestconfig: pytest.Config) -> Path:
     return ensure_model_downloaded(
         repo_root=repo_root,

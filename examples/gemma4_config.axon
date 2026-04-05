@@ -1,0 +1,36 @@
+import Config
+import Params
+
+CFG = (Config.has "text_config") ? "text_config" : ""
+PARAM_ROOT = (Params.has_root "model.language_model") ? "model" : ""
+
+D = Config.int "hidden_size" root=CFG default=5376
+V = Config.int "vocab_size" root=CFG default=262144
+L = Config.int "num_hidden_layers" root=CFG default=60
+H = Config.int "num_attention_heads" root=CFG default=32
+KVH = Config.int "num_key_value_heads" root=CFG default=16
+RAW_GKVH = Config.value "num_global_key_value_heads" root=CFG default=null
+GKVH = (RAW_GKVH == null) ? KVH : (Config.int "num_global_key_value_heads" root=CFG default=4)
+HD = Config.int "head_dim" root=CFG default=256
+RAW_GHD = Config.value "global_head_dim" root=CFG default=null
+GHD = (RAW_GHD == null) ? HD : (Config.int "global_head_dim" root=CFG default=512)
+FFN = Config.int "intermediate_size" root=CFG default=21504
+MOE_FFN = Config.int "moe_intermediate_size" root=CFG default=1408
+PLI = Config.int "hidden_size_per_layer_input" root=CFG default=0
+WIN_LOCAL = Config.int "sliding_window" root=CFG default=1024
+WIN_FULL = Config.int "max_position_embeddings" root=CFG default=262144
+EPS = Config.float "rms_norm_eps" root=CFG default=1e-06
+THETA_LOCAL = Config.float "rope_parameters.sliding_attention.rope_theta" root=CFG default=10000.0
+THETA_FULL = Config.float "rope_parameters.full_attention.rope_theta" root=CFG default=1000000.0
+ROPE_SCALE_FULL = Config.float "rope_parameters.full_attention.factor" root=CFG default=1.0
+ROTARY_PARTIAL_FULL = Config.float "rope_parameters.full_attention.partial_rotary_factor" root=CFG default=0.25
+ROPE_PERIOD = Config.int "sliding_window_pattern" root=CFG default=(USE_DOUBLE_WIDE_MLP ? 5 : 6)
+ATTN_K_EQ_V = (Config.value "attention_k_eq_v" root=CFG default=false) == true
+LOGIT_SOFTCAP = Config.float "final_logit_softcapping" root=CFG default=30.0
+HAS_PLI = PLI > 0
+PER_LAYER_INPUT_SCALE = 0.7071067811865476
+PER_LAYER_PROJ_SCALE = 1.0 / sqrt D
+NUM_KV_SHARED = Config.int "num_kv_shared_layers" root=CFG default=0
+USE_DOUBLE_WIDE_MLP = (Config.value "use_double_wide_mlp" root=CFG default=false) == true
+TOPK_EXPERTS = Config.int "top_k_experts" root=CFG default=8
+NUM_EXPERTS = Config.int "num_experts" root=CFG default=128

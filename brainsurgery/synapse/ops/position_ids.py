@@ -6,9 +6,13 @@ import torch
 
 OP_NAME = "position_ids"
 LOWERING_ARITY = (2, 2)
-LOWERING_ALLOWED_KWARGS: set[str] = {"past_length", "pad_fill"}
+LOWERING_ALLOWED_KWARGS: set[str] = {"past_length", "pad_fill", "use_attention_mask"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"past_length": "dim", "pad_fill": "dim"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {
+    "past_length": "dim",
+    "pad_fill": "dim",
+    "use_attention_mask": "bool",
+}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -64,6 +68,14 @@ def _resolve_pad_fill(
     return int(value)
 
 
+def _resolve_use_attention_mask(
+    model: Any, node_spec: dict[str, Any], env: dict[str, Any], symbols: dict[str, int]
+) -> bool:
+    raw = node_spec.get("use_attention_mask", True)
+    value = model._eval_expr(raw, env, symbols)
+    return bool(value)
+
+
 def interpret(
     model: Any,
     node_spec: dict[str, Any],
@@ -83,8 +95,9 @@ def interpret(
     seq_len = int(x.shape[1])
     out = model._require_name(node_spec.get("_bind"), field="position_ids._bind")
     mask_ref = args[1]
-    mask_tensor = env.get(mask_ref) if isinstance(mask_ref, str) else None
-    if mask_tensor is not None:
+    use_attention_mask = _resolve_use_attention_mask(model, node_spec, env, symbols)
+    mask_tensor = env.get(mask_ref) if use_attention_mask and isinstance(mask_ref, str) else None
+    if use_attention_mask and mask_tensor is not None:
         if not torch.is_tensor(mask_tensor):
             raise ValueError("position_ids.attention_mask must resolve to tensor or null")
         if mask_tensor.ndim != 2:
@@ -133,6 +146,7 @@ def compile(
     out_var = assign_out_var(out_name)
     past_expr = emitter._expr_code(node_spec.get("past_length", 0), env)
     pad_fill_expr = emitter._expr_code(node_spec.get("pad_fill", 0), env)
+    use_attention_mask_expr = emitter._expr_code(node_spec.get("use_attention_mask", True), env)
     offset = emitter._fresh("pos_offset")
 
     lines.append(f"{indent}if {src}.ndim != 2:")
@@ -143,7 +157,7 @@ def compile(
     if isinstance(mask, str):
         full_pos = emitter._fresh("full_pos")
         pad_fill = emitter._fresh("pad_fill")
-        lines.append(f"{indent}if {mask} is not None:")
+        lines.append(f"{indent}if bool({use_attention_mask_expr}) and {mask} is not None:")
         lines.append(f"{indent}    if {mask}.ndim != 2:")
         lines.append(
             f"{indent}        raise ValueError('position_ids.attention_mask must be rank-2 [batch, seq]')"

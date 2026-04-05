@@ -64,6 +64,12 @@ def run_axon_visualize(*args, **kwargs):
     return _run_axon_visualize(*args, **kwargs)
 
 
+def render_axon_test_log(*args, **kwargs):
+    from .axon_test_log import render_axon_test_log as _render_axon_test_log
+
+    return _render_axon_test_log(*args, **kwargs)
+
+
 __all__ = [
     "AxonBind",
     "AxonModule",
@@ -77,6 +83,7 @@ __all__ = [
     "infer_block_io_types_from_modules",
     "infer_output_types_for_node",
     "run_axon_test",
+    "render_axon_test_log",
     "run_axon_test_matrix",
     "run_axon_op_parity",
     "run_codegen_runtime_parity",

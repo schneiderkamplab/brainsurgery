@@ -428,6 +428,15 @@ def axon_test_matrix(
         "--device",
         help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
     ),
+    processes: int = typer.Option(
+        1,
+        "--processes",
+        min=1,
+        help=(
+            "Number of model-evaluation worker processes to run simultaneously. "
+            "When using CUDA with multiple processes, workers are assigned across GPUs."
+        ),
+    ),
     dtype: str = typer.Option(
         "float32",
         "--dtype",
@@ -453,6 +462,16 @@ def axon_test_matrix(
         "--no-capture-output",
         help="Do not capture per-run output; stream synapse axon-test output directly.",
     ),
+    log_dir: Path | None = typer.Option(
+        None,
+        "--log-dir",
+        file_okay=False,
+        dir_okay=True,
+        help=(
+            "If set, each model worker writes stdout/stderr to a separate log file "
+            "under this directory using log-<pid>-<axon>-<model>.txt."
+        ),
+    ),
     include: list[str] = typer.Option(
         [],
         "--include",
@@ -467,6 +486,22 @@ def axon_test_matrix(
         help=(
             "Exclude pairs matching these selectors (repeatable). "
             "Selectors are model directory names or .axon file names."
+        ),
+    ),
+    min_billions_params: float | None = typer.Option(
+        None,
+        "--min-billions-params",
+        help=(
+            "Only run models with estimated parameter count at or above this many "
+            "billions of parameters."
+        ),
+    ),
+    max_billions_params: float | None = typer.Option(
+        None,
+        "--max-billions-params",
+        help=(
+            "Only run models with estimated parameter count at or below this many "
+            "billions of parameters."
         ),
     ),
     dry_run: bool = typer.Option(
@@ -523,11 +558,15 @@ def axon_test_matrix(
             examples_dir=examples_dir,
             models_dir=models_dir,
             device=device,
+            processes=processes,
             dtype=dtype,
+            min_billions_params=min_billions_params,
+            max_billions_params=max_billions_params,
             max_len=max_len,
             text=text or None,
             verbose=verbose,
             no_capture_output=no_capture_output,
+            log_dir=log_dir,
             dry_run=dry_run,
             table_format=table_format,
             compile_hf=compile_hf,
@@ -543,6 +582,42 @@ def axon_test_matrix(
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     raise typer.Exit(code=int(exit_code))
+
+
+@app.command("axon-test-log")
+def axon_test_log(
+    log_dir: Path = typer.Argument(
+        Path("log"),
+        file_okay=False,
+        dir_okay=True,
+        readable=False,
+        help="Directory containing parent-<pid>.txt and log-<pid>-<axon>-<model>.txt files.",
+    ),
+    all_runs: bool = typer.Option(
+        False,
+        "--all",
+        help=(
+            "Parse all parent-tracked runs in the directory, but keep only the most recent "
+            "result for each (axon, model dir) pair."
+        ),
+    ),
+    prune: bool = typer.Option(
+        False,
+        "--prune",
+        help=(
+            "Delete all parent-*.txt and log-*.txt files except the most recent parent run "
+            "and the worker logs it references, then print the table."
+        ),
+    ),
+) -> None:
+    """Parse axon-test-matrix logs and print a markdown summary table."""
+    module = _synapse_module()
+    render_fn = getattr(module, "render_axon_test_log")
+    try:
+        output = render_fn(log_dir, all_runs=all_runs, prune=prune)
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(output)
 
 
 @app.command("axon-visualize")

@@ -17,10 +17,13 @@ FFN  = Config.int "intermediate_size" default=10944                -- dense MLP 
 E    = Config.int "n_routed_experts" default=128                   -- routed expert count
 EPT  = Config.int "num_experts_per_tok" default=8                  -- top-k experts per token
 EM   = Config.int "moe_intermediate_size" default=1408             -- routed expert MLP width
+NG   = Config.int "n_group" default=1                              -- router group count
+TKG  = Config.int "topk_group" default=1                           -- selected router groups
 EPS  = Config.float "rms_norm_eps" default=1e-05                   -- RMSNorm epsilon
 THETA = Config.float "rope_theta" default=1000000.0                -- RoPE theta
 C    = Config.int "max_position_embeddings" default=131072         -- causal window cap
 FIRST_DENSE = Config.int "first_k_dense_replace" default=1         -- initial dense-only layers
+RSC  = Config.float "routed_scaling_factor" default=1.0            -- router output scaling
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS
@@ -50,7 +53,7 @@ glm4_5_air_attn x pos_ids attn_mask past_kv = do
     q <- linear@q_proj xn dim=QD bias=true |> reshape_heads heads=H
     k <- linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
     v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA
+    q, k <- rope_pair q k position_ids=pos_ids theta=THETA partial_rotary_factor=0.5
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k (H / KVH)
     v <- repeat v (H / KVH)
@@ -74,11 +77,10 @@ glm4_5_air_moe_block x pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     shared <- scope@shared_experts do
       return shared_expert_ffn xn
-    topk_scores, topk_indices <- linear@gate xn dim=E bias=false |>
-      softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1
+    topk_weights, topk_indices <- glm4_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=true routed_scaling_factor=RSC
     routed <- zeros_like xn
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_weights topk_indices e
       x_upd <- routed_expert_ffn x_sel
       routed <- MoE.scatter_add routed token_idx x_upd sel_scores
     return shared + routed
@@ -90,9 +92,10 @@ glm_4_5_air input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model do
     x <- embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    past_0 <- Cache.index past_kv 0
-    x, new_0 <- glm4_5_air_dense_block x pos_ids attn_mask past_0
-    new_kv <- Cache.append new_kv new_0
+    for@layers i <- [0..FIRST_DENSE) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- glm4_5_air_dense_block x pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
     for@layers i <- [FIRST_DENSE..L) do
       past_i <- Cache.index past_kv i
       x, new_i <- glm4_5_air_moe_block x pos_ids attn_mask past_i

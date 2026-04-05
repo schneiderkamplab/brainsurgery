@@ -6,9 +6,27 @@ import torch
 
 OP_NAME = "causal_mask"
 LOWERING_ARITY = (2, 2)
-LOWERING_ALLOWED_KWARGS: set[str] = {"window", "padding_mask"}
+LOWERING_ALLOWED_KWARGS: set[str] = {"window", "padding_mask", "early_exit"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"window": "dim", "padding_mask": "str"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {
+    "window": "dim",
+    "padding_mask": "str",
+    "early_exit": "any",
+}
+
+
+def _padding_mask_is_trivial(mask: torch.Tensor | None) -> bool:
+    if mask is None:
+        return True
+    if not torch.is_tensor(mask):
+        raise ValueError("causal_mask.padding_mask must resolve to tensor or null")
+    if mask.numel() == 0:
+        return True
+    if mask.dtype == torch.bool:
+        return bool(mask.all())
+    if mask.is_floating_point():
+        return bool((mask != 0).all())
+    return bool(mask.to(torch.bool).all())
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -60,19 +78,24 @@ def interpret(
     key_tensor = model._read_tensor_input(raw_args[1], env)
     padding_ref = node_spec.get("padding_mask")
     padding_mask = env.get(padding_ref) if isinstance(padding_ref, str) else None
-    if padding_mask is not None and not torch.is_tensor(padding_mask):
-        raise ValueError("causal_mask.padding_mask must resolve to tensor or null")
     out_name = model._require_name(node_spec.get("_bind"), field="causal_mask._bind")
     window_expr = node_spec.get("window")
-    if window_expr is None and padding_mask is None:
-        env[out_name] = None
-        return
 
     q_len = q.shape[-2]
     k_len = key_tensor.shape[-2]
     window_value = (
         int(model._eval_expr(window_expr, env, symbols)) if window_expr is not None else None
     )
+    early_exit = bool(model._eval_expr(node_spec.get("early_exit", False), env, symbols))
+    if early_exit:
+        full_causal = window_value is None or int(window_value) >= int(k_len)
+        if full_causal and _padding_mask_is_trivial(padding_mask):
+            env[out_name] = None
+            return
+
+    if window_expr is None and padding_mask is None:
+        env[out_name] = None
+        return
     padding_key: tuple[int, int, tuple[int, ...]] | None = None
     if padding_mask is not None:
         padding_key = (
@@ -107,7 +130,7 @@ def interpret(
             keep = j_idx >= (k_len - win)
     else:
         if window_value is None:
-            keep = torch.ones((q_len, k_len), dtype=torch.bool, device=q.device)
+            keep = j_idx <= i_idx
         else:
             keep = j_idx <= i_idx
             win = window_value
@@ -173,6 +196,7 @@ def compile(
     padding_expr = (
         env.get(padding_name) if isinstance(padding_name, str) and padding_name in env else None
     )
+    early_exit_expr = emitter._expr_code(node_spec.get("early_exit", False), env)
     if window_expr is None and padding_expr is None:
         lines.append(f"{indent}{out_var} = None")
         return lines
@@ -199,19 +223,49 @@ def compile(
         pad_key_expr = pad_key
     else:
         pad_key_expr = "None"
+    early_exit = emitter._fresh("early_exit")
+    full_causal = emitter._fresh("full_causal")
+    trivial_padding = emitter._fresh("trivial_padding")
+    lines.append(f"{indent}{early_exit} = bool({early_exit_expr})")
     lines.append(
-        f"{indent}{cache_key} = (int({q_len}), int({k_len}), {window_key_expr}, {q}.dtype, {q}.device, {pad_key_expr})"
+        f"{indent}{full_causal} = ({window_key_expr} is None) or (int({window_key_expr}) >= int({k_len}))"
     )
-    lines.append(f"{indent}{cached} = self._causal_mask_cache.get({cache_key})")
-    lines.append(f"{indent}if torch.is_tensor({cached}):")
-    lines.append(f"{indent}    {out_var} = {cached}")
+    if padding_expr is not None:
+        lines.append(f"{indent}if {padding_expr} is None:")
+        lines.append(f"{indent}    {trivial_padding} = True")
+        lines.append(f"{indent}else:")
+        lines.append(f"{indent}    if not torch.is_tensor({padding_expr}):")
+        lines.append(
+            f"{indent}        raise ValueError('causal_mask.padding_mask must resolve to tensor or null')"
+        )
+        lines.append(f"{indent}    if {padding_expr}.numel() == 0:")
+        lines.append(f"{indent}        {trivial_padding} = True")
+        lines.append(f"{indent}    elif {padding_expr}.dtype == torch.bool:")
+        lines.append(f"{indent}        {trivial_padding} = bool({padding_expr}.all())")
+        lines.append(f"{indent}    elif {padding_expr}.is_floating_point():")
+        lines.append(f"{indent}        {trivial_padding} = bool(({padding_expr} != 0).all())")
+        lines.append(f"{indent}    else:")
+        lines.append(f"{indent}        {trivial_padding} = bool({padding_expr}.to(torch.bool).all())")
+    else:
+        lines.append(f"{indent}{trivial_padding} = True")
+    lines.append(f"{indent}if {early_exit} and {full_causal} and {trivial_padding}:")
+    lines.append(f"{indent}    {out_var} = None")
     lines.append(f"{indent}else:")
     body_indent = indent + "    "
+    lines.append(
+        f"{body_indent}{cache_key} = (int({q_len}), int({k_len}), {window_key_expr}, {q}.dtype, {q}.device, {pad_key_expr})"
+    )
+    lines.append(f"{body_indent}{cached} = self._causal_mask_cache.get({cache_key})")
+    lines.append(f"{body_indent}if torch.is_tensor({cached}):")
+    lines.append(f"{body_indent}    {out_var} = {cached}")
+    lines.append(f"{body_indent}else:")
+    body_indent = body_indent + "    "
     lines.append(f"{body_indent}{j_idx} = torch.arange({k_len}, device={q}.device).unsqueeze(0)")
     if window_expr is None:
         lines.append(
-            f"{body_indent}{keep} = torch.ones(({q_len}, {k_len}), dtype=torch.bool, device={q}.device)"
+            f"{body_indent}{i_idx} = torch.arange({q_len}, device={q}.device).unsqueeze(1)"
         )
+        lines.append(f"{body_indent}{keep} = ({j_idx} <= {i_idx})")
     else:
         lines.append(f"{body_indent}if {q_len} == 1:")
         lines.append(f"{body_indent}    {keep} = ({j_idx} >= ({k_len} - {win}))")

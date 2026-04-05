@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,27 @@ def _causal_mask_with_padding_spec() -> dict[str, object]:
     }
 
 
+def _causal_mask_early_exit_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"q": {}, "k": {}, "padding_mask": {"optional": True}},
+            "graph": [
+                {
+                    "m": {
+                        "_op": "causal_mask",
+                        "_args": ["q", "k"],
+                        "padding_mask": "padding_mask",
+                        "early_exit": True,
+                        "_bind": "mask",
+                    }
+                }
+            ],
+            "outputs": {"mask": "mask"},
+        },
+    }
+
+
 def _blocksparse_mask_spec(
     *, block_size: int = 2, local_blocks: int = 1, vert_stride: int = 2, homo_head: bool = False
 ) -> dict[str, object]:
@@ -174,6 +196,27 @@ def _arange_positions_with_mask_spec() -> dict[str, object]:
     }
 
 
+def _arange_positions_ignore_mask_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"input_ids": {}, "attention_mask": {"optional": True}},
+            "graph": [
+                {
+                    "p": {
+                        "_op": "position_ids",
+                        "_args": ["input_ids", "attention_mask"],
+                        "past_length": 3,
+                        "use_attention_mask": False,
+                        "_bind": "pos",
+                    }
+                }
+            ],
+            "outputs": {"pos": "pos"},
+        },
+    }
+
+
 def _rope_pair_spec(*, inv_freq_dtype: str | None = None) -> dict[str, object]:
     node: dict[str, object] = {
         "_op": "rope_pair",
@@ -190,6 +233,72 @@ def _rope_pair_spec(*, inv_freq_dtype: str | None = None) -> dict[str, object]:
             "inputs": {"q": {}, "k": {}, "position_ids": {}},
             "graph": [{"rope": node}],
             "outputs": {"q_rot": "q_rot", "k_rot": "k_rot"},
+        },
+    }
+
+
+def _rope_pair_partial_spec(*, partial_rotary_factor: float) -> dict[str, object]:
+    node: dict[str, object] = {
+        "_op": "rope_pair",
+        "_args": ["q", "k"],
+        "_bind": ["q_rot", "k_rot"],
+        "position_ids": "position_ids",
+        "theta": 1_000_000.0,
+        "partial_rotary_factor": partial_rotary_factor,
+    }
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"q": {}, "k": {}, "position_ids": {}},
+            "graph": [{"rope": node}],
+            "outputs": {"q_rot": "q_rot", "k_rot": "k_rot"},
+        },
+    }
+
+
+def _rope_pair_proportional_spec(
+    *, partial_rotary_factor: float, scale_factor: float = 1.0
+) -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"q": {}, "k": {}, "position_ids": {}},
+            "graph": [
+                {
+                    "rope": {
+                        "_op": "rope_pair",
+                        "_args": ["q", "k"],
+                        "_bind": ["q_rot", "k_rot"],
+                        "position_ids": "position_ids",
+                        "theta": 1_000_000.0,
+                        "rope_mode": "proportional",
+                        "partial_rotary_factor": partial_rotary_factor,
+                        "scale_factor": scale_factor,
+                    }
+                }
+            ],
+            "outputs": {"q_rot": "q_rot", "k_rot": "k_rot"},
+        },
+    }
+
+
+def _rmsnorm_no_scale_spec() -> dict[str, object]:
+    return {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "norm": {
+                        "_op": "rmsnorm",
+                        "_args": "x",
+                        "_bind": "y",
+                        "with_scale": False,
+                        "eps": 1.0e-6,
+                    }
+                }
+            ],
+            "outputs": {"y": "y"},
         },
     }
 
@@ -264,6 +373,63 @@ def test_runtime_select_is_lazy_and_skips_non_selected_branch() -> None:
     out = model.forward(flag=True)
     assert isinstance(out, dict)
     assert out["y"] == 1
+
+
+def test_runtime_rope_pair_proportional_matches_manual_reference() -> None:
+    model = SynapseProgramModel.from_spec(
+        _rope_pair_proportional_spec(partial_rotary_factor=0.5, scale_factor=4.0)
+    )
+    q = torch.randn(1, 2, 3, 16, dtype=torch.float32)
+    k = torch.randn(1, 2, 3, 16, dtype=torch.float32)
+    position_ids = torch.tensor([[0, 3, 7]], dtype=torch.int64)
+
+    out = model.forward(q=q, k=k, position_ids=position_ids)
+    q_rot = out["q_rot"]
+    k_rot = out["k_rot"]
+
+    rotary_dim = 8
+    half = rotary_dim // 2
+    theta = 1_000_000.0
+    inv_freq = 1.0 / (
+        theta ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / float(q.shape[-1]))
+    )
+    inv_freq = inv_freq / 4.0
+    ang = position_ids.to(torch.float32).unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
+    cos = torch.cos(ang).unsqueeze(1)
+    sin = torch.sin(ang).unsqueeze(1)
+
+    q_prefix = q[..., :rotary_dim]
+    k_prefix = k[..., :rotary_dim]
+    q_expected = torch.cat(
+        [
+            q_prefix[..., :half] * cos - q_prefix[..., half:rotary_dim] * sin,
+            q_prefix[..., :half] * sin + q_prefix[..., half:rotary_dim] * cos,
+            q[..., rotary_dim:],
+        ],
+        dim=-1,
+    )
+    k_expected = torch.cat(
+        [
+            k_prefix[..., :half] * cos - k_prefix[..., half:rotary_dim] * sin,
+            k_prefix[..., :half] * sin + k_prefix[..., half:rotary_dim] * cos,
+            k[..., rotary_dim:],
+        ],
+        dim=-1,
+    )
+
+    assert torch.allclose(q_rot, q_expected, atol=1.0e-6, rtol=1.0e-6)
+    assert torch.allclose(k_rot, k_expected, atol=1.0e-6, rtol=1.0e-6)
+
+
+def test_runtime_rmsnorm_without_scale_matches_reference() -> None:
+    model = SynapseProgramModel.from_spec(_rmsnorm_no_scale_spec())
+    x = torch.randn(2, 3, 5, dtype=torch.float32)
+
+    out = model.forward(x=x)
+    y = out["y"]
+    expected = x * torch.rsqrt(torch.mean(x * x, dim=-1, keepdim=True) + 1.0e-6)
+
+    assert torch.allclose(y, expected, atol=1.0e-6, rtol=1.0e-6)
 
 
 def _moe_scatter_add_spec() -> dict[str, object]:
@@ -578,7 +744,7 @@ def test_runtime_infer_param_path_uses_scope_for_undotted_explicit_param_name() 
     )
 
 
-def test_runtime_infer_param_path_resolves_double_at_under_param_root() -> None:
+def test_runtime_infer_param_path_keeps_double_at_absolute_under_param_root() -> None:
     model = SynapseProgramModel.from_spec({"synapse": 1, "model": {"graph": [], "outputs": {}}})
     model.load_state_dict_tensors(
         {"mlp.experts.0.gate_proj.weight": torch.ones(1, 1, dtype=torch.float32)}
@@ -591,11 +757,11 @@ def test_runtime_infer_param_path_resolves_double_at_under_param_root() -> None:
             node_path="layers.0.mlp.experts.0.n_op_0",
             param_name="weight",
         )
-        == "mlp.experts.0.gate_proj.weight"
+        == "gate_proj.weight"
     )
 
 
-def test_runtime_infer_param_path_resolves_double_at_from_scope_when_absolute_missing() -> None:
+def test_runtime_infer_param_path_keeps_double_at_absolute_under_scope() -> None:
     model = SynapseProgramModel.from_spec({"synapse": 1, "model": {"graph": [], "outputs": {}}})
     model.load_state_dict_tensors(
         {"mlp.experts.0.gate_proj.weight": torch.ones(1, 1, dtype=torch.float32)}
@@ -607,7 +773,7 @@ def test_runtime_infer_param_path_resolves_double_at_from_scope_when_absolute_mi
             node_path="mlp.experts.0.n_op_0",
             param_name="weight",
         )
-        == "mlp.experts.0.gate_proj.weight"
+        == "gate_proj.weight"
     )
 
 
@@ -825,6 +991,21 @@ def test_runtime_causal_mask_combines_padding_mask() -> None:
     assert torch.all(mask[1, :, :, :2] < -1.0e20)
 
 
+def test_runtime_causal_mask_early_exit_for_trivial_full_causal_mask() -> None:
+    spec = _causal_mask_early_exit_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    q = torch.randn(1, 8, 4, 16)
+    k = torch.randn(1, 8, 4, 16)
+
+    out = model(q=q, k=k, padding_mask=torch.ones(1, 4, dtype=torch.long))
+    assert out["mask"] is None
+
+    out_nontrivial = model(q=q, k=k, padding_mask=torch.tensor([[1, 1, 0, 1]], dtype=torch.long))
+    mask = out_nontrivial["mask"]
+    assert isinstance(mask, torch.Tensor)
+    assert mask.shape == (1, 1, 4, 4)
+
+
 def test_runtime_blocksparse_mask_combines_pattern_with_padding_mask() -> None:
     spec = _blocksparse_mask_spec(block_size=2, local_blocks=1, vert_stride=2, homo_head=False)
     model = SynapseProgramModel.from_spec(spec)
@@ -864,6 +1045,30 @@ def test_runtime_rope_pair_inv_freq_dtype_bfloat16_matches_quantized_reference()
     assert float((out_bf16["q_rot"] - out_fp32["q_rot"]).abs().max()) > 0.0
 
 
+def test_runtime_rope_pair_partial_rotary_factor_preserves_suffix() -> None:
+    q = torch.randn(1, 2, 5, 8, dtype=torch.float32)
+    k = torch.randn(1, 2, 5, 8, dtype=torch.float32)
+    pos_ids = torch.arange(5, dtype=torch.long).unsqueeze(0)
+
+    model = SynapseProgramModel.from_spec(_rope_pair_partial_spec(partial_rotary_factor=0.5))
+    out = model(q=q, k=k, position_ids=pos_ids)
+
+    rotary_dim = 4
+    half = rotary_dim // 2
+    theta = 1_000_000.0
+    inv_freq = 1.0 / (theta ** (torch.arange(0, half, dtype=torch.float32) / float(half)))
+    ang = pos_ids.to(torch.float32).unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
+    cos = torch.cos(ang).to(q.dtype).unsqueeze(1)
+    sin = torch.sin(ang).to(q.dtype).unsqueeze(1)
+    q1, q2 = q[..., :half], q[..., half:rotary_dim]
+    k1, k2 = k[..., :half], k[..., half:rotary_dim]
+    q_ref = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos, q[..., rotary_dim:]], dim=-1)
+    k_ref = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos, k[..., rotary_dim:]], dim=-1)
+
+    assert torch.allclose(out["q_rot"], q_ref, atol=1.0e-6, rtol=1.0e-6)
+    assert torch.allclose(out["k_rot"], k_ref, atol=1.0e-6, rtol=1.0e-6)
+
+
 def test_runtime_arange_positions_uses_attention_mask_for_left_padding() -> None:
     spec = _arange_positions_with_mask_spec()
     model = SynapseProgramModel.from_spec(spec)
@@ -884,6 +1089,16 @@ def test_runtime_arange_positions_without_mask_preserves_batch_dimension() -> No
     expected = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long)
     assert pos.shape == (2, 4)
     assert torch.equal(pos, expected)
+
+
+def test_runtime_arange_positions_can_ignore_attention_mask() -> None:
+    spec = _arange_positions_ignore_mask_spec()
+    model = SynapseProgramModel.from_spec(spec)
+    input_ids = torch.tensor([[10, 11, 12, 13], [0, 0, 20, 21]], dtype=torch.long)
+    attention_mask = torch.tensor([[1, 1, 1, 1], [0, 0, 1, 1]], dtype=torch.long)
+    out = model(input_ids=input_ids, attention_mask=attention_mask)
+    expected = torch.tensor([[3, 4, 5, 6], [3, 4, 5, 6]], dtype=torch.long)
+    assert torch.equal(out["pos"], expected)
 
 
 def test_runtime_moe_select_selects_routed_rows() -> None:
@@ -1554,7 +1769,7 @@ def test_runtime_params_primitives_fallback_when_root_missing() -> None:
     assert out["root"] == ""
 
 
-def test_runtime_param_root_expr_guides_parameter_resolution() -> None:
+def test_runtime_param_root_guides_parameter_resolution() -> None:
     spec = {
         "synapse": 1,
         "model": {
@@ -1567,7 +1782,7 @@ def test_runtime_param_root_expr_guides_parameter_resolution() -> None:
                         "_args": "x",
                         "_bind": "y",
                         "_params": {"weight": "proj.weight", "bias": "proj.bias"},
-                        "_param_root_expr": {"_expr": "name", "id": "root"},
+                        "_param_root": {"_expr": "name", "id": "root"},
                     }
                 },
             ],

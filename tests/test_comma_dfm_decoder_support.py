@@ -7,6 +7,10 @@ import pytest
 
 import tests.conftest as test_fixtures
 from brainsurgery.synapse import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
+from brainsurgery.synapse.axon_test import (
+    _load_auto_config_with_compat_fallback,
+    _normalize_rope_numeric_fields,
+)
 from brainsurgery.synapse.axon_test_matrix import run_axon_test_matrix
 from tests.model_downloads import MATRIX_AXON_MODEL_DIR_PAIRS, MODEL_SPECS
 
@@ -34,11 +38,21 @@ def test_comma_and_dfm_decoder_are_registered_in_download_specs_and_matrix() -> 
 
 
 def test_matrix_resolves_comma_to_shared_dfm_decoder_axon(
-    repo_root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    examples_dir = tmp_path / "examples"
+    models_dir = tmp_path / "models"
+    examples_dir.mkdir(parents=True, exist_ok=True)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    (examples_dir / "dfm_decoder.axon").write_text(
+        "dfm_decoder :: Tensor -> Tensor\ndfm_decoder x = x\n",
+        encoding="utf-8",
+    )
+    (models_dir / "comma").mkdir(parents=True, exist_ok=True)
+
     exit_code = run_axon_test_matrix(
-        examples_dir=repo_root / "examples",
-        models_dir=repo_root / "models",
+        examples_dir=examples_dir,
+        models_dir=models_dir,
         dry_run=True,
         include=["comma"],
     )
@@ -69,3 +83,22 @@ def test_dfm_decoder_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
 
     blocks = model.get("blocks", {})
     assert "dfm_block" in blocks
+
+
+def test_dfm_decoder_rope_normalization_preserves_nondefault_theta(repo_root: Path) -> None:
+    cfg = _load_auto_config_with_compat_fallback(repo_root / "models" / "dfm_decoder", trust_remote_code=False)
+    assert getattr(cfg, "rope_scaling") == {"rope_theta": 100000.0, "rope_type": "default"}
+    assert getattr(cfg, "rope_parameters") == {"rope_theta": 100000.0, "rope_type": "default"}
+
+    cfg = _normalize_rope_numeric_fields(cfg)
+
+    assert getattr(cfg, "rope_scaling") == {
+        "rope_theta": 100000.0,
+        "rope_type": "default",
+        "type": "default",
+    }
+    assert getattr(cfg, "rope_parameters") == {
+        "rope_theta": 100000.0,
+        "rope_type": "default",
+        "type": "default",
+    }

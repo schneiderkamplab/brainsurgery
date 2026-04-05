@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
+import math
 import os
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import ModuleType
 from typing import Any, cast
 
 import safetensors
@@ -17,10 +21,13 @@ from mltiming import timing
 from omegaconf import OmegaConf
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     AutoModelForMaskedLM,
     AutoModelForSeq2SeqLM,
 )
+from transformers.utils import import_utils as transformers_import_utils
 from transformers.utils.quantization_config import Mxfp4Config
 
 from .axon import (
@@ -104,6 +111,220 @@ def _extract_logits(output: Any) -> torch.Tensor:
     )
 
 
+class _DebertaV2ModernMaskedLMReference(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        backbone: Any,
+        dense_weight: torch.Tensor,
+        dense_bias: torch.Tensor,
+        layer_norm_weight: torch.Tensor,
+        layer_norm_bias: torch.Tensor,
+        decoder_bias: torch.Tensor,
+        eps: float,
+    ) -> None:
+        super().__init__()
+        self.deberta = backbone
+        hidden = int(dense_weight.shape[0])
+        self.lm_dense = torch.nn.Linear(hidden, hidden, bias=True)
+        self.lm_dense.weight.data.copy_(dense_weight)
+        self.lm_dense.bias.data.copy_(dense_bias)
+        self.lm_layer_norm = torch.nn.LayerNorm(hidden, eps=float(eps))
+        self.lm_layer_norm.weight.data.copy_(layer_norm_weight)
+        self.lm_layer_norm.bias.data.copy_(layer_norm_bias)
+        self.lm_bias = torch.nn.Parameter(decoder_bias.clone())
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> dict[str, torch.Tensor]:
+        outputs = self.deberta(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            **kwargs,
+        )
+        hidden = getattr(outputs, "last_hidden_state", None)
+        if not torch.is_tensor(hidden):
+            hidden = outputs[0]
+        hidden = self.lm_dense(hidden)
+        hidden = torch.nn.functional.gelu(hidden)
+        hidden = self.lm_layer_norm(hidden)
+        logits = torch.nn.functional.linear(
+            hidden,
+            self.deberta.embeddings.word_embeddings.weight,
+            self.lm_bias,
+        )
+        return {"logits": logits}
+
+
+def _ensure_transformers_import_compat() -> None:
+    if hasattr(transformers_import_utils, "is_torch_fx_available"):
+        return
+
+    def _is_torch_fx_available() -> bool:
+        try:
+            import torch.fx  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    setattr(transformers_import_utils, "is_torch_fx_available", _is_torch_fx_available)
+
+
+def _ensure_einops_import_compat() -> None:
+    if "einops" in sys.modules:
+        return
+    try:
+        __import__("einops")
+        return
+    except Exception:
+        pass
+
+    shim = ModuleType("einops")
+    shim.__spec__ = importlib.machinery.ModuleSpec("einops", loader=None)
+
+    def rearrange(x: torch.Tensor, pattern: str, **axes_lengths: Any) -> torch.Tensor:
+        del axes_lengths
+        normalized = " ".join(str(pattern).split())
+        if normalized != "bs sq group nh hn -> bs sq (group nh) hn":
+            raise ImportError(f"Unsupported einops.rearrange pattern shim: {pattern!r}")
+        if not torch.is_tensor(x) or x.ndim != 5:
+            raise ImportError("einops.rearrange shim expects rank-5 tensor input")
+        bs, sq, group, nh, hn = x.shape
+        return x.reshape(bs, sq, group * nh, hn)
+
+    shim.rearrange = rearrange
+    sys.modules["einops"] = shim
+
+
+def _checkpoint_contains_any_key(
+    safetensors_files: Sequence[Path],
+    *,
+    prefixes: Sequence[str],
+) -> bool:
+    normalized = tuple(str(prefix) for prefix in prefixes if str(prefix))
+    if not normalized:
+        return False
+    for path in safetensors_files:
+        st = safetensors.safe_open(str(path), framework="pt")
+        for key in st.keys():
+            if any(str(key).startswith(prefix) for prefix in normalized):
+                return True
+    return False
+
+
+def _load_checkpoint_tensor(
+    safetensors_files: Sequence[Path],
+    key: str,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    for path in safetensors_files:
+        st = safetensors.safe_open(str(path), framework="pt")
+        if key not in st.keys():
+            continue
+        tensor = st.get_tensor(key)
+        if tensor.is_floating_point():
+            return tensor.to(device=device, dtype=dtype)
+        return tensor.to(device=device)
+    raise KeyError(key)
+
+
+def _is_deberta_v2_modern_mlm_checkpoint(
+    *,
+    model_dir: Path,
+    model_config: dict[str, Any] | None,
+    safetensors_files: Sequence[Path],
+) -> bool:
+    if not isinstance(model_config, dict):
+        return False
+    if str(model_config.get("model_type", "")).strip().lower() != "deberta-v2":
+        return False
+    has_modern = _checkpoint_contains_any_key(
+        safetensors_files,
+        prefixes=("lm_predictions.lm_head.",),
+    )
+    has_legacy = _checkpoint_contains_any_key(
+        safetensors_files,
+        prefixes=("cls.predictions.",),
+    )
+    return has_modern and not has_legacy
+
+
+def _load_hf_masked_lm_reference(
+    *,
+    model_dir: Path,
+    safetensors_files: Sequence[Path],
+    resolved_dtype: torch.dtype,
+    resolved_device: torch.device,
+    hf_config: Any,
+    trust_remote_code: bool,
+    model_config: dict[str, Any] | None,
+) -> Any:
+    _ensure_transformers_import_compat()
+    if _is_deberta_v2_modern_mlm_checkpoint(
+        model_dir=model_dir,
+        model_config=model_config,
+        safetensors_files=safetensors_files,
+    ):
+        backbone = AutoModel.from_pretrained(
+            str(model_dir),
+            local_files_only=True,
+            dtype=resolved_dtype,
+            config=hf_config,
+            trust_remote_code=trust_remote_code,
+        )
+        model = _DebertaV2ModernMaskedLMReference(
+            backbone=backbone,
+            dense_weight=_load_checkpoint_tensor(
+                safetensors_files,
+                "lm_predictions.lm_head.dense.weight",
+                device=resolved_device,
+                dtype=resolved_dtype,
+            ),
+            dense_bias=_load_checkpoint_tensor(
+                safetensors_files,
+                "lm_predictions.lm_head.dense.bias",
+                device=resolved_device,
+                dtype=resolved_dtype,
+            ),
+            layer_norm_weight=_load_checkpoint_tensor(
+                safetensors_files,
+                "lm_predictions.lm_head.LayerNorm.weight",
+                device=resolved_device,
+                dtype=resolved_dtype,
+            ),
+            layer_norm_bias=_load_checkpoint_tensor(
+                safetensors_files,
+                "lm_predictions.lm_head.LayerNorm.bias",
+                device=resolved_device,
+                dtype=resolved_dtype,
+            ),
+            decoder_bias=_load_checkpoint_tensor(
+                safetensors_files,
+                "lm_predictions.lm_head.bias",
+                device=resolved_device,
+                dtype=resolved_dtype,
+            ),
+            eps=float(getattr(hf_config, "layer_norm_eps", 1.0e-7)),
+        )
+        return model.to(device=resolved_device, dtype=resolved_dtype).eval()
+
+    model = AutoModelForMaskedLM.from_pretrained(
+        str(model_dir),
+        local_files_only=True,
+        dtype=resolved_dtype,
+        config=hf_config,
+        trust_remote_code=trust_remote_code,
+    )
+    return model.to(device=resolved_device, dtype=resolved_dtype).eval()
+
+
 def _load_state_dict(
     paths: list[Path],
     *,
@@ -183,6 +404,51 @@ def _resolve_safetensors_paths(weights: Path) -> list[Path]:
 
     if not weights.is_dir():
         raise FileNotFoundError(f"Weights path not found: {weights}")
+
+    def _normalize_pytorch_bins_to_safetensors(model_dir: Path) -> None:
+        bin_paths = sorted(model_dir.glob("*.bin"))
+        if not bin_paths:
+            return
+        safetensor_paths = sorted(model_dir.glob("*.safetensors"))
+        if safetensor_paths:
+            return
+
+        def _extract_tensor_mapping(payload: object) -> dict[str, torch.Tensor] | None:
+            if not isinstance(payload, dict):
+                return None
+            if all(isinstance(k, str) and torch.is_tensor(v) for k, v in payload.items()):
+                return {str(k): v for k, v in payload.items()}
+            state_dict = payload.get("state_dict")
+            if isinstance(state_dict, dict) and all(
+                isinstance(k, str) and torch.is_tensor(v) for k, v in state_dict.items()
+            ):
+                return {str(k): v for k, v in state_dict.items()}
+            if len(payload) == 1:
+                only_value = next(iter(payload.values()))
+                if isinstance(only_value, dict) and all(
+                    isinstance(k, str) and torch.is_tensor(v) for k, v in only_value.items()
+                ):
+                    return {str(k): v for k, v in only_value.items()}
+            return None
+
+        for bin_path in bin_paths:
+            payload = torch.load(str(bin_path), map_location="cpu", weights_only=False)
+            tensor_payload = _extract_tensor_mapping(payload)
+            if tensor_payload is None:
+                raise RuntimeError(f"Unsupported PyTorch checkpoint payload in {bin_path}")
+            tensor_map: dict[str, torch.Tensor] = {}
+            for key, value in tensor_payload.items():
+                tensor_map[key] = value.detach().cpu().clone().contiguous()
+            if not tensor_map:
+                raise RuntimeError(f"No tensors found in PyTorch checkpoint {bin_path}")
+            out_name = (
+                "model.safetensors"
+                if bin_path.name == "pytorch_model.bin"
+                else f"{bin_path.stem}.safetensors"
+            )
+            safetensors.torch.save_file(tensor_map, str(model_dir / out_name))
+
+    _normalize_pytorch_bins_to_safetensors(weights)
 
     index_path = weights / "model.safetensors.index.json"
     if index_path.exists():
@@ -487,6 +753,9 @@ def _should_trust_remote_code(
     *,
     model_config: dict[str, Any] | None,
 ) -> bool:
+    model_name = model_dir.name.strip().lower()
+    if model_name == "deepseek_v2_lite":
+        return False
     has_local_artifacts = _has_local_custom_code_artifacts(model_dir)
     if not isinstance(model_config, dict):
         return has_local_artifacts
@@ -501,6 +770,9 @@ def _normalize_rope_numeric_fields(config: Any) -> Any:
     def _normalize_dict(mapping: Any) -> None:
         if not isinstance(mapping, dict):
             return
+        rope_type = mapping.get("rope_type")
+        if isinstance(rope_type, str) and "type" not in mapping:
+            mapping["type"] = rope_type
         for key in ("factor", "beta_fast", "beta_slow", "mscale", "mscale_all_dim"):
             value = mapping.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
@@ -508,8 +780,39 @@ def _normalize_rope_numeric_fields(config: Any) -> Any:
 
     rope_scaling = getattr(config, "rope_scaling", None)
     _normalize_dict(rope_scaling)
+    rope_scaling_theta = None
+    if isinstance(rope_scaling, dict):
+        raw_theta = rope_scaling.get("rope_theta")
+        if isinstance(raw_theta, int | float) and not isinstance(raw_theta, bool):
+            rope_scaling_theta = float(raw_theta)
+    if (
+        isinstance(rope_scaling, dict)
+        and rope_scaling.get("type", rope_scaling.get("rope_type")) == "default"
+        and set(rope_scaling.keys()) <= {"rope_theta", "rope_type", "type"}
+        and (rope_scaling_theta is None or math.isclose(rope_scaling_theta, 10000.0))
+    ):
+        setattr(config, "rope_scaling", None)
+        rope_scaling = None
     rope_parameters = getattr(config, "rope_parameters", None)
     _normalize_dict(rope_parameters)
+    if not isinstance(rope_parameters, dict):
+        if isinstance(rope_scaling, dict):
+            rope_parameters = dict(rope_scaling)
+            rope_type = rope_parameters.get("type", rope_parameters.get("rope_type"))
+            if isinstance(rope_type, str):
+                rope_parameters["rope_type"] = rope_type
+        else:
+            rope_parameters = {"rope_type": "default"}
+        setattr(config, "rope_parameters", rope_parameters)
+    rope_theta = getattr(config, "rope_theta", None)
+    if (
+        isinstance(rope_parameters, dict)
+        and "rope_theta" not in rope_parameters
+    ):
+        if isinstance(rope_theta, int | float) and not isinstance(rope_theta, bool):
+            rope_parameters["rope_theta"] = float(rope_theta)
+        else:
+            rope_parameters["rope_theta"] = 10000.0
     original_ctx = getattr(config, "original_max_position_embeddings", None)
     if isinstance(original_ctx, int) and not isinstance(original_ctx, bool):
         for mapping in (rope_scaling, rope_parameters):
@@ -522,16 +825,55 @@ def _normalize_rope_numeric_fields(config: Any) -> Any:
     return config
 
 
+def _patch_rope_payload_for_compat(
+    payload: dict[str, Any],
+    *,
+    error_text: str,
+) -> bool:
+    changed = False
+    original_ctx = payload.get("original_max_position_embeddings")
+    for field_name in ("rope_scaling", "rope_parameters"):
+        field = payload.get(field_name)
+        if not isinstance(field, dict):
+            continue
+        rope_type = field.get("rope_type", field.get("type"))
+        if isinstance(rope_type, str) and "type" not in field:
+            field["type"] = rope_type
+            changed = True
+        if (
+            isinstance(original_ctx, int)
+            and not isinstance(original_ctx, bool)
+            and rope_type in {"longrope", "su"}
+            and "original_max_position_embeddings" not in field
+            and "original_max_position_embeddings" in error_text
+        ):
+            field["original_max_position_embeddings"] = int(original_ctx)
+            changed = True
+        if "must be a dictionary with three fields" in error_text:
+            allowed = {"type", "short_factor", "long_factor"}
+            extra_keys = [key for key in list(field.keys()) if key not in allowed]
+            if extra_keys:
+                for key in extra_keys:
+                    field.pop(key, None)
+                changed = True
+    return changed
+
+
 def _load_auto_config_with_compat_fallback(model_dir: Path, *, trust_remote_code: bool) -> Any:
-    compat_exc: KeyError | None = None
+    _ensure_transformers_import_compat()
+    compat_exc: Exception | None = None
     try:
         return AutoConfig.from_pretrained(
             str(model_dir),
             local_files_only=True,
             trust_remote_code=trust_remote_code,
         )
-    except KeyError as exc:
-        if "original_max_position_embeddings" not in str(exc):
+    except (KeyError, ValueError) as exc:
+        error_text = str(exc)
+        if (
+            "original_max_position_embeddings" not in error_text
+            and "must be a dictionary with three fields" not in error_text
+        ):
             raise
         compat_exc = exc
 
@@ -543,20 +885,7 @@ def _load_auto_config_with_compat_fallback(model_dir: Path, *, trust_remote_code
         raise compat_exc or ValueError(
             f"Expected mapping in {config_path}, got {type(payload).__name__}"
         )
-    original_ctx = payload.get("original_max_position_embeddings")
-    if not isinstance(original_ctx, int) or isinstance(original_ctx, bool):
-        raise compat_exc or RuntimeError("Missing valid original_max_position_embeddings")
-    changed = False
-    for field_name in ("rope_scaling", "rope_parameters"):
-        field = payload.get(field_name)
-        if not isinstance(field, dict):
-            continue
-        rope_type = field.get("rope_type", field.get("type"))
-        if rope_type not in {"longrope", "su"}:
-            continue
-        if "original_max_position_embeddings" not in field:
-            field["original_max_position_embeddings"] = original_ctx
-            changed = True
+    changed = _patch_rope_payload_for_compat(payload, error_text=str(compat_exc))
     if not changed:
         raise compat_exc or RuntimeError("No compatible rope settings to patch")
 
@@ -716,6 +1045,15 @@ def _pick_first_existing_name(candidates: Sequence[str], names: set[str]) -> str
     return None
 
 
+def _tokenizer_fallback_repo_id(model_dir: Path) -> str | None:
+    aliases = {
+        "black_mamba_2_8b": "EleutherAI/gpt-neox-20b",
+        "black_mamba": "EleutherAI/gpt-neox-20b",
+        "marian_en_de": "Helsinki-NLP/opus-mt-en-de",
+    }
+    return aliases.get(model_dir.name)
+
+
 def _build_seq2seq_decoder_inputs(
     *,
     encoder_input_ids: torch.Tensor,
@@ -809,6 +1147,11 @@ def run_axon_test(
         safetensors_files=safetensors_files,
         model_config=_load_model_config(resolved_hf_model_dir),
     )
+    resolved_model_type = (
+        str(model_config.get("model_type", "")).strip().lower()
+        if isinstance(model_config, dict)
+        else ""
+    )
     effective_trust_remote_code = bool(
         trust_remote_code
         or _should_trust_remote_code(
@@ -818,13 +1161,18 @@ def run_axon_test(
     )
     if effective_trust_remote_code:
         _prime_tiktoken_cache_from_model_dir(resolved_hf_model_dir)
+        _ensure_einops_import_compat()
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:
         for candidate in candidate_tokenizer_dirs(resolved_hf_model_dir):
             if looks_like_tokenizer_dir(candidate):
                 tokenizer_source = str(candidate)
                 break
-    tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
+    tokenizer_fallback = (
+        _tokenizer_fallback_repo_id(resolved_hf_model_dir) or resolved_hf_model_dir.name
+        if tokenizer is None
+        else None
+    )
     prompts = _normalize_texts(text)
 
     with TemporaryDirectory(prefix="axon_benchmark_") as tmp_dir:
@@ -877,24 +1225,30 @@ def run_axon_test(
             )
             hf_config = _normalize_rope_numeric_fields(hf_config)
             non_mxfp4_quant_config = _build_non_mxfp4_quantization_config(hf_config)
-            if resolved_model_task == "masked_lm":
-                hf_model = AutoModelForMaskedLM.from_pretrained(
-                    str(resolved_hf_model_dir),
-                    local_files_only=True,
-                    dtype=resolved_dtype,
-                    config=hf_config,
-                    quantization_config=non_mxfp4_quant_config,
-                    trust_remote_code=effective_trust_remote_code,
-                )
-            else:
-                hf_model = AutoModelForSeq2SeqLM.from_pretrained(
-                    str(resolved_hf_model_dir),
-                    local_files_only=True,
-                    dtype=resolved_dtype,
-                    config=hf_config,
-                    quantization_config=non_mxfp4_quant_config,
-                    trust_remote_code=effective_trust_remote_code,
-                )
+        hf: Any
+        if resolved_model_task == "masked_lm":
+            if non_mxfp4_quant_config is not None:
+                raise RuntimeError("masked_lm reference path does not support mxfp4 quantization")
+            hf = _load_hf_masked_lm_reference(
+                model_dir=resolved_hf_model_dir,
+                safetensors_files=safetensors_files,
+                resolved_dtype=resolved_dtype,
+                resolved_device=resolved_device,
+                hf_config=hf_config,
+                trust_remote_code=effective_trust_remote_code,
+                model_config=model_config,
+            )
+            hf_model = hf
+        elif resolved_model_task == "seq2seq_lm":
+            _ensure_transformers_import_compat()
+            hf_model = AutoModelForSeq2SeqLM.from_pretrained(
+                str(resolved_hf_model_dir),
+                local_files_only=True,
+                dtype=resolved_dtype,
+                config=hf_config,
+                quantization_config=non_mxfp4_quant_config,
+                trust_remote_code=effective_trust_remote_code,
+            )
             hf = hf_model.to(device=resolved_device, dtype=resolved_dtype).eval()
         else:
             try:
@@ -904,6 +1258,7 @@ def run_axon_test(
                 )
                 hf_config = _normalize_rope_numeric_fields(hf_config)
                 non_mxfp4_quant_config = _build_non_mxfp4_quantization_config(hf_config)
+                _ensure_transformers_import_compat()
                 hf_model = AutoModelForCausalLM.from_pretrained(
                     str(resolved_hf_model_dir),
                     local_files_only=True,
@@ -914,21 +1269,48 @@ def run_axon_test(
                 )
                 hf = cast(Any, hf_model).to(device=resolved_device, dtype=resolved_dtype).eval()
             except Exception:
-                if not is_black_mamba_config_dir(resolved_hf_model_dir):
-                    raise
-                state_dict = _load_state_dict(
-                    safetensors_files,
-                    device=resolved_device,
-                    dtype=resolved_dtype,
-                    model_config=model_config,
-                )
-                hf = (
-                    BlackMambaReferenceModel.from_state_dict(
-                        model_dir=resolved_hf_model_dir, state_dict=state_dict
+                if (
+                    hf_config is not None
+                    and str(getattr(hf_config, "model_type", "")).strip().lower() == "gemma4"
+                ):
+                    _ensure_transformers_import_compat()
+                    hf_model = AutoModelForImageTextToText.from_pretrained(
+                        str(resolved_hf_model_dir),
+                        local_files_only=True,
+                        dtype=resolved_dtype,
+                        config=hf_config,
+                        trust_remote_code=effective_trust_remote_code,
                     )
-                    .to(resolved_device)
-                    .eval()
-                )
+                    hf = cast(Any, hf_model).to(device=resolved_device, dtype=resolved_dtype).eval()
+                elif not is_black_mamba_config_dir(resolved_hf_model_dir):
+                    if resolved_model_type not in {"phi3", "phi3small"}:
+                        raise
+                    if state_dict is None:
+                        state_dict = _load_state_dict(
+                            safetensors_files,
+                            device=resolved_device,
+                            dtype=resolved_dtype,
+                            model_config=model_config,
+                        )
+                    print(
+                        "HF: falling back to generated reference model for",
+                        resolved_model_type,
+                    )
+                    hf = model_cls.from_state_dict(dict(state_dict)).to(resolved_device).eval()
+                else:
+                    state_dict = _load_state_dict(
+                        safetensors_files,
+                        device=resolved_device,
+                        dtype=resolved_dtype,
+                        model_config=model_config,
+                    )
+                    hf = (
+                        BlackMambaReferenceModel.from_state_dict(
+                            model_dir=resolved_hf_model_dir, state_dict=state_dict
+                        )
+                        .to(resolved_device)
+                        .eval()
+                    )
         if (
             resolved_model_task == "causal_lm"
             and not _checkpoint_has_lm_head_weight(resolved_hf_model_dir)
@@ -1027,29 +1409,9 @@ def run_axon_test(
             pos_ids = pos_ids.masked_fill(attention_mask == 0, 1)
             hf_forward_inputs["position_ids"] = pos_ids
         hf_gen: torch.Tensor | None = None
-        if resolved_model_task == "causal_lm":
+        hf_time = 0.0
 
-            def _run_hf_generate(model: Any = hf) -> torch.Tensor:
-                return model.generate(
-                    **hf_inputs,
-                    max_new_tokens=max(1, max_len - int(input_ids.shape[1])),
-                    eos_token_id=tokenizer_obj.eos_token_id,
-                    pad_token_id=tokenizer_obj.eos_token_id,
-                )
-
-            try:
-                hf_gen, hf_time = _time_generate("HF", _run_hf_generate)
-            except Exception as exc:
-                print(
-                    "HF generate failed; falling back to prompt-only decode:",
-                    f"{type(exc).__name__}: {exc}",
-                )
-                hf_gen = input_ids
-                hf_time = 0.0
-        else:
-            hf_time = 0.0
-
-        def _run_hf_forward(model: Any = hf) -> torch.Tensor:
+        def _run_hf_forward(model: Any) -> torch.Tensor:
             hf_forward_kwargs = dict(hf_forward_inputs)
             if resolved_model_task in {"causal_lm", "seq2seq_lm"}:
                 hf_forward_kwargs["use_cache"] = False
@@ -1084,21 +1446,39 @@ def run_axon_test(
         if resolved_model_task in {"masked_lm", "seq2seq_lm"}:
             hf_t0 = time.perf_counter()
             with timing(message="HF"), torch.no_grad():
-                hf_logits = _run_hf_forward()
+                hf_logits = _run_hf_forward(hf)
             hf_time = time.perf_counter() - hf_t0
         else:
             with torch.no_grad():
-                hf_logits = _run_hf_forward()
+                hf_logits = _run_hf_forward(hf)
+            hf_for_generate = hf
+
+            def _run_hf_generate(model: Any) -> torch.Tensor:
+                return model.generate(
+                    **hf_inputs,
+                    max_new_tokens=max(1, max_len - int(input_ids.shape[1])),
+                    eos_token_id=tokenizer_obj.eos_token_id,
+                    pad_token_id=tokenizer_obj.eos_token_id,
+                )
+
+            try:
+                hf_gen, hf_time = _time_generate("HF", lambda: _run_hf_generate(hf_for_generate))
+            except Exception as exc:
+                print(
+                    "HF generate failed; falling back to prompt-only decode:",
+                    f"{type(exc).__name__}: {exc}",
+                )
+                hf_gen = input_ids
+                hf_time = 0.0
+        hf_logits = hf_logits.detach().cpu()
+        if hf_gen is not None:
+            hf_gen = hf_gen.detach().cpu()
         hf_dummy_tokens_mask: torch.Tensor | None = _build_phi3small_dummy_vocab_mask(
             model_config=model_config,
             vocab_size=int(hf_logits.shape[-1]),
-            device=hf_logits.device,
+            device=torch.device("cpu"),
         )
-        model_type = (
-            str(model_config.get("model_type", "")).strip().lower()
-            if isinstance(model_config, dict)
-            else ""
-        )
+        model_type = resolved_model_type
         if state_dict is None and model_type == "phi3small":
             # Phi-3-small checkpoints can differ from the effective HF-loaded tensor values
             # (for example `mlp.down_proj.weight` after remote-code loading).
@@ -1111,7 +1491,10 @@ def run_axon_test(
         for handle in hf_hook_handles:
             handle.remove()
 
+        del hf_hook_handles
         del hf
+        if "hf_model" in locals():
+            del hf_model
         _cleanup(resolved_device)
 
         if state_dict is None:
@@ -1153,31 +1536,7 @@ def run_axon_test(
             if decoder_attention_mask is not None and syn_decoder_mask_key is not None:
                 syn_inputs[syn_decoder_mask_key] = decoder_attention_mask
         syn_gen: torch.Tensor | None = None
-        if resolved_model_task == "causal_lm":
-
-            def _run_syn_generate(model: Any = syn) -> torch.Tensor:
-                generate_kwargs: dict[str, Any] = {
-                    "eos_token_id": tokenizer_obj.eos_token_id,
-                    "max_len": max_len,
-                }
-                if use_mask_for_syn and attention_mask is not None:
-                    if syn_mask_key == "attn_mask":
-                        generate_kwargs["attn_mask"] = attention_mask
-                    elif syn_mask_key == "attention_mask":
-                        generate_kwargs["attention_mask"] = attention_mask
-                return model.generate(input_ids, **generate_kwargs)
-
-            try:
-                syn_gen, syn_time = _time_generate("AxonDerived", _run_syn_generate)
-            except Exception as exc:
-                print(
-                    "Axon generate failed; falling back to prompt-only decode:",
-                    f"{type(exc).__name__}: {exc}",
-                )
-                syn_gen = input_ids
-                syn_time = 0.0
-        else:
-            syn_time = 0.0
+        syn_time = 0.0
 
         def _run_syn_forward(model: Any = syn) -> torch.Tensor:
             return _extract_logits(model(**syn_inputs))
@@ -1237,6 +1596,27 @@ def run_axon_test(
         else:
             with torch.no_grad():
                 syn_logits = _run_syn_forward()
+            def _run_syn_generate(model: Any = syn) -> torch.Tensor:
+                generate_kwargs: dict[str, Any] = {
+                    "eos_token_id": tokenizer_obj.eos_token_id,
+                    "max_len": max_len,
+                }
+                if use_mask_for_syn and attention_mask is not None:
+                    if syn_mask_key == "attn_mask":
+                        generate_kwargs["attn_mask"] = attention_mask
+                    elif syn_mask_key == "attention_mask":
+                        generate_kwargs["attention_mask"] = attention_mask
+                return model.generate(input_ids, **generate_kwargs)
+
+            try:
+                syn_gen, syn_time = _time_generate("AxonDerived", _run_syn_generate)
+            except Exception as exc:
+                print(
+                    "Axon generate failed; falling back to prompt-only decode:",
+                    f"{type(exc).__name__}: {exc}",
+                )
+                syn_gen = input_ids
+                syn_time = 0.0
         if trace_layers and callable(original_block_call) and isinstance(original_block_name, str):
             setattr(syn, original_block_name, original_block_call)
 
@@ -1321,6 +1701,8 @@ def run_axon_test(
             decoder_attention_mask if resolved_model_task == "seq2seq_lm" else attention_mask
         )
         if metric_attention_mask is not None:
+            if metric_attention_mask.device != diff.device:
+                metric_attention_mask = metric_attention_mask.to(diff.device)
             mask_bool = metric_attention_mask.to(torch.bool)
             valid = mask_bool.unsqueeze(-1).expand_as(diff) & finite_mask
             valid_count = int(valid.sum().item())

@@ -139,12 +139,17 @@ def interpret(
             env[out] = F.gelu(x)
     elif kind == "relu":
         env[out] = F.relu(x)
+    elif kind == "relu2":
+        y = F.relu(x)
+        env[out] = y * y
     elif kind == "silu":
         env[out] = F.silu(x)
     elif kind == "swiglu":
         env[out] = F.silu(x) * x
     elif kind == "sigmoid":
         env[out] = torch.sigmoid(x)
+    elif kind == "tanh":
+        env[out] = torch.tanh(x)
     elif kind == "xielu":
         alpha_p_param = _resolve_xielu_param(
             model=model,
@@ -214,6 +219,7 @@ def compile(
         raise ValueError("legacy activation node name; use _op: activations_<kind>")
     kind = op_name[len("activations_") :]
     out_var = assign_out_var(out_name)
+    relu2_tmp = emitter._fresh("relu2_tmp")
     if kind in {"gelu_new", "gelu_pytorch_tanh"}:
         if bool(node_spec.get("fp32_accum", False)):
             lines.append(
@@ -275,6 +281,9 @@ def compile(
             lines.append(f"{indent}    {out_var} = F.gelu({src})")
         else:
             lines.append(f"{indent}{out_var} = F.gelu({src})")
+    elif kind == "relu2":
+        lines.append(f"{indent}{relu2_tmp} = F.relu({src})")
+        lines.append(f"{indent}{out_var} = {relu2_tmp} * {relu2_tmp}")
     elif kind == "relu":
         lines.append(f"{indent}{out_var} = F.relu({src})")
     elif kind == "silu":
@@ -283,6 +292,8 @@ def compile(
         lines.append(f"{indent}{out_var} = F.silu({src}) * {src}")
     elif kind == "sigmoid":
         lines.append(f"{indent}{out_var} = torch.sigmoid({src})")
+    elif kind == "tanh":
+        lines.append(f"{indent}{out_var} = torch.tanh({src})")
     elif kind == "xielu":
         target_dtype = f"({src}.dtype if {src}.is_floating_point() else torch.float32)"
         alpha_p_path_var = emitter._fresh("xielu_alpha_p_path")
@@ -296,17 +307,41 @@ def compile(
         alpha_p_var = emitter._fresh("xielu_alpha_p")
         alpha_n_var = emitter._fresh("xielu_alpha_n")
 
-        alpha_p_expr = emitter._infer_param_expr(node_spec, node_path_var, "alpha_p")
-        alpha_n_expr = emitter._infer_param_expr(node_spec, node_path_var, "alpha_n")
-        beta_expr = emitter._infer_param_expr(node_spec, node_path_var, "beta")
-        eps_expr = emitter._infer_param_expr(node_spec, node_path_var, "eps")
+        alpha_p_path = emitter._hoisted_param_path(
+            node_spec=node_spec,
+            node_path_var=node_path_var,
+            param_name="alpha_p",
+            lines=lines,
+            indent=indent,
+        )
+        alpha_n_path = emitter._hoisted_param_path(
+            node_spec=node_spec,
+            node_path_var=node_path_var,
+            param_name="alpha_n",
+            lines=lines,
+            indent=indent,
+        )
+        beta_path = emitter._hoisted_param_path(
+            node_spec=node_spec,
+            node_path_var=node_path_var,
+            param_name="beta",
+            lines=lines,
+            indent=indent,
+        )
+        eps_path = emitter._hoisted_param_path(
+            node_spec=node_spec,
+            node_path_var=node_path_var,
+            param_name="eps",
+            lines=lines,
+            indent=indent,
+        )
 
-        lines.append(f"{indent}{alpha_p_path_var} = {alpha_p_expr}")
-        lines.append(f"{indent}{alpha_n_path_var} = {alpha_n_expr}")
-        lines.append(f"{indent}{beta_path_var} = {beta_expr}")
-        lines.append(f"{indent}{eps_path_var} = {eps_expr}")
+        lines.append(f"{indent}{alpha_p_path_var} = {alpha_p_path}")
+        lines.append(f"{indent}{alpha_n_path_var} = {alpha_n_path}")
+        lines.append(f"{indent}{beta_path_var} = {beta_path}")
+        lines.append(f"{indent}{eps_path_var} = {eps_path}")
 
-        lines.append(f"{indent}{alpha_p_param_var} = self._state.get({alpha_p_path_var})")
+        lines.append(f"{indent}{alpha_p_param_var} = self._state.get({alpha_p_path})")
         lines.append(f"{indent}if {alpha_p_param_var} is None:")
         lines.append(
             f"{indent}    {alpha_p_param_var} = torch.tensor({_XIELU_ALPHA_P_PARAM_DEFAULT!r}, dtype={target_dtype}, device={src}.device)"
@@ -316,7 +351,7 @@ def compile(
             f"{indent}    {alpha_p_param_var} = {alpha_p_param_var}.to(device={src}.device, dtype={target_dtype})"
         )
 
-        lines.append(f"{indent}{alpha_n_param_var} = self._state.get({alpha_n_path_var})")
+        lines.append(f"{indent}{alpha_n_param_var} = self._state.get({alpha_n_path})")
         lines.append(f"{indent}if {alpha_n_param_var} is None:")
         lines.append(
             f"{indent}    {alpha_n_param_var} = torch.tensor({_XIELU_ALPHA_N_PARAM_DEFAULT!r}, dtype={target_dtype}, device={src}.device)"
@@ -326,7 +361,7 @@ def compile(
             f"{indent}    {alpha_n_param_var} = {alpha_n_param_var}.to(device={src}.device, dtype={target_dtype})"
         )
 
-        lines.append(f"{indent}{beta_var} = self._state.get({beta_path_var})")
+        lines.append(f"{indent}{beta_var} = self._state.get({beta_path})")
         lines.append(f"{indent}if {beta_var} is None:")
         lines.append(
             f"{indent}    {beta_var} = torch.tensor({_XIELU_BETA_INIT!r}, dtype={target_dtype}, device={src}.device)"
@@ -336,7 +371,7 @@ def compile(
             f"{indent}    {beta_var} = {beta_var}.to(device={src}.device, dtype={target_dtype})"
         )
 
-        lines.append(f"{indent}{eps_var} = self._state.get({eps_path_var})")
+        lines.append(f"{indent}{eps_var} = self._state.get({eps_path})")
         lines.append(f"{indent}if {eps_var} is None:")
         lines.append(
             f"{indent}    {eps_var} = torch.tensor({_XIELU_EPS_INIT!r}, dtype={target_dtype}, device={src}.device)"

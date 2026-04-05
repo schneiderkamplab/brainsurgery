@@ -11,7 +11,7 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM
 
 from .axon import (
     candidate_tokenizer_dirs,
@@ -21,16 +21,36 @@ from .axon import (
     tokenize_prompts,
 )
 from .axon_test import (
+    _augment_model_config_from_checkpoint,
+    _ensure_transformers_import_compat,
     _extract_logits,
+    _load_auto_config_with_compat_fallback,
     _load_generated_class,
+    _load_hf_masked_lm_reference,
+    _load_model_config,
     _load_state_dict,
+    _normalize_rope_numeric_fields,
     _resolve_device,
     _resolve_safetensors_paths,
+    _should_trust_remote_code,
 )
 from .codegen import emit_model_code_from_synapse_spec
 from .runtime import SynapseProgramModel
 
 _CANONICAL_DTYPES = ("float32", "bfloat16", "float16")
+_MASKED_LM_MODEL_TYPES = {
+    "albert",
+    "bert",
+    "camembert",
+    "deberta-v2",
+    "deberta",
+    "distilbert",
+    "electra",
+    "longformer",
+    "modernbert",
+    "roberta",
+    "xlm-roberta",
+}
 
 
 def _resolve_dtype_name(name: str) -> torch.dtype:
@@ -65,6 +85,15 @@ def _normalize_texts(text: str | Sequence[str]) -> list[str]:
         return [text]
     out = [str(item) for item in text]
     return out if out else ["The future of AI is", "Hello world"]
+
+
+def _resolve_hf_loader_kind(hf_config: Any) -> str:
+    if bool(getattr(hf_config, "is_encoder_decoder", False)):
+        return "seq2seq_lm"
+    model_type = str(getattr(hf_config, "model_type", "")).strip().lower()
+    if model_type in _MASKED_LM_MODEL_TYPES:
+        return "masked_lm"
+    return "causal_lm"
 
 
 def _first_tensor(value: Any) -> torch.Tensor | None:
@@ -122,6 +151,32 @@ def _is_attention_output_projection(weight_path: str) -> bool:
         ".self_attn.out_proj.weight",
     )
     return any(normalized.endswith(suffix) for suffix in suffixes)
+
+
+def _canonical_path(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.replace("/", ".").strip(".")
+    return normalized or None
+
+
+def _hf_weight_path(module_name: str, module: nn.Module) -> str | None:
+    normalized = _canonical_path(module_name)
+    if normalized is None:
+        return None
+    if hasattr(module, "weight"):
+        return f"{normalized}.weight"
+    return None
+
+
+def _meta_pair_key(meta: dict[str, Any] | None) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+    for key in ("weight_path", "module_name", "node_path"):
+        normalized = _canonical_path(meta.get(key))
+        if normalized is not None:
+            return normalized
+    return None
 
 
 class _TracingSynapseProgramModel(SynapseProgramModel):
@@ -307,6 +362,7 @@ def _capture_hf_trace(
                 {
                     "module_name": _module_name,
                     "module_type": _module.__class__.__name__,
+                    "weight_path": _hf_weight_path(_module_name, _module),
                 }
             )
 
@@ -339,7 +395,6 @@ def _pair_stats(
     syn_meta: list[dict[str, Any]] | None = None,
     dtype_name: str | None = None,
 ) -> dict[str, Any]:
-    pairs = min(len(hf_tensors), len(syn_tensors))
     matched = 0
     skipped_shape = 0
     numel = 0
@@ -351,12 +406,43 @@ def _pair_stats(
     offenders: list[dict[str, Any]] = []
     hf_meta = hf_meta or []
     syn_meta = syn_meta or []
+    hf_remaining: list[tuple[int, torch.Tensor]] = list(enumerate(hf_tensors))
+    syn_remaining: list[tuple[int, torch.Tensor]] = list(enumerate(syn_tensors))
+    hf_by_key: dict[str, list[tuple[int, torch.Tensor]]] = defaultdict(list)
+    syn_by_key: dict[str, list[tuple[int, torch.Tensor]]] = defaultdict(list)
+    for idx, tensor in hf_remaining:
+        key = _meta_pair_key(hf_meta[idx] if idx < len(hf_meta) else None)
+        if key is not None:
+            hf_by_key[key].append((idx, tensor))
+    for idx, tensor in syn_remaining:
+        key = _meta_pair_key(syn_meta[idx] if idx < len(syn_meta) else None)
+        if key is not None:
+            syn_by_key[key].append((idx, tensor))
+
+    pairings: list[tuple[int, torch.Tensor, int, torch.Tensor]] = []
+    paired_hf: set[int] = set()
+    paired_syn: set[int] = set()
+
+    all_keys = set(hf_by_key.keys()) | set(syn_by_key.keys())
+    for key in sorted(all_keys):
+        hf_list = hf_by_key.get(key, [])
+        syn_list = syn_by_key.get(key, [])
+        local_pairs = min(len(hf_list), len(syn_list))
+        for pair_idx in range(local_pairs):
+            hf_idx, hf_t = hf_list[pair_idx]
+            syn_idx, syn_t = syn_list[pair_idx]
+            pairings.append((hf_idx, hf_t, syn_idx, syn_t))
+            paired_hf.add(hf_idx)
+            paired_syn.add(syn_idx)
+
     hf_by_shape: dict[tuple[int, ...], list[tuple[int, torch.Tensor]]] = defaultdict(list)
     syn_by_shape: dict[tuple[int, ...], list[tuple[int, torch.Tensor]]] = defaultdict(list)
-    for idx, tensor in enumerate(hf_tensors):
-        hf_by_shape[_shape_key(tensor)].append((idx, tensor))
-    for idx, tensor in enumerate(syn_tensors):
-        syn_by_shape[_shape_key(tensor)].append((idx, tensor))
+    for idx, tensor in hf_remaining:
+        if idx not in paired_hf:
+            hf_by_shape[_shape_key(tensor)].append((idx, tensor))
+    for idx, tensor in syn_remaining:
+        if idx not in paired_syn:
+            syn_by_shape[_shape_key(tensor)].append((idx, tensor))
     all_shapes = set(hf_by_shape.keys()) | set(syn_by_shape.keys())
     for shape in sorted(all_shapes):
         hf_list = hf_by_shape.get(shape, [])
@@ -366,37 +452,41 @@ def _pair_stats(
         for pair_idx in range(local_pairs):
             hf_idx, hf_t = hf_list[pair_idx]
             syn_idx, syn_t = syn_list[pair_idx]
-            diff = (syn_t - hf_t).abs()
-            local_mean = float(diff.mean()) if diff.numel() else 0.0
-            local_max = float(diff.max()) if diff.numel() else 0.0
-            offenders.append(
-                {
-                    "index": pair_idx,
-                    "hf_index": hf_idx,
-                    "syn_index": syn_idx,
-                    "shape": list(shape),
-                    "mean_abs": local_mean,
-                    "max_abs": local_max,
-                    "hf_meta": hf_meta[hf_idx] if hf_idx < len(hf_meta) else None,
-                    "syn_meta": syn_meta[syn_idx] if syn_idx < len(syn_meta) else None,
-                }
-            )
-            matched += 1
-            n = int(diff.numel())
-            numel += n
-            sum_abs += float(diff.sum())
-            denom = torch.maximum(torch.maximum(hf_t.abs(), syn_t.abs()), torch.tensor(1.0e-12))
-            rel = diff / denom
-            sum_rel += float(rel.sum())
-            local_rel_max = float(rel.max()) if rel.numel() else 0.0
-            if local_rel_max > max_rel:
-                max_rel = local_rel_max
-            if local_max > max_abs:
-                max_abs = local_max
-            if dtype_name == "bfloat16":
-                ulp_values.append(_ulp_distance(hf_t, syn_t, dtype=torch.bfloat16).reshape(-1))
-            elif dtype_name == "float16":
-                ulp_values.append(_ulp_distance(hf_t, syn_t, dtype=torch.float16).reshape(-1))
+            pairings.append((hf_idx, hf_t, syn_idx, syn_t))
+
+    pairings.sort(key=lambda item: (item[0], item[2]))
+    for pair_idx, (hf_idx, hf_t, syn_idx, syn_t) in enumerate(pairings):
+        diff = (syn_t - hf_t).abs()
+        local_mean = float(diff.mean()) if diff.numel() else 0.0
+        local_max = float(diff.max()) if diff.numel() else 0.0
+        offenders.append(
+            {
+                "index": pair_idx,
+                "hf_index": hf_idx,
+                "syn_index": syn_idx,
+                "shape": list(_shape_key(hf_t)),
+                "mean_abs": local_mean,
+                "max_abs": local_max,
+                "hf_meta": hf_meta[hf_idx] if hf_idx < len(hf_meta) else None,
+                "syn_meta": syn_meta[syn_idx] if syn_idx < len(syn_meta) else None,
+            }
+        )
+        matched += 1
+        n = int(diff.numel())
+        numel += n
+        sum_abs += float(diff.sum())
+        denom = torch.maximum(torch.maximum(hf_t.abs(), syn_t.abs()), torch.tensor(1.0e-12))
+        rel = diff / denom
+        sum_rel += float(rel.sum())
+        local_rel_max = float(rel.max()) if rel.numel() else 0.0
+        if local_rel_max > max_rel:
+            max_rel = local_rel_max
+        if local_max > max_abs:
+            max_abs = local_max
+        if dtype_name == "bfloat16":
+            ulp_values.append(_ulp_distance(hf_t, syn_t, dtype=torch.bfloat16).reshape(-1))
+        elif dtype_name == "float16":
+            ulp_values.append(_ulp_distance(hf_t, syn_t, dtype=torch.float16).reshape(-1))
     offenders.sort(key=lambda item: item["mean_abs"], reverse=True)
     shape_hf_counts = {str(list(shape)): len(items) for shape, items in hf_by_shape.items()}
     shape_syn_counts = {str(list(shape)): len(items) for shape, items in syn_by_shape.items()}
@@ -413,7 +503,7 @@ def _pair_stats(
     return {
         "hf_count": len(hf_tensors),
         "syn_count": len(syn_tensors),
-        "paired": pairs,
+        "paired": len(pairings),
         "matched": matched,
         "skipped_shape": skipped_shape,
         "mean_abs": (sum_abs / numel) if numel > 0 else None,
@@ -505,6 +595,9 @@ def _run_single_dtype(
     tokenizer_fallback: str | None,
     prompts: list[str],
     device: torch.device,
+    hf_config: Any,
+    hf_loader_kind: str,
+    trust_remote_code: bool,
 ) -> dict[str, Any]:
     trace_kinds = {"linear", "layernorm", "rmsnorm", "attention", "embedding", "add"}
     model_input_names = set(lowered_spec.get("model", {}).get("inputs", {}).keys())
@@ -537,9 +630,33 @@ def _run_single_dtype(
     syn_error: str | None = None
     logits_summary: dict[str, Any] | None = None
     try:
-        hf_model: Any = AutoModelForCausalLM.from_pretrained(
-            str(resolved_hf_model_dir), local_files_only=True, dtype=dtype
-        )
+        _ensure_transformers_import_compat()
+        if hf_loader_kind == "masked_lm":
+            hf_model = _load_hf_masked_lm_reference(
+                model_dir=resolved_hf_model_dir,
+                safetensors_files=state_dict_paths,
+                resolved_dtype=dtype,
+                resolved_device=device,
+                hf_config=hf_config,
+                trust_remote_code=trust_remote_code,
+                model_config=lowered_spec.get("model", {}).get("config")
+            )
+        elif hf_loader_kind == "seq2seq_lm":
+            hf_model = AutoModelForSeq2SeqLM.from_pretrained(
+                str(resolved_hf_model_dir),
+                local_files_only=True,
+                dtype=dtype,
+                config=hf_config,
+                trust_remote_code=trust_remote_code,
+            )
+        else:
+            hf_model = AutoModelForCausalLM.from_pretrained(
+                str(resolved_hf_model_dir),
+                local_files_only=True,
+                dtype=dtype,
+                config=hf_config,
+                trust_remote_code=trust_remote_code,
+            )
         hf = hf_model.to(device)
         hf.eval()
         hooks: list[Any] = []
@@ -612,6 +729,208 @@ def _run_single_dtype(
     }
 
 
+def run_axon_layer_op_parity(
+    *,
+    axon_file: Path,
+    weights: Path,
+    layer_index: int,
+    hf_model_dir: Path | None = None,
+    tokenizer: str | None = None,
+    text: str | Sequence[str] = ("Hello world",),
+    device: str = "cpu",
+    dtype: str = "float32",
+    class_name: str = "AxonLayerParityModel",
+) -> dict[str, Any]:
+    resolved_device = _resolve_device(device)
+    resolved_dtype = _resolve_dtype_name(dtype)
+    prompts = _normalize_texts(text)
+    axon_path = axon_file.resolve()
+    weights_path = weights.resolve()
+    if not axon_path.exists():
+        raise FileNotFoundError(f"Axon file not found: {axon_path}")
+    if not weights_path.exists():
+        raise FileNotFoundError(f"Weights path not found: {weights_path}")
+
+    state_dict_paths = _resolve_safetensors_paths(weights_path)
+    default_hf_dir = weights_path if weights_path.is_dir() else state_dict_paths[0].parent
+    resolved_hf_model_dir = (hf_model_dir or default_hf_dir).resolve()
+    model_config = _augment_model_config_from_checkpoint(
+        model_dir=resolved_hf_model_dir,
+        safetensors_files=state_dict_paths,
+        model_config=_load_model_config(resolved_hf_model_dir),
+    )
+    effective_trust_remote_code = _should_trust_remote_code(
+        resolved_hf_model_dir,
+        model_config=model_config,
+    )
+    hf_config = _load_auto_config_with_compat_fallback(
+        resolved_hf_model_dir,
+        trust_remote_code=effective_trust_remote_code,
+    )
+    hf_config = _normalize_rope_numeric_fields(hf_config)
+    tokenizer_source = tokenizer or str(resolved_hf_model_dir)
+    if tokenizer is None:
+        for candidate in candidate_tokenizer_dirs(resolved_hf_model_dir):
+            if looks_like_tokenizer_dir(candidate):
+                tokenizer_source = str(candidate)
+                break
+    tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
+
+    layer_scope = f"model.layers.{int(layer_index)}."
+    trace_kinds = {"linear", "layernorm", "rmsnorm", "attention", "embedding", "add"}
+
+    with TemporaryDirectory(prefix="axon_layer_op_parity_") as tmp_dir:
+        modules = parse_axon_program_from_path(axon_path)
+        lowered_spec = lower_axon_program_to_synapse_spec(modules)
+        loaded = OmegaConf.create(lowered_spec)
+        loaded_dict = OmegaConf.to_container(loaded, resolve=True)
+        if not isinstance(loaded_dict, dict):
+            raise ValueError("Lowered synapse spec did not produce a mapping")
+        final_spec: dict[str, Any] = {str(k): v for k, v in loaded_dict.items()}
+        model_section = final_spec.get("model")
+        if isinstance(model_section, dict) and model_config is not None:
+            model_section["config"] = model_config
+        model_input_names = set(final_spec.get("model", {}).get("inputs", {}).keys())
+
+        tokenizer_obj, input_ids, attention_mask = _build_inputs(
+            lowered_spec=final_spec,
+            prompts=prompts,
+            tokenizer_source=tokenizer_source,
+            tokenizer_fallback=tokenizer_fallback,
+            device=resolved_device,
+        )
+        del tokenizer_obj
+        hf_kwargs = _forward_kwargs(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            for_hf=True,
+            model_input_names=model_input_names,
+        )
+        syn_kwargs = _forward_kwargs(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            for_hf=False,
+            model_input_names=model_input_names,
+        )
+
+        _ensure_transformers_import_compat()
+        hf_model: Any = AutoModelForCausalLM.from_pretrained(
+            str(resolved_hf_model_dir), local_files_only=True, dtype=resolved_dtype
+        )
+        hf = hf_model.to(resolved_device).eval()
+        hooks: list[Any] = []
+        hf_trace: dict[str, list[torch.Tensor]] = defaultdict(list)
+        hf_trace_meta: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        try:
+            raw_trace, raw_meta, hooks = _capture_hf_trace(hf, trace_kinds=trace_kinds)
+            with torch.no_grad():
+                _ = _extract_logits(hf(**hf_kwargs, use_cache=False))
+            for hf_trace_kind, items in raw_trace.items():
+                meta_items = raw_meta.get(hf_trace_kind, [])
+                for idx, tensor in enumerate(items):
+                    meta = meta_items[idx] if idx < len(meta_items) else {}
+                    module_name = str(meta.get("module_name", ""))
+                    if layer_scope in module_name:
+                        hf_trace[hf_trace_kind].append(tensor)
+                        hf_trace_meta[hf_trace_kind].append(meta)
+        finally:
+            for hook in hooks:
+                hook.remove()
+            del hf
+            del hf_model
+
+        state_dict = _load_state_dict(state_dict_paths, device=resolved_device, dtype=resolved_dtype)
+        generated_py_path = Path(tmp_dir) / "generated_model.py"
+        generated_py_path.write_text(
+            emit_model_code_from_synapse_spec(final_spec, class_name=class_name),
+            encoding="utf-8",
+        )
+        model_cls = _load_generated_class(generated_py_path, class_name)
+        generated = model_cls.from_state_dict(state_dict).to(resolved_device).eval()
+        setattr(generated, "_trace_enabled", True)
+        if hasattr(generated, "_reset_trace"):
+            generated._reset_trace()
+        with torch.no_grad():
+            _ = _extract_logits(generated(**syn_kwargs))
+        generated_trace_raw = list(getattr(generated, "trace_ops", []))
+        del generated
+        del state_dict
+
+    syn_trace: dict[str, list[torch.Tensor]] = defaultdict(list)
+    syn_trace_meta: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    ordered_synapse_ops: list[dict[str, Any]] = []
+    for item in generated_trace_raw:
+        if not isinstance(item, dict):
+            continue
+        node_path = str(item.get("node_path", ""))
+        if layer_scope not in node_path:
+            continue
+        tensor_raw = item.get("tensor")
+        if not torch.is_tensor(tensor_raw):
+            continue
+        tensor = tensor_raw
+        op = str(item.get("op", ""))
+        trace_kind: str | None = None
+        if op == "linear":
+            weight_path = str(item.get("weight_path", ""))
+            if _is_attention_output_projection(weight_path):
+                trace_kind = "attention"
+        if trace_kind is None:
+            trace_kind = _synapse_kind(op)
+        if trace_kind is None:
+            ordered_synapse_ops.append(
+                {
+                    "node_path": node_path,
+                    "op": op,
+                    "bind": str(item.get("bind", "")),
+                    "shape": list(tensor.shape),
+                }
+            )
+            continue
+        meta = {
+            "node_path": node_path,
+            "op": op,
+            "bind": str(item.get("bind", "")),
+        }
+        weight_path_raw = item.get("weight_path")
+        if isinstance(weight_path_raw, str) and weight_path_raw:
+            meta["weight_path"] = weight_path_raw
+        syn_trace[trace_kind].append(tensor)
+        syn_trace_meta[trace_kind].append(meta)
+        ordered_synapse_ops.append(
+            {
+                "node_path": node_path,
+                "op": op,
+                "bind": str(item.get("bind", "")),
+                "shape": list(tensor.shape),
+            }
+        )
+
+    by_op: dict[str, Any] = {}
+    for kind in sorted(trace_kinds):
+        by_op[kind] = _pair_stats(
+            hf_trace.get(kind, []),
+            syn_trace.get(kind, []),
+            hf_meta=hf_trace_meta.get(kind, []),
+            syn_meta=syn_trace_meta.get(kind, []),
+            dtype_name=dtype,
+        )
+
+    return {
+        "axon_file": str(axon_path),
+        "weights": str(weights_path),
+        "hf_model_dir": str(resolved_hf_model_dir),
+        "device": str(resolved_device),
+        "dtype": dtype,
+        "layer_index": int(layer_index),
+        "prompts": prompts,
+        "hf_trace_counts": {kind: len(values) for kind, values in hf_trace.items()},
+        "syn_trace_counts": {kind: len(values) for kind, values in syn_trace.items()},
+        "by_op": by_op,
+        "ordered_synapse_ops": ordered_synapse_ops,
+    }
+
+
 def run_axon_op_parity(
     *,
     axon_file: Path,
@@ -635,6 +954,21 @@ def run_axon_op_parity(
     state_dict_paths = _resolve_safetensors_paths(weights_path)
     default_hf_dir = weights_path if weights_path.is_dir() else state_dict_paths[0].parent
     resolved_hf_model_dir = (hf_model_dir or default_hf_dir).resolve()
+    model_config = _augment_model_config_from_checkpoint(
+        model_dir=resolved_hf_model_dir,
+        safetensors_files=state_dict_paths,
+        model_config=_load_model_config(resolved_hf_model_dir),
+    )
+    effective_trust_remote_code = _should_trust_remote_code(
+        resolved_hf_model_dir,
+        model_config=model_config,
+    )
+    hf_config = _load_auto_config_with_compat_fallback(
+        resolved_hf_model_dir,
+        trust_remote_code=effective_trust_remote_code,
+    )
+    hf_config = _normalize_rope_numeric_fields(hf_config)
+    hf_loader_kind = _resolve_hf_loader_kind(hf_config)
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:
         for candidate in candidate_tokenizer_dirs(resolved_hf_model_dir):
@@ -651,6 +985,9 @@ def run_axon_op_parity(
         if not isinstance(loaded_dict, dict):
             raise ValueError("Lowered synapse spec did not produce a mapping")
         final_spec: dict[str, Any] = {str(k): v for k, v in loaded_dict.items()}
+        model_section = final_spec.get("model")
+        if isinstance(model_section, dict) and model_config is not None:
+            model_section["config"] = model_config
 
         results: list[dict[str, Any]] = []
         for dtype_name in resolved_dtypes:
@@ -666,6 +1003,9 @@ def run_axon_op_parity(
                 tokenizer_fallback=tokenizer_fallback,
                 prompts=prompts,
                 device=resolved_device,
+                hf_config=hf_config,
+                hf_loader_kind=hf_loader_kind,
+                trust_remote_code=effective_trust_remote_code,
             )
             results.append(result)
             logits = result.get("logits")

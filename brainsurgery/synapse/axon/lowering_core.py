@@ -398,7 +398,7 @@ def _with_scope(nodes: list[dict[str, Any]], scope: str | None) -> list[dict[str
     def _annotate_node_spec(node_spec: dict[str, Any]) -> dict[str, Any]:
         spec = dict(node_spec)
         op = spec.get("_op")
-        if isinstance(op, str) and "_scope" not in spec:
+        if isinstance(op, str) and "_scope" not in spec and "_abs_path" not in spec:
             spec["_scope"] = scope
         nested = spec.get("graph")
         if isinstance(nested, list):
@@ -946,7 +946,9 @@ def _lower_simple_call(
     pre_graph: list[dict[str, Any]] = []
     kwargs = _render_kwargs_for_call(kwargs_expr)
     effective_when = guard
-    effective_scope = ".".join(part for part in ctx.scope_stack if part)
+    effective_scope = _normalize_call_scope_for_runtime(
+        ctx, ".".join(part for part in ctx.scope_stack if part)
+    )
 
     resolved_args: list[str] = []
     for arg in args:
@@ -1017,21 +1019,6 @@ def _lower_simple_call(
     is_absolute_path = "@@" in callee
     if is_absolute_path:
         callee = callee.replace("@@", "@", 1)
-    if "@" in callee and ctx.scope_stack and not is_absolute_path:
-        scope_prefix = ".".join(part for part in ctx.scope_stack if part)
-        if scope_prefix:
-            parts = callee.split("@")
-            base = parts[0]
-            if ctx.block_signatures and base in ctx.block_signatures and len(parts) > 1:
-                scoped_paths = [
-                    f"{scope_prefix}.{param_path}" if param_path.strip() else scope_prefix
-                    for param_path in parts[1:]
-                ]
-                callee = "@".join([base, *scoped_paths])
-            else:
-                op_name_with_at, param_path = callee.split("@", 1)
-                scoped_path = f"{scope_prefix}.{param_path}" if param_path.strip() else scope_prefix
-                callee = f"{op_name_with_at}@{scoped_path}"
     op_name = _canonical_op_name(callee)
     kwargs = _normalize_call_kwargs(
         op_name=op_name,
@@ -1066,7 +1053,8 @@ def _lower_simple_call(
         for key, concrete_path in path_bindings.items():
             if key not in input_names:
                 raise ValueError(f"unknown block path parameter {key!r} for call {callee!r}")
-            provided[key] = repr(concrete_path)
+            concrete_value = f"@@{concrete_path}" if is_absolute_path else concrete_path
+            provided[key] = repr(concrete_value)
         if isinstance(ctx.block_param_shapes, dict):
             param_shapes = ctx.block_param_shapes.get(block_name, {})
         else:
@@ -1131,9 +1119,10 @@ def _lower_simple_call(
             ctx, ".".join(part for part in ctx.scope_stack if part)
         )
         if path_bindings:
-            # Path-bound calls already carry concrete path context in bound path args;
-            # avoid injecting an extra call scope layer that would double-prefix params.
-            node_spec["_scope"] = None
+            # Relative @path block calls still need the runtime lexical scope so bound
+            # relative parameter paths resolve under the current scope. Absolute @@path
+            # calls already carry their full path and must not be scope-prefixed again.
+            node_spec["_scope"] = None if is_absolute_path else call_scope
         elif call_scope:
             node_spec["_scope"] = call_scope
         else:
@@ -1142,12 +1131,12 @@ def _lower_simple_call(
             node_spec["_scope"] = None
         root_candidates = _current_param_roots(ctx)
         dynamic_root_expr = _current_dynamic_param_root(ctx)
-        if root_candidates != ("",):
-            node_spec["_param_roots"] = (
+        if dynamic_root_expr is not None:
+            node_spec["_param_root"] = dynamic_root_expr
+        elif root_candidates != ("",):
+            node_spec["_param_root"] = (
                 root_candidates[0] if len(root_candidates) == 1 else list(root_candidates)
             )
-        if dynamic_root_expr is not None:
-            node_spec["_param_root_expr"] = dynamic_root_expr
         node_spec["_bind"] = out_values[0] if len(out_values) == 1 else out_values
         for key, value in extra_kwargs.items():
             node_spec[key] = value
@@ -1182,7 +1171,6 @@ def _lower_simple_call(
             if not param_path.strip():
                 raise ValueError(f"invalid @ path in Axon call: {callee!r}")
             node_name = f"n_{ctx.fresh('op')}"
-            root_candidates = _current_param_roots(ctx)
             dynamic_root_expr = _current_dynamic_param_root(ctx)
             params: dict[str, str | list[str]] = {}
             for param_name in bound_params:
@@ -1197,16 +1185,19 @@ def _lower_simple_call(
                 else:
                     suffix = f"{param_path}.{param_name}"
                 if is_absolute_path:
-                    candidates = [suffix]
+                    concrete_node["_abs_path"] = param_path
+                    params[param_name] = explicit_token if isinstance(explicit_name, str) and explicit_name.strip() else param_name
                 else:
-                    candidates = [_join_dot(root, suffix) for root in root_candidates]
-                if len(candidates) == 1:
-                    params[param_name] = candidates[0]
-                else:
-                    params[param_name] = candidates
+                    params[param_name] = suffix
             concrete_node["_params"] = params
             if dynamic_root_expr is not None:
-                concrete_node["_param_root_expr"] = dynamic_root_expr
+                concrete_node["_param_root"] = dynamic_root_expr
+            else:
+                root_candidates = _current_param_roots(ctx)
+                if root_candidates != ("",):
+                    concrete_node["_param_root"] = (
+                        root_candidates[0] if len(root_candidates) == 1 else list(root_candidates)
+                    )
             nodes = _with_guard([{node_name: concrete_node}], effective_when)
             _record_last_dim_for_call(
                 callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx
@@ -1263,7 +1254,9 @@ def _lower_alias_or_const(
         }
     else:
         node = {"_op": "_ir_expr", "value": _expr_to_runtime_value(expr), "_bind": out}
-    effective_scope = ".".join(part for part in ctx.scope_stack if part)
+    effective_scope = _normalize_call_scope_for_runtime(
+        ctx, ".".join(part for part in ctx.scope_stack if part)
+    )
     if effective_scope:
         node["_scope"] = effective_scope
     return _with_guard([{node_name: node}], guard)
@@ -1389,7 +1382,9 @@ def _lower_expr(
             "_then_bind": _bind_field(then_binds),
             "_else_bind": _bind_field(else_binds),
         }
-        effective_scope = ".".join(part for part in ctx.scope_stack if part)
+        effective_scope = _normalize_call_scope_for_runtime(
+            ctx, ".".join(part for part in ctx.scope_stack if part)
+        )
         if effective_scope:
             node_spec["_scope"] = effective_scope
         return [*cond_graph, *(_with_scope([{node_name: node_spec}], effective_scope))]
@@ -1659,6 +1654,25 @@ def _extract_prelude_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple
     return aliases
 
 
+def _collect_imported_symbol_values(
+    module: AxonModule,
+    modules_by_name: dict[str, AxonModule] | None,
+) -> dict[str, Any]:
+    if not module.imported_members or not modules_by_name:
+        return {}
+    collected: dict[str, Any] = {}
+    for namespace, members in module.imported_members.items():
+        imported_module = modules_by_name.get(namespace)
+        if imported_module is None or not isinstance(imported_module.symbols, dict):
+            continue
+        for member in members:
+            if member in collected:
+                continue
+            if member in imported_module.symbols:
+                collected[member] = imported_module.symbols[member]
+    return collected
+
+
 def _new_lower_ctx(
     *,
     module: AxonModule,
@@ -1672,6 +1686,7 @@ def _new_lower_ctx(
     implicit_prelude_members: set[str] | None = None,
     prelude_aliases: dict[str, tuple[str, int]] | None = None,
     primitive_aliases: dict[str, tuple[str, int]] | None = None,
+    imported_symbol_values: dict[str, Any] | None = None,
 ) -> _LowerCtx:
     imported_member_namespaces: dict[str, set[str]] = {}
     if module.imported_members:
@@ -1685,6 +1700,9 @@ def _new_lower_ctx(
                 continue
             bucket = imported_member_namespaces.setdefault(member, set())
             bucket.add("Prelude")
+    symbol_values = dict(imported_symbol_values or {})
+    if isinstance(module.symbols, dict):
+        symbol_values.update(module.symbols)
     return _LowerCtx(
         block_signatures=signatures,
         block_path_params=block_path_params,
@@ -1702,8 +1720,8 @@ def _new_lower_ctx(
         primitive_aliases=dict(primitive_aliases or {}),
         current_module=module.name,
         param_names={param.name for param in module.params},
-        symbol_names=set(module.symbols.keys()) if isinstance(module.symbols, dict) else set(),
-        symbol_values=dict(module.symbols) if isinstance(module.symbols, dict) else {},
+        symbol_names=set(symbol_values.keys()),
+        symbol_values=symbol_values,
     )
 
 
@@ -1728,6 +1746,7 @@ def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
         block_output_shapes={module.name: _module_return_shapes(module, returns)},
         implicit_prelude_members=set(),
         prelude_aliases={},
+        imported_symbol_values={},
     )
 
     _lower_statements(
@@ -1779,8 +1798,12 @@ def _lower_statements(
     for stmt in statements:
         if isinstance(stmt, AxonRepeat):
             body_graph: list[dict[str, Any]] = []
+            base_loop_scope = stmt.name if isinstance(stmt.name, str) and stmt.name else ""
             loop_cover_prefix = ".".join(part for part in ctx.scope_stack if part)
-            ctx.loop_scope_cover_prefixes.append(loop_cover_prefix)
+            full_loop_scope = _join_dot(loop_cover_prefix, base_loop_scope)
+            ctx.loop_scope_cover_prefixes.append(full_loop_scope)
+            if base_loop_scope:
+                ctx.scope_stack.append(base_loop_scope)
             try:
                 _lower_statements(
                     statements=stmt.body,
@@ -1791,6 +1814,8 @@ def _lower_statements(
                     guard=guard,
                 )
             finally:
+                if base_loop_scope:
+                    ctx.scope_stack.pop()
                 ctx.loop_scope_cover_prefixes.pop()
             node_name = f"n_{ctx.fresh('for')}"
             base_loop_scope = stmt.name if isinstance(stmt.name, str) and stmt.name else node_name
@@ -1882,6 +1907,30 @@ def _as_concrete_path(value: Any) -> str | None:
         inner = token[1:-1].strip()
         return inner or None
     return token
+
+
+def _normalize_bound_params_on_node(node_spec: dict[str, Any], *, base_path: str) -> None:
+    explicit_params = node_spec.get("_params")
+    params = dict(explicit_params) if isinstance(explicit_params, dict) else {}
+    is_absolute = base_path.startswith("@@")
+    normalized_base = base_path[2:] if is_absolute else base_path
+    if is_absolute:
+        node_spec["_abs_path"] = normalized_base
+        node_spec.pop("_scope", None)
+    for param_name in _path_bound_param_names(node_spec):
+        explicit_value = params.get(param_name)
+        if isinstance(explicit_value, str) and explicit_value.strip():
+            token = explicit_value.strip()
+            if is_absolute and token.startswith("@@"):
+                token = token[2:]
+            if is_absolute:
+                params[param_name] = token or param_name
+            else:
+                params[param_name] = token if "." in token else f"{normalized_base}.{token}"
+            continue
+        params[param_name] = param_name if is_absolute else f"{normalized_base}.{param_name}"
+    node_spec["_params"] = params
+    node_spec.pop("param_base", None)
 
 
 def _sanitize_path_suffix(value: str) -> str:
@@ -2021,12 +2070,7 @@ def _resolve_paths_at_lowering_time(
 
         param_base = inlined.get("param_base")
         if isinstance(param_base, str):
-            explicit_params = inlined.get("_params")
-            params = dict(explicit_params) if isinstance(explicit_params, dict) else {}
-            for param_name in _path_bound_param_names(inlined):
-                params.setdefault(param_name, f"{param_base}.{param_name}")
-            inlined["_params"] = params
-            inlined.pop("param_base", None)
+            _normalize_bound_params_on_node(inlined, base_path=param_base)
 
         return inlined
 
@@ -2074,16 +2118,7 @@ def _resolve_paths_at_lowering_time(
             param_base = node_spec.get("param_base")
             if isinstance(param_base, str) and param_base in inherited_path_bindings:
                 base_path = inherited_path_bindings[param_base]
-                explicit_params = node_spec.get("_params")
-                params: dict[str, str]
-                if isinstance(explicit_params, dict):
-                    params = dict(explicit_params)
-                else:
-                    params = {}
-                for param_name in _path_bound_param_names(node_spec):
-                    params.setdefault(param_name, f"{base_path}.{param_name}")
-                node_spec["_params"] = params
-                node_spec.pop("param_base", None)
+                _normalize_bound_params_on_node(node_spec, base_path=base_path)
 
             if node_spec.get("_op") == "call":
                 target = node_spec.get("_target")
@@ -2294,6 +2329,7 @@ def lower_axon_program_to_synapse_spec(
             implicit_prelude_members=implicit_prelude_members,
             prelude_aliases=prelude_aliases,
             primitive_aliases=primitive_aliases,
+            imported_symbol_values=_collect_imported_symbol_values(main, by_name),
         ),
     )
     _ensure_outputs_from_returns(main_outputs, main_returns)
@@ -2331,6 +2367,7 @@ def lower_axon_program_to_synapse_spec(
                 implicit_prelude_members=implicit_prelude_members,
                 prelude_aliases=prelude_aliases,
                 primitive_aliases=primitive_aliases,
+                imported_symbol_values=_collect_imported_symbol_values(module, by_name),
             ),
         )
         _ensure_outputs_from_returns(block_outputs, block_returns)

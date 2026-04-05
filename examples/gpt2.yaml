@@ -1,6 +1,6 @@
 inputs:
   - models/gpt2/model.safetensors
-output: { path: models/test, shard: 100MB }
+output: { path: test, shard: 100MB }
 transforms:
   - help: diff
   - prefixes: { mode: list }

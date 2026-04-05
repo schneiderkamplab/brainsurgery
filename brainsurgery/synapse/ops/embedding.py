@@ -84,25 +84,25 @@ def compile(
     def assign_out_var(out_name: str) -> str:
         return emitter._assign_out_var(env, out_name)
 
-    def infer_param(param_name: str) -> str:
-        return emitter._infer_param_expr(node_spec, node_path_var, param_name)
-
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
     src = read(str(node_spec.get("_args")))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
+    weight = emitter._hoisted_param(
+        node_spec=node_spec,
+        node_path_var=node_path_var,
+        param_name="weight",
+        lines=lines,
+        indent=indent,
+    )
     scale_expr = node_spec.get("scale")
     if scale_expr is None:
-        lines.append(
-            f"{indent}{out_var} = F.embedding({src}, emitter._param({infer_param('weight')}))"
-        )
+        lines.append(f"{indent}{out_var} = F.embedding({src}, {weight})")
     else:
         scale = emitter._expr_code(scale_expr, env)
-        lines.append(
-            f"{indent}{out_var} = F.embedding({src}, emitter._param({infer_param('weight')}))"
-        )
+        lines.append(f"{indent}{out_var} = F.embedding({src}, {weight})")
         lines.append(
             f"{indent}{out_var} = {out_var} * torch.tensor(float({scale}), dtype={out_var}.dtype, device={out_var}.device)"
         )

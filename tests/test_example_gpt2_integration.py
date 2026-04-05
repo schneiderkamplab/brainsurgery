@@ -40,6 +40,7 @@ def test_download_gpt2_model_and_run_example_yaml(
     )
     assert isinstance(source_plan, dict)
     patched_plan = _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(source_plan)
+    patched_plan["output"] = {"path": str(tmp_path / "gpt2_out"), "shard": "100MB"}
     plan_path = tmp_path / "gpt2_integration.yaml"
     plan_path.write_text(OmegaConf.to_yaml(patched_plan, resolve=True), encoding="utf-8")
 
@@ -61,7 +62,7 @@ def test_download_gpt2_model_and_run_example_yaml(
         f"brainsurgery examples/gpt2.yaml failed\nstdout:\n{run.stdout}\nstderr:\n{run.stderr}"
     )
 
-    assert (repo_root / "models" / "test" / "model.safetensors.index.json").exists()
+    assert (tmp_path / "gpt2_out" / "model.safetensors.index.json").exists()
 
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])

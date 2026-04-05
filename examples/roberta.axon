@@ -41,5 +41,5 @@ roberta input_ids attn_mask = do
   logits <- scope@lm_head do
     x <- linear@dense x dim=D bias=true |> gelu
     x <- layernorm@layer_norm x eps=EPS weight=weight bias=bias
-    return linear@decoder x dim=V bias=true weight="roberta.embeddings.word_embeddings.weight" bias_path="lm_head.bias"
+    return linear@decoder x dim=V bias=true weight="@@roberta.embeddings.word_embeddings.weight" bias_path="@@lm_head.bias"
   return logits

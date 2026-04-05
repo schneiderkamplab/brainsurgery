@@ -26,6 +26,7 @@ LOWERING_ALLOWED_KWARGS: set[str] = {
     "short_factor",
     "max_context",
     "inv_freq_dtype",
+    "partial_rotary_factor",
 }
 LOWERING_REQUIRED_KWARGS: set[str] = {"position_ids"}
 LOWERING_KWARG_KINDS: dict[str, Any] = {
@@ -47,6 +48,7 @@ LOWERING_KWARG_KINDS: dict[str, Any] = {
     "short_factor": "any",
     "max_context": "dim",
     "inv_freq_dtype": "str",
+    "partial_rotary_factor": "number",
 }
 
 
@@ -224,7 +226,10 @@ def _apply_transformers_yarn_inv_freq(
 
 
 def _yarn_attention_factor(
-    *, scale_factor: float, mscale: float | None, mscale_all_dim: float | None
+    *,
+    scale_factor: float,
+    mscale: float | None,
+    mscale_all_dim: float | None,
 ) -> float:
     def _get_mscale(scale: float, value: float = 1.0) -> float:
         if scale <= 1.0:
@@ -254,6 +259,48 @@ def _quantize_inv_freq(inv_freq: torch.Tensor, raw_dtype: Any) -> torch.Tensor:
             "rope_pair.inv_freq_dtype must be one of: bfloat16, float16, float32, or empty"
         )
     return inv_freq.to(dtype=target_dtype).to(dtype=torch.float32)
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _build_base_inv_freq(
+    *,
+    q: torch.Tensor,
+    theta: float,
+    rotary_factor: float,
+    rope_mode: str,
+    scale_factor: float | None = None,
+) -> tuple[torch.Tensor, int]:
+    head_dim = int(q.shape[-1])
+    if rotary_factor <= 0.0 or rotary_factor > 1.0:
+        raise ValueError("rope_pair.partial_rotary_factor must be in (0, 1]")
+    rotary_dim = int(head_dim * rotary_factor)
+    if rotary_dim <= 0 or rotary_dim % 2 != 0:
+        raise ValueError("rope_pair rotary dimension must be positive and even")
+
+    if rope_mode == "proportional":
+        inv_freq = 1.0 / (
+            theta
+            ** (
+                torch.arange(0, rotary_dim, 2, device=q.device, dtype=torch.float32)
+                / float(head_dim)
+            )
+        )
+        if scale_factor is not None:
+            if scale_factor <= 0.0:
+                raise ValueError("rope_pair.scale_factor must be > 0")
+            inv_freq = inv_freq / float(scale_factor)
+        return inv_freq, rotary_dim
+
+    half = rotary_dim // 2
+    inv_freq = 1.0 / (
+        theta ** (torch.arange(0, half, device=q.device, dtype=torch.float32) / float(half))
+    )
+    return inv_freq, rotary_dim
 
 
 def interpret(
@@ -299,13 +346,25 @@ def interpret(
         raise ValueError("rope_pair.position_ids batch size must match q/k batch")
     if int(pos_ids.shape[1]) != int(q.shape[-2]):
         raise ValueError("rope_pair.position_ids width must match q/k sequence length")
-    half = q.shape[-1] // 2
-    inv_freq = 1.0 / (
-        theta ** (torch.arange(0, half, device=q.device, dtype=torch.float32) / float(half))
+    rope_mode = str(
+        model._eval_expr(node_spec.get("rope_mode", ""), env, symbols)
+    ).strip().lower()
+    rotary_factor = float(model._eval_expr(node_spec.get("partial_rotary_factor", 1.0), env, symbols))
+    proportional_scale_factor = None
+    if rope_mode == "proportional" and "scale_factor" in node_spec:
+        proportional_scale_factor = float(model._eval_expr(node_spec["scale_factor"], env, symbols))
+    inv_freq, rotary_dim = _build_base_inv_freq(
+        q=q,
+        theta=theta,
+        rotary_factor=rotary_factor,
+        rope_mode=rope_mode,
+        scale_factor=proportional_scale_factor,
     )
-    rope_mode = str(node_spec.get("rope_mode", "")).strip().lower()
+    half = rotary_dim // 2
     rope_attention_factor = attention_factor
-    if rope_mode in {"longrope", "su"} and all(
+    if rope_mode == "proportional":
+        pass
+    elif rope_mode in {"longrope", "su"} and all(
         key in node_spec
         for key in ("long_factor", "short_factor", "original_context", "max_context")
     ):
@@ -428,29 +487,53 @@ def interpret(
     if interleaved:
         cos = cos_half.unsqueeze(1)
         sin = sin_half.unsqueeze(1)
-        q_even = q[..., 0::2]
-        q_odd = q[..., 1::2]
-        k_even = k[..., 0::2]
-        k_odd = k[..., 1::2]
+        q_prefix = q[..., :rotary_dim]
+        k_prefix = k[..., :rotary_dim]
+        q_even = q_prefix[..., 0::2]
+        q_odd = q_prefix[..., 1::2]
+        k_even = k_prefix[..., 0::2]
+        k_odd = k_prefix[..., 1::2]
         q_rot_even = q_even * cos - q_odd * sin
         q_rot_odd = q_even * sin + q_odd * cos
         k_rot_even = k_even * cos - k_odd * sin
         k_rot_odd = k_even * sin + k_odd * cos
         q_rot = torch.empty_like(q)
         k_rot = torch.empty_like(k)
-        q_rot[..., 0::2] = q_rot_even
-        q_rot[..., 1::2] = q_rot_odd
-        k_rot[..., 0::2] = k_rot_even
-        k_rot[..., 1::2] = k_rot_odd
+        q_rot.copy_(q)
+        k_rot.copy_(k)
+        q_rot[..., :rotary_dim][..., 0::2] = q_rot_even
+        q_rot[..., :rotary_dim][..., 1::2] = q_rot_odd
+        k_rot[..., :rotary_dim][..., 0::2] = k_rot_even
+        k_rot[..., :rotary_dim][..., 1::2] = k_rot_odd
         env[outs[0]] = q_rot
         env[outs[1]] = k_rot
+    elif rope_mode == "proportional":
+        emb = torch.cat((ang, ang), dim=-1)
+        cos_full = (torch.cos(emb) * float(rope_attention_factor)).to(dtype=q.dtype).unsqueeze(1)
+        sin_full = (torch.sin(emb) * float(rope_attention_factor)).to(dtype=q.dtype).unsqueeze(1)
+        q_rotary = q[..., :rotary_dim]
+        k_rotary = k[..., :rotary_dim]
+        q_out = (q_rotary * cos_full) + (_rotate_half(q_rotary) * sin_full)
+        k_out = (k_rotary * cos_full) + (_rotate_half(k_rotary) * sin_full)
+        if rotary_dim < int(q.shape[-1]):
+            q_out = torch.cat([q_out, q[..., rotary_dim:]], dim=-1)
+            k_out = torch.cat([k_out, k[..., rotary_dim:]], dim=-1)
+        env[outs[0]] = q_out
+        env[outs[1]] = k_out
     else:
         cos = cos_half.unsqueeze(1)
         sin = sin_half.unsqueeze(1)
-        q1, q2 = q[..., :half], q[..., half : 2 * half]
-        k1, k2 = k[..., :half], k[..., half : 2 * half]
-        env[outs[0]] = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
-        env[outs[1]] = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
+        q_rotary = q[..., :rotary_dim]
+        k_rotary = k[..., :rotary_dim]
+        q1, q2 = q_rotary[..., :half], q_rotary[..., half : 2 * half]
+        k1, k2 = k_rotary[..., :half], k_rotary[..., half : 2 * half]
+        q_out = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
+        k_out = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
+        if rotary_dim < int(q.shape[-1]):
+            q_out = torch.cat([q_out, q[..., rotary_dim:]], dim=-1)
+            k_out = torch.cat([k_out, k[..., rotary_dim:]], dim=-1)
+        env[outs[0]] = q_out
+        env[outs[1]] = k_out
     return
 
 
@@ -479,6 +562,8 @@ def compile(
     k = read(str(ins[1]))
     q_out = assign_out_var(str(outs[0]))
     k_out = assign_out_var(str(outs[1]))
+    q_dst = q_out if q_out != q else emitter._fresh("q_rot")
+    k_dst = k_out if k_out != k else emitter._fresh("k_rot")
     theta = emitter._expr_code(node_spec.get("theta", 10000.0), env)
     attention_factor_expr = emitter._expr_code(node_spec.get("attention_factor", 1.0), env)
     scale_factor = emitter._expr_code(node_spec.get("scale_factor"), env)
@@ -492,7 +577,17 @@ def compile(
     long_factor_expr = emitter._expr_code(node_spec.get("long_factor"), env)
     short_factor_expr = emitter._expr_code(node_spec.get("short_factor"), env)
     max_context_expr = emitter._expr_code(node_spec.get("max_context"), env)
-    rope_mode = str(node_spec.get("rope_mode", "")).strip().lower()
+    rope_mode_raw = node_spec.get("rope_mode", "")
+    rope_mode = str(rope_mode_raw).strip().lower()
+    dynamic_rope_mode = isinstance(rope_mode_raw, str) and rope_mode not in {
+        "",
+        "proportional",
+        "longrope",
+        "su",
+        "llama3",
+        "yarn",
+        "hf_yarn",
+    }
     truncate = bool(node_spec.get("truncate", True))
     pos_name = node_spec.get("position_ids")
     if not isinstance(pos_name, str) or pos_name not in env:
@@ -512,6 +607,9 @@ def compile(
     k2 = emitter._fresh("k2")
     rope_attention_factor = emitter._fresh("rope_attention_factor")
     inv_freq_dtype = emitter._fresh("inv_freq_dtype")
+    rotary_factor = emitter._expr_code(node_spec.get("partial_rotary_factor", 1.0), env)
+    rotary_dim = emitter._fresh("rotary_dim")
+    rope_angles = emitter._fresh("rope_angles")
     interleaved = bool(node_spec.get("interleaved", False))
     lines.append(f"{indent}if {q}.ndim != 4 or {k}.ndim != 4:")
     lines.append(
@@ -529,14 +627,87 @@ def compile(
     lines.append(
         f"{indent}    raise ValueError('rope_pair expects q and k to have matching head dimension')"
     )
-    lines.append(f"{indent}{half} = {q}.shape[-1] // 2")
     lines.append(f"{indent}if int({q}.shape[-1]) % 2 != 0:")
     lines.append(f"{indent}    raise ValueError('rope_pair expects even head dimension')")
+    lines.append(f"{indent}if float({rotary_factor}) <= 0.0 or float({rotary_factor}) > 1.0:")
     lines.append(
-        f"{indent}{inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype=torch.float32) / float({half})))"
+        f"{indent}    raise ValueError('rope_pair.partial_rotary_factor must be in (0, 1]')"
     )
+    lines.append(f"{indent}{rotary_dim} = int(int({q}.shape[-1]) * float({rotary_factor}))")
+    lines.append(f"{indent}if int({rotary_dim}) <= 0 or int({rotary_dim}) % 2 != 0:")
+    lines.append(
+        f"{indent}    raise ValueError('rope_pair rotary dimension must be positive and even')"
+    )
+    if dynamic_rope_mode:
+        rope_mode_var = emitter._fresh("rope_mode")
+        rope_mode_expr = emitter._expr_code(rope_mode_raw, env)
+        inv_freq_rotated = emitter._fresh("inv_freq_rotated")
+        nope_angles = emitter._fresh("nope_angles")
+        lines.append(f"{indent}{rope_mode_var} = str({rope_mode_expr}).strip().lower()")
+        lines.append(f"{indent}if {rope_mode_var} == 'proportional':")
+        lines.append(f"{indent}    {rope_angles} = int({rotary_dim}) // 2")
+        lines.append(f"{indent}    {rotary_dim} = int({q}.shape[-1])")
+        lines.append(f"{indent}    {half} = int({rotary_dim}) // 2")
+        lines.append(
+            f"{indent}    {inv_freq_rotated} = 1.0 / (float({theta}) ** (torch.arange(0, 2 * {rope_angles}, 2, device={q}.device, dtype=torch.float32) / float(int({q}.shape[-1]))))"
+        )
+        lines.append(f"{indent}    {nope_angles} = int({q}.shape[-1]) // 2 - int({rope_angles})")
+        lines.append(f"{indent}    if int({nope_angles}) > 0:")
+        lines.append(
+            f"{indent}        {inv_freq} = torch.cat(({inv_freq_rotated}, torch.zeros(int({nope_angles}), dtype=torch.float32, device={q}.device)), dim=0)"
+        )
+        lines.append(f"{indent}    else:")
+        lines.append(f"{indent}        {inv_freq} = {inv_freq_rotated}")
+        if "scale_factor" in node_spec:
+            lines.append(f"{indent}    if float({scale_factor}) <= 0.0:")
+            lines.append(f"{indent}        raise ValueError('rope_pair.scale_factor must be > 0')")
+            lines.append(f"{indent}    {inv_freq} = {inv_freq} / float({scale_factor})")
+        lines.append(f"{indent}else:")
+        lines.append(f"{indent}    {half} = int({rotary_dim}) // 2")
+        lines.append(
+            f"{indent}    {inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype=torch.float32) / float({half})))"
+        )
+        if "scale_factor" in node_spec:
+            lines.append(f"{indent}    if float({scale_factor}) <= 0.0:")
+            lines.append(f"{indent}        raise ValueError('rope_pair.scale_factor must be > 0')")
+            lines.append(f"{indent}    {inv_freq} = {inv_freq} / float({scale_factor})")
+    elif rope_mode == "proportional":
+        inv_freq_rotated = emitter._fresh("inv_freq_rotated")
+        nope_angles = emitter._fresh("nope_angles")
+        lines.append(f"{indent}{rope_angles} = int({rotary_dim}) // 2")
+        lines.append(f"{indent}{rotary_dim} = int({q}.shape[-1])")
+        lines.append(f"{indent}{half} = int({rotary_dim}) // 2")
+        lines.append(
+            f"{indent}{inv_freq_rotated} = 1.0 / (float({theta}) ** (torch.arange(0, 2 * {rope_angles}, 2, device={q}.device, dtype=torch.float32) / float(int({q}.shape[-1]))))"
+        )
+        lines.append(f"{indent}{nope_angles} = int({q}.shape[-1]) // 2 - int({rope_angles})")
+        lines.append(f"{indent}if int({nope_angles}) > 0:")
+        lines.append(
+            f"{indent}    {inv_freq} = torch.cat(({inv_freq_rotated}, torch.zeros(int({nope_angles}), dtype=torch.float32, device={q}.device)), dim=0)"
+        )
+        lines.append(f"{indent}else:")
+        lines.append(f"{indent}    {inv_freq} = {inv_freq_rotated}")
+        if "scale_factor" in node_spec:
+            lines.append(f"{indent}if float({scale_factor}) <= 0.0:")
+            lines.append(f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0')")
+            lines.append(f"{indent}{inv_freq} = {inv_freq} / float({scale_factor})")
+    else:
+        lines.append(f"{indent}{half} = int({rotary_dim}) // 2")
+        lines.append(
+            f"{indent}{inv_freq} = 1.0 / (float({theta}) ** (torch.arange(0, {half}, device={q}.device, dtype=torch.float32) / float({half})))"
+        )
+        skip_base_scale = rope_mode == "hf_yarn" or all(
+            key in node_spec
+            for key in ("scale_factor", "low_freq_factor", "high_freq_factor", "original_context")
+        )
+        if "scale_factor" in node_spec and not skip_base_scale:
+            lines.append(f"{indent}if float({scale_factor}) <= 0.0:")
+            lines.append(f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0')")
+            lines.append(f"{indent}{inv_freq} = {inv_freq} / float({scale_factor})")
     lines.append(f"{indent}{rope_attention_factor} = float({attention_factor_expr})")
-    if rope_mode in {"longrope", "su"} and all(
+    if rope_mode == "proportional":
+        pass
+    elif rope_mode in {"longrope", "su"} and all(
         key in node_spec
         for key in ("long_factor", "short_factor", "original_context", "max_context")
     ):
@@ -665,13 +836,13 @@ def compile(
             lines.append(f"{indent}    {rope_attention_factor} = 1.0")
             lines.append(f"{indent}else:")
             lines.append(
-                f"{indent}    {mscale_term} = (0.1 * float({mscale_expr}) * math.log(float({scale_factor}))) + 1.0"
+                f"{indent}        {mscale_term} = (0.1 * float({mscale_expr}) * math.log(float({scale_factor}))) + 1.0"
             )
             lines.append(
-                f"{indent}    {mscale_all_dim_term} = (0.1 * float({mscale_all_dim_expr}) * math.log(float({scale_factor}))) + 1.0"
+                f"{indent}        {mscale_all_dim_term} = (0.1 * float({mscale_all_dim_expr}) * math.log(float({scale_factor}))) + 1.0"
             )
             lines.append(
-                f"{indent}    {rope_attention_factor} = float({mscale_term} / {mscale_all_dim_term})"
+                f"{indent}        {rope_attention_factor} = float({mscale_term} / {mscale_all_dim_term})"
             )
         else:
             lines.append(f"{indent}if float({scale_factor}) <= 1.0:")
@@ -764,10 +935,6 @@ def compile(
                 f"{indent}{is_medium} = (~({wavelen} < {high_freq_wavelen})) & (~({wavelen} > {low_freq_wavelen}))"
             )
             lines.append(f"{indent}{inv_freq} = torch.where({is_medium}, {smoothed}, {inv_scaled})")
-    elif "scale_factor" in node_spec:
-        lines.append(f"{indent}if float({scale_factor}) <= 0.0:")
-        lines.append(f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0')")
-        lines.append(f"{indent}{inv_freq} = {inv_freq} / float({scale_factor})")
     inv_freq_dtype_expr = emitter._expr_code(node_spec.get("inv_freq_dtype"), env)
     lines.append(
         f"{indent}{inv_freq_dtype} = ({inv_freq_dtype_expr}) if {'inv_freq_dtype' in node_spec} else None"
@@ -824,33 +991,138 @@ def compile(
         k_rot_odd = emitter._fresh("k_rot_odd")
         lines.append(f"{indent}{cos} = {cos_half}.unsqueeze(1)")
         lines.append(f"{indent}{sin} = {sin_half}.unsqueeze(1)")
-        lines.append(f"{indent}{q_even} = {q}[..., 0::2]")
-        lines.append(f"{indent}{q_odd} = {q}[..., 1::2]")
-        lines.append(f"{indent}{k_even} = {k}[..., 0::2]")
-        lines.append(f"{indent}{k_odd} = {k}[..., 1::2]")
+        lines.append(f"{indent}{q_even} = {q}[..., :int({rotary_dim})][..., 0::2]")
+        lines.append(f"{indent}{q_odd} = {q}[..., :int({rotary_dim})][..., 1::2]")
+        lines.append(f"{indent}{k_even} = {k}[..., :int({rotary_dim})][..., 0::2]")
+        lines.append(f"{indent}{k_odd} = {k}[..., :int({rotary_dim})][..., 1::2]")
         lines.append(f"{indent}{q_rot_even} = {q_even} * {cos} - {q_odd} * {sin}")
         lines.append(f"{indent}{q_rot_odd} = {q_even} * {sin} + {q_odd} * {cos}")
         lines.append(f"{indent}{k_rot_even} = {k_even} * {cos} - {k_odd} * {sin}")
         lines.append(f"{indent}{k_rot_odd} = {k_even} * {sin} + {k_odd} * {cos}")
-        lines.append(f"{indent}{q_out} = torch.empty_like({q})")
-        lines.append(f"{indent}{k_out} = torch.empty_like({k})")
-        lines.append(f"{indent}{q_out}[..., 0::2] = {q_rot_even}")
-        lines.append(f"{indent}{q_out}[..., 1::2] = {q_rot_odd}")
-        lines.append(f"{indent}{k_out}[..., 0::2] = {k_rot_even}")
-        lines.append(f"{indent}{k_out}[..., 1::2] = {k_rot_odd}")
+        lines.append(f"{indent}{q_dst} = torch.empty_like({q})")
+        lines.append(f"{indent}{k_dst} = torch.empty_like({k})")
+        lines.append(f"{indent}{q_dst}.copy_({q})")
+        lines.append(f"{indent}{k_dst}.copy_({k})")
+        lines.append(f"{indent}{q_dst}[..., :int({rotary_dim})][..., 0::2] = {q_rot_even}")
+        lines.append(f"{indent}{q_dst}[..., :int({rotary_dim})][..., 1::2] = {q_rot_odd}")
+        lines.append(f"{indent}{k_dst}[..., :int({rotary_dim})][..., 0::2] = {k_rot_even}")
+        lines.append(f"{indent}{k_dst}[..., :int({rotary_dim})][..., 1::2] = {k_rot_odd}")
+    elif dynamic_rope_mode:
+        rope_mode_var = emitter._fresh("rope_mode")
+        rope_mode_expr = emitter._expr_code(rope_mode_raw, env)
+        emb = emitter._fresh("emb")
+        cos_full = emitter._fresh("cos_full")
+        sin_full = emitter._fresh("sin_full")
+        q_rotary = emitter._fresh("q_rotary")
+        k_rotary = emitter._fresh("k_rotary")
+        q_rot_half = emitter._fresh("q_rot_half")
+        k_rot_half = emitter._fresh("k_rot_half")
+        lines.append(f"{indent}{rope_mode_var} = str({rope_mode_expr}).strip().lower()")
+        lines.append(f"{indent}if {rope_mode_var} == 'proportional':")
+        lines.append(f"{indent}    {emb} = torch.cat(({ang}, {ang}), dim=-1)")
+        lines.append(
+            f"{indent}    {cos_full} = (torch.cos({emb}) * float({rope_attention_factor})).to(dtype={q}.dtype).unsqueeze(1)"
+        )
+        lines.append(
+            f"{indent}    {sin_full} = (torch.sin({emb}) * float({rope_attention_factor})).to(dtype={q}.dtype).unsqueeze(1)"
+        )
+        lines.append(f"{indent}    {q_rotary} = {q}[..., :int({rotary_dim})]")
+        lines.append(f"{indent}    {k_rotary} = {k}[..., :int({rotary_dim})]")
+        lines.append(
+            f"{indent}    {q_rot_half} = torch.cat((-{q_rotary}[..., int({rotary_dim}) // 2 :], {q_rotary}[..., : int({rotary_dim}) // 2]), dim=-1)"
+        )
+        lines.append(
+            f"{indent}    {k_rot_half} = torch.cat((-{k_rotary}[..., int({rotary_dim}) // 2 :], {k_rotary}[..., : int({rotary_dim}) // 2]), dim=-1)"
+        )
+        lines.append(
+            f"{indent}    {q_dst} = ({q_rotary} * {cos_full}) + ({q_rot_half} * {sin_full})"
+        )
+        lines.append(
+            f"{indent}    {k_dst} = ({k_rotary} * {cos_full}) + ({k_rot_half} * {sin_full})"
+        )
+        lines.append(f"{indent}    if int({rotary_dim}) < int({q}.shape[-1]):")
+        lines.append(
+            f"{indent}        {q_dst} = torch.cat([{q_dst}, {q}[..., int({rotary_dim}):]], dim=-1)"
+        )
+        lines.append(
+            f"{indent}        {k_dst} = torch.cat([{k_dst}, {k}[..., int({rotary_dim}):]], dim=-1)"
+        )
+        lines.append(f"{indent}else:")
+        lines.append(f"{indent}    {cos} = {cos_half}.unsqueeze(1)")
+        lines.append(f"{indent}    {sin} = {sin_half}.unsqueeze(1)")
+        lines.append(f"{indent}    {q1} = {q}[..., :{half}]")
+        lines.append(f"{indent}    {q2} = {q}[..., {half}:int({rotary_dim})]")
+        lines.append(f"{indent}    {k1} = {k}[..., :{half}]")
+        lines.append(f"{indent}    {k2} = {k}[..., {half}:int({rotary_dim})]")
+        lines.append(
+            f"{indent}    {q_dst} = torch.cat([{q1} * {cos} - {q2} * {sin}, {q1} * {sin} + {q2} * {cos}], dim=-1)"
+        )
+        lines.append(
+            f"{indent}    {k_dst} = torch.cat([{k1} * {cos} - {k2} * {sin}, {k1} * {sin} + {k2} * {cos}], dim=-1)"
+        )
+        lines.append(f"{indent}    if int({rotary_dim}) < int({q}.shape[-1]):")
+        lines.append(
+            f"{indent}        {q_dst} = torch.cat([{q_dst}, {q}[..., int({rotary_dim}):]], dim=-1)"
+        )
+        lines.append(
+            f"{indent}        {k_dst} = torch.cat([{k_dst}, {k}[..., int({rotary_dim}):]], dim=-1)"
+        )
+    elif rope_mode == "proportional":
+        emb = emitter._fresh("emb")
+        cos_full = emitter._fresh("cos_full")
+        sin_full = emitter._fresh("sin_full")
+        q_rotary = emitter._fresh("q_rotary")
+        k_rotary = emitter._fresh("k_rotary")
+        q_rot_half = emitter._fresh("q_rot_half")
+        k_rot_half = emitter._fresh("k_rot_half")
+        lines.append(f"{indent}{emb} = torch.cat(({ang}, {ang}), dim=-1)")
+        lines.append(
+            f"{indent}{cos_full} = (torch.cos({emb}) * float({rope_attention_factor})).to(dtype={q}.dtype).unsqueeze(1)"
+        )
+        lines.append(
+            f"{indent}{sin_full} = (torch.sin({emb}) * float({rope_attention_factor})).to(dtype={q}.dtype).unsqueeze(1)"
+        )
+        lines.append(f"{indent}{q_rotary} = {q}[..., :int({rotary_dim})]")
+        lines.append(f"{indent}{k_rotary} = {k}[..., :int({rotary_dim})]")
+        lines.append(
+            f"{indent}{q_rot_half} = torch.cat((-{q_rotary}[..., int({rotary_dim}) // 2 :], {q_rotary}[..., : int({rotary_dim}) // 2]), dim=-1)"
+        )
+        lines.append(
+            f"{indent}{k_rot_half} = torch.cat((-{k_rotary}[..., int({rotary_dim}) // 2 :], {k_rotary}[..., : int({rotary_dim}) // 2]), dim=-1)"
+        )
+        lines.append(f"{indent}{q_dst} = ({q_rotary} * {cos_full}) + ({q_rot_half} * {sin_full})")
+        lines.append(f"{indent}{k_dst} = ({k_rotary} * {cos_full}) + ({k_rot_half} * {sin_full})")
+        lines.append(f"{indent}if int({rotary_dim}) < int({q}.shape[-1]):")
+        lines.append(
+            f"{indent}    {q_dst} = torch.cat([{q_dst}, {q}[..., int({rotary_dim}):]], dim=-1)"
+        )
+        lines.append(
+            f"{indent}    {k_dst} = torch.cat([{k_dst}, {k}[..., int({rotary_dim}):]], dim=-1)"
+        )
     else:
         lines.append(f"{indent}{cos} = {cos_half}.unsqueeze(1)")
         lines.append(f"{indent}{sin} = {sin_half}.unsqueeze(1)")
         lines.append(f"{indent}{q1} = {q}[..., :{half}]")
-        lines.append(f"{indent}{q2} = {q}[..., {half}: 2 * {half}]")
+        lines.append(f"{indent}{q2} = {q}[..., {half}:int({rotary_dim})]")
         lines.append(f"{indent}{k1} = {k}[..., :{half}]")
-        lines.append(f"{indent}{k2} = {k}[..., {half}: 2 * {half}]")
+        lines.append(f"{indent}{k2} = {k}[..., {half}:int({rotary_dim})]")
         lines.append(
-            f"{indent}{q_out} = torch.cat([{q1} * {cos} - {q2} * {sin}, {q1} * {sin} + {q2} * {cos}], dim=-1)"
+            f"{indent}{q_dst} = torch.cat([{q1} * {cos} - {q2} * {sin}, {q1} * {sin} + {q2} * {cos}], dim=-1)"
         )
         lines.append(
-            f"{indent}{k_out} = torch.cat([{k1} * {cos} - {k2} * {sin}, {k1} * {sin} + {k2} * {cos}], dim=-1)"
+            f"{indent}{k_dst} = torch.cat([{k1} * {cos} - {k2} * {sin}, {k1} * {sin} + {k2} * {cos}], dim=-1)"
         )
+        lines.append(f"{indent}if int({rotary_dim}) < int({q}.shape[-1]):")
+        lines.append(
+            f"{indent}    {q_dst} = torch.cat([{q_dst}, {q}[..., int({rotary_dim}):]], dim=-1)"
+        )
+        lines.append(
+            f"{indent}    {k_dst} = torch.cat([{k_dst}, {k}[..., int({rotary_dim}):]], dim=-1)"
+        )
+    if q_dst != q_out:
+        lines.append(f"{indent}{q_out} = {q_dst}")
+    if k_dst != k_out:
+        lines.append(f"{indent}{k_out} = {k_dst}")
     return lines
 
 

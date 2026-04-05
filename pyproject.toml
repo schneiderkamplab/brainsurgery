@@ -26,12 +26,13 @@ dependencies = [
     'rich',
     'safetensors',
     'torch',
+    'tiktoken',
     'tqdm',
     'typer'
 ]
 
 [project.optional-dependencies]
-dev = ["build", "mltiming", "mypy", "pre-commit", "pytest", "ruff", "transformers", "twine"]
+dev = ["build", "mltiming", "mypy", "pre-commit", "pytest", "ruff", "transformers>=5.5.0", "twine"]
 
 [project.urls]
 "Homepage" = "https://github.com/schneiderkamplab/brainsurgery"

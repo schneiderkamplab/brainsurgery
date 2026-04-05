@@ -7,6 +7,13 @@ import torch
 from transformers import AutoTokenizer
 
 
+def _looks_like_hf_repo_id(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    return "/" in normalized and " " not in normalized
+
+
 def load_tokenizer(
     tokenizer_source: str,
     *,
@@ -16,24 +23,51 @@ def load_tokenizer(
     candidate = Path(tokenizer_source).expanduser()
     if candidate.exists():
         source = str(candidate.resolve())
-        try:
-            return AutoTokenizer.from_pretrained(
-                source, local_files_only=True, trust_remote_code=trust_remote_code
+        local_attempts = [
+            {"local_files_only": True, "trust_remote_code": trust_remote_code},
+            {
+                "local_files_only": True,
+                "use_fast": False,
+                "trust_remote_code": trust_remote_code,
+            },
+        ]
+        if trust_remote_code:
+            local_attempts.extend(
+                [
+                    {"local_files_only": True, "trust_remote_code": False},
+                    {"local_files_only": True, "use_fast": False, "trust_remote_code": False},
+                ]
             )
-        except Exception:
-            return AutoTokenizer.from_pretrained(
-                source,
-                local_files_only=True,
-                use_fast=False,
-                trust_remote_code=trust_remote_code,
-            )
+        last_error: Exception | None = None
+        for kwargs in local_attempts:
+            try:
+                return AutoTokenizer.from_pretrained(source, **kwargs)
+            except Exception as exc:
+                last_error = exc
+        if _looks_like_hf_repo_id(fallback_repo_id) and fallback_repo_id != source:
+            try:
+                return AutoTokenizer.from_pretrained(
+                    fallback_repo_id,
+                    local_files_only=False,
+                    trust_remote_code=trust_remote_code,
+                )
+            except Exception:
+                return AutoTokenizer.from_pretrained(
+                    fallback_repo_id,
+                    local_files_only=False,
+                    use_fast=False,
+                    trust_remote_code=trust_remote_code,
+                )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Unable to load tokenizer from local path {source}")
 
     try:
         return AutoTokenizer.from_pretrained(
             tokenizer_source, local_files_only=False, trust_remote_code=trust_remote_code
         )
     except Exception:
-        if fallback_repo_id and fallback_repo_id != tokenizer_source:
+        if _looks_like_hf_repo_id(fallback_repo_id) and fallback_repo_id != tokenizer_source:
             try:
                 return AutoTokenizer.from_pretrained(
                     fallback_repo_id,

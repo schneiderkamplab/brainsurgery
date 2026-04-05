@@ -16,7 +16,10 @@ from .type_inference import (
 )
 
 _WORD_TOKEN_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
-_PARAM_INFER_RE = re.compile(r"_infer_param_(?:expr|path)\([^)]*?[\"']([A-Za-z0-9_]+)[\"']\)")
+_PARAM_INFER_RE = re.compile(
+    r"(?:_infer_param_(?:expr|path)|_hoisted_param(?:_path|_optional_param)?)"
+    r"\([^)]*?[\"']([A-Za-z0-9_]+)[\"']"
+)
 _INFER_PARAM_CALL_RE = re.compile(r"infer_param\([\"']([A-Za-z0-9_]+)[\"']\)")
 _PORT_TOKEN_RE = re.compile(r"[^0-9A-Za-z_]")
 _EXPECTS_ARGS_LIST_RE = re.compile(r"expects(?:\s+_args\s+as|\s+args)\s+\[([^\]]+)\]")

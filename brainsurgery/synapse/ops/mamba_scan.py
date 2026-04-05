@@ -191,9 +191,12 @@ def _resolve_interpret_inputs(
         return u, delta, a, b, c, d, state
 
     explicit_a = isinstance(node_spec.get("A"), str)
+    explicit_d = isinstance(node_spec.get("D"), str)
     a_param = "A" if explicit_a else ("A_log" if bool(node_spec.get("a_is_log", False)) else "A")
-    a_path = model._infer_param_path(node_spec, node_path=node_path, param_name=a_param)
-    d_path = model._infer_param_path(node_spec, node_path=node_path, param_name="D")
+    a_node_path = node_path if explicit_a else model._scope_of(node_path)
+    d_node_path = node_path if explicit_d else model._scope_of(node_path)
+    a_path = model._infer_param_path(node_spec, node_path=a_node_path, param_name=a_param)
+    d_path = model._infer_param_path(node_spec, node_path=d_node_path, param_name="D")
     a = model._state[a_path]
     if bool(node_spec.get("a_is_log", False)):
         a = -torch.exp(a.float())
@@ -266,8 +269,6 @@ def compile(
         a_param_name = (
             "A" if explicit_a else ("A_log" if bool(node_spec.get("a_is_log", False)) else "A")
         )
-        a_expr = emitter._infer_param_expr(node_spec, node_path_var, a_param_name)
-        d_expr = emitter._infer_param_expr(node_spec, node_path_var, "D")
         a = emitter._fresh("a")
         b = emitter._read_env_var(env, str(args[2]))
         c = emitter._read_env_var(env, str(args[3]))
@@ -299,10 +300,27 @@ def compile(
 
     lines: list[str] = []
     if len(args) in {4, 5}:
-        lines.append(f"{indent}{a} = emitter._param({a_expr})")
+        param_scope_expr = f"self._scope_of({node_path_var})"
+        a_param_node_path_var = node_path_var if explicit_a else param_scope_expr
+        d_param_node_path_var = node_path_var if isinstance(node_spec.get('D'), str) else param_scope_expr
+        a_value = emitter._hoisted_param(
+            node_spec=node_spec,
+            node_path_var=a_param_node_path_var,
+            param_name=a_param_name,
+            lines=lines,
+            indent=indent,
+        )
+        d_value = emitter._hoisted_param(
+            node_spec=node_spec,
+            node_path_var=d_param_node_path_var,
+            param_name="D",
+            lines=lines,
+            indent=indent,
+        )
+        lines.append(f"{indent}{a} = {a_value}")
         if bool(node_spec.get("a_is_log", False)):
             lines.append(f"{indent}{a} = -torch.exp({a}.float())")
-        lines.append(f"{indent}{d} = emitter._param({d_expr})")
+        lines.append(f"{indent}{d} = {d_value}")
     lines.extend(
         [
             f"{indent}if {u}.ndim != 3:",

@@ -30,7 +30,7 @@ ROPE_BETA_SLOW = Config.float "beta_slow" root="rope_scaling" default=1.0  -- Ya
 ROPE_MSCALE = Config.float "mscale" root="rope_scaling" default=0.707       -- YaRN mscale
 ROPE_MSCALE_ALL_DIM = Config.float "mscale_all_dim" root="rope_scaling" default=0.707 -- YaRN full-dim mscale
 ROPE_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=4096 -- YaRN training context
-ATTN_SCALE = 1.0 / sqrt QHD                                         -- qk scaling
+ATTN_SCALE = 1.0 / sqrt QHD -- match local HF DeepSeek implementation scaling
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS cast_float=true
@@ -123,9 +123,9 @@ deepseek_v2_lite_moe_block x pos_ids attn_mask past_kv = do
     routed <- zeros_like xn
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
-      gate <- _linear@@gate_proj x_sel dim=EM bias=false
-      up <- _linear@@up_proj x_sel dim=EM bias=false
-      x_upd <- gate |> silu |> mul up |> _linear@@down_proj dim=D bias=false
+      gate <- _linear@gate_proj x_sel dim=EM bias=false
+      up <- _linear@up_proj x_sel dim=EM bias=false
+      x_upd <- gate |> silu |> mul up |> _linear@down_proj dim=D bias=false
       routed <- MoE.scatter_add routed token_idx x_upd sel_scores
     return shared + routed
   return x + m, new_kv
@@ -153,9 +153,9 @@ deepseek_v2_lite_moe_mlp xn = do
   routed <- zeros_like xn
   for@experts e <- [0..E) do
     x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
-    gate <- _linear@@gate_proj x_sel dim=EM bias=false
-    up <- _linear@@up_proj x_sel dim=EM bias=false
-    x_upd <- gate |> silu |> mul up |> _linear@@down_proj dim=D bias=false
+    gate <- _linear@gate_proj x_sel dim=EM bias=false
+    up <- _linear@up_proj x_sel dim=EM bias=false
+    x_upd <- gate |> silu |> mul up |> _linear@down_proj dim=D bias=false
     routed <- MoE.scatter_add routed token_idx x_upd sel_scores
   return shared + routed
 
@@ -299,7 +299,7 @@ deepseek_v2_lite_layer26_topk_indices_stage input_ids attn_mask past_kv = do
     for@layers i <- [26..27) do
       past_i <- Cache.index past_kv i
       xn, _ <- deepseek_v2_lite_moe_post_attn_norm x pos_ids attn_mask past_i
-      topk_scores, topk_indices <- _linear@@mlp.gate xn dim=E bias=false |>
+      topk_scores, topk_indices <- _linear@mlp.gate xn dim=E bias=false |>
         softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1 sorted=false
       x <- topk_indices
     return x
@@ -319,7 +319,7 @@ deepseek_v2_lite_layer26_topk_scores_stage input_ids attn_mask past_kv = do
     for@layers i <- [26..27) do
       past_i <- Cache.index past_kv i
       xn, _ <- deepseek_v2_lite_moe_post_attn_norm x pos_ids attn_mask past_i
-      topk_scores, topk_indices <- _linear@@mlp.gate xn dim=E bias=false |>
+      topk_scores, topk_indices <- _linear@mlp.gate xn dim=E bias=false |>
         softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1 sorted=false
       x <- topk_scores
     return x
@@ -336,7 +336,7 @@ deepseek_v2_lite_layer1_moe_topk_scores_stage input_ids attn_mask past_kv = do
     for@layers i <- [1..2) do
       past_i <- Cache.index past_kv i
       xn, _ <- deepseek_v2_lite_moe_post_attn_norm x pos_ids attn_mask past_i
-      topk_scores, topk_indices <- _linear@@mlp.gate xn dim=E bias=false |>
+      topk_scores, topk_indices <- _linear@mlp.gate xn dim=E bias=false |>
         softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1 sorted=false
       x <- topk_scores
     return x
@@ -353,7 +353,7 @@ deepseek_v2_lite_layer1_moe_topk_indices_stage input_ids attn_mask past_kv = do
     for@layers i <- [1..2) do
       past_i <- Cache.index past_kv i
       xn, _ <- deepseek_v2_lite_moe_post_attn_norm x pos_ids attn_mask past_i
-      topk_scores, topk_indices <- _linear@@mlp.gate xn dim=E bias=false |>
+      topk_scores, topk_indices <- _linear@mlp.gate xn dim=E bias=false |>
         softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1 sorted=false
       x <- topk_indices
     return x
@@ -390,11 +390,11 @@ deepseek_v2_lite_layer26_moe_output_stage input_ids attn_mask past_kv = do
     for@layers i <- [26..27) do
       past_i <- Cache.index past_kv i
       xn, _ <- deepseek_v2_lite_moe_post_attn_norm x pos_ids attn_mask past_i
-      shared_gate <- _linear@@mlp.shared_experts.gate_proj xn dim=(EM * SE) bias=false
-      shared_up <- _linear@@mlp.shared_experts.up_proj xn dim=(EM * SE) bias=false
+      shared_gate <- _linear@mlp.shared_experts.gate_proj xn dim=(EM * SE) bias=false
+      shared_up <- _linear@mlp.shared_experts.up_proj xn dim=(EM * SE) bias=false
       shared <- shared_gate |> silu |> mul shared_up |>
-        _linear@@mlp.shared_experts.down_proj dim=D bias=false
-      topk_scores, topk_indices <- _linear@@mlp.gate xn dim=E bias=false |>
+        _linear@mlp.shared_experts.down_proj dim=D bias=false
+      topk_scores, topk_indices <- _linear@mlp.gate xn dim=E bias=false |>
         softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1 sorted=false
       routed <- zeros_like xn
       for@mlp.experts e <- [0..E) do

@@ -178,8 +178,6 @@ def compile(
     else:
         raise ValueError(f"Unsupported causal_conv1d activation: {act_name!r}")
 
-    weight_expr = emitter._infer_param_expr(node_spec, node_path_var, "weight")
-    bias_expr = emitter._infer_param_expr(node_spec, node_path_var, "bias")
     weight = emitter._fresh("w")
     bias = emitter._fresh("b")
     x_t = emitter._fresh("x_t")
@@ -193,40 +191,58 @@ def compile(
     lines = [
         f"{indent}if not torch.is_tensor({x}) or {x}.ndim != 3:",
         f"{indent}    raise ValueError('causal_conv1d expects input x shape [batch, seq, channels]')",
-        f"{indent}{weight} = emitter._param({weight_expr})",
-        f"{indent}{bias} = self._state.get({bias_expr})",
-        f"{indent}if int({weight}.ndim) != 3:",
-        f"{indent}    raise ValueError('causal_conv1d weight must have shape [channels, 1, kernel]')",
-        f"{indent}{channels} = int({x}.shape[2])",
-        f"{indent}if int({weight}.shape[0]) != {channels} or int({weight}.shape[1]) != 1:",
-        f"{indent}    raise ValueError('causal_conv1d weight shape must be [channels, 1, kernel] matching input')",
-        f"{indent}if {bias} is not None and ({bias}.ndim != 1 or int({bias}.shape[0]) != {channels}):",
-        f"{indent}    raise ValueError('causal_conv1d bias must have shape [channels]')",
-        f"{indent}{x_t} = {x}.transpose(1, 2).contiguous()",
-        f"{indent}{kernel} = int({weight}.shape[-1])",
-        f"{indent}{use_decode} = ({state_in} is not None and int({x}.shape[1]) == 1)",
-        f"{indent}if {use_decode}:",
-        f"{indent}    if (not torch.is_tensor({state_in})) or {state_in}.ndim != 3:",
-        f"{indent}        raise ValueError('causal_conv1d state must be [batch, channels, kernel]')",
-        f"{indent}    if tuple({state_in}.shape) != (int({x}.shape[0]), {channels}, {kernel}):",
-        f"{indent}        raise ValueError('causal_conv1d state shape mismatch')",
-        f"{indent}    {state} = torch.roll({state_in}, shifts=-1, dims=-1)",
-        f"{indent}    {state}[:, :, -1] = {x_t}[:, :, 0]",
-        f"{indent}    {y_t} = torch.sum({state} * {weight}[:, 0, :], dim=-1)",
-        f"{indent}    if {bias} is not None:",
-        f"{indent}        {y_t} = {y_t} + {bias}",
-        f"{indent}    {y_out} = {act_fn}({y_t}).unsqueeze(1)",
-        f"{indent}    {new_state} = {state}",
-        f"{indent}else:",
-        f"{indent}    {y_t} = F.conv1d({x_t}, {weight}, bias={bias}, stride=1, padding={kernel} - 1, groups={channels})",
-        f"{indent}    {y_t} = {y_t}[..., : int({x_t}.shape[-1])]",
-        f"{indent}    {y_t} = {act_fn}({y_t})",
-        f"{indent}    {y_out} = {y_t}.transpose(1, 2).contiguous()",
-        f"{indent}    if int({x_t}.shape[-1]) >= {kernel}:",
-        f"{indent}        {new_state} = {x_t}[..., int({x_t}.shape[-1]) - {kernel}:]",
-        f"{indent}    else:",
-        f"{indent}        {new_state} = F.pad({x_t}, ({kernel} - int({x_t}.shape[-1]), 0))",
     ]
+    weight_value = emitter._hoisted_param(
+        node_spec=node_spec,
+        node_path_var=node_path_var,
+        param_name="weight",
+        lines=lines,
+        indent=indent,
+    )
+    bias_value = emitter._hoisted_optional_param(
+        node_spec=node_spec,
+        node_path_var=node_path_var,
+        param_name="bias",
+        lines=lines,
+        indent=indent,
+    )
+    lines.extend(
+        [
+            f"{indent}{weight} = {weight_value}",
+            f"{indent}{bias} = {bias_value}",
+            f"{indent}if int({weight}.ndim) != 3:",
+            f"{indent}    raise ValueError('causal_conv1d weight must have shape [channels, 1, kernel]')",
+            f"{indent}{channels} = int({x}.shape[2])",
+            f"{indent}if int({weight}.shape[0]) != {channels} or int({weight}.shape[1]) != 1:",
+            f"{indent}    raise ValueError('causal_conv1d weight shape must be [channels, 1, kernel] matching input')",
+            f"{indent}if {bias} is not None and ({bias}.ndim != 1 or int({bias}.shape[0]) != {channels}):",
+            f"{indent}    raise ValueError('causal_conv1d bias must have shape [channels]')",
+            f"{indent}{x_t} = {x}.transpose(1, 2).contiguous()",
+            f"{indent}{kernel} = int({weight}.shape[-1])",
+            f"{indent}{use_decode} = ({state_in} is not None and int({x}.shape[1]) == 1)",
+            f"{indent}if {use_decode}:",
+            f"{indent}    if (not torch.is_tensor({state_in})) or {state_in}.ndim != 3:",
+            f"{indent}        raise ValueError('causal_conv1d state must be [batch, channels, kernel]')",
+            f"{indent}    if tuple({state_in}.shape) != (int({x}.shape[0]), {channels}, {kernel}):",
+            f"{indent}        raise ValueError('causal_conv1d state shape mismatch')",
+            f"{indent}    {state} = torch.roll({state_in}, shifts=-1, dims=-1)",
+            f"{indent}    {state}[:, :, -1] = {x_t}[:, :, 0]",
+            f"{indent}    {y_t} = torch.sum({state} * {weight}[:, 0, :], dim=-1)",
+            f"{indent}    if {bias} is not None:",
+            f"{indent}        {y_t} = {y_t} + {bias}",
+            f"{indent}    {y_out} = {act_fn}({y_t}).unsqueeze(1)",
+            f"{indent}    {new_state} = {state}",
+            f"{indent}else:",
+            f"{indent}    {y_t} = F.conv1d({x_t}, {weight}, bias={bias}, stride=1, padding={kernel} - 1, groups={channels})",
+            f"{indent}    {y_t} = {y_t}[..., : int({x_t}.shape[-1])]",
+            f"{indent}    {y_t} = {act_fn}({y_t})",
+            f"{indent}    {y_out} = {y_t}.transpose(1, 2).contiguous()",
+            f"{indent}    if int({x_t}.shape[-1]) >= {kernel}:",
+            f"{indent}        {new_state} = {x_t}[..., int({x_t}.shape[-1]) - {kernel}:]",
+            f"{indent}    else:",
+            f"{indent}        {new_state} = F.pad({x_t}, ({kernel} - int({x_t}.shape[-1]), 0))",
+        ]
+    )
     if state_out is not None:
         lines.append(f"{indent}{state_out} = {new_state}")
     return lines

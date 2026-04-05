@@ -346,11 +346,11 @@ class SynapseProgramModel(nn.Module):
             if isinstance(param_base, str) and isinstance(env.get(param_base), str):
                 exec_node_spec = dict(node_spec)
                 exec_node_spec[param_base] = env[param_base]
-            param_root_expr = node_spec.get("_param_root_expr")
-            if param_root_expr is not None:
+            param_root_value = node_spec.get("_param_root")
+            if isinstance(param_root_value, dict):
                 if exec_node_spec is node_spec:
                     exec_node_spec = dict(node_spec)
-                resolved_param_root = self._eval_expr(param_root_expr, env, symbols)
+                resolved_param_root = self._eval_expr(param_root_value, env, symbols)
                 exec_node_spec["_param_root"] = (
                     resolved_param_root if isinstance(resolved_param_root, str) else ""
                 )
@@ -414,23 +414,22 @@ class SynapseProgramModel(nn.Module):
         raw_scope = node_spec.get("_scope")
         if isinstance(raw_scope, str) and raw_scope:
             call_scope = self._join(scope, raw_scope)
-        raw_param_roots = node_spec.get("_param_roots")
-        raw_param_root_expr = node_spec.get("_param_root_expr")
+        raw_param_root = node_spec.get("_param_root")
         pushed_roots: list[str] | None = None
-        if raw_param_root_expr is not None:
-            resolved_root = self._eval_expr(raw_param_root_expr, env, symbols)
+        if isinstance(raw_param_root, dict):
+            resolved_root = self._eval_expr(raw_param_root, env, symbols)
             if isinstance(resolved_root, str):
                 pushed_roots = [resolved_root]
                 self._param_roots_stack.append(pushed_roots)
-        elif isinstance(raw_param_roots, str):
-            pushed_roots = [raw_param_roots]
+        elif isinstance(raw_param_root, str):
+            pushed_roots = [raw_param_root]
             self._param_roots_stack.append(pushed_roots)
         elif (
-            isinstance(raw_param_roots, list)
-            and bool(raw_param_roots)
-            and all(isinstance(item, str) for item in raw_param_roots)
+            isinstance(raw_param_root, list)
+            and bool(raw_param_root)
+            and all(isinstance(item, str) for item in raw_param_root)
         ):
-            pushed_roots = list(raw_param_roots)
+            pushed_roots = list(raw_param_root)
             self._param_roots_stack.append(pushed_roots)
         try:
             self._run_graph(
@@ -541,12 +540,22 @@ class SynapseProgramModel(nn.Module):
     def _infer_param_path(
         self, node_spec: dict[str, Any], *, node_path: str, param_name: str
     ) -> str:
+        def _effective_scope() -> str:
+            abs_path = node_spec.get("_abs_path")
+            if isinstance(abs_path, str) and abs_path:
+                return abs_path
+            ambient_scope = self._scope_of(node_path)
+            explicit_scope = node_spec.get("_scope")
+            if isinstance(explicit_scope, str) and explicit_scope:
+                return self._join(ambient_scope, explicit_scope)
+            return ambient_scope
+
         def _join_root(root: str, scoped: str) -> str:
-            if root:
-                if scoped == root or scoped.startswith(f"{root}."):
-                    return scoped
-                return self._join(root, scoped)
-            return scoped
+            if not root:
+                return scoped
+            if not scoped:
+                return root
+            return self._join(root, scoped)
 
         def _current_roots() -> list[str]:
             roots = list(self._param_roots_stack[-1]) if self._param_roots_stack else [""]
@@ -554,33 +563,18 @@ class SynapseProgramModel(nn.Module):
             if isinstance(direct_root, str):
                 composed: list[str] = []
                 for root in roots:
-                    if not direct_root:
-                        composed.append(root)
-                    elif root == direct_root or root.startswith(f"{direct_root}."):
-                        composed.append(root)
-                    else:
-                        composed.append(_join_root(root, direct_root))
+                    composed.append(_join_root(root, direct_root))
                 roots = composed
             return roots
 
         def _explicit_candidates(raw_path: str) -> list[str]:
-            roots = _current_roots()
             if raw_path.startswith("@@"):
                 absolute = raw_path[2:]
                 if not absolute:
                     return []
-                absolute_candidates: list[str] = []
-                for candidate in [_join_root(root, absolute) for root in roots]:
-                    if candidate not in absolute_candidates:
-                        absolute_candidates.append(candidate)
-                if absolute not in absolute_candidates:
-                    absolute_candidates.append(absolute)
-                scope_prefix = self._scope_of(node_path)
-                scoped_absolute = self._join(scope_prefix, absolute)
-                if scoped_absolute and scoped_absolute not in absolute_candidates:
-                    absolute_candidates.append(scoped_absolute)
-                return absolute_candidates
-            scope_prefix = self._scope_of(node_path)
+                return [absolute]
+            roots = _current_roots()
+            scope_prefix = _effective_scope()
             scoped = self._join(scope_prefix, raw_path)
             scoped = scoped if scoped else raw_path
             scoped_candidates: list[str] = []
@@ -621,7 +615,7 @@ class SynapseProgramModel(nn.Module):
         if isinstance(param_base, str):
             base_resolved = node_spec.get(param_base)
             base = base_resolved if isinstance(base_resolved, str) else param_base
-            scoped_base = self._join(self._scope_of(node_path), base)
+            scoped_base = self._join(_effective_scope(), base)
             scoped_param = f"{scoped_base}.{param_name}" if scoped_base else param_name
             return _pick_scoped_candidate(scoped_param)
         explicit_params = node_spec.get("_params")
@@ -950,6 +944,9 @@ class SynapseProgramModel(nn.Module):
         if not right:
             return left
         return f"{left}.{right}"
+
+    def _join_scope(self, left: str, right: str) -> str:
+        return self._join(left, right)
 
     def _scope_of(self, node_path: str) -> str:
         if "." not in node_path:

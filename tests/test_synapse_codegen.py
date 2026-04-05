@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from brainsurgery.synapse import (
     render_synapse_spec_to_dot,
 )
 from brainsurgery.synapse.ops import linear as linear_op
+from brainsurgery.synapse.runtime import SynapseProgramModel
 
 
 def _spec_dict() -> dict[str, object]:
@@ -105,7 +107,7 @@ def test_emit_model_code_from_synapse_spec_generic() -> None:
     assert "def generate(self, input_ids: torch.Tensor" in source
 
 
-def test_generated_model_resolves_double_at_params_under_current_param_root() -> None:
+def test_generated_model_keeps_double_at_params_absolute_under_current_param_root() -> None:
     source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="RootedDoubleAt")
     namespace: dict[str, object] = {}
     exec(source, namespace)
@@ -115,13 +117,11 @@ def test_generated_model_resolves_double_at_params_under_current_param_root() ->
     )
     model._param_roots_stack.append(["mlp.experts.0"])
 
-    assert (
-        model._pick_param_from_single("", "@@gate_proj.weight") == "mlp.experts.0.gate_proj.weight"
-    )
-    assert model._pick_param_path("", ["@@gate_proj.weight"]) == "mlp.experts.0.gate_proj.weight"
+    assert model._pick_param_from_single("ignored.scope", "@@gate_proj.weight") == "gate_proj.weight"
+    assert model._pick_param_path("ignored.scope", ["@@gate_proj.weight"]) == "gate_proj.weight"
 
 
-def test_generated_model_resolves_double_at_params_from_scope_when_absolute_missing() -> None:
+def test_generated_model_keeps_double_at_params_absolute_under_scope() -> None:
     source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="ScopedDoubleAt")
     namespace: dict[str, object] = {}
     exec(source, namespace)
@@ -130,14 +130,104 @@ def test_generated_model_resolves_double_at_params_from_scope_when_absolute_miss
         state_dict={"mlp.experts.0.gate_proj.weight": torch.ones(1, 1, dtype=torch.float32)}
     )
 
-    assert (
-        model._pick_param_from_single("mlp.experts.0", "@@gate_proj.weight")
-        == "mlp.experts.0.gate_proj.weight"
-    )
-    assert (
-        model._pick_param_path("mlp.experts.0", ["@@gate_proj.weight"])
-        == "mlp.experts.0.gate_proj.weight"
-    )
+    assert model._pick_param_from_single("mlp.experts.0", "@@gate_proj.weight") == "gate_proj.weight"
+    assert model._pick_param_path("mlp.experts.0", ["@@gate_proj.weight"]) == "gate_proj.weight"
+
+
+def test_generated_rope_pair_hf_yarn_matches_runtime() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {
+                "q": {"optional": False},
+                "k": {"optional": False},
+                "pos_ids": {"optional": False},
+            },
+            "graph": [
+                {
+                    "rope": {
+                        "_op": "rope_pair",
+                        "_bind": ["q_out", "k_out"],
+                        "_args": ["q", "k"],
+                        "position_ids": "pos_ids",
+                        "theta": 150000.0,
+                        "scale_factor": 32.0,
+                        "low_freq_factor": 1.0,
+                        "high_freq_factor": 32.0,
+                        "original_context": 4096,
+                        "attention_factor": 1.3465735902799727,
+                        "rope_mode": "hf_yarn",
+                        "truncate": False,
+                    }
+                }
+            ],
+            "outputs": {"q_out": "q_out", "k_out": "k_out"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="GeneratedRopePairHfYarn")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)
+    model_cls = namespace["GeneratedRopePairHfYarn"]
+
+    runtime = SynapseProgramModel.from_spec(spec).eval()
+    generated = model_cls.from_state_dict({}).eval()  # type: ignore[operator]
+
+    torch.manual_seed(0)
+    q = torch.randn(1, 64, 5, 64, dtype=torch.float32)
+    k = torch.randn(1, 8, 5, 64, dtype=torch.float32)
+    pos_ids = torch.arange(5, dtype=torch.int64).unsqueeze(0)
+
+    with torch.no_grad():
+        runtime_out = runtime(q=q, k=k, pos_ids=pos_ids)
+        generated_out = generated(q=q, k=k, pos_ids=pos_ids)
+
+    assert torch.allclose(runtime_out["q_out"], generated_out["q_out"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(runtime_out["k_out"], generated_out["k_out"], atol=1e-5, rtol=1e-5)
+
+
+def test_generated_rope_pair_plain_scale_factor_matches_runtime() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {
+                "q": {"optional": False},
+                "k": {"optional": False},
+                "pos_ids": {"optional": False},
+            },
+            "graph": [
+                {
+                    "rope": {
+                        "_op": "rope_pair",
+                        "_bind": ["q_out", "k_out"],
+                        "_args": ["q", "k"],
+                        "position_ids": "pos_ids",
+                        "theta": 1_000_000.0,
+                        "scale_factor": 8.0,
+                    }
+                }
+            ],
+            "outputs": {"q_out": "q_out", "k_out": "k_out"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="GeneratedRopePairScaleOnly")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)
+    model_cls = namespace["GeneratedRopePairScaleOnly"]
+
+    runtime = SynapseProgramModel.from_spec(spec).eval()
+    generated = model_cls.from_state_dict({}).eval()  # type: ignore[operator]
+
+    torch.manual_seed(0)
+    q = torch.randn(1, 4, 5, 64, dtype=torch.float32)
+    k = torch.randn(1, 4, 5, 64, dtype=torch.float32)
+    pos_ids = torch.arange(5, dtype=torch.int64).unsqueeze(0)
+
+    with torch.no_grad():
+        runtime_out = runtime(q=q, k=k, pos_ids=pos_ids)
+        generated_out = generated(q=q, k=k, pos_ids=pos_ids)
+
+    assert torch.allclose(runtime_out["q_out"], generated_out["q_out"], atol=1e-5, rtol=1e-5)
+    assert torch.allclose(runtime_out["k_out"], generated_out["k_out"], atol=1e-5, rtol=1e-5)
 
 
 def test_linear_op_keeps_node_path_for_double_at_weights() -> None:
@@ -1506,7 +1596,7 @@ def test_generated_params_primitives_detect_and_select_param_root() -> None:
     assert out["root"] == "language_model"
 
 
-def test_generated_param_root_expr_guides_parameter_resolution() -> None:
+def test_generated_param_root_guides_parameter_resolution() -> None:
     spec = {
         "synapse": 1,
         "model": {
@@ -1519,7 +1609,7 @@ def test_generated_param_root_expr_guides_parameter_resolution() -> None:
                         "_args": "x",
                         "_bind": "y",
                         "_params": {"weight": "proj.weight", "bias": "proj.bias"},
-                        "_param_root_expr": {"_expr": "name", "id": "root"},
+                        "_param_root": {"_expr": "name", "id": "root"},
                     }
                 },
             ],
@@ -1537,6 +1627,75 @@ def test_generated_param_root_expr_guides_parameter_resolution() -> None:
     )
     out = model(x=torch.tensor([[1.0, 2.0]], dtype=torch.float32))
     assert torch.equal(out["y"], torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+
+
+def test_generated_param_root_from_select_supports_linear_trace_codegen() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "has_root": {
+                        "_op": "params_has_root",
+                        "_args": "language_model",
+                        "_bind": "has_lm",
+                    }
+                },
+                {
+                    "root_select": {
+                        "_op": "select",
+                        "_bind": "root",
+                        "cond": "has_lm",
+                        "_then_bind": "root_then",
+                        "_else_bind": "root_else",
+                        "_then": [
+                            {
+                                "then_value": {
+                                    "_op": "_ir_expr",
+                                    "_bind": "root_then",
+                                    "value": "'language_model'",
+                                }
+                            }
+                        ],
+                        "_else": [
+                            {
+                                "else_value": {
+                                    "_op": "_ir_expr",
+                                    "_bind": "root_else",
+                                    "value": "''",
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "proj": {
+                        "_op": "linear",
+                        "_args": "x",
+                        "_bind": "y",
+                        "_params": {"weight": "proj.weight", "bias": "proj.bias"},
+                        "_param_root": {"_expr": "name", "id": "root"},
+                        "bias": True,
+                    }
+                },
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="ParamRootSelectTraceModel")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - generated test code
+    model = namespace["ParamRootSelectTraceModel"](
+        state_dict={
+            "language_model.proj.weight": torch.eye(2, dtype=torch.float32),
+            "language_model.proj.bias": torch.zeros(2, dtype=torch.float32),
+        }
+    )
+    model._trace_enabled = True
+    out = model(x=torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+    assert torch.equal(out["y"], torch.tensor([[1.0, 2.0]], dtype=torch.float32))
+    assert model.trace_ops[-1]["weight_path"] == "language_model.proj.weight"
 
 
 def test_generated_model_prefers_existing_param_candidate_path() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import math
 from typing import Any
 
 from omegaconf import OmegaConf
@@ -42,7 +43,11 @@ def emit_model_code_from_synapse_spec(
         raise ValueError("spec.model must be a mapping")
 
     symbols_raw = model.get("symbols", {})
-    symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, (int, float, bool))}
+    symbols = {
+        k: v
+        for k, v in symbols_raw.items()
+        if isinstance(v, (int, float, bool, str))
+    }
 
     emitter = _Emitter(class_name=class_name, spec=normalized_spec, symbols=symbols)
     return emitter.render()
@@ -50,7 +55,7 @@ def emit_model_code_from_synapse_spec(
 
 class _Emitter:
     def __init__(
-        self, *, class_name: str, spec: dict[str, Any], symbols: dict[str, int | float | bool]
+        self, *, class_name: str, spec: dict[str, Any], symbols: dict[str, int | float | bool | str]
     ) -> None:
         self.class_name = class_name
         self.spec = spec
@@ -59,6 +64,8 @@ class _Emitter:
         self.symbols = symbols
         self._counter = 0
         self._active_env: dict[str, str] = {}
+        self._active_scope_var: str | None = None
+        self._node_hoists: dict[tuple[str, str], str] = {}
 
     def render(self) -> str:
         lines: list[str] = []
@@ -75,6 +82,9 @@ class _Emitter:
                 "from torch import nn",
                 "from torch.nn import functional as F",
                 "",
+                "inf = float('inf')",
+                "nan = float('nan')",
+                "",
                 "",
                 f"class {self.class_name}(nn.Module):",
                 "    def __init__(self, state_dict: dict[str, torch.Tensor] | None = None, runtime_state_dict: Any | None = None) -> None:",
@@ -82,7 +92,7 @@ class _Emitter:
                 "        self._state: dict[str, torch.Tensor] = {}",
                 "        self._runtime_state_dict = runtime_state_dict",
                 "        self._param_roots_stack: list[list[str]] = []",
-                f"        self._symbols: dict[str, int | float | bool] = {repr(self.symbols)}",
+                f"        self._symbols: dict[str, int | float | bool | str] = {repr(self.symbols)}",
                 "        self._trace_enabled = False",
                 "        self.trace_ops: list[dict[str, Any]] = []",
                 "        if state_dict is not None:",
@@ -114,6 +124,15 @@ class _Emitter:
                 "            return ''",
                 "        return node_path.rsplit('.', 1)[0]",
                 "",
+                "    def _node_scope(self, ambient_scope: str, explicit_scope: str | None = None, abs_path: str | None = None) -> str:",
+                "        if isinstance(abs_path, str) and abs_path:",
+                "            return abs_path",
+                "        if not isinstance(ambient_scope, str):",
+                "            ambient_scope = ''",
+                "        if isinstance(explicit_scope, str) and explicit_scope:",
+                "            return self._join_scope(ambient_scope, explicit_scope)",
+                "        return ambient_scope",
+                "",
                 "    def _pick_param_path(self, scope: str, candidates: list[str], extra_root: str | None = None) -> str:",
                 "        scoped: list[str] = []",
                 "        for candidate in candidates:",
@@ -122,10 +141,7 @@ class _Emitter:
                 "            if candidate.startswith('@@'):",
                 "                absolute = candidate[2:]",
                 "                if absolute:",
-                "                    for root in self._current_param_roots(extra_root=extra_root):",
-                "                        scoped.append(self._join_scope(root, absolute))",
                 "                    scoped.append(absolute)",
-                "                    scoped.append(self._join_scope(scope, absolute))",
                 "                continue",
                 "            base = self._join_scope(scope, candidate)",
                 "            for root in self._current_param_roots(extra_root=extra_root):",
@@ -149,9 +165,9 @@ class _Emitter:
                 "        if isinstance(extra_root, str):",
                 "            composed: list[str] = []",
                 "            for root in base_roots:",
-                "                if not extra_root:",
-                "                    composed.append(root)",
-                "                elif root == extra_root or root.startswith(extra_root + '.'):",
+                "                if not root:",
+                "                    composed.append(extra_root)",
+                "                elif not extra_root:",
                 "                    composed.append(root)",
                 "                else:",
                 "                    composed.append(self._join_scope(root, extra_root))",
@@ -163,15 +179,7 @@ class _Emitter:
                 "            absolute = candidate[2:]",
                 "            if not absolute:",
                 "                raise ValueError('absolute parameter path cannot be empty')",
-                "            resolved: list[str] = []",
-                "            for root in self._current_param_roots(extra_root=extra_root):",
-                "                resolved.append(self._join_scope(root, absolute))",
-                "            resolved.append(absolute)",
-                "            resolved.append(self._join_scope(scope, absolute))",
-                "            for item in resolved:",
-                "                if item in self._state:",
-                "                    return item",
-                "            return resolved[0]",
+                "            return absolute",
                 "        resolved: list[str] = []",
                 "        base = self._join_scope(scope, candidate)",
                 "        for root in self._current_param_roots(extra_root=extra_root):",
@@ -180,6 +188,28 @@ class _Emitter:
                 "            if item in self._state:",
                 "                return item",
                 "        return resolved[0]",
+                "",
+                "    def _infer_param_path(self, node_spec: dict[str, Any], *, node_path: str, param_name: str) -> str:",
+                "        abs_path = node_spec.get('_abs_path')",
+                "        if isinstance(abs_path, str) and abs_path:",
+                "            scope = abs_path",
+                "        else:",
+                "            ambient_scope = self._scope_of(node_path)",
+                "            explicit_scope = node_spec.get('_scope')",
+                "            scope = self._node_scope(ambient_scope, explicit_scope if isinstance(explicit_scope, str) else None, None)",
+                "        direct_root = node_spec.get('_param_root')",
+                "        extra_root = direct_root if isinstance(direct_root, str) else None",
+                "        explicit_params = node_spec.get('_params')",
+                "        if isinstance(explicit_params, dict):",
+                "            explicit = explicit_params.get(param_name)",
+                "            if isinstance(explicit, str):",
+                "                return self._pick_param_from_single(scope, explicit, extra_root=extra_root)",
+                "            if isinstance(explicit, list) and all(isinstance(item, str) for item in explicit):",
+                "                return self._pick_param_path(scope, explicit, extra_root=extra_root)",
+                "        candidate = node_spec.get(param_name)",
+                "        if isinstance(candidate, str):",
+                "            return self._pick_param_from_single(scope, candidate, extra_root=extra_root)",
+                "        return self._pick_param_from_single(scope, param_name, extra_root=extra_root)",
                 "",
                 "    def _expr_config_root(self) -> dict[str, Any]:",
                 f"        model = {repr(self.model)}",
@@ -326,19 +356,22 @@ class _Emitter:
                 "    def _reset_trace(self) -> None:",
                 "        self.trace_ops = []",
                 "",
-                "    def _trace_op(self, node_path: str, op: str, bind: str, value: Any) -> None:",
+                "    def _trace_op(self, node_path: str, op: str, bind: str, value: Any, **meta: Any) -> None:",
                 "        if not bool(getattr(self, '_trace_enabled', False)):",
                 "            return",
                 "        tensor = self._first_tensor(value)",
                 "        if tensor is None:",
                 "            return",
-                "        self.trace_ops.append({",
+                "        payload = {",
                 "            'node_path': str(node_path),",
                 "            'op': str(op),",
                 "            'bind': str(bind),",
                 "            'dtype': str(tensor.dtype),",
                 "            'tensor': tensor.detach().float().cpu(),",
-                "        })",
+                "        }",
+                "        for key, item in meta.items():",
+                "            payload[str(key)] = item",
+                "        self.trace_ops.append(payload)",
                 "",
                 "    def _record_runtime_value(self, key: str, value: Any) -> None:",
                 "        runtime_state_dict = self._runtime_state_dict",
@@ -704,8 +737,14 @@ class _Emitter:
             for out_name in self._node_output_names(node_spec):
                 _out_var = env.get(out_name)
                 if isinstance(_out_var, str):
+                    trace_extra = ""
+                    if op == "linear":
+                        weight_expr = self._infer_param_expr(
+                            node_spec, node_path, "weight", env=env, scope_var=scope_var
+                        )
+                        trace_extra = f", weight_path={weight_expr}"
                     lines.append(
-                        f"{inner_indent}self._trace_op({trace_node_path}, {op!r}, {out_name!r}, {_out_var})"
+                        f"{inner_indent}self._trace_op({trace_node_path}, {op!r}, {out_name!r}, {_out_var}{trace_extra})"
                     )
                     lines.append(
                         f"{inner_indent}self._record_runtime_value(f'{{{trace_node_path}}}::{out_name}', {_out_var})"
@@ -808,28 +847,27 @@ class _Emitter:
         else:
             call_line = f"{indent}{', '.join(tmp_vars)} = self._block_{self._py_name(block_name)}({call_args})"
 
-        raw_param_roots = node_spec.get("_param_roots")
-        raw_param_root_expr = node_spec.get("_param_root_expr")
+        raw_param_root = node_spec.get("_param_root")
         push_roots = False
         pushed_literal: list[str] | None = None
         pushed_expr_var: str | None = None
-        if raw_param_root_expr is not None:
+        if raw_param_root is not None and not isinstance(raw_param_root, (str, list)):
             pushed_expr_var = self._fresh("param_root")
-            root_expr_code = self._expr_code(raw_param_root_expr, env)
+            root_expr_code = self._expr_code(raw_param_root, env)
             lines.append(f"{indent}{pushed_expr_var} = {root_expr_code}")
             lines.append(f"{indent}if not isinstance({pushed_expr_var}, str):")
             lines.append(f"{indent}    {pushed_expr_var} = ''")
             push_roots = True
-        elif isinstance(raw_param_roots, str):
+        elif isinstance(raw_param_root, str):
             push_roots = True
-            pushed_literal = [raw_param_roots]
+            pushed_literal = [raw_param_root]
         elif (
-            isinstance(raw_param_roots, list)
-            and bool(raw_param_roots)
-            and all(isinstance(item, str) for item in raw_param_roots)
+            isinstance(raw_param_root, list)
+            and bool(raw_param_root)
+            and all(isinstance(item, str) for item in raw_param_root)
         ):
             push_roots = True
-            pushed_literal = list(raw_param_roots)
+            pushed_literal = list(raw_param_root)
         if push_roots:
             if pushed_expr_var is not None:
                 lines.append(f"{indent}self._param_roots_stack.append([{pushed_expr_var}])")
@@ -864,7 +902,11 @@ class _Emitter:
         if op_module is None:
             raise NotImplementedError(f"Unsupported op in codegen compiler: {op}")
         prev_env = self._active_env
+        prev_scope_var = self._active_scope_var
+        prev_hoists = self._node_hoists
         self._active_env = env
+        self._active_scope_var = scope_var
+        self._node_hoists = {}
         try:
             return op_module.compile(
                 self,
@@ -876,6 +918,8 @@ class _Emitter:
             )
         finally:
             self._active_env = prev_env
+            self._active_scope_var = prev_scope_var
+            self._node_hoists = prev_hoists
 
     def _assign_out_var(self, env: dict[str, str], out_name: str) -> str:
         existing = env.get(out_name)
@@ -886,19 +930,41 @@ class _Emitter:
         return out_var
 
     def _infer_param_expr(
-        self, node_spec: dict[str, Any], node_path_var: str, param_name: str
+        self,
+        node_spec: dict[str, Any],
+        node_path_var: str,
+        param_name: str,
+        *,
+        env: dict[str, str] | None = None,
+        scope_var: str | None = None,
     ) -> str:
+        expr_env = self._active_env if env is None else env
+        ambient_scope_expr = (
+            scope_var
+            if isinstance(scope_var, str)
+            else self._active_scope_var
+            if isinstance(self._active_scope_var, str)
+            else node_path_var
+        )
         extra_root_expr: str | None = None
-        if "_param_root_expr" in node_spec:
-            extra_root_expr = self._expr_code(node_spec["_param_root_expr"], self._active_env)
-        elif isinstance(node_spec.get("_param_root"), str):
-            extra_root_expr = repr(node_spec["_param_root"])
+        if "_param_root" in node_spec:
+            raw_root = node_spec["_param_root"]
+            if isinstance(raw_root, str):
+                extra_root_expr = repr(raw_root)
+            else:
+                extra_root_expr = self._expr_code(raw_root, expr_env)
         extra_root_code = extra_root_expr if extra_root_expr is not None else "None"
+        explicit_scope = node_spec.get("_scope")
+        explicit_scope_code = repr(explicit_scope) if isinstance(explicit_scope, str) else "None"
+        abs_path = node_spec.get("_abs_path")
+        abs_path_code = repr(abs_path) if isinstance(abs_path, str) else "None"
+        scope_expr = (
+            f"self._node_scope({ambient_scope_expr}, {explicit_scope_code}, {abs_path_code})"
+        )
         param_base = node_spec.get("param_base")
         if isinstance(param_base, str):
-            scope_expr = f"self._scope_of({node_path_var})"
-            if param_base in self._active_env:
-                base_expr = self._active_env[param_base]
+            if param_base in expr_env:
+                base_expr = expr_env[param_base]
                 return (
                     "self._pick_param_from_single("
                     f"{scope_expr}, self._join_scope({base_expr}, {param_name!r}), "
@@ -923,22 +989,98 @@ class _Emitter:
             if isinstance(explicit, str):
                 return (
                     "self._pick_param_from_single("
-                    f"self._scope_of({node_path_var}), {explicit!r}, extra_root={extra_root_code})"
+                    f"{scope_expr}, {explicit!r}, extra_root={extra_root_code})"
                 )
             if isinstance(explicit, list) and all(isinstance(item, str) for item in explicit):
                 return (
                     "self._pick_param_path("
-                    f"self._scope_of({node_path_var}), {explicit!r}, extra_root={extra_root_code})"
+                    f"{scope_expr}, {explicit!r}, extra_root={extra_root_code})"
                 )
         if isinstance(node_spec.get(param_name), str):
             candidate = node_spec[param_name]
             return (
                 "self._pick_param_from_single("
-                f"self._scope_of({node_path_var}), {candidate!r}, extra_root={extra_root_code})"
+                f"{scope_expr}, {candidate!r}, extra_root={extra_root_code})"
             )
         return (
             "self._pick_param_from_single("
             f"{node_path_var}, {param_name!r}, extra_root={extra_root_code})"
+        )
+
+    def _hoist_expr(self, *, kind: str, key: str, expr: str, lines: list[str], indent: str) -> str:
+        cache_key = (kind, key)
+        existing = self._node_hoists.get(cache_key)
+        if isinstance(existing, str):
+            return existing
+        var = self._fresh(kind)
+        lines.append(f"{indent}{var} = {expr}")
+        self._node_hoists[cache_key] = var
+        return var
+
+    def _hoisted_param_path(
+        self,
+        *,
+        node_spec: dict[str, Any],
+        node_path_var: str,
+        param_name: str,
+        lines: list[str],
+        indent: str,
+    ) -> str:
+        expr = self._infer_param_expr(node_spec, node_path_var, param_name)
+        return self._hoist_expr(
+            kind="param_path",
+            key=f"{param_name}:{expr}",
+            expr=expr,
+            lines=lines,
+            indent=indent,
+        )
+
+    def _hoisted_param(
+        self,
+        *,
+        node_spec: dict[str, Any],
+        node_path_var: str,
+        param_name: str,
+        lines: list[str],
+        indent: str,
+    ) -> str:
+        path_var = self._hoisted_param_path(
+            node_spec=node_spec,
+            node_path_var=node_path_var,
+            param_name=param_name,
+            lines=lines,
+            indent=indent,
+        )
+        return self._hoist_expr(
+            kind="param_tensor",
+            key=f"required:{path_var}",
+            expr=f"emitter._param({path_var})",
+            lines=lines,
+            indent=indent,
+        )
+
+    def _hoisted_optional_param(
+        self,
+        *,
+        node_spec: dict[str, Any],
+        node_path_var: str,
+        param_name: str,
+        lines: list[str],
+        indent: str,
+    ) -> str:
+        path_var = self._hoisted_param_path(
+            node_spec=node_spec,
+            node_path_var=node_path_var,
+            param_name=param_name,
+            lines=lines,
+            indent=indent,
+        )
+        return self._hoist_expr(
+            kind="param_tensor_opt",
+            key=f"optional:{path_var}",
+            expr=f"self._state.get({path_var})",
+            lines=lines,
+            indent=indent,
         )
 
     def _read_env_var(self, env: dict[str, str], name: str) -> str:
@@ -950,6 +1092,11 @@ class _Emitter:
         if expr is None:
             return "None"
         if isinstance(expr, (int, float, bool)):
+            if isinstance(expr, float):
+                if math.isinf(expr):
+                    return "float('inf')" if expr > 0 else "float('-inf')"
+                if math.isnan(expr):
+                    return "float('nan')"
             return repr(expr)
         if isinstance(expr, list):
             items = ", ".join(self._expr_code(item, env) for item in expr)

@@ -157,9 +157,21 @@ def compile(
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     eps = emitter._expr_code(node_spec.get("eps", 1e-5), env)
-    w = f"emitter._param({emitter._infer_param_expr(node_spec, node_path_var, 'weight')})"
+    w = emitter._hoisted_param(
+        node_spec=node_spec,
+        node_path_var=node_path_var,
+        param_name="weight",
+        lines=lines,
+        indent=indent,
+    )
     if _layernorm_has_bias(node_spec):
-        b = f"emitter._param({emitter._infer_param_expr(node_spec, node_path_var, 'bias')})"
+        b = emitter._hoisted_param(
+            node_spec=node_spec,
+            node_path_var=node_path_var,
+            param_name="bias",
+            lines=lines,
+            indent=indent,
+        )
         b_fp32 = f"{b}.float()"
     else:
         b = "None"

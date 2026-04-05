@@ -38,5 +38,5 @@ bert input_ids attn_mask = do
   logits <- scope@cls.predictions do
     x <- linear@transform.dense x dim=D bias=true |> gelu
     x <- layernorm@transform.LayerNorm x eps=EPS weight=gamma bias=beta
-    return linear@decoder x dim=V bias=true weight="bert.embeddings.word_embeddings.weight" bias_path="cls.predictions.bias"
+    return linear@decoder x dim=V bias=true weight="@@bert.embeddings.word_embeddings.weight" bias_path="@@cls.predictions.bias"
   return logits

@@ -96,11 +96,12 @@ def _validate_inputs(
 def _infer_path(
     model: Any, node_spec: dict[str, Any], *, node_path: str, key: str, fallback: str
 ) -> str:
+    override = dict(node_spec)
     if key in node_spec and isinstance(node_spec[key], str):
-        override = dict(node_spec)
         override[key] = str(node_spec[key])
-        return model._infer_param_path(override, node_path=node_path, param_name=key)
-    return model._join(model._scope_of(node_path), fallback)
+    else:
+        override[key] = fallback
+    return model._infer_param_path(override, node_path=node_path, param_name=key)
 
 
 def _run_grouped_moe(
@@ -258,28 +259,28 @@ def interpret(
         node_spec,
         node_path=node_path,
         key="gate_up_weight",
-        fallback="mlp.experts.gate_up_proj.weight",
+        fallback="experts.gate_up_proj.weight",
     )
     gate_up_bias_path = _infer_path(
         model,
         node_spec,
         node_path=node_path,
         key="gate_up_bias",
-        fallback="mlp.experts.gate_up_proj.bias",
+        fallback="experts.gate_up_proj.bias",
     )
     down_weight_path = _infer_path(
         model,
         node_spec,
         node_path=node_path,
         key="down_weight",
-        fallback="mlp.experts.down_proj.weight",
+        fallback="experts.down_proj.weight",
     )
     down_bias_path = _infer_path(
         model,
         node_spec,
         node_path=node_path,
         key="down_bias",
-        fallback="mlp.experts.down_proj.bias",
+        fallback="experts.down_proj.bias",
     )
 
     gate_up_weight = model._state[gate_up_weight_path]
@@ -323,9 +324,12 @@ def compile(
         return emitter._read_env_var(env, name)
 
     def infer_param(key: str, fallback: str) -> str:
+        override = dict(node_spec)
         if key in node_spec and isinstance(node_spec[key], str):
-            return emitter._infer_param_expr(node_spec, node_path_var, key)
-        return f"self._join_scope(self._scope_of({node_path_var}), {fallback!r})"
+            override[key] = str(node_spec[key])
+        else:
+            override[key] = fallback
+        return emitter._infer_param_expr(override, node_path_var, key)
 
     ins, out_name = _resolve_inputs_and_output(node_spec, strict_out=False)
     hidden = read(ins[0])
@@ -345,197 +349,102 @@ def compile(
     hidden_flat = emitter._fresh("hidden_flat")
     topk_scores_flat = emitter._fresh("topk_scores_flat")
     topk_indices_flat = emitter._fresh("topk_indices_flat")
-    num_tokens = emitter._fresh("num_tokens")
-    hidden_dim = emitter._fresh("hidden_dim")
-    num_top_k = emitter._fresh("num_top_k")
-    num_experts = emitter._fresh("num_experts")
-    token_idx = emitter._fresh("token_idx")
-    sample_weights = emitter._fresh("sample_weights")
-    expert_ids = emitter._fresh("expert_ids")
-    selected_hidden = emitter._fresh("selected_hidden")
-    perm = emitter._fresh("perm")
-    inv_perm = emitter._fresh("inv_perm")
-    expert_ids_g = emitter._fresh("expert_ids_g")
-    sample_weights_g = emitter._fresh("sample_weights_g")
-    selected_hidden_g = emitter._fresh("selected_hidden_g")
-    histc_input = emitter._fresh("histc_input")
-    tokens_per_expert = emitter._fresh("tokens_per_expert")
-    offsets = emitter._fresh("offsets")
     gate_up_weight = emitter._fresh("gate_up_weight")
     gate_up_bias = emitter._fresh("gate_up_bias")
     down_weight = emitter._fresh("down_weight")
     down_bias = emitter._fresh("down_bias")
-    up_bias = emitter._fresh("up_bias")
-    down_bias_g = emitter._fresh("down_bias_g")
-    proj = emitter._fresh("proj")
-    gate = emitter._fresh("gate")
-    up = emitter._fresh("up")
-    down = emitter._fresh("down")
-    weighted = emitter._fresh("weighted")
-    token_idx_g = emitter._fresh("token_idx_g")
+    alpha = emitter._fresh("alpha")
+    limit = emitter._fresh("limit")
     final_hidden = emitter._fresh("final_hidden")
-    start = emitter._fresh("start")
-    end = emitter._fresh("end")
-    out_mm = emitter._fresh("out_mm")
 
-    gate_up_weight_expr = infer_param("gate_up_weight", "mlp.experts.gate_up_proj.weight")
-    gate_up_bias_expr = infer_param("gate_up_bias", "mlp.experts.gate_up_proj.bias")
-    down_weight_expr = infer_param("down_weight", "mlp.experts.down_proj.weight")
-    down_bias_expr = infer_param("down_bias", "mlp.experts.down_proj.bias")
-
-    lines.append(f"{indent}{hidden_flat} = {hidden}.reshape(-1, {hidden}.shape[-1])")
-    lines.append(f"{indent}{topk_scores_flat} = {topk_scores}.reshape(-1, {topk_scores}.shape[-1])")
     lines.append(
-        f"{indent}{topk_indices_flat} = {topk_indices}.reshape(-1, {topk_indices}.shape[-1])"
-    )
-    lines.append(f"{indent}{num_tokens} = int({hidden_flat}.shape[0])")
-    lines.append(f"{indent}{hidden_dim} = int({hidden_flat}.shape[-1])")
-    lines.append(f"{indent}{num_top_k} = int({topk_indices_flat}.shape[-1])")
-    lines.append(f"{indent}{gate_up_weight} = self._param({gate_up_weight_expr})")
-    lines.append(
-        f"{indent}{gate_up_bias} = self._state.get({gate_up_bias_expr}) if {has_bias!r} else None"
-    )
-    lines.append(f"{indent}{down_weight} = self._param({down_weight_expr})")
-    lines.append(
-        f"{indent}{down_bias} = self._state.get({down_bias_expr}) if {has_bias!r} else None"
-    )
-    lines.append(f"{indent}{num_experts} = int({gate_up_weight}.shape[0])")
-    lines.append(
-        f"{indent}{token_idx} = torch.arange({num_tokens}, device={hidden_flat}.device).unsqueeze(1).expand(-1, {num_top_k}).reshape(-1)"
-    )
-    lines.append(f"{indent}{sample_weights} = {topk_scores_flat}.reshape(-1)")
-    lines.append(f"{indent}{expert_ids} = {topk_indices_flat}.reshape(-1)")
-    lines.append(f"{indent}if {expert_ids}.numel() != 0:")
-    lines.append(
-        f"{indent}    if int({expert_ids}.min()) < 0 or int({expert_ids}.max()) >= {num_experts}:"
+        f"{indent}from brainsurgery.synapse.ops import moe_grouped_ffn as _moe_grouped_ffn_mod"
     )
     lines.append(
-        f'{indent}        raise ValueError(f"moe_grouped_ffn topk_indices contains out-of-range expert ids for 0..{{{num_experts} - 1}}")'
+        f"{indent}{hidden_flat}, {topk_scores_flat}, {topk_indices_flat} = _moe_grouped_ffn_mod._validate_inputs({hidden}, {topk_scores}, {topk_indices})"
     )
-    lines.append(f"{indent}{selected_hidden} = {hidden_flat}[{token_idx}]")
-    lines.append(f"{indent}{perm} = torch.argsort({expert_ids})")
-    lines.append(f"{indent}{inv_perm} = torch.empty_like({perm})")
+    gate_up_weight_expr = infer_param("gate_up_weight", "experts.gate_up_proj.weight")
+    gate_up_bias_expr = infer_param("gate_up_bias", "experts.gate_up_proj.bias")
+    down_weight_expr = infer_param("down_weight", "experts.down_proj.weight")
+    down_bias_expr = infer_param("down_bias", "experts.down_proj.bias")
+    gate_up_weight_path = emitter._hoist_expr(
+        kind="param_path",
+        key=f"gate_up_weight:{gate_up_weight_expr}",
+        expr=gate_up_weight_expr,
+        lines=lines,
+        indent=indent,
+    )
+    gate_up_bias_path = emitter._hoist_expr(
+        kind="param_path",
+        key=f"gate_up_bias:{gate_up_bias_expr}",
+        expr=gate_up_bias_expr,
+        lines=lines,
+        indent=indent,
+    )
+    down_weight_path = emitter._hoist_expr(
+        kind="param_path",
+        key=f"down_weight:{down_weight_expr}",
+        expr=down_weight_expr,
+        lines=lines,
+        indent=indent,
+    )
+    down_bias_path = emitter._hoist_expr(
+        kind="param_path",
+        key=f"down_bias:{down_bias_expr}",
+        expr=down_bias_expr,
+        lines=lines,
+        indent=indent,
+    )
+    gate_up_weight_value = emitter._hoist_expr(
+        kind="param_tensor",
+        key=f"required:{gate_up_weight_path}",
+        expr=f"self._param({gate_up_weight_path})",
+        lines=lines,
+        indent=indent,
+    )
+    gate_up_bias_value = emitter._hoist_expr(
+        kind="param_tensor_opt",
+        key=f"optional:{gate_up_bias_path}",
+        expr=f"self._state.get({gate_up_bias_path})",
+        lines=lines,
+        indent=indent,
+    )
+    down_weight_value = emitter._hoist_expr(
+        kind="param_tensor",
+        key=f"required:{down_weight_path}",
+        expr=f"self._param({down_weight_path})",
+        lines=lines,
+        indent=indent,
+    )
+    down_bias_value = emitter._hoist_expr(
+        kind="param_tensor_opt",
+        key=f"optional:{down_bias_path}",
+        expr=f"self._state.get({down_bias_path})",
+        lines=lines,
+        indent=indent,
+    )
+    lines.append(f"{indent}{gate_up_weight} = {gate_up_weight_value}")
+    lines.append(f"{indent}{gate_up_bias} = {gate_up_bias_value} if {has_bias!r} else None")
+    lines.append(f"{indent}{down_weight} = {down_weight_value}")
+    lines.append(f"{indent}{down_bias} = {down_bias_value} if {has_bias!r} else None")
+    lines.append(f"{indent}{alpha} = float({alpha_code})")
+    lines.append(f"{indent}{limit} = float({limit_code})")
     lines.append(
-        f"{indent}{inv_perm}[{perm}] = torch.arange({perm}.size(0), device={hidden_flat}.device)"
+        f"{indent}{final_hidden} = _moe_grouped_ffn_mod._run_grouped_moe("
     )
-    lines.append(f"{indent}{expert_ids_g} = {expert_ids}[{perm}]")
-    lines.append(f"{indent}{sample_weights_g} = {sample_weights}[{perm}]")
-    lines.append(f"{indent}{selected_hidden_g} = {selected_hidden}[{perm}]")
-    lines.append(
-        f"{indent}{histc_input} = {expert_ids_g}.float() if {hidden_flat}.device.type == 'cpu' else {expert_ids_g}.int()"
-    )
-    lines.append(
-        f"{indent}{tokens_per_expert} = torch.histc({histc_input}, bins={num_experts}, min=0, max={num_experts} - 1)"
-    )
-    lines.append(f"{indent}{offsets} = torch.cumsum({tokens_per_expert}, dim=0, dtype=torch.int32)")
-    lines.append(
-        f"{indent}{up_bias} = ({gate_up_bias}[{expert_ids_g}] if {gate_up_bias} is not None else None)"
-    )
-    lines.append(
-        f"{indent}if hasattr(torch.nn.functional, 'grouped_mm') and ({selected_hidden_g}.device.type != 'cpu' or ({selected_hidden_g}.data_ptr() % 16 == 0 and {gate_up_weight}.data_ptr() % 16 == 0 and all(((s * {selected_hidden_g}.element_size()) % 16 == 0) for s in {selected_hidden_g}.stride()) and all(((s * {gate_up_weight}.element_size()) % 16 == 0) for s in {gate_up_weight}.stride()))):"
-    )
-    if transpose:
-        lines.append(
-            f"{indent}    {proj} = torch.nn.functional.grouped_mm({selected_hidden_g}.to({gate_up_weight}.dtype), {gate_up_weight}, offs={offsets})"
-        )
-    else:
-        lines.append(
-            f"{indent}    {proj} = torch.nn.functional.grouped_mm({selected_hidden_g}.to({gate_up_weight}.dtype), {gate_up_weight}.transpose(-2, -1), offs={offsets})"
-        )
-    lines.append(
-        f"{indent}elif hasattr(torch, '_grouped_mm') and ({selected_hidden_g}.device.type != 'cpu' or ({selected_hidden_g}.data_ptr() % 16 == 0 and {gate_up_weight}.data_ptr() % 16 == 0 and all(((s * {selected_hidden_g}.element_size()) % 16 == 0) for s in {selected_hidden_g}.stride()) and all(((s * {gate_up_weight}.element_size()) % 16 == 0) for s in {gate_up_weight}.stride()))):"
-    )
-    if transpose:
-        lines.append(
-            f"{indent}    {proj} = torch._grouped_mm({selected_hidden_g}.to({gate_up_weight}.dtype), {gate_up_weight}, offs={offsets})"
-        )
-    else:
-        lines.append(
-            f"{indent}    {proj} = torch._grouped_mm({selected_hidden_g}.to({gate_up_weight}.dtype), {gate_up_weight}.transpose(-2, -1), offs={offsets})"
-        )
-    lines.append(f"{indent}else:")
-    lines.append(
-        f"{indent}    {out_mm} = torch.zeros({selected_hidden_g}.size(0), {gate_up_weight}.shape[2], device={selected_hidden_g}.device, dtype={selected_hidden_g}.dtype)"
-    )
-    lines.append(f"{indent}    {start} = 0")
-    lines.append(f"{indent}    for i, {end} in enumerate({offsets}.tolist()):")
-    lines.append(f"{indent}        if {start} == {end}:")
-    lines.append(f"{indent}            continue")
-    if transpose:
-        lines.append(
-            f"{indent}        torch.mm({selected_hidden_g}[{start}:{end}], {gate_up_weight}[i], out={out_mm}[{start}:{end}])"
-        )
-    else:
-        lines.append(
-            f"{indent}        torch.mm({selected_hidden_g}[{start}:{end}], {gate_up_weight}[i].transpose(-2, -1), out={out_mm}[{start}:{end}])"
-        )
-    lines.append(f"{indent}        {start} = {end}")
-    lines.append(f"{indent}    {proj} = {out_mm}")
-    lines.append(f"{indent}if {up_bias} is not None:")
-    lines.append(f"{indent}    {proj} = {proj} + {up_bias}")
-    if has_gate:
-        lines.append(f"{indent}{gate} = {proj}[..., ::2].clamp(max=float({limit_code}))")
-        lines.append(
-            f"{indent}{up} = {proj}[..., 1::2].clamp(min=-float({limit_code}), max=float({limit_code}))"
-        )
-        lines.append(
-            f"{indent}{proj} = ({up} + 1.0) * ({gate} * torch.sigmoid({gate} * float({alpha_code})))"
-        )
-    else:
-        lines.append(f"{indent}{proj} = torch.nn.functional.silu({proj})")
-    lines.append(
-        f"{indent}{down_bias_g} = ({down_bias}[{expert_ids_g}] if {down_bias} is not None else None)"
-    )
-    lines.append(
-        f"{indent}if hasattr(torch.nn.functional, 'grouped_mm') and ({proj}.device.type != 'cpu' or ({proj}.data_ptr() % 16 == 0 and {down_weight}.data_ptr() % 16 == 0 and all(((s * {proj}.element_size()) % 16 == 0) for s in {proj}.stride()) and all(((s * {down_weight}.element_size()) % 16 == 0) for s in {down_weight}.stride()))):"
-    )
-    if transpose:
-        lines.append(
-            f"{indent}    {down} = torch.nn.functional.grouped_mm({proj}.to({down_weight}.dtype), {down_weight}, offs={offsets})"
-        )
-    else:
-        lines.append(
-            f"{indent}    {down} = torch.nn.functional.grouped_mm({proj}.to({down_weight}.dtype), {down_weight}.transpose(-2, -1), offs={offsets})"
-        )
-    lines.append(
-        f"{indent}elif hasattr(torch, '_grouped_mm') and ({proj}.device.type != 'cpu' or ({proj}.data_ptr() % 16 == 0 and {down_weight}.data_ptr() % 16 == 0 and all(((s * {proj}.element_size()) % 16 == 0) for s in {proj}.stride()) and all(((s * {down_weight}.element_size()) % 16 == 0) for s in {down_weight}.stride()))):"
-    )
-    if transpose:
-        lines.append(
-            f"{indent}    {down} = torch._grouped_mm({proj}.to({down_weight}.dtype), {down_weight}, offs={offsets})"
-        )
-    else:
-        lines.append(
-            f"{indent}    {down} = torch._grouped_mm({proj}.to({down_weight}.dtype), {down_weight}.transpose(-2, -1), offs={offsets})"
-        )
-    lines.append(f"{indent}else:")
-    lines.append(
-        f"{indent}    {out_mm} = torch.zeros({proj}.size(0), {down_weight}.shape[2], device={proj}.device, dtype={proj}.dtype)"
-    )
-    lines.append(f"{indent}    {start} = 0")
-    lines.append(f"{indent}    for i, {end} in enumerate({offsets}.tolist()):")
-    lines.append(f"{indent}        if {start} == {end}:")
-    lines.append(f"{indent}            continue")
-    if transpose:
-        lines.append(
-            f"{indent}        torch.mm({proj}[{start}:{end}], {down_weight}[i], out={out_mm}[{start}:{end}])"
-        )
-    else:
-        lines.append(
-            f"{indent}        torch.mm({proj}[{start}:{end}], {down_weight}[i].transpose(-2, -1), out={out_mm}[{start}:{end}])"
-        )
-    lines.append(f"{indent}        {start} = {end}")
-    lines.append(f"{indent}    {down} = {out_mm}")
-    lines.append(f"{indent}if {down_bias_g} is not None:")
-    lines.append(f"{indent}    {down} = {down} + {down_bias_g}")
-    lines.append(f"{indent}{weighted} = {down} * {sample_weights_g}.unsqueeze(-1)")
-    lines.append(f"{indent}{token_idx_g} = {token_idx}[{perm}]")
-    lines.append(
-        f"{indent}{final_hidden} = torch.zeros({num_tokens}, {hidden_dim}, device={hidden_flat}.device, dtype={hidden_flat}.dtype)"
-    )
-    lines.append(
-        f"{indent}{final_hidden}.index_add_(0, {token_idx_g}, {weighted}.to({final_hidden}.dtype))"
-    )
+    lines.append(f"{indent}    hidden_flat={hidden_flat},")
+    lines.append(f"{indent}    topk_scores_flat={topk_scores_flat},")
+    lines.append(f"{indent}    topk_indices_flat={topk_indices_flat},")
+    lines.append(f"{indent}    gate_up_weight={gate_up_weight},")
+    lines.append(f"{indent}    gate_up_bias={gate_up_bias},")
+    lines.append(f"{indent}    down_weight={down_weight},")
+    lines.append(f"{indent}    down_bias={down_bias},")
+    lines.append(f"{indent}    has_gate={has_gate!r},")
+    lines.append(f"{indent}    has_bias={has_bias!r},")
+    lines.append(f"{indent}    transpose={transpose!r},")
+    lines.append(f"{indent}    alpha={alpha},")
+    lines.append(f"{indent}    limit={limit},")
+    lines.append(f"{indent})")
     lines.append(
         f"{indent}{out_var} = {final_hidden}.to({hidden}.dtype).reshape(*{hidden}.shape[:-1], {hidden}.shape[-1])"
     )
