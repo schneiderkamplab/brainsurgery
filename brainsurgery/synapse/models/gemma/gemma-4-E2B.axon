@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "google/gemma-4-E2B" #-}
+{-# CHECKPOINTS ["google/gemma-4-E2B", "google/gemma-4-E2B-it"] #-}
 
 import Activations
 import Activations (gelu_pytorch_tanh, tanh)

@@ -1130,21 +1130,29 @@ def run_axon_materialize(
     if not requested:
         raise ValueError(f"No CHECKPOINTS pragma entries found in {resolved_axon}")
 
-    grouped: dict[str, list[str]] = {}
+    grouped: dict[str, tuple[str, list[str]]] = {}
     for checkpoint in requested:
         model_dir = resolved_models_root / checkpoint
         config = _load_json(model_dir / "config.json")
         state_keys = _checkpoint_state_keys(model_dir)
         rendered = _materialize_program(parsed, config=config, state_keys=state_keys)
-        grouped.setdefault(rendered, []).append(checkpoint)
+        normalized_name = _normalize_checkpoint_name(checkpoint)
+        existing = grouped.get(normalized_name)
+        if existing is None:
+            grouped[normalized_name] = (rendered, [checkpoint])
+            continue
+        existing_rendered, existing_checkpoints = existing
+        if existing_rendered != rendered:
+            raise ValueError(
+                "Materialized source differs within checkpoint family "
+                f"{normalized_name!r}: {existing_checkpoints + [checkpoint]}"
+            )
+        existing_checkpoints.append(checkpoint)
 
     written: list[Path] = []
     expected: set[Path] = set()
-    for body, body_checkpoints in grouped.items():
-        names = {_normalize_checkpoint_name(checkpoint) for checkpoint in body_checkpoints}
-        if len(names) != 1:
-            raise ValueError(f"Could not derive single output stem for {body_checkpoints}")
-        out_name = f"{next(iter(names))}.axon"
+    for normalized_name, (body, body_checkpoints) in grouped.items():
+        out_name = f"{normalized_name}.axon"
         out_path = resolved_axon.parent / out_name
         text = body.replace(
             "CHECKPOINTS []",
