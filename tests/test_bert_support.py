@@ -88,10 +88,14 @@ def test_bert_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
         for node_spec in item.values()
         if isinstance(node_spec, dict)
         and node_spec.get("_op") == "linear"
-        and node_spec.get("weight") == "bert.embeddings.word_embeddings.weight"
+        and (
+            node_spec.get("weight") == "@@bert.embeddings.word_embeddings.weight"
+            or node_spec.get("_params", {}).get("weight")
+            == "@@bert.embeddings.word_embeddings.weight"
+        )
     ]
     assert len(decoder_nodes) == 1
-    assert decoder_nodes[0].get("bias_path") == "cls.predictions.bias"
+    assert decoder_nodes[0].get("bias_path") == "@@cls.predictions.bias"
 
     block_graph = blocks["bert_block"].get("graph", [])
     assert isinstance(block_graph, list)

@@ -429,9 +429,7 @@ def compile(
     lines.append(f"{indent}{down_bias} = {down_bias_value} if {has_bias!r} else None")
     lines.append(f"{indent}{alpha} = float({alpha_code})")
     lines.append(f"{indent}{limit} = float({limit_code})")
-    lines.append(
-        f"{indent}{final_hidden} = _moe_grouped_ffn_mod._run_grouped_moe("
-    )
+    lines.append(f"{indent}{final_hidden} = _moe_grouped_ffn_mod._run_grouped_moe(")
     lines.append(f"{indent}    hidden_flat={hidden_flat},")
     lines.append(f"{indent}    topk_scores_flat={topk_scores_flat},")
     lines.append(f"{indent}    topk_indices_flat={topk_indices_flat},")

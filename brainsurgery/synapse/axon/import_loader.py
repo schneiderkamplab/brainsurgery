@@ -203,10 +203,13 @@ def _resolve_import_path(
     builtin_candidate = (builtins_dir / rel).resolve()
     if builtin_candidate.exists():
         return builtin_candidate
-    tried = [str(local_candidate), *(str(path) for path in search_candidates), str(builtin_candidate)]
+    tried = [
+        str(local_candidate),
+        *(str(path) for path in search_candidates),
+        str(builtin_candidate),
+    ]
     raise FileNotFoundError(
-        f"Axon import {import_name!r} not found from {base_file}: "
-        f"tried {', '.join(tried)}"
+        f"Axon import {import_name!r} not found from {base_file}: tried {', '.join(tried)}"
     )
 
 

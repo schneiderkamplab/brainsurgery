@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any
 
@@ -281,7 +280,9 @@ main x = do
     assert "Activations.swiglu" in names
 
 
-def test_import_uses_axon_path_before_builtins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_import_uses_axon_path_before_builtins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     extra_dir = tmp_path / "axon_path"
     extra_dir.mkdir()
     (extra_dir / "Lib.axon").write_text(
@@ -882,8 +883,12 @@ uses_b x = do
     modules = parse_axon_program(source)
     by_name = {module.name: module for module in modules}
 
-    uses_a_binds = [stmt.targets[0] for stmt in by_name["uses_a"].statements if isinstance(stmt, AxonBind)]
-    uses_b_binds = [stmt.targets[0] for stmt in by_name["uses_b"].statements if isinstance(stmt, AxonBind)]
+    uses_a_binds = [
+        stmt.targets[0] for stmt in by_name["uses_a"].statements if isinstance(stmt, AxonBind)
+    ]
+    uses_b_binds = [
+        stmt.targets[0] for stmt in by_name["uses_b"].statements if isinstance(stmt, AxonBind)
+    ]
 
     assert "A" in uses_a_binds
     assert "B" not in uses_a_binds
@@ -2643,9 +2648,7 @@ tiny x = do
   return x
 """
     module = parse_axon_module(source)
-    assert module.pragmas == {
-        "checkpoints": ("google/gemma-3-270m", "google/gemma-3-270m-it")
-    }
+    assert module.pragmas == {"checkpoints": ("google/gemma-3-270m", "google/gemma-3-270m-it")}
     spec = lower_axon_module_to_synapse_spec(module)
     assert spec["model"]["meta"] == {
         "checkpoints": ("google/gemma-3-270m", "google/gemma-3-270m-it")

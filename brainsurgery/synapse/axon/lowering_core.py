@@ -1172,7 +1172,10 @@ def _lower_simple_call(
             out=out,
             ctx=ctx,
         )
-        return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
+        return [
+            *pre_graph,
+            *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx)),
+        ]
 
     node_spec = _to_synapse_op(callee, args_text, kwargs, out)
     if "@" in callee:
@@ -1185,7 +1188,10 @@ def _lower_simple_call(
             _record_last_dim_for_call(
                 callee=op_name, args=args_text, kwargs=kwargs, out=out, ctx=ctx
             )
-            return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
+            return [
+                *pre_graph,
+                *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx)),
+            ]
         concrete_node = _to_synapse_op(op_name, args_text, kwargs, out)
         try:
             bound_params = _path_bound_param_names(concrete_node)
@@ -1210,7 +1216,11 @@ def _lower_simple_call(
                     suffix = f"{param_path}.{param_name}"
                 if is_absolute_path:
                     concrete_node["_abs_path"] = param_path
-                    params[param_name] = explicit_token if isinstance(explicit_name, str) and explicit_name.strip() else param_name
+                    params[param_name] = (
+                        explicit_token
+                        if isinstance(explicit_name, str) and explicit_name.strip()
+                        else param_name
+                    )
                 else:
                     params[param_name] = suffix
             concrete_node["_params"] = params
@@ -1226,7 +1236,10 @@ def _lower_simple_call(
             _record_last_dim_for_call(
                 callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx
             )
-            return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
+            return [
+                *pre_graph,
+                *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx)),
+            ]
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
         if not segments:
             raise ValueError(f"invalid @ path in Axon call: {callee!r}")
@@ -1235,7 +1248,10 @@ def _lower_simple_call(
             item = {segment: {"graph": [item]}}
         nodes = _with_guard([item], effective_when)
         _record_last_dim_for_call(callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx)
-        return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
+        return [
+            *pre_graph,
+            *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx)),
+        ]
     node_name = f"n_{ctx.fresh('op')}"
     nodes = _with_guard([{node_name: node_spec}], effective_when)
     _record_last_dim_for_call(callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx)

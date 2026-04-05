@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import pytest
@@ -117,7 +116,9 @@ def test_generated_model_keeps_double_at_params_absolute_under_current_param_roo
     )
     model._param_roots_stack.append(["mlp.experts.0"])
 
-    assert model._pick_param_from_single("ignored.scope", "@@gate_proj.weight") == "gate_proj.weight"
+    assert (
+        model._pick_param_from_single("ignored.scope", "@@gate_proj.weight") == "gate_proj.weight"
+    )
     assert model._pick_param_path("ignored.scope", ["@@gate_proj.weight"]) == "gate_proj.weight"
 
 
@@ -130,7 +131,9 @@ def test_generated_model_keeps_double_at_params_absolute_under_scope() -> None:
         state_dict={"mlp.experts.0.gate_proj.weight": torch.ones(1, 1, dtype=torch.float32)}
     )
 
-    assert model._pick_param_from_single("mlp.experts.0", "@@gate_proj.weight") == "gate_proj.weight"
+    assert (
+        model._pick_param_from_single("mlp.experts.0", "@@gate_proj.weight") == "gate_proj.weight"
+    )
     assert model._pick_param_path("mlp.experts.0", ["@@gate_proj.weight"]) == "gate_proj.weight"
 
 

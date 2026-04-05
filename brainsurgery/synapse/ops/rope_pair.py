@@ -350,10 +350,10 @@ def interpret(
         raise ValueError("rope_pair.position_ids batch size must match q/k batch")
     if int(pos_ids.shape[1]) != int(q.shape[-2]):
         raise ValueError("rope_pair.position_ids width must match q/k sequence length")
-    rope_mode = str(
-        model._eval_expr(node_spec.get("rope_mode", ""), env, symbols)
-    ).strip().lower()
-    rotary_factor = float(model._eval_expr(node_spec.get("partial_rotary_factor", 1.0), env, symbols))
+    rope_mode = str(model._eval_expr(node_spec.get("rope_mode", ""), env, symbols)).strip().lower()
+    rotary_factor = float(
+        model._eval_expr(node_spec.get("partial_rotary_factor", 1.0), env, symbols)
+    )
     proportional_scale_factor = None
     if rope_mode == "proportional" and "scale_factor" in node_spec:
         proportional_scale_factor = float(model._eval_expr(node_spec["scale_factor"], env, symbols))
@@ -428,7 +428,9 @@ def interpret(
                     rope_attention_factor = 1.0
                 else:
                     rope_attention_factor = float(
-                        math.sqrt(1.0 + (math.log(scale_factor) / math.log(float(original_context))))
+                        math.sqrt(
+                            1.0 + (math.log(scale_factor) / math.log(float(original_context)))
+                        )
                     )
     elif all(
         key in node_spec for key in ("scale_factor", "beta_fast", "beta_slow", "original_context")

@@ -71,7 +71,9 @@ def _run_against_hf(
     attention_mask = torch.ones_like(input_ids)
 
     with torch.no_grad():
-        hf_logits = hf_model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).logits
+        hf_logits = hf_model(
+            input_ids=input_ids, attention_mask=attention_mask, use_cache=False
+        ).logits
         runtime_logits = extract_logits(runtime_model(input_ids, attn_mask=attention_mask))
         codegen_logits = (
             extract_logits(codegen_model(input_ids, attn_mask=attention_mask))
@@ -166,17 +168,22 @@ def test_gemma4_dense_runtime_tracks_hf_use_cache_float32(repo_root: Path) -> No
     model_section["config"] = {"text_config": hf_model.config.to_dict()}
     runtime_model = SynapseProgramModel.from_spec(spec, state_dict=state_dict).to(device).eval()
 
-    input_ids = torch.tensor([[11, 7, 19, 23, 17, 9], [5, 13, 29, 31, 2, 6]], device=device, dtype=torch.long)
+    input_ids = torch.tensor(
+        [[11, 7, 19, 23, 17, 9], [5, 13, 29, 31, 2, 6]], device=device, dtype=torch.long
+    )
     attention_mask = torch.ones_like(input_ids)
 
     with torch.no_grad():
-        hf_logits = hf_model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True).logits
+        hf_logits = hf_model(
+            input_ids=input_ids, attention_mask=attention_mask, use_cache=True
+        ).logits
         runtime_out = runtime_model(input_ids, attn_mask=attention_mask, use_cache=True)
         runtime_logits = extract_logits(runtime_out)
 
     diff = masked_logits_diff(runtime_logits, hf_logits, attention_mask)
     assert float(diff.mean()) < 2.0e-2
     assert float(diff.max()) < 1.6e-1
+
 
 def test_gemma4_plain_dense_runtime_tracks_hf_float32(repo_root: Path) -> None:
     transformers = pytest.importorskip("transformers")
@@ -247,6 +254,7 @@ def test_gemma4_moe_runtime_tracks_hf_float32(repo_root: Path) -> None:
     assert float(diff.mean()) < 1.5e-2
     assert float(diff.max()) < 2.0e-1
 
+
 def test_gemma4_moe_runtime_tracks_hf_use_cache_float32(repo_root: Path) -> None:
     transformers = pytest.importorskip("transformers")
     torch.manual_seed(0)
@@ -290,11 +298,15 @@ def test_gemma4_moe_runtime_tracks_hf_use_cache_float32(repo_root: Path) -> None
     model_section["config"] = {"text_config": hf_model.config.to_dict()}
     runtime_model = SynapseProgramModel.from_spec(spec, state_dict=state_dict).to(device).eval()
 
-    input_ids = torch.tensor([[11, 7, 19, 23, 17, 9], [5, 13, 29, 31, 2, 6]], device=device, dtype=torch.long)
+    input_ids = torch.tensor(
+        [[11, 7, 19, 23, 17, 9], [5, 13, 29, 31, 2, 6]], device=device, dtype=torch.long
+    )
     attention_mask = torch.ones_like(input_ids)
 
     with torch.no_grad():
-        hf_logits = hf_model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True).logits
+        hf_logits = hf_model(
+            input_ids=input_ids, attention_mask=attention_mask, use_cache=True
+        ).logits
         runtime_out = runtime_model(input_ids, attn_mask=attention_mask, use_cache=True)
         runtime_logits = extract_logits(runtime_out)
 

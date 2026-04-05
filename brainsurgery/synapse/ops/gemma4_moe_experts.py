@@ -107,7 +107,9 @@ def interpret(
     gate_up_weight = model._state[
         _infer_path(model, node_spec, node_path=node_path, key="gate_up_weight")
     ]
-    down_weight = model._state[_infer_path(model, node_spec, node_path=node_path, key="down_weight")]
+    down_weight = model._state[
+        _infer_path(model, node_spec, node_path=node_path, key="down_weight")
+    ]
 
     hidden_flat = hidden.reshape(-1, hidden.shape[-1])
     weights_flat = topk_weights.reshape(-1, topk_weights.shape[-1])
@@ -204,9 +206,7 @@ def compile(
     )
     lines.append(f"{indent}for {expert_idx} in {expert_hit}:")
     lines.append(f"{indent}    {expert_idx} = int({expert_idx}[0])")
-    lines.append(
-        f"{indent}    {top_k_pos}, {token_idx} = torch.where({expert_mask}[{expert_idx}])"
-    )
+    lines.append(f"{indent}    {top_k_pos}, {token_idx} = torch.where({expert_mask}[{expert_idx}])")
     lines.append(f"{indent}    {current_state} = {hidden_flat}[{token_idx}]")
     lines.append(
         f"{indent}    {gate_up} = F.linear({current_state}, {gate_up_weight}[{expert_idx}].to(dtype={current_state}.dtype))"

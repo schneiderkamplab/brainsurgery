@@ -106,9 +106,7 @@ def interpret(
     num_layers = int(model._eval_expr(node_spec.get("num_layers"), env, symbols))
     per_layer_dim = int(model._eval_expr(node_spec.get("per_layer_dim"), env, symbols))
     embed_scale = float(model._eval_expr(node_spec.get("embed_scale", 1.0), env, symbols))
-    projection_scale = float(
-        model._eval_expr(node_spec.get("projection_scale", 1.0), env, symbols)
-    )
+    projection_scale = float(model._eval_expr(node_spec.get("projection_scale", 1.0), env, symbols))
     combine_scale = float(model._eval_expr(node_spec.get("combine_scale", 1.0), env, symbols))
     rms_eps = float(model._eval_expr(node_spec.get("rms_eps", 1.0e-6), env, symbols))
 
@@ -118,7 +116,9 @@ def interpret(
     projection_weight = model._state[
         _infer_path(model, node_spec, node_path=node_path, key="projection_weight")
     ]
-    norm_weight = model._state[_infer_path(model, node_spec, node_path=node_path, key="norm_weight")]
+    norm_weight = model._state[
+        _infer_path(model, node_spec, node_path=node_path, key="norm_weight")
+    ]
 
     per_layer_inputs = F.embedding(input_ids, per_layer_embed_weight)
     if embed_scale != 1.0:
@@ -223,9 +223,7 @@ def compile(
     lines.append(
         f"{indent}{mean_squared} = {projected}.float().pow(2).mean(dim=-1, keepdim=True) + float({rms_eps})"
     )
-    lines.append(
-        f"{indent}{normed} = {projected}.float() * torch.pow({mean_squared}, -0.5)"
-    )
+    lines.append(f"{indent}{normed} = {projected}.float() * torch.pow({mean_squared}, -0.5)")
     lines.append(
         f"{indent}{projected} = ({normed} * {norm_weight}.float()).to(dtype={projected}.dtype)"
     )

@@ -645,7 +645,7 @@ def _run_single_dtype(
                 resolved_device=device,
                 hf_config=hf_config,
                 trust_remote_code=trust_remote_code,
-                model_config=lowered_spec.get("model", {}).get("config")
+                model_config=lowered_spec.get("model", {}).get("config"),
             )
         elif hf_loader_kind == "seq2seq_lm":
             hf_model = AutoModelForSeq2SeqLM.from_pretrained(
@@ -750,6 +750,7 @@ def run_axon_layer_op_parity(
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype_name(dtype)
+    resolved_max_len = 32 if max_len is None else int(max_len)
     prompts = _normalize_texts(text)
     axon_path = axon_file.resolve()
     weights_path = weights.resolve()
@@ -805,7 +806,7 @@ def run_axon_layer_op_parity(
             tokenizer_source=tokenizer_source,
             tokenizer_fallback=tokenizer_fallback,
             device=resolved_device,
-            max_len=max_len,
+            max_len=resolved_max_len,
         )
         del tokenizer_obj
         hf_kwargs = _forward_kwargs(
@@ -853,7 +854,9 @@ def run_axon_layer_op_parity(
             del hf
             del hf_model
 
-        state_dict = _load_state_dict(state_dict_paths, device=resolved_device, dtype=resolved_dtype)
+        state_dict = _load_state_dict(
+            state_dict_paths, device=resolved_device, dtype=resolved_dtype
+        )
         generated_py_path = Path(tmp_dir) / "generated_model.py"
         generated_py_path.write_text(
             emit_model_code_from_synapse_spec(final_spec, class_name=class_name),
@@ -954,6 +957,7 @@ def run_axon_op_parity(
     text: str | Sequence[str] = ("The future of AI is", "Hello world"),
     device: str = "cpu",
     dtypes: Sequence[str] | None = None,
+    max_len: int = 32,
     output_json: Path | None = None,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
@@ -1060,6 +1064,7 @@ def run_codegen_runtime_parity(
     device: str = "cpu",
     dtype: str = "float32",
     class_name: str = "AxonGeneratedParityModel",
+    max_len: int = 32,
     max_reported: int = 20,
     abs_tol: float = 1.0e-5,
     rel_tol: float = 1.0e-3,

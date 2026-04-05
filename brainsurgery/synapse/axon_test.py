@@ -50,7 +50,7 @@ def _format_metric_value(value: object) -> str:
     if isinstance(value, bool):
         return str(value)
     try:
-        return f"{float(value):.6g}"
+        return f"{float(cast(Any, value)):.6g}"
     except Exception:
         return str(value)
 
@@ -394,7 +394,7 @@ def _ensure_einops_import_compat() -> None:
         bs, sq, group, nh, hn = x.shape
         return x.reshape(bs, sq, group * nh, hn)
 
-    shim.rearrange = rearrange
+    setattr(shim, "rearrange", rearrange)
     sys.modules["einops"] = shim
 
 
@@ -994,7 +994,13 @@ def _normalize_rope_numeric_fields(config: Any) -> Any:
     if isinstance(rope_scaling, dict):
         rope_type = rope_scaling.get("type", rope_scaling.get("rope_type"))
         has_longrope_factors = "short_factor" in rope_scaling and "long_factor" in rope_scaling
-        if rope_type == "default" and not has_longrope_factors:
+        raw_theta = rope_scaling.get("rope_theta")
+        has_nondefault_theta = (
+            isinstance(raw_theta, int | float)
+            and not isinstance(raw_theta, bool)
+            and not math.isclose(float(raw_theta), 10000.0)
+        )
+        if rope_type == "default" and not has_longrope_factors and not has_nondefault_theta:
             setattr(config, "rope_scaling", None)
             if str(getattr(config, "model_type", "")).strip().lower() == "phi3small":
                 if hasattr(config, "rope_parameters"):
@@ -1028,10 +1034,7 @@ def _normalize_rope_numeric_fields(config: Any) -> Any:
             rope_parameters = {"rope_type": "default"}
         setattr(config, "rope_parameters", rope_parameters)
     rope_theta = getattr(config, "rope_theta", None)
-    if (
-        isinstance(rope_parameters, dict)
-        and "rope_theta" not in rope_parameters
-    ):
+    if isinstance(rope_parameters, dict) and "rope_theta" not in rope_parameters:
         if isinstance(rope_theta, int | float) and not isinstance(rope_theta, bool):
             rope_parameters["rope_theta"] = float(rope_theta)
         else:
@@ -1348,6 +1351,7 @@ def _declared_checkpoints_from_axon(
             f"No CHECKPOINTS pragma declared in {axon_file}"
             + ("" if main_module is None else f" for main module {main_module!r}")
         )
+    checkpoints: tuple[str, ...]
     if isinstance(raw, str):
         checkpoints = (raw,)
     elif isinstance(raw, tuple | list):
@@ -1493,7 +1497,6 @@ def _run_axon_test_single(
 
         model_cls = _load_generated_class(generated_py_path, class_name)
 
-        state_dict: dict[str, torch.Tensor] | None = None
         hf_config: Any | None = None
         non_mxfp4_quant_config: Any | None = None
         if resolved_model_task in {"masked_lm", "seq2seq_lm"} or resolved_model_type in {
@@ -1538,6 +1541,7 @@ def _run_axon_test_single(
             ("decoder_attention_mask", "decoder_attn_mask"),
             model_input_names,
         )
+
         def _build_io_for_device(target_device: torch.device) -> dict[str, Any]:
             input_ids = input_ids_cpu.to(target_device)
             attention_mask = (
@@ -1650,7 +1654,11 @@ def _run_axon_test_single(
                             config=hf_config,
                             trust_remote_code=effective_trust_remote_code,
                         )
-                        hf = cast(Any, hf_model).to(device=target_device, dtype=resolved_dtype).eval()
+                        hf = (
+                            cast(Any, hf_model)
+                            .to(device=target_device, dtype=resolved_dtype)
+                            .eval()
+                        )
                     elif is_black_mamba_config_dir(resolved_hf_model_dir):
                         generated_state = _load_state_dict(
                             safetensors_files,
@@ -1718,7 +1726,9 @@ def _run_axon_test_single(
                 if hf_layers is not None:
                     for idx, layer in enumerate(hf_layers):
 
-                        def _hf_pre_hook(module: Any, args: tuple[Any, ...], *, _idx: int = idx) -> None:
+                        def _hf_pre_hook(
+                            module: Any, args: tuple[Any, ...], *, _idx: int = idx
+                        ) -> None:
                             del module
                             if not args:
                                 return
@@ -1766,7 +1776,7 @@ def _run_axon_test_single(
                     )
 
                 try:
-                    hf_gen, hf_time = _time_generate("HF", lambda: _run_hf_generate(hf))
+                    hf_gen, hf_time = _time_generate("HF", lambda model=hf: _run_hf_generate(model))
                 except Exception as exc:
                     print(
                         "HF generate failed; falling back to prompt-only decode:",
@@ -1885,7 +1895,11 @@ def _run_axon_test_single(
                             original_block_name = attr
                             original_block_call = block_candidate
                             break
-            if trace_layers and callable(original_block_call) and isinstance(original_block_name, str):
+            if (
+                trace_layers
+                and callable(original_block_call)
+                and isinstance(original_block_name, str)
+            ):
 
                 def _syn_block_wrapper(*args: Any, **kwargs: Any) -> Any:
                     layer_raw = kwargs.get("i")
@@ -1943,7 +1957,11 @@ def _run_axon_test_single(
                     )
                     syn_gen = io["input_ids"]
                     syn_time = 0.0
-            if trace_layers and callable(original_block_call) and isinstance(original_block_name, str):
+            if (
+                trace_layers
+                and callable(original_block_call)
+                and isinstance(original_block_name, str)
+            ):
                 setattr(syn, original_block_name, original_block_call)
             syn_logits_cpu = syn_logits.detach().cpu()
             syn_gen_cpu = None if syn_gen is None else syn_gen.detach().cpu()
@@ -2054,9 +2072,7 @@ def _run_axon_test_single(
         masked_mean_rel_diff: float | None = None
         masked_max_rel_diff: float | None = None
         masked_top1_eq: bool | None = None
-        decoder_attention_mask = cast(
-            torch.Tensor | None, hf_result.get("decoder_attention_mask")
-        )
+        decoder_attention_mask = cast(torch.Tensor | None, hf_result.get("decoder_attention_mask"))
         metric_attention_mask = (
             decoder_attention_mask if resolved_model_task == "seq2seq_lm" else attention_mask
         )
@@ -2337,6 +2353,7 @@ def run_axon_test(
         compile_dynamic=compile_dynamic,
         trust_remote_code=trust_remote_code,
     )
+
 
 def run_axon_benchmark(
     *,

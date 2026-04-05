@@ -72,7 +72,9 @@ def _resolve_inputs(node_spec: dict[str, Any]) -> str:
     raise ValueError("nemotron_moe expects in=[hidden]")
 
 
-def _infer_param_path(model: Any, node_spec: dict[str, Any], *, node_path: str, param_name: str) -> str:
+def _infer_param_path(
+    model: Any, node_spec: dict[str, Any], *, node_path: str, param_name: str
+) -> str:
     local_spec = dict(node_spec)
     local_spec["_params"] = dict(local_spec.get("_params", {}))
     local_spec["_params"][param_name] = [param_name, f"@@{param_name}"]
@@ -106,18 +108,28 @@ def interpret(
     top_k = int(model._eval_expr(node_spec.get("top_k"), env, symbols))
     n_group = int(model._eval_expr(node_spec.get("n_group"), env, symbols))
     topk_group = int(model._eval_expr(node_spec.get("topk_group"), env, symbols))
-    routed_scaling_factor = float(model._eval_expr(node_spec.get("routed_scaling_factor"), env, symbols))
+    routed_scaling_factor = float(
+        model._eval_expr(node_spec.get("routed_scaling_factor"), env, symbols)
+    )
     norm_topk_prob = bool(model._eval_expr(node_spec.get("norm_topk_prob"), env, symbols))
 
-    gate_weight = model._state[_infer_param_path(model, node_spec, node_path=node_path, param_name="gate.weight")]
+    gate_weight = model._state[
+        _infer_param_path(model, node_spec, node_path=node_path, param_name="gate.weight")
+    ]
     correction_bias = model._state[
-        _infer_param_path(model, node_spec, node_path=node_path, param_name="gate.e_score_correction_bias")
+        _infer_param_path(
+            model, node_spec, node_path=node_path, param_name="gate.e_score_correction_bias"
+        )
     ]
     shared_up = model._state[
-        _infer_param_path(model, node_spec, node_path=node_path, param_name="shared_experts.up_proj.weight")
+        _infer_param_path(
+            model, node_spec, node_path=node_path, param_name="shared_experts.up_proj.weight"
+        )
     ]
     shared_down = model._state[
-        _infer_param_path(model, node_spec, node_path=node_path, param_name="shared_experts.down_proj.weight")
+        _infer_param_path(
+            model, node_spec, node_path=node_path, param_name="shared_experts.down_proj.weight"
+        )
     ]
 
     orig_shape = hidden.shape
@@ -125,9 +137,13 @@ def interpret(
     n_routed_experts = int(gate_weight.shape[0])
     router_logits = F.linear(hidden_flat.to(torch.float32), gate_weight.to(torch.float32))
     scores = router_logits.sigmoid()
-    scores_for_choice = scores.view(-1, n_routed_experts) + correction_bias.to(dtype=scores.dtype).unsqueeze(0)
+    scores_for_choice = scores.view(-1, n_routed_experts) + correction_bias.to(
+        dtype=scores.dtype
+    ).unsqueeze(0)
     group_scores = (
-        scores_for_choice.view(-1, n_group, n_routed_experts // n_group).topk(2, dim=-1)[0].sum(dim=-1)
+        scores_for_choice.view(-1, n_group, n_routed_experts // n_group)
+        .topk(2, dim=-1)[0]
+        .sum(dim=-1)
     )
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]
     group_mask = torch.zeros_like(group_scores)
@@ -146,7 +162,9 @@ def interpret(
     topk_weights = topk_weights * routed_scaling_factor
 
     final_hidden_states = torch.zeros_like(hidden_flat, dtype=topk_weights.dtype)
-    expert_mask = torch.nn.functional.one_hot(topk_indices, num_classes=n_routed_experts).permute(2, 0, 1)
+    expert_mask = torch.nn.functional.one_hot(topk_indices, num_classes=n_routed_experts).permute(
+        2, 0, 1
+    )
     for expert_idx in range(n_routed_experts):
         up_weight = model._state[
             _infer_param_path(
@@ -259,7 +277,9 @@ def compile(
     lines.append(
         f"{indent}{score_mask} = {group_mask}.unsqueeze(-1).expand(-1, int({n_group}), {n_routed_experts} // int({n_group})).reshape(-1, {n_routed_experts})"
     )
-    lines.append(f"{indent}{scores_for_choice} = {scores_for_choice}.masked_fill(~{score_mask}.bool(), 0.0)")
+    lines.append(
+        f"{indent}{scores_for_choice} = {scores_for_choice}.masked_fill(~{score_mask}.bool(), 0.0)"
+    )
     lines.append(
         f"{indent}{topk_indices} = torch.topk({scores_for_choice}, k=int({top_k}), dim=-1, sorted=False)[1]"
     )
@@ -286,7 +306,9 @@ def compile(
     lines.append(f"{indent}    _mask = {expert_mask}[_expert_idx]")
     lines.append(f"{indent}    _token_indices, _weight_indices = torch.where(_mask)")
     lines.append(f"{indent}    if _token_indices.numel() > 0:")
-    lines.append(f"{indent}        _expert_weights = {topk_weights}[_token_indices, _weight_indices]")
+    lines.append(
+        f"{indent}        _expert_weights = {topk_weights}[_token_indices, _weight_indices]"
+    )
     lines.append(f"{indent}        _expert_input = {hidden_flat}[_token_indices]")
     lines.append(
         f"{indent}        _up = F.linear(_expert_input, _up_weight.to(dtype=_expert_input.dtype))"
@@ -296,7 +318,9 @@ def compile(
         f"{indent}        _expert_out = F.linear(_act * _act, _down_weight.to(dtype=_up.dtype))"
     )
     lines.append(f"{indent}        _weighted_output = _expert_out * _expert_weights.unsqueeze(-1)")
-    lines.append(f"{indent}        {final_hidden_states}.index_add_(0, _token_indices, _weighted_output)")
+    lines.append(
+        f"{indent}        {final_hidden_states}.index_add_(0, _token_indices, _weighted_output)"
+    )
     lines.append(f"{indent}    else:")
     lines.append(
         f"{indent}        _zero_in = torch.zeros_like({hidden_flat}[0]).unsqueeze(0).to(_down_weight.dtype)"
@@ -309,8 +333,12 @@ def compile(
         f"{indent}        _dummy_out = F.linear(_act * _act, _down_weight.to(dtype=_down_weight.dtype))"
     )
     lines.append(f"{indent}        {final_hidden_states} = {final_hidden_states} + _dummy_out")
-    lines.append(f"{indent}{final_hidden_states} = {final_hidden_states}.type({hidden_flat}.dtype).view(*{orig_shape})")
-    lines.append(f"{indent}{shared_up_out} = F.linear({hidden}, {shared_up}.to(dtype={hidden}.dtype))")
+    lines.append(
+        f"{indent}{final_hidden_states} = {final_hidden_states}.type({hidden_flat}.dtype).view(*{orig_shape})"
+    )
+    lines.append(
+        f"{indent}{shared_up_out} = F.linear({hidden}, {shared_up}.to(dtype={hidden}.dtype))"
+    )
     lines.append(f"{indent}{shared_act} = F.relu({shared_up_out})")
     lines.append(
         f"{indent}{shared} = F.linear({shared_act} * {shared_act}, {shared_down}.to(dtype={shared_up_out}.dtype))"

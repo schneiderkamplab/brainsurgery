@@ -62,9 +62,9 @@ def test_t5gemma_family_files_are_split_by_checkpoint_family(repo_root: Path) ->
 
     assert "prefixlm" not in t5gemma
     assert "ul2" not in t5gemma_prefixlm
-    assert 'google/t5gemma-2-270m-270m' in t5gemma2
-    assert 'google/t5gemma-2-1b-1b' in t5gemma2
-    assert 'google/t5gemma-2-4b-4b' in t5gemma2
+    assert "google/t5gemma-2-270m-270m" in t5gemma2
+    assert "google/t5gemma-2-1b-1b" in t5gemma2
+    assert "google/t5gemma-2-4b-4b" in t5gemma2
 
 
 def test_generic_t5gemma_ul2_uses_mask_independent_position_ids(repo_root: Path) -> None:
@@ -73,8 +73,7 @@ def test_generic_t5gemma_ul2_uses_mask_independent_position_ids(repo_root: Path)
     )
 
     assert (
-        "enc_pos_ids <- position_ids input_ids attention_mask use_attention_mask=false"
-        in t5gemma
+        "enc_pos_ids <- position_ids input_ids attention_mask use_attention_mask=false" in t5gemma
     )
     assert (
         "dec_pos_ids <- position_ids decoder_input_ids decoder_attention_mask use_attention_mask=false"
@@ -91,7 +90,7 @@ def test_axon_test_auto_infers_seq2seq_for_generic_t5gemma(repo_root: Path) -> N
 def test_axon_test_task_pragma_overrides_heuristic(tmp_path: Path) -> None:
     axon = tmp_path / "weird_name.axon"
     axon.write_text(
-        '\n'.join(
+        "\n".join(
             [
                 '{-# CHECKPOINTS "google/t5gemma-s-s-ul2" #-}',
                 '{-# TASK "masked_lm" #-}',

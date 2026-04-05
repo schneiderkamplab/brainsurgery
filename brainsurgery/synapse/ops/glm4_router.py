@@ -73,9 +73,13 @@ def _read_params(
         elif key not in params:
             params[key] = _default_param_candidates(key)
     local_spec["_params"] = params
-    weight = model._param(model._infer_param_path(local_spec, node_path=node_path, param_name="weight"))
+    weight = model._param(
+        model._infer_param_path(local_spec, node_path=node_path, param_name="weight")
+    )
     bias = model._param(
-        model._infer_param_path(local_spec, node_path=node_path, param_name="e_score_correction_bias")
+        model._infer_param_path(
+            local_spec, node_path=node_path, param_name="e_score_correction_bias"
+        )
     )
     return weight, bias
 
@@ -223,18 +227,12 @@ def compile(
     )
     lines.append(f"{indent}{num_experts} = int({router_probs}.shape[-1])")
     lines.append(f"{indent}{experts_per_group} = int({num_experts} // int({n_group}))")
-    lines.append(
-        f"{indent}if int({n_group}) <= 0 or int({num_experts}) % int({n_group}) != 0:"
-    )
+    lines.append(f"{indent}if int({n_group}) <= 0 or int({num_experts}) % int({n_group}) != 0:")
     lines.append(
         f"{indent}    raise ValueError('glm4_router requires num_experts to be divisible by n_group')"
     )
-    lines.append(
-        f"{indent}if int({topk_group}) <= 0 or int({topk_group}) > int({n_group}):"
-    )
-    lines.append(
-        f"{indent}    raise ValueError('glm4_router topk_group must be in [1, n_group]')"
-    )
+    lines.append(f"{indent}if int({topk_group}) <= 0 or int({topk_group}) > int({n_group}):")
+    lines.append(f"{indent}    raise ValueError('glm4_router topk_group must be in [1, n_group]')")
     lines.append(
         f"{indent}{group_scores} = {router_choice}.view(-1, int({n_group}), int({experts_per_group})).topk(min(2, int({experts_per_group})), dim=-1)[0].sum(dim=-1)"
     )

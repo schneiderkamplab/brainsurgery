@@ -86,7 +86,9 @@ def test_dfm_decoder_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
 
 
 def test_dfm_decoder_rope_normalization_preserves_nondefault_theta(repo_root: Path) -> None:
-    cfg = _load_auto_config_with_compat_fallback(repo_root / "models" / "dfm_decoder", trust_remote_code=False)
+    cfg = _load_auto_config_with_compat_fallback(
+        repo_root / "models" / "dfm_decoder", trust_remote_code=False
+    )
     assert getattr(cfg, "rope_scaling") == {"rope_theta": 100000.0, "rope_type": "default"}
     assert getattr(cfg, "rope_parameters") == {"rope_theta": 100000.0, "rope_type": "default"}
 

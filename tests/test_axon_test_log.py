@@ -91,7 +91,9 @@ def test_render_axon_test_log_all_deduplicates_by_latest_pair(tmp_path: Path) ->
             ]
         ),
     )
-    _write(tmp_path / "parent-100.txt", f"child_start pair_index=0 pid=100 log_path={worker_a_old}\n")
+    _write(
+        tmp_path / "parent-100.txt", f"child_start pair_index=0 pid=100 log_path={worker_a_old}\n"
+    )
     _write(
         tmp_path / "parent-200.txt",
         "\n".join(

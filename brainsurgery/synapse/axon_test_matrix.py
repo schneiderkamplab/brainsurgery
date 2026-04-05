@@ -532,7 +532,9 @@ def _apply_billions_params_filter(
             kept.append(pair)
             continue
         if remote_param_count > max_params:
-            skipped.append(_ParamCountSkip(pair=pair, param_count=remote_param_count, is_exact=False))
+            skipped.append(
+                _ParamCountSkip(pair=pair, param_count=remote_param_count, is_exact=False)
+            )
             continue
         kept.append(pair)
     return kept, skipped
@@ -644,7 +646,9 @@ def _resolve_pairs(
         path for path in models_dir.iterdir() if path.is_dir() and not path.name.startswith(".")
     )
     model_by_name = {path.name: path for path in model_dirs}
-    axon_paths = sorted(path for path in examples_dir.glob("*.axon") if not path.stem.endswith("_config"))
+    axon_paths = sorted(
+        path for path in examples_dir.glob("*.axon") if not path.stem.endswith("_config")
+    )
     axon_by_stem = {path.stem: path for path in axon_paths}
 
     pairs: list[_Pair] = []
@@ -668,7 +672,9 @@ def _resolve_pairs(
             covered_model_names.add(model_dir_name)
             matched = True
         if not matched:
-            print(f"Ignoring {axon_path} as I did not locate any configured model dir or spec for {stem}")
+            print(
+                f"Ignoring {axon_path} as I did not locate any configured model dir or spec for {stem}"
+            )
 
     reverse_axon_by_model: dict[str, set[str]] = {}
     for axon_stem, model_dir_names in MATRIX_AXON_MODEL_DIRS.items():
@@ -691,7 +697,9 @@ def _resolve_pairs(
             pairs.append(_Pair(axon_path=maybe_axon_path, model_dir=model_dir))
             added = True
         if not added:
-            print(f"Ignoring model dir {model_dir} as I did not locate matching registered .axon file")
+            print(
+                f"Ignoring model dir {model_dir} as I did not locate matching registered .axon file"
+            )
 
     return pairs
 
@@ -927,7 +935,9 @@ def _summary_row_from_result(pair: _Pair, result: dict[str, Any]) -> _SummaryRow
         masked_max_diff_value if masked_max_diff_value is not None else result["max_diff"]
     )
     eval_max_rel_diff_value = (
-        masked_max_rel_diff_value if masked_max_rel_diff_value is not None else result["max_rel_diff"]
+        masked_max_rel_diff_value
+        if masked_max_rel_diff_value is not None
+        else result["max_rel_diff"]
     )
     eval_top1_eq_value = (
         bool(masked_top1_eq_value) if masked_top1_eq_value is not None else bool(result["top1_eq"])
@@ -1011,15 +1021,19 @@ def _slugify_log_name(value: str) -> str:
     return text or "unknown"
 
 
-def _worker_log_path(log_dir: Path | None, pair: _Pair, pid: int) -> Path | None:
+def _worker_log_path(log_dir: Path | None, pair: _Pair, pid: int | None) -> Path | None:
     if log_dir is None:
         return None
+    if pid is None:
+        axon_name = _slugify_log_name(pair.axon_path.stem)
+        model_name = _slugify_log_name(pair.model_dir.name)
+        return log_dir / f"log-pending-{axon_name}-{model_name}.txt"
     axon_name = _slugify_log_name(pair.axon_path.stem)
     model_name = _slugify_log_name(pair.model_dir.name)
     return log_dir / f"log-{pid}-{axon_name}-{model_name}.txt"
 
 
-def _worker_log_display_path(log_dir: Path | None, pair: _Pair, pid: int) -> str | None:
+def _worker_log_display_path(log_dir: Path | None, pair: _Pair, pid: int | None) -> str | None:
     path = _worker_log_path(log_dir, pair, pid)
     if path is None:
         return None
@@ -1044,7 +1058,9 @@ def _run_worker_loop(
     model_task = str(common_kwargs["model_task_override"] or _resolve_model_task_for_pair(pair))
     captured = io.StringIO()
     file_handle: io.TextIOWrapper | None = None
-    log_path_obj = _worker_log_path(Path(log_dir), pair, os.getpid()) if log_dir is not None else None
+    log_path_obj = (
+        _worker_log_path(Path(log_dir), pair, os.getpid()) if log_dir is not None else None
+    )
     log_path = str(log_path_obj) if log_path_obj is not None else None
     log_path_display = (
         _worker_log_display_path(Path(log_dir), pair, os.getpid()) if log_dir is not None else None
@@ -1061,7 +1077,9 @@ def _run_worker_loop(
             stderr_target = tee
         with contextlib.redirect_stdout(stdout_target), contextlib.redirect_stderr(stderr_target):
             if log_path is not None:
-                print(f"worker_pid={os.getpid()} axon={pair.axon_path.name} model_dir={pair.model_dir}")
+                print(
+                    f"worker_pid={os.getpid()} axon={pair.axon_path.name} model_dir={pair.model_dir}"
+                )
                 print(f"device={worker_device} log_path={log_path_display}")
             _maybe_ensure_pair_model_ready(pair)
             result, retry_message = _run_pair_with_fallback(
@@ -1084,7 +1102,13 @@ def _run_worker_loop(
                 print(retry_message, flush=True)
             _emit_worker_result_summary(pair, result)
         result_queue.put(
-            (pair_index, _summary_row_from_result(pair, result), None, captured.getvalue(), log_path)
+            (
+                pair_index,
+                _summary_row_from_result(pair, result),
+                None,
+                captured.getvalue(),
+                log_path,
+            )
         )
     except Exception as exc:
         result_queue.put(
@@ -1260,7 +1284,7 @@ def _run_runnable_pairs_parallel(
         )
         process.start()
         active_processes[pair_index] = process
-        log_path = _worker_log_display_path(log_dir, pair, int(process.pid))
+        log_path = _worker_log_display_path(log_dir, pair, process.pid)
         parent_logger.log(
             "child_start "
             f"pair_index={pair_index} pid={process.pid} device={worker_device} "
@@ -1283,7 +1307,7 @@ def _run_runnable_pairs_parallel(
                     pair = runnable_pairs[int(active_pair_index)]
                     process.join(timeout=0.1)
                     exitcode = int(process.exitcode or 0)
-                    log_path = _worker_log_display_path(log_dir, pair, int(process.pid))
+                    log_path = _worker_log_display_path(log_dir, pair, process.pid)
                     status = "abnormal" if exitcode != 0 else "missing_result"
                     parent_logger.log(
                         "child_finish "
@@ -1307,13 +1331,13 @@ def _run_runnable_pairs_parallel(
 
             pair = runnable_pairs[int(pair_index)]
             process = active_processes.pop(int(pair_index), None)
-            exitcode = None
+            result_exitcode: int | None = None
             if process is not None:
                 process.join(timeout=5.0)
                 if process.is_alive():
                     process.terminate()
                     process.join(timeout=5.0)
-                exitcode = int(process.exitcode or 0)
+                result_exitcode = int(process.exitcode or 0)
             output_text = str(captured_output).rstrip()
             if output_text and (no_capture_output or verbose or error is not None):
                 tqdm.write(f"===== {pair.axon_path.name} | {pair.model_dir} =====")
@@ -1327,7 +1351,7 @@ def _run_runnable_pairs_parallel(
                 parent_logger.log(
                     "child_finish "
                     f"pair_index={pair_index} pid={getattr(process, 'pid', 'unknown')} status=success "
-                    f"exitcode={exitcode} axon={pair.axon_path.name} model_dir={pair.model_dir} log_path={log_path}"
+                    f"exitcode={result_exitcode} axon={pair.axon_path.name} model_dir={pair.model_dir} log_path={log_path}"
                 )
             else:
                 assert isinstance(error, _WorkerError)
@@ -1342,7 +1366,7 @@ def _run_runnable_pairs_parallel(
                 parent_logger.log(
                     "child_finish "
                     f"pair_index={pair_index} pid={getattr(process, 'pid', 'unknown')} status=error "
-                    f"exitcode={exitcode} axon={pair.axon_path.name} model_dir={pair.model_dir} log_path={log_path} "
+                    f"exitcode={result_exitcode} axon={pair.axon_path.name} model_dir={pair.model_dir} log_path={log_path} "
                     f"error={error.exc_type}:{error.message}"
                 )
             _mark_pair_finished(int(pair_index), row)
@@ -1353,7 +1377,9 @@ def _run_runnable_pairs_parallel(
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=5.0)
-        parent_logger.log(f"run_finish passed={passed} failed={failed} total_rows={len([r for r in rows_by_index if r is not None])}")
+        parent_logger.log(
+            f"run_finish passed={passed} failed={failed} total_rows={len([r for r in rows_by_index if r is not None])}"
+        )
         parent_logger.close()
 
     rows = [row for row in rows_by_index if row is not None]

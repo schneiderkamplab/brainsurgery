@@ -245,7 +245,9 @@ def compile(
         lines.append(f"{indent}    elif {padding_expr}.is_floating_point():")
         lines.append(f"{indent}        {trivial_padding} = bool(({padding_expr} != 0).all())")
         lines.append(f"{indent}    else:")
-        lines.append(f"{indent}        {trivial_padding} = bool({padding_expr}.to(torch.bool).all())")
+        lines.append(
+            f"{indent}        {trivial_padding} = bool({padding_expr}.to(torch.bool).all())"
+        )
     else:
         lines.append(f"{indent}{trivial_padding} = True")
     lines.append(f"{indent}if {early_exit} and {full_causal} and {trivial_padding}:")

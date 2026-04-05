@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import safetensors
 import torch
@@ -38,8 +37,8 @@ from .axon.types import (
     AxonStatement,
 )
 
-
 _NOT_EVALUABLE = object()
+_Number = int | float
 
 
 def _normalize_checkpoint_name(repo_id: str) -> str:
@@ -141,6 +140,12 @@ def _params_has_root(keys: set[str], root: str) -> bool:
 
 def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _as_number(value: object) -> _Number:
+    if not _is_number(value):
+        raise TypeError(f"Expected numeric value, got {type(value).__name__}")
+    return cast(_Number, value)
 
 
 def _expr_from_scalar(value: object) -> AxonExpr:
@@ -251,36 +256,44 @@ def _eval_expr(
             if isinstance(left, str) and isinstance(right, str):
                 return left + right
             if _is_number(left) and _is_number(right):
-                return left + right
+                return _as_number(left) + _as_number(right)
             raise ValueError("binary '+' expects numeric or string operands")
         if op == "-":
             if not _is_number(left) or not _is_number(right):
                 raise ValueError("binary '-' expects numeric operands")
-            return left - right
+            return _as_number(left) - _as_number(right)
         if op == "*":
             if not _is_number(left) or not _is_number(right):
                 raise ValueError("binary '*' expects numeric operands")
-            return left * right
+            return _as_number(left) * _as_number(right)
         if op == "/":
             if not _is_number(left) or not _is_number(right):
                 raise ValueError("binary '/' expects numeric operands")
-            return left / right
+            return _as_number(left) / _as_number(right)
         if op == "%":
             if not _is_number(left) or not _is_number(right):
                 raise ValueError("binary '%' expects numeric operands")
-            return left % right
+            return _as_number(left) % _as_number(right)
         if op == "==":
             return left == right
         if op == "!=":
             return left != right
         if op == "<":
-            return left < right
+            if not _is_number(left) or not _is_number(right):
+                raise ValueError("binary '<' expects numeric operands")
+            return _as_number(left) < _as_number(right)
         if op == "<=":
-            return left <= right
+            if not _is_number(left) or not _is_number(right):
+                raise ValueError("binary '<=' expects numeric operands")
+            return _as_number(left) <= _as_number(right)
         if op == ">":
-            return left > right
+            if not _is_number(left) or not _is_number(right):
+                raise ValueError("binary '>' expects numeric operands")
+            return _as_number(left) > _as_number(right)
         if op == ">=":
-            return left >= right
+            if not _is_number(left) or not _is_number(right):
+                raise ValueError("binary '>=' expects numeric operands")
+            return _as_number(left) >= _as_number(right)
         if op == "and":
             return bool(left) and bool(right)
         if op == "or":
@@ -314,19 +327,19 @@ def _eval_expr(
         if callee in {"sqrt", "Prelude.sqrt"}:
             if len(args) != 1 or not _is_number(args[0]):
                 raise ValueError("sqrt expects one numeric argument")
-            return math.sqrt(float(args[0]))
+            return math.sqrt(float(_as_number(args[0])))
         if callee in {"abs", "Prelude.abs"}:
             if len(args) != 1 or not _is_number(args[0]):
                 raise ValueError("abs expects one numeric argument")
-            return abs(args[0])
+            return abs(_as_number(args[0]))
         if callee in {"min", "Prelude.min"}:
             if not args or any(not _is_number(arg) for arg in args):
                 raise ValueError("min expects numeric arguments")
-            return min(args)
+            return min(_as_number(arg) for arg in args)
         if callee in {"max", "Prelude.max"}:
             if not args or any(not _is_number(arg) for arg in args):
                 raise ValueError("max expects numeric arguments")
-            return max(args)
+            return max(_as_number(arg) for arg in args)
         if callee in {"Config.has", "Config.int", "Config.float", "Config.str", "Config.value"}:
             if len(args) != 1 or not isinstance(args[0], str) or not args[0]:
                 raise ValueError(f"{callee} expects one non-empty string key")
@@ -448,33 +461,85 @@ def _materialize_expr(
         return AxonExprParen(inner=inner)
     if isinstance(expr, AxonExprIf):
         return AxonExprIf(
-            cond=_materialize_expr(expr.cond, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
-            true_expr=_materialize_expr(expr.true_expr, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
-            false_expr=_materialize_expr(expr.false_expr, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
+            cond=_materialize_expr(
+                expr.cond,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
+            true_expr=_materialize_expr(
+                expr.true_expr,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
+            false_expr=_materialize_expr(
+                expr.false_expr,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
         )
     if isinstance(expr, AxonExprTernary):
         return AxonExprTernary(
-            cond=_materialize_expr(expr.cond, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
-            true_expr=_materialize_expr(expr.true_expr, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
-            false_expr=_materialize_expr(expr.false_expr, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
+            cond=_materialize_expr(
+                expr.cond,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
+            true_expr=_materialize_expr(
+                expr.true_expr,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
+            false_expr=_materialize_expr(
+                expr.false_expr,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
         )
     if isinstance(expr, AxonExprBinary):
         return AxonExprBinary(
             op=expr.op,
-            left=_materialize_expr(expr.left, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
-            right=_materialize_expr(expr.right, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
+            left=_materialize_expr(
+                expr.left,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
+            right=_materialize_expr(
+                expr.right,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
         )
     if isinstance(expr, AxonExprList):
         return AxonExprList(
             items=tuple(
-                _materialize_expr(item, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                _materialize_expr(
+                    item, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names
+                )
                 for item in expr.items
             )
         )
     if isinstance(expr, AxonExprTuple):
         return AxonExprTuple(
             items=tuple(
-                _materialize_expr(item, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                _materialize_expr(
+                    item, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names
+                )
                 for item in expr.items
             )
         )
@@ -482,37 +547,77 @@ def _materialize_expr(
         return AxonExprCall(
             callee=expr.callee,
             args=tuple(
-                _materialize_expr(arg, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                _materialize_expr(
+                    arg, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names
+                )
                 for arg in expr.args
             ),
             kwargs={
-                key: _materialize_kwarg_value(value, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                key: _materialize_kwarg_value(
+                    value,
+                    env=env,
+                    config=config,
+                    state_keys=state_keys,
+                    resolve_names=resolve_names,
+                )
                 for key, value in expr.kwargs.items()
             },
         )
     if isinstance(expr, AxonExprPipe):
         return AxonExprPipe(
-            value=_materialize_expr(expr.value, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
+            value=_materialize_expr(
+                expr.value,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
             stages=tuple(
-                _materialize_expr(stage, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                _materialize_expr(
+                    stage,
+                    env=env,
+                    config=config,
+                    state_keys=state_keys,
+                    resolve_names=resolve_names,
+                )
                 for stage in expr.stages
             ),
         )
     if isinstance(expr, AxonExprBind):
         return AxonExprBind(
-            value=_materialize_expr(expr.value, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
+            value=_materialize_expr(
+                expr.value,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
             var=expr.var,
-            body=_materialize_expr(expr.body, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
+            body=_materialize_expr(
+                expr.body,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
         )
     if isinstance(expr, AxonExprLambda):
         return AxonExprLambda(
             var=expr.var,
-            body=_materialize_expr(expr.body, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
+            body=_materialize_expr(
+                expr.body,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
         )
     if isinstance(expr, AxonExprDo):
         return AxonExprDo(
             body=tuple(
-                _materialize_statement(stmt, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                _materialize_statement(
+                    stmt, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names
+                )
                 for stmt in expr.body
             ),
             inline=expr.inline,
@@ -531,12 +636,24 @@ def _materialize_statement(
     if isinstance(stmt, AxonBind):
         return AxonBind(
             targets=stmt.targets,
-            expr=_materialize_expr(stmt.expr, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
+            expr=_materialize_expr(
+                stmt.expr,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
         )
     if isinstance(stmt, AxonReturn):
         return AxonReturn(
             values=tuple(
-                _materialize_expr(value, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                _materialize_expr(
+                    value,
+                    env=env,
+                    config=config,
+                    state_keys=state_keys,
+                    resolve_names=resolve_names,
+                )
                 for value in stmt.values
             )
         )
@@ -544,13 +661,31 @@ def _materialize_statement(
         return AxonRepeat(
             name=stmt.name,
             var=stmt.var,
-            to_expr=_materialize_expr(stmt.to_expr, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
-            from_expr=_materialize_expr(
-                stmt.from_expr, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names
+            to_expr=_materialize_expr(
+                stmt.to_expr,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
             ),
-            step_expr=_materialize_expr(stmt.step_expr, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names),
+            from_expr=_materialize_expr(
+                stmt.from_expr,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
+            step_expr=_materialize_expr(
+                stmt.step_expr,
+                env=env,
+                config=config,
+                state_keys=state_keys,
+                resolve_names=resolve_names,
+            ),
             body=tuple(
-                _materialize_statement(item, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                _materialize_statement(
+                    item, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names
+                )
                 for item in stmt.body
             ),
         )
@@ -559,11 +694,19 @@ def _materialize_statement(
             targets=stmt.targets,
             prefix=stmt.prefix,
             kwargs={
-                key: _materialize_kwarg_value(value, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                key: _materialize_kwarg_value(
+                    value,
+                    env=env,
+                    config=config,
+                    state_keys=state_keys,
+                    resolve_names=resolve_names,
+                )
                 for key, value in stmt.kwargs.items()
             },
             body=tuple(
-                _materialize_statement(item, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names)
+                _materialize_statement(
+                    item, env=env, config=config, state_keys=state_keys, resolve_names=resolve_names
+                )
                 for item in stmt.body
             ),
         )
@@ -692,9 +835,9 @@ def _collect_statement_names(stmt: AxonStatement, *, out: set[str]) -> None:
             _collect_statement_names(item, out=out)
         return
     if isinstance(stmt, AxonScopeBind):
-        for value in stmt.kwargs.values():
-            if isinstance(value, AxonExpr):
-                _collect_expr_names(value, out=out)
+        for kwarg_value in stmt.kwargs.values():
+            if isinstance(kwarg_value, AxonExpr):
+                _collect_expr_names(kwarg_value, out=out)
         for item in stmt.body:
             _collect_statement_names(item, out=out)
         return
@@ -908,7 +1051,13 @@ def _render_program(
 
     for index, module in enumerate(parsed.modules):
         lines.append(_render_signature(module.signature))
-        lines.extend(_render_definition(module.definition.module_decl, module.definition.args, module_bodies[module.definition.module_decl]))
+        lines.extend(
+            _render_definition(
+                module.definition.module_decl,
+                module.definition.args,
+                module_bodies[module.definition.module_decl],
+            )
+        )
         if index != len(parsed.modules) - 1:
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -997,7 +1146,10 @@ def run_axon_materialize(
             raise ValueError(f"Could not derive single output stem for {body_checkpoints}")
         out_name = f"{next(iter(names))}.axon"
         out_path = resolved_axon.parent / out_name
-        text = body.replace('CHECKPOINTS []', f'CHECKPOINTS {json.dumps(body_checkpoints if len(body_checkpoints) != 1 else body_checkpoints[0])}')
+        text = body.replace(
+            "CHECKPOINTS []",
+            f"CHECKPOINTS {json.dumps(body_checkpoints if len(body_checkpoints) != 1 else body_checkpoints[0])}",
+        )
         out_path.write_text(text, encoding="utf-8")
         # Validate the generated source immediately.
         parse_program_source(text)

@@ -111,9 +111,7 @@ MODEL_SPECS: dict[str, ModelDownloadSpec] = {
         local_dir="gpt_oss_120b",
         repo_id="openai/gpt-oss-120b",
     ),
-    "jamba_3b": ModelDownloadSpec(
-        local_dir="jamba_3b", repo_id="ai21labs/AI21-Jamba-Reasoning-3B"
-    ),
+    "jamba_3b": ModelDownloadSpec(local_dir="jamba_3b", repo_id="ai21labs/AI21-Jamba-Reasoning-3B"),
     "llama3_2_1b": ModelDownloadSpec(local_dir="llama3_2_1b", repo_id="meta-llama/Llama-3.2-1B"),
     "longformer": ModelDownloadSpec(
         local_dir="longformer",
@@ -156,9 +154,7 @@ MODEL_SPECS: dict[str, ModelDownloadSpec] = {
     ),
     "olmo_2_1b": ModelDownloadSpec(local_dir="olmo_2_1b", repo_id="allenai/OLMo-2-0425-1B"),
     "olmo_2_7b": ModelDownloadSpec(local_dir="olmo_2_7b", repo_id="allenai/OLMo-2-1124-7B"),
-    "olmo_2_13b": ModelDownloadSpec(
-        local_dir="olmo_2_13b", repo_id="allenai/OLMo-2-1124-13B"
-    ),
+    "olmo_2_13b": ModelDownloadSpec(local_dir="olmo_2_13b", repo_id="allenai/OLMo-2-1124-13B"),
     "olmoe_1b_7b_0924": ModelDownloadSpec(
         local_dir="olmoe_1b_7b_0924", repo_id="allenai/OLMoE-1B-7B-0924"
     ),
@@ -483,7 +479,9 @@ def estimate_remote_param_count_lower_bound(
     ]
     if not shard_entries:
         shard_entries = [
-            entry for entry in sibling_entries if "/" not in entry.rfilename and entry.rfilename.endswith(".bin")
+            entry
+            for entry in sibling_entries
+            if "/" not in entry.rfilename and entry.rfilename.endswith(".bin")
         ]
         if not shard_entries:
             return None
@@ -654,7 +652,9 @@ def _normalize_local_weight_format(model_dir: Path) -> None:
             raise RuntimeError(f"No tensors found in PyTorch checkpoint {pt_path}")
 
         target_name = (
-            "model.safetensors" if pt_path.name == "pytorch_model.bin" else f"{pt_path.stem}.safetensors"
+            "model.safetensors"
+            if pt_path.name == "pytorch_model.bin"
+            else f"{pt_path.stem}.safetensors"
         )
         save_safetensors_file(tensor_map, str(model_dir / target_name))
         pt_path.unlink(missing_ok=True)
@@ -694,11 +694,18 @@ def ensure_model_downloaded(
             index_files = [name for name in siblings if name == "model.safetensors.index.json"]
             if shard_files:
                 selected_weight_files = [*index_files, *shard_files]
-                for stale in [*model_dir.glob("*.pt"), *model_dir.glob("*.pth"), *model_dir.glob("*.bin")]:
+                for stale in [
+                    *model_dir.glob("*.pt"),
+                    *model_dir.glob("*.pth"),
+                    *model_dir.glob("*.bin"),
+                ]:
                     stale.unlink(missing_ok=True)
             else:
                 selected_weight_files = pytorch_bin_files
-                for stale in [*model_dir.glob("*.safetensors"), model_dir / "model.safetensors.index.json"]:
+                for stale in [
+                    *model_dir.glob("*.safetensors"),
+                    model_dir / "model.safetensors.index.json",
+                ]:
                     stale.unlink(missing_ok=True)
             selected_files = set(selected_weight_files)
             selected_files.update(
@@ -709,7 +716,9 @@ def ensure_model_downloaded(
                     or Path(name).name.endswith(".tiktoken")
                     or (
                         Path(name).name.endswith(".py")
-                        and Path(name).name.startswith(("configuration_", "modeling_", "tokenization_"))
+                        and Path(name).name.startswith(
+                            ("configuration_", "modeling_", "tokenization_")
+                        )
                     )
                 )
             )
@@ -835,7 +844,9 @@ def ensure_matrix_models(
     status_cb: Callable[[str], None] | None = None,
     model_dirs: list[str] | tuple[str, ...] | None = None,
 ) -> None:
-    required_dirs = sorted(model_dirs) if model_dirs is not None else sorted(all_matrix_model_dirs())
+    required_dirs = (
+        sorted(model_dirs) if model_dirs is not None else sorted(all_matrix_model_dirs())
+    )
     for model_dir in required_dirs:
         spec = MODEL_SPECS.get(model_dir)
         if spec is None:

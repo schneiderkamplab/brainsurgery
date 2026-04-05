@@ -734,7 +734,9 @@ def test_apply_billions_params_filter_uses_local_bin_lower_bound(
     monkeypatch.setattr(
         matrix_mod,
         "estimate_remote_param_count_lower_bound",
-        lambda repo_root, spec: (_ for _ in ()).throw(AssertionError("remote estimate should not run")),
+        lambda repo_root, spec: (_ for _ in ()).throw(
+            AssertionError("remote estimate should not run")
+        ),
     )
     monkeypatch.setattr(
         matrix_mod,
@@ -754,7 +756,9 @@ def test_apply_billions_params_filter_uses_local_bin_lower_bound(
     assert skipped[0].is_exact is False
 
 
-def test_run_pair_with_fallback_retries_cuda_oom_on_cpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_pair_with_fallback_retries_cuda_oom_on_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pair = matrix_mod._Pair(tmp_path / "examples" / "bert.axon", tmp_path / "models" / "bert")
     calls: list[str] = []
 

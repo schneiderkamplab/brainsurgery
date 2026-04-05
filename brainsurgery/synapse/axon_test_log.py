@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-
 LOG_NAME_RE = re.compile(r"^log-(?P<pid>\d+)-(?P<axon>.+)-(?P<model>.+)\.txt$")
 MASKED_TOP1_RE = re.compile(r"^Masked top1_eq:\s*(?P<value>.+?)\s*$")
 MASKED_ABS_RE = re.compile(r"^Masked abs diff \(max\):\s*(?P<value>.+?)\s*$")
@@ -51,7 +50,9 @@ def _parse_float(text: str) -> float:
 
 
 def _latest_parent_log(log_dir: Path) -> Path | None:
-    parents = sorted(log_dir.glob("parent-*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    parents = sorted(
+        log_dir.glob("parent-*.txt"), key=lambda path: path.stat().st_mtime, reverse=True
+    )
     if not parents:
         return None
     return parents[0]

@@ -43,11 +43,7 @@ def emit_model_code_from_synapse_spec(
         raise ValueError("spec.model must be a mapping")
 
     symbols_raw = model.get("symbols", {})
-    symbols = {
-        k: v
-        for k, v in symbols_raw.items()
-        if isinstance(v, (int, float, bool, str))
-    }
+    symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, (int, float, bool, str))}
 
     emitter = _Emitter(class_name=class_name, spec=normalized_spec, symbols=symbols)
     return emitter.render()

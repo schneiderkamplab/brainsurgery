@@ -38,11 +38,21 @@ def test_gemma4_e_axon_lowers_with_expected_structure(repo_root: Path) -> None:
     model_graph = model.get("graph", [])
     assert isinstance(model_graph, list)
     top_nodes = _collect_node_specs(model_graph)
-    assert not any("_param_root" in node and isinstance(node["_param_root"], dict) for node in top_nodes)
+    assert not any(
+        "_param_root" in node and isinstance(node["_param_root"], dict) for node in top_nodes
+    )
+    all_nodes = _collect_node_specs(
+        [{"model": model} for model in [model] if isinstance(model, dict)]
+        + [
+            {"block": block_spec}
+            for block_spec in model.get("blocks", {}).values()
+            if isinstance(block_spec, dict)
+        ]
+    )
     assert any(
         node.get("_op") == "config_float"
         and node.get("_args") == "rope_parameters.full_attention.partial_rotary_factor"
-        for node in top_nodes
+        for node in all_nodes
     )
 
     blocks = model.get("blocks", {})
@@ -117,7 +127,7 @@ def test_gemma4_e_inline_config_lowers_equivalently_to_imported_form(
     repo_root: Path, tmp_path: Path
 ) -> None:
     inline_path = (
-        repo_root / "brainsurgery" / "synapse" / "models" / "gemma" / "gemma4" / "gemma4_e.axon"
+        repo_root / "brainsurgery" / "synapse" / "models" / "gemma" / "generic-gemma-4-e.axon"
     )
     inline_text = inline_path.read_text(encoding="utf-8")
     config_start = inline_text.index("CFG = ")
@@ -142,15 +152,12 @@ def test_gemma4_e_inline_config_lowers_equivalently_to_imported_form(
 
     inline_blocks = inline_spec["model"]["blocks"]
     imported_blocks = imported_spec["model"]["blocks"]
-    assert (
-        json.dumps(
-            inline_blocks["gemma4_apply_per_layer_input"]["graph"],
-            sort_keys=True,
-        )
-        == json.dumps(
-            imported_blocks["gemma4_apply_per_layer_input"]["graph"],
-            sort_keys=True,
-        )
+    assert json.dumps(
+        inline_blocks["gemma4_apply_per_layer_input"]["graph"],
+        sort_keys=True,
+    ) == json.dumps(
+        imported_blocks["gemma4_apply_per_layer_input"]["graph"],
+        sort_keys=True,
     )
 
     imported_main = imported_spec["model"]["graph"]

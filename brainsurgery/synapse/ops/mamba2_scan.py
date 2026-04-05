@@ -132,7 +132,9 @@ def _compute_scan(
     if u.shape != gate.shape:
         raise ValueError("mamba2_scan requires u and gate to share shape [batch, seq, dim]")
     if b.shape != c.shape:
-        raise ValueError("mamba2_scan requires B and C to share shape [batch, seq, groups*state_dim]")
+        raise ValueError(
+            "mamba2_scan requires B and C to share shape [batch, seq, groups*state_dim]"
+        )
     if a_log.ndim != 1 or d.ndim != 1 or dt_bias.ndim != 1:
         raise ValueError("mamba2_scan expects A/D/dt_bias rank-1 tensors")
     if norm_weight.ndim != 1:
@@ -212,12 +214,21 @@ def _resolve_interpret_inputs(
     env: dict[str, Any],
     *,
     node_path: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None
+]:
     args = node_spec.get("_args")
     if not isinstance(args, list) or len(args) not in {5, 6}:
         raise ValueError("mamba2_scan expects 5/6 inputs [u,gate,dt,B,C,?state]")
     state = env.get(str(args[5])) if len(args) == 6 else None
-    return env[str(args[0])], env[str(args[1])], env[str(args[2])], env[str(args[3])], env[str(args[4])], state
+    return (
+        env[str(args[0])],
+        env[str(args[1])],
+        env[str(args[2])],
+        env[str(args[3])],
+        env[str(args[4])],
+        state,
+    )
 
 
 def interpret(
@@ -233,7 +244,9 @@ def interpret(
     u, gate, dt, b, c, state = _resolve_interpret_inputs(model, node_spec, env, node_path=node_path)
     a_log = model._state[model._infer_param_path(node_spec, node_path=node_path, param_name="A")]
     d = model._state[model._infer_param_path(node_spec, node_path=node_path, param_name="D")]
-    dt_bias = model._state[model._infer_param_path(node_spec, node_path=node_path, param_name="dt_bias")]
+    dt_bias = model._state[
+        model._infer_param_path(node_spec, node_path=node_path, param_name="dt_bias")
+    ]
     norm_weight = model._state[
         model._infer_param_path(node_spec, node_path=node_path, param_name="norm_weight")
     ]
@@ -296,10 +309,26 @@ def compile(
     state_in = emitter._read_env_var(env, str(args[5])) if len(args) == 6 else "None"
 
     lines: list[str] = []
-    a_log = emitter._hoisted_param(node_spec=node_spec, node_path_var=node_path_var, param_name="A", lines=lines, indent=indent)
-    d = emitter._hoisted_param(node_spec=node_spec, node_path_var=node_path_var, param_name="D", lines=lines, indent=indent)
-    dt_bias = emitter._hoisted_param(node_spec=node_spec, node_path_var=node_path_var, param_name="dt_bias", lines=lines, indent=indent)
-    norm_weight = emitter._hoisted_param(node_spec=node_spec, node_path_var=node_path_var, param_name="norm_weight", lines=lines, indent=indent)
+    a_log = emitter._hoisted_param(
+        node_spec=node_spec, node_path_var=node_path_var, param_name="A", lines=lines, indent=indent
+    )
+    d = emitter._hoisted_param(
+        node_spec=node_spec, node_path_var=node_path_var, param_name="D", lines=lines, indent=indent
+    )
+    dt_bias = emitter._hoisted_param(
+        node_spec=node_spec,
+        node_path_var=node_path_var,
+        param_name="dt_bias",
+        lines=lines,
+        indent=indent,
+    )
+    norm_weight = emitter._hoisted_param(
+        node_spec=node_spec,
+        node_path_var=node_path_var,
+        param_name="norm_weight",
+        lines=lines,
+        indent=indent,
+    )
     n_groups = emitter._expr_code(node_spec.get("n_groups"), env)
     head_dim = emitter._expr_code(node_spec.get("head_dim"), env)
     time_step_min = emitter._expr_code(node_spec.get("time_step_min", 0.0), env)

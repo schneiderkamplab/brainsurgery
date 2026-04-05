@@ -52,7 +52,9 @@ def test_deepseek_v2_lite_axon_lowers_with_expected_symbols(repo_root: Path) -> 
     assert "deepseek_v2_lite_moe_block" in blocks
 
 
-def test_deepseek_v2_lite_nested_path_block_calls_keep_relative_param_paths(repo_root: Path) -> None:
+def test_deepseek_v2_lite_nested_path_block_calls_keep_relative_param_paths(
+    repo_root: Path,
+) -> None:
     modules = parse_axon_program_from_path(repo_root / "examples" / "deepseek_v2_lite.axon")
     spec = lower_axon_program_to_synapse_spec(
         modules, main_module="deepseek_v2_lite_layer0_input_norm_stage"
@@ -60,11 +62,15 @@ def test_deepseek_v2_lite_nested_path_block_calls_keep_relative_param_paths(repo
 
     graph = spec["model"]["graph"]
     loop_node = next(node for item in graph for node in item.values() if node.get("_op") == "for")
-    call_node = loop_node["_body"][0]["n_call_28"]
+    call_node = next(
+        node for item in loop_node["_body"] for node in item.values() if node.get("_op") == "call"
+    )
     assert call_node["_target"] == "rms__path_input_layernorm"
 
     block = spec["model"]["blocks"]["rms__path_input_layernorm"]
-    rms_node = block["graph"][-1]["n_op_27"]
+    rms_node = next(
+        node for item in block["graph"] for node in item.values() if node.get("_op") == "rmsnorm"
+    )
     assert rms_node["_params"]["weight"] == "input_layernorm.weight"
 
 
@@ -82,7 +88,9 @@ def test_deepseek_v2_lite_nested_self_attn_path_calls_keep_runtime_scope(repo_ro
     assert call_node["_scope"] == "self_attn"
 
     block = spec["model"]["blocks"]["rms__path_kv_a_layernorm"]
-    rms_node = block["graph"][-1]["n_op_27"]
+    rms_node = next(
+        node for item in block["graph"] for node in item.values() if node.get("_op") == "rmsnorm"
+    )
     assert rms_node["_params"]["weight"] == "kv_a_layernorm.weight"
 
 

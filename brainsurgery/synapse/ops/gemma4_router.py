@@ -91,12 +91,12 @@ def interpret(
         raise ValueError("gemma4_router expects out=[weights,indices]")
     hidden = model._read_tensor_input(inputs, env)
     top_k = int(model._eval_expr(node_spec.get("top_k"), env, symbols))
-    scalar_root_size = float(
-        model._eval_expr(node_spec.get("scalar_root_size", 1.0), env, symbols)
-    )
+    scalar_root_size = float(model._eval_expr(node_spec.get("scalar_root_size", 1.0), env, symbols))
     rms_eps = float(model._eval_expr(node_spec.get("rms_eps", 1.0e-6), env, symbols))
 
-    router_scale = model._state[_infer_path(model, node_spec, node_path=node_path, key="router_scale")]
+    router_scale = model._state[
+        _infer_path(model, node_spec, node_path=node_path, key="router_scale")
+    ]
     router_proj_weight = model._state[
         _infer_path(model, node_spec, node_path=node_path, key="router_proj_weight")
     ]
@@ -166,22 +166,16 @@ def compile(
     lines.append(
         f"{indent}{mean_squared} = {src}.float().pow(2).mean(dim=-1, keepdim=True) + float({rms_eps})"
     )
-    lines.append(
-        f"{indent}{hidden_norm} = {src}.float() * torch.pow({mean_squared}, -0.5)"
-    )
+    lines.append(f"{indent}{hidden_norm} = {src}.float() * torch.pow({mean_squared}, -0.5)")
     lines.append(
         f"{indent}{hidden_norm} = {hidden_norm} * {router_scale}.float() * float({scalar_root_size})"
     )
-    lines.append(
-        f"{indent}{expert_scores} = F.linear({hidden_norm}, {router_proj_weight}.float())"
-    )
+    lines.append(f"{indent}{expert_scores} = F.linear({hidden_norm}, {router_proj_weight}.float())")
     lines.append(f"{indent}{weights_var} = torch.softmax({expert_scores}, dim=-1)")
     lines.append(
         f"{indent}{weights_var}, {indices_var} = torch.topk({weights_var}, k=int({top_k}), dim=-1)"
     )
-    lines.append(
-        f"{indent}{weights_var} = {weights_var} / {weights_var}.sum(dim=-1, keepdim=True)"
-    )
+    lines.append(f"{indent}{weights_var} = {weights_var} / {weights_var}.sum(dim=-1, keepdim=True)")
     lines.append(
         f"{indent}{weights_var} = ({weights_var} * {per_expert_scale}[{indices_var}].to(dtype={weights_var}.dtype)).to(dtype={src}.dtype)"
     )

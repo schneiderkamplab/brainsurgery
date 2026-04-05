@@ -302,7 +302,9 @@ def compile(
     if len(args) in {4, 5}:
         param_scope_expr = f"self._scope_of({node_path_var})"
         a_param_node_path_var = node_path_var if explicit_a else param_scope_expr
-        d_param_node_path_var = node_path_var if isinstance(node_spec.get('D'), str) else param_scope_expr
+        d_param_node_path_var = (
+            node_path_var if isinstance(node_spec.get("D"), str) else param_scope_expr
+        )
         a_value = emitter._hoisted_param(
             node_spec=node_spec,
             node_path_var=a_param_node_path_var,

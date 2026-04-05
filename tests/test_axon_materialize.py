@@ -10,7 +10,7 @@ def test_gemma3_materialize_reads_checkpoint_pragma_and_groups_variants(tmp_path
     axon_dir = tmp_path / "brainsurgery" / "synapse" / "models" / "gemma" / "gemma3"
     axon_dir.mkdir(parents=True)
     axon_path = axon_dir / "gemma3.axon"
-    source = Path("brainsurgery/synapse/models/gemma/gemma3.axon").read_text(
+    source = Path("brainsurgery/synapse/models/gemma/generic-gemma-3.axon").read_text(
         encoding="utf-8"
     )
     source = source.replace(
@@ -70,8 +70,9 @@ def test_gemma3_materialize_reads_checkpoint_pragma_and_groups_variants(tmp_path
             embed_shape = [262144, 1152]
             q_shape = [1024, 1152]
             k_shape = [256, 1152]
-        from safetensors.torch import save_file
         import torch
+        from safetensors.torch import save_file
+
         save_file(
             {
                 "model.embed_tokens.weight": torch.zeros(embed_shape),
@@ -101,7 +102,7 @@ def test_generic_materialize_works_for_non_gemma3_with_config_and_params(tmp_pat
     axon_dir.mkdir(parents=True)
     axon_path = axon_dir / "toy.axon"
     axon_path.write_text(
-        '\n'.join(
+        "\n".join(
             [
                 '{-# CHECKPOINTS ["org/toy-pt", "org/toy-it"] #-}',
                 "",
@@ -130,10 +131,13 @@ def test_generic_materialize_works_for_non_gemma3_with_config_and_params(tmp_pat
         d = model_root / name
         d.mkdir(parents=True)
         (d / "config.json").write_text(json.dumps(payload), encoding="utf-8")
-        from safetensors.torch import save_file
         import torch
+        from safetensors.torch import save_file
 
-        save_file({"language_model.embed_tokens.weight": torch.zeros([128, 32])}, str(d / "model.safetensors"))
+        save_file(
+            {"language_model.embed_tokens.weight": torch.zeros([128, 32])},
+            str(d / "model.safetensors"),
+        )
 
     written = run_axon_materialize(axon_path=axon_path, models_root=tmp_path / "weights")
 
