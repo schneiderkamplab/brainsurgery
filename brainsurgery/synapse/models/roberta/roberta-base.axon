@@ -1,0 +1,48 @@
+{-# CHECKPOINTS "FacebookAI/roberta-base" #-}
+{-# TASK "masked_lm" #-}
+
+import Activations
+import Activations (gelu)
+
+D = 768
+V = 50265
+L = 12
+H = 12
+FFN = 3072
+EPS = 1e-05
+PAD = 1
+
+roberta_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+roberta_block x attn_mask = do
+  a <- scope@attention do
+    q <- linear@self.query x dim=D bias=true |> reshape_heads heads=H
+    k <- linear@self.key x dim=D bias=true |> reshape_heads heads=H
+    v <- linear@self.value x dim=D bias=true |> reshape_heads heads=H
+    return attention q k v mask=attn_mask padding_mask=true causal=false |> merge_heads |> linear@output.dense dim=D bias=true
+  x <- x + a
+  x <- layernorm@attention.output.LayerNorm x eps=EPS weight=weight bias=bias
+  m <- linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- linear@output.dense m dim=D bias=true
+  y <- x + m
+  y <- layernorm@output.LayerNorm y eps=EPS weight=weight bias=bias
+  return y
+
+roberta :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+roberta input_ids attn_mask = do
+  pos_base <- position_ids input_ids attn_mask pad_fill=-1
+  pos_shift <- PAD + 1
+  pos_ids <- add pos_base pos_shift
+  tok_type_ids <- zeros_like input_ids
+  tok <- embedding@roberta.embeddings.word_embeddings input_ids dim=D
+  pos <- embedding@roberta.embeddings.position_embeddings pos_ids dim=D
+  typ <- embedding@roberta.embeddings.token_type_embeddings tok_type_ids dim=D
+  x <- tok + pos
+  x <- x + typ
+  x <- layernorm@roberta.embeddings.LayerNorm x eps=EPS weight=weight bias=bias
+  for@roberta.encoder.layer i <- [0..L) do
+    x <- roberta_block x attn_mask
+  logits <- scope@lm_head do
+    x <- linear@dense x dim=D bias=true |> gelu
+    x <- layernorm@layer_norm x eps=EPS weight=weight bias=bias
+    return linear@decoder x dim=V bias=true weight="@@roberta.embeddings.word_embeddings.weight" bias_path="@@lm_head.bias"
+  return logits

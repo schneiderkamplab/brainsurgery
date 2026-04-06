@@ -5,7 +5,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-LOG_NAME_RE = re.compile(r"^log-(?P<pid>\d+)-(?P<axon>.+)-(?P<model>.+)\.txt$")
+from .axon_test import _format_checkpoint_summary_table
+
 MASKED_TOP1_RE = re.compile(r"^Masked top1_eq:\s*(?P<value>.+?)\s*$")
 MASKED_ABS_RE = re.compile(r"^Masked abs diff \(max\):\s*(?P<value>.+?)\s*$")
 MASKED_REL_RE = re.compile(r"^Logits rel diff \(masked\) \| mean/max:\s+\S+\s+(?P<value>\S+)\s*$")
@@ -14,12 +15,15 @@ RESULT_MODEL_RE = re.compile(r"^result\.model_dir=(?P<value>.+?)\s*$")
 RESULT_TOP1_RE = re.compile(r"^result\.masked_top1_eq=(?P<value>.+?)\s*$")
 RESULT_ABS_RE = re.compile(r"^result\.masked_max_abs_diff=(?P<value>.+?)\s*$")
 RESULT_REL_RE = re.compile(r"^result\.masked_max_rel_diff=(?P<value>.+?)\s*$")
-PARENT_CHILD_START_RE = re.compile(r"child_start .*? log_path=(?P<log_path>\S+)\s*$")
+PARENT_CHILD_START_RE = re.compile(
+    r"child_start .*?axon=(?P<axon>\S+)\s+checkpoint=(?P<checkpoint>\S+)\s+model_dir=(?P<model_dir>\S+)\s+log_path=(?P<log_path>\S+)\s*$"
+)
 
 
 @dataclass(frozen=True)
 class AxonTestLogRow:
     axon: str
+    checkpoint: str
     model_dir: str
     masked_top1_eq: str
     masked_max_abs_diff: float
@@ -31,6 +35,14 @@ class AxonTestLogRow:
 class _RunRow:
     row: AxonTestLogRow
     run_mtime: float
+
+
+@dataclass(frozen=True)
+class _WorkerLogRef:
+    path: Path
+    axon: str
+    checkpoint: str
+    model_dir: str
 
 
 def _parse_bool_key(value: str) -> tuple[int, str]:
@@ -62,11 +74,11 @@ def _all_parent_logs(log_dir: Path) -> list[Path]:
     return sorted(log_dir.glob("parent-*.txt"), key=lambda path: path.stat().st_mtime)
 
 
-def _worker_logs_for_parent(parent_log: Path | None) -> list[Path]:
+def _worker_logs_for_parent(parent_log: Path | None) -> list[_WorkerLogRef]:
     if parent_log is None:
         return []
     base_dir = parent_log.parent
-    worker_logs: list[Path] = []
+    worker_logs: list[_WorkerLogRef] = []
     seen: set[Path] = set()
     with parent_log.open("r", encoding="utf-8", errors="replace") as fh:
         for raw_line in fh:
@@ -80,20 +92,25 @@ def _worker_logs_for_parent(parent_log: Path | None) -> list[Path]:
             if candidate in seen:
                 continue
             seen.add(candidate)
-            worker_logs.append(candidate)
+            worker_logs.append(
+                _WorkerLogRef(
+                    path=candidate,
+                    axon=match.group("axon"),
+                    checkpoint=match.group("checkpoint"),
+                    model_dir=match.group("model_dir"),
+                )
+            )
     return worker_logs
 
 
-def _parse_row(path: Path) -> AxonTestLogRow | None:
+def _parse_row(worker_log: _WorkerLogRef) -> AxonTestLogRow | None:
+    path = worker_log.path
     if not path.exists():
         return None
 
-    match = LOG_NAME_RE.match(path.name)
-    if match is None:
-        return None
-
-    axon_name = f"{match.group('axon')}.axon"
-    model_dir = match.group("model")
+    axon_name = worker_log.axon
+    checkpoint = worker_log.checkpoint
+    model_dir = worker_log.model_dir
     masked_top1_eq: str | None = None
     masked_max_abs_diff: str | None = None
     masked_max_rel_diff: str | None = None
@@ -107,7 +124,7 @@ def _parse_row(path: Path) -> AxonTestLogRow | None:
                 continue
             model_match = RESULT_MODEL_RE.match(line)
             if model_match is not None:
-                model_dir = Path(model_match.group("value")).name
+                model_dir = model_match.group("value")
                 continue
             top1_result_match = RESULT_TOP1_RE.match(line)
             if top1_result_match is not None:
@@ -139,6 +156,7 @@ def _parse_row(path: Path) -> AxonTestLogRow | None:
 
     return AxonTestLogRow(
         axon=axon_name,
+        checkpoint=checkpoint,
         model_dir=model_dir,
         masked_top1_eq=masked_top1_eq,
         masked_max_abs_diff=_parse_float(masked_max_abs_diff),
@@ -150,7 +168,7 @@ def _parse_row(path: Path) -> AxonTestLogRow | None:
 def _rows_for_latest_parent(log_dir: Path) -> list[AxonTestLogRow]:
     latest_parent = _latest_parent_log(log_dir)
     files = _worker_logs_for_parent(latest_parent)
-    return [row for row in (_parse_row(path) for path in files) if row is not None]
+    return [row for row in (_parse_row(worker_log) for worker_log in files) if row is not None]
 
 
 def _latest_rows_for_all_parents(log_dir: Path) -> list[AxonTestLogRow]:
@@ -168,17 +186,19 @@ def _latest_rows_for_all_parents(log_dir: Path) -> list[AxonTestLogRow]:
     return [item.row for item in latest_by_pair.values()]
 
 
-def format_axon_test_log_markdown(rows: list[AxonTestLogRow]) -> str:
-    header = [
-        "| axon | model dir | masked top-1 eq | masked max abs diff | masked max rel diff |",
-        "|---|---|---:|---:|---:|",
-    ]
-    body = [
-        f"| `{row.axon}` | `{row.model_dir}` | `{row.masked_top1_eq}` | "
-        f"`{row.masked_max_abs_diff_text}` | `{row.masked_max_rel_diff_text}` |"
+def _format_axon_benchmark_log_table(rows: list[AxonTestLogRow], *, table_format: str) -> str:
+    summary_rows: list[dict[str, object]] = [
+        {
+            "axon": row.axon,
+            "checkpoint": row.checkpoint,
+            "model_dir": row.model_dir,
+            "masked_top1_eq": row.masked_top1_eq,
+            "masked_max_abs_diff": row.masked_max_abs_diff_text,
+            "masked_max_rel_diff": row.masked_max_rel_diff_text,
+        }
         for row in rows
     ]
-    return "\n".join(header + body)
+    return _format_checkpoint_summary_table(summary_rows, table_format=table_format)
 
 
 def prune_axon_test_logs_to_latest_run(log_dir: Path) -> None:
@@ -187,7 +207,7 @@ def prune_axon_test_logs_to_latest_run(log_dir: Path) -> None:
         return
 
     keep: set[Path] = {latest_parent.resolve()}
-    keep.update(path.resolve() for path in _worker_logs_for_parent(latest_parent))
+    keep.update(worker_log.path.resolve() for worker_log in _worker_logs_for_parent(latest_parent))
 
     for path in log_dir.glob("parent-*.txt"):
         if path.resolve() not in keep:
@@ -200,12 +220,36 @@ def prune_axon_test_logs_to_latest_run(log_dir: Path) -> None:
 
 def load_axon_test_log_rows(log_dir: Path, *, all_runs: bool = False) -> list[AxonTestLogRow]:
     rows = _latest_rows_for_all_parents(log_dir) if all_runs else _rows_for_latest_parent(log_dir)
-    rows.sort(key=lambda row: (_parse_bool_key(row.masked_top1_eq), row.masked_max_abs_diff))
+    rows.sort(
+        key=lambda row: (
+            row.checkpoint,
+            _parse_bool_key(row.masked_top1_eq),
+            row.masked_max_abs_diff,
+            _parse_float(row.masked_max_rel_diff_text),
+        )
+    )
     return rows
 
 
-def render_axon_test_log(log_dir: Path, *, all_runs: bool = False, prune: bool = False) -> str:
+def render_axon_benchmark_log(
+    log_dir: Path,
+    *,
+    all_runs: bool = False,
+    prune: bool = False,
+    table_format: str = "markdown",
+) -> str:
     if prune:
         prune_axon_test_logs_to_latest_run(log_dir)
     rows = load_axon_test_log_rows(log_dir, all_runs=all_runs)
-    return format_axon_test_log_markdown(rows)
+    return _format_axon_benchmark_log_table(rows, table_format=table_format)
+
+
+def render_axon_test_log(
+    log_dir: Path, *, all_runs: bool = False, prune: bool = False, table_format: str = "markdown"
+) -> str:
+    return render_axon_benchmark_log(
+        log_dir,
+        all_runs=all_runs,
+        prune=prune,
+        table_format=table_format,
+    )

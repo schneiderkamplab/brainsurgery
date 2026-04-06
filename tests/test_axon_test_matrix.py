@@ -56,6 +56,25 @@ def test_axon_test_matrix_exclude_skips_selected_pairs(
     assert "gemma3.axon" in out
 
 
+def test_axon_test_matrix_dry_run_html_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_fixture_pair(tmp_path, "gpt2")
+
+    exit_code = run_axon_test_matrix(
+        examples_dir=tmp_path / "examples",
+        models_dir=tmp_path / "models",
+        dry_run=True,
+        table_format="html",
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "<table>" in out
+    assert "<th>axon_file</th>" in out
+    assert "gpt2.axon" in out
+
+
 def test_axon_test_matrix_include_axon_filename_is_exact(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

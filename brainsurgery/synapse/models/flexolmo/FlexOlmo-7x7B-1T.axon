@@ -1,0 +1,68 @@
+{-# CHECKPOINTS "allenai/FlexOlmo-7x7B-1T" #-}
+{-# TASK "causal_lm" #-}
+
+import Activations
+import Activations (silu)
+import Cache
+import Cache (past_length)
+import MoE
+
+D = 4096
+L = 32
+H = 32
+E = 7
+EPT = 7
+C = 4096
+FFN = 11008
+EPS = 1e-06
+THETA = 500000.0
+ATTN_SCALE = 0.08838834764831843
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS
+
+expert_ffn :: Tensor[N,D] -> Tensor[N,D]
+expert_ffn x = do
+  gate <- linear@gate_proj x dim=FFN
+  up <- linear@up_proj x dim=FFN
+  return gate |> silu |> mul up |> linear@down_proj dim=D
+
+flexolmo_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+flexolmo_decoder_block x pos_ids attn_mask past_kv = do
+  a, new_kv <- scope@self_attn do
+    q <- x |> linear@q_proj dim=D |> rms@q_norm |> reshape_heads heads=H
+    k <- x |> linear@k_proj dim=D |> rms@k_norm |> reshape_heads heads=H
+    v <- x |> linear@v_proj dim=D |> reshape_heads heads=H
+    q, k <- rope_pair q k position_ids=pos_ids theta=THETA
+    k, v, new_kv <- Cache.update past_kv k v
+    mask <- causal_mask q k window=C padding_mask=attn_mask
+    a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads
+    a <- linear@o_proj a dim=D
+    return a, new_kv
+  a_norm <- rms@post_attention_layernorm a
+  x <- x + a_norm
+  m <- scope@mlp do
+    topk_scores, topk_indices <- linear@gate x dim=E |> softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1
+    m <- x * 0.0
+    for@experts e <- [0..E) do
+      x_sel, token_idx, topk_pos, sel_scores <- MoE.select x topk_scores topk_indices e
+      x_upd <- expert_ffn x_sel
+      m <- MoE.scatter_add m token_idx x_upd sel_scores
+    return m
+  m_norm <- rms@post_feedforward_layernorm m
+  return x + m_norm, new_kv
+
+flexolmo :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+flexolmo input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  x, new_kv <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- flexolmo_decoder_block x pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    x <- rms@norm x
+    return x, new_kv
+  logits <- linear@lm_head x
+  return logits, new_kv

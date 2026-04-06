@@ -10,7 +10,7 @@ def test_gemma3_materialize_reads_checkpoint_pragma_and_groups_variants(tmp_path
     axon_dir = tmp_path / "brainsurgery" / "synapse" / "models" / "gemma" / "gemma3"
     axon_dir.mkdir(parents=True)
     axon_path = axon_dir / "gemma3.axon"
-    source = Path("brainsurgery/synapse/models/gemma/generic-gemma-3.axon").read_text(
+    source = Path("brainsurgery/synapse/models/gemma3/generic-gemma-3.axon").read_text(
         encoding="utf-8"
     )
     source = source.replace(

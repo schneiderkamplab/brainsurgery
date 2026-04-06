@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import contextlib
 import gc
 import hashlib
+import html
 import importlib.machinery
 import importlib.util
 import json
@@ -38,6 +38,8 @@ from .axon import (
     parse_axon_program_from_path,
     tokenize_prompts,
 )
+from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
+from .axon_runner_common import is_cuda_oom as _is_cuda_oom
 from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
 from .codegen import emit_model_code_from_synapse_spec
 from .matrix_models import ModelDownloadSpec, ensure_model_downloaded
@@ -60,8 +62,8 @@ def _format_checkpoint_summary_table(
     *,
     table_format: str,
 ) -> str:
-    if table_format not in {"plain", "markdown"}:
-        raise ValueError("table_format must be 'plain' or 'markdown'")
+    if table_format not in {"plain", "markdown", "html"}:
+        raise ValueError("table_format must be 'plain', 'markdown', or 'html'")
     headers = [
         "axon",
         "checkpoint",
@@ -81,6 +83,56 @@ def _format_checkpoint_summary_table(
         ]
         for row in rows
     ]
+    if table_format == "html":
+
+        def _numeric(cell: str) -> float | None:
+            try:
+                return float(cell)
+            except Exception:
+                return None
+
+        def _cell_style(header: str, cell: str) -> str:
+            if header == "masked top-1 eq" and cell != "True":
+                return "background-color: #f8d7da;"
+            if header == "masked max abs diff":
+                numeric = _numeric(cell)
+                if numeric is not None:
+                    if numeric > 1e-2:
+                        return "background-color: #ffe5b4;"
+                    if numeric > 1e-3:
+                        return "background-color: #fff3cd;"
+            if "max abs diff" in header and header != "masked max abs diff":
+                numeric = _numeric(cell)
+                if numeric is not None and numeric > 1.0:
+                    return "background-color: #fff3cd;"
+            return ""
+
+        def _row_style(line: Sequence[str]) -> str:
+            masked_top1 = line[3]
+            if masked_top1 != "True":
+                return "background-color: #dc3545; color: #ffffff;"
+            return ""
+
+        out = [
+            "<table>",
+            "  <thead>",
+            "    <tr>",
+            *[f"      <th>{html.escape(header)}</th>" for header in headers],
+            "    </tr>",
+            "  </thead>",
+            "  <tbody>",
+        ]
+        for line in body:
+            row_style = _row_style(line)
+            row_style_attr = f' style="{row_style}"' if row_style else ""
+            out.append(f"    <tr{row_style_attr}>")
+            for header, cell in zip(headers, line, strict=False):
+                style = "" if row_style else _cell_style(header, cell)
+                style_attr = f' style="{style}"' if style else ""
+                out.append(f"      <td{style_attr}>{html.escape(cell)}</td>")
+            out.append("    </tr>")
+        out.extend(["  </tbody>", "</table>"])
+        return "\n".join(out)
     if table_format == "markdown":
         out = [
             "| " + " | ".join(headers) + " |",
@@ -220,28 +272,6 @@ def _infer_model_task(*, axon_file: Path, weights: Path) -> str:
     ):
         return "seq2seq_lm"
     return "causal_lm"
-
-
-def _is_cuda_oom(exc: BaseException, *, device: str) -> bool:
-    normalized = str(device).strip().lower()
-    if not normalized.startswith("cuda"):
-        return False
-    message = str(exc).lower()
-    if "out of memory" in message or "cuda error: out of memory" in message:
-        return True
-    return isinstance(exc, torch.cuda.OutOfMemoryError)
-
-
-def _cleanup_cuda_after_oom(device: str) -> None:
-    normalized = str(device).strip().lower()
-    if not normalized.startswith("cuda"):
-        return
-    gc.collect()
-    if torch.cuda.is_available():
-        with contextlib.suppress(Exception):
-            torch.cuda.empty_cache()
-        with contextlib.suppress(Exception):
-            torch.cuda.ipc_collect()
 
 
 def _cleanup(device: torch.device) -> None:
@@ -2355,102 +2385,10 @@ def run_axon_test(
     )
 
 
-def run_axon_benchmark(
-    *,
-    axon_files: Sequence[Path],
-    device: str = "cpu",
-    text: str | Sequence[str] = ("The future of AI is", "Hello World"),
-    max_len: int = 32,
-    tokenizer: str | None = None,
-    class_name: str = "AxonGeneratedModel",
-    main_module: str | None = None,
-    dtype: str = "float32",
-    model_task: str = "auto",
-    trace_layers: bool = False,
-    hf_align_bf16_profile: bool = False,
-    hf_align_mask_contract: bool = False,
-    hf_align_position_ids: bool = False,
-    hf_align_add_fp32_accum: bool = False,
-    hf_align_linear_fp32_accum: bool = False,
-    hf_align_norm_fp32: bool = False,
-    compile_hf: bool = False,
-    compile_axon: bool = False,
-    compile_backend: str | None = None,
-    compile_mode: str | None = None,
-    compile_fullgraph: bool = False,
-    compile_dynamic: bool = False,
-    trust_remote_code: bool = False,
-    table_format: str = "markdown",
-) -> dict[str, Any]:
-    repo_root = _repo_root()
-    results: list[dict[str, Any]] = []
-    for axon_file in axon_files:
-        resolved_axon_file = Path(axon_file).resolve()
-        checkpoints = _declared_checkpoints_from_axon(
-            axon_file=resolved_axon_file,
-            main_module=main_module,
-        )
-        for checkpoint_id in checkpoints:
-            model_dir = _ensure_checkpoint_model_dir(
-                repo_root=repo_root,
-                checkpoint_id=checkpoint_id,
-            )
-            print()
-            print("=" * 80)
-            print(f"Axon file:      {resolved_axon_file}")
-            print(f"Checkpoint:     {checkpoint_id}")
-            print(f"Model dir:      {model_dir}")
-            print("=" * 80)
-            print()
-            result = _run_axon_test_single(
-                axon_file=resolved_axon_file,
-                weights=model_dir,
-                device=device,
-                text=text,
-                max_len=max_len,
-                hf_model_dir=model_dir,
-                tokenizer=tokenizer,
-                class_name=class_name,
-                main_module=main_module,
-                dtype=dtype,
-                model_task=model_task,
-                trace_layers=trace_layers,
-                hf_align_bf16_profile=hf_align_bf16_profile,
-                hf_align_mask_contract=hf_align_mask_contract,
-                hf_align_position_ids=hf_align_position_ids,
-                hf_align_add_fp32_accum=hf_align_add_fp32_accum,
-                hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
-                hf_align_norm_fp32=hf_align_norm_fp32,
-                compile_hf=compile_hf,
-                compile_axon=compile_axon,
-                compile_backend=compile_backend,
-                compile_mode=compile_mode,
-                compile_fullgraph=compile_fullgraph,
-                compile_dynamic=compile_dynamic,
-                trust_remote_code=trust_remote_code,
-            )
-            enriched = dict(result)
-            enriched["axon_file"] = resolved_axon_file
-            enriched["checkpoint_id"] = checkpoint_id
-            enriched["weights"] = model_dir
-            enriched["hf_model_dir"] = model_dir
-            results.append(enriched)
-    summary_rows = [
-        {
-            "axon": str(row["axon_file"]),
-            "checkpoint": row["checkpoint_id"],
-            "model_dir": str(row["weights"]),
-            "masked_top1_eq": "N/A"
-            if row.get("masked_top1_eq") is None
-            else str(bool(row["masked_top1_eq"])),
-            "masked_max_abs_diff": _format_metric_value(row.get("masked_max_diff")),
-            "masked_max_rel_diff": _format_metric_value(row.get("masked_max_rel_diff")),
-        }
-        for row in results
-    ]
-    print()
-    print(_format_checkpoint_summary_table(summary_rows, table_format=table_format))
-    return {"results": results}
+def run_axon_benchmark(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from .axon_benchmark import run_axon_benchmark as _run_axon_benchmark
+
+    return _run_axon_benchmark(*args, **kwargs)
 
 
 __all__ = ["run_axon_test", "run_axon_benchmark"]

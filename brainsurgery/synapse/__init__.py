@@ -39,9 +39,15 @@ def run_axon_test(*args, **kwargs):
 
 def run_axon_benchmark(*args, **kwargs):
     # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
-    from .axon_test import run_axon_benchmark as _run_axon_benchmark
+    from .axon_benchmark import run_axon_benchmark as _run_axon_benchmark
 
     return _run_axon_benchmark(*args, **kwargs)
+
+
+def render_axon_benchmark_csv(*args, **kwargs):
+    from .axon_benchmark import render_axon_benchmark_csv as _render_axon_benchmark_csv
+
+    return _render_axon_benchmark_csv(*args, **kwargs)
 
 
 def run_axon_test_matrix(*args, **kwargs):
@@ -71,6 +77,12 @@ def run_axon_visualize(*args, **kwargs):
     return _run_axon_visualize(*args, **kwargs)
 
 
+def render_axon_benchmark_log(*args, **kwargs):
+    from .axon_test_log import render_axon_benchmark_log as _render_axon_benchmark_log
+
+    return _render_axon_benchmark_log(*args, **kwargs)
+
+
 def render_axon_test_log(*args, **kwargs):
     from .axon_test_log import render_axon_test_log as _render_axon_test_log
 
@@ -96,8 +108,10 @@ __all__ = [
     "infer_block_io_types_from_modules",
     "infer_output_types_for_node",
     "run_axon_benchmark",
+    "render_axon_benchmark_csv",
     "run_axon_test",
     "run_axon_materialize",
+    "render_axon_benchmark_log",
     "render_axon_test_log",
     "run_axon_test_matrix",
     "run_axon_op_parity",

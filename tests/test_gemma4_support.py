@@ -127,7 +127,7 @@ def test_gemma4_e_inline_config_lowers_equivalently_to_imported_form(
     repo_root: Path, tmp_path: Path
 ) -> None:
     inline_path = (
-        repo_root / "brainsurgery" / "synapse" / "models" / "gemma" / "generic-gemma-4-e.axon"
+        repo_root / "brainsurgery" / "synapse" / "models" / "gemma4" / "generic-gemma-4-e.axon"
     )
     inline_text = inline_path.read_text(encoding="utf-8")
     config_start = inline_text.index("CFG = ")

@@ -85,7 +85,7 @@ t5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       q <- linear@EncDecAttention.q x_norm dim=D bias=false |> reshape_heads heads=H
       k <- linear@EncDecAttention.k enc_hidden dim=D bias=false |> reshape_heads heads=H
       v <- linear@EncDecAttention.v enc_hidden dim=D bias=false |> reshape_heads heads=H
-      mask <- bidirectional_mask q k padding_mask=encoder_attention_mask
+      mask <- bidirectional_mask q k padding_mask=attention_mask
       return attention q k v mask=mask causal=false scale=1.0 |> merge_heads |> linear@EncDecAttention.o dim=D bias=false
     dec_hidden <- dec_hidden + cross_attn
     ffn <- scope@layer.2 do

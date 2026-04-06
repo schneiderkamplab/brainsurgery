@@ -7,6 +7,7 @@ import os
 import random
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,7 +65,7 @@ MODEL_SPECS: dict[str, ModelDownloadSpec] = {
         repo_id="Zyphra/BlackMamba-2.8B",
         require_tokenizer=False,
     ),
-    "camembert": ModelDownloadSpec(local_dir="camembert", repo_id="camembert-base"),
+    "camembert": ModelDownloadSpec(local_dir="camembert", repo_id="almanach/camembert-base"),
     "comma": ModelDownloadSpec(local_dir="comma", repo_id="common-pile/comma-v0.1-1t"),
     "deberta_v2": ModelDownloadSpec(
         local_dir="deberta_v2",
@@ -88,7 +89,9 @@ MODEL_SPECS: dict[str, ModelDownloadSpec] = {
     ),
     "falcon_rw_1b": ModelDownloadSpec(local_dir="falcon_rw_1b", repo_id="tiiuae/falcon-rw-1b"),
     "flexmath": ModelDownloadSpec(local_dir="flexmath", repo_id="allenai/Flex-math-2x7B-1T"),
-    "flexolmo": ModelDownloadSpec(local_dir="flexolmo", repo_id="allenai/FlexOlmo-7B"),
+    "flexolmo": ModelDownloadSpec(
+        local_dir="flexolmo", repo_id="danish-foundation-models/dfm-moe-open-v0-8x7b-pt"
+    ),
     "flexolmo_7x7b_1t": ModelDownloadSpec(
         local_dir="flexolmo_7x7b_1t", repo_id="allenai/FlexOlmo-7x7B-1T"
     ),
@@ -439,7 +442,13 @@ def _load_hf_sibling_entries(*, repo_id: str, cwd: Path) -> list[HFSibling]:
         return cached
     headers = _auth_headers()
     api_url = f"{_HF_API}/{repo_id}"
-    tmp = cwd / ".tmp_hf_model_api.json"
+    with tempfile.NamedTemporaryFile(
+        dir=cwd,
+        prefix=".tmp_hf_model_api.",
+        suffix=".json",
+        delete=False,
+    ) as tmp_file:
+        tmp = Path(tmp_file.name)
     _run_curl(url=api_url, out_path=tmp, headers=headers, resume=False, cwd=cwd)
     try:
         payload = json.loads(tmp.read_text(encoding="utf-8"))

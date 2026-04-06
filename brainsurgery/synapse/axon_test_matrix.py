@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import gc
+import html
 import io
 import json
 import math
@@ -11,7 +12,6 @@ import os
 import queue
 import re
 import signal
-import time
 import traceback
 from collections import deque
 from dataclasses import dataclass
@@ -21,6 +21,30 @@ from typing import Any
 import safetensors
 from tqdm import tqdm
 
+from .axon_runner_common import (
+    LogFileWriter as _LogFileWriter,
+)
+from .axon_runner_common import (
+    ParentLogger as _ParentLogger,
+)
+from .axon_runner_common import (
+    TeeWriter as _TeeWriter,
+)
+from .axon_runner_common import (
+    cleanup_cuda_after_oom as _cleanup_cuda_after_oom,
+)
+from .axon_runner_common import (
+    is_cuda_oom as _is_cuda_oom,
+)
+from .axon_runner_common import (
+    resolve_worker_devices as _resolve_worker_devices,
+)
+from .axon_runner_common import (
+    worker_log_display_path as _common_worker_log_display_path,
+)
+from .axon_runner_common import (
+    worker_log_path as _common_worker_log_path,
+)
 from .axon_test import run_axon_test
 from .matrix_models import (
     MATRIX_AXON_MODEL_DIRS,
@@ -70,90 +94,6 @@ class _WorkerError:
     message: str
     traceback_text: str
     captured_output: str
-
-
-class _TeeWriter:
-    def __init__(self, *streams: Any) -> None:
-        self._streams = streams
-
-    def write(self, data: str) -> int:
-        for stream in self._streams:
-            stream.write(data)
-        return len(data)
-
-    def flush(self) -> None:
-        for stream in self._streams:
-            stream.flush()
-
-
-class _LogFileWriter:
-    def __init__(self, stream: Any) -> None:
-        self._stream = stream
-
-    def write(self, data: str) -> int:
-        normalized = data.replace("\r", "\n")
-        self._stream.write(normalized)
-        return len(data)
-
-    def flush(self) -> None:
-        self._stream.flush()
-
-
-class _ParentLogger:
-    def __init__(self, log_dir: Path | None) -> None:
-        self._path = (log_dir / f"parent-{os.getpid()}.txt") if log_dir is not None else None
-        self._fh: io.TextIOWrapper | None = None
-        if self._path is not None:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._fh = self._path.open("w", encoding="utf-8", buffering=1)
-
-    @property
-    def path(self) -> Path | None:
-        return self._path
-
-    def log(self, message: str) -> None:
-        if self._fh is None:
-            return
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self._fh.write(f"{timestamp} {message}\n")
-        self._fh.flush()
-
-    def close(self) -> None:
-        if self._fh is not None:
-            self._fh.close()
-            self._fh = None
-
-
-def _is_cuda_oom(exc: BaseException, *, device: str) -> bool:
-    normalized = str(device).strip().lower()
-    if not normalized.startswith("cuda"):
-        return False
-    message = str(exc).lower()
-    if "out of memory" in message:
-        return True
-    if "cuda error: out of memory" in message:
-        return True
-    try:
-        import torch
-    except Exception:
-        return False
-    return isinstance(exc, torch.cuda.OutOfMemoryError)
-
-
-def _cleanup_cuda_after_oom(device: str) -> None:
-    normalized = str(device).strip().lower()
-    if not normalized.startswith("cuda"):
-        return
-    gc.collect()
-    try:
-        import torch
-    except Exception:
-        return
-    if torch.cuda.is_available():
-        with contextlib.suppress(Exception):
-            torch.cuda.empty_cache()
-        with contextlib.suppress(Exception):
-            torch.cuda.ipc_collect()
 
 
 def _run_pair_with_fallback(
@@ -331,8 +271,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--table-format",
         default="plain",
-        choices=["plain", "markdown"],
-        help="Summary table format (plain or markdown).",
+        choices=["plain", "markdown", "html"],
+        help="Summary table format (plain, markdown, or html).",
     )
     parser.add_argument(
         "--compile-hf",
@@ -836,6 +776,92 @@ def _format_table_markdown(rows: list[_SummaryRow]) -> str:
     return "\n".join([header_row, divider, *data_rows])
 
 
+def _format_table_html(rows: list[_SummaryRow]) -> str:
+    headers = [
+        "axon_file",
+        "model_dir",
+        "HF runtime (s)",
+        "AxonDerived runtime (s)",
+        "AxonDerived runtime/HF runtime",
+        "eval max abs diff",
+        "eval max rel diff",
+        "eval top1_eq",
+        "masked max abs diff",
+        "masked last max abs diff",
+        "masked max rel diff",
+        "masked_top1_eq",
+        "debug max abs diff",
+        "debug max rel diff",
+        "debug top1_eq",
+        "mean rel diff",
+        "masked mean rel diff",
+    ]
+
+    body = [
+        [
+            row.axon_file,
+            row.model_dir,
+            row.hf_runtime_s,
+            row.axon_runtime_s,
+            row.runtime_ratio,
+            row.eval_max_abs_diff,
+            row.eval_max_rel_diff,
+            row.eval_top1_eq,
+            row.masked_max_diff,
+            row.masked_last_max_diff,
+            row.masked_max_rel_diff,
+            row.masked_top1_eq,
+            row.debug_max_logit_diff,
+            row.debug_max_rel_diff,
+            row.debug_top1_eq,
+            row.mean_rel_diff,
+            row.masked_mean_rel_diff,
+        ]
+        for row in rows
+    ]
+
+    def _numeric(cell: str) -> float | None:
+        try:
+            return float(cell)
+        except Exception:
+            return None
+
+    def _cell_style(header: str, cell: str) -> str:
+        if header == "masked_top1_eq" and cell != "True":
+            return "background-color: #f8d7da;"
+        if header == "masked max abs diff":
+            numeric = _numeric(cell)
+            if numeric is not None:
+                if numeric > 1e-2:
+                    return "background-color: #ffe5b4;"
+                if numeric > 1e-3:
+                    return "background-color: #fff3cd;"
+        if "max abs diff" in header and header != "masked max abs diff":
+            numeric = _numeric(cell)
+            if numeric is not None and numeric > 1.0:
+                return "background-color: #fff3cd;"
+        return ""
+
+    out = [
+        "<table>",
+        "  <thead>",
+        "    <tr>",
+        *[f"      <th>{html.escape(header)}</th>" for header in headers],
+        "    </tr>",
+        "  </thead>",
+        "  <tbody>",
+    ]
+    for line in body:
+        out.append("    <tr>")
+        for header, cell in zip(headers, line, strict=False):
+            style = _cell_style(header, cell)
+            style_attr = f' style="{style}"' if style else ""
+            out.append(f"      <td{style_attr}>{html.escape(cell)}</td>")
+        out.append("    </tr>")
+    out.extend(["  </tbody>", "</table>"])
+    return "\n".join(out)
+
+
 def _run_pair(
     pair: _Pair,
     *,
@@ -876,55 +902,6 @@ def _run_pair(
 
     with contextlib.redirect_stdout(io.StringIO()):
         return run_axon_test(**kwargs)
-
-
-def _resolve_worker_devices(device: str, processes: int) -> list[str]:
-    if processes <= 0:
-        raise ValueError("processes must be >= 1")
-    normalized = str(device).strip().lower()
-    if not normalized:
-        raise ValueError("device must not be empty")
-    if processes == 1:
-        return [device]
-
-    try:
-        import torch
-    except Exception:
-        if normalized.startswith("cuda") or normalized == "auto":
-            raise ValueError("torch is required to resolve multi-process CUDA worker devices")
-        return [device for _ in range(processes)]
-
-    def _cpu_or_fallback() -> list[str]:
-        if normalized == "auto":
-            if torch.cuda.is_available():
-                return _cuda_devices(start_index=0)
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return ["mps" for _ in range(processes)]
-            return ["cpu" for _ in range(processes)]
-        if normalized == "mps":
-            return ["mps" for _ in range(processes)]
-        return [device for _ in range(processes)]
-
-    def _cuda_devices(*, start_index: int) -> list[str]:
-        device_count = int(torch.cuda.device_count())
-        if device_count <= 0:
-            raise ValueError("requested CUDA multiprocessing but no CUDA devices are available")
-        end_index = start_index + processes
-        if end_index > device_count:
-            raise ValueError(
-                f"requested {processes} processes starting at cuda:{start_index}, "
-                f"but only {device_count} CUDA devices are available"
-            )
-        return [f"cuda:{idx}" for idx in range(start_index, end_index)]
-
-    if normalized == "cuda":
-        return _cuda_devices(start_index=0)
-    if normalized.startswith("cuda:"):
-        index_text = normalized.split(":", 1)[1].strip()
-        if not index_text.isdigit():
-            raise ValueError(f"invalid CUDA device specifier for multiprocessing: {device!r}")
-        return _cuda_devices(start_index=int(index_text))
-    return _cpu_or_fallback()
 
 
 def _summary_row_from_result(pair: _Pair, result: dict[str, Any]) -> _SummaryRow:
@@ -1022,22 +999,21 @@ def _slugify_log_name(value: str) -> str:
 
 
 def _worker_log_path(log_dir: Path | None, pair: _Pair, pid: int | None) -> Path | None:
-    if log_dir is None:
-        return None
-    if pid is None:
-        axon_name = _slugify_log_name(pair.axon_path.stem)
-        model_name = _slugify_log_name(pair.model_dir.name)
-        return log_dir / f"log-pending-{axon_name}-{model_name}.txt"
-    axon_name = _slugify_log_name(pair.axon_path.stem)
-    model_name = _slugify_log_name(pair.model_dir.name)
-    return log_dir / f"log-{pid}-{axon_name}-{model_name}.txt"
+    return _common_worker_log_path(
+        log_dir,
+        axon_name=_slugify_log_name(pair.axon_path.stem),
+        model_name=_slugify_log_name(pair.model_dir.name),
+        pid=pid,
+    )
 
 
 def _worker_log_display_path(log_dir: Path | None, pair: _Pair, pid: int | None) -> str | None:
-    path = _worker_log_path(log_dir, pair, pid)
-    if path is None:
-        return None
-    return path.name
+    return _common_worker_log_display_path(
+        log_dir,
+        axon_name=_slugify_log_name(pair.axon_path.stem),
+        model_name=_slugify_log_name(pair.model_dir.name),
+        pid=pid,
+    )
 
 
 def _signal_name(exitcode: int) -> str:
@@ -1412,8 +1388,8 @@ def run_axon_test_matrix(
     exclude: list[str] | None = None,
     log_dir: Path | None = None,
 ) -> int:
-    if table_format not in {"plain", "markdown"}:
-        raise ValueError("table_format must be 'plain' or 'markdown'")
+    if table_format not in {"plain", "markdown", "html"}:
+        raise ValueError("table_format must be 'plain', 'markdown', or 'html'")
     if processes <= 0:
         raise ValueError("processes must be >= 1")
 
@@ -1469,6 +1445,8 @@ def run_axon_test_matrix(
         ]
         if table_format == "markdown":
             print(_format_table_markdown(dry_rows))
+        elif table_format == "html":
+            print(_format_table_html(dry_rows))
         else:
             print(_format_table(dry_rows))
         return 0
@@ -1530,6 +1508,8 @@ def run_axon_test_matrix(
     print()
     if table_format == "markdown":
         print(_format_table_markdown(rows))
+    elif table_format == "html":
+        print(_format_table_html(rows))
     else:
         print(_format_table(rows))
     print()

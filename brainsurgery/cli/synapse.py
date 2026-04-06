@@ -342,14 +342,19 @@ def axon_benchmark(
         ...,
         exists=True,
         file_okay=True,
-        dir_okay=False,
+        dir_okay=True,
         readable=True,
-        help="One or more Axon source files.",
+        help="One or more Axon source files or directories to recurse for .axon files.",
     ),
     device: str = typer.Option(
         "cpu",
         "--device",
         help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
+    ),
+    processes: int = typer.Option(
+        1,
+        "--processes",
+        help="Number of worker processes.",
     ),
     text: list[str] = typer.Option(
         ["The future of AI is", "Hello World"],
@@ -449,7 +454,17 @@ def axon_benchmark(
     table_format: str = typer.Option(
         "markdown",
         "--table-format",
-        help="Summary table format (plain/markdown).",
+        help="Summary table format (plain/markdown/html).",
+    ),
+    log_dir: Path | None = typer.Option(
+        None,
+        "--log-dir",
+        help="Optional directory for per-worker logs.",
+    ),
+    stream_csv: Path | None = typer.Option(
+        None,
+        "--stream-csv",
+        help="Optional CSV file to append unsorted completed benchmark rows to as they finish.",
     ),
 ) -> None:
     """Run benchmark across declared CHECKPOINTS for one or more Axon files."""
@@ -459,6 +474,7 @@ def axon_benchmark(
         run_fn(
             axon_files=axon_paths,
             device=device,
+            processes=processes,
             text=text,
             max_len=max_len,
             tokenizer=tokenizer,
@@ -479,7 +495,34 @@ def axon_benchmark(
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
             table_format=table_format,
+            log_dir=log_dir,
+            stream_csv=stream_csv,
         )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@app.command("axon-benchmark-render")
+def axon_benchmark_render(
+    csv_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="CSV file previously written by axon-benchmark --stream-csv.",
+    ),
+    table_format: str = typer.Option(
+        "markdown",
+        "--table-format",
+        help="Rendered table format (plain/markdown/html).",
+    ),
+) -> None:
+    """Render a streamed axon-benchmark CSV file as a sorted table."""
+    module = _synapse_module()
+    render_fn = getattr(module, "render_axon_benchmark_csv")
+    try:
+        typer.echo(render_fn(csv_path=csv_path, table_format=table_format))
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -730,8 +773,8 @@ def axon_test_matrix(
     raise typer.Exit(code=int(exit_code))
 
 
-@app.command("axon-test-log")
-def axon_test_log(
+@app.command("axon-benchmark-log")
+def axon_benchmark_log(
     log_dir: Path = typer.Argument(
         Path("log"),
         file_okay=False,
@@ -755,12 +798,17 @@ def axon_test_log(
             "and the worker logs it references, then print the table."
         ),
     ),
+    table_format: str = typer.Option(
+        "markdown",
+        "--table-format",
+        help="Rendered table format (plain/markdown/html).",
+    ),
 ) -> None:
-    """Parse axon-test-matrix logs and print a markdown summary table."""
+    """Parse axon-benchmark or axon-test-matrix logs and print a summary table."""
     module = _synapse_module()
-    render_fn = getattr(module, "render_axon_test_log")
+    render_fn = getattr(module, "render_axon_benchmark_log")
     try:
-        output = render_fn(log_dir, all_runs=all_runs, prune=prune)
+        output = render_fn(log_dir, all_runs=all_runs, prune=prune, table_format=table_format)
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(output)
