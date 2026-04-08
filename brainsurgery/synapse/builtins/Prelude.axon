@@ -25,6 +25,24 @@ reshape_heads = _reshape_heads
 merge_heads :: Tensor[B,H,T,HD] -> Tensor[B,T,D]
 merge_heads = _merge_heads
 
+permute :: Tensor -> Tensor
+permute = _permute
+
+reshape :: Tensor -> Tensor
+reshape = _reshape
+
+expand :: Tensor -> Tensor
+expand = _expand
+
+arange :: Tensor -> IdxTensor
+arange = _arange
+
+cast :: Tensor -> Tensor
+cast = _cast
+
+cumsum :: Tensor -> Tensor
+cumsum = _cumsum
+
 causal_mask :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,1,T,TK]
 causal_mask = _causal_mask
 
@@ -51,6 +69,15 @@ repeat = _repeat
 
 mul :: Tensor[B,T,D] -> Tensor[B,T,D] -> Tensor[B,T,D]
 mul = _mul
+
+eq :: Tensor -> Tensor -> Tensor
+eq = _eq
+
+masked_fill :: Tensor -> Tensor -> Tensor
+masked_fill = _masked_fill
+
+slice :: Tensor -> Tensor
+slice = _slice
 
 sqrt :: Float -> Float
 sqrt = _sqrt

@@ -6,12 +6,13 @@ import torch
 
 OP_NAME = "causal_mask"
 LOWERING_ARITY = (2, 2)
-LOWERING_ALLOWED_KWARGS: set[str] = {"window", "padding_mask", "early_exit"}
+LOWERING_ALLOWED_KWARGS: set[str] = {"window", "padding_mask", "early_exit", "bool_mask"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {
     "window": "dim",
     "padding_mask": "str",
     "early_exit": "any",
+    "bool_mask": "bool",
 }
 
 
@@ -80,6 +81,7 @@ def interpret(
     padding_mask = env.get(padding_ref) if isinstance(padding_ref, str) else None
     out_name = model._require_name(node_spec.get("_bind"), field="causal_mask._bind")
     window_expr = node_spec.get("window")
+    bool_mask = bool(model._eval_expr(node_spec.get("bool_mask", False), env, symbols))
 
     q_len = q.shape[-2]
     k_len = key_tensor.shape[-2]
@@ -103,7 +105,7 @@ def interpret(
             int(padding_mask.storage_offset()),
             tuple(int(x) for x in padding_mask.shape),
         )
-    cache_key = (int(q_len), int(k_len), window_value, q.dtype, q.device, padding_key)
+    cache_key = (int(q_len), int(k_len), window_value, bool_mask, q.dtype, q.device, padding_key)
     cache = getattr(model, "_causal_mask_cache", None)
     if not isinstance(cache, dict):
         cache = {}
@@ -149,12 +151,15 @@ def interpret(
     else:
         keep = keep.view(1, 1, q_len, k_len)
 
-    mask_value = torch.finfo(q.dtype).min
-    env[out_name] = torch.where(
-        keep,
-        torch.zeros((), dtype=q.dtype, device=q.device),
-        torch.full((), mask_value, dtype=q.dtype, device=q.device),
-    )
+    if bool_mask:
+        env[out_name] = keep.to(torch.bool)
+    else:
+        mask_value = torch.finfo(q.dtype).min
+        env[out_name] = torch.where(
+            keep,
+            torch.zeros((), dtype=q.dtype, device=q.device),
+            torch.full((), mask_value, dtype=q.dtype, device=q.device),
+        )
     cache[cache_key] = env[out_name]
     return
 
@@ -197,6 +202,8 @@ def compile(
         env.get(padding_name) if isinstance(padding_name, str) and padding_name in env else None
     )
     early_exit_expr = emitter._expr_code(node_spec.get("early_exit", False), env)
+    bool_mask_expr = emitter._expr_code(node_spec.get("bool_mask", False), env)
+    bool_mask = emitter._fresh("bool_mask")
     if window_expr is None and padding_expr is None:
         lines.append(f"{indent}{out_var} = None")
         return lines
@@ -227,6 +234,7 @@ def compile(
     full_causal = emitter._fresh("full_causal")
     trivial_padding = emitter._fresh("trivial_padding")
     lines.append(f"{indent}{early_exit} = bool({early_exit_expr})")
+    lines.append(f"{indent}{bool_mask} = bool({bool_mask_expr})")
     lines.append(
         f"{indent}{full_causal} = ({window_key_expr} is None) or (int({window_key_expr}) >= int({k_len}))"
     )
@@ -255,7 +263,7 @@ def compile(
     lines.append(f"{indent}else:")
     body_indent = indent + "    "
     lines.append(
-        f"{body_indent}{cache_key} = (int({q_len}), int({k_len}), {window_key_expr}, {q}.dtype, {q}.device, {pad_key_expr})"
+        f"{body_indent}{cache_key} = (int({q_len}), int({k_len}), {window_key_expr}, {bool_mask}, {q}.dtype, {q}.device, {pad_key_expr})"
     )
     lines.append(f"{body_indent}{cached} = self._causal_mask_cache.get({cache_key})")
     lines.append(f"{body_indent}if torch.is_tensor({cached}):")
@@ -298,9 +306,12 @@ def compile(
     else:
         lines.append(f"{body_indent}{keep} = {keep}.view(1, 1, {q_len}, {k_len})")
 
-    lines.append(f"{body_indent}{mask_val} = torch.finfo({q}.dtype).min")
+    lines.append(f"{body_indent}if {bool_mask}:")
+    lines.append(f"{body_indent}    {out_var} = {keep}.to(torch.bool)")
+    lines.append(f"{body_indent}else:")
+    lines.append(f"{body_indent}    {mask_val} = torch.finfo({q}.dtype).min")
     lines.append(
-        f"{body_indent}{out_var} = torch.where({keep}, torch.zeros((), dtype={q}.dtype, device={q}.device), torch.full((), {mask_val}, dtype={q}.dtype, device={q}.device))"
+        f"{body_indent}    {out_var} = torch.where({keep}, torch.zeros((), dtype={q}.dtype, device={q}.device), torch.full((), {mask_val}, dtype={q}.dtype, device={q}.device))"
     )
     lines.append(f"{body_indent}self._causal_mask_cache[{cache_key}] = {out_var}")
     return lines

@@ -24,6 +24,24 @@ def lowering_validate_signature(
         raise ValueError("moe_scatter_add requires a single scalar output binding")
 
 
+def lowering_infer_metadata(
+    *,
+    args: list[str],
+    out: str | list[str],
+    kwargs: dict[str, Any],
+    ctx: Any,
+) -> bool:
+    del kwargs
+    if not isinstance(out, str) or not args:
+        return False
+    accum_name = str(args[0]).strip()
+    if accum_name in ctx.tensor_last_dim:
+        ctx.tensor_last_dim[out] = ctx.tensor_last_dim[accum_name]
+    if accum_name in ctx.tensor_shape:
+        ctx.tensor_shape[out] = ctx.tensor_shape[accum_name]
+    return True
+
+
 def _resolve_inputs_and_output(
     node_spec: dict[str, Any], *, strict_out: bool
 ) -> tuple[list[str], str]:
@@ -161,7 +179,7 @@ def compile(
 LOWERING_TYPE_SIGNATURE = {
     "args": ("Any", "Any", "Any", "Any"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
-    "returns": ("Tensor",),
+    "returns": "dynamic",
 }
 
 __all__ = [
@@ -171,6 +189,7 @@ __all__ = [
     "LOWERING_KWARG_KINDS",
     "OP_NAME",
     "lowering_validate_signature",
+    "lowering_infer_metadata",
     "interpret",
     "compile",
     "uses_node_path",

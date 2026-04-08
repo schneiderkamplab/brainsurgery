@@ -50,6 +50,18 @@ def _normalize_checkpoint_name(repo_id: str) -> str:
     return name
 
 
+def _group_output_name(checkpoints: list[str]) -> str:
+    names = [checkpoint.split("/")[-1] for checkpoint in checkpoints]
+    unique_names = sorted(set(names), key=lambda name: (len(name), name))
+    for candidate in unique_names:
+        if all(name == candidate or name.startswith(candidate + "-") for name in names):
+            return candidate
+    normalized_names = {_normalize_checkpoint_name(checkpoint) for checkpoint in checkpoints}
+    if len(normalized_names) == 1:
+        return next(iter(normalized_names))
+    return unique_names[0]
+
+
 def _load_json(path: Path) -> dict[str, object]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -101,9 +113,17 @@ def _index_weight_keys(model_dir: Path) -> set[str]:
 
 def _safetensors_weight_keys(model_dir: Path) -> set[str]:
     out: set[str] = set()
+    errors: list[tuple[Path, Exception]] = []
     for path in sorted(model_dir.glob("*.safetensors")):
-        st = safetensors.safe_open(str(path), framework="pt")
+        try:
+            st = safetensors.safe_open(str(path), framework="pt")
+        except Exception as exc:
+            errors.append((path, exc))
+            continue
         out.update(str(key) for key in st.keys())
+    if not out and errors:
+        first_path, first_exc = errors[0]
+        raise type(first_exc)(f"{first_path}: {first_exc}")
     return out
 
 
@@ -1130,29 +1150,23 @@ def run_axon_materialize(
     if not requested:
         raise ValueError(f"No CHECKPOINTS pragma entries found in {resolved_axon}")
 
-    grouped: dict[str, tuple[str, list[str]]] = {}
+    grouped: dict[str, list[str]] = {}
     for checkpoint in requested:
         model_dir = resolved_models_root / checkpoint
         config = _load_json(model_dir / "config.json")
         state_keys = _checkpoint_state_keys(model_dir)
         rendered = _materialize_program(parsed, config=config, state_keys=state_keys)
-        normalized_name = _normalize_checkpoint_name(checkpoint)
-        existing = grouped.get(normalized_name)
-        if existing is None:
-            grouped[normalized_name] = (rendered, [checkpoint])
+        existing_checkpoints = grouped.get(rendered)
+        if existing_checkpoints is None:
+            grouped[rendered] = [checkpoint]
             continue
-        existing_rendered, existing_checkpoints = existing
-        if existing_rendered != rendered:
-            raise ValueError(
-                "Materialized source differs within checkpoint family "
-                f"{normalized_name!r}: {existing_checkpoints + [checkpoint]}"
-            )
         existing_checkpoints.append(checkpoint)
 
     written: list[Path] = []
     expected: set[Path] = set()
-    for normalized_name, (body, body_checkpoints) in grouped.items():
-        out_name = f"{normalized_name}.axon"
+    stale_candidates: set[Path] = set()
+    for body, body_checkpoints in grouped.items():
+        out_name = f"{_group_output_name(body_checkpoints)}.axon"
         out_path = resolved_axon.parent / out_name
         text = body.replace(
             "CHECKPOINTS []",
@@ -1163,11 +1177,16 @@ def run_axon_materialize(
         parse_program_source(text)
         expected.add(out_path.resolve())
         written.append(out_path)
+        for checkpoint in body_checkpoints:
+            stale_candidates.add(
+                (resolved_axon.parent / f"{checkpoint.split('/')[-1]}.axon").resolve()
+            )
+            stale_candidates.add(
+                (resolved_axon.parent / f"{_normalize_checkpoint_name(checkpoint)}.axon").resolve()
+            )
 
-    for checkpoint in requested:
-        stale_name = f"{_normalize_checkpoint_name(checkpoint)}.axon"
-        stale_path = resolved_axon.parent / stale_name
-        if stale_path.resolve() not in expected and stale_path.exists():
+    for stale_path in stale_candidates:
+        if stale_path not in expected and stale_path.exists():
             stale_path.unlink()
 
     return written

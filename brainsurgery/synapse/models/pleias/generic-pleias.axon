@@ -1,0 +1,59 @@
+{-# CHECKPOINTS ["PleIAs/Pleias-Pico", "PleIAs/Pleias-Nano", "PleIAs/Pleias-3b-Preview", "PleIAs/Pleias-RAG-350M", "PleIAs/Pleias-RAG-1B", "PleIAs/Baguettotron", "PleIAs/Monad"] #-}
+{-# TASK "causal_lm" #-}
+
+import Config
+import Activations silu
+import Cache
+import Cache past_length
+
+D = Config.int "hidden_size" default=1024
+V = Config.int "vocab_size" default=65536
+L = Config.int "num_hidden_layers" default=26
+H = Config.int "num_attention_heads" default=16
+KVH = Config.int "num_key_value_heads" default=8
+HD_RAW = Config.value "head_dim" default=null
+HD = (HD_RAW == null) ? (D / H) : (Config.int "head_dim" default=64)
+KVD = KVH * HD
+FFN = Config.int "intermediate_size" default=2560
+EPS = Config.float "rms_norm_eps" default=1e-05
+THETA = Config.float "rope_theta" default=10000.0
+C = Config.int "max_position_embeddings" default=2048
+
+pleias_rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+pleias_rms@path x = rmsnorm@path x eps=EPS
+
+pleias_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+pleias_block x pos_ids attn_mask past_kv = do
+  xn <- pleias_rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- linear@q_proj xn dim=D |> reshape_heads heads=H
+    k <- linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
+    v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
+    q, k <- rope_pair q k position_ids=pos_ids theta=THETA
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- repeat k (H / KVH)
+    v <- repeat v (H / KVH)
+    mask <- causal_mask q k window=C padding_mask=attn_mask
+    a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D
+    return a, new_kv
+  x <- x + a
+  xn <- pleias_rms@post_attention_layernorm x
+  m <- scope@mlp do
+    g <- linear@gate_proj xn dim=FFN
+    u <- linear@up_proj xn dim=FFN
+    return g |> silu |> mul u |> linear@down_proj dim=D
+  return x + m, new_kv
+
+pleias :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+pleias input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  logits, new_kv <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- pleias_block x pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    logits <- pleias_rms@norm x |> linear@embed_tokens dim=V
+    return logits, new_kv
+  return logits, new_kv

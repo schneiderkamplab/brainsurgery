@@ -59,7 +59,7 @@ deepseek_v2_lite_attn x pos_ids attn_mask past_kv = do
     return a, new_kv
   return a, new_kv
 
-deepseek_v2_lite_attn_qkv :: Tensor[B,S,D] -> Tensor[B,S] -> (Tensor[B,H,S,QHD], Tensor[B,H,S,QHD], Tensor[B,H,S,VHD])
+deepseek_v2_lite_attn_qkv :: Tensor[B,S,D] -> Tensor[B,S] -> (Tensor[B,H,S,QHD], Tensor[B,H,S,KVPROJ / H], Tensor[B,H,S,VHD])
 deepseek_v2_lite_attn_qkv x pos_ids = do
   q_full, k_full, v <- scope@self_attn do
     q <- linear@q_proj x dim=(H * QHD) bias=false |> reshape_heads heads=H
@@ -78,7 +78,7 @@ deepseek_v2_lite_attn_qkv x pos_ids = do
     return q_full, k_full, v
   return q_full, k_full, v
 
-deepseek_v2_lite_qkv_block :: Tensor[B,S,D] -> Tensor[B,S] -> (Tensor[B,H,S,QHD], Tensor[B,H,S,QHD], Tensor[B,H,S,VHD])
+deepseek_v2_lite_qkv_block :: Tensor[B,S,D] -> Tensor[B,S] -> (Tensor[B,H,S,QHD], Tensor[B,H,S,KVPROJ / H], Tensor[B,H,S,VHD])
 deepseek_v2_lite_qkv_block x pos_ids = do
   xn <- rms@input_layernorm x
   q_full, k_full, v <- deepseek_v2_lite_attn_qkv xn pos_ids
@@ -218,7 +218,7 @@ deepseek_v2_lite_layer0_q_full_stage input_ids attn_mask = do
     return x
   return q_full
 
-deepseek_v2_lite_layer0_k_full_stage :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,H,S,QHD]
+deepseek_v2_lite_layer0_k_full_stage :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,H,S,KVPROJ / H]
 deepseek_v2_lite_layer0_k_full_stage input_ids attn_mask = do
   pos_ids <- position_ids input_ids attn_mask
   k_full <- scope@model do

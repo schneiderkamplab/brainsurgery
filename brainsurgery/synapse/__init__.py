@@ -18,6 +18,20 @@ from .axon import (
     validate_axon_program,
 )
 from .codegen import emit_model_code_from_synapse_spec, load_synapse_torch_op_map
+from .pipeline_backend import (
+    PipelinePlan,
+    PipelineStage,
+    available_pipeline_devices,
+    build_pipeline_plan,
+    build_pipeline_stage_spec,
+    build_pipeline_stage_specs,
+    partition_layer_ranges,
+)
+from .pipeline_codegen import (
+    emit_pipeline_stage_code_from_synapse_spec,
+    emit_pipeline_stage_codes_from_synapse_spec,
+)
+from .pipeline_runtime import SynapsePipelineModel, build_hf_device_map_from_pipeline_usage
 from .runtime import SynapseProgramModel
 from .type_inference import (
     annotate_spec_with_block_io_types,
@@ -107,6 +121,17 @@ __all__ = [
     "extract_block_io_types_from_spec",
     "infer_block_io_types_from_modules",
     "infer_output_types_for_node",
+    "PipelinePlan",
+    "PipelineStage",
+    "SynapsePipelineModel",
+    "build_hf_device_map_from_pipeline_usage",
+    "available_pipeline_devices",
+    "build_pipeline_plan",
+    "build_pipeline_stage_spec",
+    "build_pipeline_stage_specs",
+    "emit_pipeline_stage_code_from_synapse_spec",
+    "emit_pipeline_stage_codes_from_synapse_spec",
+    "partition_layer_ranges",
     "run_axon_benchmark",
     "render_axon_benchmark_csv",
     "run_axon_test",

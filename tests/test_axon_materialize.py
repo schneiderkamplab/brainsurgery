@@ -149,3 +149,46 @@ def test_generic_materialize_works_for_non_gemma3_with_config_and_params(tmp_pat
     assert 'ROOT = "language_model"' in rendered
     assert "D = 32" in rendered
     assert "scope@model root=ROOT" in rendered
+
+
+def test_materialize_groups_identical_instruct_variant_by_body(tmp_path: Path) -> None:
+    axon_dir = tmp_path / "modelsrc"
+    axon_dir.mkdir(parents=True)
+    axon_path = axon_dir / "toy.axon"
+    axon_path.write_text(
+        "\n".join(
+            [
+                '{-# CHECKPOINTS ["org/toy", "org/toy-Instruct"] #-}',
+                "",
+                "import Config",
+                "",
+                'D = Config.int "hidden_size" default=16',
+                "",
+                "toy :: TokenIds[B,S] -> Tensor[B,S,D]",
+                "toy input_ids = do",
+                "  x <- embedding@embed_tokens input_ids dim=D",
+                "  return x",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    model_root = tmp_path / "weights" / "org"
+    model_root.mkdir(parents=True)
+    payload = {"hidden_size": 32}
+    for name in ("toy", "toy-Instruct"):
+        d = model_root / name
+        d.mkdir(parents=True)
+        (d / "config.json").write_text(json.dumps(payload), encoding="utf-8")
+        import torch
+        from safetensors.torch import save_file
+
+        save_file({"embed_tokens.weight": torch.zeros([128, 32])}, str(d / "model.safetensors"))
+
+    written = run_axon_materialize(axon_path=axon_path, models_root=tmp_path / "weights")
+
+    assert written == [axon_dir / "toy.axon"]
+    rendered = (axon_dir / "toy.axon").read_text(encoding="utf-8")
+    assert 'CHECKPOINTS ["org/toy", "org/toy-Instruct"]' in rendered
+    assert not (axon_dir / "toy-Instruct.axon").exists()

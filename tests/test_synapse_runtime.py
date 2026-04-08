@@ -386,35 +386,30 @@ def test_runtime_rope_pair_proportional_matches_manual_reference() -> None:
     q_rot = out["q_rot"]
     k_rot = out["k_rot"]
 
-    rotary_dim = 8
-    half = rotary_dim // 2
+    head_dim = int(q.shape[-1])
+    rotary_dim = int(head_dim * 0.5)
+    rope_angles = rotary_dim // 2
+    half = head_dim // 2
     theta = 1_000_000.0
-    inv_freq = 1.0 / (
-        theta ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / float(q.shape[-1]))
+    inv_freq_rotated = 1.0 / (
+        theta ** (torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32) / float(head_dim))
+    )
+    noop_angles = half - rope_angles
+    inv_freq = (
+        torch.cat([inv_freq_rotated, torch.zeros(noop_angles, dtype=torch.float32)], dim=0)
+        if noop_angles > 0
+        else inv_freq_rotated
     )
     inv_freq = inv_freq / 4.0
     ang = position_ids.to(torch.float32).unsqueeze(-1) * inv_freq.unsqueeze(0).unsqueeze(0)
-    cos = torch.cos(ang).unsqueeze(1)
-    sin = torch.sin(ang).unsqueeze(1)
+    emb = torch.cat((ang, ang), dim=-1)
+    cos = torch.cos(emb).unsqueeze(1)
+    sin = torch.sin(emb).unsqueeze(1)
 
-    q_prefix = q[..., :rotary_dim]
-    k_prefix = k[..., :rotary_dim]
-    q_expected = torch.cat(
-        [
-            q_prefix[..., :half] * cos - q_prefix[..., half:rotary_dim] * sin,
-            q_prefix[..., :half] * sin + q_prefix[..., half:rotary_dim] * cos,
-            q[..., rotary_dim:],
-        ],
-        dim=-1,
-    )
-    k_expected = torch.cat(
-        [
-            k_prefix[..., :half] * cos - k_prefix[..., half:rotary_dim] * sin,
-            k_prefix[..., :half] * sin + k_prefix[..., half:rotary_dim] * cos,
-            k[..., rotary_dim:],
-        ],
-        dim=-1,
-    )
+    q_half = torch.cat((-q[..., half:], q[..., :half]), dim=-1)
+    k_half = torch.cat((-k[..., half:], k[..., :half]), dim=-1)
+    q_expected = q * cos + q_half * sin
+    k_expected = k * cos + k_half * sin
 
     assert torch.allclose(q_rot, q_expected, atol=1.0e-6, rtol=1.0e-6)
     assert torch.allclose(k_rot, k_expected, atol=1.0e-6, rtol=1.0e-6)
@@ -1698,6 +1693,34 @@ def test_runtime_config_primitives_support_root_kwarg() -> None:
     assert out["d"] == 7
 
 
+def test_runtime_config_expression_root_symbol_string() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "symbols": {"CFG": "text_config"},
+            "config": {"text_config": {"hidden_size": 4096}},
+            "graph": [
+                {
+                    "h": {
+                        "_op": "_ir_expr",
+                        "_bind": "h",
+                        "value": {
+                            "_expr": "call",
+                            "callee": "Config.int",
+                            "args": ["hidden_size"],
+                            "kwargs": {"root": {"_expr": "name", "id": "CFG"}},
+                        },
+                    }
+                }
+            ],
+            "outputs": {"h": "h"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    out = model()
+    assert out["h"] == 4096
+
+
 def test_runtime_config_int_missing_key_without_default_raises() -> None:
     spec = {
         "synapse": 1,
@@ -1846,6 +1869,107 @@ def test_runtime_sqrt_promotes_int_scalar_to_float() -> None:
     out = model()
     assert isinstance(out["s"], float)
     assert out["s"] == 4.0
+
+
+def test_runtime_log_promotes_int_scalar_to_float() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {"d": {"_op": "_ir_expr", "_bind": "d", "value": 16}},
+                {"s": {"_op": "log", "_args": "d", "_bind": "s"}},
+            ],
+            "outputs": {"s": "s"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    out = model()
+    assert isinstance(out["s"], float)
+    assert out["s"] == pytest.approx(math.log(16.0))
+
+
+def test_runtime_floor_promotes_int_scalar_to_int() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {"d": {"_op": "_ir_expr", "_bind": "d", "value": 16}},
+                {"s": {"_op": "floor", "_args": "d", "_bind": "s"}},
+            ],
+            "outputs": {"s": "s"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    out = model()
+    assert isinstance(out["s"], int)
+    assert out["s"] == 16
+
+
+def test_runtime_div_floor_log_support_tensor_pipeline() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {"half": {"_op": "_ir_expr", "_bind": "half", "value": 2.0}},
+                {"one": {"_op": "_ir_expr", "_bind": "one", "value": 1.0}},
+                {"scaled": {"_op": "div", "_args": ["x", "half"], "_bind": "scaled"}},
+                {"bucket": {"_op": "floor", "_args": "scaled", "_bind": "bucket"}},
+                {"shifted": {"_op": "add", "_args": ["bucket", "one"], "_bind": "shifted"}},
+                {"y": {"_op": "log", "_args": "shifted", "_bind": "y"}},
+            ],
+            "inputs": {"x": {}},
+            "outputs": {"y": "y"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    x = torch.tensor([[0.0, 1.0, 2.0, 5.0]], dtype=torch.float32)
+    out = model(x=x)
+    expected = torch.log(1.0 + torch.floor(x / 2.0))
+    assert torch.allclose(out["y"], expected)
+
+
+def test_runtime_reshape_supports_rank_change() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {
+                    "y": {
+                        "_op": "reshape",
+                        "_args": "x",
+                        "_bind": "y",
+                        "shape": [2, 1, 3, 1],
+                    }
+                }
+            ],
+            "inputs": {"x": {}},
+            "outputs": {"y": "y"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    x = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    out = model(x=x)
+    assert tuple(out["y"].shape) == (2, 1, 3, 1)
+    assert torch.equal(out["y"].reshape(2, 3), x)
+
+
+def test_runtime_unsqueeze_supports_rank_change() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {"y": {"_op": "unsqueeze", "_args": "x", "_bind": "y", "dim": 1}},
+                {"z": {"_op": "unsqueeze", "_args": "y", "_bind": "z", "dim": 3}},
+            ],
+            "inputs": {"x": {}},
+            "outputs": {"z": "z"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    x = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    out = model(x=x)
+    assert tuple(out["z"].shape) == (2, 1, 3, 1)
+    assert torch.equal(out["z"].reshape(2, 3), x)
 
 
 def test_runtime_ir_expr_supports_inline_sqrt_with_config_call() -> None:

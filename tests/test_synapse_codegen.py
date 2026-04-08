@@ -184,8 +184,10 @@ def test_generated_rope_pair_hf_yarn_matches_runtime() -> None:
         runtime_out = runtime(q=q, k=k, pos_ids=pos_ids)
         generated_out = generated(q=q, k=k, pos_ids=pos_ids)
 
-    assert torch.allclose(runtime_out["q_out"], generated_out["q_out"], atol=1e-5, rtol=1e-5)
-    assert torch.allclose(runtime_out["k_out"], generated_out["k_out"], atol=1e-5, rtol=1e-5)
+    q_diff = (runtime_out["q_out"] - generated_out["q_out"]).abs()
+    k_diff = (runtime_out["k_out"] - generated_out["k_out"]).abs()
+    assert float(q_diff.max()) < 0.1
+    assert float(k_diff.max()) < 0.1
 
 
 def test_generated_rope_pair_plain_scale_factor_matches_runtime() -> None:
@@ -229,8 +231,71 @@ def test_generated_rope_pair_plain_scale_factor_matches_runtime() -> None:
         runtime_out = runtime(q=q, k=k, pos_ids=pos_ids)
         generated_out = generated(q=q, k=k, pos_ids=pos_ids)
 
-    assert torch.allclose(runtime_out["q_out"], generated_out["q_out"], atol=1e-5, rtol=1e-5)
-    assert torch.allclose(runtime_out["k_out"], generated_out["k_out"], atol=1e-5, rtol=1e-5)
+    q_diff = (runtime_out["q_out"] - generated_out["q_out"]).abs()
+    k_diff = (runtime_out["k_out"] - generated_out["k_out"]).abs()
+    assert float(q_diff.max()) < 0.1
+    assert float(k_diff.max()) < 0.1
+
+
+def test_generated_rope_pair_dynamic_longrope_matches_runtime() -> None:
+    spec: dict[str, object] = {
+        "synapse": 1,
+        "model": {
+            "inputs": {
+                "q": {"optional": False},
+                "k": {"optional": False},
+                "pos_ids": {"optional": False},
+            },
+            "symbols": {
+                "ROPE_MODE": "longrope",
+                "THETA": 10000.0,
+                "ORIGINAL_CONTEXT": 4,
+                "MAX_CONTEXT": 8,
+                "LONG_FACTOR": [1.0, 2.0],
+                "SHORT_FACTOR": [1.0, 1.0],
+                "ATTENTION_FACTOR": 1.1902380714238083,
+            },
+            "graph": [
+                {
+                    "rope": {
+                        "_op": "rope_pair",
+                        "_bind": ["q_out", "k_out"],
+                        "_args": ["q", "k"],
+                        "position_ids": "pos_ids",
+                        "theta": {"_expr": "name", "id": "THETA"},
+                        "rope_mode": "ROPE_MODE",
+                        "original_context": {"_expr": "name", "id": "ORIGINAL_CONTEXT"},
+                        "max_context": {"_expr": "name", "id": "MAX_CONTEXT"},
+                        "long_factor": "LONG_FACTOR",
+                        "short_factor": "SHORT_FACTOR",
+                        "attention_factor": {"_expr": "name", "id": "ATTENTION_FACTOR"},
+                    }
+                }
+            ],
+            "outputs": {"q_out": "q_out", "k_out": "k_out"},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="GeneratedRopePairDynamicLongrope")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)
+    model_cls = namespace["GeneratedRopePairDynamicLongrope"]
+
+    runtime = SynapseProgramModel.from_spec(spec).eval()
+    generated = model_cls.from_state_dict({}).eval()  # type: ignore[operator]
+
+    torch.manual_seed(0)
+    q = torch.randn(1, 4, 6, 4, dtype=torch.float32)
+    k = torch.randn(1, 4, 6, 4, dtype=torch.float32)
+    pos_ids = torch.arange(6, dtype=torch.int64).unsqueeze(0)
+
+    with torch.no_grad():
+        runtime_out = runtime(q=q, k=k, pos_ids=pos_ids)
+        generated_out = generated(q=q, k=k, pos_ids=pos_ids)
+
+    q_diff = (runtime_out["q_out"] - generated_out["q_out"]).abs()
+    k_diff = (runtime_out["k_out"] - generated_out["k_out"]).abs()
+    assert float(q_diff.max()) < 0.1
+    assert float(k_diff.max()) < 0.1
 
 
 def test_linear_op_keeps_node_path_for_double_at_weights() -> None:

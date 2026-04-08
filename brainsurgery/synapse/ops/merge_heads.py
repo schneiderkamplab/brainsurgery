@@ -29,6 +29,12 @@ def lowering_infer_metadata(
         first_dim = ctx.tensor_last_dim.get(first_in)
         if first_dim is not None:
             ctx.tensor_last_dim[out] = first_dim
+        first_shape = ctx.tensor_shape.get(first_in)
+        if isinstance(first_shape, tuple) and len(first_shape) == 4:
+            batch, heads, seq_len, head_dim = first_shape
+            merged_dim = f"({heads} * {head_dim})"
+            ctx.tensor_shape[out] = (batch, seq_len, merged_dim)
+            ctx.tensor_last_dim[out] = merged_dim
     return True
 
 

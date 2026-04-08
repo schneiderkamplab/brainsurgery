@@ -2653,3 +2653,33 @@ tiny x = do
     assert spec["model"]["meta"] == {
         "checkpoints": ("google/gemma-3-270m", "google/gemma-3-270m-it")
     }
+
+
+def test_parse_axon_tokenizer_pragma_is_preserved() -> None:
+    source = """
+{-# TOKENIZER "EleutherAI/gpt-neox-20b" #-}
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  return x
+"""
+    module = parse_axon_module(source)
+    assert module.pragmas == {"tokenizer": "EleutherAI/gpt-neox-20b"}
+    spec = lower_axon_module_to_synapse_spec(module)
+    assert spec["model"]["meta"] == {"tokenizer": "EleutherAI/gpt-neox-20b"}
+
+
+def test_parse_axon_tokenizer_checkpoint_pair_pragma_is_preserved() -> None:
+    source = """
+{-# TOKENIZER ["mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"] #-}
+tiny :: Tensor[B,T,D] -> Tensor[B,T,D]
+tiny x = do
+  return x
+"""
+    module = parse_axon_module(source)
+    assert module.pragmas == {
+        "tokenizer": ("mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507")
+    }
+    spec = lower_axon_module_to_synapse_spec(module)
+    assert spec["model"]["meta"] == {
+        "tokenizer": ("mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507")
+    }

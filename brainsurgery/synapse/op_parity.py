@@ -98,6 +98,17 @@ def _resolve_hf_loader_kind(hf_config: Any) -> str:
     return "causal_lm"
 
 
+def _normalize_deepseek_rope_scaling_config(hf_config: Any) -> Any:
+    if str(getattr(hf_config, "model_type", "")).strip().lower() != "deepseek":
+        return hf_config
+    rope_scaling = getattr(hf_config, "rope_scaling", None)
+    if isinstance(rope_scaling, dict):
+        rope_type = str(rope_scaling.get("type", rope_scaling.get("rope_type", ""))).strip()
+        if rope_type in {"", "default"}:
+            setattr(hf_config, "rope_scaling", None)
+    return hf_config
+
+
 def _first_tensor(value: Any) -> torch.Tensor | None:
     if torch.is_tensor(value):
         return value
@@ -571,15 +582,17 @@ def _forward_kwargs(
     attention_mask: torch.Tensor | None,
     for_hf: bool,
     model_input_names: set[str],
+    hf_model_type: str | None = None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {"input_ids": input_ids}
     if attention_mask is None:
         return kwargs
     if for_hf:
         kwargs["attention_mask"] = attention_mask
-        pos_ids = attention_mask.to(torch.long).cumsum(dim=-1) - 1
-        pos_ids = pos_ids.masked_fill(attention_mask == 0, 1)
-        kwargs["position_ids"] = pos_ids
+        if str(hf_model_type or "") != "gpt_neox":
+            pos_ids = attention_mask.to(torch.long).cumsum(dim=-1) - 1
+            pos_ids = pos_ids.masked_fill(attention_mask == 0, 1)
+            kwargs["position_ids"] = pos_ids
         return kwargs
     if "attn_mask" in model_input_names:
         kwargs["attn_mask"] = attention_mask
@@ -620,6 +633,7 @@ def _run_single_dtype(
         attention_mask=attention_mask,
         for_hf=True,
         model_input_names=model_input_names,
+        hf_model_type=getattr(hf_config, "model_type", None),
     )
     syn_kwargs = _forward_kwargs(
         input_ids=input_ids,
@@ -651,7 +665,7 @@ def _run_single_dtype(
             hf_model = AutoModelForSeq2SeqLM.from_pretrained(
                 str(resolved_hf_model_dir),
                 local_files_only=True,
-                dtype=dtype,
+                torch_dtype=dtype,
                 config=hf_config,
                 trust_remote_code=trust_remote_code,
             )
@@ -659,7 +673,7 @@ def _run_single_dtype(
             hf_model = AutoModelForCausalLM.from_pretrained(
                 str(resolved_hf_model_dir),
                 local_files_only=True,
-                dtype=dtype,
+                torch_dtype=dtype,
                 config=hf_config,
                 trust_remote_code=trust_remote_code,
             )
@@ -776,6 +790,7 @@ def run_axon_layer_op_parity(
         trust_remote_code=effective_trust_remote_code,
     )
     hf_config = _normalize_rope_numeric_fields(hf_config)
+    hf_config = _normalize_deepseek_rope_scaling_config(hf_config)
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:
         for candidate in candidate_tokenizer_dirs(resolved_hf_model_dir):
@@ -814,6 +829,7 @@ def run_axon_layer_op_parity(
             attention_mask=attention_mask,
             for_hf=True,
             model_input_names=model_input_names,
+            hf_model_type=getattr(hf_config, "model_type", None),
         )
         syn_kwargs = _forward_kwargs(
             input_ids=input_ids,
@@ -828,7 +844,8 @@ def run_axon_layer_op_parity(
         hf_model: Any = AutoModelForCausalLM.from_pretrained(
             str(resolved_hf_model_dir),
             local_files_only=True,
-            dtype=resolved_dtype,
+            torch_dtype=resolved_dtype,
+            config=hf_config,
             trust_remote_code=effective_trust_remote_code,
         )
         hf = hf_model.to(resolved_device).eval()
@@ -986,6 +1003,7 @@ def run_axon_op_parity(
         trust_remote_code=effective_trust_remote_code,
     )
     hf_config = _normalize_rope_numeric_fields(hf_config)
+    hf_config = _normalize_deepseek_rope_scaling_config(hf_config)
     hf_loader_kind = _resolve_hf_loader_kind(hf_config)
     tokenizer_source = tokenizer or str(resolved_hf_model_dir)
     if tokenizer is None:

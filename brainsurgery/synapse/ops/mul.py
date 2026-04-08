@@ -2,21 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._broadcast import broadcast_last_dim, broadcast_shape
+
 OP_NAME = "mul"
 LOWERING_ARITY = (2, 2)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {}
-
-
-def _normalize_dim_token(value: Any) -> Any:
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value.strip())
-    return value
-
-
-def _dims_compatible(left: Any, right: Any) -> bool:
-    return _normalize_dim_token(left) == _normalize_dim_token(right)
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -54,19 +46,34 @@ def lowering_infer_metadata(
         if isinstance(second_in, str) and second_in.isidentifier()
         else None
     )
-    if (
-        first_dim is not None
-        and second_dim is not None
-        and not _dims_compatible(first_dim, second_dim)
-    ):
-        raise ValueError(f"mul requires matching last-dim; got {first_dim!r} and {second_dim!r}")
-    unified = first_dim if first_dim is not None else second_dim
+    first_shape = (
+        ctx.tensor_shape.get(first_in)
+        if isinstance(first_in, str) and first_in.isidentifier()
+        else None
+    )
+    second_shape = (
+        ctx.tensor_shape.get(second_in)
+        if isinstance(second_in, str) and second_in.isidentifier()
+        else None
+    )
+    broadcasted_shape = broadcast_shape(first_shape, second_shape)
+    if first_shape is not None and second_shape is not None and broadcasted_shape is None:
+        raise ValueError(
+            f"mul requires broadcastable shapes; got {first_shape!r} and {second_shape!r}"
+        )
+    unified = broadcast_last_dim(first_dim, second_dim)
+    if first_dim is not None and second_dim is not None and unified is None:
+        raise ValueError(
+            f"mul requires broadcastable last-dim; got {first_dim!r} and {second_dim!r}"
+        )
     if unified is not None:
         if isinstance(first_in, str) and first_in.isidentifier() and first_dim is None:
             ctx.tensor_last_dim[first_in] = unified
         if isinstance(second_in, str) and second_in.isidentifier() and second_dim is None:
             ctx.tensor_last_dim[second_in] = unified
         ctx.tensor_last_dim[out] = unified
+    if broadcasted_shape is not None:
+        ctx.tensor_shape[out] = broadcasted_shape
     return True
 
 

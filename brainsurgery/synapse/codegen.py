@@ -6,6 +6,7 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
+from .axon.type_system import TypeTensor, parse_type_expr
 from .ops import get_op_module
 from .spec_normalize import normalize_synapse_spec_expressions
 
@@ -43,25 +44,53 @@ def emit_model_code_from_synapse_spec(
         raise ValueError("spec.model must be a mapping")
 
     symbols_raw = model.get("symbols", {})
-    symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, (int, float, bool, str))}
+
+    def _is_codegen_symbol_value(value: Any) -> bool:
+        if isinstance(value, (int, float, bool, str)):
+            return True
+        if isinstance(value, (list, tuple)):
+            return all(isinstance(item, (int, float, bool, str)) for item in value)
+        return False
+
+    symbols = {k: v for k, v in symbols_raw.items() if _is_codegen_symbol_value(v)}
 
     emitter = _Emitter(class_name=class_name, spec=normalized_spec, symbols=symbols)
     return emitter.render()
 
 
 class _Emitter:
-    def __init__(
-        self, *, class_name: str, spec: dict[str, Any], symbols: dict[str, int | float | bool | str]
-    ) -> None:
+    def __init__(self, *, class_name: str, spec: dict[str, Any], symbols: dict[str, Any]) -> None:
         self.class_name = class_name
         self.spec = spec
         self.model = spec["model"]
         self.blocks = self.model.get("blocks", {})
         self.symbols = symbols
+        types_raw = self.model.get("types", {})
+        self.block_io_types = types_raw.get("block_io", {}) if isinstance(types_raw, dict) else {}
         self._counter = 0
         self._active_env: dict[str, str] = {}
+        self._active_shape_aliases: dict[str, str] = {}
         self._active_scope_var: str | None = None
         self._node_hoists: dict[tuple[str, str], str] = {}
+
+    def _shape_symbol_aliases(
+        self, *, env: dict[str, str], input_types: dict[str, Any]
+    ) -> dict[str, str]:
+        aliases: dict[str, str] = {}
+        for input_name, type_expr in input_types.items():
+            if input_name not in env or not isinstance(type_expr, str):
+                continue
+            try:
+                parsed = parse_type_expr(type_expr)
+            except Exception:
+                continue
+            if not isinstance(parsed, TypeTensor):
+                continue
+            src = env[input_name]
+            for axis, dim in enumerate(parsed.dims):
+                if isinstance(dim, str) and dim not in env and dim not in aliases:
+                    aliases[dim] = f"int({src}.shape[{axis}])"
+        return aliases
 
     def render(self) -> str:
         lines: list[str] = []
@@ -88,7 +117,7 @@ class _Emitter:
                 "        self._state: dict[str, torch.Tensor] = {}",
                 "        self._runtime_state_dict = runtime_state_dict",
                 "        self._param_roots_stack: list[list[str]] = []",
-                f"        self._symbols: dict[str, int | float | bool | str] = {repr(self.symbols)}",
+                f"        self._symbols: dict[str, Any] = {repr(self.symbols)}",
                 "        self._trace_enabled = False",
                 "        self.trace_ops: list[dict[str, Any]] = []",
                 "        if state_dict is not None:",
@@ -434,6 +463,13 @@ class _Emitter:
 
         arg_names = [self._py_name(name) for name in inputs]
         env: dict[str, str] = {name: py for name, py in zip(inputs, arg_names, strict=True)}
+        block_types = self.block_io_types.get(block_name, {})
+        input_types = block_types.get("inputs", {}) if isinstance(block_types, dict) else {}
+        shape_aliases = (
+            self._shape_symbol_aliases(env=env, input_types=input_types)
+            if isinstance(input_types, dict)
+            else {}
+        )
 
         sig = ", ".join(["self", *arg_names, "scope: str"])
         lines = [f"    def _block_{self._py_name(block_name)}({sig}) -> tuple[Any, ...]:"]
@@ -442,7 +478,12 @@ class _Emitter:
         for syn_name, py_name in env.items():
             lines.append(f"        env[{syn_name!r}] = {py_name}")
 
-        body = self._compile_graph(graph=graph, env=env, scope_var="scope", indent="        ")
+        prev_shape_aliases = self._active_shape_aliases
+        self._active_shape_aliases = shape_aliases
+        try:
+            body = self._compile_graph(graph=graph, env=env, scope_var="scope", indent="        ")
+        finally:
+            self._active_shape_aliases = prev_shape_aliases
         lines.extend(body)
 
         return_values: list[str] = []
@@ -487,10 +528,22 @@ class _Emitter:
             else:
                 lines.append(f"        {py_name} = self._safe_get(env, {name!r})")
             env[name] = py_name
-
-        lines.extend(
-            self._compile_graph(graph=graph, env=env, scope_var="scope", indent="        ")
+        main_types = self.block_io_types.get("main", {})
+        main_input_types = main_types.get("inputs", {}) if isinstance(main_types, dict) else {}
+        shape_aliases = (
+            self._shape_symbol_aliases(env=env, input_types=main_input_types)
+            if isinstance(main_input_types, dict)
+            else {}
         )
+
+        prev_shape_aliases = self._active_shape_aliases
+        self._active_shape_aliases = shape_aliases
+        try:
+            lines.extend(
+                self._compile_graph(graph=graph, env=env, scope_var="scope", indent="        ")
+            )
+        finally:
+            self._active_shape_aliases = prev_shape_aliases
 
         lines.append("        outputs: dict[str, Any] = {}")
         for out_name, ref in outputs.items():
@@ -898,6 +951,7 @@ class _Emitter:
         if op_module is None:
             raise NotImplementedError(f"Unsupported op in codegen compiler: {op}")
         prev_env = self._active_env
+        prev_shape_aliases = self._active_shape_aliases
         prev_scope_var = self._active_scope_var
         prev_hoists = self._node_hoists
         self._active_env = env
@@ -914,6 +968,7 @@ class _Emitter:
             )
         finally:
             self._active_env = prev_env
+            self._active_shape_aliases = prev_shape_aliases
             self._active_scope_var = prev_scope_var
             self._node_hoists = prev_hoists
 
@@ -1109,6 +1164,8 @@ class _Emitter:
                 if isinstance(ident, str):
                     if ident in env:
                         return env[ident]
+                    if ident in self._active_shape_aliases:
+                        return self._active_shape_aliases[ident]
                     if ident in self.symbols:
                         return repr(self.symbols[ident])
                     raise ValueError(f"Unknown symbol in expression: {ident}")

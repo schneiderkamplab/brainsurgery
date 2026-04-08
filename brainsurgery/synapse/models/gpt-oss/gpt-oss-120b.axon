@@ -1,0 +1,72 @@
+{-# CHECKPOINTS "openai/gpt-oss-120b" #-}
+{-# TASK "causal_lm" #-}
+
+import Activations
+import Activations (sigmoid)
+import Cache
+import Cache (past_length)
+import MoE
+
+D = 2880
+V = 201088
+L = 36
+H = 64
+KVH = 8
+QD = 4096
+KVD = 512
+E = 128
+EPT = 4
+C = 131072
+SW = 128
+EPS = 1e-05
+THETA = 150000.0
+ROPE_SCALE = 32.0
+ROPE_LOW_FREQ = 1.0
+ROPE_HIGH_FREQ = 32.0
+ROPE_CONTEXT = 4096
+ROPE_ATTN_FACTOR = 1.3465735902799727
+ATTN_SCALE = 0.125
+SWIGLU_LIMIT = 7.0
+SWIGLU_ALPHA = 1.702
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS cast_float=true
+
+gpt_oss_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gpt_oss_block x i pos_ids attn_mask past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- linear@q_proj xn dim=QD bias=true |> reshape_heads heads=H
+    k <- linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    q, k <- rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE low_freq_factor=ROPE_LOW_FREQ high_freq_factor=ROPE_HIGH_FREQ original_context=ROPE_CONTEXT attention_factor=ROPE_ATTN_FACTOR rope_mode=hf_yarn truncate=false
+    k_ctx, v_ctx, new_kv <- Cache.update past_kv k v
+    k_ctx <- repeat k_ctx (H / KVH)
+    v_ctx <- repeat v_ctx (H / KVH)
+    window <- ((i % 2) == 1) ? C : SW
+    mask <- causal_mask q k_ctx window=window padding_mask=attn_mask
+    a <- attention q k_ctx v_ctx mask=mask scale=ATTN_SCALE sink_path="self_attn.sinks" |> merge_heads
+    a <- linear@o_proj a dim=D bias=true
+    return a, new_kv
+  x <- x + a
+  xn <- rms@post_attention_layernorm x
+  m <- scope@mlp do
+    router_topk, topk_indices <- linear@router xn dim=E bias=true |> topk k=EPT dim=-1
+    topk_scores <- softmax router_topk dim=-1
+    return MoE.grouped_ffn xn topk_scores topk_indices gate_up_weight="experts.gate_up_proj.weight" gate_up_bias="experts.gate_up_proj.bias" alpha=SWIGLU_ALPHA limit=SWIGLU_LIMIT
+  return x + m, new_kv
+
+gpt_oss_20b :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gpt_oss_20b input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  x, new_kv <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- gpt_oss_block x i pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    x <- rms@norm x
+    return x, new_kv
+  logits <- linear@lm_head x dim=V
+  return logits, new_kv

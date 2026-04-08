@@ -78,6 +78,7 @@ _TYPE_EXPR_CLASSES = (
 _IMPLICIT_ACTIVATION_ALIASES: dict[str, str] = {
     "gelu": "_activations_gelu",
     "gelu_new": "_activations_gelu_new",
+    "gelu_fast": "_activations_gelu_new",
     "gelu_pytorch_tanh": "_activations_gelu_pytorch_tanh",
     "gegelu": "_activations_gegelu",
     "relu": "_activations_relu",
@@ -290,6 +291,7 @@ def _normalize_dim(
     subst: dict[str, DimToken],
     symbols: dict[str, DimToken],
     visiting: set[str] | None = None,
+    visiting_expr: set[int] | None = None,
 ) -> DimToken:
     if isinstance(token, int):
         return token
@@ -304,6 +306,7 @@ def _normalize_dim(
                 subst=subst,
                 symbols=symbols,
                 visiting={*seen, token},
+                visiting_expr=visiting_expr,
             )
         if token in symbols and token not in seen:
             expanded = symbols[token]
@@ -312,15 +315,33 @@ def _normalize_dim(
                 subst=subst,
                 symbols=symbols,
                 visiting={*seen, token},
+                visiting_expr=visiting_expr,
             )
         return token
     assert isinstance(token, DimExprBinary)
-    left = _normalize_dim(token.left, subst=subst, symbols=symbols, visiting=visiting)
-    right = _normalize_dim(token.right, subst=subst, symbols=symbols, visiting=visiting)
+    seen_expr = visiting_expr or set()
+    token_id = id(token)
+    if token_id in seen_expr:
+        return token
+    next_seen_expr = {*seen_expr, token_id}
+    left = _normalize_dim(
+        token.left,
+        subst=subst,
+        symbols=symbols,
+        visiting=visiting,
+        visiting_expr=next_seen_expr,
+    )
+    right = _normalize_dim(
+        token.right,
+        subst=subst,
+        symbols=symbols,
+        visiting=visiting,
+        visiting_expr=next_seen_expr,
+    )
     if token.op in {"+", "*"}:
         terms: list[DimToken] = []
         for part in _flatten_dim_op(DimExprBinary(op=token.op, left=left, right=right), token.op):
-            terms.append(_normalize_dim(part, subst=subst, symbols=symbols, visiting=visiting))
+            terms.append(part)
         int_terms = [term for term in terms if isinstance(term, int)]
         non_int_terms: list[DimToken] = [term for term in terms if not isinstance(term, int)]
         if token.op == "+":
@@ -663,11 +684,14 @@ def _primitive_fallback_type(
             "activation",
             "add",
             "mul",
+            "div",
             "clamp",
             "layernorm",
             "rmsnorm",
             "softmax",
             "zeros_like",
+            "reshape",
+            "unsqueeze",
             "merge_heads",
             "repeat",
             "reshape_heads",
@@ -801,6 +825,17 @@ def _primitive_output_type(
     rigid_symbols: set[str],
     expected_arity: int | None,
 ) -> TypeExpr:
+    def _is_generic_tensor_decl(tp: TypeExpr) -> bool:
+        return isinstance(tp, TypeNamed) and tp.name in {"Tensor", "IdxTensor"}
+
+    generic_tensor_inference_ops = {
+        "reshape_heads",
+        "repeat",
+        "merge_heads",
+        "rope_pair",
+        "moe_scatter_add",
+    }
+
     op_name = _canonical_primitive_name(callee)
     structural_ops = {"cache_update", "split", "list_append", "list_index"}
     dynamic_from_first_arg = False
@@ -812,7 +847,13 @@ def _primitive_output_type(
             declared_return_items = tuple(parse_type_expr(item) for item in returns_spec)
             if (
                 declared_return_items
-                and all(not _is_any_type(tp) for tp in declared_return_items)
+                and all(
+                    not _is_any_type(tp)
+                    and not (
+                        _is_generic_tensor_decl(tp) and op_name in generic_tensor_inference_ops
+                    )
+                    for tp in declared_return_items
+                )
                 and op_name not in structural_ops
             ):
                 if len(declared_return_items) == 1:
@@ -823,7 +864,13 @@ def _primitive_output_type(
                 dynamic_from_first_arg = True
             else:
                 parsed = parse_type_expr(returns_spec)
-                if not _is_any_type(parsed) and op_name not in structural_ops:
+                if (
+                    not _is_any_type(parsed)
+                    and not (
+                        _is_generic_tensor_decl(parsed) and op_name in generic_tensor_inference_ops
+                    )
+                    and op_name not in structural_ops
+                ):
                     return parsed
 
     arg_types = [
@@ -1124,16 +1171,15 @@ def _tensor_like_binary_result(
         return None
     if _is_tensor_like(left) and _is_tensor_like(right):
         if isinstance(left, TypeTensor) and isinstance(right, TypeTensor):
-            dim_subst: dict[str, DimToken] = {}
-            if not _dims_compatible(
+            broadcasted = _broadcast_dims(
                 left.dims,
                 right.dims,
-                dim_subst,
                 symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
-            ):
+            )
+            if broadcasted is None:
                 return None
-            return left
+            return TypeTensor(base=left.base, dims=broadcasted)
         if isinstance(left, TypeTensor):
             return left
         if isinstance(right, TypeTensor):
@@ -1144,6 +1190,34 @@ def _tensor_like_binary_result(
     if _is_tensor_like(right) and is_numeric_type(left):
         return right
     return None
+
+
+def _broadcast_dims(
+    left: tuple[DimToken, ...],
+    right: tuple[DimToken, ...],
+    *,
+    symbols: dict[str, DimToken],
+    rigid_symbols: set[str],
+) -> tuple[DimToken, ...] | None:
+    max_rank = max(len(left), len(right))
+    left_full = (1,) * (max_rank - len(left)) + left
+    right_full = (1,) * (max_rank - len(right)) + right
+    result: list[DimToken] = []
+    subst: dict[str, DimToken] = {}
+    for left_raw, right_raw in zip(left_full, right_full, strict=True):
+        left_dim = _normalize_dim(left_raw, subst=subst, symbols=symbols)
+        right_dim = _normalize_dim(right_raw, subst=subst, symbols=symbols)
+        if _dim_equal(left_dim, right_dim, subst=subst, symbols=symbols):
+            result.append(left_dim)
+            continue
+        if left_dim == 1:
+            result.append(right_dim)
+            continue
+        if right_dim == 1:
+            result.append(left_dim)
+            continue
+        return None
+    return tuple(result)
 
 
 def _expr_name(expr: AxonExpr) -> str | None:
@@ -1329,8 +1403,18 @@ def _call_return_type(
     ):
         raise _error(module, path, f"unknown callee {callee!r}")
 
+    signature = get_op_lowering_signature(op_name)
+    kwarg_kinds = signature.get("kwarg_kinds") if isinstance(signature, dict) else {}
     rendered_kwargs: dict[str, Any] = {}
     for key, value in kwargs.items():
+        expected_kind = kwarg_kinds.get(key) if isinstance(kwarg_kinds, dict) else None
+        if (
+            isinstance(value, AxonExprName)
+            and value.name in env
+            and expected_kind in {"list_int", "list_dim"}
+        ):
+            rendered_kwargs[key] = ("__expr__", env[value.name], None)
+            continue
         if isinstance(value, AxonExpr):
             scalar_value = _expr_scalar_value(value, env=env)
             if scalar_value is not _MISSING:

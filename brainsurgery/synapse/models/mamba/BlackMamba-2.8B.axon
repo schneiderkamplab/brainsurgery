@@ -1,0 +1,66 @@
+{-# CHECKPOINTS "Zyphra/BlackMamba-2.8B" #-}
+{-# TASK "causal_lm" #-}
+{-# TOKENIZER "EleutherAI/gpt-neox-20b" #-}
+{-# PADDING_SIDE "right" #-}
+
+import Activations
+import Activations (silu)
+import MoE
+
+D = 1472
+V = 50304
+L = 36
+I = 2944
+N = 16
+R = 92
+E = 8
+K = 2
+FF = 3872
+EPS = 1e-05
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS cast_float=true
+
+expert_ffn :: Tensor[Nt,D] -> Tensor[Nt,D]
+expert_ffn x = do
+  in_proj <- linear@linear_fc1 x dim=2 * FF
+  gate, up <- split in_proj sizes=[FF, FF]
+  return gate |> silu |> mul up |> linear@linear_fc2 dim=D
+
+moe_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+moe_ffn x = do
+  x_norm <- rms@norm x
+  router_logits <- linear@mixer.router x_norm dim=E bias=true
+  router_probs <- softmax router_logits dim=-1 dtype=float32
+  topk_scores, topk_indices <- topk router_probs k=K dim=-1
+  m <- zeros_like x_norm
+  x_upd <- scope@mixer do
+    for@local_experts e <- [0..E) do
+      x_sel, token_idx, topk_pos, sel_scores <- MoE.select x_norm topk_scores topk_indices e
+      x_expert <- expert_ffn x_sel
+      m <- MoE.scatter_add m token_idx x_expert sel_scores
+    return m
+  return x + x_upd
+
+mamba_mixer :: Tensor[B,S,D] -> Tensor[B,S,D]
+mamba_mixer x = do
+  x_norm <- rms@norm x
+  y <- do
+    in_proj <- linear@mixer.in_proj x_norm dim=2 * I
+    u, gate <- split in_proj sizes=[I, I]
+    u_conv <- causal_conv1d@mixer.conv1d u activation=silu
+    params <- linear@mixer.x_proj u_conv dim=R + 2 * N
+    dt, b, c <- split params sizes=[R, N, N]
+    delta <- linear@mixer.dt_proj dt dim=I bias=true
+    y_scan <- mamba_scan u_conv delta b c A="mixer.A_log" D="mixer.D" a_is_log=true
+    return y_scan |> mul (silu gate) |> linear@mixer.out_proj dim=D
+  return x + y
+
+black_mamba :: TokenIds[B,S] -> Tensor[B,S,V]
+black_mamba input_ids = do
+  x <- embedding@embedding.word_embeddings input_ids dim=D
+  for@decoder.layers i <- [0..L) do
+    x <- ((i % 2) == 0) ? mamba_mixer x : moe_ffn x
+  x <- rms@decoder.final_layernorm x
+  logits <- linear@embedding.word_embeddings x dim=V
+  return logits

@@ -45,6 +45,34 @@ def _render_synapse_to_axon_text(spec: dict[str, Any], *, module_name: str) -> s
     return render_fn(spec, module_name=module_name)
 
 
+def _build_pipeline_plan_for_axon(
+    axon_path: Path, *, device: str = "cuda", main_module: str | None = None
+) -> Any:
+    module = _synapse_module()
+    parse_fn = getattr(module, "parse_axon_program_from_path")
+    lower_fn = getattr(module, "lower_axon_program_to_synapse_spec")
+    plan_fn = getattr(module, "build_pipeline_plan")
+    parsed = parse_fn(axon_path)
+    spec = lower_fn(parsed, main_module=main_module)
+    return plan_fn(spec, requested_device=device)
+
+
+def _emit_pipeline_stage_codes_for_axon(
+    axon_path: Path,
+    *,
+    device: str = "cuda",
+    main_module: str | None = None,
+    class_name_prefix: str = "GeneratedPipelineStage",
+) -> tuple[Any, tuple[str, ...]]:
+    module = _synapse_module()
+    parse_fn = getattr(module, "parse_axon_program_from_path")
+    lower_fn = getattr(module, "lower_axon_program_to_synapse_spec")
+    emit_fn = getattr(module, "emit_pipeline_stage_codes_from_synapse_spec")
+    parsed = parse_fn(axon_path)
+    spec = lower_fn(parsed, main_module=main_module)
+    return emit_fn(spec, requested_device=device, class_name_prefix=class_name_prefix)
+
+
 def _ensure_overwrite_allowed(path: Path, *, force: bool) -> None:
     if path.exists() and not force:
         raise typer.BadParameter(
@@ -300,6 +328,11 @@ def axon_test(
         "--compile-dynamic/--no-compile-dynamic",
         help="Set torch.compile(dynamic=True).",
     ),
+    hf_strict_dtype: bool = typer.Option(
+        False,
+        "--hf-strict-dtype/--no-hf-strict-dtype",
+        help="Force HF floating tensors to exactly match --dtype and disable HF quantization overrides when needed.",
+    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -331,9 +364,104 @@ def axon_test(
             compile_mode=compile_mode,
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
+            hf_strict_dtype=hf_strict_dtype,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+@app.command("axon-pipeline-plan")
+def axon_pipeline_plan(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    device: str = typer.Option(
+        "cuda",
+        "--device",
+        help="Pipeline device target (cuda or explicit like cuda:0).",
+    ),
+    main_module: str | None = typer.Option(
+        None,
+        "--main-module",
+        help="Main Axon module name (defaults to last module in file).",
+    ),
+) -> None:
+    """Show the inferred pipeline layer split for an Axon model."""
+    if isinstance(main_module, OptionInfo):
+        main_module = None
+    try:
+        plan = _build_pipeline_plan_for_axon(axon_path, device=device, main_module=main_module)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"layers_var={plan.layers_var}")
+    typer.echo(f"total_layers={plan.total_layers}")
+    for stage in plan.stages:
+        typer.echo(
+            f"stage={stage.index} device={stage.device} layers=[{stage.layer_start},{stage.layer_stop})"
+        )
+
+
+@app.command("axon-pipeline-emit")
+def axon_pipeline_emit(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    output_dir: Path = typer.Argument(
+        ...,
+        help="Destination directory for emitted per-stage Python files.",
+    ),
+    device: str = typer.Option(
+        "cuda",
+        "--device",
+        help="Pipeline device target (cuda or explicit like cuda:0).",
+    ),
+    class_name_prefix: str = typer.Option(
+        "GeneratedPipelineStage",
+        "--class-name-prefix",
+        help="Python class-name prefix for emitted stages.",
+    ),
+    main_module: str | None = typer.Option(
+        None,
+        "--main-module",
+        help="Main Axon module name (defaults to last module in file).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite output files if they already exist.",
+    ),
+) -> None:
+    """Emit separate Python modules for each inferred pipeline stage."""
+    if isinstance(main_module, OptionInfo):
+        main_module = None
+    try:
+        plan, codes = _emit_pipeline_stage_codes_for_axon(
+            axon_path,
+            device=device,
+            main_module=main_module,
+            class_name_prefix=class_name_prefix,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stage, code in zip(plan.stages, codes, strict=True):
+        output_path = output_dir / f"stage_{stage.index}.py"
+        _ensure_overwrite_allowed(output_path, force=force)
+        output_path.write_text(code, encoding="utf-8")
+        typer.echo(
+            f"wrote {output_path} for {stage.device} layers=[{stage.layer_start},{stage.layer_stop})"
+        )
 
 
 @app.command("axon-benchmark")
@@ -355,6 +483,19 @@ def axon_benchmark(
         1,
         "--processes",
         help="Number of worker processes.",
+    ),
+    checkpoints: list[str] = typer.Option(
+        [],
+        "--checkpoint",
+        help="Benchmark only the specified declared checkpoint ID(s). Repeat --checkpoint to select multiple.",
+    ),
+    exclude: list[str] = typer.Option(
+        [],
+        "--exclude",
+        help=(
+            "Exclude discovered .axon files matching these selectors (repeatable). "
+            "Selectors are substring-matched against the file path, name, and stem."
+        ),
     ),
     text: list[str] = typer.Option(
         ["The future of AI is", "Hello World"],
@@ -451,6 +592,30 @@ def axon_benchmark(
         "--compile-dynamic/--no-compile-dynamic",
         help="Set torch.compile(dynamic=True).",
     ),
+    axon_backend: str = typer.Option(
+        "single",
+        "--axon-backend",
+        help="Axon execution backend (single or pipeline).",
+    ),
+    pipeline_parallel_size: int | None = typer.Option(
+        None,
+        "--pipeline-parallel-size",
+        "--pp",
+        help=(
+            "Pipeline stages per worker when --axon-backend pipeline is used. "
+            "With --processes > 1, each worker gets pp GPUs via CUDA_VISIBLE_DEVICES partitioning."
+        ),
+    ),
+    skip_hf: bool = typer.Option(
+        False,
+        "--skip-hf/--no-skip-hf",
+        help="Skip the HF reference side and run only AxonDerived. Useful for large pipeline experiments.",
+    ),
+    hf_strict_dtype: bool = typer.Option(
+        False,
+        "--hf-strict-dtype/--no-hf-strict-dtype",
+        help="Force HF floating tensors to exactly match --dtype and disable HF quantization overrides when needed.",
+    ),
     table_format: str = typer.Option(
         "markdown",
         "--table-format",
@@ -466,6 +631,21 @@ def axon_benchmark(
         "--stream-csv",
         help="Optional CSV file to append unsorted completed benchmark rows to as they finish.",
     ),
+    min_billion_parameters: float | None = typer.Option(
+        None,
+        "--min-billion-parameters",
+        help="Only run models with estimated parameter count at or above this many billions.",
+    ),
+    max_billion_parameters: float | None = typer.Option(
+        None,
+        "--max-billion-parameters",
+        help="Only run models with estimated parameter count at or below this many billions.",
+    ),
+    debug_errors: bool = typer.Option(
+        False,
+        "--debug-errors/--no-debug-errors",
+        help="Print full traceback details for benchmark pair failures.",
+    ),
 ) -> None:
     """Run benchmark across declared CHECKPOINTS for one or more Axon files."""
     module = _synapse_module()
@@ -473,6 +653,8 @@ def axon_benchmark(
     try:
         run_fn(
             axon_files=axon_paths,
+            checkpoints=checkpoints,
+            exclude=exclude,
             device=device,
             processes=processes,
             text=text,
@@ -494,9 +676,16 @@ def axon_benchmark(
             compile_mode=compile_mode,
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
+            axon_backend=axon_backend,
+            pipeline_parallel_size=pipeline_parallel_size,
+            skip_hf=skip_hf,
+            hf_strict_dtype=hf_strict_dtype,
             table_format=table_format,
             log_dir=log_dir,
             stream_csv=stream_csv,
+            debug_errors=debug_errors,
+            min_billion_parameters=min_billion_parameters,
+            max_billion_parameters=max_billion_parameters,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

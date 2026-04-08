@@ -1,0 +1,45 @@
+{-# CHECKPOINTS "state-spaces/mamba-2.8b-hf" #-}
+{-# TASK "causal_lm" #-}
+{-# PADDING_SIDE "right" #-}
+
+import Activations
+import Activations (silu)
+
+D = 2560
+I = 5120
+N = 16
+R = 160
+L = 64
+V = 50280
+EPS = 1e-05
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS cast_float=true
+
+mamba_mixer :: Tensor[B,S,D] -> Tensor[B,S,D]
+mamba_mixer x = do
+  in_proj <- linear@in_proj x dim=2 * I
+  u, gate <- split in_proj sizes=[I, I]
+  u_conv <- causal_conv1d@conv1d u activation=silu
+  params <- linear@x_proj u_conv dim=R + 2 * N
+  dt, b, c <- split params sizes=[R, N, N]
+  delta <- linear@dt_proj dt dim=I bias=true
+  y_scan <- mamba_scan u_conv delta b c A=A_log D=D a_is_log=true
+  return y_scan |> mul (silu gate) |> linear@out_proj dim=D
+
+mamba_block :: Tensor[B,S,D] -> Tensor[B,S,D]
+mamba_block x = do
+  x_norm <- rms@norm x
+  y <- scope@mixer do
+    return mamba_mixer x_norm
+  return x + y
+
+mamba_2_8b :: TokenIds[B,S] -> Tensor[B,S,V]
+mamba_2_8b input_ids = do
+  logits <- scope@backbone do
+    x <- embedding@embeddings input_ids dim=D
+    for@layers i <- [0..L) do
+      x <- mamba_block x
+    x <- rms@norm_f x
+    return linear@embeddings x dim=V
+  return logits

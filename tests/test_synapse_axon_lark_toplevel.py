@@ -85,6 +85,30 @@ lin x = x
     )
 
 
+def test_parse_program_source_tokenizer_pragma_preserved() -> None:
+    source = """
+{-# TOKENIZER "EleutherAI/gpt-neox-20b" #-}
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    parsed = parse_program_source(source)
+    assert parsed.pragmas["tokenizer"] == "EleutherAI/gpt-neox-20b"
+
+
+def test_parse_program_source_multiple_tokenizer_pragmas_merge() -> None:
+    source = """
+{-# TOKENIZER "mistralai/Mistral-7B-v0.1" #-}
+{-# TOKENIZER ["mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"] #-}
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    parsed = parse_program_source(source)
+    assert parsed.pragmas["tokenizer"] == (
+        "mistralai/Mistral-7B-v0.1",
+        ("mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"),
+    )
+
+
 def test_parse_program_source_rejects_invalid_import_member_token() -> None:
     source = """
 import Activations (gelu-new)

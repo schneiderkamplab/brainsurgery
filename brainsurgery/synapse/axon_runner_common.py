@@ -22,6 +22,17 @@ class TeeWriter:
         for stream in self._streams:
             stream.flush()
 
+    def isatty(self) -> bool:
+        for stream in self._streams:
+            isatty = getattr(stream, "isatty", None)
+            if callable(isatty):
+                try:
+                    if bool(isatty()):
+                        return True
+                except Exception:
+                    continue
+        return False
+
 
 class LogFileWriter:
     def __init__(self, stream: Any) -> None:

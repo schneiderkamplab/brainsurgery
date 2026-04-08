@@ -80,3 +80,66 @@ main x = do
     modules = parse_axon_program(source)
     signatures = typecheck_axon_program(modules, main_module="main")
     assert "main" in signatures
+
+
+def test_typecheck_allows_log_on_int_input_via_numeric_promotion() -> None:
+    source = """
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  d <- 640
+  s <- log d
+  return x
+"""
+    modules = parse_axon_program(source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
+
+
+def test_typecheck_allows_floor_on_int_input_via_numeric_promotion() -> None:
+    source = """
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  d <- 640
+  s <- floor d
+  return x
+"""
+    modules = parse_axon_program(source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
+
+
+def test_typecheck_allows_broadcasted_tensor_binary_mul() -> None:
+    source = """
+main :: Tensor[B,1,S,1] -> Tensor[B,H,S,D] -> Tensor[B,H,S,D]
+main scale q = do
+  y <- scale * q
+  return y
+"""
+    modules = parse_axon_program(source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
+
+
+def test_typecheck_allows_generic_reshape_to_higher_rank() -> None:
+    source = """
+main :: Tensor[B,S] -> Tensor[B,1,S,1]
+main x = do
+  y <- reshape x shape=[B, 1, S, 1]
+  return y
+"""
+    modules = parse_axon_program(source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
+
+
+def test_typecheck_allows_unsqueeze_to_higher_rank() -> None:
+    source = """
+main :: Tensor[B,S] -> Tensor[B,1,S,1]
+main x = do
+  y <- unsqueeze x dim=1
+  z <- unsqueeze y dim=3
+  return z
+"""
+    modules = parse_axon_program(source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures

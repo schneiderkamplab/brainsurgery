@@ -13,6 +13,7 @@ def test_format_checkpoint_summary_table_markdown() -> None:
                 "axon": "/tmp/gemma3.axon",
                 "checkpoint": "google/gemma-3-270m",
                 "model_dir": "/tmp/models/google/gemma-3-270m",
+                "fallback": "none",
                 "masked_top1_eq": "True",
                 "masked_max_abs_diff": "2.3e-05",
                 "masked_max_rel_diff": "0.1",
@@ -21,11 +22,11 @@ def test_format_checkpoint_summary_table_markdown() -> None:
         table_format="markdown",
     )
     assert (
-        "| axon | checkpoint | model dir | masked top-1 eq | masked max abs diff | masked max rel diff |"
+        "| axon | checkpoint | model dir | fallback | masked top-1 eq | masked max abs diff | masked max rel diff |"
         in table
     )
     assert (
-        "| /tmp/gemma3.axon | google/gemma-3-270m | /tmp/models/google/gemma-3-270m | True | 2.3e-05 | 0.1 |"
+        "| /tmp/gemma3.axon | google/gemma-3-270m | /tmp/models/google/gemma-3-270m | none | True | 2.3e-05 | 0.1 |"
         in table
     )
 
@@ -37,6 +38,7 @@ def test_format_checkpoint_summary_table_html_highlights_cells() -> None:
                 "axon": "/tmp/a.axon",
                 "checkpoint": "google/a",
                 "model_dir": "/tmp/models/google/a",
+                "fallback": "HF+Axon->cpu",
                 "masked_top1_eq": "False",
                 "masked_max_abs_diff": "0.02",
                 "masked_max_rel_diff": "0.1",
@@ -45,6 +47,7 @@ def test_format_checkpoint_summary_table_html_highlights_cells() -> None:
                 "axon": "/tmp/b.axon",
                 "checkpoint": "google/b",
                 "model_dir": "/tmp/models/google/b",
+                "fallback": "none",
                 "masked_top1_eq": "True",
                 "masked_max_abs_diff": "0.005",
                 "masked_max_rel_diff": "0.2",
@@ -53,6 +56,7 @@ def test_format_checkpoint_summary_table_html_highlights_cells() -> None:
                 "axon": "/tmp/c.axon",
                 "checkpoint": "google/c",
                 "model_dir": "/tmp/models/google/c",
+                "fallback": "none",
                 "masked_top1_eq": "True",
                 "masked_max_abs_diff": "0.02",
                 "masked_max_rel_diff": "0.3",
@@ -183,6 +187,40 @@ main x = do
             },
         ]
     }
+
+
+def test_tokenizer_pragma_for_checkpoint_supports_global_and_override(tmp_path: Path) -> None:
+    axon = tmp_path / "toy.axon"
+    axon.write_text(
+        "\n".join(
+            [
+                '{-# CHECKPOINTS ["mistralai/Mistral-7B-v0.1", "mistralai/Devstral-Small-2507"] #-}',
+                '{-# TOKENIZER "mistralai/Mistral-7B-v0.1" #-}',
+                '{-# TOKENIZER ["mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"] #-}',
+                "toy :: Tensor[B,S,D] -> Tensor[B,S,D]",
+                "toy x = x",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        axon_test_module._tokenizer_pragma_for_checkpoint(
+            axon_file=axon,
+            main_module=None,
+            checkpoint_id="mistralai/Mistral-7B-v0.1",
+        )
+        == "mistralai/Mistral-7B-v0.1"
+    )
+    assert (
+        axon_test_module._tokenizer_pragma_for_checkpoint(
+            axon_file=axon,
+            main_module=None,
+            checkpoint_id="mistralai/Devstral-Small-2507",
+        )
+        == "mistralai/Devstral-Small-2507"
+    )
 
 
 def test_run_axon_benchmark_parallel_dispatches_pairs(tmp_path: Path, monkeypatch) -> None:
@@ -407,6 +445,190 @@ main x = do
     }
 
 
+def test_run_axon_benchmark_excludes_matching_axon_files(tmp_path: Path, monkeypatch) -> None:
+    axon_dir = tmp_path / "models"
+    axon_dir.mkdir(parents=True)
+    keep_path = axon_dir / "keep.axon"
+    keep_path.write_text(
+        """
+{-# CHECKPOINTS "google/keep" #-}
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    skip_path = axon_dir / "mistral4.axon"
+    skip_path.write_text(
+        """
+{-# CHECKPOINTS "google/skip" #-}
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    seen: list[tuple[str, str]] = []
+
+    def _fake_repo_root() -> Path:
+        return tmp_path
+
+    def _fake_ensure_checkpoint_model_dir(*, repo_root: Path, checkpoint_id: str) -> Path:
+        return repo_root / "models" / checkpoint_id
+
+    def _fake_run_single(**kwargs):
+        seen.append((Path(kwargs["axon_file"]).name, str(kwargs["weights"]).split("/models/")[-1]))
+        return {"masked_top1_eq": True, "max_diff": 0.0}
+
+    monkeypatch.setattr(axon_benchmark_module, "_repo_root", _fake_repo_root)
+    monkeypatch.setattr(
+        axon_benchmark_module,
+        "_ensure_checkpoint_model_dir",
+        _fake_ensure_checkpoint_model_dir,
+    )
+    monkeypatch.setattr(axon_benchmark_module, "_run_axon_test_single", _fake_run_single)
+
+    result = axon_benchmark_module.run_axon_benchmark(
+        axon_files=[axon_dir],
+        exclude=["mistral4"],
+        device="cpu",
+        dtype="float32",
+        text="hi",
+        max_len=4,
+        table_format="plain",
+    )
+
+    assert seen == [("keep.axon", "google/keep")]
+    assert len(result["results"]) == 1
+    assert Path(result["results"][0]["axon_file"]).name == "keep.axon"
+
+
+def test_run_axon_benchmark_forwards_axon_backend(tmp_path: Path, monkeypatch) -> None:
+    axon_path = tmp_path / "model.axon"
+    axon_path.write_text(
+        """
+{-# CHECKPOINTS "google/test" #-}
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    seen_backend: list[str] = []
+
+    def _fake_repo_root() -> Path:
+        return tmp_path
+
+    def _fake_ensure_checkpoint_model_dir(*, repo_root: Path, checkpoint_id: str) -> Path:
+        return repo_root / "models" / checkpoint_id
+
+    def _fake_run_single(**kwargs):
+        seen_backend.append(str(kwargs["axon_backend"]))
+        return {"masked_top1_eq": True, "max_diff": 0.0}
+
+    monkeypatch.setattr(axon_benchmark_module, "_repo_root", _fake_repo_root)
+    monkeypatch.setattr(
+        axon_benchmark_module,
+        "_ensure_checkpoint_model_dir",
+        _fake_ensure_checkpoint_model_dir,
+    )
+    monkeypatch.setattr(axon_benchmark_module, "_run_axon_test_single", _fake_run_single)
+
+    axon_benchmark_module.run_axon_benchmark(
+        axon_files=[axon_path],
+        axon_backend="pipeline",
+        device="cuda",
+        processes=1,
+        dtype="float32",
+        text="hi",
+        max_len=4,
+        table_format="plain",
+    )
+
+    assert seen_backend == ["pipeline"]
+
+
+def test_run_axon_benchmark_forwards_skip_hf(tmp_path: Path, monkeypatch) -> None:
+    axon_path = tmp_path / "model.axon"
+    axon_path.write_text(
+        """
+{-# CHECKPOINTS "google/test" #-}
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    seen_skip_hf: list[bool] = []
+
+    def _fake_repo_root() -> Path:
+        return tmp_path
+
+    def _fake_ensure_checkpoint_model_dir(*, repo_root: Path, checkpoint_id: str) -> Path:
+        return repo_root / "models" / checkpoint_id
+
+    def _fake_run_single(**kwargs):
+        seen_skip_hf.append(bool(kwargs["skip_hf"]))
+        return {"fallback": "skip-hf", "masked_top1_eq": None, "masked_max_diff": None}
+
+    monkeypatch.setattr(axon_benchmark_module, "_repo_root", _fake_repo_root)
+    monkeypatch.setattr(
+        axon_benchmark_module,
+        "_ensure_checkpoint_model_dir",
+        _fake_ensure_checkpoint_model_dir,
+    )
+    monkeypatch.setattr(axon_benchmark_module, "_run_axon_test_single", _fake_run_single)
+
+    axon_benchmark_module.run_axon_benchmark(
+        axon_files=[axon_path],
+        skip_hf=True,
+        device="cpu",
+        dtype="float32",
+        text="hi",
+        max_len=4,
+        table_format="plain",
+    )
+
+    assert seen_skip_hf == [True]
+
+
+def test_run_axon_benchmark_pipeline_requires_single_process(tmp_path: Path) -> None:
+    axon_path = tmp_path / "model.axon"
+    axon_path.write_text(
+        """
+{-# CHECKPOINTS "google/test" #-}
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    try:
+        axon_benchmark_module.run_axon_benchmark(
+            axon_files=[axon_path],
+            axon_backend="pipeline",
+            device="cuda",
+            processes=2,
+            dtype="float32",
+            text="hi",
+            max_len=4,
+            table_format="plain",
+        )
+    except ValueError as exc:
+        assert "requires --processes 1" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for pipeline backend with processes > 1")
+
+
 def test_run_axon_benchmark_sorts_summary_by_checkpoint_and_metrics(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -539,6 +761,7 @@ main x = do
     def _fake_run_single(**kwargs):
         checkpoint = str(kwargs["weights"]).split("/models/")[-1]
         return {
+            "fallback": "none",
             "masked_top1_eq": checkpoint.endswith("a"),
             "masked_max_diff": 0.02 if checkpoint.endswith("a") else 0.001,
             "masked_max_rel_diff": 0.3 if checkpoint.endswith("a") else 0.2,
@@ -564,7 +787,7 @@ main x = do
 
     csv_text = csv_path.read_text(encoding="utf-8")
     assert (
-        "axon,checkpoint,model_dir,masked_top1_eq,masked_max_abs_diff,masked_max_rel_diff"
+        "axon,checkpoint,model_dir,fallback,masked_top1_eq,masked_max_abs_diff,masked_max_rel_diff"
         in csv_text
     )
     assert "google/gemma-a" in csv_text
@@ -576,10 +799,10 @@ def test_render_axon_benchmark_csv_sorts_rows(tmp_path: Path) -> None:
     csv_path.write_text(
         "\n".join(
             [
-                "axon,checkpoint,model_dir,masked_top1_eq,masked_max_abs_diff,masked_max_rel_diff",
-                "/tmp/z.axon,google/gemma-b,/tmp/models/google/gemma-b,False,0.1,0.3",
-                "/tmp/y.axon,google/gemma-b,/tmp/models/google/gemma-b,True,0.1,0.2",
-                "/tmp/x.axon,google/gemma-a,/tmp/models/google/gemma-a,True,0.2,0.4",
+                "axon,checkpoint,model_dir,fallback,masked_top1_eq,masked_max_abs_diff,masked_max_rel_diff",
+                "/tmp/z.axon,google/gemma-b,/tmp/models/google/gemma-b,HF->cpu,False,0.1,0.3",
+                "/tmp/y.axon,google/gemma-b,/tmp/models/google/gemma-b,none,True,0.1,0.2",
+                "/tmp/x.axon,google/gemma-a,/tmp/models/google/gemma-a,Axon->cpu,True,0.2,0.4",
             ]
         )
         + "\n",

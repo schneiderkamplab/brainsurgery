@@ -1,0 +1,37 @@
+{-# CHECKPOINTS ["openai-community/gpt2", "openai-community/gpt2-medium", "openai-community/gpt2-large", "openai-community/gpt2-xl"] #-}
+{-# TASK "causal_lm" #-}
+
+import Config
+import Activations gelu_new
+
+T   = Config.int "n_positions" default=1024
+D   = Config.int "n_embd" default=768
+L   = Config.int "n_layer" default=12
+H   = Config.int "n_head" default=12
+V   = Config.int "vocab_size" default=520257
+
+gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+gpt2_block x attn_mask = do
+  x1 <- layernorm@ln_1 x
+  a <- scope@attn do
+    q_lin, k_lin, v_lin <- linear@c_attn x1 dim=(3 * D) bias=true transpose=true |> split parts=3
+    q <- reshape_heads q_lin heads=H
+    k <- reshape_heads k_lin heads=H
+    v <- reshape_heads v_lin heads=H
+    mask <- causal_mask q k window=T padding_mask=attn_mask
+    return attention q k v mask=mask |> merge_heads |> linear@c_proj dim=D bias=true transpose=true
+  x <- x + a
+  x3 <- layernorm@ln_2 x
+  m <- scope@mlp do
+    return linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new fp32_accum=true |> linear@c_proj dim=D bias=true transpose=true
+  return x + m
+
+gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+gpt2 input_ids attn_mask = do
+  tok <- embedding@wte input_ids dim=D
+  pos <- position_ids input_ids attn_mask pad_fill=1 |> embedding@wpe
+  x <- tok + pos
+  for@h i <- [0..L) do
+    x <- gpt2_block x attn_mask
+  logits <- layernorm@ln_f x |> linear@wte
+  return logits

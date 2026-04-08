@@ -467,6 +467,21 @@ class _ProgramTransformer(Transformer[Token, object]):
             if side not in {"left", "right"}:
                 raise ValueError("PADDING_SIDE must be 'left' or 'right'")
             return side
+        if name == "tokenizer":
+            if isinstance(value, str) and value:
+                return value
+            if isinstance(value, list | tuple) and len(value) == 2:
+                checkpoint, tokenizer = value
+                if (
+                    isinstance(checkpoint, str)
+                    and checkpoint
+                    and isinstance(tokenizer, str)
+                    and tokenizer
+                ):
+                    return (checkpoint, tokenizer)
+            raise ValueError(
+                "TOKENIZER must be a non-empty string or a [checkpoint, tokenizer] pair"
+            )
         if name == "checkpoints":
             if isinstance(value, str):
                 return (value,)
@@ -477,6 +492,54 @@ class _ProgramTransformer(Transformer[Token, object]):
                 return items
             raise ValueError("CHECKPOINTS must be a string or a list/tuple of strings")
         return value
+
+    @staticmethod
+    def _merge_tokenizer_pragma(prev_value: object | None, pragma_value: object) -> object:
+        def _entries(value: object | None) -> list[object]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value]
+            if (
+                isinstance(value, tuple)
+                and len(value) == 2
+                and all(isinstance(item, str) for item in value)
+            ):
+                return [value]
+            if isinstance(value, list | tuple):
+                return list(value)
+            raise ValueError("invalid TOKENIZER pragma state")
+
+        entries = _entries(prev_value)
+        new_entry = pragma_value
+        if isinstance(new_entry, str):
+            for entry in entries:
+                if isinstance(entry, str):
+                    if entry != new_entry:
+                        raise ValueError(
+                            "conflicting TOKENIZER pragmas; expected a single consistent global tokenizer"
+                        )
+                    return prev_value if prev_value is not None else new_entry
+            entries.insert(0, new_entry)
+        else:
+            checkpoint, tokenizer = cast(tuple[str, str], new_entry)
+            for idx, entry in enumerate(entries):
+                if (
+                    isinstance(entry, tuple)
+                    and len(entry) == 2
+                    and all(isinstance(item, str) for item in entry)
+                    and entry[0] == checkpoint
+                ):
+                    if entry[1] != tokenizer:
+                        raise ValueError(
+                            "conflicting TOKENIZER pragmas; expected a single tokenizer per checkpoint"
+                        )
+                    return prev_value if prev_value is not None else new_entry
+            entries.append(new_entry)
+
+        if len(entries) == 1:
+            return entries[0]
+        return tuple(entries)
 
     @staticmethod
     def _is_stmt(value: object) -> bool:
@@ -538,13 +601,16 @@ class _ProgramTransformer(Transformer[Token, object]):
                 pragma_name = cast(str, child[1])
                 pragma_value = child[2]
                 prev_value = pragmas.get(pragma_name)
+                if pragma_name == "tokenizer":
+                    pragmas[pragma_name] = self._merge_tokenizer_pragma(prev_value, pragma_value)
+                    continue
                 if (
-                    pragma_name == "padding_side"
+                    pragma_name in {"padding_side", "tokenizer"}
                     and isinstance(prev_value, str)
                     and prev_value != pragma_value
                 ):
                     raise ValueError(
-                        "conflicting PADDING_SIDE pragmas; expected a single consistent value"
+                        f"conflicting {pragma_name.upper()} pragmas; expected a single consistent value"
                     )
                 pragmas[pragma_name] = pragma_value
                 continue

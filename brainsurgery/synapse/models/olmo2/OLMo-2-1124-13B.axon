@@ -1,0 +1,60 @@
+{-# CHECKPOINTS "allenai/OLMo-2-1124-13B" #-}
+{-# TASK "causal_lm" #-}
+
+import Activations
+import Activations (silu)
+import Cache
+import Cache (past_length)
+
+D = 5120
+V = 100352
+L = 40
+H = 40
+KVH = 40
+HD = 128
+FFN = 13824
+C = 4096
+EPS = 1e-06
+THETA = 500000.0
+ROPE_SCALE = 1.0
+ATTN_SCALE = 0.08838834764831843
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS
+
+olmo2_block :: Tensor -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
+olmo2_block x pos_ids attn_mask past_kv = do
+  a, new_kv <- scope@self_attn do
+    q <- linear@q_proj x dim=(H * HD) |> rms@q_norm |> reshape_heads heads=H
+    k <- linear@k_proj x dim=(KVH * HD) |> rms@k_norm |> reshape_heads heads=KVH
+    v <- linear@v_proj x dim=(KVH * HD) |> reshape_heads heads=KVH
+    q, k <- rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- repeat k (H / KVH)
+    v <- repeat v (H / KVH)
+    mask <- causal_mask q k window=C padding_mask=attn_mask
+    a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads |> linear@o_proj dim=D
+    return a, new_kv
+  a <- rms@post_attention_layernorm a
+  x <- x + a
+  m <- scope@mlp do
+    g <- linear@gate_proj x dim=FFN
+    u <- linear@up_proj x dim=FFN
+    return g |> silu |> mul u |> linear@down_proj dim=D
+  m <- rms@post_feedforward_layernorm m
+  return x + m, new_kv
+
+olmo2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+olmo2 input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  x, new_kv <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- olmo2_block x pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    x <- rms@norm x
+    return x, new_kv
+  logits <- linear@lm_head x dim=V
+  return logits, new_kv

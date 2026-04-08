@@ -1,0 +1,100 @@
+{-# CHECKPOINTS ["meta-llama/Llama-4-Scout-17B-16E", "meta-llama/Llama-4-Scout-17B-16E-Instruct"] #-}
+{-# TASK "causal_lm" #-}
+
+import Config
+import Activations silu
+import Cache past_length
+import Cache
+import MoE
+
+CFG = "text_config"
+
+D = Config.int "hidden_size" root=CFG default=5120
+V = Config.int "vocab_size" root=CFG default=202048
+L = Config.int "num_hidden_layers" root=CFG default=48
+H = Config.int "num_attention_heads" root=CFG default=40
+KVH = Config.int "num_key_value_heads" root=CFG default=8
+HD = Config.int "head_dim" root=CFG default=128
+KVD = KVH * HD
+FFN = Config.int "intermediate_size" root=CFG default=8192
+FFN_SHARED = Config.int "intermediate_size_mlp" root=CFG default=16384
+E = Config.int "num_local_experts" root=CFG default=16
+EPT = Config.int "num_experts_per_tok" root=CFG default=1
+EPS = Config.float "rms_norm_eps" root=CFG default=1e-05
+THETA = Config.float "rope_theta" root=CFG default=500000.0
+C = Config.int "max_position_embeddings" root=CFG default=262144
+ROPE_SCALE = Config.float "rope_scaling.factor" root=CFG default=16.0
+ROPE_LOW_FREQ = Config.float "rope_scaling.low_freq_factor" root=CFG default=1.0
+ROPE_HIGH_FREQ = Config.float "rope_scaling.high_freq_factor" root=CFG default=1.0
+ROPE_CONTEXT = Config.int "rope_scaling.original_max_position_embeddings" root=CFG default=8192
+HAS_LLAMA3_FREQ_SPLIT = ROPE_HIGH_FREQ >= ROPE_LOW_FREQ
+NO_ROPE_INTERVAL = Config.int "no_rope_layer_interval" root=CFG default=4
+ATTN_CHUNK = Config.int "attention_chunk_size" root=CFG default=8192
+USE_QK_NORM = (Config.value "use_qk_norm" root=CFG default=true) == true
+USE_TEMP_TUNING = (Config.value "attn_temperature_tuning" root=CFG default=true) == true
+FLOOR_SCALE = Config.float "floor_scale" root=CFG default=8192.0
+ATTN_TEMP_SCALE = Config.float "attn_scale" root=CFG default=0.1
+ATTN_SCALE = 1.0 / sqrt HD
+
+llama4_norm :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+llama4_norm@path x = rmsnorm@path x eps=EPS
+
+llama4_temp_scale :: Tensor[B,S] -> Tensor[B,1,S,1]
+llama4_temp_scale pos_ids = do
+  shifted <- pos_ids + 1.0
+  scaled <- shifted / FLOOR_SCALE
+  bucket <- floor scaled
+  logged <- log (bucket + 1.0)
+  gain <- (logged * ATTN_TEMP_SCALE) + 1.0
+  gain3 <- unsqueeze gain dim=1
+  gain4 <- unsqueeze gain3 dim=3
+  return gain4
+
+llama4_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
+llama4_moe x = do
+  shared <- scope@shared_expert do
+    gate <- linear@gate_proj x dim=FFN_SHARED bias=false
+    up <- linear@up_proj x dim=FFN_SHARED bias=false
+    return gate |> silu |> mul up |> linear@down_proj dim=D bias=false
+  topk_weights, topk_indices <- sigmoid_topk_router@router x top_k=EPT
+  routed <- MoE.grouped_swiglu_ffn x topk_weights topk_indices transpose=true pre_scale_input=true
+  return shared + routed
+
+llama4_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+llama4_block x i pos_ids attn_mask past_kv = do
+  use_rope <- ((i + 1) % NO_ROPE_INTERVAL) != 0
+  xn <- llama4_norm@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- linear@q_proj xn dim=D bias=false |> reshape_heads heads=H
+    k <- linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
+    v <- linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
+    q, k <- use_rope ? (HAS_LLAMA3_FREQ_SPLIT ? (rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE low_freq_factor=ROPE_LOW_FREQ high_freq_factor=ROPE_HIGH_FREQ original_context=ROPE_CONTEXT interleaved=true) : (rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE interleaved=true)) : (q, k)
+    q <- (USE_QK_NORM and use_rope) ? (l2norm q eps=EPS) : q
+    k <- (USE_QK_NORM and use_rope) ? (l2norm k eps=EPS) : k
+    q <- ((USE_TEMP_TUNING and (use_rope == false)) ? (q * (llama4_temp_scale pos_ids)) : q)
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- repeat k (H / KVH)
+    v <- repeat v (H / KVH)
+    mask <- use_rope ? (causal_mask q k window=ATTN_CHUNK padding_mask=attn_mask) : (causal_mask q k padding_mask=attn_mask)
+    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=D bias=false
+    return a, new_kv
+  x <- x + a
+  xn <- llama4_norm@post_attention_layernorm x
+  m <- scope@feed_forward do
+    return llama4_moe xn
+  return x + m, new_kv
+
+llama4 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+llama4 input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  x, new_kv <- scope@language_model.model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- llama4_block x i pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    x <- llama4_norm@norm x
+    return x, new_kv
+  logits <- linear@language_model.lm_head x dim=V bias=false
+  return logits, new_kv

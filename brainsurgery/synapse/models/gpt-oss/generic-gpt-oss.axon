@@ -1,0 +1,78 @@
+{-# CHECKPOINTS ["openai/gpt-oss-20b", "openai/gpt-oss-120b"] #-}
+{-# TASK "causal_lm" #-}
+
+import Config
+import Activations sigmoid
+import Cache
+import Cache past_length
+import MoE
+
+-- GPT-OSS-20B architecture and YaRN constants.
+D   = Config.int "hidden_size" default=2880                        -- residual hidden size
+V   = Config.int "vocab_size" default=201088                       -- tokenizer vocabulary size
+L   = Config.int "num_hidden_layers" default=24                    -- decoder depth
+H   = Config.int "num_attention_heads" default=64                  -- query head count
+KVH = Config.int "num_key_value_heads" default=8                   -- key/value head count
+HD  = Config.int "head_dim" default=64                             -- per-head hidden size
+QD  = H * HD                                                       -- query projection width
+KVD = KVH * HD                                                     -- key/value projection width
+E   = Config.int "num_local_experts" default=32                    -- total local experts
+EPT = Config.int "num_experts_per_tok" default=4                   -- routed experts per token
+C   = Config.int "max_position_embeddings" default=131072          -- max context length
+SW  = Config.int "sliding_window" default=128                      -- short-window attention size
+EPS = Config.float "rms_norm_eps" default=1e-05                    -- RMSNorm epsilon
+THETA = Config.float "rope_theta" default=150000.0                 -- base RoPE theta
+ROPE_SCALE = Config.float "factor" root="rope_scaling" default=32.0 -- YaRN scaling factor
+ROPE_LOW_FREQ = Config.float "beta_slow" root="rope_scaling" default=1.0 -- YaRN slow beta
+ROPE_HIGH_FREQ = Config.float "beta_fast" root="rope_scaling" default=32.0 -- YaRN fast beta
+ROPE_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=4096 -- YaRN train context
+ROPE_ATTN_FACTOR = Config.float "attention_factor" root="rope_scaling" default=1.3465735902799727 -- YaRN attention factor
+ATTN_SCALE = 1.0 / sqrt HD                                          -- qk scaling
+SWIGLU_LIMIT = Config.float "swiglu_limit" default=7.0             -- SwiGLU clamp threshold
+SWIGLU_ALPHA = Config.float "swiglu_alpha" default=1.702           -- SwiGLU slope
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS cast_float=true
+
+gpt_oss_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gpt_oss_block x i pos_ids attn_mask past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- linear@q_proj xn dim=QD bias=true |> reshape_heads heads=H
+    k <- linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    q, k <- rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE low_freq_factor=ROPE_LOW_FREQ high_freq_factor=ROPE_HIGH_FREQ original_context=ROPE_CONTEXT attention_factor=ROPE_ATTN_FACTOR rope_mode=hf_yarn truncate=false
+    k_ctx, v_ctx, new_kv <- Cache.update past_kv k v
+    k_ctx <- repeat k_ctx (H / KVH)
+    v_ctx <- repeat v_ctx (H / KVH)
+    window <- ((i % 2) == 1) ? C : SW
+    mask <- causal_mask q k_ctx window=window padding_mask=attn_mask
+    a <- attention q k_ctx v_ctx mask=mask scale=ATTN_SCALE sink_path="self_attn.sinks" |> merge_heads
+    a <- linear@o_proj a dim=D bias=true
+    return a, new_kv
+  x <- x + a
+
+  xn <- rms@post_attention_layernorm x
+  m <- scope@mlp do
+    router_topk, topk_indices <- linear@router xn dim=E bias=true |>
+      topk k=EPT dim=-1
+    topk_scores <- softmax router_topk dim=-1
+    return MoE.grouped_ffn xn topk_scores topk_indices gate_up_weight="experts.gate_up_proj.weight" gate_up_bias="experts.gate_up_proj.bias" alpha=SWIGLU_ALPHA limit=SWIGLU_LIMIT
+
+  return x + m, new_kv
+
+gpt_oss_20b :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gpt_oss_20b input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  x, new_kv <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- gpt_oss_block x i pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    x <- rms@norm x
+    return x, new_kv
+
+  logits <- linear@lm_head x dim=V
+  return logits, new_kv

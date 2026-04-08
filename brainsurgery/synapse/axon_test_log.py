@@ -12,9 +12,12 @@ MASKED_ABS_RE = re.compile(r"^Masked abs diff \(max\):\s*(?P<value>.+?)\s*$")
 MASKED_REL_RE = re.compile(r"^Logits rel diff \(masked\) \| mean/max:\s+\S+\s+(?P<value>\S+)\s*$")
 RESULT_AXON_RE = re.compile(r"^result\.axon=(?P<value>.+?)\s*$")
 RESULT_MODEL_RE = re.compile(r"^result\.model_dir=(?P<value>.+?)\s*$")
+RESULT_FALLBACK_RE = re.compile(r"^result\.fallback=(?P<value>.+?)\s*$")
 RESULT_TOP1_RE = re.compile(r"^result\.masked_top1_eq=(?P<value>.+?)\s*$")
 RESULT_ABS_RE = re.compile(r"^result\.masked_max_abs_diff=(?P<value>.+?)\s*$")
 RESULT_REL_RE = re.compile(r"^result\.masked_max_rel_diff=(?P<value>.+?)\s*$")
+HF_FALLBACK_RE = re.compile(r"^CUDA OOM on .+; retrying HF on cpu\s*$")
+AXON_FALLBACK_RE = re.compile(r"^CUDA OOM on .+; retrying AxonDerived on cpu\s*$")
 PARENT_CHILD_START_RE = re.compile(
     r"child_start .*?axon=(?P<axon>\S+)\s+checkpoint=(?P<checkpoint>\S+)\s+model_dir=(?P<model_dir>\S+)\s+log_path=(?P<log_path>\S+)\s*$"
 )
@@ -25,6 +28,7 @@ class AxonTestLogRow:
     axon: str
     checkpoint: str
     model_dir: str
+    fallback: str
     masked_top1_eq: str
     masked_max_abs_diff: float
     masked_max_abs_diff_text: str
@@ -111,6 +115,9 @@ def _parse_row(worker_log: _WorkerLogRef) -> AxonTestLogRow | None:
     axon_name = worker_log.axon
     checkpoint = worker_log.checkpoint
     model_dir = worker_log.model_dir
+    fallback = "none"
+    saw_hf_fallback = False
+    saw_axon_fallback = False
     masked_top1_eq: str | None = None
     masked_max_abs_diff: str | None = None
     masked_max_rel_diff: str | None = None
@@ -125,6 +132,16 @@ def _parse_row(worker_log: _WorkerLogRef) -> AxonTestLogRow | None:
             model_match = RESULT_MODEL_RE.match(line)
             if model_match is not None:
                 model_dir = model_match.group("value")
+                continue
+            fallback_match = RESULT_FALLBACK_RE.match(line)
+            if fallback_match is not None:
+                fallback = fallback_match.group("value")
+                continue
+            if HF_FALLBACK_RE.match(line) is not None:
+                saw_hf_fallback = True
+                continue
+            if AXON_FALLBACK_RE.match(line) is not None:
+                saw_axon_fallback = True
                 continue
             top1_result_match = RESULT_TOP1_RE.match(line)
             if top1_result_match is not None:
@@ -153,11 +170,19 @@ def _parse_row(worker_log: _WorkerLogRef) -> AxonTestLogRow | None:
 
     if masked_top1_eq is None or masked_max_abs_diff is None or masked_max_rel_diff is None:
         return None
+    if fallback == "none":
+        if saw_hf_fallback and saw_axon_fallback:
+            fallback = "HF+Axon->cpu"
+        elif saw_hf_fallback:
+            fallback = "HF->cpu"
+        elif saw_axon_fallback:
+            fallback = "Axon->cpu"
 
     return AxonTestLogRow(
         axon=axon_name,
         checkpoint=checkpoint,
         model_dir=model_dir,
+        fallback=fallback,
         masked_top1_eq=masked_top1_eq,
         masked_max_abs_diff=_parse_float(masked_max_abs_diff),
         masked_max_abs_diff_text=masked_max_abs_diff,
@@ -192,6 +217,7 @@ def _format_axon_benchmark_log_table(rows: list[AxonTestLogRow], *, table_format
             "axon": row.axon,
             "checkpoint": row.checkpoint,
             "model_dir": row.model_dir,
+            "fallback": row.fallback,
             "masked_top1_eq": row.masked_top1_eq,
             "masked_max_abs_diff": row.masked_max_abs_diff_text,
             "masked_max_rel_diff": row.masked_max_rel_diff_text,

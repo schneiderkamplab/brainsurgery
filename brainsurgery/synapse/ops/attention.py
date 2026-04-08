@@ -9,6 +9,7 @@ OP_NAME = "attention"
 LOWERING_ARITY = (3, 3)
 LOWERING_ALLOWED_KWARGS: set[str] = {
     "scale",
+    "softcap",
     "mask",
     "padding_mask",
     "causal",
@@ -24,6 +25,7 @@ LOWERING_KWARG_KINDS: dict[str, Any] = {
     "mask": "str",
     "padding_mask": "bool",
     "scale": "number",
+    "softcap": "number",
     "eager": "bool",
     "float_mask_additive": "bool",
     "float_mask_floor_keep": "bool",
@@ -154,6 +156,10 @@ def interpret(
     scale_value = None if scale_expr is None else float(model._eval_expr(scale_expr, env, symbols))
     if scale_value is None:
         scale_value = float(q.shape[-1]) ** -0.5
+    softcap_expr = node_spec.get("softcap")
+    softcap_value = (
+        None if softcap_expr is None else float(model._eval_expr(softcap_expr, env, symbols))
+    )
 
     causal_expr = node_spec.get("causal", True)
     causal_flag = bool(model._eval_expr(causal_expr, env, symbols))
@@ -165,9 +171,13 @@ def interpret(
         if eager_kw is not None
         else bool(getattr(model, "_hf_align_attention_eager", False))
     )
+    if softcap_value is not None:
+        use_eager = True
 
     if sink is not None:
         attn_logits = (q @ k_tensor.transpose(-2, -1)) * float(scale_value)
+        if softcap_value is not None and softcap_value != 0.0:
+            attn_logits = softcap_value * torch.tanh(attn_logits / softcap_value)
         if mask is not None:
             attn_logits = attn_logits + mask
         elif causal_flag:
@@ -186,8 +196,10 @@ def interpret(
         attn_out = scores.to(v.dtype) @ v
     elif use_eager:
         attn_scores = torch.matmul(q, k_tensor.transpose(-2, -1)) * float(scale_value)
+        if softcap_value is not None and softcap_value != 0.0:
+            attn_scores = softcap_value * torch.tanh(attn_scores / softcap_value)
         keep_mask: torch.Tensor | None = None
-        if causal_flag:
+        if causal_flag and (mask is None or softcap_value is None):
             q_len = int(q.shape[-2])
             k_len = int(k_tensor.shape[-2])
             causal_mask = torch.ones((q_len, k_len), dtype=torch.bool, device=q.device).tril(
@@ -376,6 +388,9 @@ def compile(
 
     scale_value = node_spec.get("scale")
     scale_expr = "None" if scale_value is None else emitter._expr_code(scale_value, env)
+    softcap_value = node_spec.get("softcap")
+    softcap_expr = "None" if softcap_value is None else emitter._expr_code(softcap_value, env)
+    softcap_var = emitter._fresh("attn_softcap")
     use_eager = emitter._fresh("use_eager_attn")
     float_mask_additive = emitter._fresh("float_mask_additive")
     float_mask_floor_keep = emitter._fresh("float_mask_floor_keep")
@@ -393,6 +408,9 @@ def compile(
         lines.append(f"{indent}{use_eager} = bool({eager_expr})")
     lines.append(f"{indent}{float_mask_additive} = bool({float_mask_additive_expr})")
     lines.append(f"{indent}{float_mask_floor_keep} = bool({float_mask_floor_keep_expr})")
+    lines.append(f"{indent}{softcap_var} = {softcap_expr}")
+    lines.append(f"{indent}if {softcap_var} is not None:")
+    lines.append(f"{indent}    {use_eager} = True")
 
     causal_expr = emitter._expr_code(node_spec.get("causal", True), env)
     is_causal = f"(bool({causal_expr}) and {q}.shape[-2] > 1 and {mask_for_sdpa} is None)"
@@ -411,8 +429,14 @@ def compile(
         lines.append(
             f"{indent}    {attn_scores} = torch.matmul({q}, {k}.transpose(-2, -1)) * float(_scale)"
         )
+        lines.append(f"{indent}    if {softcap_var} is not None and float({softcap_var}) != 0.0:")
+        lines.append(
+            f"{indent}        {attn_scores} = float({softcap_var}) * torch.tanh({attn_scores} / float({softcap_var}))"
+        )
         lines.append(f"{indent}    {keep_mask} = None")
-        lines.append(f"{indent}    _causal = bool({causal_expr})")
+        lines.append(
+            f"{indent}    _causal = bool({causal_expr}) and ({mask_for_sdpa} is None or {softcap_var} is None)"
+        )
         lines.append(f"{indent}    if _causal:")
         q_len = emitter._fresh("q_len")
         k_len = emitter._fresh("k_len")
@@ -489,6 +513,10 @@ def compile(
     lines.append(f"{indent}    if _scale is None:")
     lines.append(f"{indent}        _scale = float({q}.shape[-1]) ** -0.5")
     lines.append(f"{indent}    {attn_logits_var} = ({q} @ {k}.transpose(-2, -1)) * float(_scale)")
+    lines.append(f"{indent}    if {softcap_var} is not None and float({softcap_var}) != 0.0:")
+    lines.append(
+        f"{indent}        {attn_logits_var} = float({softcap_var}) * torch.tanh({attn_logits_var} / float({softcap_var}))"
+    )
     lines.append(f"{indent}    if {mask_for_sdpa} is not None:")
     lines.append(f"{indent}        {attn_logits_var} = {attn_logits_var} + {mask_for_sdpa}")
     lines.append(

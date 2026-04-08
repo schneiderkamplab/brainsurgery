@@ -49,7 +49,6 @@ def lowering_infer_metadata(
     kwargs: dict[str, Any],
     ctx: Any,
 ) -> bool:
-    del kwargs
     if not isinstance(out, str):
         return False
     src_name: str | None = None
@@ -57,7 +56,20 @@ def lowering_infer_metadata(
     if args:
         src_name = args[0].strip()
     if isinstance(src_name, str) and src_name.isidentifier() and src_name in ctx.tensor_heads:
-        ctx.tensor_heads[out] = ctx.tensor_heads[src_name]
+        src_heads = ctx.tensor_heads[src_name]
+        repeats = kwargs.get("repeats")
+        ctx.tensor_heads[out] = f"({src_heads} * {repeats})" if repeats is not None else src_heads
+    if isinstance(src_name, str) and src_name.isidentifier():
+        if src_name in ctx.tensor_last_dim:
+            ctx.tensor_last_dim[out] = ctx.tensor_last_dim[src_name]
+        src_shape = ctx.tensor_shape.get(src_name)
+        if isinstance(src_shape, tuple) and len(src_shape) == 4:
+            batch, heads, seq_len, head_dim = src_shape
+            repeats = kwargs.get("repeats")
+            if repeats is not None:
+                ctx.tensor_shape[out] = (batch, f"({heads} * {repeats})", seq_len, head_dim)
+            else:
+                ctx.tensor_shape[out] = src_shape
     return True
 
 

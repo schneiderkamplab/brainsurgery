@@ -1,0 +1,62 @@
+{-# CHECKPOINTS ["swiss-ai/Apertus-8B-2509", "swiss-ai/Apertus-8B-Instruct-2509", "swiss-ai/Apertus-70B-2509", "swiss-ai/Apertus-70B-Instruct-2509"] #-}
+{-# TASK "causal_lm" #-}
+
+import Config
+import Activations xielu
+import Cache past_length
+import Cache
+
+D    = Config.int "hidden_size" default=4096
+V    = Config.int "vocab_size" default=131072
+L    = Config.int "num_hidden_layers" default=32
+H    = Config.int "num_attention_heads" default=32
+KVH  = Config.int "num_key_value_heads" default=8
+HD   = Config.int "head_dim" default=128
+QD   = H * HD
+KVD  = KVH * HD
+FFN  = Config.int "intermediate_size" default=21504
+EPS  = Config.float "rms_norm_eps" default=1e-05
+THETA = Config.float "rope_theta" default=12000000.0
+C    = Config.int "max_position_embeddings" default=65536
+ROPE_SCALE = Config.float "rope_scaling.factor" default=8.0
+ROPE_LOW_FREQ = Config.float "rope_scaling.low_freq_factor" default=1.0
+ROPE_HIGH_FREQ = Config.float "rope_scaling.high_freq_factor" default=4.0
+ROPE_CONTEXT = Config.int "rope_scaling.original_max_position_embeddings" default=8192
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS dim=D cast_float=true
+
+apertus_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+apertus_block x pos_ids attn_mask past_kv = do
+  xn <- rms@attention_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H |> rmsnorm@q_norm eps=EPS dim=HD cast_float=true
+    k <- linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> rmsnorm@k_norm eps=EPS dim=HD cast_float=true
+    v <- linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
+    q, k <- rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE low_freq_factor=ROPE_LOW_FREQ high_freq_factor=ROPE_HIGH_FREQ original_context=ROPE_CONTEXT
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- repeat k (H / KVH)
+    v <- repeat v (H / KVH)
+    mask <- causal_mask q k window=C padding_mask=attn_mask
+    a <- attention q k v mask=mask eager=true |> merge_heads |> linear@o_proj dim=D bias=false
+    return a, new_kv
+  x <- x + a
+  xn <- rms@feedforward_layernorm x
+  m <- scope@mlp do
+    return linear@up_proj xn dim=FFN bias=false |> xielu@act_fn |> linear@down_proj dim=D bias=false
+  return x + m, new_kv
+
+apertus :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+apertus input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  x, new_kv <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- apertus_block x pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    x <- rms@norm x
+    return x, new_kv
+  logits <- linear@lm_head x dim=V bias=false
+  return logits, new_kv

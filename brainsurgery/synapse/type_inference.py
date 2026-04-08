@@ -180,9 +180,6 @@ def infer_output_types_for_node(
         "rmsnorm",
         "softmax",
         "zeros_like",
-        "merge_heads",
-        "repeat",
-        "reshape_heads",
     }
     if op_name in same_as_first and isinstance(first_type, str):
         for out_name in output_vars:
@@ -196,6 +193,48 @@ def infer_output_types_for_node(
             if isinstance(replaced, str):
                 for out_name in output_vars:
                     inferred[out_name] = replaced
+
+    if op_name == "moe_scatter_add":
+        accum_type = in_types_by_slot.get("accum") or first_type
+        if isinstance(accum_type, str):
+            for out_name in output_vars:
+                inferred[out_name] = accum_type
+
+    if op_name == "reshape_heads":
+        x_type = in_types_by_slot.get("x") or first_type
+        heads_val = node_spec.get("heads")
+        head_dim_val = node_spec.get("head_dim")
+        dims = split_bracket_dims(x_type) if isinstance(x_type, str) else None
+        if isinstance(dims, list) and len(dims) == 3:
+            batch, seq_len, hidden = dims
+            heads = str(heads_val) if isinstance(heads_val, str | int) else None
+            head_dim = str(head_dim_val) if isinstance(head_dim_val, str | int) else None
+            if heads is None and head_dim is not None:
+                heads = f"({hidden}/{head_dim})"
+            if head_dim is None and heads is not None:
+                head_dim = f"({hidden}/{heads})"
+            if heads is not None and head_dim is not None:
+                for out_name in output_vars:
+                    inferred[out_name] = f"Tensor[{batch},{heads},{seq_len},{head_dim}]"
+
+    if op_name == "repeat":
+        x_type = in_types_by_slot.get("x") or first_type
+        repeats_val = node_spec.get("repeats")
+        dims = split_bracket_dims(x_type) if isinstance(x_type, str) else None
+        if isinstance(dims, list) and len(dims) == 4 and isinstance(repeats_val, str | int):
+            batch, heads, seq_len, head_dim = dims
+            repeats = str(repeats_val)
+            for out_name in output_vars:
+                inferred[out_name] = f"Tensor[{batch},({heads}*{repeats}),{seq_len},{head_dim}]"
+
+    if op_name == "merge_heads":
+        x_type = in_types_by_slot.get("x") or first_type
+        dims = split_bracket_dims(x_type) if isinstance(x_type, str) else None
+        if isinstance(dims, list) and len(dims) == 4:
+            batch, heads, seq_len, head_dim = dims
+            merged_dim = f"({heads}*{head_dim})"
+            for out_name in output_vars:
+                inferred[out_name] = f"Tensor[{batch},{seq_len},{merged_dim}]"
 
     if op_name == "embedding":
         x_type = in_types_by_slot.get("x") or first_type

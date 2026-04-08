@@ -8,3 +8,6 @@ scatter_add = _moe_scatter_add
 
 grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Tensor[B,T,D]
 grouped_ffn = _moe_grouped_ffn
+
+grouped_swiglu_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Tensor[B,T,D]
+grouped_swiglu_ffn = _moe_grouped_swiglu_ffn

@@ -81,11 +81,14 @@ class SynapseProgramModel(nn.Module):
         materialize_mxfp4_aliases(loaded, drop_packed=True)
         self._state = loaded
 
+    def _param(self, path: str) -> torch.Tensor:
+        return self._state[path]
+
     def forward(self, input_ids: torch.Tensor | None = None, **inputs: Any) -> Any:
         spec = self.spec
         model = spec.get("model", {})
         symbols_raw = model.get("symbols", {})
-        symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, (int, float, bool))}
+        symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, (int, float, bool, str))}
         blocks = model.get("blocks", {})
         input_specs = model.get("inputs", {})
         if not isinstance(input_specs, dict):

@@ -1,19 +1,22 @@
-import Config
-import Activations silu
-import Cache past_length
-import Cache
+{-# CHECKPOINTS ["HuggingFaceTB/SmolLM-1.7B", "HuggingFaceTB/SmolLM-1.7B-Instruct"] #-}
+{-# TASK "causal_lm" #-}
 
-D    = Config.int "hidden_size" default=576        -- hidden dimension
-V    = Config.int "vocab_size" default=49152       -- vocabulary size
-L    = Config.int "num_hidden_layers" default=30   -- number of decoder layers
-H    = Config.int "num_attention_heads" default=9  -- number of query attention heads
-KVH  = Config.int "num_key_value_heads" default=3  -- number of key/value heads
-HD   = D / H                                       -- per-head dimension
-KVD  = KVH * HD                                    -- key/value projection dimension (KVH * HD)
-FFN  = Config.int "intermediate_size" default=1536 -- feed-forward intermediate dimension
-EPS  = Config.float "rms_norm_eps" default=1e-05  -- RMSNorm epsilon
-THETA = Config.float "rope_theta" default=10000.0 -- RoPE base theta
-C    = Config.int "max_position_embeddings" default=2048 -- max context window
+import Activations
+import Activations (silu)
+import Cache
+import Cache (past_length)
+
+PARAM_ROOT = ""
+D = 2048
+V = 49152
+L = 24
+H = 32
+KVH = 32
+KVD = 2048.0
+FFN = 8192
+EPS = 1e-05
+THETA = 10000.0
+C = 2048
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS
@@ -40,10 +43,10 @@ smollm_block x pos_ids attn_mask past_kv = do
     return g |> silu |> mul u |> linear@down_proj dim=D
   return x + m, new_kv
 
-smollm_135m :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
-smollm_135m input_ids attn_mask past_kv use_cache = do
+smollm :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+smollm input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
-  logits, new_kv <- scope@model do
+  logits, new_kv <- scope@model root=PARAM_ROOT do
     x <- embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do

@@ -71,6 +71,8 @@ def lowering_infer_metadata(
             ctx.tensor_last_dim[first_in] = norm_dim
     if first_dim is not None:
         ctx.tensor_last_dim[out] = first_dim
+    if isinstance(first_in, str) and first_in.isidentifier() and first_in in ctx.tensor_shape:
+        ctx.tensor_shape[out] = ctx.tensor_shape[first_in]
     return True
 
 

@@ -1,0 +1,71 @@
+{-# CHECKPOINTS "ai21labs/AI21-Jamba-Reasoning-3B" #-}
+{-# TASK "causal_lm" #-}
+{-# PADDING_SIDE "right" #-}
+
+import Activations
+import Activations (silu)
+
+D = 2560
+V = 65536
+L = 28
+H = 20
+KVH = 1
+HD = 128
+SCALE = 0.08838834764831843
+FF = 8192
+I = 5120
+N = 16
+R = 160
+ATTN_PERIOD = 14
+ATTN_OFFSET = 7
+EPS = 1e-06
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS cast_float=true
+
+dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+dense_ffn x = do
+  gate <- linear@feed_forward.gate_proj x dim=FF
+  up <- linear@feed_forward.up_proj x dim=FF
+  return gate |> silu |> mul up |> linear@feed_forward.down_proj dim=D
+
+attn_core :: Tensor[B,S,D] -> Tensor[B,S,D]
+attn_core x = do
+  x_norm <- rms@input_layernorm x
+  q <- linear@self_attn.q_proj x_norm dim=H * HD |> reshape_heads heads=H
+  k <- linear@self_attn.k_proj x_norm dim=KVH * HD |> reshape_heads heads=KVH
+  k <- repeat k repeats=H / KVH
+  v <- linear@self_attn.v_proj x_norm dim=KVH * HD |> reshape_heads heads=KVH
+  v <- repeat v repeats=H / KVH
+  a <- attention q k v scale=SCALE causal=true eager=true |> merge_heads
+  a <- linear@self_attn.o_proj a dim=D
+  return x + a
+
+mamba_core :: Tensor[B,S,D] -> Tensor[B,S,D]
+mamba_core x = do
+  x_norm <- rms@input_layernorm x
+  y <- do
+    in_proj <- linear@mamba.in_proj x_norm dim=2 * I
+    u, gate <- split in_proj sizes=[I, I]
+    u_conv <- causal_conv1d@mamba.conv1d u activation=silu
+    params <- linear@mamba.x_proj u_conv dim=R + 2 * N
+    dt, b, c <- split params sizes=[R, N, N]
+    dt <- rmsnorm@mamba.dt_layernorm dt eps=EPS cast_float=true
+    b <- rmsnorm@mamba.b_layernorm b eps=EPS cast_float=true
+    c <- rmsnorm@mamba.c_layernorm c eps=EPS cast_float=true
+    delta <- linear@mamba.dt_proj dt dim=I bias=true
+    y_scan <- mamba_scan u_conv delta b c A="mamba.A_log" D="mamba.D" a_is_log=true
+    return y_scan |> mul (silu gate) |> linear@mamba.out_proj dim=D
+  return x + y
+
+jamba_3b :: TokenIds[B,S] -> Tensor[B,S,V]
+jamba_3b input_ids = do
+  x <- embedding@model.embed_tokens input_ids dim=D
+  for@model.layers i <- [0..L) do
+    x <- ((i % ATTN_PERIOD) == ATTN_OFFSET) ? attn_core x : mamba_core x
+    x_ff <- rms@pre_ff_layernorm x
+    m <- dense_ffn x_ff
+    x <- x + m
+  x <- rms@model.final_layernorm x
+  logits <- linear@lm_head x dim=V
+  return logits

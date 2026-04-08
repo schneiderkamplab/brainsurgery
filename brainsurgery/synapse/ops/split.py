@@ -4,13 +4,12 @@ from typing import Any
 
 OP_NAME = "split"
 LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"dim", "parts", "sizes", "interleave"}
+LOWERING_ALLOWED_KWARGS: set[str] = {"dim", "parts", "sizes"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {
     "dim": "int",
     "parts": "int",
     "sizes": "list_dim",
-    "interleave": "bool",
 }
 
 
@@ -124,21 +123,12 @@ def lowering_normalize_kwargs(
     kwargs: dict[str, Any],
     ctx: Any,
 ) -> None:
-    dim = kwargs.get("dim", -1)
-    if dim != -1:
-        raise ValueError("split currently supports only dim=-1 (last axis)")
-    kwargs.pop("dim", None)
     if not isinstance(out, list):
         raise ValueError("split requires tuple/list binding outputs")
     has_parts = "parts" in kwargs
     has_sizes = "sizes" in kwargs
     if has_parts and has_sizes:
         raise ValueError("split accepts either parts or sizes, not both")
-    interleave = bool(kwargs.get("interleave", False))
-    if interleave and has_sizes:
-        raise ValueError("split interleave=true does not support sizes")
-    if interleave and has_parts and int(kwargs["parts"]) <= 0:
-        raise ValueError("split parts must be a positive integer")
     if has_sizes and isinstance(kwargs["sizes"], str):
         parsed_sizes = _maybe_int_list(kwargs["sizes"])
         if parsed_sizes is not None:
@@ -205,11 +195,30 @@ def lowering_infer_metadata(
     del args
     if not isinstance(out, list):
         return False
+    dim = kwargs.get("dim", -1)
+    if not isinstance(dim, int) or isinstance(dim, bool):
+        return False
     sizes = _maybe_int_list(kwargs.get("sizes"))
     if sizes is not None and len(sizes) == len(out):
-        for name, dim in zip(out, sizes, strict=True):
-            ctx.tensor_last_dim[name] = dim
-    return True
+        axis = dim
+        if args:
+            source_name = str(args[0]).strip()
+            source_shape = ctx.tensor_shape.get(source_name)
+            if isinstance(source_shape, tuple):
+                rank = len(source_shape)
+                target_axis = axis if axis >= 0 else rank + axis
+                if 0 <= target_axis < rank:
+                    for name, split_dim in zip(out, sizes, strict=True):
+                        new_shape = list(source_shape)
+                        new_shape[target_axis] = split_dim
+                        ctx.tensor_shape[name] = tuple(new_shape)
+                        ctx.tensor_last_dim[name] = new_shape[-1]
+                    return True
+        if axis in (-1,):
+            for name, split_dim in zip(out, sizes, strict=True):
+                ctx.tensor_last_dim[name] = split_dim
+            return True
+    return False
 
 
 def interpret(
@@ -226,25 +235,16 @@ def interpret(
     outs = node_spec.get("_bind")
     if not isinstance(outs, list) or len(outs) == 0:
         raise ValueError("split requires non-empty list out")
+    dim = int(model._eval_expr(node_spec.get("dim", -1), env, symbols))
     sizes = node_spec.get("sizes")
-    interleave = bool(node_spec.get("interleave", False))
-    if interleave:
-        parts = int(model._eval_expr(node_spec.get("parts", len(outs)), env, symbols))
-        if parts <= 0:
-            raise ValueError("split parts must be > 0 when interleave=true")
-        if parts != len(outs):
-            raise ValueError(
-                f"split interleave=true requires parts to match output count ({len(outs)}), got {parts}"
-            )
-        chunks = [x[..., idx::parts] for idx in range(parts)]
-    elif sizes is not None:
+    if sizes is not None:
         if not isinstance(sizes, list) or len(sizes) != len(outs):
             raise ValueError("split sizes must be a list with same length as out")
         split_sizes = [int(model._eval_expr(size, env, symbols)) for size in sizes]
-        chunks = x.split(split_sizes, dim=-1)
+        chunks = x.split(split_sizes, dim=dim)
     else:
         parts = int(model._eval_expr(node_spec.get("parts", len(outs)), env, symbols))
-        chunks = x.chunk(parts, dim=-1)
+        chunks = x.chunk(parts, dim=dim)
     for name, tensor in zip(outs, chunks, strict=True):
         env[str(name)] = tensor
 
@@ -265,28 +265,16 @@ def compile(
     if not isinstance(outs, list) or len(outs) == 0:
         raise ValueError("split requires non-empty list out")
     tmp = emitter._fresh("split")
+    dim = emitter._expr_code(node_spec.get("dim", -1), env)
     sizes = node_spec.get("sizes")
-    interleave = bool(node_spec.get("interleave", False))
-    if interleave:
-        parts = emitter._expr_code(node_spec.get("parts", len(outs)), env)
-        lines.append(f"{indent}{tmp} = int({parts})")
-        lines.append(f"{indent}if {tmp} <= 0:")
-        lines.append(
-            f"{indent}    raise ValueError('split parts must be > 0 when interleave=true')"
-        )
-        lines.append(f"{indent}if {tmp} != {len(outs)}:")
-        lines.append(
-            f"{indent}    raise ValueError('split interleave=true requires parts to match output count ({len(outs)})')"
-        )
-        lines.append(f"{indent}{tmp} = [{src}[..., idx::{tmp}] for idx in range({tmp})]")
-    elif sizes is not None:
+    if sizes is not None:
         if not isinstance(sizes, list) or len(sizes) != len(outs):
             raise ValueError("split sizes must be a list with same length as out")
         sizes_code = ", ".join(emitter._expr_code(size, env) for size in sizes)
-        lines.append(f"{indent}{tmp} = torch.split({src}, [{sizes_code}], dim=-1)")
+        lines.append(f"{indent}{tmp} = torch.split({src}, [{sizes_code}], dim=int({dim}))")
     else:
         parts = emitter._expr_code(node_spec.get("parts", len(outs)), env)
-        lines.append(f"{indent}{tmp} = torch.chunk({src}, int({parts}), dim=-1)")
+        lines.append(f"{indent}{tmp} = torch.chunk({src}, int({parts}), dim=int({dim}))")
     for idx, out_name in enumerate(outs):
         out_var = emitter._assign_out_var(env, str(out_name))
         lines.append(f"{indent}{out_var} = {tmp}[{idx}]")

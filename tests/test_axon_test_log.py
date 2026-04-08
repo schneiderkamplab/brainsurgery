@@ -20,6 +20,7 @@ def test_render_axon_benchmark_log_uses_latest_parent_run(tmp_path: Path) -> Non
             [
                 "result.axon=a.axon",
                 "result.model_dir=/tmp/b",
+                "result.fallback=none",
                 "result.masked_top1_eq=True",
                 "result.masked_max_abs_diff=1.0",
                 "result.masked_max_rel_diff=2.0",
@@ -32,6 +33,7 @@ def test_render_axon_benchmark_log_uses_latest_parent_run(tmp_path: Path) -> Non
             [
                 "result.axon=a.axon",
                 "result.model_dir=/tmp/b",
+                "result.fallback=HF+Axon->cpu",
                 "result.masked_top1_eq=True",
                 "result.masked_max_abs_diff=0.5",
                 "result.masked_max_rel_diff=1.5",
@@ -53,7 +55,7 @@ def test_render_axon_benchmark_log_uses_latest_parent_run(tmp_path: Path) -> Non
 
     rendered = render_axon_benchmark_log(tmp_path)
 
-    assert "| a.axon | google/new | /tmp/b | True | 0.5 | 1.5 |" in rendered
+    assert "| a.axon | google/new | /tmp/b | HF+Axon->cpu | True | 0.5 | 1.5 |" in rendered
     assert "google/old" not in rendered
 
 
@@ -67,6 +69,7 @@ def test_render_axon_benchmark_log_all_deduplicates_by_latest_pair(tmp_path: Pat
             [
                 "result.axon=a.axon",
                 "result.model_dir=/tmp/x",
+                "result.fallback=none",
                 "result.masked_top1_eq=False",
                 "result.masked_max_abs_diff=9.0",
                 "result.masked_max_rel_diff=9.0",
@@ -79,6 +82,7 @@ def test_render_axon_benchmark_log_all_deduplicates_by_latest_pair(tmp_path: Pat
             [
                 "result.axon=a.axon",
                 "result.model_dir=/tmp/x",
+                "result.fallback=none",
                 "result.masked_top1_eq=True",
                 "result.masked_max_abs_diff=0.25",
                 "result.masked_max_rel_diff=0.5",
@@ -91,6 +95,7 @@ def test_render_axon_benchmark_log_all_deduplicates_by_latest_pair(tmp_path: Pat
             [
                 "result.axon=b.axon",
                 "result.model_dir=/tmp/y",
+                "result.fallback=Axon->cpu",
                 "result.masked_top1_eq=True",
                 "result.masked_max_abs_diff=0.75",
                 "result.masked_max_rel_diff=0.9",
@@ -116,9 +121,9 @@ def test_render_axon_benchmark_log_all_deduplicates_by_latest_pair(tmp_path: Pat
     rendered = render_axon_benchmark_log(tmp_path, all_runs=True)
 
     assert rendered.count("| a.axon | google/a | /tmp/x |") == 1
-    assert "| a.axon | google/a | /tmp/x | True | 0.25 | 0.5 |" in rendered
+    assert "| a.axon | google/a | /tmp/x | none | True | 0.25 | 0.5 |" in rendered
     assert "9.0" not in rendered
-    assert "| b.axon | google/b | /tmp/y | True | 0.75 | 0.9 |" in rendered
+    assert "| b.axon | google/b | /tmp/y | Axon->cpu | True | 0.75 | 0.9 |" in rendered
 
 
 def test_render_axon_benchmark_log_html_output(tmp_path: Path) -> None:
@@ -129,6 +134,7 @@ def test_render_axon_benchmark_log_html_output(tmp_path: Path) -> None:
             [
                 "result.axon=a.axon",
                 "result.model_dir=/tmp/x",
+                "result.fallback=HF->cpu",
                 "result.masked_top1_eq=False",
                 "result.masked_max_abs_diff=0.02",
                 "result.masked_max_rel_diff=0.9",
@@ -144,4 +150,5 @@ def test_render_axon_benchmark_log_html_output(tmp_path: Path) -> None:
 
     assert "<table>" in rendered
     assert 'style="background-color: #dc3545; color: #ffffff;"' in rendered
+    assert "<td>HF-&gt;cpu</td>" in rendered
     assert "<td>0.02</td>" in rendered

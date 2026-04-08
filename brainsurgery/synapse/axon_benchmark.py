@@ -4,16 +4,20 @@ import contextlib
 import csv
 import gc
 import io
+import json
+import math
 import multiprocessing as mp
 import os
 import queue
 import signal
+import sys
 import traceback
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+import safetensors
 from tqdm import tqdm
 
 from .axon_runner_common import (
@@ -49,16 +53,327 @@ class _BenchmarkWorkerError:
     captured_output: str
 
 
+@dataclass(frozen=True)
+class _ParamCountSkip:
+    pair: _BenchmarkPair
+    param_count: int
+    is_exact: bool
+
+
+@dataclass(frozen=True)
+class _WorkerSpec:
+    run_device: str
+    cuda_visible_devices: str | None = None
+    label: str | None = None
+
+
 _SUMMARY_FIELDNAMES = [
     "axon",
     "checkpoint",
     "model_dir",
+    "fallback",
     "masked_top1_eq",
     "masked_max_abs_diff",
     "masked_max_rel_diff",
 ]
 
 _MAX_BENCHMARK_WORKER_RETRIES = 1
+
+
+def _resolve_pipeline_worker_specs(
+    *,
+    device: str,
+    processes: int,
+    pipeline_parallel_size: int | None,
+) -> list[_WorkerSpec]:
+    normalized = str(device).strip().lower()
+    if not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
+        raise ValueError(
+            "axon_backend='pipeline' requires a CUDA device target "
+            "(use --device cuda or --device cuda:<index>)"
+        )
+    if processes <= 0:
+        raise ValueError("processes must be >= 1")
+    if pipeline_parallel_size is not None and pipeline_parallel_size <= 0:
+        raise ValueError("pipeline_parallel_size must be >= 1 when provided")
+
+    try:
+        import torch
+    except Exception as exc:
+        raise ValueError("torch is required for pipeline worker device resolution") from exc
+    if not torch.cuda.is_available():
+        raise ValueError("axon_backend='pipeline' requires CUDA, but CUDA is unavailable")
+    device_count = int(torch.cuda.device_count())
+    if device_count <= 0:
+        raise ValueError("axon_backend='pipeline' requires at least one CUDA device")
+
+    if normalized == "auto":
+        start_index = 0
+    elif normalized.startswith("cuda:"):
+        index_text = normalized.split(":", 1)[1].strip()
+        if not index_text.isdigit():
+            raise ValueError(f"invalid CUDA device specifier: {device!r}")
+        start_index = int(index_text)
+    else:
+        start_index = 0
+
+    if start_index < 0 or start_index >= device_count:
+        raise ValueError(
+            f"requested start device cuda:{start_index}, but visible CUDA range is "
+            f"0..{max(0, device_count - 1)}"
+        )
+
+    available_from_start = device_count - start_index
+    if pipeline_parallel_size is None:
+        if available_from_start % processes != 0:
+            raise ValueError(
+                "cannot infer pipeline parallel size: visible CUDA count is not divisible by "
+                f"processes ({available_from_start} GPUs for {processes} processes). "
+                "Pass --pipeline-parallel-size/--pp explicitly."
+            )
+        pp_size = available_from_start // processes
+    else:
+        pp_size = pipeline_parallel_size
+
+    required = processes * pp_size
+    if required > available_from_start:
+        raise ValueError(
+            f"requested processes={processes} with pp={pp_size} requires {required} GPUs "
+            f"starting at cuda:{start_index}, but only {available_from_start} are available"
+        )
+
+    worker_specs: list[_WorkerSpec] = []
+    for worker_index in range(processes):
+        group_start = start_index + worker_index * pp_size
+        group = [f"{idx}" for idx in range(group_start, group_start + pp_size)]
+        visible = ",".join(group)
+        label = ",".join(f"cuda:{idx}" for idx in range(group_start, group_start + pp_size))
+        worker_specs.append(
+            _WorkerSpec(
+                run_device="cuda",
+                cuda_visible_devices=visible,
+                label=label,
+            )
+        )
+    return worker_specs
+
+
+def _estimate_model_param_count(model_dir: Path) -> tuple[int, bool] | None:
+    index_path = model_dir / "model.safetensors.index.json"
+    if index_path.exists():
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        weight_map = payload.get("weight_map")
+        if not isinstance(weight_map, dict):
+            return None
+        shard_names = sorted({str(name) for name in weight_map.values()})
+        shard_paths = [model_dir / shard_name for shard_name in shard_names]
+        if not all(path.exists() for path in shard_paths):
+            return None
+    else:
+        single_path = model_dir / "model.safetensors"
+        if single_path.exists():
+            shard_paths = [single_path]
+        else:
+            shard_paths = sorted(model_dir.glob("*.safetensors"))
+            if not shard_paths:
+                return None
+
+    total_params = 0
+    for shard_path in shard_paths:
+        handle = safetensors.safe_open(str(shard_path), framework="pt")
+        for key in handle.keys():
+            total_params += int(math.prod(handle.get_slice(key).get_shape()))
+    return total_params, True
+
+
+def _param_count_cache_path(model_dir: Path) -> Path:
+    return model_dir / "._param_count.json"
+
+
+def _read_param_count_cache(model_dir: Path) -> tuple[int, bool] | None:
+    cache_path = _param_count_cache_path(model_dir)
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(payload, int) and payload > 0:
+        return payload, True
+    if not isinstance(payload, dict):
+        return None
+    param_count = payload.get("param_count")
+    if not isinstance(param_count, int) or param_count <= 0:
+        return None
+    is_exact = payload.get("is_exact", True)
+    return param_count, bool(is_exact)
+
+
+def _write_param_count_cache(
+    model_dir: Path,
+    *,
+    param_count: int,
+    is_exact: bool,
+    method: str,
+) -> None:
+    if param_count <= 0:
+        return
+    payload = {
+        "param_count": int(param_count),
+        "is_exact": bool(is_exact),
+        "method": str(method),
+    }
+    cache_path = _param_count_cache_path(model_dir)
+    try:
+        cache_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _estimate_model_param_count_via_cpu_load(model_dir: Path) -> tuple[int, bool] | None:
+    try:
+        from transformers import (
+            AutoModel,
+            AutoModelForCausalLM,
+            AutoModelForMaskedLM,
+            AutoModelForSeq2SeqLM,
+        )
+    except Exception:
+        return None
+
+    constructors: tuple[Any, ...] = (
+        AutoModelForCausalLM,
+        AutoModelForSeq2SeqLM,
+        AutoModelForMaskedLM,
+        AutoModel,
+    )
+    for constructor in constructors:
+        model: Any | None = None
+        try:
+            model = constructor.from_pretrained(
+                str(model_dir),
+                local_files_only=True,
+                trust_remote_code=True,
+            )
+            param_count = int(sum(int(param.numel()) for param in model.parameters()))
+            if param_count > 0:
+                return param_count, True
+        except Exception:
+            continue
+        finally:
+            if model is not None:
+                with contextlib.suppress(Exception):
+                    del model
+            gc.collect()
+    return None
+
+
+def _estimate_model_param_count_lower_bound(model_dir: Path) -> tuple[int, bool] | None:
+    cached = _read_param_count_cache(model_dir)
+    if cached is not None:
+        return cached
+
+    exact_from_safetensors = _estimate_model_param_count(model_dir)
+    if exact_from_safetensors is not None:
+        _write_param_count_cache(
+            model_dir,
+            param_count=exact_from_safetensors[0],
+            is_exact=exact_from_safetensors[1],
+            method="safetensors_shape",
+        )
+        return exact_from_safetensors
+
+    exact_from_cpu_load = _estimate_model_param_count_via_cpu_load(model_dir)
+    if exact_from_cpu_load is not None:
+        _write_param_count_cache(
+            model_dir,
+            param_count=exact_from_cpu_load[0],
+            is_exact=exact_from_cpu_load[1],
+            method="cpu_model_load",
+        )
+        return exact_from_cpu_load
+    return None
+
+
+def _apply_billions_params_filter(
+    pairs: list[_BenchmarkPair],
+    *,
+    min_billions_params: float | None,
+    max_billions_params: float | None,
+) -> tuple[list[_BenchmarkPair], list[_ParamCountSkip]]:
+    if min_billions_params is None and max_billions_params is None:
+        return pairs, []
+    if min_billions_params is not None and min_billions_params <= 0:
+        raise ValueError("min_billions_params must be > 0 when provided")
+    if max_billions_params is not None and max_billions_params <= 0:
+        raise ValueError("max_billions_params must be > 0 when provided")
+    if (
+        min_billions_params is not None
+        and max_billions_params is not None
+        and min_billions_params > max_billions_params
+    ):
+        raise ValueError("min_billions_params must be <= max_billions_params when both provided")
+
+    min_params = (
+        int(min_billions_params * 1_000_000_000) if min_billions_params is not None else None
+    )
+    max_params = (
+        int(max_billions_params * 1_000_000_000) if max_billions_params is not None else None
+    )
+    kept: list[_BenchmarkPair] = []
+    skipped: list[_ParamCountSkip] = []
+    for pair in pairs:
+        estimate = _estimate_model_param_count_lower_bound(pair.model_dir)
+        if estimate is None:
+            # If no local estimate is available, keep the pair rather than incorrectly dropping it.
+            kept.append(pair)
+            continue
+        param_count, is_exact = estimate
+        # Fast exact-safe upper-bound cull using index/bytes lower-bound estimate.
+        if max_params is not None and param_count > max_params:
+            skipped.append(_ParamCountSkip(pair=pair, param_count=param_count, is_exact=is_exact))
+            continue
+        # If estimate is not exact and min-bound might still be satisfiable, refine to exact count.
+        if not is_exact and min_params is not None and param_count < min_params:
+            exact = _estimate_model_param_count(pair.model_dir)
+            if exact is not None:
+                param_count, is_exact = exact
+        if min_params is not None and param_count < min_params:
+            skipped.append(_ParamCountSkip(pair=pair, param_count=param_count, is_exact=is_exact))
+            continue
+        kept.append(pair)
+    return kept, skipped
+
+
+def _format_billions_params(param_count: int, *, is_exact: bool) -> str:
+    prefix = "" if is_exact else ">="
+    return f"{prefix}{param_count / 1_000_000_000:.3f}B"
+
+
+def _print_param_count_skips(
+    skipped_pairs: list[_ParamCountSkip],
+    *,
+    min_billions_params: float | None,
+    max_billions_params: float | None,
+) -> None:
+    if not skipped_pairs:
+        return
+    if min_billions_params is not None and max_billions_params is not None:
+        bound_desc = (
+            f"--min-billion-parameters/--max-billion-parameters "
+            f"({min_billions_params:g}B..{max_billions_params:g}B)"
+        )
+    elif min_billions_params is not None:
+        bound_desc = f"--min-billion-parameters ({min_billions_params:g}B)"
+    else:
+        bound_desc = f"--max-billion-parameters ({max_billions_params:g}B)"
+    print(f"Skipped due to {bound_desc}: {len(skipped_pairs)}")
+    for skipped in skipped_pairs:
+        print(
+            f"  - {skipped.pair.axon_file.name} | {skipped.pair.checkpoint_id} | "
+            f"{_format_billions_params(skipped.param_count, is_exact=skipped.is_exact)}"
+        )
+    print()
 
 
 def _summary_sort_key(row: dict[str, Any]) -> tuple[str, int, float, float]:
@@ -102,6 +417,7 @@ def _summary_row_from_result(row: dict[str, Any]) -> dict[str, object]:
         "axon": str(row["axon_file"]),
         "checkpoint": str(row["checkpoint_id"]),
         "model_dir": str(row["weights"]),
+        "fallback": str(row.get("fallback", "none")),
         "masked_top1_eq": masked_top1_eq_text,
         "masked_max_abs_diff": _format_metric_value(row.get("masked_max_diff")),
         "masked_max_rel_diff": _format_metric_value(row.get("masked_max_rel_diff")),
@@ -116,6 +432,9 @@ def _sanitize_benchmark_result(row: dict[str, Any]) -> dict[str, Any]:
         "hf_model_dir": row["hf_model_dir"],
     }
     for key in (
+        "fallback",
+        "hf_device",
+        "axon_device",
         "hf_time",
         "axon_time",
         "speed_ratio_axon_over_hf",
@@ -156,6 +475,7 @@ def _error_result_for_pair(
         "checkpoint_id": pair.checkpoint_id,
         "weights": model_dir,
         "hf_model_dir": model_dir,
+        "fallback": "none",
         "masked_top1_eq": "ERROR",
         "masked_max_diff": "ERROR",
         "masked_max_rel_diff": "ERROR",
@@ -218,6 +538,21 @@ def _expand_axon_inputs(axon_inputs: Sequence[Path]) -> list[Path]:
     return discovered
 
 
+def _matches_any_selector(path: Path, selectors: set[str]) -> bool:
+    if not selectors:
+        return False
+    haystacks = {
+        str(path),
+        str(path.resolve()),
+        path.name,
+        path.stem,
+    }
+    for selector in selectors:
+        if any(selector in haystack for haystack in haystacks):
+            return True
+    return False
+
+
 def _run_benchmark_pair(
     pair: _BenchmarkPair,
     *,
@@ -244,6 +579,9 @@ def _run_benchmark_pair(
     compile_fullgraph: bool,
     compile_dynamic: bool,
     trust_remote_code: bool,
+    axon_backend: str,
+    skip_hf: bool = False,
+    hf_strict_dtype: bool = False,
 ) -> dict[str, Any]:
     model_dir = _ensure_checkpoint_model_dir(repo_root=repo_root, checkpoint_id=pair.checkpoint_id)
     print()
@@ -279,6 +617,9 @@ def _run_benchmark_pair(
         compile_fullgraph=compile_fullgraph,
         compile_dynamic=compile_dynamic,
         trust_remote_code=trust_remote_code,
+        axon_backend=axon_backend,
+        skip_hf=skip_hf,
+        hf_strict_dtype=hf_strict_dtype,
     )
     enriched = dict(result)
     enriched["axon_file"] = pair.axon_file
@@ -288,10 +629,110 @@ def _run_benchmark_pair(
     return _sanitize_benchmark_result(enriched)
 
 
+def _run_benchmark_jobs_serial(
+    pairs: list[_BenchmarkPair],
+    *,
+    device: str,
+    log_dir: Path | None,
+    stream_csv: Path | None,
+    common_kwargs: dict[str, Any],
+    worker_cuda_visible_devices: str | None = None,
+    debug_errors: bool = False,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    parent_logger = ParentLogger(log_dir)
+    if parent_logger.path is not None:
+        print(f"Parent log: {parent_logger.path}")
+    device_label = (
+        f"{device} (CUDA_VISIBLE_DEVICES={worker_cuda_visible_devices})"
+        if worker_cuda_visible_devices is not None
+        else device
+    )
+    parent_logger.log(
+        f"run_start total_pairs={len(pairs)} devices={[device_label]} max_concurrent=1"
+    )
+    progress = tqdm(total=len(pairs), desc="synapse axon-benchmark", unit="pair")
+    previous_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if worker_cuda_visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = worker_cuda_visible_devices
+    try:
+        for pair_index, pair in enumerate(pairs):
+            log_path = worker_log_path(
+                log_dir,
+                axon_name=pair.axon_file.stem.replace(" ", "_"),
+                model_name=pair.model_dir.name.replace(" ", "_"),
+                pid=os.getpid(),
+            )
+            parent_logger.log(
+                "child_start "
+                f"pair_index={pair_index} pid={os.getpid()} device={device} "
+                f"axon={pair.axon_file.name} checkpoint={pair.checkpoint_id} model_dir={pair.model_dir} "
+                f"log_path={worker_log_display_path(log_dir, axon_name=pair.axon_file.stem.replace(' ', '_'), model_name=pair.model_dir.name.replace(' ', '_'), pid=os.getpid())}"
+            )
+            file_handle: io.TextIOWrapper | None = None
+            tee_stdout: Any = sys.stdout
+            tee_stderr: Any = sys.stderr
+            try:
+                if log_path is not None:
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    file_handle = log_path.open("w", encoding="utf-8", buffering=1)
+                    print(f"log_path={log_path.name}", file=file_handle)
+                    tee_stdout = TeeWriter(sys.stdout, LogFileWriter(file_handle))
+                    tee_stderr = TeeWriter(sys.stderr, LogFileWriter(file_handle))
+                with contextlib.redirect_stdout(tee_stdout), contextlib.redirect_stderr(tee_stderr):
+                    if worker_cuda_visible_devices is not None:
+                        print(f"worker.CUDA_VISIBLE_DEVICES={worker_cuda_visible_devices}")
+                    try:
+                        result = _run_benchmark_pair(pair, device=device, **common_kwargs)
+                    except Exception as exc:
+                        if debug_errors:
+                            print(
+                                "Benchmark pair failed:",
+                                f"axon={pair.axon_file}",
+                                f"checkpoint={pair.checkpoint_id}",
+                            )
+                            print(traceback.format_exc())
+                        result = _error_result_for_pair(
+                            pair, exc, repo_root=cast(Path, common_kwargs["repo_root"])
+                        )
+                    print(f"result.axon={pair.axon_file.name}")
+                    print(f"result.checkpoint={pair.checkpoint_id}")
+                    print(f"result.model_dir={result['weights']}")
+                    print(f"result.fallback={result.get('fallback', 'none')}")
+                    print(f"result.masked_top1_eq={result.get('masked_top1_eq')}")
+                    print(f"result.masked_max_abs_diff={result.get('masked_max_diff')}")
+                    print(f"result.masked_max_rel_diff={result.get('masked_max_rel_diff')}")
+                results.append(result)
+                if stream_csv is not None:
+                    _append_stream_csv_row(stream_csv, _summary_row_from_result(result))
+                parent_logger.log(
+                    "child_finish "
+                    f"pair_index={pair_index} pid={os.getpid()} status=ok "
+                    f"masked_top1_eq={result.get('masked_top1_eq')} "
+                    f"masked_max_abs_diff={result.get('masked_max_diff')} "
+                    f"masked_max_rel_diff={result.get('masked_max_rel_diff')}"
+                )
+            finally:
+                if file_handle is not None:
+                    file_handle.close()
+            progress.update(1)
+        parent_logger.log(f"run_finish total_rows={len(results)}")
+    finally:
+        if worker_cuda_visible_devices is not None:
+            if previous_cuda_visible_devices is None:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = previous_cuda_visible_devices
+        progress.close()
+        parent_logger.close()
+    return results
+
+
 def _run_benchmark_worker_loop(
     pair_index: int,
     pair: _BenchmarkPair,
     worker_device: str,
+    worker_cuda_visible_devices: str | None,
     result_queue: Any,
     common_kwargs: dict[str, Any],
     log_dir: str | None,
@@ -309,15 +750,27 @@ def _run_benchmark_worker_loop(
     capture = io.StringIO()
     file_handle: io.TextIOWrapper | None = None
     tee: Any = capture
+    previous_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     try:
+        if worker_cuda_visible_devices is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = worker_cuda_visible_devices
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             file_handle = log_path.open("w", encoding="utf-8", buffering=1)
             print(f"log_path={log_path.name}", file=file_handle)
             tee = TeeWriter(capture, LogFileWriter(file_handle))
         with contextlib.redirect_stdout(tee), contextlib.redirect_stderr(tee):
+            if worker_cuda_visible_devices is not None:
+                print(f"worker.CUDA_VISIBLE_DEVICES={worker_cuda_visible_devices}")
             try:
                 result = _run_benchmark_pair(pair, device=worker_device, **common_kwargs)
+                print(f"result.axon={pair.axon_file.name}")
+                print(f"result.checkpoint={pair.checkpoint_id}")
+                print(f"result.model_dir={result['weights']}")
+                print(f"result.fallback={result.get('fallback', 'none')}")
+                print(f"result.masked_top1_eq={result.get('masked_top1_eq')}")
+                print(f"result.masked_max_abs_diff={result.get('masked_max_diff')}")
+                print(f"result.masked_max_rel_diff={result.get('masked_max_rel_diff')}")
                 result_queue.put(
                     (
                         pair_index,
@@ -343,6 +796,11 @@ def _run_benchmark_worker_loop(
                     )
                 )
     finally:
+        if worker_cuda_visible_devices is not None:
+            if previous_cuda_visible_devices is None:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = previous_cuda_visible_devices
         if file_handle is not None:
             file_handle.close()
         gc.collect()
@@ -356,8 +814,15 @@ def _run_benchmark_jobs_parallel(
     log_dir: Path | None,
     stream_csv: Path | None,
     common_kwargs: dict[str, Any],
+    worker_specs: list[_WorkerSpec] | None = None,
+    debug_errors: bool = False,
 ) -> list[dict[str, Any]]:
-    worker_devices = resolve_worker_devices(device, processes)
+    resolved_worker_specs = worker_specs
+    if resolved_worker_specs is None:
+        worker_devices = resolve_worker_devices(device, processes)
+        resolved_worker_specs = [
+            _WorkerSpec(run_device=item, label=item) for item in worker_devices
+        ]
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
     active_processes: dict[int, Any] = {}
@@ -370,20 +835,24 @@ def _run_benchmark_jobs_parallel(
     if parent_logger.path is not None:
         print(f"Parent log: {parent_logger.path}")
     parent_logger.log(
-        f"run_start total_pairs={len(pairs)} devices={worker_devices} max_concurrent={len(worker_devices)}"
+        "run_start "
+        f"total_pairs={len(pairs)} "
+        f"devices={[spec.label or spec.run_device for spec in resolved_worker_specs]} "
+        f"max_concurrent={len(resolved_worker_specs)}"
     )
 
     def _spawn_next_pair(pair_index: int) -> None:
         nonlocal next_device_index
         pair = pairs[pair_index]
-        worker_device = worker_devices[next_device_index % len(worker_devices)]
+        worker_spec = resolved_worker_specs[next_device_index % len(resolved_worker_specs)]
         next_device_index += 1
         process = ctx.Process(
             target=_run_benchmark_worker_loop,
             args=(
                 pair_index,
                 pair,
-                worker_device,
+                worker_spec.run_device,
+                worker_spec.cuda_visible_devices,
                 result_queue,
                 common_kwargs,
                 str(log_dir) if log_dir else None,
@@ -394,7 +863,7 @@ def _run_benchmark_jobs_parallel(
         active_processes[pair_index] = process
         parent_logger.log(
             "child_start "
-            f"pair_index={pair_index} pid={process.pid} device={worker_device} "
+            f"pair_index={pair_index} pid={process.pid} device={worker_spec.label or worker_spec.run_device} "
             f"axon={pair.axon_file.name} checkpoint={pair.checkpoint_id} model_dir={pair.model_dir} "
             f"log_path={worker_log_display_path(log_dir, axon_name=pair.axon_file.stem.replace(' ', '_'), model_name=pair.model_dir.name.replace(' ', '_'), pid=process.pid)}"
         )
@@ -416,7 +885,7 @@ def _run_benchmark_jobs_parallel(
 
     try:
         while pending_indices or active_processes:
-            while pending_indices and len(active_processes) < len(worker_devices):
+            while pending_indices and len(active_processes) < len(resolved_worker_specs):
                 _spawn_next_pair(pending_indices.pop(0))
 
             try:
@@ -481,6 +950,9 @@ def _run_benchmark_jobs_parallel(
                 assert isinstance(error, _BenchmarkWorkerError)
                 if captured_output:
                     print(captured_output.rstrip())
+                if debug_errors and error.traceback_text:
+                    print("Worker traceback:")
+                    print(error.traceback_text.rstrip())
                 if log_path is not None:
                     print(f"log file: {log_path}")
                 parent_logger.log(
@@ -540,6 +1012,8 @@ def _run_benchmark_jobs_parallel(
 def run_axon_benchmark(
     *,
     axon_files: Sequence[Path],
+    checkpoints: Sequence[str] | None = None,
+    exclude: Sequence[str] | None = None,
     device: str = "cpu",
     processes: int = 1,
     text: str | Sequence[str] = ("The future of AI is", "Hello World"),
@@ -563,18 +1037,35 @@ def run_axon_benchmark(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
+    axon_backend: str = "single",
+    pipeline_parallel_size: int | None = None,
+    skip_hf: bool = False,
+    hf_strict_dtype: bool = False,
     table_format: str = "markdown",
     log_dir: Path | None = None,
     stream_csv: Path | None = None,
+    debug_errors: bool = False,
+    min_billion_parameters: float | None = None,
+    max_billion_parameters: float | None = None,
 ) -> dict[str, Any]:
+    if axon_backend not in {"single", "pipeline"}:
+        raise ValueError("axon_backend must be 'single' or 'pipeline'")
+    if axon_backend != "pipeline" and pipeline_parallel_size is not None:
+        raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline")
     repo_root = _repo_root()
+    checkpoint_filter = {str(item).strip() for item in (checkpoints or ()) if str(item).strip()}
+    exclude_filter = {str(item).strip() for item in (exclude or ()) if str(item).strip()}
     pairs: list[_BenchmarkPair] = []
     for resolved_axon_file in _expand_axon_inputs(axon_files):
+        if _matches_any_selector(resolved_axon_file, exclude_filter):
+            continue
         checkpoints = _declared_checkpoints_from_axon(
             axon_file=resolved_axon_file,
             main_module=main_module,
         )
         for checkpoint_id in checkpoints:
+            if checkpoint_filter and checkpoint_id not in checkpoint_filter:
+                continue
             pairs.append(
                 _BenchmarkPair(
                     axon_file=resolved_axon_file,
@@ -582,6 +1073,23 @@ def run_axon_benchmark(
                     model_dir=repo_root / "models" / checkpoint_id,
                 )
             )
+    if not pairs:
+        if checkpoint_filter:
+            requested = ", ".join(sorted(checkpoint_filter))
+            raise ValueError(f"No declared checkpoints matched: {requested}")
+        raise ValueError("No benchmark pairs found")
+    pairs, skipped_by_param_count = _apply_billions_params_filter(
+        pairs,
+        min_billions_params=min_billion_parameters,
+        max_billions_params=max_billion_parameters,
+    )
+    _print_param_count_skips(
+        skipped_by_param_count,
+        min_billions_params=min_billion_parameters,
+        max_billions_params=max_billion_parameters,
+    )
+    if not pairs:
+        raise ValueError("No benchmark pairs remain after parameter-range filtering")
 
     common_kwargs = {
         "repo_root": repo_root,
@@ -606,54 +1114,47 @@ def run_axon_benchmark(
         "compile_fullgraph": compile_fullgraph,
         "compile_dynamic": compile_dynamic,
         "trust_remote_code": trust_remote_code,
+        "axon_backend": axon_backend,
+        "skip_hf": skip_hf,
+        "hf_strict_dtype": hf_strict_dtype,
     }
 
     if stream_csv is not None:
         _initialize_stream_csv(stream_csv)
 
+    serial_cuda_visible_devices: str | None = None
+    pipeline_worker_specs: list[_WorkerSpec] | None = None
+    effective_device = device
+    if axon_backend == "pipeline":
+        pipeline_worker_specs = _resolve_pipeline_worker_specs(
+            device=device,
+            processes=max(1, int(processes)),
+            pipeline_parallel_size=pipeline_parallel_size,
+        )
+        if processes <= 1:
+            serial_cuda_visible_devices = pipeline_worker_specs[0].cuda_visible_devices
+            effective_device = pipeline_worker_specs[0].run_device
+
     if processes <= 1:
-        results = []
-        for pair in pairs:
-            try:
-                result = _run_benchmark_pair(
-                    pair,
-                    repo_root=repo_root,
-                    device=device,
-                    text=text,
-                    max_len=max_len,
-                    tokenizer=tokenizer,
-                    class_name=class_name,
-                    main_module=main_module,
-                    dtype=dtype,
-                    model_task=model_task,
-                    trace_layers=trace_layers,
-                    hf_align_bf16_profile=hf_align_bf16_profile,
-                    hf_align_mask_contract=hf_align_mask_contract,
-                    hf_align_position_ids=hf_align_position_ids,
-                    hf_align_add_fp32_accum=hf_align_add_fp32_accum,
-                    hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
-                    hf_align_norm_fp32=hf_align_norm_fp32,
-                    compile_hf=compile_hf,
-                    compile_axon=compile_axon,
-                    compile_backend=compile_backend,
-                    compile_mode=compile_mode,
-                    compile_fullgraph=compile_fullgraph,
-                    compile_dynamic=compile_dynamic,
-                    trust_remote_code=trust_remote_code,
-                )
-            except Exception as exc:
-                result = _error_result_for_pair(pair, exc, repo_root=repo_root)
-            results.append(result)
-            if stream_csv is not None:
-                _append_stream_csv_row(stream_csv, _summary_row_from_result(result))
+        results = _run_benchmark_jobs_serial(
+            pairs,
+            device=effective_device,
+            log_dir=log_dir,
+            stream_csv=stream_csv,
+            common_kwargs=common_kwargs,
+            worker_cuda_visible_devices=serial_cuda_visible_devices,
+            debug_errors=debug_errors,
+        )
     else:
         results = _run_benchmark_jobs_parallel(
             pairs,
             processes=processes,
-            device=device,
+            device=effective_device,
             log_dir=log_dir,
             stream_csv=stream_csv,
             common_kwargs=common_kwargs,
+            worker_specs=pipeline_worker_specs,
+            debug_errors=debug_errors,
         )
 
     sorted_results = sorted(results, key=_summary_sort_key)

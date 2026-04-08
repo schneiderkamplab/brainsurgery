@@ -1,0 +1,43 @@
+{-# CHECKPOINTS "openai-community/gpt2-xl" #-}
+{-# TASK "causal_lm" #-}
+
+import Activations
+import Activations (gelu_new)
+import Cache
+import Cache (past_length)
+
+T = 1024
+D = 1600
+L = 48
+H = 25
+
+gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gpt2_block x attn_mask past_kv = do
+  x1 <- layernorm@ln_1 x
+  a, new_kv <- scope@attn do
+    q_lin, k_lin, v_lin <- linear@c_attn x1 dim=(3 * D) bias=true transpose=true |> split parts=3
+    q <- reshape_heads q_lin heads=H
+    k <- reshape_heads k_lin heads=H
+    v <- reshape_heads v_lin heads=H
+    k, v, new_kv <- Cache.update past_kv k v
+    mask <- causal_mask q k window=T padding_mask=attn_mask
+    a <- attention q k v mask=mask |> merge_heads |> linear@c_proj dim=D bias=true transpose=true
+    return a, new_kv
+  x <- x + a
+  x3 <- layernorm@ln_2 x
+  m <- scope@mlp do
+    return linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new fp32_accum=true |> linear@c_proj dim=D bias=true transpose=true
+  return x + m, new_kv
+
+gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gpt2 input_ids attn_mask past_kv use_cache = do
+  tok <- embedding@wte input_ids dim=D
+  pos <- position_ids input_ids attn_mask past_length=(past_length past_kv) pad_fill=1 |> embedding@wpe
+  x <- tok + pos
+  new_kv <- use_cache ? Cache.init : null
+  for@h i <- [0..L) do
+    past_i <- Cache.index past_kv i
+    x, new_i <- gpt2_block x attn_mask past_i
+    new_kv <- Cache.append new_kv new_i
+  logits <- layernorm@ln_f x |> linear@wte
+  return logits, new_kv

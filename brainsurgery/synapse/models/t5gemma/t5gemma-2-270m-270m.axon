@@ -33,18 +33,12 @@ ATTN_SCALE = 0.0625
 EMB_SCALE_ENC = 25.25
 EMB_SCALE_DEC = 25.298221281347036
 
-rmsd :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rmsd@path x = rmsnorm@path x eps=EPS cast_float=true unit_offset=true
-
-rmsh :: @Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
-rmsh@path x = rmsnorm@path x eps=EPS dim=HD cast_float=true unit_offset=true
-
 t5gemma2_encoder_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> Tensor[B,S,D]
 t5gemma2_encoder_block x i pos_ids attention_mask = do
-  xn <- rmsd@pre_self_attn_layernorm x
+  xn <- rmsnorm@pre_self_attn_layernorm x eps=EPS cast_float=true unit_offset=true
   a <- scope@self_attn do
-    q <- linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H |> rmsh@q_norm
-    k <- linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> rmsh@k_norm
+    q <- linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H |> rmsnorm@q_norm eps=EPS dim=HD cast_float=true unit_offset=true
+    k <- linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> rmsnorm@k_norm eps=EPS dim=HD cast_float=true unit_offset=true
     v <- linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     full_attn <- ((i + 1) % ROPE_PERIOD_ENC) == 0
     theta <- full_attn ? THETA_FULL_ENC : THETA_SLIDE_ENC
@@ -55,28 +49,28 @@ t5gemma2_encoder_block x i pos_ids attention_mask = do
     window <- full_attn ? WIN_FULL_ENC : WIN_SLIDE_ENC
     mask <- bidirectional_mask q k window=window padding_mask=attention_mask
     return attention q k v mask=mask causal=false scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=D bias=false
-  a <- rmsd@post_self_attn_layernorm a
+  a <- rmsnorm@post_self_attn_layernorm a eps=EPS cast_float=true unit_offset=true
   x <- x + a
-  xn <- rmsd@pre_feedforward_layernorm x
+  xn <- rmsnorm@pre_feedforward_layernorm x eps=EPS cast_float=true unit_offset=true
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN_ENC bias=false |> gelu_pytorch_tanh
     u <- linear@up_proj xn dim=FFN_ENC bias=false
     return g |> mul u |> linear@down_proj dim=D bias=false
-  m <- rmsd@post_feedforward_layernorm m
+  m <- rmsnorm@post_feedforward_layernorm m eps=EPS cast_float=true unit_offset=true
   return x + m
 
-t5gemma2_decoder_block :: Tensor[B,SDEC,D] -> Tensor[B,SENC,D] -> Int -> Tensor[B,SDEC] -> ?Tensor[B,S] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,D]
+t5gemma2_decoder_block :: Tensor[B,SDEC,D] -> Tensor[B,SENC,D] -> Int -> Tensor[B,SDEC] -> ?Tensor[B,SENC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,D]
 t5gemma2_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_attention_mask = do
-  xn <- rmsd@pre_self_attn_layernorm x
+  xn <- rmsnorm@pre_self_attn_layernorm x eps=EPS cast_float=true unit_offset=true
   a <- scope@self_attn do
-    q <- linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H |> rmsh@q_norm
-    k_self <- linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> rmsh@k_norm
+    q <- linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H |> rmsnorm@q_norm eps=EPS dim=HD cast_float=true unit_offset=true
+    k_self <- linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> rmsnorm@k_norm eps=EPS dim=HD cast_float=true unit_offset=true
     v_self <- linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     full_attn <- ((i + 1) % ROPE_PERIOD_DEC) == 0
     theta <- full_attn ? THETA_FULL_DEC : THETA_SLIDE_DEC
     rope_scale <- full_attn ? ROPE_SCALE_FULL_DEC : 1.0
     q, k_self <- rope_pair q k_self position_ids=pos_ids theta=theta scale_factor=rope_scale
-    k_cross <- linear@k_proj enc_hidden dim=KVD bias=false |> reshape_heads heads=KVH |> rmsh@k_norm
+    k_cross <- linear@k_proj enc_hidden dim=KVD bias=false |> reshape_heads heads=KVH |> rmsnorm@k_norm eps=EPS dim=HD cast_float=true unit_offset=true
     v_cross <- linear@v_proj enc_hidden dim=KVD bias=false |> reshape_heads heads=KVH
     k_merged <- concat k_self k_cross dim=2
     v_merged <- concat v_self v_cross dim=2
@@ -87,14 +81,14 @@ t5gemma2_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_att
     cross_mask <- bidirectional_mask q k_cross padding_mask=encoder_attention_mask
     merged_mask <- concat self_mask cross_mask dim=-1
     return attention q k_merged v_merged mask=merged_mask causal=false scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=D bias=false
-  a <- rmsd@post_self_attn_layernorm a
+  a <- rmsnorm@post_self_attn_layernorm a eps=EPS cast_float=true unit_offset=true
   x <- x + a
-  xn <- rmsd@pre_feedforward_layernorm x
+  xn <- rmsnorm@pre_feedforward_layernorm x eps=EPS cast_float=true unit_offset=true
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN_DEC bias=false |> gelu_pytorch_tanh
     u <- linear@up_proj xn dim=FFN_DEC bias=false
     return g |> mul u |> linear@down_proj dim=D bias=false
-  m <- rmsd@post_feedforward_layernorm m
+  m <- rmsnorm@post_feedforward_layernorm m eps=EPS cast_float=true unit_offset=true
   return x + m
 
 t5gemma2 :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
@@ -103,11 +97,11 @@ t5gemma2 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
   enc_hidden <- embedding@model.encoder.embed_tokens input_ids dim=D scale=EMB_SCALE_ENC
   for@model.encoder.layers i <- [0..L_ENC) do
     enc_hidden <- t5gemma2_encoder_block enc_hidden i enc_pos_ids attention_mask
-  enc_hidden <- rmsd@model.encoder.norm enc_hidden
+  enc_hidden <- rmsnorm@model.encoder.norm enc_hidden eps=EPS cast_float=true unit_offset=true
   dec_pos_ids <- position_ids decoder_input_ids decoder_attention_mask
   dec_hidden <- embedding@model.encoder.embed_tokens decoder_input_ids dim=D scale=EMB_SCALE_DEC
   for@model.decoder.layers i <- [0..L_DEC) do
     dec_hidden <- t5gemma2_decoder_block dec_hidden enc_hidden i dec_pos_ids attention_mask decoder_attention_mask
-  dec_hidden <- rmsd@model.decoder.norm dec_hidden
+  dec_hidden <- rmsnorm@model.decoder.norm dec_hidden eps=EPS cast_float=true unit_offset=true
   logits <- linear@model.encoder.embed_tokens dec_hidden dim=V bias=false
   return logits

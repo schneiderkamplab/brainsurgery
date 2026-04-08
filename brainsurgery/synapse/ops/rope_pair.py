@@ -78,8 +78,10 @@ def _apply_frequency_scaling(
         raise ValueError("rope_pair.scale_factor must be > 0")
     if low_freq_factor <= 0.0:
         raise ValueError("rope_pair.low_freq_factor must be > 0")
-    if high_freq_factor <= low_freq_factor:
-        raise ValueError("rope_pair.high_freq_factor must be > low_freq_factor")
+    # Some HF llama3-style configs encode a degenerate band (high == low).
+    # Preserve execution by skipping medium-band smoothing in that case.
+    if high_freq_factor < low_freq_factor:
+        raise ValueError("rope_pair.high_freq_factor must be >= low_freq_factor")
     if original_context <= 0:
         raise ValueError("rope_pair.original_context must be > 0")
 
@@ -88,6 +90,8 @@ def _apply_frequency_scaling(
     wavelen = (2.0 * math.pi) / inv_freq
 
     inv_scaled = torch.where(wavelen > low_freq_wavelen, inv_freq / scale_factor, inv_freq)
+    if high_freq_factor == low_freq_factor:
+        return inv_scaled
     smooth = (float(original_context) / wavelen - low_freq_factor) / (
         high_freq_factor - low_freq_factor
     )
@@ -364,6 +368,21 @@ def interpret(
         rope_mode=rope_mode,
         scale_factor=proportional_scale_factor,
     )
+    if rope_mode == "proportional":
+        # Keep codegen/runtime aligned: proportional mode applies rotate_half over the full
+        # head dimension, while only a prefix gets non-zero RoPE frequencies.
+        rope_angles = rotary_dim // 2
+        rotary_dim = int(q.shape[-1])
+        half = rotary_dim // 2
+        nope_angles = half - int(rope_angles)
+        if nope_angles > 0:
+            inv_freq = torch.cat(
+                (
+                    inv_freq,
+                    torch.zeros(int(nope_angles), dtype=torch.float32, device=q.device),
+                ),
+                dim=0,
+            )
     half = rotary_dim // 2
     rope_attention_factor = attention_factor
     if rope_mode == "proportional":
@@ -685,6 +704,95 @@ def compile(
             lines.append(f"{indent}    if float({scale_factor}) <= 0.0:")
             lines.append(f"{indent}        raise ValueError('rope_pair.scale_factor must be > 0')")
             lines.append(f"{indent}    {inv_freq} = {inv_freq} / float({scale_factor})")
+        elif all(
+            key in node_spec
+            for key in ("long_factor", "short_factor", "original_context", "max_context")
+        ):
+            seq_len = emitter._fresh("seq_len")
+            ext_raw = emitter._fresh("ext_raw")
+            ext_factors = emitter._fresh("ext_factors")
+            inv_shape = emitter._fresh("inv_shape")
+            scale_factor_long = emitter._fresh("scale_factor_long")
+            explicit_mscale = emitter._fresh("explicit_mscale")
+            lines.append(f"{indent}elif {rope_mode_var} in ('longrope', 'su'):")
+            lines.append(f"{indent}    {half} = int({rotary_dim}) // 2")
+            lines.append(
+                f"{indent}    if not isinstance({long_factor_expr}, (list, tuple)) or any((isinstance(_v, bool) or not isinstance(_v, (int, float))) for _v in {long_factor_expr}):"
+            )
+            lines.append(
+                f"{indent}        raise ValueError('rope_pair.long_factor must resolve to a list of numbers')"
+            )
+            lines.append(
+                f"{indent}    if not isinstance({short_factor_expr}, (list, tuple)) or any((isinstance(_v, bool) or not isinstance(_v, (int, float))) for _v in {short_factor_expr}):"
+            )
+            lines.append(
+                f"{indent}        raise ValueError('rope_pair.short_factor must resolve to a list of numbers')"
+            )
+            lines.append(f"{indent}    if int({original_context}) <= 1:")
+            lines.append(
+                f"{indent}        raise ValueError('rope_pair.original_context must be > 1 for longrope/su')"
+            )
+            lines.append(f"{indent}    if int({max_context_expr}) <= 0:")
+            lines.append(
+                f"{indent}        raise ValueError('rope_pair.max_context must be > 0 for longrope/su')"
+            )
+            lines.append(
+                f"{indent}    {seq_len} = int({pos_ids}.max().item()) + 1 if {pos_ids}.numel() > 0 else 0"
+            )
+            lines.append(
+                f"{indent}    {ext_raw} = {long_factor_expr} if {seq_len} > int({original_context}) else {short_factor_expr}"
+            )
+            lines.append(f"{indent}    if len({ext_raw}) != int({half}):")
+            lines.append(
+                f"{indent}        raise ValueError('rope_pair longrope/su factor length must match head_dim/2')"
+            )
+            lines.append(
+                f"{indent}    {ext_factors} = torch.tensor({ext_raw}, dtype=torch.float32, device={q}.device)"
+            )
+            lines.append(
+                f"{indent}    {inv_shape} = torch.arange(0, int({half}), dtype=torch.float32, device={q}.device) / float({half})"
+            )
+            lines.append(
+                f"{indent}    {inv_freq} = 1.0 / ({ext_factors} * (float({theta}) ** {inv_shape}))"
+            )
+            if "attention_factor" in node_spec:
+                lines.append(
+                    f"{indent}    {rope_attention_factor} = float({attention_factor_expr})"
+                )
+            else:
+                lines.append(f"{indent}    if {seq_len} > int({original_context}):")
+                if "long_mscale" in node_spec:
+                    lines.append(f"{indent}        {explicit_mscale} = float({long_mscale_expr})")
+                else:
+                    lines.append(f"{indent}        {explicit_mscale} = None")
+                lines.append(f"{indent}    else:")
+                if "short_mscale" in node_spec:
+                    lines.append(f"{indent}        {explicit_mscale} = float({short_mscale_expr})")
+                else:
+                    lines.append(f"{indent}        {explicit_mscale} = None")
+                lines.append(
+                    f"{indent}    if {explicit_mscale} is not None and float({explicit_mscale}) > 0.0:"
+                )
+                lines.append(f"{indent}        {rope_attention_factor} = float({explicit_mscale})")
+                lines.append(f"{indent}    else:")
+                if "scale_factor" in node_spec:
+                    lines.append(f"{indent}        {scale_factor_long} = float({scale_factor})")
+                else:
+                    lines.append(
+                        f"{indent}        {scale_factor_long} = float({max_context_expr}) / float({original_context})"
+                    )
+                lines.append(f"{indent}        if {scale_factor_long} <= 0.0:")
+                lines.append(
+                    f"{indent}            raise ValueError('rope_pair.scale_factor must be > 0 for longrope/su')"
+                )
+                lines.append(
+                    f"{indent}        if {seq_len} <= int({original_context}) or {scale_factor_long} <= 1.0:"
+                )
+                lines.append(f"{indent}            {rope_attention_factor} = 1.0")
+                lines.append(f"{indent}        else:")
+                lines.append(
+                    f"{indent}            {rope_attention_factor} = float(math.sqrt(1.0 + (math.log({scale_factor_long}) / math.log(float({original_context})))))"
+                )
         lines.append(f"{indent}else:")
         lines.append(f"{indent}    {half} = int({rotary_dim}) // 2")
         lines.append(
@@ -898,9 +1006,9 @@ def compile(
         lines.append(f"{indent}    raise ValueError('rope_pair.scale_factor must be > 0')")
         lines.append(f"{indent}if float({low_freq_factor}) <= 0.0:")
         lines.append(f"{indent}    raise ValueError('rope_pair.low_freq_factor must be > 0')")
-        lines.append(f"{indent}if float({high_freq_factor}) <= float({low_freq_factor}):")
+        lines.append(f"{indent}if float({high_freq_factor}) < float({low_freq_factor}):")
         lines.append(
-            f"{indent}    raise ValueError('rope_pair.high_freq_factor must be > low_freq_factor')"
+            f"{indent}    raise ValueError('rope_pair.high_freq_factor must be >= low_freq_factor')"
         )
         lines.append(f"{indent}if int({original_context}) <= 0:")
         lines.append(f"{indent}    raise ValueError('rope_pair.original_context must be > 0')")
@@ -957,16 +1065,21 @@ def compile(
             lines.append(
                 f"{indent}{inv_scaled} = torch.where({wavelen} > {low_freq_wavelen}, {inv_freq} / float({scale_factor}), {inv_freq})"
             )
+            lines.append(f"{indent}if float({high_freq_factor}) == float({low_freq_factor}):")
+            lines.append(f"{indent}    {inv_freq} = {inv_scaled}")
+            lines.append(f"{indent}else:")
             lines.append(
-                f"{indent}{smooth} = (float({original_context}) / {wavelen} - float({low_freq_factor})) / (float({high_freq_factor}) - float({low_freq_factor}))"
+                f"{indent}    {smooth} = (float({original_context}) / {wavelen} - float({low_freq_factor})) / (float({high_freq_factor}) - float({low_freq_factor}))"
             )
             lines.append(
-                f"{indent}{smoothed} = (1.0 - {smooth}) * ({inv_scaled} / float({scale_factor})) + {smooth} * {inv_scaled}"
+                f"{indent}    {smoothed} = (1.0 - {smooth}) * ({inv_scaled} / float({scale_factor})) + {smooth} * {inv_scaled}"
             )
             lines.append(
-                f"{indent}{is_medium} = (~({wavelen} < {high_freq_wavelen})) & (~({wavelen} > {low_freq_wavelen}))"
+                f"{indent}    {is_medium} = (~({wavelen} < {high_freq_wavelen})) & (~({wavelen} > {low_freq_wavelen}))"
             )
-            lines.append(f"{indent}{inv_freq} = torch.where({is_medium}, {smoothed}, {inv_scaled})")
+            lines.append(
+                f"{indent}    {inv_freq} = torch.where({is_medium}, {smoothed}, {inv_scaled})"
+            )
     inv_freq_dtype_expr = emitter._expr_code(node_spec.get("inv_freq_dtype"), env)
     lines.append(
         f"{indent}{inv_freq_dtype} = ({inv_freq_dtype_expr}) if {'inv_freq_dtype' in node_spec} else None"

@@ -1,0 +1,63 @@
+{-# CHECKPOINTS "meta-llama/Meta-Llama-3-70B-Instruct" #-}
+{-# TASK "causal_lm" #-}
+
+import Activations
+import Activations (silu)
+import Cache
+import Cache (past_length)
+
+D = 8192
+V = 128256
+L = 80
+H = 64
+KVH = 8
+KVD = 512
+FFN = 28672
+EPS = 1e-05
+THETA = 500000.0
+C = 8192
+ROPE_SCALE = 1.0
+ROPE_LOW_FREQ = 1.0
+ROPE_HIGH_FREQ = 4.0
+ROPE_CONTEXT = 8192
+HAS_LM_HEAD = true
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS
+
+llama3_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+llama3_block x pos_ids attn_mask past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- linear@q_proj xn dim=D |> reshape_heads heads=H
+    k <- linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
+    v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
+    q, k <- rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE low_freq_factor=ROPE_LOW_FREQ high_freq_factor=ROPE_HIGH_FREQ original_context=ROPE_CONTEXT
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- repeat k (H / KVH)
+    v <- repeat v (H / KVH)
+    mask <- causal_mask q k window=C padding_mask=attn_mask
+    a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D
+    return a, new_kv
+  x <- x + a
+  xn <- rms@post_attention_layernorm x
+  m <- scope@mlp do
+    g <- linear@gate_proj xn dim=FFN
+    u <- linear@up_proj xn dim=FFN
+    return g |> silu |> mul u |> linear@down_proj dim=D
+  return x + m, new_kv
+
+llama3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+llama3 input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  logits, new_kv <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- llama3_block x pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    x <- rms@norm x
+    logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V weight="@@lm_head.weight") : (linear@embed_tokens x dim=V)
+    return logits, new_kv
+  return logits, new_kv

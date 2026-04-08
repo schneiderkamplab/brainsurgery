@@ -1,0 +1,76 @@
+{-# CHECKPOINTS ["zai-org/GLM-4-9B-0414", "zai-org/GLM-Z1-9B-0414"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations
+import Activations (silu)
+import Cache
+import Cache (past_length)
+
+D = 4096
+V = 151552
+L = 40
+H = 32
+KVH = 2
+QD = 4096
+KVD = 256
+FFN = 13696
+EPS = 1e-05
+THETA = 10000.0
+C = 32768
+PROPE = 0.5
+ATTN_BIAS = true
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS
+
+glm4_dense_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+glm4_dense_attn x pos_ids attn_mask past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- ATTN_BIAS ? (linear@q_proj xn dim=QD bias=true) : (linear@q_proj xn dim=QD bias=false)
+    q <- reshape_heads q heads=H
+    k <- ATTN_BIAS ? (linear@k_proj xn dim=KVD bias=true) : (linear@k_proj xn dim=KVD bias=false)
+    k <- reshape_heads k heads=KVH
+    v <- ATTN_BIAS ? (linear@v_proj xn dim=KVD bias=true) : (linear@v_proj xn dim=KVD bias=false)
+    v <- reshape_heads v heads=KVH
+    q, k <- rope_pair q k position_ids=pos_ids theta=THETA partial_rotary_factor=PROPE interleaved=true
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- repeat k (H / KVH)
+    v <- repeat v (H / KVH)
+    mask <- causal_mask q k window=C padding_mask=attn_mask
+    a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D bias=false
+    return a, new_kv
+  a <- rms@post_self_attn_layernorm a
+  return x + a, new_kv
+
+glm4_dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+glm4_dense_ffn x = do
+  gu <- linear@gate_up_proj x dim=(2 * FFN) bias=false
+  g, u <- split gu sizes=[FFN, FFN]
+  return g |> silu |> mul u |> linear@down_proj dim=D bias=false
+
+glm4_dense_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+glm4_dense_block x pos_ids attn_mask past_kv = do
+  x, new_kv <- glm4_dense_attn x pos_ids attn_mask past_kv
+  residual <- x
+  xn <- rms@post_attention_layernorm residual
+  m <- scope@mlp do
+    return glm4_dense_ffn xn
+  m <- rms@post_mlp_layernorm m
+  x <- residual + m
+  return x, new_kv
+
+glm4_dense :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+glm4_dense input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids null past_length=(past_length past_kv)
+  x, new_kv <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- glm4_dense_block x pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    x <- rms@norm x
+    return x, new_kv
+  logits <- linear@lm_head x dim=V bias=false
+  return logits, new_kv

@@ -104,6 +104,13 @@ def lowering_infer_metadata(
     last_dim = kwargs.get("dim", first_dim)
     if last_dim is not None:
         ctx.tensor_last_dim[out] = last_dim
+    first_shape = (
+        ctx.tensor_shape.get(first_in)
+        if isinstance(first_in, str) and first_in.isidentifier()
+        else None
+    )
+    if isinstance(first_shape, tuple) and len(first_shape) >= 1 and last_dim is not None:
+        ctx.tensor_shape[out] = (*first_shape[:-1], last_dim)
     return True
 
 

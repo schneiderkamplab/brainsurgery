@@ -373,19 +373,55 @@ def _download_with_retry(
     backoff_initial_s: float,
     backoff_max_s: float,
 ) -> None:
+    expected_size = _head_content_length(url=url, headers=headers, cwd=cwd)
+    partial_path = out_path.with_name(f"{out_path.name}.partial")
+
+    def _is_valid_target(path: Path) -> bool:
+        if not path.exists():
+            return False
+        if expected_size is not None and path.stat().st_size != expected_size:
+            return False
+        if out_path.suffix == ".safetensors":
+            return _is_valid_safetensors_file(path)
+        if out_path.suffix == ".bin":
+            return _is_valid_pytorch_checkpoint_file(path)
+        return True
+
+    if _is_valid_target(out_path):
+        partial_path.unlink(missing_ok=True)
+        return
+
     attempt = 0
     while True:
         attempt += 1
         try:
             _run_curl(
                 url=url,
-                out_path=out_path,
+                out_path=partial_path,
                 headers=headers,
-                resume=True,
+                resume=partial_path.exists(),
                 cwd=cwd,
             )
+            if expected_size is not None and partial_path.exists():
+                actual_size = partial_path.stat().st_size
+                if actual_size != expected_size:
+                    raise RuntimeError(
+                        f"download size mismatch for {filename}: expected {expected_size}, got {actual_size}"
+                    )
+            if out_path.suffix == ".safetensors" and not _is_valid_safetensors_file(partial_path):
+                raise RuntimeError(f"invalid safetensors file after download: {filename}")
+            if out_path.suffix == ".bin" and not _is_valid_pytorch_checkpoint_file(partial_path):
+                raise RuntimeError(f"invalid pytorch checkpoint after download: {filename}")
+            partial_path.replace(out_path)
             return
         except RuntimeError as exc:
+            if partial_path.exists() and expected_size is not None:
+                try:
+                    actual_size = partial_path.stat().st_size
+                except Exception:
+                    actual_size = None
+                if actual_size is not None and actual_size >= expected_size:
+                    partial_path.unlink(missing_ok=True)
             if attempt >= max_retries:
                 raise RuntimeError(
                     f"{model_name}: failed downloading {filename} after {attempt} attempts"
@@ -424,6 +460,20 @@ def _is_valid_safetensors_file(path: Path) -> bool:
     try:
         with safe_open(str(path), framework="pt") as handle:
             _ = list(handle.keys())
+        return True
+    except Exception:
+        return False
+
+
+def _is_valid_pytorch_checkpoint_file(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        import torch
+    except Exception:
+        return False
+    try:
+        torch.load(str(path), map_location="cpu", weights_only=False)
         return True
     except Exception:
         return False
@@ -544,7 +594,7 @@ def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
     elif single_path.exists():
         has_weights = True
     elif pytorch_bin_path.exists():
-        has_weights = True
+        has_weights = _is_valid_pytorch_checkpoint_file(pytorch_bin_path)
 
     if not has_weights:
         return False
@@ -649,7 +699,11 @@ def _normalize_local_weight_format(model_dir: Path) -> None:
         return None
 
     for pt_path in pt_files:
-        payload = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+        try:
+            payload = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+        except Exception:
+            pt_path.unlink(missing_ok=True)
+            continue
         tensor_payload = _extract_tensor_mapping(payload)
         if tensor_payload is None:
             raise RuntimeError(f"Unsupported PyTorch checkpoint payload in {pt_path}")
@@ -684,6 +738,12 @@ def ensure_model_downloaded(
     with lock_path.open("w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
+            if _is_complete_model_dir(model_dir, require_tokenizer=spec.require_tokenizer):
+                _normalize_local_weight_format(model_dir)
+                _normalize_config_rope_numeric_fields(model_dir)
+                _status(status_cb, f"{spec.local_dir}: already complete, skipping download")
+                return model_dir
+
             _normalize_local_weight_format(model_dir)
 
             if _is_complete_model_dir(model_dir, require_tokenizer=spec.require_tokenizer):
@@ -738,6 +798,11 @@ def ensure_model_downloaded(
                 target = model_dir / name
                 if name.endswith(".safetensors"):
                     if not _is_valid_safetensors_file(target):
+                        pending_files.append(name)
+                    continue
+                if name.endswith(".bin"):
+                    if not _is_valid_pytorch_checkpoint_file(target):
+                        target.unlink(missing_ok=True)
                         pending_files.append(name)
                     continue
                 if not target.exists():

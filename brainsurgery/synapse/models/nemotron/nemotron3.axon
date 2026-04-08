@@ -1,0 +1,79 @@
+{-# CHECKPOINTS "nemotron3" #-}
+{-# TASK "causal_lm" #-}
+{-# PADDING_SIDE "right" #-}
+
+import Activations
+import Activations (sigmoid, relu2)
+import MoE
+
+MODEL_D = 2688
+V = 131072
+L = 52
+H = 32
+KVH = 2
+HD = 128
+ATTN_SCALE = 0.08838834764831843
+C = 262144
+EPS = 1e-05
+M_H = 64
+M_HD = 64
+M_G = 8
+M_N = 128
+M_I = 4096
+M_CONV = 6144
+EPT = 6
+N_GROUP = 1
+TOPK_GROUP = 1
+NORM_TOPK_PROB = 1
+FFN = 1856
+SFFN = 3712
+ROUTE_SCALE = 2.5
+
+rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = rmsnorm@path x eps=EPS cast_float=true
+
+expert_ffn :: Tensor[N,D] -> Tensor[N,D]
+expert_ffn x = do
+  up <- linear@up_proj x dim=FFN bias=false
+  return up |> relu2 |> linear@down_proj dim=MODEL_D bias=false
+
+shared_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+shared_ffn x = do
+  up <- linear@shared_experts.up_proj x dim=SFFN bias=false
+  return up |> relu2 |> linear@shared_experts.down_proj dim=MODEL_D bias=false
+
+nemotron_h_attention :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+nemotron_h_attention x attn_mask = do
+  q <- linear@q_proj x dim=(H * HD) bias=false |> reshape_heads heads=H
+  k <- linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> repeat repeats=(H / KVH)
+  v <- linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> repeat repeats=(H / KVH)
+  mask <- causal_mask q k window=C padding_mask=attn_mask
+  return attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=MODEL_D bias=false
+
+nemotron_h_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
+nemotron_h_moe xn = do
+  return nemotron_moe xn top_k=EPT n_group=N_GROUP topk_group=TOPK_GROUP routed_scaling_factor=ROUTE_SCALE norm_topk_prob=(NORM_TOPK_PROB != 0)
+
+nemotron_h_mamba :: Tensor[B,S,D] -> Tensor[B,S,D]
+nemotron_h_mamba xn = do
+  proj <- linear@in_proj xn dim=(M_I + M_CONV + M_H) bias=false
+  gate, conv_in, dt <- split proj sizes=[M_I, M_CONV, M_H]
+  conv_all <- causal_conv1d@conv1d conv_in activation=silu
+  u, b, c <- split conv_all sizes=[M_I, M_G * M_N, M_G * M_N]
+  scan <- mamba2_scan u gate dt b c A=A_log D=D dt_bias=dt_bias norm_weight="norm.weight" n_groups=M_G head_dim=M_HD time_step_min=0.0 time_step_max=1e+30
+  return linear@out_proj scan dim=MODEL_D bias=false
+
+nemotron_h_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Int -> Tensor[B,S,D]
+nemotron_h_block x attn_mask i = do
+  xn <- rms@norm x
+  y <- scope@mixer do
+    return ((i == 5) or (i == 12) or (i == 19) or (i == 26) or (i == 33) or (i == 42)) ? (nemotron_h_attention xn attn_mask) : ((((i == 0) or (i == 2) or (i == 4) or (i == 7) or (i == 9) or (i == 11) or (i == 14) or (i == 16) or (i == 18) or (i == 21) or (i == 23) or (i == 25) or (i == 28) or (i == 30) or (i == 32) or (i == 35) or (i == 37) or (i == 39) or (i == 41) or (i == 44) or (i == 46) or (i == 48) or (i == 50)) ? (nemotron_h_mamba xn) : (nemotron_h_moe xn)))
+  return x + y
+
+nemotron_h :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+nemotron_h input_ids attn_mask = do
+  x <- embedding@backbone.embeddings input_ids dim=MODEL_D
+  for@backbone.layers i <- [0..L) do
+    x <- nemotron_h_block x attn_mask i
+  x <- rms@backbone.norm_f x
+  return linear@lm_head x dim=V bias=false

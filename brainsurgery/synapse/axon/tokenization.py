@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 
 def _looks_like_hf_repo_id(value: str | None) -> bool:
@@ -12,6 +13,25 @@ def _looks_like_hf_repo_id(value: str | None) -> bool:
         return False
     normalized = value.strip()
     return "/" in normalized and " " not in normalized
+
+
+def _needs_mistral_tokenizer_type(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    return normalized in {
+        "mistralai/Devstral-Small-2507",
+        "mistralai/Magistral-Small-2509",
+    }
+
+
+def _from_pretrained(source: str, **kwargs: Any) -> Any:
+    if _needs_mistral_tokenizer_type(source):
+        try:
+            return AutoTokenizer.from_pretrained(source, tokenizer_type="mistral", **kwargs)
+        except Exception:
+            pass
+    return AutoTokenizer.from_pretrained(source, **kwargs)
 
 
 def load_tokenizer(
@@ -41,18 +61,18 @@ def load_tokenizer(
         last_error: Exception | None = None
         for kwargs in local_attempts:
             try:
-                return AutoTokenizer.from_pretrained(source, **kwargs)
+                return _from_pretrained(source, **kwargs)
             except Exception as exc:
                 last_error = exc
         if _looks_like_hf_repo_id(fallback_repo_id) and fallback_repo_id != source:
             try:
-                return AutoTokenizer.from_pretrained(
+                return _from_pretrained(
                     fallback_repo_id,
                     local_files_only=False,
                     trust_remote_code=trust_remote_code,
                 )
             except Exception:
-                return AutoTokenizer.from_pretrained(
+                return _from_pretrained(
                     fallback_repo_id,
                     local_files_only=False,
                     use_fast=False,
@@ -63,20 +83,20 @@ def load_tokenizer(
         raise RuntimeError(f"Unable to load tokenizer from local path {source}")
 
     try:
-        return AutoTokenizer.from_pretrained(
+        return _from_pretrained(
             tokenizer_source, local_files_only=False, trust_remote_code=trust_remote_code
         )
     except Exception:
         if _looks_like_hf_repo_id(fallback_repo_id) and fallback_repo_id != tokenizer_source:
             try:
-                return AutoTokenizer.from_pretrained(
+                return _from_pretrained(
                     fallback_repo_id,
                     local_files_only=False,
                     trust_remote_code=trust_remote_code,
                 )
             except Exception:
                 pass
-        return AutoTokenizer.from_pretrained(
+        return _from_pretrained(
             tokenizer_source,
             local_files_only=False,
             use_fast=False,
@@ -117,6 +137,67 @@ def candidate_tokenizer_dirs(model_dir: Path) -> list[Path]:
     return out
 
 
+def _special_token_ids_from_config(
+    tokenizer_source: str,
+    fallback_repo_id: str | None,
+    *,
+    trust_remote_code: bool,
+) -> tuple[int | None, int | None]:
+    sources: list[str] = []
+    candidate = Path(tokenizer_source).expanduser()
+    if candidate.exists():
+        sources.append(str(candidate.resolve()))
+    else:
+        sources.append(tokenizer_source)
+    if _looks_like_hf_repo_id(fallback_repo_id) and fallback_repo_id not in sources:
+        sources.append(fallback_repo_id)
+    for source in sources:
+        path = Path(source)
+        try:
+            if path.exists():
+                cfg_path = path / "config.json"
+                if cfg_path.exists():
+                    payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+                else:
+                    continue
+            else:
+                cfg = AutoConfig.from_pretrained(source, trust_remote_code=trust_remote_code)
+                payload = cfg.to_dict()
+        except Exception:
+            continue
+        eos = payload.get("eos_token_id")
+        bos = payload.get("bos_token_id")
+        eos_id = int(eos) if isinstance(eos, int) else None
+        bos_id = int(bos) if isinstance(bos, int) else None
+        if eos_id is not None or bos_id is not None:
+            return eos_id, bos_id
+    return None, None
+
+
+def _ensure_special_tokens_from_config(
+    tokenizer_obj: Any,
+    tokenizer_source: str,
+    fallback_repo_id: str | None,
+    *,
+    trust_remote_code: bool,
+) -> None:
+    if tokenizer_obj.eos_token_id is not None or tokenizer_obj.bos_token_id is not None:
+        return
+    eos_id, bos_id = _special_token_ids_from_config(
+        tokenizer_source,
+        fallback_repo_id,
+        trust_remote_code=trust_remote_code,
+    )
+    if eos_id is not None:
+        eos_token = tokenizer_obj.convert_ids_to_tokens(eos_id)
+        if isinstance(eos_token, str):
+            tokenizer_obj.eos_token = eos_token
+    if tokenizer_obj.bos_token_id is None and bos_id is not None:
+        bos_token = tokenizer_obj.convert_ids_to_tokens(bos_id)
+        if isinstance(bos_token, str):
+            tokenizer_obj.bos_token = bos_token
+
+
 def spec_padding_side(spec: dict[str, Any]) -> str | None:
     model = spec.get("model", {})
     if not isinstance(model, dict):
@@ -155,9 +236,18 @@ def tokenize_prompts(
         fallback_repo_id=tokenizer_fallback,
         trust_remote_code=trust_remote_code,
     )
-    if len(prompts) > 1:
+    _ensure_special_tokens_from_config(
+        tokenizer_obj,
+        tokenizer_source,
+        tokenizer_fallback,
+        trust_remote_code=trust_remote_code,
+    )
+    explicit_padding_side = spec_padding_side(lowered_spec) if lowered_spec is not None else None
+    if len(prompts) > 1 or explicit_padding_side is not None:
         tokenizer_obj.padding_side = (
-            preferred_padding_side(lowered_spec) if lowered_spec is not None else "left"
+            explicit_padding_side
+            if explicit_padding_side is not None
+            else (preferred_padding_side(lowered_spec) if lowered_spec is not None else "left")
         )
         if tokenizer_obj.pad_token_id is None:
             if tokenizer_obj.eos_token_id is None:

@@ -23,12 +23,28 @@ def lowering_infer_metadata(
 ) -> bool:
     if not isinstance(out, str):
         return False
+    src_name = args[0].strip() if args else None
     head_dim = kwargs.get("head_dim")
     if head_dim is not None:
         ctx.tensor_last_dim[out] = head_dim
     heads = kwargs.get("heads")
     if heads is not None:
         ctx.tensor_heads[out] = heads
+    src_shape = (
+        ctx.tensor_shape.get(src_name)
+        if isinstance(src_name, str) and src_name.isidentifier()
+        else None
+    )
+    if isinstance(src_shape, tuple) and len(src_shape) == 3:
+        batch, seq_len, hidden = src_shape
+        out_heads = heads
+        out_head_dim = head_dim
+        if out_heads is None and out_head_dim is not None:
+            out_heads = f"({hidden} / {out_head_dim})"
+        if out_head_dim is None and out_heads is not None:
+            out_head_dim = f"({hidden} / {out_heads})"
+        if out_heads is not None and out_head_dim is not None:
+            ctx.tensor_shape[out] = (batch, out_heads, seq_len, out_head_dim)
     return True
 
 

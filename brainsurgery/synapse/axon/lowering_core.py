@@ -101,6 +101,7 @@ def _parse_scalar_token(token: str) -> Any:
 _IMPLICIT_ACTIVATION_ALIASES: dict[str, tuple[str, int]] = {
     "gelu": ("_activations_gelu", 0),
     "gelu_new": ("_activations_gelu_new", 0),
+    "gelu_fast": ("_activations_gelu_new", 0),
     "gelu_pytorch_tanh": ("_activations_gelu_pytorch_tanh", 0),
     "gegelu": ("_activations_gegelu", 0),
     "relu": ("_activations_relu", 0),
@@ -115,6 +116,7 @@ _PRIMITIVE_NAME_ALIASES: dict[str, str] = {
     "_list_append": "list_append",
     "_moe_select": "moe_select",
     "_moe_grouped_ffn": "moe_grouped_ffn",
+    "_moe_grouped_swiglu_ffn": "moe_grouped_swiglu_ffn",
 }
 _CACHE_PRIMITIVE_ALIASES: dict[str, str] = {
     "update": "cache_update",
@@ -302,16 +304,20 @@ def _is_kind(value: Any, kind: str) -> bool:
             return False
         return isinstance(value, (int, str)) or is_expr_payload
     if kind == "list_int":
-        return isinstance(value, list) and all(
-            isinstance(v, int) and not isinstance(v, bool) for v in value
-        )
+        return (
+            isinstance(value, list)
+            and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+        ) or is_expr_payload
     if kind == "list_dim":
-        return isinstance(value, list) and all(
-            (isinstance(v, int) and not isinstance(v, bool))
-            or isinstance(v, str)
-            or (isinstance(v, dict) and v.get("_expr") in {"name", "binary", "if", "tuple"})
-            for v in value
-        )
+        return (
+            isinstance(value, list)
+            and all(
+                (isinstance(v, int) and not isinstance(v, bool))
+                or isinstance(v, str)
+                or (isinstance(v, dict) and v.get("_expr") in {"name", "binary", "if", "tuple"})
+                for v in value
+            )
+        ) or is_expr_payload
     return True
 
 
@@ -999,10 +1005,17 @@ def _lower_simple_call(
         resolved_args.append(tmp)
     args_text = resolved_args
 
+    op_name = _canonical_op_name(callee)
+    signature = get_op_lowering_signature(op_name)
+    kwarg_kinds = signature.get("kwarg_kinds") if isinstance(signature, dict) else {}
     resolved_kwargs: dict[str, Any] = {}
     for key, value_expr in kwargs_expr.items():
+        expected_kind = kwarg_kinds.get(key) if isinstance(kwarg_kinds, dict) else None
         if isinstance(value_expr, AxonExprName):
-            resolved_kwargs[key] = value_expr.name
+            if expected_kind in {"list_int", "list_dim"}:
+                resolved_kwargs[key] = {"_expr": "name", "value": value_expr.name}
+            else:
+                resolved_kwargs[key] = value_expr.name
             continue
         if isinstance(value_expr, AxonExprInt):
             resolved_kwargs[key] = value_expr.value
@@ -1020,6 +1033,9 @@ def _lower_simple_call(
             resolved_kwargs[key] = value_expr.value
             continue
         if isinstance(value_expr, AxonExprList):
+            if expected_kind in {"list_int", "list_dim"}:
+                resolved_kwargs[key] = _expr_to_runtime_value(value_expr)
+                continue
             if _kwarg_needs_temp_binding(value_expr, ctx):
                 key_token = _sanitize_token(key, default="kwarg")
                 tmp = ctx.fresh(f"kwarg_{key_token}")
@@ -1043,7 +1059,6 @@ def _lower_simple_call(
     is_absolute_path = "@@" in callee
     if is_absolute_path:
         callee = callee.replace("@@", "@", 1)
-    op_name = _canonical_op_name(callee)
     kwargs = _normalize_call_kwargs(
         op_name=op_name,
         args=args_text,
@@ -1065,7 +1080,7 @@ def _lower_simple_call(
     if resolved_block is not None and ctx.block_signatures:
         block_name, path_bindings = resolved_block
         input_names, output_names = ctx.block_signatures[block_name]
-        provided: dict[str, str] = {}
+        provided: dict[str, Any] = {}
         for idx, value in enumerate(args_text):
             if idx >= len(input_names):
                 raise ValueError(f"too many positional args for block call {callee!r}")
@@ -1073,7 +1088,7 @@ def _lower_simple_call(
         for key, value in kwargs.items():
             if key not in input_names:
                 raise ValueError(f"unknown block input {key!r} for call {callee!r}")
-            provided[key] = str(value)
+            provided[key] = value
         for key, concrete_path in path_bindings.items():
             if key not in input_names:
                 raise ValueError(f"unknown block path parameter {key!r} for call {callee!r}")
@@ -1085,7 +1100,9 @@ def _lower_simple_call(
             param_shapes = {}
         symbol_bindings: dict[str, Any] = {}
         for param_name, raw in provided.items():
-            token = str(raw).strip()
+            if not isinstance(raw, str):
+                continue
+            token = raw.strip()
             if _is_name_token(token) and token in ctx.tensor_last_dim:
                 symbol_bindings[param_name] = ctx.tensor_last_dim[token]
             elif not _is_name_token(token):
@@ -1093,7 +1110,10 @@ def _lower_simple_call(
         for param_name, param_shape in param_shapes.items():
             if param_name not in provided:
                 continue
-            token = str(provided[param_name]).strip()
+            raw_value = provided[param_name]
+            if not isinstance(raw_value, str):
+                continue
+            token = raw_value.strip()
             if not _is_name_token(token):
                 continue
             arg_shape = ctx.tensor_shape.get(token)
@@ -1122,7 +1142,7 @@ def _lower_simple_call(
                 f"block call {callee!r} expects {len(output_names)} outputs, got {len(out_values)}"
             )
         positional_args: list[str] = []
-        extra_kwargs: dict[str, str] = {}
+        extra_kwargs: dict[str, Any] = {}
         for input_name in input_names:
             if input_name not in provided:
                 continue
