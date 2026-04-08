@@ -24,12 +24,15 @@ EMB_SCALE = sqrt D                                                 -- embedding 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x cast_float=true unit_offset=true
 
+rms4 :: @Path -> Tensor[B,H,S,D] -> Tensor[B,H,S,D]
+rms4@path x = rmsnorm@path x cast_float=true unit_offset=true
+
 gemma3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gemma3_block x i pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj xn dim=QD |> reshape_heads heads=H |> rms@q_norm
-    k <- linear@k_proj xn dim=KVD |> reshape_heads heads=KVH |> rms@k_norm
+    q <- linear@q_proj xn dim=QD |> reshape_heads heads=H |> rms4@q_norm
+    k <- linear@k_proj xn dim=KVD |> reshape_heads heads=KVH |> rms4@k_norm
     v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
     theta <- ((i + 1) % ROPE_PERIOD) == 0 ? THETA_LONG : THETA_BASE
     q, k <- rope_pair q k position_ids=pos_ids theta=theta

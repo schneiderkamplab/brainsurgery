@@ -159,9 +159,13 @@ def _find_bound_int(
         cond_root = _resolve_config_root(cond_node.get("root"))
         cond_base = _lookup_path(model_config, cond_root or "")
         cond_value = isinstance(cond_base, dict) and cond_key in cond_base
+        then_bind = root_node.get("_then_bind")
+        else_bind = root_node.get("_else_bind")
+        if not isinstance(then_bind, str) or not isinstance(else_bind, str):
+            return None
         if cond_value:
-            return _resolve_block_bound_string(root_node.get("_then"), root_node.get("_then_bind"))
-        return _resolve_block_bound_string(root_node.get("_else"), root_node.get("_else_bind"))
+            return _resolve_block_bound_string(root_node.get("_then"), then_bind)
+        return _resolve_block_bound_string(root_node.get("_else"), else_bind)
 
     def _lookup_config_int(
         model_config: dict[str, Any] | None,
@@ -535,11 +539,9 @@ def build_pipeline_stage_spec(spec: dict[str, Any], stage: PipelineStage) -> dic
 
     out_spec = copy.deepcopy(spec)
     out_model = out_spec["model"]
-    out_graph = out_model["graph"]
     first_loop_index = min(index for index, *_rest in layer_loops)
     last_loop_index = max(index for index, *_rest in layer_loops)
     prefix_graph = graph[:first_loop_index]
-    layer_region_graph = graph[first_loop_index : last_loop_index + 1]
     suffix_graph = graph[last_loop_index + 1 :]
     original_outputs = out_model.get("outputs", {})
     if not isinstance(original_outputs, dict):

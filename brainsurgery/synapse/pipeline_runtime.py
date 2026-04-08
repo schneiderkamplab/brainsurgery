@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, KeysView
+from collections.abc import Iterator, KeysView, Mapping
 from typing import Any
 
 import torch
@@ -21,7 +21,6 @@ _LAYER_KEY_RE = re.compile(r"(^|\.)layers\.(\d+)(\.|$)")
 def _hf_device_map_prefix_for_key(key: str) -> str | None:
     match = _LAYER_KEY_RE.search(key)
     if match is not None:
-        layer_index = int(match.group(2))
         prefix = key[: match.end(2)]
         return prefix
     if "." not in key:
@@ -125,8 +124,8 @@ class _PipelineStageModel(SynapseProgramModel):
         self._state = _PipelineStateView(self._state, stage)
 
 
-class _PipelineStateView:
-    def __init__(self, base: dict[str, torch.Tensor], stage: PipelineStage) -> None:
+class _PipelineStateView(Mapping[str, torch.Tensor]):
+    def __init__(self, base: Mapping[str, torch.Tensor], stage: PipelineStage) -> None:
         self._base = base
         self._stage = stage
         self._cache: dict[str, torch.Tensor] = {}

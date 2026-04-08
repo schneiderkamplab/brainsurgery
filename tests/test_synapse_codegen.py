@@ -1388,7 +1388,7 @@ def test_generated_linear_expert_materializes_mxfp4_aliases() -> None:
     assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
 
 
-def test_generated_split_interleave_mode() -> None:
+def test_generated_split_parts_mode() -> None:
     spec = {
         "synapse": 1,
         "model": {
@@ -1400,7 +1400,6 @@ def test_generated_split_interleave_mode() -> None:
                         "_args": "x",
                         "_bind": ["even", "odd"],
                         "parts": 2,
-                        "interleave": True,
                     }
                 }
             ],
@@ -1412,8 +1411,8 @@ def test_generated_split_interleave_mode() -> None:
     exec(source, namespace)  # noqa: S102 - generated test code
     model = namespace["SplitInterleaveModel"]()
     out = model(x=torch.tensor([[0.0, 1.0, 2.0, 3.0]], dtype=torch.float32))
-    assert torch.equal(out["even"], torch.tensor([[0.0, 2.0]], dtype=torch.float32))
-    assert torch.equal(out["odd"], torch.tensor([[1.0, 3.0]], dtype=torch.float32))
+    assert torch.equal(out["even"], torch.tensor([[0.0, 1.0]], dtype=torch.float32))
+    assert torch.equal(out["odd"], torch.tensor([[2.0, 3.0]], dtype=torch.float32))
 
 
 def test_generated_clamp_and_sigmoid_ops() -> None:

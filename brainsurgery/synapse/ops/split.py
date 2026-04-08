@@ -192,7 +192,6 @@ def lowering_infer_metadata(
     kwargs: dict[str, Any],
     ctx: Any,
 ) -> bool:
-    del args
     if not isinstance(out, list):
         return False
     dim = kwargs.get("dim", -1)

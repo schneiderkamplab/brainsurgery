@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +14,20 @@ from .mxfp4 import materialize_mxfp4_aliases
 from .ops import get_op_module
 from .spec_normalize import normalize_synapse_spec_expressions
 
+SymbolScalar = int | float | bool | str
+SymbolValue = SymbolScalar | list[SymbolScalar] | tuple[SymbolScalar, ...]
+
 
 def _is_int_token(token: str) -> bool:
     return bool(token) and (token.isdigit() or (token[0] in {"+", "-"} and token[1:].isdigit()))
+
+
+def _is_symbol_value(value: Any) -> bool:
+    if isinstance(value, (int, float, bool, str)):
+        return True
+    if isinstance(value, list | tuple):
+        return all(isinstance(item, (int, float, bool, str)) for item in value)
+    return False
 
 
 class SynapseProgramModel(nn.Module):
@@ -32,7 +44,7 @@ class SynapseProgramModel(nn.Module):
     ) -> None:
         super().__init__()
         self.spec: dict[str, Any] = self._resolve_spec(spec)
-        self._state: dict[str, torch.Tensor] = {}
+        self._state: Mapping[str, torch.Tensor] = {}
         self._runtime_state_dict = runtime_state_dict
         self._param_roots_stack: list[list[str]] = []
         if state_dict is not None:
@@ -88,7 +100,9 @@ class SynapseProgramModel(nn.Module):
         spec = self.spec
         model = spec.get("model", {})
         symbols_raw = model.get("symbols", {})
-        symbols = {k: v for k, v in symbols_raw.items() if isinstance(v, (int, float, bool, str))}
+        symbols: dict[str, SymbolValue] = {
+            k: v for k, v in symbols_raw.items() if _is_symbol_value(v)
+        }
         blocks = model.get("blocks", {})
         input_specs = model.get("inputs", {})
         if not isinstance(input_specs, dict):
@@ -290,7 +304,7 @@ class SynapseProgramModel(nn.Module):
         env: dict[str, Any],
         *,
         scope: str,
-        symbols: dict[str, int | float | bool],
+        symbols: dict[str, SymbolValue],
         blocks: dict[str, Any],
     ) -> None:
         for item in graph:
@@ -368,7 +382,7 @@ class SynapseProgramModel(nn.Module):
         env: dict[str, Any],
         *,
         scope: str,
-        symbols: dict[str, int | float | bool],
+        symbols: dict[str, SymbolValue],
         blocks: dict[str, Any],
     ) -> None:
         block_name = node_spec.get("_target")
@@ -526,7 +540,7 @@ class SynapseProgramModel(nn.Module):
         *,
         node_path: str,
         scope: str,
-        symbols: dict[str, int | float | bool],
+        symbols: dict[str, SymbolValue],
     ) -> None:
         op_module = get_op_module(op)
         if op_module is None:
@@ -647,7 +661,7 @@ class SynapseProgramModel(nn.Module):
         self,
         env: dict[str, Any],
         input_specs: dict[str, Any],
-        symbols: dict[str, int | float | bool],
+        symbols: dict[str, SymbolValue],
     ) -> None:
         dim_bindings: dict[str, int] = {}
         for input_name, input_spec in input_specs.items():
@@ -721,9 +735,7 @@ class SynapseProgramModel(nn.Module):
             raise ValueError(f"Input reference {ref!r} does not resolve to tensor")
         return value
 
-    def _eval_expr(
-        self, expr: Any, env: dict[str, Any], symbols: dict[str, int | float | bool]
-    ) -> Any:
+    def _eval_expr(self, expr: Any, env: dict[str, Any], symbols: dict[str, SymbolValue]) -> Any:
         if expr is None:
             return None
         if isinstance(expr, (int, float, bool)):

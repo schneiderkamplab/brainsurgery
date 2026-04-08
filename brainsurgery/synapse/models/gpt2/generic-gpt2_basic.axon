@@ -9,7 +9,7 @@ T   = Config.int "n_positions" default=1024
 D   = Config.int "n_embd" default=768
 L   = Config.int "n_layer" default=12
 H   = Config.int "n_head" default=12
-V   = Config.int "vocab_size" default=520257
+V   = Config.int "vocab_size" default=52057
 PAD_FILL = 1
 
 reshape_head_basic :: Tensor[B,S,D] -> Int -> Tensor

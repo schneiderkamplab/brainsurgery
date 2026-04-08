@@ -8,7 +8,7 @@ T   = Config.int "n_positions" default=1024
 D   = Config.int "n_embd" default=768
 L   = Config.int "n_layer" default=12
 H   = Config.int "n_head" default=12
-V   = Config.int "vocab_size" default=520257
+V   = Config.int "vocab_size" default=52057
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 gpt2_block x attn_mask = do

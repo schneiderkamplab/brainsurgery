@@ -1632,7 +1632,7 @@ def _collect_hf_param_names_for_device_map(
         return set()
     _ensure_transformers_import_compat()
     try:
-        from accelerate import init_empty_weights  # type: ignore[import-not-found]
+        from accelerate import init_empty_weights
     except Exception:
         return set()
 
@@ -2930,6 +2930,9 @@ def _run_axon_test_single(
         print(f"Compile fullgraph:     {bool(compile_fullgraph)}")
         print(f"Compile dynamic:       {bool(compile_dynamic)}")
         print()
+        hf_time_safe = 0.0 if hf_time is None else hf_time
+        if not skip_hf:
+            assert hf_time is not None
         if skip_hf:
             print("HF:             skipped")
             print(
@@ -2938,15 +2941,15 @@ def _run_axon_test_single(
             print("Speed ratio (Axon/HF): N/A")
         elif resolved_model_task == "causal_lm":
             print(
-                f"HF:             {hf_time:.4f}s total, {gen_hf / max(hf_time, 1e-9):.2f} tok/s, generated={gen_hf}"
+                f"HF:             {hf_time_safe:.4f}s total, {gen_hf / max(hf_time_safe, 1e-9):.2f} tok/s, generated={gen_hf}"
             )
             print(
                 f"Axon-derived:   {syn_time:.4f}s total, {gen_syn / max(syn_time, 1e-9):.2f} tok/s, generated={gen_syn}"
             )
         else:
-            print(f"HF forward:     {hf_time:.4f}s total")
+            print(f"HF forward:     {hf_time_safe:.4f}s total")
             print(f"Axon forward:   {syn_time:.4f}s total")
-            print(f"Speed ratio (Axon/HF): {syn_time / max(hf_time, 1e-9):.3f}x")
+            print(f"Speed ratio (Axon/HF): {syn_time / max(hf_time_safe, 1e-9):.3f}x")
         print()
         if (
             (not skip_hf)

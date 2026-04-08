@@ -37,7 +37,7 @@ from .axon_test import (
     _should_trust_remote_code,
 )
 from .codegen import emit_model_code_from_synapse_spec
-from .runtime import SynapseProgramModel
+from .runtime import SymbolValue, SynapseProgramModel
 
 _CANONICAL_DTYPES = ("float32", "bfloat16", "float16")
 _MASKED_LM_MODEL_TYPES = {
@@ -223,7 +223,7 @@ class _TracingSynapseProgramModel(SynapseProgramModel):
         *,
         node_path: str,
         scope: str,
-        symbols: dict[str, int | float | bool],
+        symbols: dict[str, SymbolValue],
     ) -> None:
         super()._execute_op(op, node_spec, env, node_path=node_path, scope=scope, symbols=symbols)
         kind = _synapse_kind(op)
@@ -288,7 +288,7 @@ class _NodeTracingSynapseProgramModel(SynapseProgramModel):
         *,
         node_path: str,
         scope: str,
-        symbols: dict[str, int | float | bool],
+        symbols: dict[str, SymbolValue],
     ) -> None:
         super()._execute_op(op, node_spec, env, node_path=node_path, scope=scope, symbols=symbols)
         bind = node_spec.get("_bind")

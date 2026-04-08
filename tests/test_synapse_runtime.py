@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
@@ -637,7 +638,7 @@ def _cache_state_generate_spec() -> dict[str, object]:
     }
 
 
-def _split_interleave_spec() -> dict[str, object]:
+def _split_parts_spec() -> dict[str, object]:
     return {
         "synapse": 1,
         "model": {
@@ -649,7 +650,6 @@ def _split_interleave_spec() -> dict[str, object]:
                         "_args": "x",
                         "_bind": ["even", "odd"],
                         "parts": 2,
-                        "interleave": True,
                     }
                 }
             ],
@@ -1421,13 +1421,13 @@ def test_runtime_linear_expert_materializes_mxfp4_aliases() -> None:
     assert torch.allclose(out["y"], expected, atol=1e-6, rtol=0.0)
 
 
-def test_runtime_split_supports_interleave_mode() -> None:
-    spec = _split_interleave_spec()
+def test_runtime_split_parts_mode() -> None:
+    spec = _split_parts_spec()
     model = SynapseProgramModel.from_spec(spec)
     x = torch.tensor([[0.0, 1.0, 2.0, 3.0]], dtype=torch.float32)
     out = model(x=x)
-    assert torch.equal(out["even"], torch.tensor([[0.0, 2.0]], dtype=torch.float32))
-    assert torch.equal(out["odd"], torch.tensor([[1.0, 3.0]], dtype=torch.float32))
+    assert torch.equal(out["even"], torch.tensor([[0.0, 1.0]], dtype=torch.float32))
+    assert torch.equal(out["odd"], torch.tensor([[2.0, 3.0]], dtype=torch.float32))
 
 
 def test_runtime_clamp_and_sigmoid_ops() -> None:

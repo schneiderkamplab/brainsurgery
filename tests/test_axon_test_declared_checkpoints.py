@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import brainsurgery.synapse.axon_benchmark as axon_benchmark_module
 import brainsurgery.synapse.axon_test as axon_test_module
 
@@ -254,6 +256,8 @@ main x = do
         log_dir: Path | None,
         stream_csv: Path | None,
         common_kwargs: dict[str, object],
+        worker_specs=None,
+        debug_errors: bool = False,
     ):
         parallel_call["pairs"] = pairs
         parallel_call["processes"] = processes
@@ -261,6 +265,8 @@ main x = do
         parallel_call["log_dir"] = log_dir
         parallel_call["stream_csv"] = stream_csv
         parallel_call["common_kwargs"] = common_kwargs
+        parallel_call["worker_specs"] = worker_specs
+        parallel_call["debug_errors"] = debug_errors
         return [
             {
                 "masked_top1_eq": True,
@@ -612,8 +618,65 @@ main x = do
         encoding="utf-8",
     )
 
+    def _fake_resolve_pipeline_worker_specs(
+        *, device: str, processes: int, pipeline_parallel_size: int | None
+    ):
+        del pipeline_parallel_size
+        # Simulate two workers with two GPUs each.
+        assert device == "cuda"
+        assert processes == 2
+        return [
+            axon_benchmark_module._WorkerSpec(run_device="cuda", cuda_visible_devices="0,1"),
+            axon_benchmark_module._WorkerSpec(run_device="cuda", cuda_visible_devices="2,3"),
+        ]
+
+    seen: dict[str, object] = {}
+
+    def _fake_parallel(
+        pairs,
+        *,
+        processes: int,
+        device: str,
+        log_dir: Path | None,
+        stream_csv: Path | None,
+        common_kwargs: dict[str, object],
+        worker_specs=None,
+        debug_errors: bool = False,
+    ):
+        seen["pairs"] = pairs
+        seen["processes"] = processes
+        seen["device"] = device
+        seen["log_dir"] = log_dir
+        seen["stream_csv"] = stream_csv
+        seen["common_kwargs"] = common_kwargs
+        seen["worker_specs"] = worker_specs
+        seen["debug_errors"] = debug_errors
+        return [
+            {
+                "masked_top1_eq": True,
+                "masked_max_diff": 0.0,
+                "masked_max_rel_diff": 0.0,
+                "axon_file": pair.axon_file,
+                "checkpoint_id": pair.checkpoint_id,
+                "weights": pair.model_dir,
+                "hf_model_dir": pair.model_dir,
+            }
+            for pair in pairs
+        ]
+
+    def _fake_repo_root() -> Path:
+        return tmp_path
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(axon_benchmark_module, "_repo_root", _fake_repo_root)
+    monkeypatch.setattr(
+        axon_benchmark_module,
+        "_resolve_pipeline_worker_specs",
+        _fake_resolve_pipeline_worker_specs,
+    )
+    monkeypatch.setattr(axon_benchmark_module, "_run_benchmark_jobs_parallel", _fake_parallel)
     try:
-        axon_benchmark_module.run_axon_benchmark(
+        result = axon_benchmark_module.run_axon_benchmark(
             axon_files=[axon_path],
             axon_backend="pipeline",
             device="cuda",
@@ -623,10 +686,15 @@ main x = do
             max_len=4,
             table_format="plain",
         )
-    except ValueError as exc:
-        assert "requires --processes 1" in str(exc)
-    else:
-        raise AssertionError("expected ValueError for pipeline backend with processes > 1")
+    finally:
+        monkeypatch.undo()
+
+    assert seen["processes"] == 2
+    assert seen["device"] == "cuda"
+    assert isinstance(seen["worker_specs"], list)
+    assert len(seen["worker_specs"]) == 2
+    assert isinstance(result, dict)
+    assert "results" in result
 
 
 def test_run_axon_benchmark_sorts_summary_by_checkpoint_and_metrics(

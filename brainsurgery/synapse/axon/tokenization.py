@@ -64,7 +64,11 @@ def load_tokenizer(
                 return _from_pretrained(source, **kwargs)
             except Exception as exc:
                 last_error = exc
-        if _looks_like_hf_repo_id(fallback_repo_id) and fallback_repo_id != source:
+        if (
+            isinstance(fallback_repo_id, str)
+            and _looks_like_hf_repo_id(fallback_repo_id)
+            and fallback_repo_id != source
+        ):
             try:
                 return _from_pretrained(
                     fallback_repo_id,
@@ -87,7 +91,11 @@ def load_tokenizer(
             tokenizer_source, local_files_only=False, trust_remote_code=trust_remote_code
         )
     except Exception:
-        if _looks_like_hf_repo_id(fallback_repo_id) and fallback_repo_id != tokenizer_source:
+        if (
+            isinstance(fallback_repo_id, str)
+            and _looks_like_hf_repo_id(fallback_repo_id)
+            and fallback_repo_id != tokenizer_source
+        ):
             try:
                 return _from_pretrained(
                     fallback_repo_id,
@@ -149,7 +157,11 @@ def _special_token_ids_from_config(
         sources.append(str(candidate.resolve()))
     else:
         sources.append(tokenizer_source)
-    if _looks_like_hf_repo_id(fallback_repo_id) and fallback_repo_id not in sources:
+    if (
+        isinstance(fallback_repo_id, str)
+        and _looks_like_hf_repo_id(fallback_repo_id)
+        and fallback_repo_id not in sources
+    ):
         sources.append(fallback_repo_id)
     for source in sources:
         path = Path(source)

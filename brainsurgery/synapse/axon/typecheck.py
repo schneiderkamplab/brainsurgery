@@ -392,6 +392,31 @@ def _dim_equal(
     return _dim_key(left_n) == _dim_key(right_n)
 
 
+def _substitute_type_dims(
+    tp: TypeExpr,
+    *,
+    dim_subst: dict[str, DimToken],
+    symbols: dict[str, DimToken],
+) -> TypeExpr:
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(
+            inner=_substitute_type_dims(tp.inner, dim_subst=dim_subst, symbols=symbols)
+        )
+    if isinstance(tp, TypeTensor):
+        dims = tuple(_normalize_dim(dim, subst=dim_subst, symbols=symbols) for dim in tp.dims)
+        return TypeTensor(base=tp.base, dims=dims)
+    if isinstance(tp, TypeList):
+        return TypeList(item=_substitute_type_dims(tp.item, dim_subst=dim_subst, symbols=symbols))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(
+            items=tuple(
+                _substitute_type_dims(item, dim_subst=dim_subst, symbols=symbols)
+                for item in tp.items
+            )
+        )
+    return tp
+
+
 def _is_flexible_dim_var(token: DimToken, rigid_symbols: set[str]) -> bool:
     return isinstance(token, str) and token not in rigid_symbols
 
@@ -1368,9 +1393,19 @@ def _call_return_type(
                     f"{callee!r} arg {idx}: expected {render_type(param_type)}, "
                     f"got {render_type(arg_type)}",
                 )
-        if len(call_sig.returns) == 1:
-            return call_sig.returns[0]
-        return TypeTuple(items=call_sig.returns)
+            if idx < len(call_sig.param_names):
+                param_name = call_sig.param_names[idx]
+                if param_name == "dim" and isinstance(param_type, TypeInt | TypeFloat):
+                    dim_token = _infer_dim_token_from_expr(arg_expr, env=env)
+                    if dim_token is not None:
+                        dim_subst[param_name] = dim_token
+        substituted_returns = tuple(
+            _substitute_type_dims(ret, dim_subst=dim_subst, symbols=dim_symbols)
+            for ret in call_sig.returns
+        )
+        if len(substituted_returns) == 1:
+            return substituted_returns[0]
+        return TypeTuple(items=substituted_returns)
 
     if callee in {"sqrt", "Prelude.sqrt"}:
         if kwargs:
