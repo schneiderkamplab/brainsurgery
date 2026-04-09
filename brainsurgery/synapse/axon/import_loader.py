@@ -26,6 +26,7 @@ from .types import (
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
+    AxonStatement,
 )
 
 
@@ -145,6 +146,105 @@ def _apply_namespace(
 ) -> tuple[AxonModule, ...]:
     if not namespace:
         return modules
+    local_module_names = {module.name for module in modules if "." not in module.name}
+
+    def _qualify_callee(callee: str) -> str:
+        base, sep, suffix = callee.partition("@")
+        if "." in base or base not in local_module_names:
+            return callee
+        qualified = f"{namespace}.{base}"
+        return f"{qualified}{sep}{suffix}" if sep else qualified
+
+    def _rewrite_expr(expr: AxonExpr) -> AxonExpr:
+        if isinstance(expr, AxonExprCall):
+            return AxonExprCall(
+                callee=_qualify_callee(expr.callee),
+                args=tuple(_rewrite_expr(arg) for arg in expr.args),
+                kwargs={
+                    key: _rewrite_expr(value) if isinstance(value, AxonExpr) else value
+                    for key, value in expr.kwargs.items()
+                },
+            )
+        if isinstance(expr, AxonExprPipe):
+            return AxonExprPipe(
+                value=_rewrite_expr(expr.value),
+                stages=tuple(_rewrite_expr(stage) for stage in expr.stages),
+            )
+        if isinstance(expr, AxonExprBind):
+            return AxonExprBind(
+                value=_rewrite_expr(expr.value),
+                var=expr.var,
+                body=_rewrite_expr(expr.body),
+            )
+        if isinstance(expr, AxonExprIf):
+            return AxonExprIf(
+                cond=_rewrite_expr(expr.cond),
+                true_expr=_rewrite_expr(expr.true_expr),
+                false_expr=_rewrite_expr(expr.false_expr),
+            )
+        if isinstance(expr, AxonExprTernary):
+            return AxonExprTernary(
+                cond=_rewrite_expr(expr.cond),
+                true_expr=_rewrite_expr(expr.true_expr),
+                false_expr=_rewrite_expr(expr.false_expr),
+            )
+        if isinstance(expr, AxonExprBinary):
+            return AxonExprBinary(
+                op=expr.op,
+                left=_rewrite_expr(expr.left),
+                right=_rewrite_expr(expr.right),
+            )
+        if isinstance(expr, AxonExprLambda):
+            return AxonExprLambda(var=expr.var, body=_rewrite_expr(expr.body))
+        if isinstance(expr, AxonExprParen):
+            return AxonExprParen(inner=_rewrite_expr(expr.inner))
+        if isinstance(expr, AxonExprList):
+            return AxonExprList(items=tuple(_rewrite_expr(item) for item in expr.items))
+        if isinstance(expr, AxonExprTuple):
+            return AxonExprTuple(items=tuple(_rewrite_expr(item) for item in expr.items))
+        if isinstance(expr, AxonExprDo):
+            return AxonExprDo(body=_rewrite_statements(expr.body), inline=expr.inline)
+        return expr
+
+    def _rewrite_statements(
+        statements: tuple[AxonStatement, ...],
+    ) -> tuple[AxonStatement, ...]:
+        rewritten: list[AxonStatement] = []
+        for stmt in statements:
+            if isinstance(stmt, AxonBind):
+                rewritten.append(AxonBind(targets=stmt.targets, expr=_rewrite_expr(stmt.expr)))
+                continue
+            if isinstance(stmt, AxonReturn):
+                rewritten.append(AxonReturn(values=tuple(_rewrite_expr(v) for v in stmt.values)))
+                continue
+            if isinstance(stmt, AxonRepeat):
+                rewritten.append(
+                    AxonRepeat(
+                        name=stmt.name,
+                        var=stmt.var,
+                        to_expr=_rewrite_expr(stmt.to_expr),
+                        from_expr=_rewrite_expr(stmt.from_expr),
+                        step_expr=_rewrite_expr(stmt.step_expr),
+                        body=_rewrite_statements(stmt.body),
+                    )
+                )
+                continue
+            if isinstance(stmt, AxonScopeBind):
+                rewritten.append(
+                    AxonScopeBind(
+                        targets=stmt.targets,
+                        prefix=_qualify_callee(stmt.prefix),
+                        body=_rewrite_statements(stmt.body),
+                        kwargs={
+                            key: _rewrite_expr(value) if isinstance(value, AxonExpr) else value
+                            for key, value in stmt.kwargs.items()
+                        },
+                    )
+                )
+                continue
+            rewritten.append(stmt)
+        return tuple(rewritten)
+
     namespaced: list[AxonModule] = []
     for module in modules:
         if "." in module.name:
@@ -157,7 +257,7 @@ def _apply_namespace(
                 path_params=module.path_params,
                 params=module.params,
                 returns=module.returns,
-                statements=module.statements,
+                statements=_rewrite_statements(module.statements),
                 imports=module.imports,
                 imported_members=module.imported_members,
                 symbols=module.symbols,

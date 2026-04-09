@@ -15,13 +15,13 @@ from .pipeline_backend import (
 )
 from .runtime import SynapseProgramModel
 
-_LAYER_KEY_RE = re.compile(r"(^|\.)layers\.(\d+)(\.|$)")
+_LAYER_KEY_RE = re.compile(r"(^|\.)(layers|layer|block|h)\.(\d+)(\.|$)")
 
 
 def _hf_device_map_prefix_for_key(key: str) -> str | None:
     match = _LAYER_KEY_RE.search(key)
     if match is not None:
-        prefix = key[: match.end(2)]
+        prefix = key[: match.end(3)]
         return prefix
     if "." not in key:
         return None
@@ -36,6 +36,7 @@ def _candidate_hf_prefixes(prefix: str) -> tuple[str, ...]:
     out = [
         prefix,
         f"model.{prefix}",
+        f"transformer.{prefix}",
         prefix.replace("language_model.model.", "language_model.", 1),
         f"model.{prefix.replace('language_model.model.', 'language_model.', 1)}",
         prefix.replace("language_model.", "model.language_model.", 1),
@@ -55,6 +56,10 @@ def _candidate_hf_prefixes(prefix: str) -> tuple[str, ...]:
 
 def _match_prefix_to_hf_names(prefix: str, hf_param_names: set[str]) -> str:
     if not hf_param_names:
+        # Fallback for GPT/BLOOM-style unprefixed runtime keys when HF parameter
+        # introspection is unavailable (empty set).
+        if prefix.startswith("h.") or prefix == "ln_f" or prefix.startswith("word_embeddings"):
+            return f"transformer.{prefix}"
         return prefix
     candidates = _candidate_hf_prefixes(prefix)
     best = prefix
@@ -135,7 +140,7 @@ class _PipelineStateView(Mapping[str, torch.Tensor]):
         match = _LAYER_KEY_RE.search(key)
         if match is None:
             return
-        layer_index = int(match.group(2))
+        layer_index = int(match.group(3))
         if self._stage.layer_start <= layer_index < self._stage.layer_stop:
             return
         raise ValueError(
@@ -489,7 +494,13 @@ def build_hf_device_map_from_pipeline_usage(
             prefix = _match_prefix_to_hf_names(prefix, hf_param_names)
         device_map.setdefault(prefix, last_device)
     embed_device = next(
-        (device for prefix, device in device_map.items() if prefix.endswith("embed_tokens")),
+        (
+            device
+            for prefix, device in device_map.items()
+            if prefix.endswith("embed_tokens")
+            or prefix.endswith("word_embeddings")
+            or prefix.endswith("wte")
+        ),
         None,
     )
     if embed_device is not None:

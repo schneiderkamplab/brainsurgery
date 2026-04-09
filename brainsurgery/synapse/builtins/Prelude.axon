@@ -28,6 +28,9 @@ merge_heads = _merge_heads
 permute :: Tensor -> Tensor
 permute = _permute
 
+transpose :: Tensor -> Tensor
+transpose = _transpose
+
 reshape :: Tensor -> Tensor
 reshape = _reshape
 
@@ -70,11 +73,20 @@ repeat = _repeat
 mul :: Tensor[B,T,D] -> Tensor[B,T,D] -> Tensor[B,T,D]
 mul = _mul
 
+matmul :: Tensor -> Tensor -> Tensor
+matmul = _matmul
+
 eq :: Tensor -> Tensor -> Tensor
 eq = _eq
 
-masked_fill :: Tensor -> Tensor -> Tensor
-masked_fill = _masked_fill
+le = _le
+
+and = _and
+
+where = _where
+
+masked_fill :: Tensor -> Tensor -> Tensor -> Tensor
+masked_fill x mask value = where mask value x
 
 slice :: Tensor -> Tensor
 slice = _slice
@@ -90,3 +102,6 @@ topk = _topk
 
 zeros_like :: Tensor[B,T,D] -> Tensor[B,T,D]
 zeros_like = _zeros_like
+
+min_like :: Tensor[B,T,D] -> Tensor[B,T,D]
+min_like = _min_like

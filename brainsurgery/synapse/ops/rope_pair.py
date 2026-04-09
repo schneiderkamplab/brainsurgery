@@ -411,7 +411,7 @@ def interpret(
         ext_factors_raw = long_factor_raw if seq_len > original_context else short_factor_raw
         if len(ext_factors_raw) != int(half):
             raise ValueError(
-                "rope_pair longrope/su factor length must match head_dim/2: "
+                "rope_pair longrope/su factor length must match rotary_dim/2: "
                 f"expected {int(half)}, got {len(ext_factors_raw)}"
             )
         ext_factors = torch.tensor(ext_factors_raw, dtype=torch.float32, device=q.device)
@@ -744,7 +744,7 @@ def compile(
             )
             lines.append(f"{indent}    if len({ext_raw}) != int({half}):")
             lines.append(
-                f"{indent}        raise ValueError('rope_pair longrope/su factor length must match head_dim/2')"
+                f"{indent}        raise ValueError('rope_pair longrope/su factor length must match rotary_dim/2')"
             )
             lines.append(
                 f"{indent}    {ext_factors} = torch.tensor({ext_raw}, dtype=torch.float32, device={q}.device)"
@@ -876,7 +876,7 @@ def compile(
         )
         lines.append(f"{indent}if len({ext_raw}) != int({half}):")
         lines.append(
-            f"{indent}    raise ValueError('rope_pair longrope/su factor length must match head_dim/2')"
+            f"{indent}    raise ValueError('rope_pair longrope/su factor length must match rotary_dim/2')"
         )
         lines.append(
             f"{indent}{ext_factors} = torch.tensor({ext_raw}, dtype=torch.float32, device={q}.device)"

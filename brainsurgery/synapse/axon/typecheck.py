@@ -654,6 +654,38 @@ def _is_any_type(tp: TypeExpr) -> bool:
     return False
 
 
+def _refine_env_for_null_test(
+    cond: AxonExpr,
+    env: dict[str, TypeExpr],
+) -> tuple[dict[str, TypeExpr], dict[str, TypeExpr]]:
+    true_env = dict(env)
+    false_env = dict(env)
+    while isinstance(cond, AxonExprParen):
+        cond = cond.inner
+    if not isinstance(cond, AxonExprBinary) or cond.op not in {"==", "!="}:
+        return true_env, false_env
+
+    refined_name: str | None = None
+    refined_type: TypeExpr | None = None
+    if isinstance(cond.left, AxonExprName) and isinstance(cond.right, AxonExprNull):
+        refined_name = cond.left.name
+        refined_type = env.get(refined_name)
+    elif isinstance(cond.right, AxonExprName) and isinstance(cond.left, AxonExprNull):
+        refined_name = cond.right.name
+        refined_type = env.get(refined_name)
+
+    if refined_name is None or not isinstance(refined_type, TypeOptional):
+        return true_env, false_env
+
+    if cond.op == "==":
+        true_env[refined_name] = TypeNull()
+        false_env[refined_name] = refined_type.inner
+    else:
+        true_env[refined_name] = refined_type.inner
+        false_env[refined_name] = TypeNull()
+    return true_env, false_env
+
+
 def _first_tensor_like_type(arg_types: list[TypeExpr]) -> TypeExpr | None:
     for tp in arg_types:
         root = tp.inner if isinstance(tp, TypeOptional) else tp
@@ -1736,9 +1768,10 @@ def _infer_expr_type(
                 path,
                 f"condition must be Bool-compatible, got {render_type(cond_type)}",
             )
+        true_env, false_env = _refine_env_for_null_test(expr.cond, env)
         true_type = _infer_expr_type(
             expr.true_expr,
-            env=env,
+            env=true_env,
             signatures=signatures,
             primitive_aliases=primitive_aliases,
             module=module,
@@ -1748,7 +1781,7 @@ def _infer_expr_type(
         )
         false_type = _infer_expr_type(
             expr.false_expr,
-            env=env,
+            env=false_env,
             signatures=signatures,
             primitive_aliases=primitive_aliases,
             module=module,

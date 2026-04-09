@@ -401,13 +401,17 @@ def _top_level_layer_loops(
     model_symbols: dict[str, Any] | None = None,
     model_config: dict[str, Any] | None = None,
 ) -> list[tuple[int, str, dict[str, Any], str, str, int, int]]:
+    def _is_layerish_scope(scope_name: str) -> bool:
+        token = scope_name.rsplit(".", 1)[-1]
+        return token in {"layers", "layer", "block", "h"}
+
     loops: list[tuple[int, str, dict[str, Any], str, str, int, int]] = []
     for index, node_name, node_spec in _iter_top_level_named_nodes(model_graph):
         if node_spec.get("_op") != "for":
             continue
         scope_name = node_spec.get("_scope")
         var_name = node_spec.get("_var")
-        if not isinstance(scope_name, str) or not scope_name.endswith(".layers"):
+        if not isinstance(scope_name, str) or not _is_layerish_scope(scope_name):
             continue
         if not isinstance(var_name, str) or not var_name:
             continue
@@ -446,13 +450,6 @@ def _find_primary_layer_loop(
     if not loops:
         raise ValueError("pipeline backend could not find a top-level for@*.layers loop")
     first_var = loops[0][3]
-    first_scope = loops[0][4]
-    for _idx, _name, _spec, var_name, scope_name, _from, _to in loops[1:]:
-        if var_name != first_var or scope_name != first_scope:
-            raise ValueError(
-                "pipeline backend requires all top-level for@*.layers loops "
-                "to share the same loop variable and scope"
-            )
     total_layers = max(to_value for *_head, to_value in loops)
     return first_var, "layers", total_layers
 

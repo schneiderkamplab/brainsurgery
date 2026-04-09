@@ -4,6 +4,12 @@ from typing import Any
 
 
 def _normalize_dim_token(value: Any) -> Any:
+    if (
+        isinstance(value, dict)
+        and value.get("_expr") == "name"
+        and isinstance(value.get("id"), str)
+    ):
+        return value["id"]
     if isinstance(value, str) and value.strip().lstrip("-").isdigit():
         return int(value.strip())
     return value
