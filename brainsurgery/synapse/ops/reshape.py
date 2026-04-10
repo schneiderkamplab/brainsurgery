@@ -5,10 +5,31 @@ from typing import Any
 import torch
 
 OP_NAME = "reshape"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"shape"}
-LOWERING_REQUIRED_KWARGS: set[str] = {"shape"}
-LOWERING_KWARG_KINDS: dict[str, Any] = {"shape": "list_dim"}
+LOWERING_ARITY = (2, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
+
+
+def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
+    raw = node_spec.get("_args")
+    if isinstance(raw, list):
+        return list(raw)
+    if raw is None:
+        return []
+    return [raw]
+
+
+def _name_expr(value: str) -> dict[str, Any]:
+    return {"_expr": "name", "id": value}
+
+
+def _expr_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        token = value.strip()
+        if token.isidentifier():
+            return _name_expr(token)
+    return value
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -19,11 +40,14 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
-    del args, ctx
+    del ctx
     if not isinstance(out, str):
         raise ValueError("reshape requires a single scalar output binding")
-    if "shape" not in kwargs:
-        raise ValueError("reshape requires shape")
+    if kwargs:
+        unknown = ", ".join(sorted(str(key) for key in kwargs))
+        raise ValueError(f"reshape unsupported kwargs: {unknown}")
+    if len(args) != 2:
+        raise ValueError(f"reshape expects 2 positional args, got {len(args)}")
 
 
 def lowering_infer_metadata(
@@ -35,7 +59,9 @@ def lowering_infer_metadata(
 ) -> bool:
     if not isinstance(out, str):
         return False
-    shape = kwargs.get("shape")
+    if len(args) != 2:
+        return False
+    shape = args[1]
     if not isinstance(shape, list) or not shape:
         return False
     ctx.tensor_shape[out] = tuple(shape)
@@ -75,8 +101,11 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope
-    src = model._read_tensor_input(node_spec.get("_args"), env)
-    shape = _resolve_shape(model, node_spec.get("shape"), env, symbols)
+    args = _raw_args(node_spec)
+    if len(args) != 2:
+        raise ValueError("reshape requires positional args: x shape")
+    src = model._read_tensor_input(args[0], env)
+    shape = _resolve_shape(model, args[1], env, symbols)
     out = model._require_name(node_spec.get("_bind"), field="reshape._bind")
     env[out] = torch.reshape(src, shape)
 
@@ -92,15 +121,16 @@ def compile(
 ) -> list[str]:
     del node_path_var, scope_var
     lines: list[str] = []
-    src = emitter._read_env_var(env, str(node_spec.get("_args")))
+    args = _raw_args(node_spec)
+    if len(args) != 2:
+        raise ValueError("reshape requires positional args: x shape")
+    src = emitter._read_env_var(env, str(args[0]))
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
-    raw_shape = node_spec.get("shape")
+    raw_shape = args[1]
     if isinstance(raw_shape, list) and raw_shape:
-        shape_expr = (
-            f"({', '.join(f'int({emitter._expr_code(item, env)})' for item in raw_shape)},)"
-        )
+        shape_expr = f"({', '.join(f'int({emitter._expr_code(_expr_payload(item), env)})' for item in raw_shape)},)"
     else:
-        shape_expr = emitter._expr_code(raw_shape, env)
+        shape_expr = emitter._expr_code(_expr_payload(raw_shape), env)
     shape_var = emitter._fresh("shape")
     lines.append(f"{indent}{shape_var} = tuple(int(v) for v in {shape_expr})")
     lines.append(f"{indent}if len({shape_var}) == 0:")
@@ -110,8 +140,8 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any",),
-    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "args": ("Any", "Any"),
+    "kwargs": {},
     "returns": ("Tensor",),
 }
 

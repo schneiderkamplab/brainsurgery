@@ -19,11 +19,11 @@ bert_block x attn_mask = do
     v <- linear@self.value x dim=D bias=true |> reshape_heads heads=H
     return attention q k v mask=attn_mask padding_mask=true causal=false |> merge_heads |> linear@output.dense dim=D bias=true
   x <- x + a
-  x <- layernorm@attention.output.LayerNorm x eps=EPS weight=gamma bias=beta
+  x <- layernorm@attention.output.LayerNorm x eps=EPS weight_path=@attention.output.LayerNorm.gamma bias_path=@attention.output.LayerNorm.beta
   m <- linear@intermediate.dense x dim=FFN bias=true |> gelu
   m <- linear@output.dense m dim=D bias=true
   y <- x + m
-  y <- layernorm@output.LayerNorm y eps=EPS weight=gamma bias=beta
+  y <- layernorm@output.LayerNorm y eps=EPS weight_path=@output.LayerNorm.gamma bias_path=@output.LayerNorm.beta
   return y
 
 bert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
@@ -35,11 +35,11 @@ bert input_ids attn_mask = do
   typ <- embedding@bert.embeddings.token_type_embeddings tok_type_ids dim=D
   x <- tok + pos
   x <- x + typ
-  x <- layernorm@bert.embeddings.LayerNorm x eps=EPS weight=gamma bias=beta
+  x <- layernorm@bert.embeddings.LayerNorm x eps=EPS weight_path=@@bert.embeddings.LayerNorm.gamma bias_path=@@bert.embeddings.LayerNorm.beta
   for@bert.encoder.layer i <- [0..L) do
     x <- bert_block x attn_mask
   logits <- scope@cls.predictions do
     x <- linear@transform.dense x dim=D bias=true |> gelu
-    x <- layernorm@transform.LayerNorm x eps=EPS weight=gamma bias=beta
-    return linear@decoder x dim=V bias=true weight="@@bert.embeddings.word_embeddings.weight" bias_path="@@cls.predictions.bias"
+    x <- layernorm@transform.LayerNorm x eps=EPS weight_path=@@cls.predictions.transform.LayerNorm.gamma bias_path=@@cls.predictions.transform.LayerNorm.beta
+    return linear@decoder x dim=V bias=true weight_path=@@bert.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
   return logits

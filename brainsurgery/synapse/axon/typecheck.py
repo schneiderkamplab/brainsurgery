@@ -106,6 +106,7 @@ class ModuleSignature:
     param_names: tuple[str, ...]
     returns: tuple[TypeExpr, ...]
     optional_params: tuple[bool, ...]
+    param_default_exprs: tuple[AxonExpr | None, ...]
     param_shapes: tuple[tuple[DimToken, ...] | None, ...]
     return_shapes: tuple[tuple[DimToken, ...] | None, ...]
 
@@ -140,6 +141,7 @@ def _module_signature(module: AxonModule) -> ModuleSignature:
     param_types: list[TypeExpr] = []
     param_names: list[str] = []
     optional_flags: list[bool] = []
+    default_exprs: list[AxonExpr | None] = []
     param_shapes: list[tuple[DimToken, ...] | None] = []
     for param in module.params:
         if not isinstance(param.type_expr, _TYPE_EXPR_CLASSES):
@@ -152,6 +154,7 @@ def _module_signature(module: AxonModule) -> ModuleSignature:
         param_types.append(param_type)
         param_names.append(param.name)
         optional_flags.append(bool(param.optional))
+        default_exprs.append(param.default_expr)
         parsed_shape = _shape_from_param_shape(param.shape)
         if parsed_shape is None:
             parsed_shape = _shape_dims_from_type(param_type)
@@ -171,12 +174,54 @@ def _module_signature(module: AxonModule) -> ModuleSignature:
         param_names=tuple(param_names),
         returns=tuple(return_types),
         optional_params=tuple(optional_flags),
+        param_default_exprs=tuple(default_exprs),
         param_shapes=tuple(param_shapes),
         return_shapes=tuple(return_shapes),
     )
 
 
 def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple[str, int]]:
+    def _module_path_param_names(module: AxonModule) -> tuple[str, ...]:
+        if module.path_params:
+            return tuple(module.path_params)
+        if module.path_param is not None:
+            return (module.path_param,)
+        return ()
+
+    def _is_identity_alias_call(module: AxonModule, value: AxonExprCall) -> bool:
+        # Defaulted wrapper params change call-surface semantics (especially kwargs),
+        # so do not collapse those wrappers to primitives.
+        if any(param.default_expr is not None for param in module.params):
+            return False
+        callee_parts = value.callee.split("@")
+        callee_path_params = tuple(callee_parts[1:])
+        module_path_params = _module_path_param_names(module)
+        if callee_path_params != module_path_params:
+            return False
+        if value.kwargs:
+            return False
+        if len(value.args) != len(module.params):
+            return False
+        for arg_expr, param in zip(value.args, module.params, strict=True):
+            if not isinstance(arg_expr, AxonExprName) or arg_expr.name != param.name:
+                return False
+        return True
+
+    def _same_module_signature(left: AxonModule, right: AxonModule) -> bool:
+        left_sig = _module_signature(left)
+        right_sig = _module_signature(right)
+        return (
+            left_sig.path_param_count == right_sig.path_param_count
+            and left_sig.params == right_sig.params
+            and left_sig.param_names == right_sig.param_names
+            and left_sig.returns == right_sig.returns
+            and left_sig.optional_params == right_sig.optional_params
+            and left_sig.param_default_exprs == right_sig.param_default_exprs
+            and left_sig.param_shapes == right_sig.param_shapes
+            and left_sig.return_shapes == right_sig.return_shapes
+        )
+
+    modules_by_name = {module.name: module for module in modules}
     direct_aliases: dict[str, tuple[str, int]] = {}
     for module in modules:
         if not isinstance(module.name, str) or "." not in module.name:
@@ -189,8 +234,13 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
         value = stmt.values[0]
         if not isinstance(value, AxonExprCall):
             continue
+        if not _is_identity_alias_call(module, value):
+            continue
         target_base = value.callee.split("@", 1)[0]
-        direct_aliases[module.name] = (target_base, len(module.path_params))
+        target_module = modules_by_name.get(target_base)
+        if target_module is not None and not _same_module_signature(module, target_module):
+            continue
+        direct_aliases[module.name] = (target_base, len(_module_path_param_names(module)))
 
     aliases: dict[str, tuple[str, int]] = {}
     for name, (target_base, expected_path_count) in direct_aliases.items():
@@ -465,6 +515,18 @@ def _types_compatible(
     dim_symbols: dict[str, DimToken],
     rigid_symbols: set[str],
 ) -> bool:
+    def _is_path_type(tp: TypeExpr) -> bool:
+        return isinstance(tp, TypeNamed) and tp.name == "Path"
+
+    # Path-typed parameters accept explicit string/path values only.
+    if _is_path_type(expected):
+        if isinstance(actual, TypeString):
+            return True
+        if _is_path_type(actual):
+            return True
+    if _is_path_type(actual) and isinstance(expected, TypeString):
+        return True
+
     if isinstance(expected, TypeAny):
         return True
     if isinstance(actual, TypeAny):
@@ -535,6 +597,8 @@ def _types_compatible(
         )
     if isinstance(actual, TypeInt) and isinstance(expected, TypeFloat):
         return True
+    if isinstance(actual, TypeInt) and isinstance(expected, TypeNamed) and expected.name == "Dim":
+        return True
     if isinstance(actual, TypeList) and isinstance(expected, TypeNamed):
         expected_item = _named_list_item_type(expected.name)
         if expected_item is None:
@@ -569,6 +633,8 @@ def _types_compatible(
         return actual.name in {"Tensor", "IdxTensor"}
     if type(actual) is type(expected):
         if isinstance(actual, TypeNamed) and isinstance(expected, TypeNamed):
+            if {actual.name, expected.name} <= {"Tensor", "IdxTensor"}:
+                return True
             return actual.name == expected.name
         return True
     if isinstance(actual, TypeNamed) or isinstance(expected, TypeNamed):
@@ -613,6 +679,18 @@ def _kwarg_matches_kind(value: Any, expected: str) -> bool:
         if isinstance(expr_type, TypeString):
             return True
         return isinstance(raw, str)
+    if expected == "path":
+        if isinstance(expr_type, TypeNamed) and expr_type.name == "Path":
+            return True
+        if isinstance(expr_type, TypeString):
+            return True
+        return isinstance(raw, str)
+    if expected == "path_or_null":
+        if isinstance(expr_type, TypeNamed) and expr_type.name == "Path":
+            return True
+        if isinstance(expr_type, (TypeString, TypeNull)):
+            return True
+        return isinstance(raw, str) or raw is None
     if expected == "str_or_bool_or_null":
         if isinstance(expr_type, (TypeString, TypeBool, TypeNull)):
             return True
@@ -956,23 +1034,9 @@ def _primitive_output_type(
             else TypeNamed(name="Tensor")
         )
         return TypeTuple(items=(k_ctx, v_ctx, present))
-    if op_name == "split":
-        split_arity: int | None = None
-        sizes_expr = kwargs.get("sizes")
-        if isinstance(sizes_expr, AxonExprList):
-            split_arity = len(sizes_expr.items)
-        parts_expr = kwargs.get("parts")
-        if split_arity is None and isinstance(parts_expr, AxonExprInt):
-            if parts_expr.value > 0:
-                split_arity = parts_expr.value
-        if split_arity is None:
-            split_arity = (
-                expected_arity if (isinstance(expected_arity, int) and expected_arity > 0) else 1
-            )
+    if op_name in {"split", "chunk"}:
         tensor_type = arg_types[0] if arg_types else TypeAny()
-        if split_arity <= 1:
-            return tensor_type
-        return TypeTuple(items=tuple(tensor_type for _ in range(split_arity)))
+        return TypeList(item=tensor_type)
     if op_name == "list_append":
         list_arg = arg_types[0] if arg_types else TypeAny()
         list_root = list_arg.inner if isinstance(list_arg, TypeOptional) else list_arg
@@ -1032,11 +1096,11 @@ def _primitive_output_type(
     kwarg_scalars: dict[str, Any] = {}
     for key, value in kwargs.items():
         if isinstance(value, AxonExpr):
-            scalar_value = _expr_scalar_value(value, env=env)
+            scalar_value = _expr_scalar_value(value, env=env, dim_symbols=dim_symbols)
             if scalar_value is not _MISSING:
                 kwarg_scalars[key] = scalar_value
                 continue
-            dim_token = _infer_dim_token_from_expr(value, env=env)
+            dim_token = _infer_dim_token_from_expr(value, env=env, dim_symbols=dim_symbols)
             if dim_token is not None:
                 kwarg_scalars[key] = render_dim_token(dim_token)
                 continue
@@ -1127,18 +1191,25 @@ def _primitive_output_type(
     return TypeAny()
 
 
-def _infer_dim_token_from_expr(expr: AxonExpr, *, env: dict[str, TypeExpr]) -> DimToken | None:
+def _infer_dim_token_from_expr(
+    expr: AxonExpr,
+    *,
+    env: dict[str, TypeExpr],
+    dim_symbols: dict[str, DimToken] | None = None,
+) -> DimToken | None:
     if isinstance(expr, AxonExprInt):
         return expr.value
     if isinstance(expr, AxonExprName):
         if expr.name in env:
             return expr.name
+        if isinstance(dim_symbols, dict) and expr.name in dim_symbols:
+            return expr.name
         return None
     if isinstance(expr, AxonExprParen):
-        return _infer_dim_token_from_expr(expr.inner, env=env)
+        return _infer_dim_token_from_expr(expr.inner, env=env, dim_symbols=dim_symbols)
     if isinstance(expr, AxonExprBinary) and expr.op in {"+", "-", "*", "/"}:
-        left = _infer_dim_token_from_expr(expr.left, env=env)
-        right = _infer_dim_token_from_expr(expr.right, env=env)
+        left = _infer_dim_token_from_expr(expr.left, env=env, dim_symbols=dim_symbols)
+        right = _infer_dim_token_from_expr(expr.right, env=env, dim_symbols=dim_symbols)
         if left is None or right is None:
             return None
         return DimExprBinary(op=expr.op, left=left, right=right)
@@ -1179,7 +1250,12 @@ def _list_type_placeholder(item_type: TypeExpr) -> list[Any]:
     return []
 
 
-def _expr_scalar_value(expr: AxonExpr, *, env: dict[str, TypeExpr]) -> Any:
+def _expr_scalar_value(
+    expr: AxonExpr,
+    *,
+    env: dict[str, TypeExpr],
+    dim_symbols: dict[str, DimToken] | None = None,
+) -> Any:
     if isinstance(expr, AxonExprInt):
         return expr.value
     if isinstance(expr, AxonExprFloat):
@@ -1193,19 +1269,19 @@ def _expr_scalar_value(expr: AxonExpr, *, env: dict[str, TypeExpr]) -> Any:
     if isinstance(expr, AxonExprName):
         return expr.name
     if isinstance(expr, AxonExprParen):
-        return _expr_scalar_value(expr.inner, env=env)
+        return _expr_scalar_value(expr.inner, env=env, dim_symbols=dim_symbols)
     if isinstance(expr, AxonExprList):
         items: list[Any] = []
         for item in expr.items:
-            value = _expr_scalar_value(item, env=env)
+            value = _expr_scalar_value(item, env=env, dim_symbols=dim_symbols)
             if value is _MISSING:
-                dim_token = _infer_dim_token_from_expr(item, env=env)
+                dim_token = _infer_dim_token_from_expr(item, env=env, dim_symbols=dim_symbols)
                 if dim_token is None:
                     return _MISSING
                 value = render_dim_token(dim_token)
             items.append(value)
         return items
-    dim_token = _infer_dim_token_from_expr(expr, env=env)
+    dim_token = _infer_dim_token_from_expr(expr, env=env, dim_symbols=dim_symbols)
     if dim_token is not None:
         return render_dim_token(dim_token)
     return _MISSING
@@ -1264,6 +1340,26 @@ def _broadcast_dims(
     for left_raw, right_raw in zip(left_full, right_full, strict=True):
         left_dim = _normalize_dim(left_raw, subst=subst, symbols=symbols)
         right_dim = _normalize_dim(right_raw, subst=subst, symbols=symbols)
+        if _is_flexible_dim_var(right_dim, rigid_symbols):
+            assert isinstance(right_dim, str)
+            prev = subst.get(right_dim)
+            if prev is None:
+                subst[right_dim] = left_dim
+                right_dim = left_dim
+            else:
+                if not _dim_equal(prev, left_dim, subst=subst, symbols=symbols):
+                    return None
+                right_dim = prev
+        if _is_flexible_dim_var(left_dim, rigid_symbols):
+            assert isinstance(left_dim, str)
+            prev = subst.get(left_dim)
+            if prev is None:
+                subst[left_dim] = right_dim
+                left_dim = right_dim
+            else:
+                if not _dim_equal(prev, right_dim, subst=subst, symbols=symbols):
+                    return None
+                left_dim = prev
         if _dim_equal(left_dim, right_dim, subst=subst, symbols=symbols):
             result.append(left_dim)
             continue
@@ -1308,6 +1404,151 @@ def _arity_kwarg_value(value: Any) -> Any:
     return value
 
 
+def _kwarg_value_to_expr(value: AxonKwargValue) -> AxonExpr:
+    if isinstance(value, AxonExpr):
+        return value
+    if isinstance(value, bool):
+        return AxonExprBool(value=value)
+    if isinstance(value, int):
+        return AxonExprInt(value=value)
+    if isinstance(value, float):
+        return AxonExprFloat(value=value)
+    if value is None:
+        return AxonExprNull()
+    if isinstance(value, str):
+        return AxonExprString(value=value)
+    if isinstance(value, list):
+        return AxonExprList(items=tuple(_kwarg_value_to_expr(item) for item in value))
+    raise ValueError(f"unsupported kwarg value type for module call: {type(value).__name__}")
+
+
+def _substitute_expr(expr: AxonExpr, var_name: str, replacement: AxonExpr) -> AxonExpr:
+    if isinstance(expr, AxonExprName):
+        if expr.name == var_name:
+            return replacement
+        return expr
+    if isinstance(
+        expr,
+        AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString,
+    ):
+        return expr
+    if isinstance(expr, AxonExprTuple):
+        return AxonExprTuple(
+            items=tuple(_substitute_expr(item, var_name, replacement) for item in expr.items)
+        )
+    if isinstance(expr, AxonExprList):
+        return AxonExprList(
+            items=tuple(_substitute_expr(item, var_name, replacement) for item in expr.items)
+        )
+    if isinstance(expr, AxonExprCall):
+        new_kwargs: dict[str, AxonKwargValue] = {}
+        for key, value in expr.kwargs.items():
+            if isinstance(value, AxonExpr):
+                new_kwargs[key] = _substitute_expr(value, var_name, replacement)
+            else:
+                new_kwargs[key] = value
+        return AxonExprCall(
+            callee=expr.callee,
+            args=tuple(_substitute_expr(arg, var_name, replacement) for arg in expr.args),
+            kwargs=new_kwargs,
+        )
+    if isinstance(expr, AxonExprPipe):
+        return AxonExprPipe(
+            value=_substitute_expr(expr.value, var_name, replacement),
+            stages=tuple(_substitute_expr(stage, var_name, replacement) for stage in expr.stages),
+        )
+    if isinstance(expr, AxonExprBind):
+        if expr.var == var_name:
+            return AxonExprBind(
+                value=_substitute_expr(expr.value, var_name, replacement),
+                var=expr.var,
+                body=expr.body,
+            )
+        return AxonExprBind(
+            value=_substitute_expr(expr.value, var_name, replacement),
+            var=expr.var,
+            body=_substitute_expr(expr.body, var_name, replacement),
+        )
+    if isinstance(expr, AxonExprIf):
+        return AxonExprIf(
+            cond=_substitute_expr(expr.cond, var_name, replacement),
+            true_expr=_substitute_expr(expr.true_expr, var_name, replacement),
+            false_expr=_substitute_expr(expr.false_expr, var_name, replacement),
+        )
+    if isinstance(expr, AxonExprTernary):
+        return AxonExprTernary(
+            cond=_substitute_expr(expr.cond, var_name, replacement),
+            true_expr=_substitute_expr(expr.true_expr, var_name, replacement),
+            false_expr=_substitute_expr(expr.false_expr, var_name, replacement),
+        )
+    if isinstance(expr, AxonExprBinary):
+        return AxonExprBinary(
+            op=expr.op,
+            left=_substitute_expr(expr.left, var_name, replacement),
+            right=_substitute_expr(expr.right, var_name, replacement),
+        )
+    if isinstance(expr, AxonExprLambda):
+        if expr.var == var_name:
+            return expr
+        return AxonExprLambda(var=expr.var, body=_substitute_expr(expr.body, var_name, replacement))
+    if isinstance(expr, AxonExprParen):
+        return AxonExprParen(inner=_substitute_expr(expr.inner, var_name, replacement))
+    if isinstance(expr, AxonExprDo):
+        return expr
+    return expr
+
+
+def _expr_name_refs(expr: AxonExpr) -> set[str]:
+    out: set[str] = set()
+    stack: list[AxonExpr] = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, AxonExprName):
+            out.add(node.name)
+            continue
+        if isinstance(
+            node,
+            AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString,
+        ):
+            continue
+        if isinstance(node, AxonExprParen):
+            stack.append(node.inner)
+            continue
+        if isinstance(node, AxonExprTuple):
+            stack.extend(node.items)
+            continue
+        if isinstance(node, AxonExprList):
+            stack.extend(node.items)
+            continue
+        if isinstance(node, AxonExprPipe):
+            stack.append(node.value)
+            stack.extend(node.stages)
+            continue
+        if isinstance(node, AxonExprBind):
+            stack.append(node.value)
+            stack.append(node.body)
+            continue
+        if isinstance(node, AxonExprIf | AxonExprTernary):
+            stack.append(node.cond)
+            stack.append(node.true_expr)
+            stack.append(node.false_expr)
+            continue
+        if isinstance(node, AxonExprBinary):
+            stack.append(node.left)
+            stack.append(node.right)
+            continue
+        if isinstance(node, AxonExprCall):
+            stack.extend(node.args)
+            for value in node.kwargs.values():
+                if isinstance(value, AxonExpr):
+                    stack.append(value)
+            continue
+        if isinstance(node, AxonExprLambda):
+            stack.append(node.body)
+            continue
+    return out
+
+
 def _call_return_type(
     *,
     callee: str,
@@ -1322,8 +1563,9 @@ def _call_return_type(
     rigid_symbols: set[str],
     expected_arity: int | None = None,
 ) -> TypeExpr:
-    parts = callee.split("@")
-    base = parts[0]
+    raw_callee = callee
+    if "@@" in callee:
+        callee = callee.replace("@@", "@", 1)
 
     def _apply_primitive_alias(name: str) -> str:
         alias_parts = name.split("@")
@@ -1337,17 +1579,34 @@ def _call_return_type(
             return name
         return "@".join([alias_base, *alias_path_parts]) if alias_path_parts else alias_base
 
+    def _resolve_unqualified_import_member(name: str) -> str:
+        base_name, *path_suffix = name.split("@")
+        if "." in base_name or base_name in signatures:
+            return name
+
+        explicit_namespaces: list[str] = []
+        if isinstance(module.imported_members, dict):
+            for namespace, members in module.imported_members.items():
+                if base_name in members and f"{namespace}.{base_name}" in signatures:
+                    explicit_namespaces.append(namespace)
+        if explicit_namespaces:
+            if len(explicit_namespaces) > 1:
+                choices = ", ".join(sorted(explicit_namespaces))
+                raise _error(
+                    module,
+                    path,
+                    f"ambiguous imported member {base_name!r}; found in namespaces: {choices}",
+                )
+            qualified_base = f"{explicit_namespaces[0]}.{base_name}"
+            return "@".join([qualified_base, *path_suffix]) if path_suffix else qualified_base
+
+        prelude_qualified = f"Prelude.{base_name}"
+        if prelude_qualified in signatures:
+            return "@".join([prelude_qualified, *path_suffix]) if path_suffix else prelude_qualified
+        return name
+
     callee = _apply_primitive_alias(callee)
-    if "." not in base and isinstance(module.imported_members, dict) and base not in signatures:
-        path_suffix = callee.split("@")[1:]
-        for namespace, members in module.imported_members.items():
-            if base not in members:
-                continue
-            qualified = f"{namespace}.{base}"
-            if qualified in signatures:
-                callee = "@".join([qualified, *path_suffix]) if path_suffix else qualified
-                base = qualified
-                break
+    callee = _resolve_unqualified_import_member(callee)
     callee = _apply_primitive_alias(callee)
     base = callee.split("@", 1)[0]
     implicit_activation = _IMPLICIT_ACTIVATION_ALIASES.get(base)
@@ -1363,18 +1622,114 @@ def _call_return_type(
         if base_sig is not None and base_sig.path_param_count == len(callee_paths):
             call_sig = base_sig
             callee = callee_base
+    if call_sig is None:
+        callee_parts = callee.split("@")
+        callee_base = callee_parts[0]
+        callee_paths = callee_parts[1:]
+        if "." in callee_base:
+            member_base = callee_base.rsplit(".", 1)[1]
+            member_sig = signatures.get(member_base)
+            if member_sig is not None and member_sig.path_param_count == len(callee_paths):
+                call_sig = member_sig
+                callee = member_base
     if call_sig is not None:
-        if kwargs:
-            names = ", ".join(sorted(kwargs))
-            raise _error(module, path, f"module call {callee!r} does not support kwargs: {names}")
-        if len(args) != len(call_sig.params):
+        if len(args) > len(call_sig.params):
             raise _error(
                 module,
                 path,
                 f"call {callee!r} expects {len(call_sig.params)} args, got {len(args)}",
             )
+        bound_args: list[AxonExpr | None] = [None] * len(call_sig.params)
+        for idx, arg_expr in enumerate(args):
+            bound_args[idx] = arg_expr
+        param_index_by_name = {name: idx for idx, name in enumerate(call_sig.param_names)}
+        for kw_name, kw_value in kwargs.items():
+            kw_idx = param_index_by_name.get(kw_name)
+            if kw_idx is None:
+                raise _error(module, path, f"unknown kwarg {kw_name!r} for call {callee!r}")
+            if bound_args[kw_idx] is not None:
+                raise _error(
+                    module,
+                    path,
+                    f"call {callee!r} received multiple values for argument {kw_name!r}",
+                )
+            bound_args[kw_idx] = _kwarg_value_to_expr(kw_value)
+        missing: list[str] = []
+        defaulted_param_idxs: set[int] = set()
+        param_name_set = set(call_sig.param_names)
+        for idx, bound_value in enumerate(bound_args):
+            if bound_value is not None:
+                continue
+            default_expr = (
+                call_sig.param_default_exprs[idx]
+                if idx < len(call_sig.param_default_exprs)
+                else None
+            )
+            if isinstance(default_expr, AxonExpr):
+                resolved_default = default_expr
+                for sub_name, sub_value in zip(
+                    call_sig.param_names,
+                    bound_args,
+                    strict=True,
+                ):
+                    if not isinstance(sub_value, AxonExpr):
+                        continue
+                    resolved_default = _substitute_expr(resolved_default, sub_name, sub_value)
+                unresolved_params = sorted(
+                    {name for name in _expr_name_refs(resolved_default) if name in param_name_set}
+                )
+                if unresolved_params:
+                    missing.extend(unresolved_params)
+                    continue
+                bound_args[idx] = resolved_default
+                defaulted_param_idxs.add(idx)
+                continue
+            if idx < len(call_sig.optional_params) and call_sig.optional_params[idx]:
+                bound_args[idx] = AxonExprNull()
+                continue
+            missing.append(call_sig.param_names[idx])
+        if missing:
+            raise _error(
+                module,
+                path,
+                f"call {callee!r} missing required args: {', '.join(missing)}",
+            )
         dim_subst: dict[str, DimToken] = {}
-        for idx, (arg_expr, param_type) in enumerate(zip(args, call_sig.params, strict=True)):
+        for idx, param_type in enumerate(call_sig.params):
+            arg_expr_maybe = bound_args[idx]
+            if arg_expr_maybe is None:
+                raise _error(
+                    module,
+                    path,
+                    f"internal typecheck error: missing bound arg {call_sig.param_names[idx]!r} for call {callee!r}",
+                )
+            arg_expr = arg_expr_maybe
+            if idx in defaulted_param_idxs:
+                continue
+            param_name = call_sig.param_names[idx] if idx < len(call_sig.param_names) else None
+            is_int_param = isinstance(param_type, TypeInt) or (
+                isinstance(param_type, TypeOptional) and isinstance(param_type.inner, TypeInt)
+            )
+            if (
+                is_int_param
+                and param_name in {"dim", "start", "end"}
+                and callee
+                in {
+                    "slice",
+                    "Prelude.slice",
+                }
+            ):
+                dim_token = _infer_dim_token_from_expr(arg_expr, env=env, dim_symbols=dim_symbols)
+                if dim_token is not None:
+                    dim_subst[param_name] = dim_token
+                    continue
+            if param_name == "dim" and isinstance(param_type, TypeInt):
+                dim_token = _infer_dim_token_from_expr(arg_expr, env=env, dim_symbols=dim_symbols)
+                if dim_token is not None:
+                    dim_subst["dim"] = dim_token
+                    if callee == "linear":
+                        dim_subst["DO"] = dim_token
+                    continue
             arg_type = _infer_expr_type(
                 arg_expr,
                 env=env,
@@ -1425,12 +1780,12 @@ def _call_return_type(
                     f"{callee!r} arg {idx}: expected {render_type(param_type)}, "
                     f"got {render_type(arg_type)}",
                 )
-            if idx < len(call_sig.param_names):
-                param_name = call_sig.param_names[idx]
-                if param_name == "dim" and isinstance(param_type, TypeInt | TypeFloat):
-                    dim_token = _infer_dim_token_from_expr(arg_expr, env=env)
-                    if dim_token is not None:
-                        dim_subst[param_name] = dim_token
+            if param_name == "dim" and isinstance(param_type, TypeInt | TypeFloat):
+                dim_token = _infer_dim_token_from_expr(arg_expr, env=env, dim_symbols=dim_symbols)
+                if dim_token is not None:
+                    dim_subst[param_name] = dim_token
+                    if callee == "linear":
+                        dim_subst["DO"] = dim_token
         substituted_returns = tuple(
             _substitute_type_dims(ret, dim_subst=dim_subst, symbols=dim_symbols)
             for ret in call_sig.returns
@@ -1462,6 +1817,62 @@ def _call_return_type(
             )
         return TypeFloat()
 
+    raw_base = raw_callee.split("@", 1)[0].strip()
+    if raw_base == "_linear" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_linear only accepts positional arguments; use Prelude.linear for keyword/default syntax",
+        )
+    if raw_base == "_layernorm" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_layernorm only accepts positional arguments; use Prelude.layernorm for keyword/default syntax",
+        )
+    if raw_base == "_embedding" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_embedding only accepts positional arguments; use Prelude.embedding for keyword/default syntax",
+        )
+    if raw_base == "_split" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_split only accepts positional arguments; use Prelude.split for keyword/default syntax",
+        )
+    if raw_base == "_cast" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_cast only accepts positional arguments; use Prelude.cast for keyword/default syntax",
+        )
+    if raw_base == "_cumsum" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_cumsum only accepts positional arguments; use Prelude.cumsum for keyword/default syntax",
+        )
+    if raw_base == "_arange" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_arange only accepts positional arguments; use Prelude.arange for keyword/default syntax",
+        )
+    if raw_base == "_expand" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_expand only accepts positional arguments; use Prelude.expand for keyword/default syntax",
+        )
+    if raw_base == "_slice" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_slice only accepts positional arguments; use Prelude.slice for keyword/default syntax",
+        )
+
     op_name = _canonical_primitive_name(callee)
     if (
         get_op_lowering_signature(op_name) is None
@@ -1475,15 +1886,25 @@ def _call_return_type(
     rendered_kwargs: dict[str, Any] = {}
     for key, value in kwargs.items():
         expected_kind = kwarg_kinds.get(key) if isinstance(kwarg_kinds, dict) else None
-        if (
-            isinstance(value, AxonExprName)
-            and value.name in env
-            and expected_kind in {"list_int", "list_dim"}
-        ):
-            rendered_kwargs[key] = ("__expr__", env[value.name], None)
+        if isinstance(value, AxonExprName) and value.name in env:
+            inferred_name_type = env[value.name]
+            if expected_kind == "str":
+                root = (
+                    inferred_name_type.inner
+                    if isinstance(inferred_name_type, TypeOptional)
+                    else inferred_name_type
+                )
+                if isinstance(root, TypeString):
+                    dim_token = _infer_dim_token_from_expr(value, env=env, dim_symbols=dim_symbols)
+                    rendered_kwargs[key] = ("__expr__", inferred_name_type, dim_token)
+                else:
+                    rendered_kwargs[key] = value.name
+                continue
+            dim_token = _infer_dim_token_from_expr(value, env=env, dim_symbols=dim_symbols)
+            rendered_kwargs[key] = ("__expr__", inferred_name_type, dim_token)
             continue
         if isinstance(value, AxonExpr):
-            scalar_value = _expr_scalar_value(value, env=env)
+            scalar_value = _expr_scalar_value(value, env=env, dim_symbols=dim_symbols)
             if scalar_value is not _MISSING:
                 rendered_kwargs[key] = scalar_value
                 continue
@@ -1497,7 +1918,7 @@ def _call_return_type(
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
             )
-            dim_token = _infer_dim_token_from_expr(value, env=env)
+            dim_token = _infer_dim_token_from_expr(value, env=env, dim_symbols=dim_symbols)
             rendered_kwargs[key] = ("__expr__", inferred, dim_token)
             continue
         rendered_kwargs[key] = value
@@ -1977,10 +2398,16 @@ def _collect_return_types(
                     env[target] = inferred
                 continue
             if not isinstance(inferred, TypeTuple):
+                if isinstance(inferred, TypeList):
+                    item_type = inferred.item
+                    for target in stmt.targets:
+                        if target != "_":
+                            env[target] = item_type
+                    continue
                 raise _error(
                     module,
                     stmt_path,
-                    "multi-target bind requires a tuple-valued expression",
+                    "multi-target bind requires a tuple- or list-valued expression",
                 )
             if len(inferred.items) != len(stmt.targets):
                 raise _error(
@@ -2088,10 +2515,16 @@ def _typecheck_statements(
                     env[target] = inferred
                 continue
             if not isinstance(inferred, TypeTuple):
+                if isinstance(inferred, TypeList):
+                    item_type = inferred.item
+                    for target in stmt.targets:
+                        if target != "_":
+                            env[target] = item_type
+                    continue
                 raise _error(
                     module,
                     stmt_path,
-                    "multi-target bind requires a tuple-valued expression",
+                    "multi-target bind requires a tuple- or list-valued expression",
                 )
             if len(inferred.items) != len(stmt.targets):
                 raise _error(
@@ -2305,6 +2738,45 @@ def typecheck_axon_program(
                     env[name] = TypeString()
                 else:
                     env[name] = TypeAny()
+        for idx, param in enumerate(module.params):
+            if not isinstance(param.default_expr, AxonExpr):
+                continue
+            default_type = _infer_expr_type(
+                param.default_expr,
+                env=env,
+                signatures=signatures,
+                primitive_aliases=primitive_aliases,
+                module=module,
+                path=(-1, idx),
+                dim_symbols=dim_symbols,
+                rigid_symbols=rigid_symbols,
+            )
+            expected_type = sig.params[idx]
+            if param.optional and not isinstance(expected_type, TypeOptional):
+                expected_type = TypeOptional(inner=expected_type)
+            if not _types_compatible(
+                default_type,
+                expected_type,
+                dim_subst={},
+                dim_symbols=dim_symbols,
+                rigid_symbols=rigid_symbols,
+            ):
+                raise _error(
+                    module,
+                    (-1, idx),
+                    "default value type mismatch for "
+                    f"parameter {param.name!r}: expected {render_type(expected_type)}, "
+                    f"got {render_type(default_type)}",
+                )
+            # Optional params with a definite non-null default behave as non-optional
+            # inside the module body.
+            param_type = sig.params[idx]
+            if (
+                param.optional
+                and isinstance(param_type, TypeOptional)
+                and not isinstance(default_type, TypeNull | TypeOptional | TypeAny)
+            ):
+                env[param.name] = param_type.inner
 
         _typecheck_statements(
             module.statements,

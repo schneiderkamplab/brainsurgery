@@ -39,8 +39,8 @@ gemma2_block x i pos_ids attn_mask past_kv = do
     v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
     q, k <- rope_pair q k position_ids=pos_ids theta=THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     window <- (i % 2) == 0 ? C_LOCAL : C_FULL
     mask <- causal_mask q k window=window padding_mask=attn_mask
     a <- ((Config.str "_attn_implementation" default="") == "eager") ? (attention q k v mask=mask scale=ATTN_SCALE softcap=ATTN_LOGIT_SOFTCAP eager=true) : (attention q k v mask=mask scale=ATTN_SCALE eager=false)
@@ -67,7 +67,7 @@ gemma2 input_ids attn_mask past_kv use_cache = do
       x, new_i <- gemma2_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
     x <- rms@norm x
-    logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V weight="@@lm_head.weight") : (linear@embed_tokens x dim=V)
+    logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V weight_path=@@lm_head.weight) : (linear@embed_tokens x dim=V)
     logits <- logits / LOGIT_SOFTCAP
     logits <- tanh logits
     logits <- logits * LOGIT_SOFTCAP

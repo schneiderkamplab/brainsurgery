@@ -6,15 +6,10 @@ import torch
 from torch.nn import functional as F
 
 OP_NAME = "layernorm"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"eps", "dim", "weight", "bias"}
+LOWERING_ARITY = (1, 6)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {
-    "dim": "dim",
-    "eps": "number",
-    "weight": "str",
-    "bias": "str_or_bool_or_null",
-}
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def _dims_compatible(left: Any, right: Any) -> bool:
@@ -25,29 +20,36 @@ def _dims_compatible(left: Any, right: Any) -> bool:
     return left == right
 
 
-def _validate_layernorm_keys(node_spec: dict[str, Any]) -> None:
-    if "weight" in node_spec and not isinstance(node_spec.get("weight"), str):
-        raise ValueError("layernorm weight must be a string when provided")
-    if "bias" in node_spec:
-        bias = node_spec.get("bias")
-        if isinstance(bias, str):
-            return
-        if bias is None:
-            return
-        if isinstance(bias, bool):
-            return
-        raise ValueError("layernorm bias must be a string, bool, or null when provided")
+def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
+    raw = node_spec.get("_args")
+    if isinstance(raw, list):
+        return list(raw)
+    if raw is None:
+        return []
+    return [raw]
 
 
-def _layernorm_has_bias(node_spec: dict[str, Any]) -> bool:
-    if "bias" not in node_spec:
-        return True
-    bias = node_spec.get("bias")
-    if bias is None:
-        return False
-    if isinstance(bias, bool):
-        return bool(bias)
-    return True
+def _arg_or_default(args: list[Any], index: int, default: Any) -> Any:
+    if index >= len(args):
+        return default
+    value = args[index]
+    if isinstance(value, str) and value.strip().lower() == "null":
+        return default
+    return value
+
+
+def _path_override(args: list[Any], index: int) -> str | None:
+    if index >= len(args):
+        return None
+    value = args[index]
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower() == "null":
+            return None
+        return stripped
+    return None
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -62,15 +64,12 @@ def lowering_normalize_kwargs(
     kwargs: dict[str, Any],
     ctx: Any,
 ) -> None:
-    del out
-    if "dim" in kwargs or not args:
-        return
-    first_arg = args[0].strip()
-    if not first_arg.isidentifier():
-        return
-    inferred = ctx.tensor_last_dim.get(first_arg)
-    if inferred is not None:
-        kwargs["dim"] = inferred
+    del out, ctx
+    if kwargs:
+        unknown = ", ".join(sorted(str(key) for key in kwargs))
+        raise ValueError(f"layernorm unsupported kwargs: {unknown}")
+    if len(args) > 6:
+        raise ValueError(f"layernorm expects at most 6 positional args, got {len(args)}")
 
 
 def lowering_infer_metadata(
@@ -88,9 +87,21 @@ def lowering_infer_metadata(
         if isinstance(first_in, str) and first_in.isidentifier()
         else None
     )
-    norm_dim = kwargs.get("dim")
+    norm_dim = args[2] if len(args) >= 3 else None
+    if isinstance(norm_dim, str) and norm_dim.strip().lower() == "null":
+        norm_dim = None
     if norm_dim is not None:
-        if first_dim is not None and not _dims_compatible(norm_dim, first_dim):
+        unresolved_symbolic = (
+            isinstance(norm_dim, str)
+            and norm_dim.isidentifier()
+            and isinstance(first_dim, str)
+            and first_dim.isidentifier()
+        )
+        if (
+            first_dim is not None
+            and not unresolved_symbolic
+            and not _dims_compatible(norm_dim, first_dim)
+        ):
             raise ValueError(f"layernorm dim={norm_dim!r} mismatches input last-dim {first_dim!r}")
         if first_dim is None and isinstance(first_in, str) and first_in.isidentifier():
             ctx.tensor_last_dim[first_in] = norm_dim
@@ -108,18 +119,75 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    _validate_layernorm_keys(node_spec)
-    x = model._read_tensor_input(node_spec.get("_args"), env)
-    weight = model._state[
-        model._infer_param_path(node_spec, node_path=node_path, param_name="weight")
-    ]
-    has_bias = _layernorm_has_bias(node_spec)
+    args = _raw_args(node_spec)
+    if not args:
+        raise ValueError(
+            "layernorm requires positional args: x [eps dim weight_path bias bias_path]"
+        )
+    x = model._read_tensor_input(args[0], env)
+    eps_expr = _arg_or_default(args, 1, 1e-5)
+    weight_override = _path_override(args, 3)
+    bias_expr = _arg_or_default(args, 4, True)
+    bias_override = _path_override(args, 5)
+    if weight_override in {"weight_path", "bias_path"}:
+        weight_override = None
+    if bias_override in {"weight_path", "bias_path"}:
+        bias_override = None
+    path_spec = dict(node_spec)
+    weight_param = "weight"
+    direct_weight_path: str | None = None
+    if weight_override is not None:
+        if weight_override.isidentifier():
+            resolved = env.get(weight_override)
+            if isinstance(resolved, str):
+                direct_weight_path = resolved
+            else:
+                path_spec["weight_path"] = weight_override
+                weight_param = "weight_path"
+        else:
+            path_spec["weight_path"] = weight_override
+            weight_param = "weight_path"
+    bias_param = "bias"
+    direct_bias_path: str | None = None
+    if bias_override is not None:
+        if bias_override.isidentifier():
+            resolved = env.get(bias_override)
+            if isinstance(resolved, str):
+                direct_bias_path = resolved
+            else:
+                path_spec["bias_path"] = bias_override
+                bias_param = "bias_path"
+        else:
+            path_spec["bias_path"] = bias_override
+            bias_param = "bias_path"
+
+    weight_path = (
+        direct_weight_path
+        if isinstance(direct_weight_path, str)
+        else model._infer_param_path(
+            path_spec,
+            node_path=node_path,
+            param_name=weight_param,
+        )
+    )
+    weight = model._state[weight_path]
+    has_bias = bool(model._eval_expr(bias_expr, env, symbols))
     bias = (
-        model._state[model._infer_param_path(node_spec, node_path=node_path, param_name="bias")]
+        model._state[
+            (
+                direct_bias_path
+                if isinstance(direct_bias_path, str)
+                else model._infer_param_path(
+                    path_spec,
+                    node_path=node_path,
+                    param_name=bias_param,
+                )
+            )
+        ]
         if has_bias
         else None
     )
-    eps_value = model._eval_expr(node_spec.get("eps", 1e-5), env, symbols)
+    eps_value = model._eval_expr(eps_expr, env, symbols)
     out = model._require_name(node_spec.get("_bind"), field="layernorm._bind")
     align_norm_fp32 = bool(getattr(model, "_hf_align_norm_fp32", False))
     if align_norm_fp32 and x.is_floating_point() and x.dtype in {torch.float16, torch.bfloat16}:
@@ -144,7 +212,6 @@ def compile(
     scope_var: str,
     indent: str,
 ) -> list[str]:
-    _validate_layernorm_keys(node_spec)
     lines: list[str] = []
 
     def assign_out_var(out_name: str) -> str:
@@ -153,29 +220,65 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("_args")))
+    args = _raw_args(node_spec)
+    if not args:
+        raise ValueError(
+            "layernorm requires positional args: x [eps dim weight_path bias bias_path]"
+        )
+    src = read(str(args[0]))
+    eps_expr = _arg_or_default(args, 1, 1e-5)
+    weight_override = _path_override(args, 3)
+    bias_expr = _arg_or_default(args, 4, True)
+    bias_override = _path_override(args, 5)
+    if weight_override in {"weight_path", "bias_path"}:
+        weight_override = None
+    if bias_override in {"weight_path", "bias_path"}:
+        bias_override = None
+    path_spec = dict(node_spec)
+    weight_param = "weight"
+    weight_param_expr: str | None = None
+    if weight_override is not None:
+        if weight_override.isidentifier() and weight_override in env:
+            weight_param_expr = f"self._param({read(weight_override)})"
+        else:
+            path_spec["weight_path"] = weight_override
+            weight_param = "weight_path"
+    bias_param = "bias"
+    bias_param_expr: str | None = None
+    if bias_override is not None:
+        if bias_override.isidentifier() and bias_override in env:
+            bias_param_expr = f"self._param({read(bias_override)})"
+        else:
+            path_spec["bias_path"] = bias_override
+            bias_param = "bias_path"
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
-    eps = emitter._expr_code(node_spec.get("eps", 1e-5), env)
-    w = emitter._hoisted_param(
-        node_spec=node_spec,
-        node_path_var=node_path_var,
-        param_name="weight",
-        lines=lines,
-        indent=indent,
-    )
-    if _layernorm_has_bias(node_spec):
-        b = emitter._hoisted_param(
-            node_spec=node_spec,
+    eps = emitter._expr_code(eps_expr, env)
+    w = (
+        weight_param_expr
+        if isinstance(weight_param_expr, str)
+        else emitter._hoisted_param(
+            node_spec=path_spec,
             node_path_var=node_path_var,
-            param_name="bias",
+            param_name=weight_param,
             lines=lines,
             indent=indent,
         )
-        b_fp32 = f"{b}.float()"
-    else:
-        b = "None"
-        b_fp32 = "None"
+    )
+    b = (
+        bias_param_expr
+        if isinstance(bias_param_expr, str)
+        else emitter._hoisted_optional_param(
+            node_spec=path_spec,
+            node_path_var=node_path_var,
+            param_name=bias_param,
+            lines=lines,
+            indent=indent,
+        )
+    )
+    lines.append(f"{indent}if not bool({emitter._expr_code(bias_expr, env)}):")
+    lines.append(f"{indent}    {b} = None")
+    b_fp32 = f"{b}.float() if {b} is not None else None"
     lines.append(
         f"{indent}if getattr(self, '_hf_align_norm_fp32', False) and {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
     )

@@ -12,7 +12,7 @@ V = 128256
 L = 36
 H = 16
 KVH = 4
-KVD = 512.0
+KVD = 512
 FFN = 11008
 EPS = 1e-06
 THETA = 5000000.0
@@ -32,8 +32,8 @@ smollm3_block x i pos_ids attn_mask past_kv = do
     use_rope <- (NO_ROPE_LAYER_INTERVAL <= 0) or (((i + 1) % NO_ROPE_LAYER_INTERVAL) != 0)
     q, k <- if use_rope then rope_pair q k position_ids=pos_ids theta=THETA else (q, k)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
     a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D
     return a, new_kv

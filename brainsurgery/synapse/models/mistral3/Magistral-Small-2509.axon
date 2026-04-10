@@ -31,8 +31,8 @@ magistral_block x pos_ids attn_mask past_kv = do
     v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
     q, k <- rope_pair q k position_ids=pos_ids theta=THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     mask <- HAS_WINDOW ? (causal_mask q k window=C padding_mask=attn_mask) : (causal_mask q k padding_mask=attn_mask)
     a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D
     return a, new_kv

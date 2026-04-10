@@ -67,8 +67,8 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
     k, v, new_kv <- if shared_layer then (k, v, null) else Cache.update past_kv k v
     shared_k <- k
     shared_v <- v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
     a <- attention q k v mask=mask scale=1.0 |> merge_heads |> linear@o_proj dim=D bias=false
     return a, new_kv, shared_k, shared_v

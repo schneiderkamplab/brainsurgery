@@ -67,8 +67,8 @@ llama4_block x i pos_ids attn_mask past_kv = do
     k <- (USE_QK_NORM and use_rope) ? (l2norm k eps=EPS) : k
     q <- ((USE_TEMP_TUNING and (use_rope == false)) ? (q * (llama4_temp_scale pos_ids)) : q)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     mask <- use_rope ? (causal_mask q k window=ATTN_CHUNK padding_mask=attn_mask) : (causal_mask q k padding_mask=attn_mask)
     a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=D bias=false
     return a, new_kv

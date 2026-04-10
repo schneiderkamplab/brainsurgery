@@ -124,7 +124,7 @@ def test_typecheck_allows_generic_reshape_to_higher_rank() -> None:
     source = """
 main :: Tensor[B,S] -> Tensor[B,1,S,1]
 main x = do
-  y <- reshape x shape=[B, 1, S, 1]
+  y <- _reshape x [B, 1, S, 1]
   return y
 """
     modules = parse_axon_program(source)

@@ -46,8 +46,8 @@ phi3small_block x i pos_ids attn_mask past_kv = do
     q, k, v <- split_qkv_grouped qkv heads=H kv_heads=KVH
     q, k <- HAS_LONGROPE ? (rope_pair q k position_ids=pos_ids theta=THETA rope_mode="longrope" original_context=ROPE_ORIGINAL_CONTEXT max_context=ROPE_MAX_CONTEXT long_factor=ROPE_LONG_FACTOR short_factor=ROPE_SHORT_FACTOR long_mscale=ROPE_LONG_MSCALE short_mscale=ROPE_SHORT_MSCALE inv_freq_dtype="bfloat16") : (rope_pair q k position_ids=pos_ids theta=THETA inv_freq_dtype="bfloat16")
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     dense <- (DENSE_EVERY > 0) and (((i + 1) % DENSE_EVERY) == 0)
     mask <- dense ? (causal_mask q k window=WINDOW_GLOBAL padding_mask=attn_mask) : (blocksparse_mask q k padding_mask=attn_mask block_size=BS_BLOCK_SIZE local_blocks=BS_LOCAL_BLOCKS vert_stride=BS_VERT_STRIDE homo_head=false)
     a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@dense dim=D bias=true

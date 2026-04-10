@@ -771,6 +771,82 @@ def test_runtime_infer_param_path_keeps_double_at_absolute_under_scope() -> None
     )
 
 
+def test_runtime_linear_explicit_path_kwargs_override_params_mapping() -> None:
+    model = SynapseProgramModel.from_spec({"synapse": 1, "model": {"graph": [], "outputs": {}}})
+    model.load_state_dict_tensors(
+        {
+            "proj.weight": torch.ones(1, 1, dtype=torch.float32),
+            "decoder.layer.0.weight": torch.ones(1, 1, dtype=torch.float32),
+            "proj.bias": torch.ones(1, dtype=torch.float32),
+            "decoder.layer.0.bias": torch.ones(1, dtype=torch.float32),
+        }
+    )
+    node_spec = {
+        "_params": {"weight": "proj.weight", "bias": "proj.bias"},
+        "weight": "@decoder.layer.0.weight",
+        "bias_path": "@decoder.layer.0.bias",
+    }
+    assert (
+        model._infer_param_path(node_spec, node_path="layers.0.attn.n_op_0", param_name="weight")
+        == "layers.0.attn.decoder.layer.0.weight"
+    )
+    assert (
+        model._infer_param_path(node_spec, node_path="layers.0.attn.n_op_0", param_name="bias_path")
+        == "layers.0.attn.decoder.layer.0.bias"
+    )
+    assert (
+        model._infer_param_path(node_spec, node_path="layers.0.attn.n_op_0", param_name="bias")
+        == "layers.0.attn.proj.bias"
+    )
+
+
+def test_runtime_linear_relative_path_kwarg_keeps_numeric_segments() -> None:
+    model = SynapseProgramModel.from_spec({"synapse": 1, "model": {"graph": [], "outputs": {}}})
+    model.load_state_dict_tensors(
+        {
+            "decoder.layer.0.weight": torch.ones(1, 1, dtype=torch.float32),
+        }
+    )
+    node_spec = {"weight": "@decoder.layer.0.weight"}
+    assert (
+        model._infer_param_path(node_spec, node_path="n_op_0", param_name="weight")
+        == "decoder.layer.0.weight"
+    )
+
+
+def test_runtime_prefers_plain_explicit_alias_when_present_else_params() -> None:
+    model = SynapseProgramModel.from_spec({"synapse": 1, "model": {"graph": [], "outputs": {}}})
+    model.load_state_dict_tensors(
+        {
+            "model.language_model.layers.0.layer_scalar": torch.ones(1, dtype=torch.float32),
+            "model.language_model.layers.0.proj.bias": torch.ones(1, dtype=torch.float32),
+        }
+    )
+    node_spec = {
+        "_scope": "model.language_model.layers.0",
+        "scale": "layer_scalar",
+        "_params": {"bias": "proj.bias"},
+    }
+    assert (
+        model._infer_param_path(node_spec, node_path="n_op_0", param_name="scale")
+        == "model.language_model.layers.0.layer_scalar"
+    )
+    assert (
+        model._infer_param_path(node_spec, node_path="n_op_0", param_name="bias")
+        == "model.language_model.layers.0.proj.bias"
+    )
+
+
+def test_runtime_plain_explicit_equal_param_name_can_bind_scoped_tensor() -> None:
+    model = SynapseProgramModel.from_spec({"synapse": 1, "model": {"graph": [], "outputs": {}}})
+    model.load_state_dict_tensors({"backbone.layers.0.mixer.D": torch.ones(1, dtype=torch.float32)})
+    node_spec = {"_scope": "backbone.layers.0.mixer", "D": "D"}
+    assert (
+        model._infer_param_path(node_spec, node_path="n_op_0", param_name="D")
+        == "backbone.layers.0.mixer.D"
+    )
+
+
 def test_runtime_scope_path_bound_calls_do_not_double_apply_local_scope() -> None:
     modules = parse_axon_program(
         """

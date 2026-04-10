@@ -205,6 +205,10 @@ class _Emitter:
                 "            if not absolute:",
                 "                raise ValueError('absolute parameter path cannot be empty')",
                 "            return absolute",
+                "        if candidate.startswith('@'):",
+                "            candidate = candidate[1:]",
+                "            if not candidate:",
+                "                raise ValueError('parameter path cannot be empty')",
                 "        resolved: list[str] = []",
                 "        base = self._join_scope(scope, candidate)",
                 "        for root in self._current_param_roots(extra_root=extra_root):",
@@ -225,15 +229,17 @@ class _Emitter:
                 "        direct_root = node_spec.get('_param_root')",
                 "        extra_root = direct_root if isinstance(direct_root, str) else None",
                 "        explicit_params = node_spec.get('_params')",
+                "        candidate = node_spec.get(param_name)",
+                "        if isinstance(candidate, str):",
+                "            if candidate.startswith('@') or '.' in candidate:",
+                "                if candidate != param_name:",
+                "                    return self._pick_param_from_single(scope, candidate, extra_root=extra_root)",
                 "        if isinstance(explicit_params, dict):",
                 "            explicit = explicit_params.get(param_name)",
                 "            if isinstance(explicit, str):",
                 "                return self._pick_param_from_single(scope, explicit, extra_root=extra_root)",
                 "            if isinstance(explicit, list) and all(isinstance(item, str) for item in explicit):",
                 "                return self._pick_param_path(scope, explicit, extra_root=extra_root)",
-                "        candidate = node_spec.get(param_name)",
-                "        if isinstance(candidate, str):",
-                "            return self._pick_param_from_single(scope, candidate, extra_root=extra_root)",
                 "        return self._pick_param_from_single(scope, param_name, extra_root=extra_root)",
                 "",
                 "    def _expr_config_root(self) -> dict[str, Any]:",
@@ -1035,28 +1041,33 @@ class _Emitter:
                 f"extra_root={extra_root_code})"
             )
         explicit_params = node_spec.get("_params")
+        if isinstance(node_spec.get(param_name), str):
+            candidate = node_spec[param_name]
+            if candidate != param_name and (candidate.startswith("@") or "." in candidate):
+                return (
+                    "self._pick_param_from_single("
+                    f"{scope_expr}, {candidate!r}, extra_root={extra_root_code})"
+                )
+        # Next precedence level: lowered path bindings from _params.
         if isinstance(explicit_params, dict):
             explicit = explicit_params.get(param_name)
             if isinstance(explicit, str):
-                return (
+                expr = (
                     "self._pick_param_from_single("
                     f"{scope_expr}, {explicit!r}, extra_root={extra_root_code})"
                 )
+                return expr
             if isinstance(explicit, list) and all(isinstance(item, str) for item in explicit):
-                return (
+                expr = (
                     "self._pick_param_path("
                     f"{scope_expr}, {explicit!r}, extra_root={extra_root_code})"
                 )
-        if isinstance(node_spec.get(param_name), str):
-            candidate = node_spec[param_name]
-            return (
-                "self._pick_param_from_single("
-                f"{scope_expr}, {candidate!r}, extra_root={extra_root_code})"
-            )
-        return (
+                return expr
+        fallback_expr = (
             "self._pick_param_from_single("
             f"{node_path_var}, {param_name!r}, extra_root={extra_root_code})"
         )
+        return fallback_expr
 
     def _hoist_expr(self, *, kind: str, key: str, expr: str, lines: list[str], indent: str) -> str:
         cache_key = (kind, key)

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib
+import inspect
 import json
+import re
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -150,15 +153,90 @@ def _hf_kind(module: nn.Module) -> str | None:
 
 
 def _synapse_kind(op_name: str) -> str | None:
-    if op_name in {"linear", "layernorm", "rmsnorm", "add", "embedding"}:
+    if op_name in {"linear", "layernorm", "rmsnorm", "add", "embedding", "rope_pair"}:
         return op_name
     return None
+
+
+def _install_hf_rope_trace(
+    model: nn.Module,
+    *,
+    trace: dict[str, list[torch.Tensor]],
+    trace_meta: dict[str, list[dict[str, Any]]],
+    trace_kinds: set[str],
+) -> Any | None:
+    if "rope_pair" not in trace_kinds:
+        return None
+    module_name = getattr(model.__class__, "__module__", "")
+    if not isinstance(module_name, str) or not module_name:
+        return None
+    try:
+        module_obj = importlib.import_module(module_name)
+    except Exception:
+        return None
+    original = getattr(module_obj, "apply_rotary_pos_emb", None)
+    if not callable(original):
+        return None
+
+    rope_call_index = 0
+
+    def _wrapped_apply_rotary_pos_emb(*args: Any, **kwargs: Any) -> Any:
+        nonlocal rope_call_index
+        out = original(*args, **kwargs)
+        try:
+            q_rot: torch.Tensor | None = None
+            k_rot: torch.Tensor | None = None
+            if isinstance(out, tuple) and len(out) >= 2:
+                if torch.is_tensor(out[0]):
+                    q_rot = out[0]
+                if torch.is_tensor(out[1]):
+                    k_rot = out[1]
+            elif torch.is_tensor(out):
+                # GPT-J applies rotary separately for k and q and returns a single tensor.
+                role = "k" if (rope_call_index % 2 == 0) else "q"
+                rope_call_index += 1
+                if role == "k":
+                    k_rot = out
+                else:
+                    q_rot = out
+            if q_rot is None and k_rot is None:
+                return out
+            frame = inspect.currentframe()
+            caller = frame.f_back if frame is not None else None
+            self_obj = caller.f_locals.get("self") if caller is not None else None
+            layer_idx = getattr(self_obj, "layer_idx", None)
+            module_path = (
+                f"model.layers.{int(layer_idx)}.self_attn" if isinstance(layer_idx, int) else None
+            )
+            for role, tensor in (("q", q_rot), ("k", k_rot)):
+                if not torch.is_tensor(tensor):
+                    continue
+                trace["rope_pair"].append(tensor.detach().float().cpu())
+                trace_meta["rope_pair"].append(
+                    {
+                        "module_name": module_path,
+                        "module_type": "rope_pair",
+                        "weight_path": None,
+                        "rope_role": role,
+                    }
+                )
+        except Exception:
+            pass
+        return out
+
+    setattr(module_obj, "apply_rotary_pos_emb", _wrapped_apply_rotary_pos_emb)
+
+    def _restore() -> None:
+        setattr(module_obj, "apply_rotary_pos_emb", original)
+
+    return _restore
 
 
 def _is_attention_output_projection(weight_path: str) -> bool:
     normalized = weight_path.replace("/", ".")
     suffixes = (
         ".self_attn.o_proj.weight",
+        ".attn.out_proj.weight",
         ".attn.c_proj.weight",
         ".attention.wo.weight",
         ".self_attn.out_proj.weight",
@@ -190,6 +268,18 @@ def _meta_pair_key(meta: dict[str, Any] | None) -> str | None:
         if normalized is not None:
             return normalized
     return None
+
+
+_LAYER_KEY_RE = re.compile(r"(^|\.)(layers|h)\.(\d+)(\.|$)")
+
+
+def _matches_layer_index(value: str | None, layer_index: int) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    for match in _LAYER_KEY_RE.finditer(value):
+        if int(match.group(3)) == int(layer_index):
+            return True
+    return False
 
 
 class _TracingSynapseProgramModel(SynapseProgramModel):
@@ -381,6 +471,36 @@ def _capture_hf_trace(
 
         hooks.append(module.register_forward_hook(_hook))
     return trace, trace_meta, hooks
+
+
+def _capture_hf_all_module_outputs(model: nn.Module) -> tuple[list[dict[str, Any]], list[Any]]:
+    outputs: list[dict[str, Any]] = []
+    hooks: list[Any] = []
+    for module_name, module in model.named_modules():
+        if module_name == "":
+            continue
+
+        def _hook(
+            _module: nn.Module,
+            _inp: Any,
+            out: Any,
+            *,
+            _module_name: str = module_name,
+        ) -> None:
+            tensor = _first_tensor(out)
+            if tensor is None:
+                return
+            outputs.append(
+                {
+                    "module_name": _module_name,
+                    "module_type": _module.__class__.__name__,
+                    "shape": list(tensor.shape),
+                    "dtype": str(tensor.dtype),
+                }
+            )
+
+        hooks.append(module.register_forward_hook(_hook))
+    return outputs, hooks
 
 
 def _shape_key(tensor: torch.Tensor) -> tuple[int, ...]:
@@ -589,7 +709,7 @@ def _forward_kwargs(
         return kwargs
     if for_hf:
         kwargs["attention_mask"] = attention_mask
-        if str(hf_model_type or "") != "gpt_neox":
+        if str(hf_model_type or "") not in {"gpt_neox", "exaone4"}:
             pos_ids = attention_mask.to(torch.long).cumsum(dim=-1) - 1
             pos_ids = pos_ids.masked_fill(attention_mask == 0, 1)
             kwargs["position_ids"] = pos_ids
@@ -617,7 +737,7 @@ def _run_single_dtype(
     trust_remote_code: bool,
     max_len: int,
 ) -> dict[str, Any]:
-    trace_kinds = {"linear", "layernorm", "rmsnorm", "attention", "embedding", "add"}
+    trace_kinds = {"linear", "layernorm", "rmsnorm", "attention", "embedding", "add", "rope_pair"}
     model_input_names = set(lowered_spec.get("model", {}).get("inputs", {}).keys())
     tokenizer_obj, input_ids, attention_mask = _build_inputs(
         lowered_spec=lowered_spec,
@@ -680,14 +800,20 @@ def _run_single_dtype(
         hf = hf_model.to(device)
         hf.eval()
         hooks: list[Any] = []
+        restore_rope_trace = None
         add_mode = _AddTraceMode()
         try:
             hf_trace, hf_trace_meta, hooks = _capture_hf_trace(hf, trace_kinds=trace_kinds)
+            restore_rope_trace = _install_hf_rope_trace(
+                hf, trace=hf_trace, trace_meta=hf_trace_meta, trace_kinds=trace_kinds
+            )
             with add_mode, torch.no_grad():
                 hf_logits = _extract_logits(hf(**hf_kwargs, use_cache=False)).detach().float().cpu()
             hf_trace["add"] = list(add_mode.outputs)
             hf_trace_meta["add"] = list(add_mode.meta)
         finally:
+            if callable(restore_rope_trace):
+                restore_rope_trace()
             for hook in hooks:
                 hook.remove()
             del hf
@@ -799,8 +925,10 @@ def run_axon_layer_op_parity(
                 break
     tokenizer_fallback = resolved_hf_model_dir.name if tokenizer is None else None
 
-    layer_scope = f"model.layers.{int(layer_index)}."
-    trace_kinds = {"linear", "layernorm", "rmsnorm", "attention", "embedding", "add"}
+    layer_index_int = int(layer_index)
+    layer_scope = f"model.layers.{layer_index_int}."
+    trace_kinds = {"linear", "layernorm", "rmsnorm", "attention", "embedding", "add", "rope_pair"}
+    hf_ordered_ops: list[dict[str, Any]] = []
 
     with TemporaryDirectory(prefix="axon_layer_op_parity_") as tmp_dir:
         modules = parse_axon_program_from_path(axon_path)
@@ -851,22 +979,41 @@ def run_axon_layer_op_parity(
         hf = hf_model.to(resolved_device).eval()
         _refresh_hf_rotary_caches_if_needed(hf, dtype=resolved_dtype)
         hooks: list[Any] = []
+        all_hooks: list[Any] = []
+        restore_rope_trace = None
         hf_trace: dict[str, list[torch.Tensor]] = defaultdict(list)
         hf_trace_meta: dict[str, list[dict[str, Any]]] = defaultdict(list)
         try:
             raw_trace, raw_meta, hooks = _capture_hf_trace(hf, trace_kinds=trace_kinds)
+            hf_all_outputs, all_hooks = _capture_hf_all_module_outputs(hf)
+            restore_rope_trace = _install_hf_rope_trace(
+                hf, trace=raw_trace, trace_meta=raw_meta, trace_kinds=trace_kinds
+            )
             with torch.no_grad():
                 _ = _extract_logits(hf(**hf_kwargs, use_cache=False))
+            for item in hf_all_outputs:
+                module_name = str(item.get("module_name", ""))
+                if layer_scope in module_name or _matches_layer_index(module_name, layer_index_int):
+                    hf_ordered_ops.append(item)
             for hf_trace_kind, items in raw_trace.items():
                 meta_items = raw_meta.get(hf_trace_kind, [])
                 for idx, tensor in enumerate(items):
                     meta = meta_items[idx] if idx < len(meta_items) else {}
                     module_name = str(meta.get("module_name", ""))
-                    if layer_scope in module_name:
+                    weight_path = str(meta.get("weight_path", ""))
+                    if (
+                        layer_scope in module_name
+                        or _matches_layer_index(module_name, layer_index_int)
+                        or _matches_layer_index(weight_path, layer_index_int)
+                    ):
                         hf_trace[hf_trace_kind].append(tensor)
                         hf_trace_meta[hf_trace_kind].append(meta)
         finally:
+            if callable(restore_rope_trace):
+                restore_rope_trace()
             for hook in hooks:
+                hook.remove()
+            for hook in all_hooks:
                 hook.remove()
             del hf
             del hf_model
@@ -897,7 +1044,14 @@ def run_axon_layer_op_parity(
         if not isinstance(item, dict):
             continue
         node_path = str(item.get("node_path", ""))
-        if layer_scope not in node_path:
+        bind_path = str(item.get("bind", ""))
+        weight_path = str(item.get("weight_path", ""))
+        if not (
+            layer_scope in node_path
+            or _matches_layer_index(node_path, layer_index_int)
+            or _matches_layer_index(bind_path, layer_index_int)
+            or _matches_layer_index(weight_path, layer_index_int)
+        ):
             continue
         tensor_raw = item.get("tensor")
         if not torch.is_tensor(tensor_raw):
@@ -961,6 +1115,7 @@ def run_axon_layer_op_parity(
         "hf_trace_counts": {kind: len(values) for kind, values in hf_trace.items()},
         "syn_trace_counts": {kind: len(values) for kind, values in syn_trace.items()},
         "by_op": by_op,
+        "ordered_hf_ops": hf_ordered_ops,
         "ordered_synapse_ops": ordered_synapse_ops,
     }
 

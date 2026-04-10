@@ -12,7 +12,7 @@ V = 32000
 L = 56
 H = 48
 KVH = 8
-KVD = 1024.0
+KVD = 1024
 FFN = 16384
 E = 8
 EPT = 2
@@ -38,15 +38,15 @@ mixtral_block x pos_ids attn_mask past_kv = do
     v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
     q, k <- rope_pair q k position_ids=pos_ids theta=THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
     a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@block_sparse_moe do
-    topk_scores, topk_indices <- softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true weight="gate.weight"
+    topk_scores, topk_indices <- softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true weight=@@gate.weight
     m <- xn * 0.0
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e

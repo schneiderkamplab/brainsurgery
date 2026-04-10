@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 OP_NAME = "rmsnorm"
-LOWERING_ARITY = (1, 1)
+LOWERING_ARITY = (1, 6)
 LOWERING_ALLOWED_KWARGS: set[str] = {"eps", "dim", "unit_offset", "cast_float", "with_scale"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {
@@ -23,6 +23,22 @@ def _dims_compatible(left: Any, right: Any) -> bool:
     if isinstance(right, str) and right.strip().lstrip("-").isdigit():
         right = int(right.strip())
     return left == right
+
+
+def _bool_literal_or_default(value: Any, *, default: bool, field: str) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token == "true":
+            return True
+        if token == "false":
+            return False
+    raise ValueError(f"rmsnorm {field} must resolve to a boolean literal in codegen")
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -63,7 +79,16 @@ def lowering_infer_metadata(
         if isinstance(first_in, str) and first_in.isidentifier()
         else None
     )
-    norm_dim = kwargs.get("dim")
+    norm_dim: Any = kwargs.get("dim")
+    if norm_dim is None and len(args) >= 3:
+        raw = args[2].strip()
+        if raw.lower() != "null":
+            if raw.lstrip("-").isdigit():
+                norm_dim = int(raw)
+            else:
+                norm_dim = raw
+    if norm_dim is None:
+        norm_dim = first_dim
     if norm_dim is not None:
         if first_dim is not None and not _dims_compatible(norm_dim, first_dim):
             raise ValueError(f"rmsnorm dim={norm_dim!r} mismatches input last-dim {first_dim!r}")
@@ -85,21 +110,32 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    x = model._read_tensor_input(node_spec.get("_args"), env)
-    with_scale = bool(node_spec.get("with_scale", True))
+    raw_args = node_spec.get("_args")
+    args = raw_args if isinstance(raw_args, list) else [raw_args]
+    if not isinstance(args, list) or len(args) < 1:
+        raise ValueError("rmsnorm requires positional args: x [eps dim unit_offset cast_float with_scale]")
+    x = model._read_tensor_input(args[0], env)
+
+    eps_raw = args[1] if len(args) >= 2 else node_spec.get("eps", 1e-6)
+    eps_value = float(model._eval_expr(eps_raw, env, symbols))
+    if len(args) >= 3:
+        _ = model._eval_expr(args[2], env, symbols)
+    unit_raw = args[3] if len(args) >= 4 else node_spec.get("unit_offset", False)
+    cast_raw = args[4] if len(args) >= 5 else node_spec.get("cast_float", False)
+    scale_raw = args[5] if len(args) >= 6 else node_spec.get("with_scale", True)
+    unit_offset = bool(model._eval_expr(unit_raw, env, symbols))
+    cast_float = bool(model._eval_expr(cast_raw, env, symbols))
+    with_scale = bool(model._eval_expr(scale_raw, env, symbols))
     weight = None
     if with_scale:
         weight = model._state[
             model._infer_param_path(node_spec, node_path=node_path, param_name="weight")
         ]
-    eps_value = float(model._eval_expr(node_spec.get("eps", 1e-6), env, symbols))
-    cast_float = bool(node_spec.get("cast_float", False))
     align_norm_fp32 = bool(getattr(model, "_hf_align_norm_fp32", False))
     auto_cast_float = (
         align_norm_fp32 and x.is_floating_point() and x.dtype in {torch.float16, torch.bfloat16}
     )
     do_cast_float = cast_float or auto_cast_float
-    unit_offset = bool(node_spec.get("unit_offset", False))
     if do_cast_float:
         # Match HF RMSNorm ordering for bf16/fp16 parity:
         # normalize in fp32, cast normalized activations back, then apply weight.
@@ -143,14 +179,34 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("_args")))
+    raw_args = node_spec.get("_args")
+    args = raw_args if isinstance(raw_args, list) else [raw_args]
+    if not isinstance(args, list) or len(args) < 1:
+        raise ValueError("rmsnorm requires positional args: x [eps dim unit_offset cast_float with_scale]")
+    src = read(str(args[0]))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
-    eps = emitter._expr_code(node_spec.get("eps", 1e-6), env)
+    eps = (
+        emitter._expr_code(args[1], env)
+        if len(args) >= 2
+        else emitter._expr_code(node_spec.get("eps", 1e-6), env)
+    )
     tmp = emitter._fresh("xnorm")
-    cast_float = bool(node_spec.get("cast_float", False))
-    unit_offset = bool(node_spec.get("unit_offset", False))
-    with_scale = bool(node_spec.get("with_scale", True))
+    unit_offset = _bool_literal_or_default(
+        args[3] if len(args) >= 4 else node_spec.get("unit_offset"),
+        default=False,
+        field="unit_offset",
+    )
+    cast_float = _bool_literal_or_default(
+        args[4] if len(args) >= 5 else node_spec.get("cast_float"),
+        default=False,
+        field="cast_float",
+    )
+    with_scale = _bool_literal_or_default(
+        args[5] if len(args) >= 6 else node_spec.get("with_scale"),
+        default=True,
+        field="with_scale",
+    )
     weight = None
     if with_scale:
         weight = emitter._hoisted_param(

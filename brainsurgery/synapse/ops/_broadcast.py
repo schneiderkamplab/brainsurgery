@@ -28,6 +28,13 @@ def broadcast_dim(left: Any, right: Any) -> Any | None:
         return right_norm
     if _is_dim_one(right_norm):
         return left_norm
+    # Lowering metadata often carries unresolved symbolic dimensions
+    # (for example "S" vs "T"). Keep those compatible so lowering does
+    # not reject valid dynamic-shape programs.
+    if not isinstance(left_norm, int):
+        return left_norm
+    if not isinstance(right_norm, int):
+        return right_norm
     return None
 
 

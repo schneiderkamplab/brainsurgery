@@ -35,8 +35,8 @@ deepseek_v1_attn x pos_ids attn_mask past_kv = do
     v <- linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH
     q, k <- rope_pair q k position_ids=pos_ids theta=THETA interleaved=false truncate=false
     k_all, v_all, new_kv <- Cache.update past_kv k v
-    k_all <- repeat k_all (H / KVH)
-    v_all <- repeat v_all (H / KVH)
+    k_all <- repeat k_all repeats=(H / KVH)
+    v_all <- repeat v_all repeats=(H / KVH)
     mask <- causal_mask q k_all padding_mask=attn_mask early_exit=true
     a <- attention q k_all v_all mask=mask eager=false |> merge_heads
     a <- linear@o_proj a dim=D bias=false
@@ -67,13 +67,13 @@ deepseek_v1_moe_block x pos_ids attn_mask past_kv = do
       up <- linear@up_proj xn dim=(EM * SE) bias=false
       return gate |> silu |> mul up |> linear@down_proj dim=D bias=false
     topk_scores, topk_indices <- linear@gate xn dim=E bias=false |>
-      softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1 sorted=false
+      softmax dim=-1 dtype="float32" |> topk k=EPT dim=-1 sorted=false
     routed <- zeros_like xn
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
-      gate <- _linear@gate_proj x_sel dim=EM bias=false
-      up <- _linear@up_proj x_sel dim=EM bias=false
-      x_upd <- gate |> silu |> mul up |> _linear@down_proj dim=D bias=false
+      gate <- linear@gate_proj x_sel dim=EM bias=false
+      up <- linear@up_proj x_sel dim=EM bias=false
+      x_upd <- gate |> silu |> mul up |> linear@down_proj dim=D bias=false
       routed <- MoE.scatter_add routed token_idx x_upd sel_scores
     return shared + routed
   return x + m, new_kv

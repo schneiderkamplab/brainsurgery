@@ -14,7 +14,7 @@ gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 gpt2_block x attn_mask = do
   x1 <- layernorm@ln_1 x
   a <- scope@attn do
-    q_lin, k_lin, v_lin <- linear@c_attn x1 dim=(3 * D) bias=true transpose=true |> split parts=3
+    q_lin, k_lin, v_lin <- chunk (linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
     q <- reshape_heads q_lin heads=H
     k <- reshape_heads k_lin heads=H
     v <- reshape_heads v_lin heads=H

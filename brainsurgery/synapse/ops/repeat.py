@@ -3,13 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 OP_NAME = "repeat"
-LOWERING_ARITY = (1, 3)
-LOWERING_ALLOWED_KWARGS: set[str] = {"repeats", "dim"}
+LOWERING_ARITY = (2, 3)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {
-    "repeats": "dim",
-    "dim": "int",
-}
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -24,22 +21,21 @@ def lowering_normalize_kwargs(
     kwargs: dict[str, Any],
     ctx: Any,
 ) -> None:
-    if len(args) >= 2 and "repeats" not in kwargs:
-        kwargs["repeats"] = args[1]
-        del args[1:]
-    dim = kwargs.pop("dim", 1)
-    if dim != 1:
+    del kwargs, out, ctx
+    dim_literal: int | None = 1
+    if len(args) >= 3:
+        dim_expr = args[2]
+        if isinstance(dim_expr, str):
+            raw = dim_expr.strip()
+            try:
+                dim_literal = int(raw)
+            except ValueError:
+                dim_literal = None
+        elif isinstance(dim_expr, int):
+            dim_literal = int(dim_expr)
+        del args[2:]
+    if dim_literal is not None and dim_literal != 1:
         raise ValueError("repeat currently supports only dim=1 (head axis)")
-    if "repeats" in kwargs:
-        return
-    src_name = args[0].strip()
-    if not src_name.isidentifier() or not isinstance(out, str):
-        raise ValueError("repeat requires repeats (positional or keyword)")
-    kv_heads = ctx.tensor_heads.get(src_name)
-    heads = ctx.tensor_heads.get(out)
-    if kv_heads is None or heads is None:
-        raise ValueError("repeat requires repeats (positional or keyword)")
-    kwargs["repeats"] = f"({heads} // {kv_heads})"
 
 
 def lowering_infer_metadata(
@@ -82,11 +78,14 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    src = model._read_tensor_input(node_spec.get("_args"), env)
-    repeats = node_spec.get("repeats")
-    if repeats is None:
-        raise ValueError("repeat requires repeats")
-    n_rep = int(model._eval_expr(repeats, env, symbols))
+    raw_args = node_spec.get("_args")
+    if not isinstance(raw_args, list) or len(raw_args) < 2:
+        raise ValueError("repeat requires positional args: x repeats [dim]")
+    src = model._read_tensor_input(raw_args[0], env)
+    n_rep = int(model._eval_expr(raw_args[1], env, symbols))
+    dim = int(model._eval_expr(raw_args[2], env, symbols)) if len(raw_args) >= 3 else 1
+    if dim != 1:
+        raise ValueError("repeat currently supports only dim=1 (head axis)")
     out = model._require_name(node_spec.get("_bind"), field="repeat._bind")
     if n_rep == 1:
         env[out] = src
@@ -114,14 +113,21 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("_args")))
+    raw_args = node_spec.get("_args")
+    if not isinstance(raw_args, list) or len(raw_args) < 2:
+        raise ValueError("repeat requires positional args: x repeats [dim]")
+    src = read(str(raw_args[0]))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
-    repeats = node_spec.get("repeats")
-    if repeats is None:
-        raise ValueError("repeat requires repeats")
-    repeats_code = emitter._expr_code(repeats, env)
+    repeats_code = emitter._expr_code(raw_args[1], env)
+    dim_code = emitter._expr_code(raw_args[2], env) if len(raw_args) >= 3 else "1"
+    dim_var = emitter._fresh("dim")
     n_rep = emitter._fresh("n_rep")
+    lines.append(f"{indent}{dim_var} = int({dim_code})")
+    lines.append(f"{indent}if {dim_var} != 1:")
+    lines.append(
+        f"{indent}    raise ValueError('repeat currently supports only dim=1 (head axis)')"
+    )
     lines.append(f"{indent}{n_rep} = int({repeats_code})")
     lines.append(f"{indent}if {n_rep} == 1:")
     lines.append(f"{indent}    {out_var} = {src}")
@@ -133,7 +139,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "Any"),
+    "args": ("Any", "Any", "Any"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": ("Tensor",),
 }

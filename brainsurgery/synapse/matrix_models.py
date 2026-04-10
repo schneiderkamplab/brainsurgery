@@ -566,6 +566,7 @@ def estimate_remote_param_count_lower_bound(
 
 def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
     index_path = model_dir / "model.safetensors.index.json"
+    pytorch_index_path = model_dir / "pytorch_model.bin.index.json"
     single_path = model_dir / "model.safetensors"
     pytorch_bin_path = model_dir / "pytorch_model.bin"
     pt_files = (
@@ -589,6 +590,20 @@ def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
             if not shard_names:
                 return False
             has_weights = all((model_dir / shard).exists() for shard in shard_names)
+        except json.JSONDecodeError:
+            return False
+    elif pytorch_index_path.exists():
+        try:
+            payload = json.loads(pytorch_index_path.read_text(encoding="utf-8"))
+            weight_map = payload.get("weight_map")
+            if not isinstance(weight_map, dict):
+                return False
+            shard_names = {str(v) for v in weight_map.values()}
+            if not shard_names:
+                return False
+            has_weights = all(
+                _is_valid_pytorch_checkpoint_file(model_dir / shard) for shard in shard_names
+            )
         except json.JSONDecodeError:
             return False
     elif single_path.exists():
@@ -662,6 +677,13 @@ def _normalize_config_rope_numeric_fields(model_dir: Path) -> None:
 
 
 def _normalize_local_weight_format(model_dir: Path) -> None:
+    # Keep sharded PyTorch checkpoints in their original format.
+    # Converting each shard into standalone safetensors files without an index
+    # breaks later resolution paths that expect either a single safetensors file
+    # or explicit shard-index handling.
+    if (model_dir / "pytorch_model.bin.index.json").exists():
+        return
+
     safetensor_files = sorted(model_dir.glob("*.safetensors"))
     pt_files = (
         sorted(model_dir.glob("*.pt"))
@@ -761,6 +783,9 @@ def ensure_model_downloaded(
                 name for name in siblings if "/" not in name and name.endswith(".bin")
             )
             index_files = [name for name in siblings if name == "model.safetensors.index.json"]
+            pytorch_index_files = [
+                name for name in siblings if name == "pytorch_model.bin.index.json"
+            ]
             if shard_files:
                 selected_weight_files = [*index_files, *shard_files]
                 for stale in [
@@ -770,7 +795,7 @@ def ensure_model_downloaded(
                 ]:
                     stale.unlink(missing_ok=True)
             else:
-                selected_weight_files = pytorch_bin_files
+                selected_weight_files = [*pytorch_index_files, *pytorch_bin_files]
                 for stale in [
                     *model_dir.glob("*.safetensors"),
                     model_dir / "model.safetensors.index.json",

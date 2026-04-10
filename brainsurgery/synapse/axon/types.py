@@ -12,6 +12,7 @@ class AxonParam:
     optional: bool = False
     type_expr: TypeExpr | None = None
     shape: tuple[DimToken, ...] | None = None
+    default_expr: "AxonExpr | None" = None
 
 
 @dataclass(frozen=True)

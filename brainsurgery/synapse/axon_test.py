@@ -826,7 +826,11 @@ def _resolve_safetensors_paths(weights: Path) -> list[Path]:
         return [candidates[0]]
     if not candidates:
         raise FileNotFoundError(f"No .safetensors files found in directory: {weights}")
-    if all(path.name.startswith("model-") and "-of-" in path.name for path in candidates):
+    if all(
+        (path.name.startswith("model-") or path.name.startswith("pytorch_model-"))
+        and "-of-" in path.name
+        for path in candidates
+    ):
         return candidates
     raise ValueError(
         f"Multiple .safetensors files found in {weights}; pass an explicit .safetensors file path."
@@ -2098,6 +2102,7 @@ def _run_axon_test_single(
                 and attention_mask is not None
                 and resolved_model_type != "deepseek"
                 and resolved_model_type != "gpt_neox"
+                and resolved_model_type != "exaone4"
             ):
                 pos_ids = attention_mask.to(torch.long).cumsum(dim=-1) - 1
                 pos_ids = pos_ids.masked_fill(attention_mask == 0, 1)

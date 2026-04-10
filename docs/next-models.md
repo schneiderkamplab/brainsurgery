@@ -37,6 +37,76 @@ If only a small number of families should be added next, start with:
 
 ## Axon / Synapse TODO
 
-- For GPT-2-style `position_ids_basic`, the immediate primitive-op path is to add `_eq` and `_masked_fill` rather than broadening Axon expressions first.
-- Full expression-level elementwise tensor comparisons such as `attn_mask == 0` should remain a separate language/runtime task.
-- Once that larger task exists, tensor comparison expressions could eventually replace some dedicated comparison primitives in Axon modules.
+### Groomed primitive ops
+
+- `linear`
+- `layernorm`
+- `embedding`
+- `repeat`
+- `split`
+- `chunk`
+- `slice`
+- `reshape`
+- `permute`
+- `transpose`
+- `expand`
+- `arange`
+- `cast`
+- `cumsum`
+- `softmax`
+- `topk`
+- `sqrt`
+- `eq`
+- `le`
+- `and`
+- `where`
+- `zeros_like`
+- `min_like`
+
+### Deprecated operations
+
+- `bidirectional_mask`
+- `causal_mask`
+- `attention`
+- `rope_pair`
+- `reshape_heads`
+- `merge_heads`
+- `position_ids`
+- `split_qkv_heads`
+- `split_qkv_grouped`
+- `linear_position_bias`
+- `blocksparse_mask`
+- `moe_select`
+- `moe_scatter_add`
+- `moe_grouped_ffn`
+- `moe_grouped_swiglu_ffn`
+- `softmax_topk_router`
+- `sigmoid_topk_router`
+- `nemotron_moe`
+- `gemma4_router`
+- `gemma4_moe_experts`
+- `gemma4_per_layer_inputs`
+- `gemma4_per_layer_input_at`
+- `glm4_router`
+- `mamba_scan`
+- `mamba2_scan`
+- `causal_conv1d`
+- `t5_relative_position_bias`
+- `disentangled_relative_bias`
+
+### Other too-coarse/opaque ops to move into `Derived.axon`
+
+- `repeat`
+- `rmsnorm` (when a stable derived formulation is agreed)
+- `param_scale`
+
+### To be sorted (all current primitive ops)
+
+- `_ir_alias`, `_ir_expr`, `activation`, `add`, `and`, `arange`, `attention`, `bidirectional_mask`, `blocksparse_mask`, `cache_seq_len`, `cache_update`, `cast`, `causal_conv1d`, `causal_mask`, `chunk`, `clamp`, `concat`, `config_float`, `config_has`, `config_int`, `config_str`, `config_value`, `cumsum`, `disentangled_relative_bias`, `div`, `embedding`, `eq`, `expand`, `floor`, `gemma4_moe_experts`, `gemma4_per_layer_input_at`, `gemma4_per_layer_inputs`, `gemma4_router`, `glm4_router`, `l2norm`, `layernorm`, `le`, `linear`, `linear_position_bias`, `list_append`, `list_index`, `list_init`, `log`, `mamba2_scan`, `mamba_scan`, `matmul`, `merge_heads`, `min_like`, `moe_grouped_ffn`, `moe_grouped_swiglu_ffn`, `moe_scatter_add`, `moe_select`, `mul`, `nemotron_moe`, `param_scale`, `params_has_root`, `params_root`, `permute`, `position_ids`, `repeat`, `reshape`, `reshape_heads`, `rmsnorm`, `rope_pair`, `select`, `sigmoid_topk_router`, `slice`, `softmax`, `softmax_topk_router`, `split`, `split_qkv_grouped`, `split_qkv_heads`, `sqrt`, `t5_relative_position_bias`, `topk`, `transpose`, `unsqueeze`, `where`, `zeros_like`
+
+### Language/runtime follow-ups
+
+- Full expression-level elementwise tensor comparisons such as `attn_mask == 0`.
+- Once that larger task exists, tensor comparison expressions could replace some dedicated comparison primitives in Axon modules.
+- Add `_to_idx` primitive (`Tensor -> IdxTensor`) as an explicit typed boundary, then tighten `embedding` to consume `IdxTensor` and avoid broad implicit `Tensor`/`IdxTensor` interchange.
+- Add generic list-unpack syntax (Python-style starred target), e.g. `head, *tail <- xs` and `*init, last <- xs`; use it to simplify Cache/list handling (`List.index` head/last patterns).

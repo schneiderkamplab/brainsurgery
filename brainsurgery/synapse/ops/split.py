@@ -3,12 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 OP_NAME = "split"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"dim", "parts", "sizes"}
+LOWERING_ARITY = (1, 3)
+LOWERING_ALLOWED_KWARGS: set[str] = {"dim", "sizes"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {
     "dim": "int",
-    "parts": "int",
     "sizes": "list_dim",
 }
 
@@ -35,9 +34,38 @@ def _maybe_int_list(value: Any) -> list[int] | None:
     return None
 
 
+def _is_null_like(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip().lower() == "null":
+        return True
+    return False
+
+
+def _arg_or_default(args: list[Any], index: int, default: Any) -> Any:
+    if index >= len(args):
+        return default
+    value = args[index]
+    if _is_null_like(value):
+        return default
+    return value
+
+
+def _to_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str) and _is_int_token(value):
+        return int(value.strip())
+    return None
+
+
 def _is_int_token(value: str) -> bool:
     token = value.strip()
     return bool(token) and (token.isdigit() or (token[0] in {"+", "-"} and token[1:].isdigit()))
+
+
+def _is_name_token(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().isidentifier()
 
 
 def _name_expr(name: str) -> dict[str, Any]:
@@ -123,47 +151,67 @@ def lowering_normalize_kwargs(
     kwargs: dict[str, Any],
     ctx: Any,
 ) -> None:
-    if not isinstance(out, list):
-        raise ValueError("split requires tuple/list binding outputs")
-    has_parts = "parts" in kwargs
-    has_sizes = "sizes" in kwargs
-    if has_parts and has_sizes:
-        raise ValueError("split accepts either parts or sizes, not both")
-    if has_sizes and isinstance(kwargs["sizes"], str):
-        parsed_sizes = _maybe_int_list(kwargs["sizes"])
+    if not args:
+        raise ValueError("split requires at least one positional arg: x")
+    src = args[0]
+    dim_value = _arg_or_default(args, 1, -1)
+    sizes_value = _arg_or_default(args, 2, None)
+    if len(args) > 3:
+        raise ValueError(f"split expects at most 3 positional args, got {len(args)}")
+    if "dim" in kwargs:
+        if len(args) >= 2 and not _is_null_like(args[1]):
+            raise ValueError("split received multiple values for dim")
+        dim_value = kwargs["dim"]
+    if "sizes" in kwargs:
+        if len(args) >= 3 and not _is_null_like(args[2]):
+            raise ValueError("split received multiple values for sizes")
+        sizes_value = kwargs["sizes"]
+    has_sizes = not _is_null_like(sizes_value)
+    if has_sizes and isinstance(sizes_value, str):
+        parsed_sizes = _maybe_int_list(sizes_value)
         if parsed_sizes is not None:
-            kwargs["sizes"] = parsed_sizes
-    if not has_parts and not has_sizes and args:
+            sizes_value = parsed_sizes
+    if not has_sizes and isinstance(out, list) and args:
         first_arg = args[0].strip()
         if first_arg.isidentifier():
             inferred = ctx.tensor_last_dim.get(first_arg)
             split_sizes = _infer_split_sizes_from_last_dim(inferred, len(out))
             if split_sizes is not None:
-                kwargs["sizes"] = split_sizes
+                sizes_value = split_sizes
                 has_sizes = True
-    if has_parts:
-        parts_raw = kwargs["parts"]
-        if not isinstance(parts_raw, int) or isinstance(parts_raw, bool) or parts_raw <= 0:
-            raise ValueError("split parts must be a positive integer")
-        if len(out) != parts_raw:
-            raise ValueError(
-                f"split parts={parts_raw} requires {parts_raw} outputs, got {len(out)}"
-            )
+    if not has_sizes:
+        raise ValueError(
+            "split requires sizes (explicit or inferable from symbolic last-dim and bind arity)"
+        )
     if has_sizes:
-        sizes_raw = kwargs["sizes"]
-        if not isinstance(sizes_raw, list) or len(sizes_raw) == 0:
+        sizes_raw = sizes_value
+        if isinstance(sizes_raw, list):
+            if len(sizes_raw) == 0:
+                raise ValueError("split sizes must be a non-empty list")
+            if not all(
+                (isinstance(v, int) and not isinstance(v, bool))
+                or isinstance(v, str)
+                or (
+                    isinstance(v, dict)
+                    and v.get("_expr") in {"name", "binary", "if", "tuple", "call", "string"}
+                )
+                for v in sizes_raw
+            ):
+                raise ValueError("split sizes must contain only ints or symbolic dims")
+            if isinstance(out, list) and len(out) != len(sizes_raw):
+                raise ValueError(
+                    f"split sizes length {len(sizes_raw)} requires {len(sizes_raw)} outputs, got {len(out)}"
+                )
+            sizes_value = sizes_raw
+        elif _is_name_token(sizes_raw):
+            sizes_value = sizes_raw
+        else:
             raise ValueError("split sizes must be a non-empty list")
-        if not all(
-            (isinstance(v, int) and not isinstance(v, bool))
-            or isinstance(v, str)
-            or (isinstance(v, dict) and v.get("_expr") in {"name", "binary", "if", "tuple"})
-            for v in sizes_raw
-        ):
-            raise ValueError("split sizes must contain only ints or symbolic dims")
-        if len(out) != len(sizes_raw):
-            raise ValueError(
-                f"split sizes length {len(sizes_raw)} requires {len(sizes_raw)} outputs, got {len(out)}"
-            )
+    dim_int = _to_int(dim_value)
+    if dim_int is not None:
+        dim_value = dim_int
+    args[:] = [src, dim_value, sizes_value]
+    kwargs.clear()
 
 
 def lowering_known_output_arity(*, kwargs: dict[str, Any]) -> int | None:
@@ -177,11 +225,6 @@ def lowering_known_output_arity(*, kwargs: dict[str, Any]) -> int | None:
             if not inner:
                 return 0
             return len([part for part in inner.split(",") if part.strip()])
-    parts = kwargs.get("parts")
-    if isinstance(parts, int):
-        return parts
-    if isinstance(parts, str) and _is_int_token(parts):
-        return int(parts.strip())
     return None
 
 
@@ -194,10 +237,10 @@ def lowering_infer_metadata(
 ) -> bool:
     if not isinstance(out, list):
         return False
-    dim = kwargs.get("dim", -1)
+    dim = _arg_or_default(args, 1, -1)
     if not isinstance(dim, int) or isinstance(dim, bool):
         return False
-    sizes = _maybe_int_list(kwargs.get("sizes"))
+    sizes = _maybe_int_list(_arg_or_default(args, 2, None))
     if sizes is not None and len(sizes) == len(out):
         axis = dim
         if args:
@@ -230,22 +273,40 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope
-    x = model._read_tensor_input(node_spec.get("_args"), env)
-    outs = node_spec.get("_bind")
-    if not isinstance(outs, list) or len(outs) == 0:
-        raise ValueError("split requires non-empty list out")
-    dim = int(model._eval_expr(node_spec.get("dim", -1), env, symbols))
-    sizes = node_spec.get("sizes")
-    if sizes is not None:
-        if not isinstance(sizes, list) or len(sizes) != len(outs):
-            raise ValueError("split sizes must be a list with same length as out")
-        split_sizes = [int(model._eval_expr(size, env, symbols)) for size in sizes]
-        chunks = x.split(split_sizes, dim=dim)
+    raw_args = node_spec.get("_args")
+    if isinstance(raw_args, list):
+        args = list(raw_args)
+    elif raw_args is None:
+        args = []
     else:
-        parts = int(model._eval_expr(node_spec.get("parts", len(outs)), env, symbols))
-        chunks = x.chunk(parts, dim=dim)
-    for name, tensor in zip(outs, chunks, strict=True):
-        env[str(name)] = tensor
+        args = [raw_args]
+    if not args:
+        raise ValueError("split requires positional args: x [dim sizes]")
+    x = model._read_tensor_input(args[0], env)
+    out_bind = node_spec.get("_bind")
+    dim = int(model._eval_expr(_arg_or_default(args, 1, -1), env, symbols))
+    sizes = _arg_or_default(args, 2, None)
+    expected_len = len(out_bind) if isinstance(out_bind, list) and len(out_bind) > 0 else None
+    sizes_eval = model._eval_expr(sizes, env, symbols)
+    if not isinstance(sizes_eval, list | tuple):
+        raise ValueError("split sizes must be a list")
+    if expected_len is not None and len(sizes_eval) != expected_len:
+        raise ValueError("split sizes must be a list with same length as out")
+    split_sizes = [int(model._eval_expr(size, env, symbols)) for size in sizes_eval]
+    chunks = x.split(split_sizes, dim=dim)
+    if isinstance(out_bind, list):
+        outs = out_bind
+        if len(outs) == 0:
+            raise ValueError("split requires non-empty list out")
+        if len(chunks) != len(outs):
+            raise ValueError(
+                f"split output arity mismatch: produced {len(chunks)}, expected {len(outs)}"
+            )
+        for name, tensor in zip(outs, chunks, strict=True):
+            env[str(name)] = tensor
+        return
+    out_name = model._require_name(out_bind, field="split._bind")
+    env[out_name] = list(chunks)
 
 
 def compile(
@@ -259,24 +320,32 @@ def compile(
 ) -> list[str]:
     del node_path_var, scope_var
     lines: list[str] = []
-    src = emitter._read_env_var(env, str(node_spec.get("_args")))
-    outs = node_spec.get("_bind")
-    if not isinstance(outs, list) or len(outs) == 0:
-        raise ValueError("split requires non-empty list out")
-    tmp = emitter._fresh("split")
-    dim = emitter._expr_code(node_spec.get("dim", -1), env)
-    sizes = node_spec.get("sizes")
-    if sizes is not None:
-        if not isinstance(sizes, list) or len(sizes) != len(outs):
-            raise ValueError("split sizes must be a list with same length as out")
-        sizes_code = ", ".join(emitter._expr_code(size, env) for size in sizes)
-        lines.append(f"{indent}{tmp} = torch.split({src}, [{sizes_code}], dim=int({dim}))")
+    raw_args = node_spec.get("_args")
+    if isinstance(raw_args, list):
+        args = list(raw_args)
+    elif raw_args is None:
+        args = []
     else:
-        parts = emitter._expr_code(node_spec.get("parts", len(outs)), env)
-        lines.append(f"{indent}{tmp} = torch.chunk({src}, int({parts}), dim=int({dim}))")
-    for idx, out_name in enumerate(outs):
-        out_var = emitter._assign_out_var(env, str(out_name))
-        lines.append(f"{indent}{out_var} = {tmp}[{idx}]")
+        args = [raw_args]
+    if not args:
+        raise ValueError("split requires positional args: x [dim sizes]")
+    src = emitter._read_env_var(env, str(args[0]))
+    out_bind = node_spec.get("_bind")
+    tmp = emitter._fresh("split")
+    dim = emitter._expr_code(_arg_or_default(args, 1, -1), env)
+    sizes = _arg_or_default(args, 2, None)
+    sizes_code = emitter._expr_code(sizes, env)
+    lines.append(f"{indent}{tmp} = torch.split({src}, {sizes_code}, dim=int({dim}))")
+    if isinstance(out_bind, list):
+        outs = out_bind
+        if len(outs) == 0:
+            raise ValueError("split requires non-empty list out")
+        for idx, out_name in enumerate(outs):
+            out_var = emitter._assign_out_var(env, str(out_name))
+            lines.append(f"{indent}{out_var} = {tmp}[{idx}]")
+        return lines
+    out_var = emitter._assign_out_var(env, str(out_bind))
+    lines.append(f"{indent}{out_var} = list({tmp})")
     return lines
 
 

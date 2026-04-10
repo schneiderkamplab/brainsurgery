@@ -71,9 +71,15 @@ class ParsedFunctionType:
 
 
 @dataclass(frozen=True)
+class ParsedDefParam:
+    name: str
+    default_expr: AxonExpr | None = None
+
+
+@dataclass(frozen=True)
 class ParsedDefinition:
     module_decl: str
-    args: tuple[str, ...]
+    args: tuple[ParsedDefParam, ...]
     rhs: AxonExpr
 
 
@@ -110,9 +116,12 @@ class _AxonIndenter(Indenter):
         super().__init__()
         self._continuation_indents: list[int] = []
         self._prev_type: str | None = None
+        self._pending_paren_do_block = False
+        self._paren_do_base_indents: list[int] = []
 
     def handle_NL(self, token: Token) -> Iterator[Token]:
-        if self.paren_level > 0:
+        in_paren_do_block = bool(self._paren_do_base_indents)
+        if self.paren_level > 0 and not (self._pending_paren_do_block or in_paren_do_block):
             return
 
         indent_str = token.rsplit("\n", 1)[1]
@@ -129,6 +138,17 @@ class _AxonIndenter(Indenter):
         ):
             yield token
             return
+
+        if self._pending_paren_do_block:
+            self._pending_paren_do_block = False
+            if indent > current:
+                self._paren_do_base_indents.append(current)
+                self.indent_level.append(indent)
+                yield Token.new_borrow_pos(self.INDENT_type, indent_str, token)
+                return
+            if indent == current:
+                yield token
+                return
 
         if self._prev_type in {"PIPE_OP", "MONAD_BIND"} and indent > current:
             self._continuation_indents.append(indent)
@@ -147,7 +167,17 @@ class _AxonIndenter(Indenter):
         while indent < self.indent_level[-1]:
             self.indent_level.pop()
             yield Token.new_borrow_pos(self.DEDENT_type, indent_str, token)
+
+        if indent > self.indent_level[-1]:
+            yield token
+            return
+
         yield token
+
+        while (
+            self._paren_do_base_indents and self.indent_level[-1] == self._paren_do_base_indents[-1]
+        ):
+            self._paren_do_base_indents.pop()
 
         if indent != self.indent_level[-1]:
             raise DedentError(
@@ -159,6 +189,8 @@ class _AxonIndenter(Indenter):
         self.indent_level = [0]
         self._continuation_indents = []
         self._prev_type = None
+        self._pending_paren_do_block = False
+        self._paren_do_base_indents = []
         return self._process(stream)
 
     def _process(self, stream: Iterator[Token]) -> Iterator[Token]:
@@ -174,6 +206,11 @@ class _AxonIndenter(Indenter):
             elif token.type in self.CLOSE_PAREN_types:
                 self.paren_level -= 1
                 assert self.paren_level >= 0
+
+            if token.type == "DO" and self.paren_level > 0:
+                self._pending_paren_do_block = True
+            elif self._pending_paren_do_block and token.type != self.NL_type and token.type != "DO":
+                self._pending_paren_do_block = False
 
             if token.type not in {self.NL_type, self.INDENT_type, self.DEDENT_type}:
                 self._prev_type = token.type
@@ -224,7 +261,10 @@ type_name: NAME
     | type_name -> type_dim_name
     | LPAR type_dim_expr RPAR -> type_dim_paren
 
-definition: mod_decl NAME* "=" expr
+definition: mod_decl def_param* "=" expr
+def_param: NAME -> def_param_positional
+    | "?" NAME "=" def_param_simple -> def_param_default
+    | "?" NAME "=" LPAR expr RPAR -> def_param_default_paren
 mod_decl: module_name mod_decl_param*
 mod_decl_param: "@" NAME
 module_name: NAME ("." NAME)*
@@ -282,9 +322,11 @@ do_expr: DO suite
     | pipe_expr PIPE_OP nl_gap? ternary_expr -> pipe
 
 ?ternary_expr: if_expr
-    | or_expr "?" tuple_value ":" tuple_value -> ternary
+    | or_expr "?" arg_ws? tuple_value arg_ws? ":" arg_ws? tuple_value -> ternary
+    | or_expr INDENT "?" arg_ws? tuple_value arg_ws? ":" arg_ws? tuple_value DEDENT -> ternary
 
-?if_expr: "if" expr "then" tuple_value "else" tuple_value -> if_expr
+?if_expr: "if" arg_ws? expr arg_ws? "then" arg_ws? tuple_value arg_ws? "else" arg_ws? tuple_value -> if_expr
+    | "if" arg_ws? expr arg_ws? "then" INDENT tuple_value DEDENT arg_ws? "else" INDENT tuple_value DEDENT -> if_expr
     | or_expr
 
 ?or_expr: and_expr
@@ -308,12 +350,18 @@ do_expr: DO suite
 bare_arg: kwarg_bare | arg_expr
 kwarg_bare: NAME "=" kwarg_value
 
-kwarg_value: arg_expr
+kwarg_value: path_lit | arg_expr
+path_lit: PATH_LIT
 
-?arg_expr: arg_ternary
+?arg_expr: do_expr
+    | arg_ternary
 ?arg_ternary: arg_if
-    | arg_or "?" arg_expr ":" arg_expr -> ternary
-?arg_if: "if" arg_expr "then" arg_expr "else" arg_expr -> if_expr
+    | arg_or "?" arg_ws? arg_expr arg_ws? ":" arg_ws? arg_expr -> ternary
+    | arg_or INDENT "?" arg_ws? arg_expr arg_ws? ":" arg_ws? arg_expr DEDENT -> ternary
+?def_param_simple: literal
+    | name_ref
+?arg_if: "if" arg_ws? arg_expr arg_ws? "then" arg_ws? arg_expr arg_ws? "else" arg_ws? arg_expr -> if_expr
+    | "if" arg_ws? arg_expr arg_ws? "then" INDENT arg_expr DEDENT arg_ws? "else" INDENT arg_expr DEDENT -> if_expr
     | arg_or
 ?arg_or: arg_and
     | arg_or "or" arg_and -> or_expr
@@ -332,12 +380,12 @@ kwarg_value: arg_expr
 lambda_expr: "\\" NAME LAMBDA_ARROW expr -> lambda_expr
 
 ?atom: tuple_expr
-    | LPAR expr RPAR -> paren
+    | LPAR _NL* expr _NL* RPAR -> paren
     | list_expr
     | literal
     | name_ref
 
-?atom_no_tuple: LPAR expr RPAR -> paren
+?atom_no_tuple: LPAR _NL* expr _NL* RPAR -> paren
     | list_expr
     | literal
     | name_ref
@@ -355,12 +403,14 @@ callable: NAME
     | NULL -> lit_null
     | STRING -> lit_string
 
+arg_ws: (_NL | INDENT | DEDENT)*
 nl_gap: (_NL | INDENT | DEDENT)+
 
 NAME: /[A-Za-z_](?:[A-Za-z0-9_:@]|\.(?!\.))*(?=[ \t\r\n]|$|[),;?:|+\-*\/%<>=\[\]]|\.\.)/
 INT: /-?[0-9]+/
 FLOAT: /-?(?:[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?|[0-9]+(?:[eE][+-]?[0-9]+))/
 STRING: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/
+PATH_LIT: /@@?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+))*/
 
 CMP_OP: "==" | "!=" | "<=" | ">=" | "<" | ">"
 ADD_OP: "+" | "-"
@@ -794,17 +844,42 @@ class _ProgramTransformer(Transformer[Token, object]):
 
     def definition(self, children: list[object]) -> ParsedDefinition:
         mod = cast(str, children[0])
-        args: list[str] = []
+        args: list[ParsedDefParam] = []
         rhs: AxonExpr | None = None
         for child in children[1:]:
-            if isinstance(child, Token) and child.type == "NAME":
-                args.append(str(child))
+            if isinstance(child, ParsedDefParam):
+                args.append(child)
                 continue
             if self._is_expr(child):
                 rhs = self._as_expr(child)
         if rhs is None:
             raise ValueError("definition rhs expression is required")
         return ParsedDefinition(module_decl=mod, args=tuple(args), rhs=rhs)
+
+    def def_param_positional(self, children: list[object]) -> ParsedDefParam:
+        if len(children) != 1:
+            raise ValueError("invalid positional definition parameter")
+        token = cast(Token, children[0])
+        return ParsedDefParam(name=str(token), default_expr=None)
+
+    def def_param_default(self, children: list[object]) -> ParsedDefParam:
+        if len(children) != 2:
+            raise ValueError("invalid defaulted definition parameter")
+        token = cast(Token, children[0])
+        default_expr = self._as_expr(children[1])
+        return ParsedDefParam(name=str(token), default_expr=default_expr)
+
+    def def_param_default_paren(self, children: list[object]) -> ParsedDefParam:
+        token = next(
+            (child for child in children if isinstance(child, Token) and child.type == "NAME"),
+            None,
+        )
+        default_expr = next(
+            (self._as_expr(child) for child in children if self._is_expr(child)), None
+        )
+        if not isinstance(token, Token) or default_expr is None:
+            raise ValueError("invalid parenthesized defaulted definition parameter")
+        return ParsedDefParam(name=str(token), default_expr=default_expr)
 
     def import_members_paren(self, children: list[object]) -> tuple[str, ...]:
         return tuple(
@@ -1078,6 +1153,11 @@ class _ProgramTransformer(Transformer[Token, object]):
             return AxonExprString(value=text[1:-1])
         return AxonExprString(value=text)
 
+    def path_lit(self, children: list[object]) -> AxonExpr:
+        token = children[0]
+        assert isinstance(token, Token)
+        return AxonExprString(value=str(token))
+
     def tuple_expr(self, children: list[object]) -> AxonExpr:
         items = tuple(self._as_expr(child) for child in children if self._is_expr(child))
         return AxonExprTuple(items=items)
@@ -1147,15 +1227,17 @@ class _ProgramTransformer(Transformer[Token, object]):
         return AxonExprPipe(value=left, stages=(right,))
 
     def ternary(self, children: list[object]) -> AxonExpr:
-        cond = self._as_expr(children[0])
-        true_expr = self._as_expr(children[1])
-        false_expr = self._as_expr(children[2])
+        exprs = [self._as_expr(child) for child in children if self._is_expr(child)]
+        if len(exprs) != 3:
+            raise ValueError("ternary expression requires condition and two branches")
+        cond, true_expr, false_expr = exprs
         return AxonExprTernary(cond=cond, true_expr=true_expr, false_expr=false_expr)
 
     def if_expr(self, children: list[object]) -> AxonExpr:
-        cond = self._as_expr(children[0])
-        true_expr = self._as_expr(children[1])
-        false_expr = self._as_expr(children[2])
+        exprs = [self._as_expr(child) for child in children if self._is_expr(child)]
+        if len(exprs) != 3:
+            raise ValueError("if-expression requires condition and two branches")
+        cond, true_expr, false_expr = exprs
         return AxonExprIf(cond=cond, true_expr=true_expr, false_expr=false_expr)
 
     def or_expr(self, children: list[object]) -> AxonExpr:

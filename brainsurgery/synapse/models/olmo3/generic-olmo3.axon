@@ -32,8 +32,8 @@ olmo3_block x i pos_ids attn_mask past_kv = do
     v <- linear@v_proj x dim=(KVH * HD) |> reshape_heads heads=KVH
     q, k <- rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE beta_fast=ROPE_BETA_FAST beta_slow=ROPE_BETA_SLOW original_context=ROPE_CONTEXT
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     window <- ((i + 1) % FULL_ATTN_PERIOD) == 0 ? C : SW
     mask <- causal_mask q k window=window padding_mask=attn_mask
     a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads |> linear@o_proj dim=D

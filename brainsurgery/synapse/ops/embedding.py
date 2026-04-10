@@ -5,32 +5,33 @@ from typing import Any
 from torch.nn import functional as F
 
 OP_NAME = "embedding"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"scale", "dim"}
+LOWERING_ARITY = (1, 3)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"dim": "dim", "scale": "number"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
+
+
+def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
+    raw = node_spec.get("_args")
+    if isinstance(raw, list):
+        return list(raw)
+    if raw is None:
+        return []
+    return [raw]
+
+
+def _arg_or_default(args: list[Any], index: int, default: Any) -> Any:
+    if index >= len(args):
+        return default
+    value = args[index]
+    if isinstance(value, str) and value.strip().lower() == "null":
+        return default
+    return value
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return True
-
-
-def lowering_normalize_kwargs(
-    *,
-    args: list[str],
-    out: str | list[str],
-    kwargs: dict[str, Any],
-    ctx: Any,
-) -> None:
-    del args
-    if "embedding_dim" in kwargs:
-        raise ValueError("embedding does not support embedding_dim; use dim")
-    if "dim" in kwargs or not isinstance(out, str):
-        return
-    inferred = ctx.tensor_last_dim.get(out)
-    if inferred is not None:
-        kwargs["dim"] = inferred
 
 
 def lowering_infer_metadata(
@@ -40,10 +41,15 @@ def lowering_infer_metadata(
     kwargs: dict[str, Any],
     ctx: Any,
 ) -> bool:
-    del args
     if not isinstance(out, str):
         return False
-    last_dim = kwargs.get("dim")
+    last_dim: Any = None
+    if len(args) >= 2:
+        last_dim = args[1]
+    else:
+        inferred = ctx.tensor_last_dim.get(out)
+        if inferred is not None:
+            last_dim = inferred
     if last_dim is not None:
         ctx.tensor_last_dim[out] = last_dim
     return True
@@ -58,13 +64,17 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    x = model._read_tensor_input(node_spec.get("_args"), env)
+    args = _raw_args(node_spec)
+    if not args:
+        raise ValueError("embedding requires positional args: x [dim scale]")
+    x = model._read_tensor_input(args[0], env)
     weight_path = model._infer_param_path(node_spec, node_path=node_path, param_name="weight")
     weight = model._state[weight_path]
     out = model._require_name(node_spec.get("_bind"), field="embedding._bind")
     y = F.embedding(x, weight)
-    if node_spec.get("scale") is not None:
-        scale = float(model._eval_expr(node_spec.get("scale"), env, symbols))
+    scale_expr = _arg_or_default(args, 2, None)
+    if scale_expr is not None:
+        scale = float(model._eval_expr(scale_expr, env, symbols))
         y = y * y.new_tensor(scale)
     env[out] = y
     return
@@ -87,7 +97,10 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("_args")))
+    args = _raw_args(node_spec)
+    if not args:
+        raise ValueError("embedding requires positional args: x [dim scale]")
+    src = read(str(args[0]))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     weight = emitter._hoisted_param(
@@ -97,7 +110,7 @@ def compile(
         lines=lines,
         indent=indent,
     )
-    scale_expr = node_spec.get("scale")
+    scale_expr = _arg_or_default(args, 2, None)
     if scale_expr is None:
         lines.append(f"{indent}{out_var} = F.embedding({src}, {weight})")
     else:
@@ -121,7 +134,6 @@ __all__ = [
     "LOWERING_REQUIRED_KWARGS",
     "LOWERING_KWARG_KINDS",
     "OP_NAME",
-    "lowering_normalize_kwargs",
     "lowering_infer_metadata",
     "interpret",
     "compile",

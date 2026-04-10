@@ -98,6 +98,199 @@ def _parse_scalar_token(token: str) -> Any:
         return value
 
 
+_NO_CONST = object()
+
+
+def _is_static_literal(value: Any) -> bool:
+    if isinstance(value, (bool, int, float, str)) or value is None:
+        return True
+    if isinstance(value, list):
+        return all(_is_static_literal(item) for item in value)
+    if isinstance(value, tuple):
+        return all(_is_static_literal(item) for item in value)
+    return False
+
+
+def _const_fold_expr(expr: AxonExpr, ctx: "_LowerCtx") -> Any:
+    if isinstance(expr, AxonExprParen):
+        return _const_fold_expr(expr.inner, ctx)
+    if isinstance(expr, AxonExprInt):
+        return expr.value
+    if isinstance(expr, AxonExprFloat):
+        return expr.value
+    if isinstance(expr, AxonExprBool):
+        return expr.value
+    if isinstance(expr, AxonExprNull):
+        return None
+    if isinstance(expr, AxonExprString):
+        return expr.value
+    if isinstance(expr, AxonExprName):
+        if expr.name in ctx.runtime_bound_symbol_names:
+            return _NO_CONST
+        value = ctx.symbol_values.get(expr.name, _NO_CONST)
+        if value is None and expr.name in ctx.symbol_names:
+            return _NO_CONST
+        if value is _NO_CONST or not _is_static_literal(value):
+            return _NO_CONST
+        return value
+    if isinstance(expr, AxonExprList):
+        list_items: list[Any] = []
+        for item in expr.items:
+            folded = _const_fold_expr(item, ctx)
+            if folded is _NO_CONST:
+                return _NO_CONST
+            list_items.append(folded)
+        return list_items
+    if isinstance(expr, AxonExprTuple):
+        tuple_items: list[Any] = []
+        for item in expr.items:
+            folded = _const_fold_expr(item, ctx)
+            if folded is _NO_CONST:
+                return _NO_CONST
+            tuple_items.append(folded)
+        return tuple(tuple_items)
+    if isinstance(expr, AxonExprIf):
+        cond = _const_fold_expr(expr.cond, ctx)
+        if not isinstance(cond, bool):
+            return _NO_CONST
+        return _const_fold_expr(expr.true_expr if cond else expr.false_expr, ctx)
+    if isinstance(expr, AxonExprTernary):
+        cond = _const_fold_expr(expr.cond, ctx)
+        if not isinstance(cond, bool):
+            return _NO_CONST
+        return _const_fold_expr(expr.true_expr if cond else expr.false_expr, ctx)
+    if isinstance(expr, AxonExprBinary):
+        left = _const_fold_expr(expr.left, ctx)
+        right = _const_fold_expr(expr.right, ctx)
+        if left is _NO_CONST or right is _NO_CONST:
+            return _NO_CONST
+        try:
+            if expr.op == "+":
+                return left + right
+            if expr.op == "-":
+                return left - right
+            if expr.op == "*":
+                return left * right
+            if expr.op == "/":
+                return _NO_CONST
+            if expr.op == "%":
+                return left % right
+            if expr.op == "==":
+                return left == right
+            if expr.op == "!=":
+                return left != right
+            if expr.op == "<":
+                return left < right
+            if expr.op == "<=":
+                return left <= right
+            if expr.op == ">":
+                return left > right
+            if expr.op == ">=":
+                return left >= right
+            if expr.op == "and":
+                return bool(left) and bool(right)
+            if expr.op == "or":
+                return bool(left) or bool(right)
+        except Exception:
+            return _NO_CONST
+        return _NO_CONST
+    if isinstance(expr, AxonExprCall):
+        if "." in expr.callee or "@" in expr.callee:
+            return _NO_CONST
+        if expr.kwargs:
+            return _NO_CONST
+        args: list[Any] = []
+        for arg in expr.args:
+            folded = _const_fold_expr(arg, ctx)
+            if folded is _NO_CONST:
+                return _NO_CONST
+            args.append(folded)
+        try:
+            if expr.callee == "sqrt" and len(args) == 1:
+                value = float(args[0])
+                if value < 0:
+                    return _NO_CONST
+                return value**0.5
+            if expr.callee == "int" and len(args) == 1:
+                return int(args[0])
+            if expr.callee == "float" and len(args) == 1:
+                return float(args[0])
+            if expr.callee == "bool" and len(args) == 1:
+                return bool(args[0])
+            if expr.callee == "str" and len(args) == 1:
+                return str(args[0])
+            if expr.callee == "abs" and len(args) == 1:
+                return abs(args[0])
+            if expr.callee == "min" and len(args) >= 1:
+                return min(args)
+            if expr.callee == "max" and len(args) >= 1:
+                return max(args)
+        except Exception:
+            return _NO_CONST
+    return _NO_CONST
+
+
+def _const_fold_dim_expr(expr: AxonExpr, ctx: "_LowerCtx", *, allow_bare_name: bool = False) -> Any:
+    if isinstance(expr, AxonExprParen):
+        return _const_fold_dim_expr(expr.inner, ctx, allow_bare_name=allow_bare_name)
+    if isinstance(expr, AxonExprInt):
+        return int(expr.value)
+    if isinstance(expr, AxonExprName):
+        if expr.name in ctx.runtime_bound_symbol_names:
+            return _NO_CONST
+        value = ctx.symbol_values.get(expr.name, _NO_CONST)
+        if value is _NO_CONST:
+            return _NO_CONST
+        if isinstance(value, bool):
+            return _NO_CONST
+        if isinstance(value, int):
+            return int(value) if allow_bare_name else _NO_CONST
+        if isinstance(value, float) and float(value).is_integer():
+            return int(value) if allow_bare_name else _NO_CONST
+        return _NO_CONST
+    if isinstance(expr, AxonExprIf):
+        cond = _const_fold_expr(expr.cond, ctx)
+        if not isinstance(cond, bool):
+            return _NO_CONST
+        return _const_fold_dim_expr(
+            expr.true_expr if cond else expr.false_expr,
+            ctx,
+            allow_bare_name=allow_bare_name,
+        )
+    if isinstance(expr, AxonExprTernary):
+        cond = _const_fold_expr(expr.cond, ctx)
+        if not isinstance(cond, bool):
+            return _NO_CONST
+        return _const_fold_dim_expr(
+            expr.true_expr if cond else expr.false_expr,
+            ctx,
+            allow_bare_name=allow_bare_name,
+        )
+    if isinstance(expr, AxonExprBinary):
+        left = _const_fold_dim_expr(expr.left, ctx, allow_bare_name=True)
+        right = _const_fold_dim_expr(expr.right, ctx, allow_bare_name=True)
+        if not isinstance(left, int) or not isinstance(right, int):
+            return _NO_CONST
+        try:
+            if expr.op == "+":
+                return left + right
+            if expr.op == "-":
+                return left - right
+            if expr.op == "*":
+                return left * right
+            if expr.op == "/":
+                if right == 0 or (left % right) != 0:
+                    return _NO_CONST
+                return left // right
+            if expr.op == "%":
+                if right == 0:
+                    return _NO_CONST
+                return left % right
+        except Exception:
+            return _NO_CONST
+    return _NO_CONST
+
+
 _IMPLICIT_ACTIVATION_ALIASES: dict[str, tuple[str, int]] = {
     "gelu": ("_activations_gelu", 0),
     "gelu_new": ("_activations_gelu_new", 0),
@@ -121,6 +314,17 @@ _PRIMITIVE_NAME_ALIASES: dict[str, str] = {
 _CACHE_PRIMITIVE_ALIASES: dict[str, str] = {
     "update": "cache_update",
     "seq_len": "cache_seq_len",
+}
+_BUILTIN_MODULE_NAMESPACES: set[str] = {
+    "Prelude",
+    "Activations",
+    "Cache",
+    "List",
+    "MoE",
+    "Config",
+    "Params",
+    "Position",
+    "Derived",
 }
 
 
@@ -282,9 +486,15 @@ def _is_kind(value: Any, kind: str) -> bool:
         "binary",
         "if",
         "tuple",
+        "call",
+        "string",
     }
     if kind == "bool":
-        return isinstance(value, bool | str) or is_expr_payload
+        return (
+            isinstance(value, bool)
+            or (isinstance(value, str) and _is_identifier(value))
+            or is_expr_payload
+        )
     if kind == "int":
         return (
             (isinstance(value, int) and not isinstance(value, bool))
@@ -297,6 +507,10 @@ def _is_kind(value: Any, kind: str) -> bool:
         return isinstance(value, (int, float, str)) or is_expr_payload
     if kind == "str":
         return isinstance(value, str) or is_expr_payload
+    if kind == "path":
+        return isinstance(value, str)
+    if kind == "path_or_null":
+        return isinstance(value, str) or value is None
     if kind == "str_or_bool_or_null":
         return isinstance(value, (str, bool)) or value is None or is_expr_payload
     if kind == "dim":
@@ -314,7 +528,10 @@ def _is_kind(value: Any, kind: str) -> bool:
             and all(
                 (isinstance(v, int) and not isinstance(v, bool))
                 or isinstance(v, str)
-                or (isinstance(v, dict) and v.get("_expr") in {"name", "binary", "if", "tuple"})
+                or (
+                    isinstance(v, dict)
+                    and v.get("_expr") in {"name", "binary", "if", "tuple", "call", "string"}
+                )
                 for v in value
             )
         ) or is_expr_payload
@@ -369,6 +586,8 @@ class _LowerCtx:
     block_output_last_dims: dict[str, dict[str, Any]] | None = None
     block_param_shapes: dict[str, dict[str, tuple[Any, ...]]] | None = None
     block_output_shapes: dict[str, dict[str, tuple[Any, ...]]] | None = None
+    block_optional_inputs: dict[str, set[str]] | None = None
+    block_default_inputs: dict[str, dict[str, AxonExpr]] | None = None
     tensor_last_dim: dict[str, Any] = field(default_factory=dict)
     tensor_heads: dict[str, Any] = field(default_factory=dict)
     tensor_shape: dict[str, tuple[Any, ...]] = field(default_factory=dict)
@@ -385,6 +604,7 @@ class _LowerCtx:
     param_names: set[str] = field(default_factory=set)
     symbol_names: set[str] = field(default_factory=set)
     symbol_values: dict[str, Any] = field(default_factory=dict)
+    runtime_bound_symbol_names: set[str] = field(default_factory=set)
 
     def fresh(self, base: str = "t") -> str:
         self.counter += 1
@@ -521,10 +741,31 @@ def _record_last_dim_for_call(
             if isinstance(ctx.block_param_last_dims, dict)
             else {}
         )
+        param_shapes = (
+            ctx.block_param_shapes.get(block_name, {})
+            if isinstance(ctx.block_param_shapes, dict)
+            else {}
+        )
+        for param_name, shape_tokens in param_shapes.items():
+            if param_name not in provided:
+                continue
+            raw = provided[param_name]
+            if not _is_name_token(raw):
+                continue
+            actual_shape = ctx.tensor_shape.get(raw)
+            if not isinstance(actual_shape, tuple):
+                continue
+            if len(shape_tokens) != len(actual_shape):
+                continue
+            for sym, actual in zip(shape_tokens, actual_shape, strict=True):
+                if not isinstance(sym, str):
+                    continue
+                if sym in symbol_bindings:
+                    continue
+                symbol_bindings[sym] = actual
         for param_name, sym in param_last_dims.items():
             if param_name in symbol_bindings and isinstance(sym, str):
                 symbol_bindings[sym] = symbol_bindings[param_name]
-
         output_last_dims = (
             ctx.block_output_last_dims.get(block_name, {})
             if isinstance(ctx.block_output_last_dims, dict)
@@ -535,17 +776,36 @@ def _record_last_dim_for_call(
             if isinstance(ctx.block_output_shapes, dict)
             else {}
         )
+
+        def _is_token_resolved(token: Any) -> bool:
+            if not isinstance(token, str):
+                return True
+            stripped = token.strip()
+            if not stripped:
+                return True
+            if stripped in symbol_bindings:
+                return True
+            if stripped in ctx.symbol_values:
+                return True
+            if _is_int_literal(stripped):
+                return True
+            return not _is_identifier(stripped)
+
         out_targets = [out] if isinstance(out, str) else list(out)
         for output_name, target in zip(output_names, out_targets, strict=False):
             dim_token = output_last_dims.get(output_name)
             if isinstance(dim_token, str):
+                if not _is_token_resolved(dim_token):
+                    continue
                 resolved_dim = symbol_bindings.get(dim_token, dim_token)
                 ctx.tensor_last_dim[target] = resolved_dim
             elif dim_token is not None:
                 ctx.tensor_last_dim[target] = dim_token
-            shape_tokens = output_shapes.get(output_name)
-            if shape_tokens is not None:
-                resolved_shape = tuple(symbol_bindings.get(tok, tok) for tok in shape_tokens)
+            out_shape_tokens = output_shapes.get(output_name)
+            if out_shape_tokens is not None:
+                if not all(_is_token_resolved(tok) for tok in out_shape_tokens):
+                    continue
+                resolved_shape = tuple(symbol_bindings.get(tok, tok) for tok in out_shape_tokens)
                 ctx.tensor_shape[target] = resolved_shape
 
     op_name = _canonical_op_name(callee)
@@ -576,31 +836,53 @@ def _validate_normalized_kwargs(op_name: str, kwargs: dict[str, Any], args: list
 
 
 def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str]] | None:
+    parse_callee = callee.replace("@@", "@", 1) if "@@" in callee else callee
     if not ctx.block_signatures:
         return None
-    if callee in ctx.block_signatures:
-        return callee, {}
-    if "@" not in callee and "." not in callee and "::" not in callee:
-        imported_namespaces = ctx.imported_member_namespaces.get(callee, set())
+    if parse_callee in ctx.block_signatures:
+        return parse_callee, {}
+    if "." in parse_callee and "@" not in parse_callee:
+        member = parse_callee.rsplit(".", 1)[1]
+        namespace = parse_callee.rsplit(".", 1)[0]
+        if member in ctx.block_signatures and namespace in ctx.imported_namespaces:
+            return member, {}
+    if "@" not in parse_callee and "." not in parse_callee and "::" not in parse_callee:
+        imported_namespaces = ctx.imported_member_namespaces.get(parse_callee, set())
         if imported_namespaces:
             if len(imported_namespaces) > 1:
                 choices = ", ".join(sorted(imported_namespaces))
                 raise ValueError(
-                    f"ambiguous imported member {callee!r}; found in namespaces: {choices}"
+                    f"ambiguous imported member {parse_callee!r}; found in namespaces: {choices}"
                 )
             namespace = next(iter(imported_namespaces))
-            namespaced_callee = f"{namespace}.{callee}"
+            namespaced_callee = f"{namespace}.{parse_callee}"
             if namespaced_callee in ctx.block_signatures:
                 return namespaced_callee, {}
             raise ValueError(
-                f"imported member {callee!r} from {namespace!r} not found as module "
+                f"imported member {parse_callee!r} from {namespace!r} not found as module "
                 f"{namespaced_callee!r}"
             )
-    if "@" not in callee:
+    if "@" not in parse_callee:
         return None
-    parts = callee.split("@")
+    parts = parse_callee.split("@")
     base = parts[0]
     concrete_paths = parts[1:]
+    if base not in ctx.block_signatures and "." in base:
+        namespace, member = base.rsplit(".", 1)
+        if member in ctx.block_signatures and namespace in ctx.imported_namespaces:
+            base = member
+    if base not in ctx.block_signatures and "." not in base:
+        imported_namespaces = ctx.imported_member_namespaces.get(base, set())
+        if imported_namespaces:
+            if len(imported_namespaces) > 1:
+                choices = ", ".join(sorted(imported_namespaces))
+                raise ValueError(
+                    f"ambiguous imported member {base!r}; found in namespaces: {choices}"
+                )
+            namespace = next(iter(imported_namespaces))
+            namespaced_base = f"{namespace}.{base}"
+            if namespaced_base in ctx.block_signatures:
+                base = namespaced_base
     if base not in ctx.block_signatures:
         return None
     path_params = (
@@ -890,6 +1172,38 @@ def _substitute_expr(expr: AxonExpr, var_name: str, replacement: AxonExpr) -> Ax
     return expr
 
 
+def _runtime_value_to_expr(value: Any) -> AxonExpr:
+    if isinstance(value, AxonExpr):
+        return value
+    if value is None:
+        return AxonExprNull()
+    if isinstance(value, bool):
+        return AxonExprBool(value=value)
+    if isinstance(value, int):
+        return AxonExprInt(value=value)
+    if isinstance(value, float):
+        return AxonExprFloat(value=float(value))
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw and _is_name_token(raw):
+            return AxonExprName(name=raw)
+        parsed = _parse_scalar_token(raw)
+        if parsed is None:
+            return AxonExprNull()
+        if isinstance(parsed, bool):
+            return AxonExprBool(value=parsed)
+        if isinstance(parsed, int):
+            return AxonExprInt(value=parsed)
+        if isinstance(parsed, float):
+            return AxonExprFloat(value=float(parsed))
+        if isinstance(parsed, str) and _is_name_token(raw):
+            return AxonExprName(name=raw)
+        return AxonExprString(value=str(parsed))
+    if isinstance(value, list):
+        return AxonExprList(items=tuple(_runtime_value_to_expr(item) for item in value))
+    return AxonExprString(value=str(value))
+
+
 def _expr_is_tensorish(expr: AxonExpr, ctx: _LowerCtx) -> bool:
     if isinstance(
         expr, AxonExprCall | AxonExprPipe | AxonExprBind | AxonExprIf | AxonExprTernary | AxonExprDo
@@ -970,9 +1284,62 @@ def _lower_simple_call(
     guard: str | None = None,
 ) -> list[dict[str, Any]]:
     callee = callee.strip()
+    raw_callee = callee
     _validate_namespaced_block_call(callee, ctx)
     callee = _rewrite_prelude_alias_callee(callee, kwargs_expr, ctx)
     callee = _rewrite_primitive_alias_callee(callee, kwargs_expr, ctx)
+    raw_base = raw_callee.split("@", 1)[0].strip()
+    if raw_base.startswith("_"):
+        caller_namespace = (
+            ctx.current_module.split(".", 1)[0]
+            if isinstance(ctx.current_module, str) and ctx.current_module
+            else ""
+        )
+        if "." in (ctx.current_module or "") and caller_namespace not in _BUILTIN_MODULE_NAMESPACES:
+            raise ValueError(
+                f"direct primitive call {raw_base!r} is only allowed in builtins (*.axon)"
+            )
+    if raw_base == "_linear" and kwargs_expr:
+        raise ValueError(
+            "_linear only accepts positional arguments; use Prelude.linear for keyword/default syntax"
+        )
+    if raw_base == "_layernorm" and kwargs_expr:
+        raise ValueError(
+            "_layernorm only accepts positional arguments; use Prelude.layernorm for keyword/default syntax"
+        )
+    if raw_base == "_embedding" and kwargs_expr:
+        raise ValueError(
+            "_embedding only accepts positional arguments; use Prelude.embedding for keyword/default syntax"
+        )
+    if raw_base == "_split" and kwargs_expr:
+        raise ValueError(
+            "_split only accepts positional arguments; use Prelude.split for keyword/default syntax"
+        )
+    if raw_base == "_chunk" and kwargs_expr:
+        raise ValueError(
+            "_chunk only accepts positional arguments; use Prelude.chunk for keyword/default syntax"
+        )
+    if raw_base == "_cast" and kwargs_expr:
+        raise ValueError(
+            "_cast only accepts positional arguments; use Prelude.cast for keyword/default syntax"
+        )
+    if raw_base == "_cumsum" and kwargs_expr:
+        raise ValueError(
+            "_cumsum only accepts positional arguments; use Prelude.cumsum for keyword/default syntax"
+        )
+    if raw_base == "_arange" and kwargs_expr:
+        raise ValueError(
+            "_arange only accepts positional arguments; use Prelude.arange for keyword/default syntax"
+        )
+    if raw_base == "_expand" and kwargs_expr:
+        raise ValueError(
+            "_expand only accepts positional arguments; use Prelude.expand for keyword/default syntax"
+        )
+    if raw_base == "_slice" and kwargs_expr:
+        raise ValueError(
+            "_slice only accepts positional arguments; use Prelude.slice for keyword/default syntax"
+        )
+    resolved_block = _resolve_block_call(callee, ctx)
     pre_graph: list[dict[str, Any]] = []
     kwargs = _render_kwargs_for_call(kwargs_expr)
     effective_when = guard
@@ -981,28 +1348,52 @@ def _lower_simple_call(
     )
 
     resolved_args: list[str] = []
+    runtime_args: list[Any] = []
     for arg in args:
         if isinstance(arg, AxonExprName):
             resolved_args.append(arg.name)
+            runtime_value: Any = arg.name
+            is_dimlike_symbol = (
+                arg.name.isidentifier()
+                and arg.name.upper() == arg.name
+                and any(ch.isalpha() for ch in arg.name)
+            )
+            if (
+                resolved_block is not None
+                and is_dimlike_symbol
+                and arg.name not in ctx.param_names
+                and arg.name not in ctx.tensor_last_dim
+                and arg.name not in ctx.tensor_shape
+            ):
+                # Forward symbolic scalar/dim names through block wrappers as expression
+                # payloads so codegen/runtime can resolve them via shape aliases/symbols.
+                runtime_value = {"_expr": "name", "id": arg.name}
+            runtime_args.append(runtime_value)
             continue
         if isinstance(arg, AxonExprInt):
             resolved_args.append(str(arg.value))
+            runtime_args.append(arg.value)
             continue
         if isinstance(arg, AxonExprFloat):
             resolved_args.append(arg.lexeme if arg.lexeme else str(arg.value))
+            runtime_args.append(arg.lexeme if arg.lexeme else arg.value)
             continue
         if isinstance(arg, AxonExprBool):
             resolved_args.append("true" if arg.value else "false")
+            runtime_args.append(arg.value)
             continue
         if isinstance(arg, AxonExprNull):
             resolved_args.append("null")
+            runtime_args.append(None)
             continue
         if isinstance(arg, AxonExprString):
             resolved_args.append(arg.value)
+            runtime_args.append(arg.value)
             continue
         tmp = ctx.fresh("arg")
         pre_graph.extend(_lower_expr(arg, tmp, ctx, guard=guard))
         resolved_args.append(tmp)
+        runtime_args.append(tmp)
     args_text = resolved_args
 
     op_name = _canonical_op_name(callee)
@@ -1011,7 +1402,40 @@ def _lower_simple_call(
     resolved_kwargs: dict[str, Any] = {}
     for key, value_expr in kwargs_expr.items():
         expected_kind = kwarg_kinds.get(key) if isinstance(kwarg_kinds, dict) else None
+        if isinstance(value_expr, AxonExpr):
+            folded = _NO_CONST
+            if expected_kind == "dim":
+                folded = _const_fold_dim_expr(value_expr, ctx, allow_bare_name=False)
+            elif expected_kind == "list_dim" and isinstance(value_expr, AxonExprList):
+                folded_items: list[Any] = []
+                for item in value_expr.items:
+                    folded_item = _const_fold_dim_expr(item, ctx, allow_bare_name=False)
+                    if folded_item is _NO_CONST:
+                        folded_items = []
+                        break
+                    folded_items.append(folded_item)
+                if folded_items:
+                    folded = folded_items
+            elif expected_kind not in {"dim", "list_dim", "str", "str_or_bool_or_null"}:
+                folded = _const_fold_expr(value_expr, ctx)
+            if folded is not _NO_CONST:
+                resolved_kwargs[key] = folded
+                continue
         if isinstance(value_expr, AxonExprName):
+            if resolved_block is not None:
+                is_dimlike_symbol = (
+                    value_expr.name.isidentifier()
+                    and value_expr.name.upper() == value_expr.name
+                    and any(ch.isalpha() for ch in value_expr.name)
+                )
+                if (
+                    is_dimlike_symbol
+                    and value_expr.name not in ctx.param_names
+                    and value_expr.name not in ctx.tensor_last_dim
+                    and value_expr.name not in ctx.tensor_shape
+                ):
+                    resolved_kwargs[key] = {"_expr": "name", "id": value_expr.name}
+                    continue
             if expected_kind in {"list_int", "list_dim"}:
                 resolved_kwargs[key] = {"_expr": "name", "value": value_expr.name}
             else:
@@ -1045,6 +1469,23 @@ def _lower_simple_call(
                 resolved_kwargs[key] = _expr_to_runtime_value(value_expr)
             continue
         if isinstance(value_expr, AxonExpr):
+            if expected_kind in {
+                "bool",
+                "int",
+                "number",
+                "str",
+                "str_or_bool_or_null",
+                "dim",
+                "any",
+            }:
+                if _kwarg_needs_temp_binding(value_expr, ctx):
+                    key_token = _sanitize_token(key, default="kwarg")
+                    tmp = ctx.fresh(f"kwarg_{key_token}")
+                    pre_graph.extend(_lower_expr(value_expr, tmp, ctx, guard=guard))
+                    resolved_kwargs[key] = tmp
+                    continue
+                resolved_kwargs[key] = _expr_to_runtime_value(value_expr)
+                continue
             if _kwarg_needs_temp_binding(value_expr, ctx):
                 key_token = _sanitize_token(key, default="kwarg")
                 tmp = ctx.fresh(f"kwarg_{key_token}")
@@ -1059,19 +1500,21 @@ def _lower_simple_call(
     is_absolute_path = "@@" in callee
     if is_absolute_path:
         callee = callee.replace("@@", "@", 1)
-    kwargs = _normalize_call_kwargs(
-        op_name=op_name,
-        args=args_text,
-        out=out,
-        kwargs=kwargs,
-        ctx=ctx,
-    )
-    _validate_normalized_kwargs(op_name, kwargs, args_text)
-    op_validate = get_op_lowering_validator(op_name)
-    if callable(op_validate):
-        op_validate(args=args_text, out=out, kwargs=kwargs, ctx=ctx)
+        if resolved_block is None:
+            resolved_block = _resolve_block_call(callee, ctx)
+    if resolved_block is None:
+        kwargs = _normalize_call_kwargs(
+            op_name=op_name,
+            args=args_text,
+            out=out,
+            kwargs=kwargs,
+            ctx=ctx,
+        )
+        _validate_normalized_kwargs(op_name, kwargs, args_text)
+        op_validate = get_op_lowering_validator(op_name)
+        if callable(op_validate):
+            op_validate(args=args_text, out=out, kwargs=kwargs, ctx=ctx)
     _validate_namespaced_block_call(callee, ctx)
-    resolved_block = _resolve_block_call(callee, ctx)
     if resolved_block is None and "." in callee and "@" not in callee and "::" not in callee:
         namespace = callee.split(".", 1)[0]
         raise ValueError(
@@ -1081,7 +1524,7 @@ def _lower_simple_call(
         block_name, path_bindings = resolved_block
         input_names, output_names = ctx.block_signatures[block_name]
         provided: dict[str, Any] = {}
-        for idx, value in enumerate(args_text):
+        for idx, value in enumerate(runtime_args):
             if idx >= len(input_names):
                 raise ValueError(f"too many positional args for block call {callee!r}")
             provided[input_names[idx]] = value
@@ -1092,8 +1535,44 @@ def _lower_simple_call(
         for key, concrete_path in path_bindings.items():
             if key not in input_names:
                 raise ValueError(f"unknown block path parameter {key!r} for call {callee!r}")
-            concrete_value = f"@@{concrete_path}" if is_absolute_path else concrete_path
-            provided[key] = repr(concrete_value)
+            if concrete_path in ctx.path_param_names:
+                # Preserve symbolic path-param forwarding through wrappers (for example
+                # Prelude wrappers called as @path inside another @path module).
+                provided[key] = concrete_path
+            else:
+                concrete_value = f"@@{concrete_path}" if is_absolute_path else concrete_path
+                provided[key] = repr(concrete_value)
+        optional_inputs: set[str] = set()
+        if isinstance(ctx.block_optional_inputs, dict):
+            raw_optional = ctx.block_optional_inputs.get(block_name)
+            if isinstance(raw_optional, set):
+                optional_inputs = raw_optional
+        default_inputs: dict[str, AxonExpr] = {}
+        if isinstance(ctx.block_default_inputs, dict):
+            raw_defaults = ctx.block_default_inputs.get(block_name)
+            if isinstance(raw_defaults, dict):
+                default_inputs = raw_defaults
+        for input_name in input_names:
+            if input_name in provided:
+                continue
+            default_expr = default_inputs.get(input_name)
+            if isinstance(default_expr, AxonExpr):
+                resolved_default = default_expr
+                for param_name, param_value in provided.items():
+                    resolved_default = _substitute_expr(
+                        resolved_default,
+                        param_name,
+                        _runtime_value_to_expr(param_value),
+                    )
+                if _kwarg_needs_temp_binding(resolved_default, ctx):
+                    tmp_name = ctx.fresh(f"default_{_sanitize_token(input_name, default='arg')}")
+                    pre_graph.extend(_lower_expr(resolved_default, tmp_name, ctx, guard=guard))
+                    provided[input_name] = tmp_name
+                else:
+                    provided[input_name] = _expr_to_runtime_value(resolved_default)
+                continue
+            if input_name in optional_inputs:
+                provided[input_name] = None
         if isinstance(ctx.block_param_shapes, dict):
             param_shapes = ctx.block_param_shapes.get(block_name, {})
         else:
@@ -1263,10 +1742,10 @@ def _lower_simple_call(
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
         if not segments:
             raise ValueError(f"invalid @ path in Axon call: {callee!r}")
-        item: dict[str, Any] = {segments[-1]: node_spec}
+        graph_item: dict[str, Any] = {segments[-1]: node_spec}
         for segment in reversed(segments[:-1]):
-            item = {segment: {"graph": [item]}}
-        nodes = _with_guard([item], effective_when)
+            graph_item = {segment: {"graph": [graph_item]}}
+        nodes = _with_guard([graph_item], effective_when)
         _record_last_dim_for_call(callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx)
         return [
             *pre_graph,
@@ -1330,6 +1809,119 @@ def _bind_names(out: str | list[str]) -> list[str]:
 
 def _bind_field(names: list[str]) -> str | list[str]:
     return names[0] if len(names) == 1 else names
+
+
+def _is_null_expr(expr: AxonExpr | None) -> bool:
+    return isinstance(expr, AxonExprNull)
+
+
+def _infer_split_sizes_from_dim_for_bind(
+    *,
+    source_name: str,
+    dim_value: int,
+    bind_arity: int,
+    ctx: _LowerCtx,
+) -> list[Any] | None:
+    if bind_arity <= 0:
+        return None
+    source_shape = ctx.tensor_shape.get(source_name)
+    axis_dim: Any = None
+    if isinstance(source_shape, tuple):
+        rank = len(source_shape)
+        axis = dim_value if dim_value >= 0 else rank + dim_value
+        if 0 <= axis < rank:
+            axis_dim = source_shape[axis]
+    if axis_dim is None and dim_value == -1:
+        axis_dim = ctx.tensor_last_dim.get(source_name)
+    if axis_dim is None:
+        return None
+    if isinstance(axis_dim, int):
+        if axis_dim % bind_arity != 0:
+            return None
+        piece = axis_dim // bind_arity
+        return [piece for _ in range(bind_arity)]
+    if isinstance(axis_dim, str):
+        token = axis_dim.strip().replace(" ", "")
+        if not token:
+            return None
+        if token.isdigit() or (token[0] in {"+", "-"} and token[1:].isdigit()):
+            value = int(token)
+            if value % bind_arity != 0:
+                return None
+            piece = value // bind_arity
+            return [piece for _ in range(bind_arity)]
+        parts = token.split("*")
+        if len(parts) == 2:
+            left, right = parts
+            if left.isdigit() and int(left) % bind_arity == 0:
+                factor = int(left) // bind_arity
+                term = right
+                piece_str = term if factor == 1 else f"{factor}*{term}"
+                return [piece_str for _ in range(bind_arity)]
+            if right.isdigit() and int(right) % bind_arity == 0:
+                factor = int(right) // bind_arity
+                term = left
+                piece_str = term if factor == 1 else f"{factor}*{term}"
+                return [piece_str for _ in range(bind_arity)]
+    return None
+
+
+def _with_multibind_inference(
+    expr: AxonExprCall,
+    *,
+    bind_arity: int,
+    ctx: _LowerCtx,
+) -> AxonExprCall:
+    resolved = _resolve_block_call(expr.callee, ctx)
+    if resolved is None or ctx.block_signatures is None:
+        return expr
+    block_name, _ = resolved
+    input_names, output_names = ctx.block_signatures.get(block_name, ([], []))
+    if len(output_names) != 1:
+        return expr
+    kwargs = dict(expr.kwargs)
+    bound_positional: dict[str, AxonExpr] = {}
+    for idx, arg in enumerate(expr.args):
+        if idx < len(input_names):
+            bound_positional[input_names[idx]] = arg
+    has_parts = False
+    has_sizes = False
+    if "parts" in kwargs and not _is_null_expr(_runtime_value_to_expr(kwargs["parts"])):
+        has_parts = True
+    if "sizes" in kwargs and not _is_null_expr(_runtime_value_to_expr(kwargs["sizes"])):
+        has_sizes = True
+    if "parts" in bound_positional and not _is_null_expr(bound_positional["parts"]):
+        has_parts = True
+    if "sizes" in bound_positional and not _is_null_expr(bound_positional["sizes"]):
+        has_sizes = True
+    if has_parts and has_sizes:
+        return expr
+    if "sizes" in input_names and not has_sizes:
+        dim_raw = kwargs.get("dim", bound_positional.get("dim", AxonExprInt(value=-1)))
+        dim_expr = _runtime_value_to_expr(dim_raw)
+        dim_folded = _const_fold_dim_expr(dim_expr, ctx, allow_bare_name=True)
+        source_expr = bound_positional.get(input_names[0]) if input_names else None
+        if (
+            isinstance(source_expr, AxonExprName)
+            and isinstance(dim_folded, int)
+            and not isinstance(dim_folded, bool)
+        ):
+            inferred_sizes = _infer_split_sizes_from_dim_for_bind(
+                source_name=source_expr.name,
+                dim_value=dim_folded,
+                bind_arity=bind_arity,
+                ctx=ctx,
+            )
+            if inferred_sizes is not None:
+                kwargs["sizes"] = AxonExprList(
+                    items=tuple(_runtime_value_to_expr(v) for v in inferred_sizes)
+                )
+                has_sizes = True
+    if "parts" in input_names and not has_parts and not has_sizes:
+        kwargs["parts"] = AxonExprInt(value=bind_arity)
+    if kwargs == expr.kwargs:
+        return expr
+    return AxonExprCall(callee=expr.callee, args=expr.args, kwargs=kwargs)
 
 
 def _lower_select_branch(
@@ -1566,6 +2158,17 @@ def _module_return_names(module: AxonModule) -> tuple[str, ...]:
     return ()
 
 
+def _module_output_names_from_declared_arity(
+    module: AxonModule, *, expected_arity: int
+) -> tuple[str, ...]:
+    inferred = _module_return_names(module)
+    if len(inferred) == expected_arity:
+        return inferred
+    if expected_arity <= 0:
+        return ()
+    return tuple(f"out_{idx}" for idx in range(expected_arity))
+
+
 def _module_return_last_dims(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
     if not returns or module.return_shape is None or len(module.return_shape) == 0:
         return {}
@@ -1664,16 +2267,53 @@ def _ensure_outputs_from_returns(outputs: dict[str, str], returns: tuple[str, ..
 
 
 def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple[str, int]]:
-    allowed_namespaces = {
-        "Prelude",
-        "Activations",
-        "Cache",
-        "List",
-        "MoE",
-        "Config",
-        "Params",
-        "Position",
-    }
+    def _module_path_param_names(module: AxonModule) -> tuple[str, ...]:
+        if module.path_params:
+            return tuple(module.path_params)
+        if module.path_param is not None:
+            return (module.path_param,)
+        return ()
+
+    def _is_identity_alias_call(module: AxonModule, value: AxonExprCall) -> bool:
+        # Defaulted wrapper params change call-surface semantics (especially kwargs),
+        # so do not collapse those wrappers to primitives.
+        if any(param.default_expr is not None for param in module.params):
+            return False
+        callee_parts = value.callee.split("@")
+        callee_path_params = tuple(callee_parts[1:])
+        module_path_params = _module_path_param_names(module)
+        if callee_path_params != module_path_params:
+            return False
+        if value.kwargs:
+            return False
+        if len(value.args) != len(module.params):
+            return False
+        for arg_expr, param in zip(value.args, module.params, strict=True):
+            if not isinstance(arg_expr, AxonExprName) or arg_expr.name != param.name:
+                return False
+        return True
+
+    def _module_signature_fingerprint(module: AxonModule) -> tuple[Any, ...]:
+        path_params = (
+            tuple(module.path_params)
+            if module.path_params
+            else tuple([module.path_param] if module.path_param is not None else [])
+        )
+        return (
+            path_params,
+            tuple(param.name for param in module.params),
+            tuple(param.type_expr for param in module.params),
+            tuple(bool(param.optional) for param in module.params),
+            tuple(param.default_expr for param in module.params),
+            tuple(
+                tuple(param.shape) if param.shape is not None else None for param in module.params
+            ),
+            module.return_type_expr,
+            tuple(module.return_shape) if module.return_shape is not None else None,
+        )
+
+    allowed_namespaces = set(_BUILTIN_MODULE_NAMESPACES)
+    modules_by_name = {module.name: module for module in modules}
     direct_aliases: dict[str, tuple[str, int]] = {}
     for module in modules:
         if not isinstance(module.name, str) or "." not in module.name:
@@ -1689,8 +2329,15 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
         value = stmt.values[0]
         if not isinstance(value, AxonExprCall):
             continue
+        if not _is_identity_alias_call(module, value):
+            continue
         target_base = value.callee.split("@", 1)[0]
-        direct_aliases[module.name] = (target_base, len(module.path_params))
+        target_module = modules_by_name.get(target_base)
+        if target_module is not None and (
+            _module_signature_fingerprint(module) != _module_signature_fingerprint(target_module)
+        ):
+            continue
+        direct_aliases[module.name] = (target_base, len(_module_path_param_names(module)))
 
     aliases: dict[str, tuple[str, int]] = {}
     for name, (target_base, expected_path_count) in direct_aliases.items():
@@ -1754,6 +2401,8 @@ def _new_lower_ctx(
     block_output_last_dims: dict[str, dict[str, Any]] | None,
     block_param_shapes: dict[str, dict[str, tuple[Any, ...]]] | None = None,
     block_output_shapes: dict[str, dict[str, tuple[Any, ...]]] | None = None,
+    block_optional_inputs: dict[str, set[str]] | None = None,
+    block_default_inputs: dict[str, dict[str, AxonExpr]] | None = None,
     implicit_prelude_members: set[str] | None = None,
     prelude_aliases: dict[str, tuple[str, int]] | None = None,
     primitive_aliases: dict[str, tuple[str, int]] | None = None,
@@ -1774,6 +2423,12 @@ def _new_lower_ctx(
     symbol_values = dict(imported_symbol_values or {})
     if isinstance(module.symbols, dict):
         symbol_values.update(module.symbols)
+    runtime_bound_symbol_names: set[str] = set()
+    for stmt in module.statements:
+        if isinstance(stmt, AxonBind):
+            for target in stmt.targets:
+                if target != "_" and target in symbol_values:
+                    runtime_bound_symbol_names.add(target)
     return _LowerCtx(
         block_signatures=signatures,
         block_path_params=block_path_params,
@@ -1781,6 +2436,8 @@ def _new_lower_ctx(
         block_output_last_dims=block_output_last_dims,
         block_param_shapes=block_param_shapes,
         block_output_shapes=block_output_shapes,
+        block_optional_inputs=block_optional_inputs,
+        block_default_inputs=block_default_inputs,
         tensor_last_dim=_module_initial_dims(module, returns),
         tensor_heads=_module_initial_heads(module, returns),
         tensor_shape=_module_initial_shapes(module, returns),
@@ -1793,6 +2450,7 @@ def _new_lower_ctx(
         param_names={param.name for param in module.params},
         symbol_names=set(symbol_values.keys()),
         symbol_values=symbol_values,
+        runtime_bound_symbol_names=runtime_bound_symbol_names,
     )
 
 
@@ -1952,11 +2610,54 @@ def _lower_statements(
             continue
 
         if isinstance(stmt, AxonBind):
-            out: str | list[str] = stmt.targets[0] if len(stmt.targets) == 1 else list(stmt.targets)
+            if len(stmt.targets) == 1:
+                graph.extend(_lower_expr(stmt.expr, stmt.targets[0], ctx, guard=guard))
+                continue
+            if isinstance(stmt.expr, AxonExprCall) and ctx.block_signatures is not None:
+                call_expr = _with_multibind_inference(
+                    stmt.expr,
+                    bind_arity=len(stmt.targets),
+                    ctx=ctx,
+                )
+                resolved = _resolve_block_call(call_expr.callee, ctx)
+                if resolved is not None:
+                    block_name, _ = resolved
+                    input_names, output_names = ctx.block_signatures.get(block_name, ([], []))
+                    if len(output_names) == 1 and (
+                        "parts" in input_names or "sizes" in input_names
+                    ):
+                        unpack_src = ctx.fresh("unpack")
+                        graph.extend(_lower_expr(call_expr, unpack_src, ctx, guard=guard))
+                        for idx, target in enumerate(stmt.targets):
+                            if target == "_":
+                                continue
+                            graph.extend(
+                                _lower_expr(
+                                    AxonExprCall(
+                                        callee="list_index",
+                                        args=(
+                                            AxonExprName(name=unpack_src),
+                                            AxonExprInt(value=idx),
+                                        ),
+                                        kwargs={},
+                                    ),
+                                    target,
+                                    ctx,
+                                    guard=guard,
+                                )
+                            )
+                        continue
+
+            out: str | list[str] = list(stmt.targets)
             graph.extend(_lower_expr(stmt.expr, out, ctx, guard=guard))
             continue
 
         if isinstance(stmt, AxonReturn):
+            if len(stmt.values) == 1 and len(returns) > 1:
+                graph.extend(_lower_expr(stmt.values[0], list(returns), ctx, guard=guard))
+                for name in returns:
+                    outputs[name] = name
+                continue
             for idx, value in enumerate(stmt.values):
                 output_name = returns[idx] if idx < len(returns) else f"out_{idx}"
                 maybe_name = _expr_name(value)
@@ -1990,6 +2691,10 @@ def _normalize_bound_params_on_node(node_spec: dict[str, Any], *, base_path: str
         node_spec.pop("_scope", None)
     for param_name in _path_bound_param_names(node_spec):
         explicit_value = params.get(param_name)
+        if not (isinstance(explicit_value, str) and explicit_value.strip()):
+            node_value = node_spec.get(param_name)
+            if isinstance(node_value, str) and node_value.strip():
+                explicit_value = node_value
         if isinstance(explicit_value, str) and explicit_value.strip():
             token = explicit_value.strip()
             if is_absolute and token.startswith("@@"):
@@ -2009,20 +2714,52 @@ def _sanitize_path_suffix(value: str) -> str:
 
 
 def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
+    def _raw_arg(index: int) -> Any:
+        raw_args = node_spec.get("_args")
+        if isinstance(raw_args, list):
+            return raw_args[index] if index < len(raw_args) else None
+        if index == 0:
+            return raw_args
+        return None
+
+    def _parse_bool(value: Any, *, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, str):
+            token = value.strip().lower()
+            if token == "true":
+                return True
+            if token in {"false", "null"}:
+                return False
+            # Symbolic/non-literal bool expression: keep bias path binding enabled.
+            return True
+        if isinstance(value, dict):
+            kind = value.get("_expr")
+            if kind == "bool":
+                parsed = value.get("value")
+                if isinstance(parsed, bool):
+                    return parsed
+            if kind == "name":
+                return True
+        return bool(value)
+
     op = node_spec.get("_op")
     if op == "embedding":
         return ["weight"]
     if op == "linear":
         names = ["weight"]
-        if bool(node_spec.get("bias", False)):
+        raw_bias = node_spec.get("bias", _raw_arg(2))
+        if _parse_bool(raw_bias, default=False):
             names.append("bias")
         return names
     if op == "rmsnorm":
         return ["weight"]
     if op == "layernorm":
         names = ["weight"]
-        raw_bias = node_spec.get("bias", True)
-        has_bias = not (raw_bias is None or raw_bias is False)
+        raw_bias = node_spec.get("bias", _raw_arg(4))
+        has_bias = _parse_bool(raw_bias, default=True)
         if has_bias:
             names.append("bias")
         return names
@@ -2148,7 +2885,8 @@ def _resolve_paths_at_lowering_time(
 
         param_base = inlined.get("param_base")
         if isinstance(param_base, str):
-            _normalize_bound_params_on_node(inlined, base_path=param_base)
+            resolved_base = concrete_paths.get(param_base, param_base)
+            _normalize_bound_params_on_node(inlined, base_path=resolved_base)
 
         return inlined
 
@@ -2193,6 +2931,15 @@ def _resolve_paths_at_lowering_time(
             if not isinstance(node_spec, dict):
                 continue
 
+            if inherited_path_bindings:
+                for path_name, concrete_path in inherited_path_bindings.items():
+                    if path_name not in node_spec:
+                        continue
+                    raw_value = node_spec.get(path_name)
+                    token = _as_concrete_path(raw_value)
+                    if token == path_name:
+                        node_spec[path_name] = concrete_path
+
             param_base = node_spec.get("param_base")
             if isinstance(param_base, str) and param_base in inherited_path_bindings:
                 base_path = inherited_path_bindings[param_base]
@@ -2209,6 +2956,12 @@ def _resolve_paths_at_lowering_time(
                             if concrete_value is None:
                                 concrete = {}
                                 break
+                            if concrete_value in required_path_params:
+                                forwarded = inherited_path_bindings.get(concrete_value)
+                                if forwarded is None:
+                                    concrete = {}
+                                    break
+                                concrete_value = forwarded
                             concrete[path_name] = concrete_value
                         if concrete:
                             inlined = _inline_simple_call_if_possible(
@@ -2346,7 +3099,7 @@ def _finalize_block_io_types_for_model(
 def lower_axon_program_to_synapse_spec(
     modules: tuple[AxonModule, ...], *, main_module: str | None = None
 ) -> dict[str, Any]:
-    typecheck_axon_program(modules, main_module=main_module)
+    typed_signatures = typecheck_axon_program(modules, main_module=main_module)
     if not modules:
         raise ValueError("Axon program must contain at least one module")
 
@@ -2364,19 +3117,34 @@ def lower_axon_program_to_synapse_spec(
     block_output_last_dims: dict[str, dict[str, Any]] = {}
     block_param_shapes: dict[str, dict[str, tuple[Any, ...]]] = {}
     block_output_shapes: dict[str, dict[str, tuple[Any, ...]]] = {}
+    block_optional_inputs: dict[str, set[str]] = {}
+    block_default_inputs: dict[str, dict[str, AxonExpr]] = {}
+    module_output_names: dict[str, tuple[str, ...]] = {}
     for module in modules:
         input_names = [param.name for param in module.params]
         path_params = module.path_params
         if not path_params and module.path_param is not None:
             path_params = (module.path_param,)
         input_names.extend(path_params)
-        output_names = list(_module_return_names(module))
+        declared_arity = len(typed_signatures[module.name].returns)
+        output_names = list(
+            _module_output_names_from_declared_arity(module, expected_arity=declared_arity)
+        )
+        module_output_names[module.name] = tuple(output_names)
         signatures[module.name] = (input_names, output_names)
         block_path_params[module.name] = path_params
         block_param_last_dims[module.name] = _module_param_last_dims(module)
         block_output_last_dims[module.name] = _module_return_last_dims(module, tuple(output_names))
         block_param_shapes[module.name] = _module_param_shapes(module)
         block_output_shapes[module.name] = _module_return_shapes(module, tuple(output_names))
+        block_optional_inputs[module.name] = {
+            param.name for param in module.params if bool(param.optional)
+        }
+        block_default_inputs[module.name] = {
+            param.name: param.default_expr
+            for param in module.params
+            if isinstance(param.default_expr, AxonExpr)
+        }
     primitive_aliases = _extract_primitive_aliases(modules)
     prelude_aliases = _extract_prelude_aliases(modules)
     implicit_prelude_members = {
@@ -2386,7 +3154,7 @@ def lower_axon_program_to_synapse_spec(
     }
 
     main = by_name[main_name]
-    main_returns = _module_return_names(main)
+    main_returns = module_output_names[main.name]
     main_inputs = _module_inputs(main)
     main_graph: list[dict[str, Any]] = []
     main_outputs: dict[str, str] = {}
@@ -2404,6 +3172,8 @@ def lower_axon_program_to_synapse_spec(
             block_output_last_dims=block_output_last_dims,
             block_param_shapes=block_param_shapes,
             block_output_shapes=block_output_shapes,
+            block_optional_inputs=block_optional_inputs,
+            block_default_inputs=block_default_inputs,
             implicit_prelude_members=implicit_prelude_members,
             prelude_aliases=prelude_aliases,
             primitive_aliases=primitive_aliases,
@@ -2412,8 +3182,19 @@ def lower_axon_program_to_synapse_spec(
     )
     _ensure_outputs_from_returns(main_outputs, main_returns)
     model: dict[str, Any] = {"inputs": main_inputs, "graph": main_graph, "outputs": main_outputs}
-    if main.symbols:
-        model["symbols"] = dict(main.symbols)
+    combined_symbols: dict[str, Any] = {}
+    for module in modules:
+        if not isinstance(module.symbols, dict):
+            continue
+        for key, value in module.symbols.items():
+            if key not in combined_symbols:
+                combined_symbols[key] = value
+                continue
+            existing = combined_symbols[key]
+            if existing is None and value is not None:
+                combined_symbols[key] = value
+    if combined_symbols:
+        model["symbols"] = combined_symbols
     if main.pragmas:
         model["meta"] = dict(main.pragmas)
     spec: dict[str, Any] = {"synapse": 1, "model": model}
@@ -2425,7 +3206,7 @@ def lower_axon_program_to_synapse_spec(
         if module.name in primitive_aliases:
             continue
         block_inputs = _module_inputs(module)
-        block_returns = _module_return_names(module)
+        block_returns = module_output_names[module.name]
         block_graph: list[dict[str, Any]] = []
         block_outputs: dict[str, str] = {}
         _lower_statements(
@@ -2442,6 +3223,8 @@ def lower_axon_program_to_synapse_spec(
                 block_output_last_dims=block_output_last_dims,
                 block_param_shapes=block_param_shapes,
                 block_output_shapes=block_output_shapes,
+                block_optional_inputs=block_optional_inputs,
+                block_default_inputs=block_default_inputs,
                 implicit_prelude_members=implicit_prelude_members,
                 prelude_aliases=prelude_aliases,
                 primitive_aliases=primitive_aliases,

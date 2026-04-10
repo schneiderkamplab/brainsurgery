@@ -1646,7 +1646,7 @@ blk x = do
         lower_axon_program_to_synapse_spec(modules)
 
 
-def test_topk_requires_k_kwarg() -> None:
+def test_topk_requires_k_positional_arg() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]
 blk x = do
@@ -1654,7 +1654,7 @@ blk x = do
   return vals
 """
     modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match=r"topk missing required kwargs: k"):
+    with pytest.raises(ValueError, match=r"topk expects 2\.\.5 positional args, got 1"):
         lower_axon_program_to_synapse_spec(modules)
 
 
@@ -1662,7 +1662,7 @@ def test_topk_requires_two_outputs() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]
 blk x = do
-  vals <- topk x k=8
+  vals <- _topk x 8
   return vals
 """
     modules = parse_axon_program(source)
@@ -1674,6 +1674,32 @@ blk x = do
         ),
     ):
         lower_axon_program_to_synapse_spec(modules)
+
+
+def test_wrapper_return_arity_propagates_from_declared_tuple() -> None:
+    source = """
+topk_wrap :: Tensor[B,T,D] -> Int -> (Tensor[B,T,K], Tensor[B,T,K])
+topk_wrap x k = _topk x k
+
+main :: Tensor[B,T,D] -> Tensor[B,T,K]
+main x = do
+  vals, idx <- topk_wrap x 8
+  return vals
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+
+    main_specs = _node_specs(spec["model"]["graph"])
+    assert main_specs[0]["_op"] == "call"
+    assert main_specs[0]["_target"] == "topk_wrap"
+    assert main_specs[0]["_bind"] == ["vals", "idx"]
+
+    blocks = spec["model"]["blocks"]
+    topk_block = blocks["topk_wrap"]
+    assert len(topk_block["outputs"]) == 2
+    topk_specs = _node_specs(topk_block["graph"])
+    assert topk_specs[0]["_op"] == "topk"
+    assert topk_specs[0]["_bind"] == ["out_0", "out_1"]
 
 
 def test_moe_select_requires_expert_kwarg() -> None:
@@ -1942,26 +1968,25 @@ blk input_ids attn_mask = do
         lower_axon_program_to_synapse_spec(modules)
 
 
-def test_topk_accepts_largest_and_sorted_kwargs() -> None:
+def test_topk_accepts_largest_and_sorted_positionals() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]
 blk x = do
-  vals, idx <- topk x k=8 dim=-1 largest=false sorted=false
+  vals, idx <- _topk x 8 -1 false false
   return vals
 """
     modules = parse_axon_program(source)
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["_op"] == "topk"
-    assert node_specs[0]["largest"] is False
-    assert node_specs[0]["sorted"] is False
+    assert node_specs[0]["_args"] == ["x", "8", "-1", "false", "false"]
 
 
 def test_softmax_rejects_tuple_outputs() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]
 blk x = do
-  y, z <- softmax x dim=-1
+  y, z <- _softmax x -1
   return y
 """
     modules = parse_axon_program(source)
@@ -1975,31 +2000,32 @@ blk x = do
         lower_axon_program_to_synapse_spec(modules)
 
 
-def test_softmax_rejects_unsupported_dtype() -> None:
+def test_softmax_passes_through_dtype_token() -> None:
     source = """
 blk :: Tensor[B,T,D] -> Tensor[B,T,D]
 blk x = do
-  y <- softmax x dim=-1 dtype=float64
-  return y
-"""
-    modules = parse_axon_program(source)
-    with pytest.raises(ValueError, match=r"Unsupported softmax dtype: float64"):
-        lower_axon_program_to_synapse_spec(modules)
-
-
-def test_softmax_accepts_supported_dtype_and_default_dim() -> None:
-    source = """
-blk :: Tensor[B,T,D] -> Tensor[B,T,D]
-blk x = do
-  y <- softmax x dtype=bfloat16
+  y <- _softmax x -1 float64
   return y
 """
     modules = parse_axon_program(source)
     spec = lower_axon_program_to_synapse_spec(modules)
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["_op"] == "softmax"
-    assert node_specs[0]["dtype"] == "bfloat16"
-    assert "dim" not in node_specs[0]
+    assert node_specs[0]["_args"] == ["x", "-1", "float64"]
+
+
+def test_softmax_accepts_supported_dtype_and_default_dim() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- _softmax x -1 bfloat16
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "softmax"
+    assert node_specs[0]["_args"] == ["x", "-1", "bfloat16"]
 
 
 def test_zeros_like_rejects_tuple_outputs() -> None:
@@ -2191,6 +2217,175 @@ blk x = do
     node_specs = _node_specs(spec["model"]["graph"])
     assert node_specs[0]["_op"] == "linear"
     assert node_specs[0]["transpose"] is True
+
+
+def test__linear_rejects_kwargs_and_requires_positional_only() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- _linear@proj x dim=D
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(
+        ValueError,
+        match=r"_linear only accepts positional arguments; use Prelude\.linear for keyword/default syntax",
+    ):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test__layernorm_rejects_kwargs_and_requires_positional_only() -> None:
+    source = """
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- _layernorm@ln x eps=1e-05
+  return y
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(
+        ValueError,
+        match=r"_layernorm only accepts positional arguments; use Prelude\.layernorm for keyword/default syntax",
+    ):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_linear_path_kwargs_lower_to_expected_node_fields() -> None:
+    source = """
+linear :: @Path -> Tensor[B,T,D] -> ?Int -> ?Bool -> ?Bool -> ?Int -> ?Path -> ?Path -> Tensor[B,T,DO]
+linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=null ?bias_path=null = _linear@path x dim bias transpose expert weight_path bias_path
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,4]
+blk x = do
+  y <- linear@proj x dim=4 bias=true weight_path=@@decoder.layer.0.weight bias_path=@decoder.layer.0.bias
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "linear"
+    assert node_specs[0]["_args"][5] == "@@decoder.layer.0.weight"
+    assert node_specs[0]["_args"][6] == "@decoder.layer.0.bias"
+
+
+def test_defaulted_linear_wrapper_preserves_kwarg_and_default_behavior() -> None:
+    source = """
+wrap :: @Path -> Tensor[B,T,D] -> ?Int -> Tensor[B,T,dim]
+wrap@path x ?dim=4 = _linear@path x dim false false null null null
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,8]
+blk x = do
+  y <- wrap@proj x dim=8
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["dim"] == 8
+
+    default_source = """
+wrap :: @Path -> Tensor[B,T,D] -> ?Int -> Tensor[B,T,dim]
+wrap@path x ?dim=4 = _linear@path x dim false false null null null
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,4]
+blk x = do
+  y <- wrap@proj x
+  return y
+"""
+    default_spec = lower_axon_program_to_synapse_spec(parse_axon_program(default_source))
+    default_nodes = _node_specs(default_spec["model"]["graph"])
+    assert default_nodes[0]["dim"] == 4
+
+
+def test_defaulted_layernorm_wrapper_preserves_kwarg_and_default_behavior() -> None:
+    source = """
+wrap :: @Path -> Tensor[B,T,D] -> ?Float -> ?Int -> ?String -> ?Any -> Tensor[B,T,D]
+wrap@path x ?eps=1e-05 ?dim=D ?weight=null ?bias=true = _layernorm@path x eps dim weight bias
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- wrap@ln x eps=1e-06 bias=false
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["eps"] == 1e-06
+    assert node_specs[0]["bias"] is False
+    assert node_specs[0]["dim"] == {"_expr": "name", "id": "D"}
+
+    default_source = """
+wrap :: @Path -> Tensor[B,T,D] -> ?Float -> ?Int -> ?String -> ?Any -> Tensor[B,T,D]
+wrap@path x ?eps=1e-05 ?dim=D ?weight=null ?bias=true = _layernorm@path x eps dim weight bias
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- wrap@ln x
+  return y
+"""
+    default_spec = lower_axon_program_to_synapse_spec(parse_axon_program(default_source))
+    default_nodes = _node_specs(default_spec["model"]["graph"])
+    assert default_nodes[0]["eps"] == 1e-05
+    assert default_nodes[0]["bias"] is True
+    assert default_nodes[0]["dim"] == {"_expr": "name", "id": "D"}
+
+
+def test_optional_param_with_non_null_default_is_non_optional_in_body() -> None:
+    source = """
+scaled :: Tensor[B,T,D] -> ?Float -> Tensor[B,T,D]
+scaled x ?scale=1.0 = x * scale
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    assert isinstance(spec, dict)
+
+
+def test_optional_param_with_null_default_remains_optional_in_body() -> None:
+    source = """
+scaled :: Tensor[B,T,D] -> ?Float -> Tensor[B,T,D]
+scaled x ?scale=null = x * scale
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(
+        ValueError,
+        match=r"invalid binary operation '\*' for Tensor\[B,T,D\] and \?Float",
+    ):
+        lower_axon_program_to_synapse_spec(modules)
+
+
+def test_layernorm_path_forwarding_through_wrappers_resolves_concrete_param_path() -> None:
+    source = """
+inner_ln :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
+inner_ln@path x = layernorm@path x eps=1e-05 bias=null
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- inner_ln@foo x
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "layernorm"
+    assert node_specs[0]["_params"]["weight"] == "foo.weight"
+    assert node_specs[0]["bias"] is None
+
+
+def test_layernorm_weight_path_type_accepts_symbolic_path_name() -> None:
+    source = """
+layernorm :: @Path -> Tensor[B,T,D] -> ?Float -> ?Int -> ?Path -> ?Bool -> ?Path -> Tensor[B,T,D]
+layernorm@path x ?eps=1e-5 ?dim=null ?weight_path=null ?bias=true ?bias_path="bias" = _layernorm@path x eps dim weight_path bias bias_path
+
+blk :: Tensor[B,T,D] -> Tensor[B,T,D]
+blk x = do
+  y <- layernorm@ln x eps=1e-05 weight_path=@gamma bias_path=@beta
+  return y
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules)
+    node_specs = _node_specs(spec["model"]["graph"])
+    assert node_specs[0]["_op"] == "layernorm"
+    assert node_specs[0]["_args"][3] == "@gamma"
+    assert node_specs[0]["_args"][5] == "@beta"
 
 
 def test_block_signature_propagates_output_last_dim_from_tensor_shape() -> None:
@@ -2456,6 +2651,66 @@ tiny x use_cache = do
     if_spec = lower_axon_module_to_synapse_spec(parse_axon_module(if_source))
 
     assert _node_specs(if_spec["model"]["graph"]) == _node_specs(ternary_spec["model"]["graph"])
+
+
+def test_multiline_if_then_else_with_do_branches_lowers_to_select() -> None:
+    source = """
+tiny :: Tensor -> ?Tensor -> Int
+tiny x use_cache = do
+  y <- if use_cache then
+    (do
+      z <- _cache_seq_len x
+      return z
+    )
+  else
+    (do
+      return 0
+    )
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    select_nodes = [node for node in node_specs if node.get("_op") == "select"]
+    assert len(select_nodes) == 1
+
+
+def test_multiline_ternary_with_do_branches_lowers_to_select() -> None:
+    source = """
+tiny :: Tensor -> ?Tensor -> Int
+tiny x use_cache = do
+  y <- use_cache
+    ? (do
+      z <- _cache_seq_len x
+      return z
+    )
+    : (do
+      return 0
+    )
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    select_nodes = [node for node in node_specs if node.get("_op") == "select"]
+    assert len(select_nodes) == 1
+
+
+def test_multiline_do_allows_mixed_if_branch_indent_style() -> None:
+    source = """
+tiny :: Tensor -> ?Tensor -> Int -> Int
+tiny x attn_mask past_length = do
+  y <- if attn_mask == null then
+      1
+    else
+      0
+  return y
+"""
+    module = parse_axon_module(source)
+    spec = lower_axon_module_to_synapse_spec(module)
+    node_specs = _node_specs(spec["model"]["graph"])
+    select_nodes = [node for node in node_specs if node.get("_op") == "select"]
+    assert len(select_nodes) == 1
 
 
 def test_synapse_to_axon_roundtrip_equivalence_for_subset() -> None:

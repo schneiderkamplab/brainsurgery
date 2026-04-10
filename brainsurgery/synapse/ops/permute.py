@@ -5,10 +5,31 @@ from typing import Any
 import torch
 
 OP_NAME = "permute"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"dims"}
-LOWERING_REQUIRED_KWARGS: set[str] = {"dims"}
-LOWERING_KWARG_KINDS: dict[str, Any] = {"dims": "list_dim"}
+LOWERING_ARITY = (2, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
+
+
+def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
+    raw = node_spec.get("_args")
+    if isinstance(raw, list):
+        return list(raw)
+    if raw is None:
+        return []
+    return [raw]
+
+
+def _name_expr(value: str) -> dict[str, Any]:
+    return {"_expr": "name", "id": value}
+
+
+def _expr_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        token = value.strip()
+        if token.isidentifier():
+            return _name_expr(token)
+    return value
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -19,11 +40,14 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
-    del args, ctx
+    del ctx
     if not isinstance(out, str):
         raise ValueError("permute requires a single scalar output binding")
-    if "dims" not in kwargs:
-        raise ValueError("permute requires dims")
+    if kwargs:
+        unknown = ", ".join(sorted(str(key) for key in kwargs))
+        raise ValueError(f"permute unsupported kwargs: {unknown}")
+    if len(args) != 2:
+        raise ValueError(f"permute expects 2 positional args, got {len(args)}")
 
 
 def lowering_infer_metadata(
@@ -35,7 +59,9 @@ def lowering_infer_metadata(
 ) -> bool:
     if not isinstance(out, str) or not args:
         return False
-    dims = kwargs.get("dims")
+    if len(args) != 2:
+        return False
+    dims = args[1]
     if not isinstance(dims, list) or not all(
         isinstance(v, int) and not isinstance(v, bool) for v in dims
     ):
@@ -95,8 +121,11 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope
-    src = model._read_tensor_input(node_spec.get("_args"), env)
-    dims = _resolve_dims(model, node_spec.get("dims"), env, symbols)
+    args = _raw_args(node_spec)
+    if len(args) != 2:
+        raise ValueError("permute requires positional args: x dims")
+    src = model._read_tensor_input(args[0], env)
+    dims = _resolve_dims(model, args[1], env, symbols)
     normalized = _validate_permutation(dims, src.dim())
     out = model._require_name(node_spec.get("_bind"), field="permute._bind")
     env[out] = torch.permute(src, normalized)
@@ -113,13 +142,16 @@ def compile(
 ) -> list[str]:
     del node_path_var, scope_var
     lines: list[str] = []
-    src = emitter._read_env_var(env, str(node_spec.get("_args")))
+    args = _raw_args(node_spec)
+    if len(args) != 2:
+        raise ValueError("permute requires positional args: x dims")
+    src = emitter._read_env_var(env, str(args[0]))
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
-    raw_dims = node_spec.get("dims")
+    raw_dims = args[1]
     if isinstance(raw_dims, list) and raw_dims:
-        dims_expr = f"({', '.join(f'int({emitter._expr_code(item, env)})' for item in raw_dims)},)"
+        dims_expr = f"({', '.join(f'int({emitter._expr_code(_expr_payload(item), env)})' for item in raw_dims)},)"
     else:
-        dims_expr = emitter._expr_code(raw_dims, env)
+        dims_expr = emitter._expr_code(_expr_payload(raw_dims), env)
     rank_var = emitter._fresh("rank")
     dims_var = emitter._fresh("dims")
     norm_var = emitter._fresh("normalized_dims")
@@ -145,8 +177,8 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any",),
-    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "args": ("Any", "Any"),
+    "kwargs": {},
     "returns": ("Tensor",),
 }
 

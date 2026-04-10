@@ -81,13 +81,13 @@ deepseek_v2_moe_block x pos_ids attn_mask past_kv = do
       gate <- linear@gate_proj xn dim=(EM * SE) bias=false
       up <- linear@up_proj xn dim=(EM * SE) bias=false
       return gate |> silu |> mul up |> linear@down_proj dim=D bias=false
-    topk_scores, topk_indices <- linear@gate xn dim=E bias=false |> softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1 sorted=false
+    topk_scores, topk_indices <- linear@gate xn dim=E bias=false |> softmax dim=-1 dtype="float32" |> topk k=EPT dim=-1 sorted=false
     routed <- zeros_like xn
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
-      gate <- _linear@gate_proj x_sel dim=EM bias=false
-      up <- _linear@up_proj x_sel dim=EM bias=false
-      x_upd <- gate |> silu |> mul up |> _linear@down_proj dim=D bias=false
+      gate <- linear@gate_proj x_sel dim=EM bias=false
+      up <- linear@up_proj x_sel dim=EM bias=false
+      x_upd <- gate |> silu |> mul up |> linear@down_proj dim=D bias=false
       routed <- MoE.scatter_add routed token_idx x_upd sel_scores
     return shared + routed
   return x + m, new_kv

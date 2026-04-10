@@ -3,10 +3,28 @@ from __future__ import annotations
 from typing import Any
 
 OP_NAME = "expand"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"shape"}
-LOWERING_REQUIRED_KWARGS: set[str] = {"shape"}
-LOWERING_KWARG_KINDS: dict[str, Any] = {"shape": "list_dim"}
+LOWERING_ARITY = (1, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
+
+
+def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
+    raw = node_spec.get("_args")
+    if isinstance(raw, list):
+        return list(raw)
+    if raw is None:
+        return []
+    return [raw]
+
+
+def _arg_or_default(args: list[Any], index: int, default: Any) -> Any:
+    if index >= len(args):
+        return default
+    value = args[index]
+    if isinstance(value, str) and value.strip().lower() == "null":
+        return default
+    return value
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -17,11 +35,14 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
-    del args, ctx
+    del ctx
     if not isinstance(out, str):
         raise ValueError("expand requires a single scalar output binding")
-    if "shape" not in kwargs:
-        raise ValueError("expand requires shape")
+    if kwargs:
+        unknown = ", ".join(sorted(str(key) for key in kwargs))
+        raise ValueError(f"expand unsupported kwargs: {unknown}")
+    if len(args) < 1 or len(args) > 2:
+        raise ValueError("expand requires positional args: x [shape]")
 
 
 def lowering_infer_metadata(
@@ -33,7 +54,7 @@ def lowering_infer_metadata(
 ) -> bool:
     if not isinstance(out, str):
         return False
-    shape = kwargs.get("shape")
+    shape = _arg_or_default(args, 1, None)
     if not isinstance(shape, list) or not shape:
         return False
     ctx.tensor_shape[out] = tuple(shape)
@@ -73,8 +94,14 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope
-    src = model._read_tensor_input(node_spec.get("_args"), env)
-    shape = _resolve_shape(model, node_spec.get("shape"), env, symbols)
+    args = _raw_args(node_spec)
+    if len(args) < 1 or len(args) > 2:
+        raise ValueError("expand requires positional args: x [shape]")
+    src = model._read_tensor_input(args[0], env)
+    raw_shape = _arg_or_default(args, 1, None)
+    if raw_shape is None:
+        raise ValueError("expand.shape is required")
+    shape = _resolve_shape(model, raw_shape, env, symbols)
     out = model._require_name(node_spec.get("_bind"), field="expand._bind")
     env[out] = src.expand(*shape)
 
@@ -90,9 +117,14 @@ def compile(
 ) -> list[str]:
     del node_path_var, scope_var
     lines: list[str] = []
-    src = emitter._read_env_var(env, str(node_spec.get("_args")))
+    args = _raw_args(node_spec)
+    if len(args) < 1 or len(args) > 2:
+        raise ValueError("expand requires positional args: x [shape]")
+    src = emitter._read_env_var(env, str(args[0]))
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
-    raw_shape = node_spec.get("shape")
+    raw_shape = _arg_or_default(args, 1, None)
+    if raw_shape is None:
+        raise ValueError("expand.shape is required")
     if isinstance(raw_shape, list) and raw_shape:
         shape_expr = (
             f"({', '.join(f'int({emitter._expr_code(item, env)})' for item in raw_shape)},)"
@@ -108,7 +140,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any",),
+    "args": ("Any", "Any"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": ("Tensor",),
 }

@@ -78,6 +78,13 @@ def run_axon_op_parity(*args, **kwargs):
     return _run_axon_op_parity(*args, **kwargs)
 
 
+def run_axon_layer_op_parity(*args, **kwargs):
+    # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
+    from .op_parity import run_axon_layer_op_parity as _run_axon_layer_op_parity
+
+    return _run_axon_layer_op_parity(*args, **kwargs)
+
+
 def run_codegen_runtime_parity(*args, **kwargs):
     # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
     from .op_parity import run_codegen_runtime_parity as _run_codegen_runtime_parity
@@ -140,6 +147,7 @@ __all__ = [
     "render_axon_test_log",
     "run_axon_test_matrix",
     "run_axon_op_parity",
+    "run_axon_layer_op_parity",
     "run_codegen_runtime_parity",
     "run_axon_visualize",
     "lower_axon_module_to_synapse_block",

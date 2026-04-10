@@ -3,14 +3,41 @@ from __future__ import annotations
 from typing import Any
 
 OP_NAME = "slice"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"dim", "start", "end"}
-LOWERING_REQUIRED_KWARGS: set[str] = {"dim", "start", "end"}
-LOWERING_KWARG_KINDS: dict[str, Any] = {
-    "dim": "int",
-    "start": "dim",
-    "end": "dim",
-}
+LOWERING_ARITY = (4, 4)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
+
+
+def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
+    raw = node_spec.get("_args")
+    if isinstance(raw, list):
+        return list(raw)
+    if raw is None:
+        return []
+    return [raw]
+
+
+def _int_literal(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        token = value.strip()
+        if token and (token.isdigit() or (token[0] in {"+", "-"} and token[1:].isdigit())):
+            return int(token)
+    return None
+
+
+def _name_expr(value: str) -> dict[str, Any]:
+    return {"_expr": "name", "id": value}
+
+
+def _expr_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        token = value.strip()
+        if token.isidentifier():
+            return _name_expr(token)
+    return value
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -21,12 +48,14 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
-    del args, ctx
+    del ctx
     if not isinstance(out, str):
         raise ValueError("slice requires a single scalar output binding")
-    for key in ("dim", "start", "end"):
-        if key not in kwargs:
-            raise ValueError(f"slice requires {key}")
+    if kwargs:
+        unknown = ", ".join(sorted(str(key) for key in kwargs))
+        raise ValueError(f"slice unsupported kwargs: {unknown}")
+    if len(args) != 4:
+        raise ValueError(f"slice expects 4 positional args, got {len(args)}")
 
 
 def lowering_infer_metadata(
@@ -40,14 +69,16 @@ def lowering_infer_metadata(
         return False
     source_name = str(args[0]).strip()
     source_shape = ctx.tensor_shape.get(source_name)
-    raw_dim = kwargs.get("dim")
-    raw_start = kwargs.get("start")
-    raw_end = kwargs.get("end")
+    if len(args) != 4:
+        return False
+    raw_dim = _int_literal(args[1])
+    raw_start = _int_literal(args[2])
+    raw_end = _int_literal(args[3])
     if (
         isinstance(source_shape, tuple)
-        and isinstance(raw_dim, int)
-        and isinstance(raw_start, int)
-        and isinstance(raw_end, int)
+        and raw_dim is not None
+        and raw_start is not None
+        and raw_end is not None
     ):
         rank = len(source_shape)
         dim = raw_dim if raw_dim >= 0 else raw_dim + rank
@@ -82,10 +113,13 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del node_path, scope
-    src = model._read_tensor_input(node_spec.get("_args"), env)
-    dim = _resolve_int(model, node_spec.get("dim"), env, symbols, "dim")
-    start = _resolve_int(model, node_spec.get("start"), env, symbols, "start")
-    end = _resolve_int(model, node_spec.get("end"), env, symbols, "end")
+    args = _raw_args(node_spec)
+    if len(args) != 4:
+        raise ValueError("slice requires positional args: x dim start end")
+    src = model._read_tensor_input(args[0], env)
+    dim = _resolve_int(model, args[1], env, symbols, "dim")
+    start = _resolve_int(model, args[2], env, symbols, "start")
+    end = _resolve_int(model, args[3], env, symbols, "end")
     rank = src.ndim
     axis = dim if dim >= 0 else dim + rank
     if axis < 0 or axis >= rank:
@@ -106,11 +140,14 @@ def compile(
     indent: str,
 ) -> list[str]:
     del node_path_var, scope_var
-    src = emitter._read_env_var(env, str(node_spec.get("_args")))
+    args = _raw_args(node_spec)
+    if len(args) != 4:
+        raise ValueError("slice requires positional args: x dim start end")
+    src = emitter._read_env_var(env, str(args[0]))
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
-    dim_expr = emitter._expr_code(node_spec.get("dim"), env)
-    start_expr = emitter._expr_code(node_spec.get("start"), env)
-    end_expr = emitter._expr_code(node_spec.get("end"), env)
+    dim_expr = emitter._expr_code(_expr_payload(args[1]), env)
+    start_expr = emitter._expr_code(_expr_payload(args[2]), env)
+    end_expr = emitter._expr_code(_expr_payload(args[3]), env)
     rank_var = emitter._fresh("rank")
     axis_var = emitter._fresh("axis")
     slices_var = emitter._fresh("slices")
@@ -128,8 +165,8 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any",),
-    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "args": ("Any", "Any", "Any", "Any"),
+    "kwargs": {},
     "returns": ("Tensor",),
 }
 

@@ -72,5 +72,5 @@ marian input_ids attention_mask decoder_input_ids decoder_attention_mask = do
   for@model.decoder.layers i <- [0..L_DEC) do
     dec_hidden <- marian_decoder_layer dec_hidden enc_hidden attention_mask decoder_attention_mask
 
-  logits <- linear@model.shared dec_hidden dim=V bias=true bias_path="final_logits_bias_flat"
+  logits <- linear@model.shared dec_hidden dim=V bias=true bias_path=@final_logits_bias_flat
   return logits

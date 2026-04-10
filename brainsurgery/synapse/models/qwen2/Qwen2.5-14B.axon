@@ -11,7 +11,7 @@ V = 152064
 L = 48
 H = 40
 KVH = 8
-KVD = 1024.0
+KVD = 1024
 FFN = 13824
 EPS = 1e-05
 THETA = 1000000.0
@@ -39,8 +39,8 @@ qwen2_block x pos_ids attn_mask past_kv = do
     v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
     q, k <- rope_pair q k position_ids=pos_ids theta=THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
     a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D
     return a, new_kv

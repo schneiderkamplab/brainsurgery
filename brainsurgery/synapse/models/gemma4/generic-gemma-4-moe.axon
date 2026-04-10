@@ -78,8 +78,8 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
     k, v <- if (full and ATTN_K_EQ_V) then gemma4_kv_shared xn kv_dim kv_heads hd else gemma4_kv_separate xn kv_dim kv_heads hd
     q, k <- rope_pair q k position_ids=pos_ids theta=theta scale_factor=(full ? ROPE_SCALE_FULL : 1.0) rope_mode=(full ? "proportional" : "") partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / kv_heads)
-    v <- repeat v (H / kv_heads)
+    k <- repeat k repeats=(H / kv_heads)
+    v <- repeat v repeats=(H / kv_heads)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
     a <- attention q k v mask=mask scale=1.0 |> merge_heads |> linear@o_proj dim=D bias=false
     return a, new_kv

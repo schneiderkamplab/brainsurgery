@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -779,6 +780,96 @@ def axon_op_parity(
             dtypes=dtypes,
             output_json=output_json,
         )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@app.command("axon-layer-op-parity")
+def axon_layer_op_parity(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    weights: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=True,
+        readable=True,
+        help="Path to a .safetensors file or a model directory containing safetensors.",
+    ),
+    layer_index: int = typer.Option(
+        ...,
+        "--layer-index",
+        min=0,
+        help="Layer index to compare.",
+    ),
+    hf_model_dir: Path | None = typer.Option(
+        None,
+        "--hf-model-dir",
+        help="HF model directory for AutoModel (defaults to weights directory).",
+    ),
+    tokenizer: str | None = typer.Option(
+        None,
+        "--tokenizer",
+        help="Tokenizer source override (local path or HF repo id).",
+    ),
+    text: list[str] = typer.Option(
+        ["Hello world"],
+        "--text",
+        help="Prompt text for forward-pass parity. Repeat --text for batched prompts.",
+    ),
+    device: str = typer.Option(
+        "cpu",
+        "--device",
+        help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
+    ),
+    dtype: str = typer.Option(
+        "float32",
+        "--dtype",
+        help="Dtype to run (float32/bfloat16/float16).",
+    ),
+    max_len: int = typer.Option(
+        32,
+        "--max-len",
+        help="Total sequence length target.",
+    ),
+    output_json: Path | None = typer.Option(
+        None,
+        "--output-json",
+        help="Optional path to write the full JSON report.",
+    ),
+) -> None:
+    """Run layer-scoped HF-internals vs Synapse parity harness."""
+    module = _synapse_module()
+    run_fn = getattr(module, "run_axon_layer_op_parity")
+    try:
+        result = run_fn(
+            axon_file=axon_path,
+            weights=weights,
+            layer_index=layer_index,
+            hf_model_dir=hf_model_dir,
+            tokenizer=tokenizer,
+            text=text,
+            device=device,
+            dtype=dtype,
+            max_len=max_len,
+        )
+        if output_json is not None:
+            output_json.parent.mkdir(parents=True, exist_ok=True)
+            output_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
+            typer.echo(f"[axon-layer-op-parity] wrote report: {output_json}")
+        by_op = result.get("by_op", {})
+        for kind in sorted(by_op):
+            stats = by_op[kind]
+            typer.echo(
+                f"[axon-layer-op-parity] {kind} max_abs={stats.get('max_abs')} "
+                f"mean_abs={stats.get('mean_abs')} matched={stats.get('matched')}"
+            )
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 

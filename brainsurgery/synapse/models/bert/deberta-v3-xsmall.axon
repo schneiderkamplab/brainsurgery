@@ -27,27 +27,27 @@ deberta_block x attn_mask = do
     full_bias <- add rel_bias pad_bias
     return attention q k v mask=full_bias padding_mask=false causal=false |> merge_heads |> linear@output.dense dim=D bias=true
   x <- x + a
-  x <- layernorm@attention.output.LayerNorm x eps=EPS weight=weight bias=bias
+  x <- layernorm@attention.output.LayerNorm x eps=EPS
   m <- linear@intermediate.dense x dim=FFN bias=true |> gelu
   m <- linear@output.dense m dim=D bias=true
   y <- x + m
-  y <- layernorm@output.LayerNorm y eps=EPS weight=weight bias=bias
+  y <- layernorm@output.LayerNorm y eps=EPS
   return y
 
 deberta_legacy_head :: Tensor[B,S,D] -> Tensor[B,S,V]
 deberta_legacy_head x = do
   logits <- scope@cls.predictions do
     x <- linear@transform.dense x dim=E bias=true |> gelu
-    x <- layernorm@transform.LayerNorm x eps=EPS weight=weight bias=bias
-    return linear@decoder x dim=V bias=true weight="@@deberta.embeddings.word_embeddings.weight" bias_path="cls.predictions.bias"
+    x <- layernorm@transform.LayerNorm x eps=EPS
+    return linear@decoder x dim=V bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
   return logits
 
 deberta_modern_head :: Tensor[B,S,D] -> Tensor[B,S,V]
 deberta_modern_head x = do
   logits <- scope@lm_predictions.lm_head do
     x <- linear@dense x dim=D bias=true |> gelu
-    x <- layernorm@LayerNorm x eps=EPS weight=weight bias=bias
-    return linear@decoder x dim=V bias=true weight="@@deberta.embeddings.word_embeddings.weight" bias_path="lm_predictions.lm_head.bias"
+    x <- layernorm@LayerNorm x eps=EPS
+    return linear@decoder x dim=V bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@lm_predictions.lm_head.bias
   return logits
 
 deberta_v2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
@@ -62,7 +62,7 @@ deberta_v2 input_ids attn_mask = do
   x <- x + typ
   has_proj <- false
   x <- has_proj ? linear@deberta.embeddings.embed_proj x dim=D bias=false : x
-  x <- layernorm@deberta.embeddings.LayerNorm x eps=EPS weight=weight bias=bias
+  x <- layernorm@deberta.embeddings.LayerNorm x eps=EPS
   for@deberta.encoder.layer i <- [0..L) do
     x <- deberta_block x attn_mask
   modern_head <- true

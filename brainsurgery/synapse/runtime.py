@@ -590,6 +590,10 @@ class SynapseProgramModel(nn.Module):
                 if not absolute:
                     return []
                 return [absolute]
+            if raw_path.startswith("@"):
+                raw_path = raw_path[1:]
+                if not raw_path:
+                    return []
             roots = _current_roots()
             scope_prefix = _effective_scope()
             scoped = self._join(scope_prefix, raw_path)
@@ -635,14 +639,18 @@ class SynapseProgramModel(nn.Module):
             scoped_base = self._join(_effective_scope(), base)
             scoped_param = f"{scoped_base}.{param_name}" if scoped_base else param_name
             return _pick_scoped_candidate(scoped_param)
+        # Explicit per-node path override wins over _params.
         explicit_params = node_spec.get("_params")
-        if isinstance(explicit_params, dict):
-            explicit = _pick_explicit_candidate(explicit_params.get(param_name))
-            if isinstance(explicit, str):
-                return explicit
         if param_name in node_spec and isinstance(node_spec[param_name], str):
             candidate = node_spec[param_name]
-            explicit = _pick_explicit_candidate(candidate)
+            if candidate.startswith("@") or "." in candidate:
+                if candidate != param_name:
+                    explicit = _pick_explicit_candidate(candidate)
+                    if isinstance(explicit, str):
+                        return explicit
+        # Next precedence level: lowered path bindings.
+        if isinstance(explicit_params, dict):
+            explicit = _pick_explicit_candidate(explicit_params.get(param_name))
             if isinstance(explicit, str):
                 return explicit
         fallback = f"{node_path}.{param_name}" if node_path else param_name

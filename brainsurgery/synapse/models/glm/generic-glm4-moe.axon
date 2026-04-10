@@ -57,8 +57,8 @@ glm4_moe_attn x pos_ids attn_mask past_kv = do
     v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
     q, k <- rope_pair q k position_ids=pos_ids theta=THETA partial_rotary_factor=0.5
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
     a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D bias=false
     return a, new_kv

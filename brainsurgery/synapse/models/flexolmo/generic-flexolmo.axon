@@ -45,7 +45,7 @@ flexolmo_decoder_block x pos_ids attn_mask past_kv = do
   x <- x + a_norm
   m <- scope@mlp do
     topk_scores, topk_indices <- linear@gate x dim=E |>
-      softmax dim=-1 dtype=float32 |> topk k=EPT dim=-1
+      softmax dim=-1 dtype="float32" |> topk k=EPT dim=-1
     m <- x * 0.0
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select x topk_scores topk_indices e

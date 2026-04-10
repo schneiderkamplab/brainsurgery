@@ -716,7 +716,9 @@ def _parse_haskell_header(
     tuple[DimToken, ...] | None,
 ]:
     name_def_raw = definition.module_decl
-    arg_names = list(definition.args)
+    def_params = list(definition.args)
+    arg_names = [param.name for param in def_params]
+    def_defaults = [param.default_expr for param in def_params]
     rhs_expr = definition.rhs
 
     name_sig_raw = signature.module_decl
@@ -772,6 +774,7 @@ def _parse_haskell_header(
                 f"signature arg count ({len(opt_flags)}) does not match definition args ({len(arg_names)})"
             )
         arg_names = [f"arg_{idx}" for idx in range(len(opt_flags))]
+        def_defaults = [None] * len(opt_flags)
         if isinstance(rhs_expr, AxonExprName):
             rhs_expr = AxonExprCall(callee=rhs_expr.name, args=(), kwargs={})
         assert isinstance(rhs_expr, AxonExprCall)
@@ -780,10 +783,19 @@ def _parse_haskell_header(
             args=tuple(AxonExprName(name=arg_name) for arg_name in arg_names),
             kwargs={},
         )
+    if len(def_defaults) != len(opt_flags):
+        raise ValueError(
+            f"signature arg count ({len(opt_flags)}) does not match definition args ({len(def_defaults)})"
+        )
 
     annotation_symbols: dict[str, object] = {}
     params_out: list[AxonParam] = []
     for idx, arg_name in enumerate(arg_names):
+        default_expr = def_defaults[idx]
+        if default_expr is not None and not opt_flags[idx]:
+            raise ValueError(
+                f"parameter {arg_name!r} has a default expression but signature marks it as required"
+            )
         raw_type = arg_types[idx]
         clean_type = raw_type.inner if isinstance(raw_type, TypeOptional) else raw_type
         shape = _shape_dims_from_type(clean_type)
@@ -795,6 +807,7 @@ def _parse_haskell_header(
                 optional=opt_flags[idx],
                 type_expr=clean_type,
                 shape=shape,
+                default_expr=default_expr,
             )
         )
     ret_shape = _shape_dims_from_type(sig_type.return_type)

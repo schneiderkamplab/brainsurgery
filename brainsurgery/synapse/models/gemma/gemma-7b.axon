@@ -31,8 +31,8 @@ gemma_block x pos_ids attn_mask past_kv = do
     v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
     q, k <- rope_pair q k position_ids=pos_ids theta=THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
     a <- attention q k v mask=mask |> merge_heads |> linear@o_proj dim=D
     return a, new_kv
@@ -55,6 +55,6 @@ gemma input_ids attn_mask past_kv use_cache = do
       x, new_i <- gemma_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
     x <- rms@norm x
-    logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V weight="@@lm_head.weight") : (linear@embed_tokens x dim=V)
+    logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V weight_path=@@lm_head.weight) : (linear@embed_tokens x dim=V)
     return logits, new_kv
   return logits, new_kv

@@ -24,13 +24,13 @@ gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?C
 gpt2_block x attn_mask past_kv = do
   x1 <- layernorm@ln_1 x
   a, new_kv <- scope@attn do
-    q_lin, k_lin, v_lin <- linear@c_attn x1 dim=(3 * D) bias=true transpose=true |> split parts=3
+    q_lin, k_lin, v_lin <- chunk (linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
     q <- reshape_head_basic q_lin H
     k <- reshape_head_basic k_lin H
     v <- reshape_head_basic v_lin H
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask_basic q k attn_mask
-    a <- attention_basic q k v mask ATTN_SCALE |> merge_heads_basic H |> linear@c_proj dim=D bias=true transpose=true
+    a <- attention_basic q k v mask scale=ATTN_SCALE |> merge_heads_basic H |> linear@c_proj dim=D bias=true transpose=true
     return a, new_kv
   x <- x + a
   x3 <- layernorm@ln_2 x

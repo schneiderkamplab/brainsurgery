@@ -5,10 +5,19 @@ from typing import Any
 import torch
 
 OP_NAME = "cast"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"dtype"}
-LOWERING_REQUIRED_KWARGS: set[str] = {"dtype"}
-LOWERING_KWARG_KINDS: dict[str, Any] = {"dtype": "str"}
+LOWERING_ARITY = (1, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
+
+
+def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
+    raw = node_spec.get("_args")
+    if isinstance(raw, list):
+        return list(raw)
+    if raw is None:
+        return []
+    return [raw]
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -19,11 +28,14 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
-    del args, ctx
+    del ctx
     if not isinstance(out, str):
         raise ValueError("cast requires a single scalar output binding")
-    if "dtype" not in kwargs:
-        raise ValueError("cast requires dtype")
+    if kwargs:
+        unknown = ", ".join(sorted(str(key) for key in kwargs))
+        raise ValueError(f"cast unsupported kwargs: {unknown}")
+    if len(args) != 2:
+        raise ValueError("cast requires positional args: x dtype")
 
 
 def lowering_infer_metadata(
@@ -61,6 +73,17 @@ def _resolve_dtype(raw: Any) -> torch.dtype:
     raise ValueError("cast.dtype must be one of: long, int64, bool, float32")
 
 
+def _resolve_dtype_code(raw_expr: str) -> str:
+    return (
+        "(\n"
+        f"            torch.long if str({raw_expr}).strip().lower() in ('long', 'int64') else\n"
+        f"            torch.bool if str({raw_expr}).strip().lower() in ('bool',) else\n"
+        f"            torch.float32 if str({raw_expr}).strip().lower() in ('float', 'float32', 'fp32') else\n"
+        "            None\n"
+        "        )"
+    )
+
+
 def interpret(
     model: Any,
     node_spec: dict[str, Any],
@@ -70,9 +93,13 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    del node_path, scope, symbols
-    src = model._read_tensor_input(node_spec.get("_args"), env)
-    dtype = _resolve_dtype(node_spec.get("dtype"))
+    del node_path, scope
+    args = _raw_args(node_spec)
+    if len(args) != 2:
+        raise ValueError("cast requires positional args: x dtype")
+    src = model._read_tensor_input(args[0], env)
+    dtype_raw = model._eval_expr(args[1], env, symbols)
+    dtype = _resolve_dtype(dtype_raw)
     out = model._require_name(node_spec.get("_bind"), field="cast._bind")
     env[out] = src.to(dtype=dtype)
 
@@ -87,18 +114,24 @@ def compile(
     indent: str,
 ) -> list[str]:
     del node_path_var, scope_var
-    src = emitter._read_env_var(env, str(node_spec.get("_args")))
+    args = _raw_args(node_spec)
+    if len(args) != 2:
+        raise ValueError("cast requires positional args: x dtype")
+    src = emitter._read_env_var(env, str(args[0]))
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
-    dtype = _resolve_dtype(node_spec.get("dtype"))
+    dtype_expr = emitter._expr_code(args[1], env)
+    dtype_var = emitter._fresh("dtype")
     return [
-        f"{indent}{out_var} = {src}.to(dtype={dtype!r})".replace(
-            "'" + str(dtype) + "'", f"torch.{str(dtype).split('.')[-1]}"
-        )
+        f"{indent}{dtype_var}_raw = {dtype_expr}",
+        f"{indent}{dtype_var} = {_resolve_dtype_code(f'{dtype_var}_raw')}",
+        f"{indent}if {dtype_var} is None:",
+        f"{indent}    raise ValueError('cast.dtype must be one of: long, int64, bool, float32')",
+        f"{indent}{out_var} = {src}.to(dtype={dtype_var})",
     ]
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any",),
+    "args": ("Any", "Any"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": "dynamic",
 }

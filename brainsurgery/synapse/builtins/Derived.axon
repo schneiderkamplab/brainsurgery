@@ -1,59 +1,121 @@
 reshape_head_basic :: Tensor[B,S,D] -> Int -> Tensor
 reshape_head_basic x heads = do
-  x4 <- reshape x shape=[B, S, heads, (D / heads)]
-  return permute x4 dims=[0, 2, 1, 3]
+  return reshape x shape=[B, S, heads, (D / heads)] |> permute dims=[0, 2, 1, 3]
+
 
 merge_heads_basic :: Tensor[B,H,S,HD] -> Int -> Tensor
 merge_heads_basic x heads = do
-  x4 <- permute x dims=[0, 2, 1, 3]
-  return reshape x4 shape=[B, S, (heads * HD)]
+  return permute x dims=[0, 2, 1, 3] |> reshape shape=[B, S, (heads * HD)]
+
 
 mask_to_additive_basic :: Tensor -> Tensor -> Tensor
 mask_to_additive_basic ref keep = where keep (zeros_like ref) (min_like ref)
 
+
 position_ids_basic_masked :: TokenIds[B,S] -> Tensor[B,SM] -> Int -> Tensor[B,S]
 position_ids_basic_masked x attn_mask pad_fill = do
-  m1 <- cast attn_mask dtype="long"
-  pos1 <- cumsum m1 dim=-1
-  pos2 <- pos1 - 1
-  pad <- eq attn_mask 0
-  pos3 <- where pad pad_fill pos42
-  return slice pos3 dim=-1 start=(SM - S) end=SM
+  pos <- cast attn_mask dtype="long" |> cumsum dim=-1
+  pos <- where (eq attn_mask 0) pad_fill (pos - 1)
+  return slice pos dim=-1 start=(SM - S) end=SM
+
 
 position_ids_basic_nomask :: TokenIds[B,S] -> Int -> Tensor[B,S]
 position_ids_basic_nomask x past_length = do
-  pos1 <- arange x start=past_length end=(past_length + S)
-  pos2 <- reshape pos1 shape=[1, S]
-  return expand pos2 shape=[B, S]
+  return arange x start=past_length end=(past_length + S) |>
+    cast dtype="long" |>
+    reshape shape=[1, S] |>
+    expand shape=[B, S]
+
 
 position_ids_basic :: TokenIds[B,S] -> ?Tensor[B,S] -> Int -> Int -> Tensor[B,S]
-position_ids_basic x attn_mask past_length pad_fill = (attn_mask == null) ? (position_ids_basic_nomask x past_length) : (position_ids_basic_masked x attn_mask pad_fill)
+position_ids_basic x attn_mask past_length pad_fill = if attn_mask == null then
+    position_ids_basic_nomask x past_length
+  else
+    position_ids_basic_masked x attn_mask pad_fill
+
 
 causal_mask_basic_nomask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K]
 causal_mask_basic_nomask q k = do
-  i1 <- arange q start=0 end=Q
-  j1 <- arange k start=0 end=K
-  i2 <- reshape i1 shape=[Q, 1]
-  j2 <- reshape j1 shape=[1, K]
-  upper <- le j2 (i2 + (K - Q))
+  row_ids <- arange q start=0 end=Q |> reshape shape=[Q, 1]
+  col_ids <- arange k start=0 end=K |> reshape shape=[1, K]
+  upper <- le col_ids (row_ids + (K - Q))
   keep <- reshape upper shape=[1, 1, Q, K]
   return expand keep shape=[B, 1, Q, K]
+
 
 causal_mask_basic_masked :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,K] -> Tensor[B,1,Q,K]
 causal_mask_basic_masked q k attn_mask = do
   keep <- causal_mask_basic_nomask q k
-  pad <- cast attn_mask dtype="bool"
-  pad4 <- reshape pad shape=[B, 1, 1, K]
-  return and keep pad4
+  pad_keep <- cast attn_mask dtype="bool" |> reshape shape=[B, 1, 1, K]
+  return and keep pad_keep
+
 
 causal_mask_basic :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,K] -> Tensor
-causal_mask_basic q k attn_mask = (attn_mask == null) ? (causal_mask_basic_nomask q k) : (causal_mask_basic_masked q k attn_mask)
+causal_mask_basic q k attn_mask = if attn_mask == null then
+    causal_mask_basic_nomask q k
+  else
+    causal_mask_basic_masked q k attn_mask
 
-attention_basic :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> Float -> Tensor[B,H,Q,HD]
-attention_basic q k v keep scale = do
-  kt <- transpose k dim1=2 dim2=3
-  scores0 <- matmul q kt
-  scores1 <- scores0 * scale
-  mask <- mask_to_additive_basic scores1 keep
-  probs <- add scores1 mask |> softmax dim=-1
+
+bidirectional_mask_basic_nomask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K]
+bidirectional_mask_basic_nomask q k = do
+  col_ids <- arange k start=0 end=K |> reshape shape=[1, 1, 1, K]
+  keep <- eq col_ids col_ids
+  return expand keep shape=[B, 1, Q, K]
+
+
+bidirectional_mask_basic_masked :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,SM] -> Tensor[B,1,Q,K]
+bidirectional_mask_basic_masked q k attn_mask = do
+  keep <- bidirectional_mask_basic_nomask q k
+  pad_keep <- slice attn_mask dim=-1 start=(SM - K) end=SM |>
+    cast dtype="bool" |>
+    reshape shape=[B, 1, 1, K]
+  return and keep pad_keep
+
+
+bidirectional_mask_basic :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,SM] -> Tensor[B,1,Q,K]
+bidirectional_mask_basic q k attn_mask = if attn_mask == null then
+    bidirectional_mask_basic_nomask q k
+  else
+    bidirectional_mask_basic_masked q k attn_mask
+
+
+attention_basic :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor[1,H,Q,K] -> ?Float -> Tensor[B,H,Q,HD]
+attention_basic q k v keep ?rel_bias=null ?scale=(1.0 / sqrt HD) = do
+  scores <- matmul q (transpose k dim1=2 dim2=3)
+  scores <- scores * scale
+  mask <- mask_to_additive_basic scores keep
+  probs_in <- add scores mask
+  probs_in <- (rel_bias == null) ? probs_in : add probs_in rel_bias
+  probs <- softmax probs_in dim=-1
   return matmul probs v
+
+
+relative_position_buckets_basic :: Tensor[Q,K] -> Int -> Int -> Bool -> Tensor[Q,K]
+relative_position_buckets_basic relative_position num_buckets max_distance bidirectional = do
+  half_buckets <- floor (num_buckets / 2)
+  bucket_count <- bidirectional ? half_buckets : num_buckets
+
+  rel_base <- bidirectional ? where (le relative_position 0) 0 half_buckets : zeros_like relative_position
+
+  rel_pos_abs <- where (le relative_position 0) (0 - relative_position) relative_position
+  rel_pos <- bidirectional ? rel_pos_abs : where (le relative_position 0) rel_pos_abs 0
+
+  max_exact <- floor (bucket_count / 2)
+  max_exact <- (max_exact < 1) ? 1 : max_exact
+  is_small <- le rel_pos (max_exact - 1)
+  rel_pos_large_input <- where (le rel_pos max_exact) max_exact rel_pos
+
+  log_scale <- log (max_distance / max_exact)
+  rel_pos_if_large <- max_exact + floor ((log (rel_pos_large_input / max_exact) / log_scale) * (bucket_count - max_exact))
+  rel_pos_if_large <- where (le rel_pos_if_large (bucket_count - 1)) rel_pos_if_large (bucket_count - 1)
+
+  return rel_base + where is_small rel_pos rel_pos_if_large
+
+
+relative_position_bias_basic :: @Path -> Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Int -> Int -> Bool -> Tensor[1,H,Q,K]
+relative_position_bias_basic@path q k num_buckets max_distance bidirectional = do
+  row_ids <- arange q start=0 |> reshape shape=[-1, 1]
+  col_ids <- arange k start=0 |> reshape shape=[1, -1]
+  buckets <- col_ids - row_ids |> relative_position_buckets_basic num_buckets max_distance bidirectional |> cast dtype="int64"
+  return embedding@path buckets dim=H |> permute dims=[2, 0, 1] |> expand shape=[1, -1, -1, -1]

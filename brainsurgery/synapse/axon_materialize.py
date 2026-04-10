@@ -8,7 +8,7 @@ from typing import Any, cast
 import safetensors
 import torch
 
-from .axon.grammar import ParsedProgramSource, ParsedSignature, parse_program_source
+from .axon.grammar import ParsedDefParam, ParsedProgramSource, ParsedSignature, parse_program_source
 from .axon.type_system import render_type
 from .axon.types import (
     AxonBind,
@@ -1025,10 +1025,28 @@ def _render_signature(signature: ParsedSignature) -> str:
     return f"{signature.module_decl} :: " + " -> ".join(parts)
 
 
-def _render_definition(module_decl: str, args: tuple[str, ...], rhs: AxonExpr) -> list[str]:
+def _is_simple_default_expr(expr: AxonExpr) -> bool:
+    return isinstance(
+        expr,
+        AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString | AxonExprName,
+    )
+
+
+def _render_def_param(param: ParsedDefParam) -> str:
+    if not isinstance(param.default_expr, AxonExpr):
+        return param.name
+    default_text = _expr_text(param.default_expr)
+    if _is_simple_default_expr(param.default_expr):
+        return f"?{param.name}={default_text}"
+    return f"?{param.name}=({default_text})"
+
+
+def _render_definition(
+    module_decl: str, args: tuple[ParsedDefParam, ...], rhs: AxonExpr
+) -> list[str]:
     head = module_decl
     if args:
-        head += " " + " ".join(args)
+        head += " " + " ".join(_render_def_param(arg) for arg in args)
     if isinstance(rhs, AxonExprDo):
         lines = [f"{head} = do"]
         lines.extend(_render_statements(rhs.body, indent="  "))

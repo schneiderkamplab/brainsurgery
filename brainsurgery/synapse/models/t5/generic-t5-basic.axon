@@ -1,0 +1,120 @@
+{-# CHECKPOINTS ["google-t5/t5-small", "google-t5/t5-base", "google-t5/t5-large", "google-t5/t5-3b", "google-t5/t5-11b"] #-}
+{-# TASK "seq2seq_lm" #-}
+
+import Activations relu
+import Config
+import Derived (
+  reshape_head_basic,
+  merge_heads_basic,
+  bidirectional_mask_basic,
+  causal_mask_basic,
+  attention_basic,
+  relative_position_bias_basic
+)
+
+D = Config.int "d_model" default=512
+V = Config.int "vocab_size" default=32128
+L_ENC = Config.int "num_layers" default=6
+L_DEC_OVERRIDE = Config.int "num_decoder_layers" default=-1
+L_DEC = (L_DEC_OVERRIDE > 0) ? L_DEC_OVERRIDE : L_ENC
+H = Config.int "num_heads" default=8
+FFN = Config.int "d_ff" default=2048
+EPS = Config.float "layer_norm_epsilon" default=1e-06
+NUM_BUCKETS = Config.int "relative_attention_num_buckets" default=32
+MAX_DISTANCE = Config.int "relative_attention_max_distance" default=128
+LM_SCALE_DERIVED = 1.0 / sqrt D
+LM_SCALE_OVERRIDE = Config.float "output_logit_scale" default=-1.0
+LM_SCALE = (LM_SCALE_OVERRIDE > 0.0) ? LM_SCALE_OVERRIDE : LM_SCALE_DERIVED
+
+t5_encoder_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+t5_encoder_block x attention_mask = do
+  self_attn <- scope@layer.0 do
+    x_norm <- rmsnorm@layer_norm x eps=EPS
+    q <- linear@SelfAttention.q x_norm dim=D bias=false |> reshape_head_basic H
+    k <- linear@SelfAttention.k x_norm dim=D bias=false |> reshape_head_basic H
+    v <- linear@SelfAttention.v x_norm dim=D bias=false |> reshape_head_basic H
+    rel_bias <- relative_position_bias_basic@@encoder.block.0.layer.0.SelfAttention.relative_attention_bias q k NUM_BUCKETS MAX_DISTANCE true
+    keep <- bidirectional_mask_basic q k attention_mask
+    return attention_basic q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads_basic H |> linear@SelfAttention.o dim=D bias=false
+  x <- x + self_attn
+  ffn <- scope@layer.1 do
+    x_norm <- rmsnorm@layer_norm x eps=EPS
+    x_ffn <- linear@DenseReluDense.wi x_norm dim=FFN bias=false |> relu
+    return linear@DenseReluDense.wo x_ffn dim=D bias=false
+  y <- x + ffn
+  return y
+
+t5_decoder_block :: Tensor[B,SDEC,D] -> Tensor[B,SENC,D] -> ?Tensor[B,SENC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,D]
+t5_decoder_block x enc_hidden encoder_attention_mask decoder_attention_mask = do
+  self_attn <- scope@layer.0 do
+    x_norm <- rmsnorm@layer_norm x eps=EPS
+    q <- linear@SelfAttention.q x_norm dim=D bias=false |> reshape_head_basic H
+    k <- linear@SelfAttention.k x_norm dim=D bias=false |> reshape_head_basic H
+    v <- linear@SelfAttention.v x_norm dim=D bias=false |> reshape_head_basic H
+    rel_bias <- relative_position_bias_basic@@decoder.block.0.layer.0.SelfAttention.relative_attention_bias q k NUM_BUCKETS MAX_DISTANCE false
+    keep <- causal_mask_basic q k decoder_attention_mask
+    return attention_basic q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads_basic H |> linear@SelfAttention.o dim=D bias=false
+  x <- x + self_attn
+  cross_attn <- scope@layer.1 do
+    x_norm <- rmsnorm@layer_norm x eps=EPS
+    q <- linear@EncDecAttention.q x_norm dim=D bias=false |> reshape_head_basic H
+    k <- linear@EncDecAttention.k enc_hidden dim=D bias=false |> reshape_head_basic H
+    v <- linear@EncDecAttention.v enc_hidden dim=D bias=false |> reshape_head_basic H
+    keep <- bidirectional_mask_basic q k encoder_attention_mask
+    return attention_basic q k v keep scale=1.0 |> merge_heads_basic H |> linear@EncDecAttention.o dim=D bias=false
+  x <- x + cross_attn
+  ffn <- scope@layer.2 do
+    x_norm <- rmsnorm@layer_norm x eps=EPS
+    x_ffn <- linear@DenseReluDense.wi x_norm dim=FFN bias=false |> relu
+    return linear@DenseReluDense.wo x_ffn dim=D bias=false
+  y <- x + ffn
+  return y
+
+t5 :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
+t5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
+  enc_hidden <- embedding@shared input_ids dim=D
+  for@encoder.block i <- [0..L_ENC) do
+    self_attn <- scope@layer.0 do
+      x_norm <- rmsnorm@layer_norm enc_hidden eps=EPS
+      q <- linear@SelfAttention.q x_norm dim=D bias=false |> reshape_head_basic H
+      k <- linear@SelfAttention.k x_norm dim=D bias=false |> reshape_head_basic H
+      v <- linear@SelfAttention.v x_norm dim=D bias=false |> reshape_head_basic H
+      rel_bias <- relative_position_bias_basic@@encoder.block.0.layer.0.SelfAttention.relative_attention_bias q k NUM_BUCKETS MAX_DISTANCE true
+      keep <- bidirectional_mask_basic q k attention_mask
+      return attention_basic q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads_basic H |> linear@SelfAttention.o dim=D bias=false
+    enc_hidden <- enc_hidden + self_attn
+    ffn <- scope@layer.1 do
+      x_norm <- rmsnorm@layer_norm enc_hidden eps=EPS
+      x_ffn <- linear@DenseReluDense.wi x_norm dim=FFN bias=false |> relu
+      return linear@DenseReluDense.wo x_ffn dim=D bias=false
+    enc_hidden <- enc_hidden + ffn
+  enc_hidden <- rmsnorm@encoder.final_layer_norm enc_hidden eps=EPS
+
+  dec_hidden <- embedding@shared decoder_input_ids dim=D
+  for@decoder.block i <- [0..L_DEC) do
+    self_attn <- scope@layer.0 do
+      x_norm <- rmsnorm@layer_norm dec_hidden eps=EPS
+      q <- linear@SelfAttention.q x_norm dim=D bias=false |> reshape_head_basic H
+      k <- linear@SelfAttention.k x_norm dim=D bias=false |> reshape_head_basic H
+      v <- linear@SelfAttention.v x_norm dim=D bias=false |> reshape_head_basic H
+      rel_bias <- relative_position_bias_basic@@decoder.block.0.layer.0.SelfAttention.relative_attention_bias q k NUM_BUCKETS MAX_DISTANCE false
+      keep <- causal_mask_basic q k decoder_attention_mask
+      return attention_basic q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads_basic H |> linear@SelfAttention.o dim=D bias=false
+    dec_hidden <- dec_hidden + self_attn
+    cross_attn <- scope@layer.1 do
+      x_norm <- rmsnorm@layer_norm dec_hidden eps=EPS
+      q <- linear@EncDecAttention.q x_norm dim=D bias=false |> reshape_head_basic H
+      k <- linear@EncDecAttention.k enc_hidden dim=D bias=false |> reshape_head_basic H
+      v <- linear@EncDecAttention.v enc_hidden dim=D bias=false |> reshape_head_basic H
+      keep <- bidirectional_mask_basic q k attention_mask
+      return attention_basic q k v keep scale=1.0 |> merge_heads_basic H |> linear@EncDecAttention.o dim=D bias=false
+    dec_hidden <- dec_hidden + cross_attn
+    ffn <- scope@layer.2 do
+      x_norm <- rmsnorm@layer_norm dec_hidden eps=EPS
+      x_ffn <- linear@DenseReluDense.wi x_norm dim=FFN bias=false |> relu
+      return linear@DenseReluDense.wo x_ffn dim=D bias=false
+    dec_hidden <- dec_hidden + ffn
+  dec_hidden <- rmsnorm@decoder.final_layer_norm dec_hidden eps=EPS
+  dec_hidden <- dec_hidden * LM_SCALE
+  logits <- linear@shared dec_hidden dim=V bias=false
+  return logits

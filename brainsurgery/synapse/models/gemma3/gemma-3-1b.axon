@@ -33,8 +33,8 @@ gemma3_block x i pos_ids attn_mask past_kv = do
     rope_scale <- long ? ROPE_LONG_SCALE : 1.0
     q, k <- rope_pair q k position_ids=pos_ids theta=theta scale_factor=rope_scale
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k (H / KVH)
-    v <- repeat v (H / KVH)
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
     window <- ((i + 1) % ROPE_PERIOD) == 0 ? WIN_LONG : WIN_LOCAL
     mask <- causal_mask q k window=window padding_mask=attn_mask
     a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads |> linear@o_proj dim=D

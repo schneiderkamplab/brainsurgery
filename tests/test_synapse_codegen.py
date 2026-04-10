@@ -137,6 +137,69 @@ def test_generated_model_keeps_double_at_params_absolute_under_scope() -> None:
     assert model._pick_param_path("mlp.experts.0", ["@@gate_proj.weight"]) == "gate_proj.weight"
 
 
+def test_generated_model_prefers_explicit_path_like_field_over_params_mapping() -> None:
+    source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="ExplicitPathPriority")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)
+    model_cls = namespace["ExplicitPathPriority"]
+    model = model_cls(  # type: ignore[operator]
+        state_dict={
+            "proj.weight": torch.ones(1, 1, dtype=torch.float32),
+            "decoder.layer.0.weight": torch.ones(1, 1, dtype=torch.float32),
+            "layers.0.attn.decoder.layer.0.weight": torch.ones(1, 1, dtype=torch.float32),
+        }
+    )
+    node_spec = {
+        "_params": {"weight": "proj.weight"},
+        "weight": "@decoder.layer.0.weight",
+    }
+    assert (
+        model._infer_param_path(node_spec, node_path="layers.0.attn.n_op_0", param_name="weight")
+        == "layers.0.attn.decoder.layer.0.weight"
+    )
+
+
+def test_generated_model_prefers_plain_explicit_alias_when_present_else_params() -> None:
+    source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="PlainAliasPriority")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)
+    model_cls = namespace["PlainAliasPriority"]
+    model = model_cls(  # type: ignore[operator]
+        state_dict={
+            "model.language_model.layers.0.layer_scalar": torch.ones(1, dtype=torch.float32),
+            "model.language_model.layers.0.proj.bias": torch.ones(1, dtype=torch.float32),
+        }
+    )
+    node_spec = {
+        "_scope": "model.language_model.layers.0",
+        "scale": "layer_scalar",
+        "_params": {"bias": "proj.bias"},
+    }
+    assert (
+        model._infer_param_path(node_spec, node_path="n_op_0", param_name="scale")
+        == "model.language_model.layers.0.layer_scalar"
+    )
+    assert (
+        model._infer_param_path(node_spec, node_path="n_op_0", param_name="bias")
+        == "model.language_model.layers.0.proj.bias"
+    )
+
+
+def test_generated_model_plain_explicit_equal_param_name_can_bind_scoped_tensor() -> None:
+    source = emit_model_code_from_synapse_spec(_spec_dict(), class_name="PlainEqualNameBinding")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)
+    model_cls = namespace["PlainEqualNameBinding"]
+    model = model_cls(  # type: ignore[operator]
+        state_dict={"backbone.layers.0.mixer.D": torch.ones(1, dtype=torch.float32)}
+    )
+    node_spec = {"_scope": "backbone.layers.0.mixer", "D": "D"}
+    assert (
+        model._infer_param_path(node_spec, node_path="n_op_0", param_name="D")
+        == "backbone.layers.0.mixer.D"
+    )
+
+
 def test_generated_rope_pair_hf_yarn_matches_runtime() -> None:
     spec: dict[str, object] = {
         "synapse": 1,

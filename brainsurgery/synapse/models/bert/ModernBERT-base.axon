@@ -17,10 +17,10 @@ THETA_LOCAL = 10000.0
 
 modernbert_layer :: Tensor[B,S,D] -> Int -> TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,D]
 modernbert_layer x i pos_ids attn_mask = do
-  xn <- (i == 0) ? x : layernorm@attn_norm x eps=EPS bias=null
+  xn <- (i == 0) ? x : layernorm@attn_norm x eps=EPS bias=false
   a <- scope@attn do
     qkv <- linear@Wqkv xn dim=3 * D bias=false
-    q, k, v <- split qkv parts=3
+    q, k, v <- chunk qkv parts=3
     q <- reshape_heads q heads=H
     k <- reshape_heads k heads=H
     v <- reshape_heads v heads=H
@@ -30,10 +30,10 @@ modernbert_layer x i pos_ids attn_mask = do
     mask <- if full then bidirectional_mask q k padding_mask=attn_mask else bidirectional_mask q k window=LOCAL_WIN padding_mask=attn_mask
     return attention q k v mask=mask causal=false eager=true |> merge_heads |> linear@Wo dim=D bias=false
   x <- x + a
-  xn <- layernorm@mlp_norm x eps=EPS bias=null
+  xn <- layernorm@mlp_norm x eps=EPS bias=false
   m <- scope@mlp do
     wi <- linear@Wi xn dim=2 * FFN bias=false
-    u, g <- split wi parts=2
+    u, g <- chunk wi parts=2
     return gelu u |> mul g |> linear@Wo dim=D bias=false
   return x + m
 
@@ -41,11 +41,11 @@ modernbert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 modernbert input_ids attn_mask = do
   pos_ids <- position_ids input_ids attn_mask
   x <- embedding@model.embeddings.tok_embeddings input_ids dim=D
-  x <- layernorm@model.embeddings.norm x eps=EPS bias=null
+  x <- layernorm@model.embeddings.norm x eps=EPS bias=false
   for@model.layers i <- [0..L) do
     x <- modernbert_layer x i pos_ids attn_mask
-  x <- layernorm@model.final_norm x eps=EPS bias=null
+  x <- layernorm@model.final_norm x eps=EPS bias=false
   x <- linear@head.dense x dim=D bias=false |> gelu
-  x <- layernorm@head.norm x eps=EPS bias=null
-  logits <- linear@decoder x dim=V bias=true weight="model.embeddings.tok_embeddings.weight"
+  x <- layernorm@head.norm x eps=EPS bias=false
+  logits <- linear@decoder x dim=V bias=true weight_path=@@model.embeddings.tok_embeddings.weight
   return logits
