@@ -43,6 +43,9 @@ expand x ?shape=null = _expand x shape
 arange :: Tensor -> ?Int -> ?Int -> IdxTensor
 arange x ?start=0 ?end=null = _arange x start end
 
+sinusoidal_positions :: Tensor -> Tensor -> ?Float -> ?Int -> ?Int -> Tensor
+sinusoidal_positions ref position_ids ?theta=10000.0 ?offset=2 ?padding_idx=null = _sinusoidal_positions ref position_ids theta offset padding_idx
+
 cast :: Tensor -> ?String -> Tensor
 cast x ?dtype=null = _cast x dtype
 
@@ -106,8 +109,25 @@ softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype
 topk :: Tensor[B,T,D] -> Int -> ?Int -> ?Bool -> ?Bool -> (Tensor[B,T,K], Tensor[B,T,K])
 topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted
 
+dtype_value :: Tensor -> String -> Float
+dtype_value x kind = _dtype_value x kind
+
+empty_like :: Tensor -> ?String -> Tensor
+empty_like x ?dtype=null = _empty_like x dtype
+
+fill :: Tensor -> Any -> ?String -> Tensor
+fill x value ?dtype=null = _fill x value dtype
+
+gather :: Tensor -> IdxTensor -> ?Int -> Tensor
+gather x index ?dim=-1 = _gather x index dim
+
+scatter :: Tensor -> IdxTensor -> Any -> ?Int -> Tensor
+scatter x index src ?dim=-1 = _scatter x index src dim
+
 zeros_like :: Tensor[B,T,D] -> Tensor[B,T,D]
 zeros_like = _zeros_like
 
 min_like :: Tensor[B,T,D] -> Tensor[B,T,D]
-min_like = _min_like
+min_like x = do
+  min_val <- dtype_value x "min"
+  return fill (empty_like x) min_val

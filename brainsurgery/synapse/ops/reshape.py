@@ -85,9 +85,15 @@ def _resolve_shape(
     resolved: list[int] = []
     for item in raw_items:
         value = model._eval_expr(item, env, symbols)
-        if isinstance(value, bool) or not isinstance(value, int):
+        if isinstance(value, bool):
             raise ValueError("reshape.shape entries must resolve to ints")
-        resolved.append(int(value))
+        if isinstance(value, int):
+            resolved.append(int(value))
+            continue
+        if isinstance(value, float) and float(value).is_integer():
+            resolved.append(int(value))
+            continue
+        raise ValueError("reshape.shape entries must resolve to ints")
     return tuple(resolved)
 
 

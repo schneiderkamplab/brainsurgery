@@ -594,9 +594,9 @@ def axon_benchmark(
         help="Set torch.compile(dynamic=True).",
     ),
     axon_backend: str = typer.Option(
-        "single",
+        "codegen",
         "--axon-backend",
-        help="Axon execution backend (single or pipeline).",
+        help="Axon execution backend (codegen, runtime, or pipeline).",
     ),
     pipeline_parallel_size: int | None = typer.Option(
         None,

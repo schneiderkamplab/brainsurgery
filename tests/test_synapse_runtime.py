@@ -88,6 +88,29 @@ def _reshape_heads_spec(
     }
 
 
+def test_runtime_binds_inferred_shape_symbols_for_ir_expr() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "symbols": {"B": None, "S": None, "D": 4},
+            "inputs": {"x": {"shape": ["B", "S", "D"], "dtype": "float32"}},
+            "graph": [
+                {
+                    "seq_len": {
+                        "_op": "_ir_expr",
+                        "_bind": "s",
+                        "value": {"_expr": "name", "id": "S"},
+                    }
+                }
+            ],
+            "outputs": {"s": "s"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec).eval()
+    out = model(None, x=torch.randn(2, 3, 4))
+    assert out["s"] == 3
+
+
 def _split_qkv_grouped_spec(*, heads: int, kv_heads: int) -> dict[str, object]:
     return {
         "synapse": 1,
@@ -812,6 +835,40 @@ def test_runtime_linear_relative_path_kwarg_keeps_numeric_segments() -> None:
         model._infer_param_path(node_spec, node_path="n_op_0", param_name="weight")
         == "decoder.layer.0.weight"
     )
+
+
+def test_runtime_linear_identifier_weight_path_honors_scope_and_param_root() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "inputs": {"x": {}},
+            "graph": [
+                {
+                    "n_op_0": {
+                        "_op": "_ir_expr",
+                        "_bind": "wpath",
+                        "value": {"_expr": "string", "value": "experts.gate_up_proj"},
+                    }
+                },
+                {
+                    "n_op_1": {
+                        "_op": "linear",
+                        "_bind": "y",
+                        "_args": ["x", None, False, False, 0, "wpath", None],
+                        "_scope": "model.layers.0.mlp",
+                        "_param_root": "language_model",
+                    }
+                },
+            ],
+            "outputs": {"y": "y"},
+        },
+    }
+    model = SynapseProgramModel.from_spec(spec)
+    model.load_state_dict_tensors(
+        {"language_model.model.layers.0.mlp.experts.gate_up_proj": torch.randn(2, 3, 4)}
+    )
+    out = model(x=torch.randn(1, 4))
+    assert out["y"].shape == (1, 3)
 
 
 def test_runtime_prefers_plain_explicit_alias_when_present_else_params() -> None:

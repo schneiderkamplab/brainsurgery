@@ -132,12 +132,12 @@ def interpret(
 
     path_spec = dict(node_spec)
     weight_param = "weight"
-    direct_weight_path: str | None = None
     if weight_override is not None:
         if weight_override.isidentifier():
             resolved = env.get(weight_override)
             if isinstance(resolved, str):
-                direct_weight_path = resolved
+                path_spec["weight_path"] = resolved
+                weight_param = "weight_path"
             else:
                 path_spec["weight_path"] = weight_override
                 weight_param = "weight_path"
@@ -145,12 +145,12 @@ def interpret(
             path_spec["weight_path"] = weight_override
             weight_param = "weight_path"
     bias_param = "bias"
-    direct_bias_path: str | None = None
     if bias_override is not None:
         if bias_override.isidentifier():
             resolved = env.get(bias_override)
             if isinstance(resolved, str):
-                direct_bias_path = resolved
+                path_spec["bias_path"] = resolved
+                bias_param = "bias_path"
             else:
                 path_spec["bias_path"] = bias_override
                 bias_param = "bias_path"
@@ -158,14 +158,10 @@ def interpret(
             path_spec["bias_path"] = bias_override
             bias_param = "bias_path"
 
-    linear_weight_path = (
-        direct_weight_path
-        if isinstance(direct_weight_path, str)
-        else model._infer_param_path(
-            path_spec,
-            node_path=node_path,
-            param_name=weight_param,
-        )
+    linear_weight_path = model._infer_param_path(
+        path_spec,
+        node_path=node_path,
+        param_name=weight_param,
     )
     weight = model._state[linear_weight_path]
     if expert_expr is not None:
@@ -180,16 +176,12 @@ def interpret(
 
     bias = None
     if bool(model._eval_expr(bias_expr, env, symbols)):
-        bias_path = (
-            direct_bias_path
-            if isinstance(direct_bias_path, str)
-            else model._infer_param_path(
-                path_spec,
-                node_path=node_path,
-                param_name=bias_param,
-            )
+        bias_path = model._infer_param_path(
+            path_spec,
+            node_path=node_path,
+            param_name=bias_param,
         )
-        bias = model._state.get(bias_path)
+        bias = model._state_tensor_from_resolved_path(bias_path, field="linear.bias")
         if bias is not None and expert_expr is not None and bias.ndim >= 2:
             bias = bias[expert_idx]
 
@@ -266,7 +258,10 @@ def compile(
     weight_param_expr: str | None = None
     if weight_override is not None:
         if weight_override.isidentifier() and weight_override in env:
-            weight_param_expr = f"self._param({read(weight_override)})"
+            weight_param_expr = (
+                f"self._param(self._resolve_state_path("
+                f"node_path={node_path_var}, raw_path={read(weight_override)}))"
+            )
         else:
             path_spec["weight_path"] = weight_override
             weight_param = "weight_path"
@@ -274,7 +269,10 @@ def compile(
     bias_param_expr: str | None = None
     if bias_override is not None:
         if bias_override.isidentifier() and bias_override in env:
-            bias_param_expr = f"self._param({read(bias_override)})"
+            bias_param_expr = (
+                f"self._state_tensor_from_path("
+                f"node_path={node_path_var}, raw_path={read(bias_override)}, field='linear.bias')"
+            )
         else:
             path_spec["bias_path"] = bias_override
             bias_param = "bias_path"
@@ -327,6 +325,8 @@ def compile(
     lines.append(f"{indent}{bias_var} = {selected_bias}")
     lines.append(f"{indent}if not bool({has_bias_code}):")
     lines.append(f"{indent}    {bias_var} = None")
+    lines.append(f"{indent}elif {bias_var} is None:")
+    lines.append(f"{indent}    raise ValueError('linear.bias tensor not found for resolved path')")
     lines.append(f"{indent}{weight_run_var} = {weight_var}")
     lines.append(f"{indent}{bias_run_var} = {bias_var}")
     lines.append(

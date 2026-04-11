@@ -305,7 +305,7 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(
         webui_handler,
         "_render_execution_summary",
-        lambda **kwargs: (seen_modes.append(kwargs["mode"]) or "transforms: []\n"),
+        lambda **kwargs: seen_modes.append(kwargs["mode"]) or "transforms: []\n",
     )
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is True

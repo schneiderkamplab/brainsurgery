@@ -23,6 +23,7 @@ THETA_RAW = Config.value "rope_theta" default=null
 THETA = (THETA_RAW == null) ? 10000.0 : (Config.float "rope_theta" default=10000.0)
 ACT = Config.value "hidden_act" default="gelu_pytorch_tanh"
 HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD_BIAS = Params.has_root "lm_head.bias"
 
 starcoder2_ln :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 starcoder2_ln@path x = layernorm@path x eps=EPS
@@ -63,5 +64,5 @@ starcoder2 input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- starcoder2_ln@norm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V bias=true) : (linear@model.embed_tokens x dim=V)
+  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V bias=HAS_LM_HEAD_BIAS) : (linear@model.embed_tokens x dim=V)
   return logits, new_kv

@@ -1,0 +1,80 @@
+{-# CHECKPOINTS ["microsoft/Phi-3.5-MoE-instruct"] #-}
+{-# TASK "causal_lm" #-}
+
+import Config
+import Params
+import Activations silu
+import Cache
+import Cache past_length
+import MoE
+
+D = Config.int "hidden_size" default=4096
+V = Config.int "vocab_size" default=32064
+L = Config.int "num_hidden_layers" default=32
+H = Config.int "num_attention_heads" default=32
+KVH = Config.int "num_key_value_heads" default=8
+HD_RAW = Config.value "head_dim" default=null
+HD = (HD_RAW == null) ? (D / H) : (Config.int "head_dim" default=128)
+QD = H * HD
+KVD = KVH * HD
+FFN = Config.int "intermediate_size" default=6400
+E = Config.int "num_local_experts" default=16
+EPT = Config.int "num_experts_per_tok" default=2
+EPS = Config.float "rms_norm_eps" default=1e-05
+THETA = Config.float "rope_theta" default=10000.0
+ROPE_MODE = Config.str "rope_type" root="rope_scaling" default=(Config.str "type" root="rope_scaling" default="default")
+ROPE_ORIGINAL_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=(Config.int "original_max_position_embeddings" default=4096)
+ROPE_MAX_CONTEXT = Config.int "max_position_embeddings" default=131072
+ROPE_LONG_FACTOR = Config.value "long_factor" root="rope_scaling" default=[]
+ROPE_SHORT_FACTOR = Config.value "short_factor" root="rope_scaling" default=[]
+HAS_LONGROPE = Config.has "long_factor" root="rope_scaling"
+ROPE_ATTENTION_FACTOR = Config.float "long_mscale" root="rope_scaling" default=1.0
+WINDOW = Config.int "sliding_window" default=131072
+ROUTER_JITTER = Config.float "router_jitter_noise" default=0.01
+HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD_BIAS = Params.has_root "lm_head.bias"
+
+ATTN_SCALE = 1.0 / sqrt HD
+
+phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+phimoe_block x pos_ids attn_mask past_kv = do
+  xn <- layernorm@input_layernorm x eps=EPS bias=true
+  a, new_kv <- scope@self_attn do
+    q <- linear@q_proj xn dim=QD bias=true |> reshape_heads heads=H
+    k <- linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    q, k <- HAS_LONGROPE
+      ? (rope_pair q k position_ids=pos_ids theta=THETA rope_mode=ROPE_MODE original_context=ROPE_ORIGINAL_CONTEXT max_context=ROPE_MAX_CONTEXT long_factor=ROPE_LONG_FACTOR short_factor=ROPE_SHORT_FACTOR attention_factor=ROPE_ATTENTION_FACTOR)
+      : (rope_pair q k position_ids=pos_ids theta=THETA)
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- repeat k repeats=(H / KVH)
+    v <- repeat v repeats=(H / KVH)
+    mask <- causal_mask q k window=WINDOW padding_mask=attn_mask
+    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=D bias=true
+    return a, new_kv
+  x <- x + a
+  xn <- layernorm@post_attention_layernorm x eps=EPS bias=true
+  m <- scope@block_sparse_moe do
+    topk_scores, topk_indices <- MoE.sparsemixer_router xn E ROUTER_JITTER
+    m <- xn * 0.0
+    for@experts e <- [0..E) do
+      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
+      x_upd <- linear@w1 x_sel dim=FFN |> silu |> mul (linear@w3 x_sel dim=FFN) |> linear@w2 dim=D bias=false
+      m <- MoE.scatter_add m token_idx x_upd sel_scores
+    return m
+  return x + m, new_kv
+
+phimoe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+phimoe input_ids attn_mask past_kv use_cache = do
+  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  x, new_kv <- scope@model do
+    x <- embedding@embed_tokens input_ids dim=D
+    new_kv <- use_cache ? Cache.init : null
+    for@layers i <- [0..L) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- phimoe_block x pos_ids attn_mask past_i
+      new_kv <- Cache.append new_kv new_i
+    x <- layernorm@norm x eps=EPS bias=true
+    return x, new_kv
+  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V bias=HAS_LM_HEAD_BIAS) : (linear@model.embed_tokens x dim=V bias=false)
+  return logits, new_kv

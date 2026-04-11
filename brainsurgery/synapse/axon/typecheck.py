@@ -1860,6 +1860,12 @@ def _call_return_type(
             path,
             "_arange only accepts positional arguments; use Prelude.arange for keyword/default syntax",
         )
+    if raw_base == "_sinusoidal_positions" and kwargs:
+        raise _error(
+            module,
+            path,
+            "_sinusoidal_positions only accepts positional arguments; use Prelude.sinusoidal_positions for keyword/default syntax",
+        )
     if raw_base == "_expand" and kwargs:
         raise _error(
             module,

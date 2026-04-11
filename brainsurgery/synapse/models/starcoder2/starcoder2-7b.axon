@@ -5,19 +5,21 @@ import Activations
 import Activations (gelu, gelu_pytorch_tanh)
 import Cache
 import Cache (past_length)
+import Params
 
 D = 4608
 V = 49152
 L = 32
 H = 36
 KVH = 4
-KVD = 512.0
+KVD = 512
 FFN = 18432
 EPS = 1e-05
 SW = 4096
 THETA = 1000000.0
 ACT = "gelu_pytorch_tanh"
 HAS_LM_HEAD = false
+HAS_LM_HEAD_BIAS = Params.has_root "lm_head.bias"
 
 starcoder2_ln :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 starcoder2_ln@path x = layernorm@path x eps=EPS
@@ -58,5 +60,5 @@ starcoder2 input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- starcoder2_ln@norm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V bias=true) : (linear@model.embed_tokens x dim=V)
+  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V bias=HAS_LM_HEAD_BIAS) : (linear@model.embed_tokens x dim=V)
   return logits, new_kv

@@ -146,11 +146,17 @@ def interpret(
             mask = _expand_padding_mask(mask, q=q, k_tensor=k_tensor)
 
     sink_name = node_spec.get("sink")
-    sink = env.get(sink_name) if isinstance(sink_name, str) else None
+    sink = None
+    if isinstance(sink_name, str):
+        if sink_name not in env:
+            raise ValueError(f"attention.sink input not found in env: {sink_name}")
+        sink = env[sink_name]
     if sink is None and isinstance(node_spec.get("sink_path"), str):
-        sink_scope = model._scope_of(node_path)
-        sink_path = model._join_scope(sink_scope, str(node_spec["sink_path"]))
-        sink = model._state.get(sink_path)
+        sink = model._state_tensor_from_path(
+            node_path=node_path,
+            raw_path=str(node_spec["sink_path"]),
+            field="attention.sink_path",
+        )
 
     scale_expr = node_spec.get("scale")
     scale_value = None if scale_expr is None else float(model._eval_expr(scale_expr, env, symbols))
@@ -367,21 +373,20 @@ def compile(
         mask_for_sdpa = padding_mask
 
     sink_name = node_spec.get("sink")
-    sink_expr = env[sink_name] if isinstance(sink_name, str) and sink_name in env else None
+    sink_expr = None
+    if isinstance(sink_name, str):
+        if sink_name not in env:
+            raise ValueError(f"attention.sink input not found in env: {sink_name}")
+        sink_expr = env[sink_name]
     if sink_expr is None and isinstance(node_spec.get("sink_path"), str):
-        sink_scope_expr = f"self._scope_of({node_path_var})"
-        sink_path_expr = f"self._join_scope({sink_scope_expr}, {node_spec['sink_path']!r})"
-        sink_path_var = emitter._hoist_expr(
-            kind="param_path",
-            key=f"sink:{sink_path_expr}",
-            expr=sink_path_expr,
-            lines=lines,
-            indent=indent,
-        )
         sink_expr = emitter._hoist_expr(
-            kind="param_tensor_opt",
-            key=f"optional:{sink_path_var}",
-            expr=f"self._state.get({sink_path_var})",
+            kind="param_tensor",
+            key=f"sink_required:{node_spec['sink_path']!r}:{node_path_var}",
+            expr=(
+                "self._state_tensor_from_path("
+                f"node_path={node_path_var}, raw_path={node_spec['sink_path']!r}, "
+                "field='attention.sink_path')"
+            ),
             lines=lines,
             indent=indent,
         )

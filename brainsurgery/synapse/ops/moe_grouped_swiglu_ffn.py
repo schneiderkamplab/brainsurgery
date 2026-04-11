@@ -13,6 +13,7 @@ LOWERING_ALLOWED_KWARGS: set[str] = {
     "gate_up_weight",
     "gate_up_scale",
     "down_weight",
+    "out_weight",
     "down_scale",
     "transpose",
     "pre_scale_input",
@@ -22,6 +23,7 @@ LOWERING_KWARG_KINDS: dict[str, Any] = {
     "gate_up_weight": "str",
     "gate_up_scale": "str",
     "down_weight": "str",
+    "out_weight": "str",
     "down_scale": "str",
     "transpose": "bool",
     "pre_scale_input": "bool",
@@ -57,6 +59,34 @@ def _infer_path(
     model: Any, node_spec: dict[str, Any], *, node_path: str, key: str, fallback: str
 ) -> str:
     return _base._infer_path(model, node_spec, node_path=node_path, key=key, fallback=fallback)
+
+
+def _infer_down_weight_path(model: Any, node_spec: dict[str, Any], *, node_path: str) -> str:
+    if isinstance(node_spec.get("down_weight"), str):
+        return _infer_path(
+            model,
+            node_spec,
+            node_path=node_path,
+            key="down_weight",
+            fallback="experts.down_proj",
+        )
+    if isinstance(node_spec.get("out_weight"), str):
+        override = dict(node_spec)
+        override["down_weight"] = str(node_spec["out_weight"])
+        return _infer_path(
+            model,
+            override,
+            node_path=node_path,
+            key="down_weight",
+            fallback="experts.down_proj",
+        )
+    return _infer_path(
+        model,
+        node_spec,
+        node_path=node_path,
+        key="down_weight",
+        fallback="experts.down_proj",
+    )
 
 
 def _maybe_dequantize(weight: torch.Tensor, scale: torch.Tensor | None) -> torch.Tensor:
@@ -178,9 +208,7 @@ def interpret(
         key="gate_up_scale",
         fallback="experts.gate_up_proj_scale_inv",
     )
-    down_weight_path = _infer_path(
-        model, node_spec, node_path=node_path, key="down_weight", fallback="experts.down_proj"
-    )
+    down_weight_path = _infer_down_weight_path(model, node_spec, node_path=node_path)
     down_scale_path = _infer_path(
         model,
         node_spec,
@@ -190,9 +218,21 @@ def interpret(
     )
 
     gate_up_weight = model._param(gate_up_weight_path)
-    gate_up_scale = model._state.get(gate_up_scale_path)
+    gate_up_scale = (
+        model._state_tensor_from_resolved_path(
+            gate_up_scale_path, field="moe_grouped_swiglu_ffn.gate_up_scale"
+        )
+        if isinstance(node_spec.get("gate_up_scale"), str)
+        else model._state.get(gate_up_scale_path)
+    )
     down_weight = model._param(down_weight_path)
-    down_scale = model._state.get(down_scale_path)
+    down_scale = (
+        model._state_tensor_from_resolved_path(
+            down_scale_path, field="moe_grouped_swiglu_ffn.down_scale"
+        )
+        if isinstance(node_spec.get("down_scale"), str)
+        else model._state.get(down_scale_path)
+    )
 
     final_hidden = _run_grouped_swiglu_moe(
         hidden_flat=hidden_flat,
@@ -254,7 +294,13 @@ def compile(
 
     gate_up_weight_expr = infer_param("gate_up_weight", "experts.gate_up_proj")
     gate_up_scale_expr = infer_param("gate_up_scale", "experts.gate_up_proj_scale_inv")
-    down_weight_expr = infer_param("down_weight", "experts.down_proj")
+    down_weight_key = (
+        "down_weight"
+        if isinstance(node_spec.get("down_weight"), str)
+        or not isinstance(node_spec.get("out_weight"), str)
+        else "out_weight"
+    )
+    down_weight_expr = infer_param(down_weight_key, "experts.down_proj")
     down_scale_expr = infer_param("down_scale", "experts.down_proj_scale_inv")
 
     gate_up_weight_path = emitter._hoist_expr(
@@ -321,6 +367,16 @@ def compile(
         f"{indent}{down_weight} = _moe_grouped_swiglu_ffn_mod._maybe_dequantize({down_weight_value}, {down_scale_value})"
     )
     lines.append(f"{indent}{down_scale} = {down_scale_value}")
+    if isinstance(node_spec.get("gate_up_scale"), str):
+        lines.append(f"{indent}if {gate_up_scale} is None:")
+        lines.append(
+            f"{indent}    raise ValueError('moe_grouped_swiglu_ffn.gate_up_scale tensor not found for resolved path')"
+        )
+    if isinstance(node_spec.get("down_scale"), str):
+        lines.append(f"{indent}if {down_scale} is None:")
+        lines.append(
+            f"{indent}    raise ValueError('moe_grouped_swiglu_ffn.down_scale tensor not found for resolved path')"
+        )
     lines.append(f"{indent}{final_hidden} = _moe_grouped_swiglu_ffn_mod._run_grouped_swiglu_moe(")
     lines.append(f"{indent}    hidden_flat={hidden_flat},")
     lines.append(f"{indent}    topk_scores_flat={topk_scores_flat},")

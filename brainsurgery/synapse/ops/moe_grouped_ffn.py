@@ -284,9 +284,19 @@ def interpret(
     )
 
     gate_up_weight = model._state[gate_up_weight_path]
-    gate_up_bias = model._state.get(gate_up_bias_path) if has_bias else None
+    gate_up_bias = (
+        model._state_tensor_from_resolved_path(
+            gate_up_bias_path, field="moe_grouped_ffn.gate_up_bias"
+        )
+        if has_bias
+        else None
+    )
     down_weight = model._state[down_weight_path]
-    down_bias = model._state.get(down_bias_path) if has_bias else None
+    down_bias = (
+        model._state_tensor_from_resolved_path(down_bias_path, field="moe_grouped_ffn.down_bias")
+        if has_bias
+        else None
+    )
 
     out_flat = _run_grouped_moe(
         hidden_flat=hidden_flat,
@@ -427,6 +437,15 @@ def compile(
     lines.append(f"{indent}{gate_up_bias} = {gate_up_bias_value} if {has_bias!r} else None")
     lines.append(f"{indent}{down_weight} = {down_weight_value}")
     lines.append(f"{indent}{down_bias} = {down_bias_value} if {has_bias!r} else None")
+    if has_bias:
+        lines.append(f"{indent}if {gate_up_bias} is None:")
+        lines.append(
+            f"{indent}    raise ValueError('moe_grouped_ffn.gate_up_bias tensor not found for resolved path')"
+        )
+        lines.append(f"{indent}if {down_bias} is None:")
+        lines.append(
+            f"{indent}    raise ValueError('moe_grouped_ffn.down_bias tensor not found for resolved path')"
+        )
     lines.append(f"{indent}{alpha} = float({alpha_code})")
     lines.append(f"{indent}{limit} = float({limit_code})")
     lines.append(f"{indent}{final_hidden} = _moe_grouped_ffn_mod._run_grouped_moe(")

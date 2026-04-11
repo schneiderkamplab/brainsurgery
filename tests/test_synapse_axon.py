@@ -1196,6 +1196,26 @@ main x = do
     assert body_calls[0].get("_scope") is None
 
 
+def test_unscoped_for_does_not_emit_synthetic_loop_scope() -> None:
+    source = """
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  for i <- [0..2) do
+    x <- add x x
+  return x
+"""
+    spec = lower_axon_program_to_synapse_spec(parse_axon_program(source))
+    graph = spec["model"]["graph"]
+    for_nodes = [
+        node_spec
+        for item in graph
+        for _, node_spec in item.items()
+        if isinstance(node_spec, dict) and node_spec.get("_op") == "for"
+    ]
+    assert len(for_nodes) == 1
+    assert for_nodes[0]["_scope"] == ""
+
+
 def test_scope_root_candidates_are_applied_to_param_paths() -> None:
     source = """
 tiny :: TokenIds[B,T] -> Tensor[B,T,D]

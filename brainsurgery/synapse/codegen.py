@@ -135,7 +135,8 @@ class _Emitter:
                 "        self._state = loaded",
                 "",
                 "    def _param(self, path: str) -> torch.Tensor:",
-                "        return self._state[path]",
+                "        resolved = path[2:] if isinstance(path, str) and path.startswith('@@') else path",
+                "        return self._state[resolved]",
                 "",
                 "    def _join_scope(self, left: str, right: str) -> str:",
                 "        if not left:",
@@ -148,6 +149,46 @@ class _Emitter:
                 "        if '.' not in node_path:",
                 "            return ''",
                 "        return node_path.rsplit('.', 1)[0]",
+                "",
+                "    def _resolve_state_path(self, *, node_path: str, raw_path: str) -> str:",
+                "        if not isinstance(raw_path, str):",
+                "            raise ValueError(f'state path must resolve to string, got {raw_path!r}')",
+                "        token = raw_path.strip()",
+                "        if not token:",
+                "            raise ValueError('state path cannot be empty')",
+                "        if token.startswith('@@'):",
+                "            absolute = token[2:]",
+                "            if not absolute:",
+                "                raise ValueError('absolute state path cannot be empty')",
+                "            return absolute",
+                "        if token.startswith('@'):",
+                "            token = token[1:]",
+                "            if not token:",
+                "                raise ValueError('state path cannot be empty')",
+                "        scope = self._scope_of(node_path)",
+                "        scope_parts = scope.split('.') if scope else []",
+                "        synthetic_prefixes = ('n_for_', 'n_if_', 'n_else_', 'n_call_', 'n_op_')",
+                "        while scope_parts:",
+                "            if len(scope_parts) >= 2 and scope_parts[-1].isdigit() and any(scope_parts[-2].startswith(prefix) for prefix in synthetic_prefixes):",
+                "                scope_parts.pop()",
+                "                scope_parts.pop()",
+                "                continue",
+                "            if any(scope_parts[-1].startswith(prefix) for prefix in synthetic_prefixes):",
+                "                scope_parts.pop()",
+                "                continue",
+                "            break",
+                "        normalized_scope = '.'.join(scope_parts)",
+                "        return self._join_scope(normalized_scope, token)",
+                "",
+                "    def _state_tensor_from_resolved_path(self, path: str, *, field: str) -> torch.Tensor:",
+                "        resolved = path[2:] if isinstance(path, str) and path.startswith('@@') else path",
+                "        if resolved not in self._state:",
+                "            raise ValueError(f'{field} tensor not found at path: {resolved}')",
+                "        return self._state[resolved]",
+                "",
+                "    def _state_tensor_from_path(self, *, node_path: str, raw_path: str, field: str) -> torch.Tensor:",
+                "        path = self._resolve_state_path(node_path=node_path, raw_path=raw_path)",
+                "        return self._state_tensor_from_resolved_path(path, field=field)",
                 "",
                 "    def _node_scope(self, ambient_scope: str, explicit_scope: str | None = None, abs_path: str | None = None) -> str:",
                 "        if isinstance(abs_path, str) and abs_path:",
@@ -708,7 +749,7 @@ class _Emitter:
             op = node_spec.get("_op")
             if op == "for":
                 scope_name = node_spec.get("_scope")
-                if not isinstance(scope_name, str) or not scope_name:
+                if not isinstance(scope_name, str):
                     raise ValueError("for requires string _scope")
                 var_name = node_spec.get("_var")
                 if not isinstance(var_name, str):
@@ -730,7 +771,10 @@ class _Emitter:
                 env[var_name] = iter_value
                 child_scope = self._fresh("scope")
                 lines.append(
-                    f"{inner_indent}    {child_scope} = self._join_scope({scope_var}, f'{scope_name}.{{{iter_value}}}')"
+                    f"{inner_indent}    {child_scope}_seg = '' if not {scope_name!r} else f'{scope_name}.{{{iter_value}}}'"
+                )
+                lines.append(
+                    f"{inner_indent}    {child_scope} = self._join_scope({scope_var}, {child_scope}_seg)"
                 )
                 body = node_spec.get("_body")
                 if not isinstance(body, list):

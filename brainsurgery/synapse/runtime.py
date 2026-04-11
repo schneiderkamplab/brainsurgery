@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from ..core import StateDictLike
+from .axon.type_system import TypeTensor, parse_type_expr
 from .mxfp4 import materialize_mxfp4_aliases
 from .ops import get_op_module
 from .spec_normalize import normalize_synapse_spec_expressions
@@ -94,7 +95,8 @@ class SynapseProgramModel(nn.Module):
         self._state = loaded
 
     def _param(self, path: str) -> torch.Tensor:
-        return self._state[path]
+        resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
+        return self._state[resolved]
 
     def forward(self, input_ids: torch.Tensor | None = None, **inputs: Any) -> Any:
         spec = self.spec
@@ -317,7 +319,7 @@ class SynapseProgramModel(nn.Module):
             op = node_spec.get("_op")
             if op == "for":
                 scope_name = node_spec.get("_scope")
-                if not isinstance(scope_name, str) or not scope_name:
+                if not isinstance(scope_name, str):
                     raise ValueError("for requires string '_scope'")
                 to_value = self._eval_expr(node_spec.get("_to"), env, symbols)
                 from_value = self._eval_expr(node_spec.get("_from", 0), env, symbols)
@@ -332,7 +334,8 @@ class SynapseProgramModel(nn.Module):
                     from_value=from_value, to_value=to_value, step_value=step_value
                 ):
                     env[var_name] = iter_value
-                    for_scope = self._join(scope, f"{scope_name}.{iter_value}")
+                    iter_segment = "" if not scope_name else f"{scope_name}.{iter_value}"
+                    for_scope = self._join(scope, iter_segment)
                     self._run_graph(body, env, scope=for_scope, symbols=symbols, blocks=blocks)
                 env.pop(var_name, None)
                 continue
@@ -448,6 +451,12 @@ class SynapseProgramModel(nn.Module):
         ):
             pushed_roots = list(raw_param_root)
             self._param_roots_stack.append(pushed_roots)
+        self._bind_shape_symbols_from_types(
+            env=block_env,
+            input_types=self._block_input_types(block_name),
+            symbols=symbols,
+        )
+        self._validate_input_shapes(block_env, block_inputs, symbols)
         try:
             self._run_graph(
                 block_graph, block_env, scope=call_scope, symbols=symbols, blocks=blocks
@@ -643,17 +652,17 @@ class SynapseProgramModel(nn.Module):
         explicit_params = node_spec.get("_params")
         if param_name in node_spec and isinstance(node_spec[param_name], str):
             candidate = node_spec[param_name]
-            if candidate.startswith("@") or "." in candidate:
-                if candidate != param_name:
-                    explicit = _pick_explicit_candidate(candidate)
-                    if isinstance(explicit, str):
-                        return explicit
+            if candidate != param_name:
+                explicit = _pick_explicit_candidate(candidate)
+                if isinstance(explicit, str):
+                    return explicit
         # Next precedence level: lowered path bindings.
         if isinstance(explicit_params, dict):
             explicit = _pick_explicit_candidate(explicit_params.get(param_name))
             if isinstance(explicit, str):
                 return explicit
-        fallback = f"{node_path}.{param_name}" if node_path else param_name
+        scope_fallback = self._join(_effective_scope(), param_name)
+        fallback = scope_fallback if scope_fallback else param_name
         return _pick_scoped_candidate(fallback)
 
     def _resolve_output_ref(self, ref: Any, env: dict[str, Any]) -> Any:
@@ -729,11 +738,64 @@ class SynapseProgramModel(nn.Module):
                 bound = dim_bindings.get(token)
                 if bound is None:
                     dim_bindings[token] = actual
+                    symbols[token] = actual
                 elif actual != bound:
                     raise ValueError(
                         f"Input {input_name!r} shape mismatch at axis {axis}: "
                         f"symbol {token} was previously bound to {bound}, got {actual}"
                     )
+
+    def _block_input_types(self, block_name: str) -> dict[str, str]:
+        model = self.spec.get("model", {})
+        if not isinstance(model, dict):
+            return {}
+        types = model.get("types")
+        if not isinstance(types, dict):
+            return {}
+        block_io = types.get("block_io")
+        if not isinstance(block_io, dict):
+            return {}
+        block_type = block_io.get(block_name)
+        if not isinstance(block_type, dict):
+            return {}
+        inputs = block_type.get("inputs")
+        if not isinstance(inputs, dict):
+            return {}
+        out: dict[str, str] = {}
+        for key, value in inputs.items():
+            if isinstance(key, str) and isinstance(value, str):
+                out[key] = value
+        return out
+
+    def _bind_shape_symbols_from_types(
+        self,
+        *,
+        env: dict[str, Any],
+        input_types: dict[str, str],
+        symbols: dict[str, SymbolValue],
+    ) -> None:
+        for input_name, type_expr in input_types.items():
+            value = env.get(input_name)
+            if not torch.is_tensor(value):
+                continue
+            try:
+                parsed = parse_type_expr(type_expr)
+            except Exception:
+                continue
+            if not isinstance(parsed, TypeTensor):
+                continue
+            for axis, dim in enumerate(parsed.dims):
+                if not isinstance(dim, str):
+                    continue
+                if axis >= value.ndim:
+                    break
+                actual = int(value.shape[axis])
+                current = symbols.get(dim)
+                if isinstance(current, bool):
+                    raise ValueError(f"Invalid boolean symbol value for {dim!r}")
+                if isinstance(current, int):
+                    continue
+                symbols[dim] = actual
 
     def _read_tensor_input(self, ref: Any, env: dict[str, Any]) -> torch.Tensor:
         if not isinstance(ref, str):
@@ -975,3 +1037,53 @@ class SynapseProgramModel(nn.Module):
         if "." not in node_path:
             return ""
         return node_path.rsplit(".", 1)[0]
+
+    def _resolve_state_path(self, *, node_path: str, raw_path: str) -> str:
+        if not isinstance(raw_path, str):
+            raise ValueError(f"state path must resolve to string, got {raw_path!r}")
+        token = raw_path.strip()
+        if not token:
+            raise ValueError("state path cannot be empty")
+        if token.startswith("@@"):
+            absolute = token[2:]
+            if not absolute:
+                raise ValueError("absolute state path cannot be empty")
+            return absolute
+        if token.startswith("@"):
+            token = token[1:]
+            if not token:
+                raise ValueError("state path cannot be empty")
+        scope = self._scope_of(node_path)
+        scope_parts = scope.split(".") if scope else []
+        synthetic_prefixes = ("n_for_", "n_if_", "n_else_", "n_call_", "n_op_")
+        while scope_parts:
+            if (
+                len(scope_parts) >= 2
+                and scope_parts[-1].isdigit()
+                and any(scope_parts[-2].startswith(prefix) for prefix in synthetic_prefixes)
+            ):
+                scope_parts.pop()
+                scope_parts.pop()
+                continue
+            if any(scope_parts[-1].startswith(prefix) for prefix in synthetic_prefixes):
+                scope_parts.pop()
+                continue
+            break
+        normalized_scope = ".".join(scope_parts)
+        return self._join_scope(normalized_scope, token)
+
+    def _state_tensor_from_resolved_path(self, path: str, *, field: str) -> torch.Tensor:
+        resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
+        if resolved not in self._state:
+            raise ValueError(f"{field} tensor not found at path: {resolved}")
+        return self._state[resolved]
+
+    def _state_tensor_from_path(
+        self,
+        *,
+        node_path: str,
+        raw_path: str,
+        field: str,
+    ) -> torch.Tensor:
+        path = self._resolve_state_path(node_path=node_path, raw_path=raw_path)
+        return self._state_tensor_from_resolved_path(path, field=field)

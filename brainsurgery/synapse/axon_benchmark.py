@@ -1037,7 +1037,7 @@ def run_axon_benchmark(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
-    axon_backend: str = "single",
+    axon_backend: str = "codegen",
     pipeline_parallel_size: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
@@ -1048,8 +1048,12 @@ def run_axon_benchmark(
     min_billion_parameters: float | None = None,
     max_billion_parameters: float | None = None,
 ) -> dict[str, Any]:
-    if axon_backend not in {"single", "pipeline"}:
-        raise ValueError("axon_backend must be 'single' or 'pipeline'")
+    backend_token = str(axon_backend).strip().lower()
+    if backend_token == "single":
+        backend_token = "codegen"
+    if backend_token not in {"codegen", "runtime", "pipeline"}:
+        raise ValueError("axon_backend must be 'codegen', 'runtime', or 'pipeline'")
+    axon_backend = backend_token
     if axon_backend != "pipeline" and pipeline_parallel_size is not None:
         raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline")
     repo_root = _repo_root()

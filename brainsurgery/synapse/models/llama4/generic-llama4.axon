@@ -57,7 +57,7 @@ llama4_moe x = do
     up <- linear@up_proj x dim=FFN_SHARED bias=false
     return gate |> silu |> mul up |> linear@down_proj dim=D bias=false
   topk_weights, topk_indices <- sigmoid_topk_router@router x top_k=EPT
-  routed <- MoE.grouped_swiglu_ffn x topk_weights topk_indices transpose=true pre_scale_input=true
+  routed <- MoE.grouped_swiglu_ffn_basic x topk_weights topk_indices E transpose=true pre_scale_input=true
   return shared + routed
 
 llama4_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)

@@ -60,7 +60,7 @@ nemotron_h_mamba xn = do
   gate, conv_in, dt <- split proj sizes=[M_I, M_CONV, M_H]
   conv_all <- causal_conv1d@conv1d conv_in activation=silu
   u, b, c <- split conv_all sizes=[M_I, M_G * M_N, M_G * M_N]
-  scan <- mamba2_scan u gate dt b c A=A_log D=D dt_bias=dt_bias norm_weight="norm.weight" n_groups=M_G head_dim=M_HD time_step_min=0.0 time_step_max=1e+30
+  scan <- mamba2_scan u gate dt b c A=@A_log D=@D dt_bias=@dt_bias norm_weight=@norm.weight n_groups=M_G head_dim=M_HD time_step_min=0.0 time_step_max=1e+30
   return linear@out_proj scan dim=MODEL_D bias=false
 
 nemotron_h_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Int -> Tensor[B,S,D]

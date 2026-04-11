@@ -278,6 +278,10 @@ def compile(
     )
     lines.append(f"{indent}if not bool({emitter._expr_code(bias_expr, env)}):")
     lines.append(f"{indent}    {b} = None")
+    lines.append(f"{indent}elif {b} is None:")
+    lines.append(
+        f"{indent}    raise ValueError('layernorm.bias tensor not found for resolved path')"
+    )
     b_fp32 = f"{b}.float() if {b} is not None else None"
     lines.append(
         f"{indent}if getattr(self, '_hf_align_norm_fp32', False) and {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"

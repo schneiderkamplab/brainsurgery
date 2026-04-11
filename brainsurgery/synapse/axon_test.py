@@ -47,6 +47,7 @@ from .codegen import emit_model_code_from_synapse_spec
 from .matrix_models import ModelDownloadSpec, ensure_model_downloaded
 from .mxfp4 import materialize_mxfp4_aliases
 from .pipeline_runtime import SynapsePipelineModel, build_hf_device_map_from_pipeline_usage
+from .runtime import SynapseProgramModel
 
 
 def _format_metric_value(value: object) -> str:
@@ -1877,7 +1878,7 @@ def _run_axon_test_single(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
-    axon_backend: str = "single",
+    axon_backend: str = "codegen",
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
 ) -> dict[str, Any]:
@@ -1898,8 +1899,12 @@ def _run_axon_test_single(
         raise FileNotFoundError(f"Weights path not found: {weights_path}")
     if resolved_model_task == "auto":
         resolved_model_task = _infer_model_task(axon_file=axon_file, weights=weights_path)
-    if axon_backend not in {"single", "pipeline"}:
-        raise ValueError("axon_backend must be 'single' or 'pipeline'")
+    backend_token = str(axon_backend).strip().lower()
+    if backend_token == "single":
+        backend_token = "codegen"
+    if backend_token not in {"codegen", "runtime", "pipeline"}:
+        raise ValueError("axon_backend must be 'codegen', 'runtime', or 'pipeline'")
+    axon_backend = backend_token
     if axon_backend == "pipeline":
         if resolved_model_task != "causal_lm":
             raise ValueError("axon_backend='pipeline' currently supports only causal_lm models")
@@ -1909,6 +1914,8 @@ def _run_axon_test_single(
             raise ValueError("compile_axon is not supported with axon_backend='pipeline'")
         if trace_layers:
             raise ValueError("trace_layers is not supported with axon_backend='pipeline'")
+    if axon_backend == "runtime" and trace_layers:
+        raise ValueError("trace_layers is not supported with axon_backend='runtime'")
 
     safetensors_files = _resolve_safetensors_paths(weights_path)
     default_hf_dir = weights_path if weights_path.is_dir() else safetensors_files[0].parent
@@ -2531,12 +2538,19 @@ def _run_axon_test_single(
                     key: value.to(device=target_device, dtype=resolved_dtype)
                     for key, value in local_state_dict.items()
                 }
+            syn: Any
             if axon_backend == "pipeline":
                 syn = SynapsePipelineModel.from_spec(
                     lowered_spec,
                     state_dict=local_state_dict,
                     requested_device=target_device_str,
                 ).eval()
+            elif axon_backend == "runtime":
+                syn = (
+                    SynapseProgramModel.from_spec(lowered_spec, state_dict=local_state_dict)
+                    .to(target_device)
+                    .eval()
+                )
             else:
                 syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
             if local_state_dict is not state_ref_cpu:
@@ -3088,7 +3102,7 @@ def run_axon_test(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
-    axon_backend: str = "single",
+    axon_backend: str = "codegen",
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
 ) -> dict[str, Any]:

@@ -113,7 +113,9 @@ def interpret(
     raw_args = node_spec.get("_args")
     args = raw_args if isinstance(raw_args, list) else [raw_args]
     if not isinstance(args, list) or len(args) < 1:
-        raise ValueError("rmsnorm requires positional args: x [eps dim unit_offset cast_float with_scale]")
+        raise ValueError(
+            "rmsnorm requires positional args: x [eps dim unit_offset cast_float with_scale]"
+        )
     x = model._read_tensor_input(args[0], env)
 
     eps_raw = args[1] if len(args) >= 2 else node_spec.get("eps", 1e-6)
@@ -182,7 +184,9 @@ def compile(
     raw_args = node_spec.get("_args")
     args = raw_args if isinstance(raw_args, list) else [raw_args]
     if not isinstance(args, list) or len(args) < 1:
-        raise ValueError("rmsnorm requires positional args: x [eps dim unit_offset cast_float with_scale]")
+        raise ValueError(
+            "rmsnorm requires positional args: x [eps dim unit_offset cast_float with_scale]"
+        )
     src = read(str(args[0]))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)

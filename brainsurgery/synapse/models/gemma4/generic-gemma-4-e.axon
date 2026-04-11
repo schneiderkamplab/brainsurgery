@@ -105,7 +105,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
   m <- rms@post_feedforward_layernorm m
   x <- x + m
   x <- gemma4_apply_per_layer_input x per_layer_inputs i
-  x <- param_scale x scale="layer_scalar"
+  x <- param_scale x scale="@layer_scalar"
   shared_full_k <- (use_cache and (shared_layer == false) and full) ? shared_k : shared_full_k
   shared_full_v <- (use_cache and (shared_layer == false) and full) ? shared_v : shared_full_v
   shared_sliding_k <- (use_cache and (shared_layer == false) and (full == false)) ? shared_k : shared_sliding_k

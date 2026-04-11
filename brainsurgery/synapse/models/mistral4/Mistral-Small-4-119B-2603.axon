@@ -19,6 +19,7 @@ VHD = 128
 QLR = 1024
 KVR = 256
 EM = 2048
+E = 128
 EPT = 4
 SE = 1
 EPS = 1e-06
@@ -86,7 +87,7 @@ mistral4_moe xn = do
     up <- linear@up_proj xn dim=(EM * SE) bias=false
     return gate |> silu |> mul up |> linear@down_proj dim=D bias=false
   topk_weights, topk_indices <- softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true routed_scaling_factor=ROUTE_SCALE
-  routed <- MoE.grouped_swiglu_ffn xn topk_weights topk_indices
+  routed <- MoE.grouped_swiglu_ffn_basic xn topk_weights topk_indices E
   return shared + routed
 
 mistral4_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)

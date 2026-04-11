@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
 from torch.nn import functional as F
 
 OP_NAME = "embedding"
@@ -69,7 +70,9 @@ def interpret(
         raise ValueError("embedding requires positional args: x [dim scale]")
     x = model._read_tensor_input(args[0], env)
     weight_path = model._infer_param_path(node_spec, node_path=node_path, param_name="weight")
-    weight = model._state[weight_path]
+    weight = model._state_tensor_from_resolved_path(weight_path, field="embedding.weight")
+    if torch.is_tensor(weight) and torch.is_tensor(x) and weight.device != x.device:
+        weight = weight.to(device=x.device)
     out = model._require_name(node_spec.get("_bind"), field="embedding._bind")
     y = F.embedding(x, weight)
     scale_expr = _arg_or_default(args, 2, None)

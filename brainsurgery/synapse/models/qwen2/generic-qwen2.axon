@@ -5,6 +5,7 @@ import Config
 import Activations silu
 import Cache past_length
 import Cache
+import Derived rope_pair_basic
 
 D    = Config.int "hidden_size" default=896
 V    = Config.int "vocab_size" default=151936
@@ -39,7 +40,7 @@ qwen2_block x pos_ids attn_mask past_kv = do
     q <- linear@q_proj xn dim=D bias=true |> reshape_heads heads=H
     k <- linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
     v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA
+    q, k <- rope_pair_basic q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k repeats=(H / KVH)
     v <- repeat v repeats=(H / KVH)

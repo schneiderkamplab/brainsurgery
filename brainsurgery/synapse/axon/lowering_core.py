@@ -1331,6 +1331,10 @@ def _lower_simple_call(
         raise ValueError(
             "_arange only accepts positional arguments; use Prelude.arange for keyword/default syntax"
         )
+    if raw_base == "_sinusoidal_positions" and kwargs_expr:
+        raise ValueError(
+            "_sinusoidal_positions only accepts positional arguments; use Prelude.sinusoidal_positions for keyword/default syntax"
+        )
     if raw_base == "_expand" and kwargs_expr:
         raise ValueError(
             "_expand only accepts positional arguments; use Prelude.expand for keyword/default syntax"
@@ -2547,12 +2551,14 @@ def _lower_statements(
                     ctx.scope_stack.pop()
                 ctx.loop_scope_cover_prefixes.pop()
             node_name = f"n_{ctx.fresh('for')}"
-            base_loop_scope = stmt.name if isinstance(stmt.name, str) and stmt.name else node_name
-            loop_scope = base_loop_scope
-            if ctx.scope_stack:
-                scope_prefix = ".".join(part for part in ctx.scope_stack if part)
-                if scope_prefix:
-                    loop_scope = f"{scope_prefix}.{base_loop_scope}"
+            base_loop_scope = stmt.name if isinstance(stmt.name, str) and stmt.name else ""
+            loop_scope = ""
+            if base_loop_scope:
+                loop_scope = base_loop_scope
+                if ctx.scope_stack:
+                    scope_prefix = ".".join(part for part in ctx.scope_stack if part)
+                    if scope_prefix:
+                        loop_scope = f"{scope_prefix}.{base_loop_scope}"
             repeat_item: dict[str, Any] = {
                 node_name: {
                     "_op": "for",
