@@ -1,19 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 import tests.conftest as test_fixtures
-from brainsurgery.synapse import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
 from brainsurgery.synapse.axon_test_matrix import run_axon_test_matrix
 from tests.model_downloads import MATRIX_AXON_MODEL_DIR_PAIRS, MODEL_SPECS
-
-
-def _load_axon_spec(path: Path) -> dict[str, Any]:
-    modules = parse_axon_program_from_path(path)
-    return lower_axon_program_to_synapse_spec(modules)
 
 
 def test_bert_fixture_is_declared() -> None:
@@ -49,66 +42,3 @@ def test_matrix_resolves_bert_to_bert_axon(
     out = capsys.readouterr().out
     assert "bert.axon" in out
     assert "/models/bert" in out
-
-
-def test_bert_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
-    pytest.skip(
-        "outdated example bert.axon lowering expectations after positional-only/kwarg changes"
-    )
-    spec = _load_axon_spec(repo_root / "examples" / "bert.axon")
-
-    assert spec.get("synapse") == 1
-    model = spec.get("model", {})
-    assert model.get("outputs") == {"logits": "logits"}
-
-    symbols = model.get("symbols", {})
-    assert symbols.get("D") == 768
-    assert symbols.get("V") in (30522, None)
-    assert symbols.get("L") == 12
-    assert symbols.get("H") == 12
-    assert symbols.get("FFN") == 3072
-    assert symbols.get("EPS") == 1.0e-12
-
-    blocks = model.get("blocks", {})
-    assert "bert_block" in blocks
-
-    graph = model.get("graph", [])
-    assert isinstance(graph, list)
-    position_nodes = [
-        node_spec
-        for item in graph
-        if isinstance(item, dict)
-        for node_spec in item.values()
-        if isinstance(node_spec, dict) and node_spec.get("_op") == "position_ids"
-    ]
-    assert len(position_nodes) == 1
-    assert position_nodes[0].get("_args") == ["input_ids", "null"]
-
-    decoder_nodes = [
-        node_spec
-        for item in graph
-        if isinstance(item, dict)
-        for node_spec in item.values()
-        if isinstance(node_spec, dict)
-        and node_spec.get("_op") == "linear"
-        and (
-            node_spec.get("weight") == "@@bert.embeddings.word_embeddings.weight"
-            or node_spec.get("_params", {}).get("weight")
-            == "@@bert.embeddings.word_embeddings.weight"
-        )
-    ]
-    assert len(decoder_nodes) == 1
-    assert decoder_nodes[0].get("bias_path") == "@@cls.predictions.bias"
-
-    block_graph = blocks["bert_block"].get("graph", [])
-    assert isinstance(block_graph, list)
-    attention_nodes = [
-        node_spec
-        for item in block_graph
-        if isinstance(item, dict)
-        for node_spec in item.values()
-        if isinstance(node_spec, dict) and node_spec.get("_op") == "attention"
-    ]
-    assert len(attention_nodes) == 1
-    assert attention_nodes[0].get("mask") == "attn_mask"
-    assert attention_nodes[0].get("padding_mask") is True

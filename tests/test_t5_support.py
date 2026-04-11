@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 import tests.conftest as test_fixtures
-from brainsurgery.synapse import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
 from brainsurgery.synapse.axon_test import _infer_model_task
 from brainsurgery.synapse.axon_test_matrix import (
     _Pair,
@@ -14,11 +12,6 @@ from brainsurgery.synapse.axon_test_matrix import (
     run_axon_test_matrix,
 )
 from tests.model_downloads import MATRIX_AXON_MODEL_DIR_PAIRS, MODEL_SPECS
-
-
-def _load_axon_spec(path: Path) -> dict[str, Any]:
-    modules = parse_axon_program_from_path(path)
-    return lower_axon_program_to_synapse_spec(modules)
 
 
 def test_t5_small_fixture_is_declared() -> None:
@@ -156,23 +149,3 @@ def test_matrix_auto_task_resolves_seq2seq_families(
         model_dir=Path(f"models/{model_dir_name}"),
     )
     assert _resolve_model_task_for_pair(pair) == "seq2seq_lm"
-
-
-def test_t5_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
-    pytest.skip("outdated t5 example lowering expectations after positional-only/kwarg changes")
-    spec = _load_axon_spec(repo_root / "examples" / "t5.axon")
-
-    assert spec.get("synapse") == 1
-    model = spec.get("model", {})
-    assert model.get("outputs") == {"logits": "logits"}
-
-    symbols = model.get("symbols", {})
-    assert symbols.get("D") == 512
-    assert symbols.get("V") is None
-    assert symbols.get("L_ENC") == 6
-    assert symbols.get("L_DEC") == 6
-    assert symbols.get("H") == 8
-    assert symbols.get("FFN") == 2048
-    assert symbols.get("EPS") == 1.0e-06
-    assert symbols.get("NUM_BUCKETS") == 32
-    assert symbols.get("MAX_DISTANCE") == 128

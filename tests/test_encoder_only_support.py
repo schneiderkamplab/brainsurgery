@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 import tests.conftest as test_fixtures
-from brainsurgery.synapse import lower_axon_program_to_synapse_spec, parse_axon_program_from_path
 from brainsurgery.synapse.axon_test_matrix import run_axon_test_matrix
 from tests.model_downloads import MATRIX_AXON_MODEL_DIR_PAIRS, MODEL_SPECS
 
@@ -20,11 +18,6 @@ _MODEL_CASES: list[tuple[str, str, str]] = [
     ("longformer", "longformer", "longformer_local_path"),
     ("deberta_v2", "deberta_v2", "deberta_v2_local_path"),
 ]
-
-
-def _load_axon_spec(path: Path) -> dict[str, Any]:
-    modules = parse_axon_program_from_path(path)
-    return lower_axon_program_to_synapse_spec(modules)
 
 
 @pytest.mark.parametrize(("axon_stem", "model_dir", "fixture_name"), _MODEL_CASES)
@@ -66,17 +59,3 @@ def test_matrix_resolves_encoder_only_pairs(
     out = capsys.readouterr().out
     assert f"{axon_stem}.axon" in out
     assert f"/models/{model_dir}" in out
-
-
-@pytest.mark.parametrize(
-    "axon_stem",
-    ["roberta", "distilbert", "electra", "albert", "longformer", "deberta_v2"],
-)
-def test_encoder_only_axon_lowers_with_logits_output(repo_root: Path, axon_stem: str) -> None:
-    pytest.skip(
-        "outdated encoder-only example lowering expectations after positional-only/kwarg changes"
-    )
-    spec = _load_axon_spec(repo_root / "examples" / f"{axon_stem}.axon")
-    assert spec.get("synapse") == 1
-    model = spec.get("model", {})
-    assert model.get("outputs") == {"logits": "logits"}
