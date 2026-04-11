@@ -69,6 +69,7 @@ def _spec(*, bidirectional: bool) -> dict[str, Any]:
                         "_op": "t5_relative_position_bias",
                         "_args": ["q", "k"],
                         "_bind": "bias",
+                        "_params": {"weight": "rel_bias.weight"},
                         "num_buckets": 32,
                         "max_distance": 128,
                         "bidirectional": bidirectional,

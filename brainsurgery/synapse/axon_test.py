@@ -1881,6 +1881,7 @@ def _run_axon_test_single(
     axon_backend: str = "codegen",
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
+    oom_cpu_fallback: bool = True,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
@@ -2508,6 +2509,8 @@ def _run_axon_test_single(
             except Exception as exc:
                 if not _is_cuda_oom(exc, device=exec_device_str):
                     raise
+                if not oom_cpu_fallback:
+                    raise
                 _cleanup_cuda_after_oom(exec_device_str)
                 print(f"CUDA OOM on {exec_device_str}; retrying HF on cpu")
                 hf_result = _run_hf_side("cpu")
@@ -2712,6 +2715,8 @@ def _run_axon_test_single(
             if not _is_cuda_oom(exc, device=exec_device_str):
                 raise
             if axon_backend == "pipeline":
+                raise
+            if not oom_cpu_fallback:
                 raise
             _cleanup_cuda_after_oom(exec_device_str)
             print(f"CUDA OOM on {exec_device_str}; retrying AxonDerived on cpu")

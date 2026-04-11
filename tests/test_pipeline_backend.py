@@ -471,7 +471,7 @@ def test_build_hf_device_map_from_pipeline_usage_uses_stage_accesses() -> None:
                                     "_op": "linear",
                                     "_bind": "x",
                                     "_args": "x",
-                                    "_scope": "model.layers.i",
+                                    "_scope": "n_lin",
                                     "dim": 4,
                                 }
                             }

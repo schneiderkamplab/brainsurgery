@@ -334,6 +334,11 @@ def axon_test(
         "--hf-strict-dtype/--no-hf-strict-dtype",
         help="Force HF floating tensors to exactly match --dtype and disable HF quantization overrides when needed.",
     ),
+    oom_cpu_fallback: bool = typer.Option(
+        True,
+        "--oom-cpu-fallback/--no-oom-cpu-fallback",
+        help="On CUDA OOM, retry HF/Axon on CPU (disable to fail fast on OOM).",
+    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -617,6 +622,11 @@ def axon_benchmark(
         "--hf-strict-dtype/--no-hf-strict-dtype",
         help="Force HF floating tensors to exactly match --dtype and disable HF quantization overrides when needed.",
     ),
+    oom_cpu_fallback: bool = typer.Option(
+        True,
+        "--oom-cpu-fallback/--no-oom-cpu-fallback",
+        help="On CUDA OOM, retry HF/Axon on CPU (disable to fail fast on OOM).",
+    ),
     table_format: str = typer.Option(
         "markdown",
         "--table-format",
@@ -681,6 +691,7 @@ def axon_benchmark(
             pipeline_parallel_size=pipeline_parallel_size,
             skip_hf=skip_hf,
             hf_strict_dtype=hf_strict_dtype,
+            oom_cpu_fallback=oom_cpu_fallback,
             table_format=table_format,
             log_dir=log_dir,
             stream_csv=stream_csv,

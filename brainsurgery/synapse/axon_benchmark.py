@@ -582,6 +582,7 @@ def _run_benchmark_pair(
     axon_backend: str,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
+    oom_cpu_fallback: bool = True,
 ) -> dict[str, Any]:
     model_dir = _ensure_checkpoint_model_dir(repo_root=repo_root, checkpoint_id=pair.checkpoint_id)
     print()
@@ -620,6 +621,7 @@ def _run_benchmark_pair(
         axon_backend=axon_backend,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
+        oom_cpu_fallback=oom_cpu_fallback,
     )
     enriched = dict(result)
     enriched["axon_file"] = pair.axon_file
@@ -1041,6 +1043,7 @@ def run_axon_benchmark(
     pipeline_parallel_size: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
+    oom_cpu_fallback: bool = True,
     table_format: str = "markdown",
     log_dir: Path | None = None,
     stream_csv: Path | None = None,
@@ -1121,6 +1124,7 @@ def run_axon_benchmark(
         "axon_backend": axon_backend,
         "skip_hf": skip_hf,
         "hf_strict_dtype": hf_strict_dtype,
+        "oom_cpu_fallback": oom_cpu_fallback,
     }
 
     if stream_csv is not None:
