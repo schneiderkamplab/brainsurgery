@@ -5,7 +5,6 @@ import Config
 import Activations gelu_new
 import Cache past_length
 import Derived (
-  reshape_head_basic,
   merge_heads_basic,
   position_ids_basic,
   causal_mask_basic,
@@ -25,12 +24,12 @@ gpt2_block x attn_mask past_kv = do
   x1 <- layernorm@ln_1 x
   a, new_kv <- scope@attn do
     q_lin, k_lin, v_lin <- chunk (linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
-    q <- reshape_head_basic q_lin H
-    k <- reshape_head_basic k_lin H
-    v <- reshape_head_basic v_lin H
+    q <- reshape_heads q_lin heads=H
+    k <- reshape_heads k_lin heads=H
+    v <- reshape_heads v_lin heads=H
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask_basic q k attn_mask
-    a <- attention_basic q k v mask scale=ATTN_SCALE |> merge_heads_basic H |> linear@c_proj dim=D bias=true transpose=true
+    a <- attention_basic q k v mask scale=ATTN_SCALE |> merge_heads_basic |> linear@c_proj dim=D bias=true transpose=true
     return a, new_kv
   x <- x + a
   x3 <- layernorm@ln_2 x
@@ -41,7 +40,7 @@ gpt2_block x attn_mask past_kv = do
 gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gpt2 input_ids attn_mask past_kv use_cache = do
   tok <- embedding@wte input_ids dim=D
-  pos <- position_ids_basic input_ids attn_mask (past_length past_kv) PAD_FILL |> embedding@wpe
+  pos <- position_ids_basic input_ids attn_mask=attn_mask past_length=(past_length past_kv) pad_fill=PAD_FILL |> embedding@wpe
   x <- tok + pos
   new_kv <- use_cache ? Cache.init : null
   for@h i <- [0..L) do

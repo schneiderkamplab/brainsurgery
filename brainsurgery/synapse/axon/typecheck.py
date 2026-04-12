@@ -447,20 +447,57 @@ def _substitute_type_dims(
     *,
     dim_subst: dict[str, DimToken],
     symbols: dict[str, DimToken],
+    rest_subst: dict[str, tuple[DimToken, ...]] | None = None,
 ) -> TypeExpr:
+    rest_map = rest_subst if isinstance(rest_subst, dict) else {}
     if isinstance(tp, TypeOptional):
         return TypeOptional(
-            inner=_substitute_type_dims(tp.inner, dim_subst=dim_subst, symbols=symbols)
+            inner=_substitute_type_dims(
+                tp.inner,
+                dim_subst=dim_subst,
+                symbols=symbols,
+                rest_subst=rest_map,
+            )
         )
     if isinstance(tp, TypeTensor):
-        dims = tuple(_normalize_dim(dim, subst=dim_subst, symbols=symbols) for dim in tp.dims)
+        dims_out: list[DimToken] = []
+        has_unresolved_rest = False
+        for dim in tp.dims:
+            if isinstance(dim, str) and dim.startswith(".."):
+                bound = rest_map.get(dim)
+                if isinstance(bound, tuple):
+                    dims_out.extend(
+                        _normalize_dim(tok, subst=dim_subst, symbols=symbols) for tok in bound
+                    )
+                else:
+                    # If a variadic rest dim is unbound (for example caller
+                    # provided only generic Tensor with unknown rank), degrade
+                    # to rank-unknown Tensor/IdxTensor.
+                    has_unresolved_rest = True
+                continue
+            dims_out.append(_normalize_dim(dim, subst=dim_subst, symbols=symbols))
+        if has_unresolved_rest:
+            return TypeNamed(name=tp.base)
+        dims = tuple(dims_out)
         return TypeTensor(base=tp.base, dims=dims)
     if isinstance(tp, TypeList):
-        return TypeList(item=_substitute_type_dims(tp.item, dim_subst=dim_subst, symbols=symbols))
+        return TypeList(
+            item=_substitute_type_dims(
+                tp.item,
+                dim_subst=dim_subst,
+                symbols=symbols,
+                rest_subst=rest_map,
+            )
+        )
     if isinstance(tp, TypeTuple):
         return TypeTuple(
             items=tuple(
-                _substitute_type_dims(item, dim_subst=dim_subst, symbols=symbols)
+                _substitute_type_dims(
+                    item,
+                    dim_subst=dim_subst,
+                    symbols=symbols,
+                    rest_subst=rest_map,
+                )
                 for item in tp.items
             )
         )
@@ -471,6 +508,10 @@ def _is_flexible_dim_var(token: DimToken, rigid_symbols: set[str]) -> bool:
     return isinstance(token, str) and token not in rigid_symbols
 
 
+def _is_rest_dim_var(token: DimToken) -> bool:
+    return isinstance(token, str) and token.startswith("..") and len(token) > 2
+
+
 def _dims_compatible(
     actual: tuple[DimToken, ...],
     expected: tuple[DimToken, ...],
@@ -478,7 +519,49 @@ def _dims_compatible(
     *,
     symbols: dict[str, DimToken],
     rigid_symbols: set[str],
+    rest_subst: dict[str, tuple[DimToken, ...]] | None = None,
 ) -> bool:
+    rest_map = rest_subst if isinstance(rest_subst, dict) else {}
+    expected_rest = [i for i, tok in enumerate(expected) if _is_rest_dim_var(tok)]
+    if len(expected_rest) > 1:
+        return False
+    if expected_rest:
+        rest_idx = expected_rest[0]
+        rest_tok = expected[rest_idx]
+        assert isinstance(rest_tok, str)
+        prefix = expected[:rest_idx]
+        suffix = expected[rest_idx + 1 :]
+        if len(actual) < len(prefix) + len(suffix):
+            return False
+        if prefix and not _dims_compatible(
+            actual[: len(prefix)],
+            prefix,
+            subst,
+            symbols=symbols,
+            rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
+        ):
+            return False
+        if suffix and not _dims_compatible(
+            actual[len(actual) - len(suffix) :],
+            suffix,
+            subst,
+            symbols=symbols,
+            rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
+        ):
+            return False
+        middle = actual[len(prefix) : len(actual) - len(suffix)]
+        prev_rest = rest_map.get(rest_tok)
+        if prev_rest is None:
+            rest_map[rest_tok] = middle
+            return True
+        if len(prev_rest) != len(middle):
+            return False
+        for left, right in zip(prev_rest, middle, strict=True):
+            if not _dim_equal(left, right, subst=subst, symbols=symbols):
+                return False
+        return True
     if len(actual) != len(expected):
         return False
     for left_raw, right_raw in zip(actual, expected, strict=True):
@@ -486,20 +569,20 @@ def _dims_compatible(
         right = _normalize_dim(right_raw, subst=subst, symbols=symbols)
         if _is_flexible_dim_var(right, rigid_symbols):
             assert isinstance(right, str)
-            prev = subst.get(right)
-            if prev is None:
+            prev_dim: DimToken | None = subst.get(right)
+            if prev_dim is None:
                 subst[right] = left
                 continue
-            if not _dim_equal(prev, left, subst=subst, symbols=symbols):
+            if not _dim_equal(prev_dim, left, subst=subst, symbols=symbols):
                 return False
             continue
         if _is_flexible_dim_var(left, rigid_symbols):
             assert isinstance(left, str)
-            prev = subst.get(left)
-            if prev is None:
+            prev_dim_left: DimToken | None = subst.get(left)
+            if prev_dim_left is None:
                 subst[left] = right
                 continue
-            if not _dim_equal(prev, right, subst=subst, symbols=symbols):
+            if not _dim_equal(prev_dim_left, right, subst=subst, symbols=symbols):
                 return False
             continue
         if not _dim_equal(left, right, subst=subst, symbols=symbols):
@@ -514,7 +597,10 @@ def _types_compatible(
     dim_subst: dict[str, DimToken],
     dim_symbols: dict[str, DimToken],
     rigid_symbols: set[str],
+    rest_subst: dict[str, tuple[DimToken, ...]] | None = None,
 ) -> bool:
+    rest_map = rest_subst if isinstance(rest_subst, dict) else {}
+
     def _is_path_type(tp: TypeExpr) -> bool:
         return isinstance(tp, TypeNamed) and tp.name == "Path"
 
@@ -539,6 +625,7 @@ def _types_compatible(
                 dim_subst=dim_subst,
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
+                rest_subst=rest_map,
             )
         if isinstance(actual, TypeNull):
             return True
@@ -548,6 +635,7 @@ def _types_compatible(
             dim_subst=dim_subst,
             dim_symbols=dim_symbols,
             rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
         )
     if isinstance(actual, TypeOptional):
         if isinstance(expected, TypeOptional):
@@ -557,6 +645,7 @@ def _types_compatible(
                 dim_subst=dim_subst,
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
+                rest_subst=rest_map,
             )
         return False
     if isinstance(actual, TypeNull):
@@ -573,6 +662,7 @@ def _types_compatible(
             dim_subst,
             symbols=dim_symbols,
             rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
         )
     if isinstance(actual, TypeTuple) and isinstance(expected, TypeTuple):
         if len(actual.items) != len(expected.items):
@@ -584,6 +674,7 @@ def _types_compatible(
                 dim_subst=dim_subst,
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
+                rest_subst=rest_map,
             )
             for a, e in zip(actual.items, expected.items, strict=True)
         )
@@ -594,6 +685,7 @@ def _types_compatible(
             dim_subst=dim_subst,
             dim_symbols=dim_symbols,
             rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
         )
     if isinstance(actual, TypeInt) and isinstance(expected, TypeFloat):
         return True
@@ -613,6 +705,7 @@ def _types_compatible(
             dim_subst=dim_subst,
             dim_symbols=dim_symbols,
             rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
         )
     if isinstance(actual, TypeNamed) and isinstance(expected, TypeList):
         actual_item = _named_list_item_type(actual.name)
@@ -626,6 +719,7 @@ def _types_compatible(
             dim_subst=dim_subst,
             dim_symbols=dim_symbols,
             rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
         )
     if isinstance(actual, TypeTensor) and isinstance(expected, TypeNamed):
         return expected.name in {"Tensor", "IdxTensor"}
@@ -1632,6 +1726,23 @@ def _call_return_type(
             if member_sig is not None and member_sig.path_param_count == len(callee_paths):
                 call_sig = member_sig
                 callee = member_base
+    if call_sig is None:
+        callee_parts = callee.split("@")
+        callee_base = callee_parts[0]
+        callee_paths = callee_parts[1:]
+        if "." not in callee_base:
+            candidates: list[tuple[str, ModuleSignature]] = []
+            for module_name, module_sig in signatures.items():
+                leaf = module_name.rsplit(".", 1)[-1]
+                if leaf != callee_base:
+                    continue
+                if module_sig.path_param_count != len(callee_paths):
+                    continue
+                candidates.append((module_name, module_sig))
+            if len(candidates) == 1:
+                chosen_name, chosen_sig = candidates[0]
+                call_sig = chosen_sig
+                callee = chosen_name
     if call_sig is not None:
         if len(args) > len(call_sig.params):
             raise _error(
@@ -1695,6 +1806,7 @@ def _call_return_type(
                 f"call {callee!r} missing required args: {', '.join(missing)}",
             )
         dim_subst: dict[str, DimToken] = {}
+        rest_subst: dict[str, tuple[DimToken, ...]] = {}
         for idx, param_type in enumerate(call_sig.params):
             arg_expr_maybe = bound_args[idx]
             if arg_expr_maybe is None:
@@ -1758,6 +1870,7 @@ def _call_return_type(
                     dim_subst,
                     symbols=dim_symbols,
                     rigid_symbols=rigid_symbols,
+                    rest_subst=rest_subst,
                 ):
                     raise _error(
                         module,
@@ -1772,6 +1885,7 @@ def _call_return_type(
                 dim_subst=dim_subst,
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
+                rest_subst=rest_subst,
             ):
                 raise _error(
                     module,
@@ -1787,7 +1901,12 @@ def _call_return_type(
                     if callee == "linear":
                         dim_subst["DO"] = dim_token
         substituted_returns = tuple(
-            _substitute_type_dims(ret, dim_subst=dim_subst, symbols=dim_symbols)
+            _substitute_type_dims(
+                ret,
+                dim_subst=dim_subst,
+                symbols=dim_symbols,
+                rest_subst=rest_subst,
+            )
             for ret in call_sig.returns
         )
         if len(substituted_returns) == 1:

@@ -258,6 +258,7 @@ type_name: NAME
 ?type_dim_term: type_dim_factor
     | type_dim_term MUL_OP type_dim_factor -> type_dim_binary
 ?type_dim_factor: INT -> type_dim_int
+    | RANGE_DOTS type_name -> type_dim_rest
     | type_name -> type_dim_name
     | LPAR type_dim_expr RPAR -> type_dim_paren
 
@@ -761,6 +762,14 @@ class _ProgramTransformer(Transformer[Token, object]):
 
     def type_dim_name(self, children: list[object]) -> DimToken:
         return cast(str, children[0])
+
+    def type_dim_rest(self, children: list[object]) -> DimToken:
+        if len(children) != 2:
+            raise ValueError("invalid variadic tensor dimension token")
+        name = cast(str, children[1]).strip()
+        if not name:
+            raise ValueError("variadic tensor dimension requires a name")
+        return f"..{name}"
 
     def type_dim_paren(self, children: list[object]) -> DimToken:
         token = children[0]

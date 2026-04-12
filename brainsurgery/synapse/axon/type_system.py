@@ -117,6 +117,16 @@ def _tokenize_dim_expr(text: str) -> list[tuple[str, str]]:
             out.append(("NAME", text[i:j]))
             i = j
             continue
+        if ch == "." and i + 1 < n and text[i + 1] == ".":
+            j = i + 2
+            if j >= n or not _is_name_start(text[j]):
+                raise ValueError(f"invalid variadic dimension token in {text!r}")
+            j += 1
+            while j < n and _is_name_char(text[j]):
+                j += 1
+            out.append(("NAME", text[i:j]))
+            i = j
+            continue
         if ch in "+-*/":
             out.append(("OP", ch))
             i += 1
@@ -401,7 +411,14 @@ class _TypeExprParser:
             raw_dim = self.text[start : self.i].strip()
             if not raw_dim:
                 raise ValueError(f"empty tensor dimension in {self.text!r}")
-            dims.append(parse_dim_expr(raw_dim))
+            if raw_dim.startswith(".."):
+                if len(raw_dim) <= 2 or not _is_name_start(raw_dim[2]):
+                    raise ValueError(f"invalid variadic tensor dimension {raw_dim!r}")
+                if not all(_is_name_char(ch) for ch in raw_dim[3:]):
+                    raise ValueError(f"invalid variadic tensor dimension {raw_dim!r}")
+                dims.append(raw_dim)
+            else:
+                dims.append(parse_dim_expr(raw_dim))
             self._skip_ws()
             if self._consume(","):
                 continue

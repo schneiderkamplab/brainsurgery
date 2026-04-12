@@ -1,3 +1,8 @@
+import Derived (
+  merge_heads_basic,
+  reshape_head_basic
+)
+
 linear :: @Path -> Tensor -> ?Int -> ?Bool -> ?Bool -> ?Int -> ?Path -> ?Path -> Tensor
 linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=null ?bias_path=null = _linear@path x dim bias transpose expert weight_path bias_path
 
@@ -10,10 +15,10 @@ layernorm@path x ?eps=1e-5 ?dim=null ?weight_path=null ?bias=true ?bias_path=nul
 rmsnorm :: @Path -> Tensor -> ?Float -> ?Int -> ?Bool -> ?Bool -> ?Bool -> Tensor
 rmsnorm@path x ?eps=1e-6 ?dim=null ?unit_offset=false ?cast_float=false ?with_scale=true = _rmsnorm@path x eps dim unit_offset cast_float with_scale
 
-split :: Tensor[B,T,D] -> ?Int -> ?List[Dim] -> List[Tensor[B,T,D]]
+split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..S]]
 split x ?dim=-1 ?sizes=null = _split x dim sizes
 
-chunk :: Tensor[B,T,D] -> ?Int -> ?Int -> List[Tensor[B,T,D]]
+chunk :: Tensor[..S] -> ?Int -> ?Int -> List[Tensor[..S]]
 chunk x ?dim=-1 ?parts=null = _chunk x dim parts
 
 split_qkv_heads :: Tensor[B,T,D] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD], Tensor[B,H,T,HD])
@@ -22,11 +27,11 @@ split_qkv_heads = _split_qkv_heads
 split_qkv_grouped :: Tensor[B,T,D] -> (Tensor[B,H,T,HD], Tensor[B,KVH,T,HD], Tensor[B,KVH,T,HD])
 split_qkv_grouped = _split_qkv_grouped
 
-reshape_heads :: Tensor[B,T,D] -> Tensor[B,H,T,HD]
-reshape_heads = _reshape_heads
+reshape_heads :: Tensor[B,T,D] -> Int -> Tensor[B,H,T,HD]
+reshape_heads x heads = reshape_head_basic x heads
 
 merge_heads :: Tensor[B,H,T,HD] -> Tensor[B,T,D]
-merge_heads = _merge_heads
+merge_heads = merge_heads_basic
 
 permute :: Tensor -> ?Any -> Tensor
 permute x ?dims=null = _permute x dims

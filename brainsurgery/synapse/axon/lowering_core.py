@@ -1593,6 +1593,10 @@ def _lower_simple_call(
         for param_name, param_shape in param_shapes.items():
             if param_name not in provided:
                 continue
+            if any(isinstance(tok, str) and tok.startswith("..") for tok in param_shape):
+                # Variadic rank capture (e.g., Tensor[..S]) is typechecked upstream.
+                # Lowering shape checks stay conservative and skip fixed-rank assertions here.
+                continue
             raw_value = provided[param_name]
             if not isinstance(raw_value, str):
                 continue

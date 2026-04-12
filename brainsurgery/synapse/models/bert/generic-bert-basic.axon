@@ -4,7 +4,6 @@
 import Config
 import Activations gelu
 import Derived (
-  reshape_head_basic,
   merge_heads_basic,
   position_ids_basic,
   bidirectional_mask_basic,
@@ -22,11 +21,11 @@ ATTN_SCALE = 1.0 / sqrt (D / H)
 bert_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 bert_block x attn_mask = do
   a <- scope@attention do
-    q <- linear@self.query x dim=D bias=true |> reshape_head_basic H
-    k <- linear@self.key x dim=D bias=true |> reshape_head_basic H
-    v <- linear@self.value x dim=D bias=true |> reshape_head_basic H
+    q <- linear@self.query x dim=D bias=true |> reshape_heads heads=H
+    k <- linear@self.key x dim=D bias=true |> reshape_heads heads=H
+    v <- linear@self.value x dim=D bias=true |> reshape_heads heads=H
     keep <- bidirectional_mask_basic q k attn_mask
-    return attention_basic q k v keep scale=ATTN_SCALE |> merge_heads_basic H |> linear@output.dense dim=D bias=true
+    return attention_basic q k v keep scale=ATTN_SCALE |> merge_heads_basic |> linear@output.dense dim=D bias=true
   x <- x + a
   x <- layernorm@attention.output.LayerNorm x eps=EPS weight_path=@attention.output.LayerNorm.gamma bias_path=@attention.output.LayerNorm.beta
   m <- linear@intermediate.dense x dim=FFN bias=true |> gelu
@@ -37,7 +36,7 @@ bert_block x attn_mask = do
 
 bert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 bert input_ids attn_mask = do
-  pos_ids <- position_ids_basic input_ids null 0 1
+  pos_ids <- position_ids_basic input_ids attn_mask=null past_length=0 pad_fill=1
   tok_type_ids <- zeros_like input_ids
   tok <- embedding@bert.embeddings.word_embeddings input_ids dim=D
   pos <- embedding@bert.embeddings.position_embeddings pos_ids dim=D

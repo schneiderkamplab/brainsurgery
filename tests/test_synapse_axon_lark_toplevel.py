@@ -132,3 +132,15 @@ def test_parse_program_source_rejects_definition_without_signature() -> None:
     source = "lin@path x = linear@path x dim=4\n"
     with pytest.raises(ValueError, match="invalid Axon source syntax"):
         parse_program_source(source)
+
+
+def test_parse_program_source_supports_variadic_tensor_dims() -> None:
+    source = """
+split_like :: Tensor[..S] -> List[Tensor[..S]]
+split_like x = split x
+"""
+    parsed = parse_program_source(source)
+    signature = parsed.modules[0].signature
+    sig = signature.type_signature
+    assert tuple(render_type(arg) for arg in sig.arg_types) == ("Tensor[..S]",)
+    assert render_type(sig.return_type) == "List[Tensor[..S]]"

@@ -143,3 +143,19 @@ main x = do
     modules = parse_axon_program(source)
     signatures = typecheck_axon_program(modules, main_module="main")
     assert "main" in signatures
+
+
+def test_typecheck_allows_variadic_split_on_4d_tensor() -> None:
+    source = """
+split_any :: Tensor[..S] -> List[Tensor[..S]]
+split_any x = split x dim=-1 sizes=[64, 64]
+
+main :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD]
+main x = do
+  a, b <- split_any x
+  y <- concat a b dim=-1
+  return y
+"""
+    modules = parse_axon_program(source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
