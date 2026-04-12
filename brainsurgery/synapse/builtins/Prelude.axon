@@ -81,8 +81,8 @@ rope_pair = _rope_pair
 rope_pair_base :: Tensor[B,HQ,T,HD] -> Tensor[B,HK,T,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,T,HD], Tensor[B,HK,T,HD])
 rope_pair_base q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null ?interleaved=false = rope_pair_base_basic q k position_ids theta scale_factor partial_rotary_factor interleaved
 
-rope_pair_freq_scale :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Int -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
-rope_pair_freq_scale q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context = rope_pair_freq_scale_basic q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context
+rope_pair_freq_scale :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Int -> ?Bool -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
+rope_pair_freq_scale q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context ?interleaved=false = rope_pair_freq_scale_basic q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context interleaved
 
 linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
 linear_position_bias = _linear_position_bias

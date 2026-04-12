@@ -33,7 +33,7 @@ deepseek_v1_attn x pos_ids attn_mask past_kv = do
     q <- linear@q_proj x dim=D bias=false |> reshape_heads heads=H
     k <- linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH
     v <- linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA interleaved=false truncate=false
+    q, k <- rope_pair_base q k pos_ids theta=THETA interleaved=false
     k_all, v_all, new_kv <- Cache.update past_kv k v
     k_all <- repeat k_all repeats=(H / KVH)
     v_all <- repeat v_all repeats=(H / KVH)

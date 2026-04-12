@@ -236,22 +236,22 @@ rope_inv_freq_freq_scale_basic q theta scale_factor low_freq_factor high_freq_fa
 
 
 
-rope_apply_inv_freq_basic :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Tensor -> Tensor[B,H,S,HD]
-rope_apply_inv_freq_basic x pos_ids inv_freq = do
+rope_apply_inv_freq_basic :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Tensor -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_inv_freq_basic x pos_ids inv_freq ?interleaved=false = do
   pos <- cast pos_ids dtype="float32" |> reshape shape=[B, S, 1]
   inv <- reshape inv_freq shape=[1, 1, (HD / 2)]
   angles <- pos * inv
   sin_full <- sin angles |> rope_expand_half_basic
   cos_full <- cos angles |> rope_expand_half_basic
-  return (x * cos_full) + ((rope_rotate_half_basic x) * sin_full)
+  return (x * cos_full) + ((rope_rotate_half_basic x interleaved=interleaved) * sin_full)
 
 
 
-rope_pair_freq_scale_basic :: Tensor[B,H,S,HD] -> Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Int -> (Tensor[B,H,S,HD], Tensor[B,H,S,HD])
-rope_pair_freq_scale_basic q k pos_ids theta scale_factor low_freq_factor high_freq_factor original_context = do
+rope_pair_freq_scale_basic :: Tensor[B,H,S,HD] -> Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Int -> ?Bool -> (Tensor[B,H,S,HD], Tensor[B,H,S,HD])
+rope_pair_freq_scale_basic q k pos_ids theta scale_factor low_freq_factor high_freq_factor original_context ?interleaved=false = do
   inv_freq <- rope_inv_freq_freq_scale_basic q theta scale_factor low_freq_factor high_freq_factor original_context
-  q_rot <- rope_apply_inv_freq_basic q pos_ids inv_freq
-  k_rot <- rope_apply_inv_freq_basic k pos_ids inv_freq
+  q_rot <- rope_apply_inv_freq_basic q pos_ids inv_freq interleaved=interleaved
+  k_rot <- rope_apply_inv_freq_basic k pos_ids inv_freq interleaved=interleaved
   return q_rot, k_rot
 
 
