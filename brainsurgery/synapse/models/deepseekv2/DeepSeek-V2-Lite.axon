@@ -94,7 +94,7 @@ deepseek_v2_moe_block x pos_ids attn_mask past_kv = do
 
 deepseek_v2_lite :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 deepseek_v2_lite input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv)
   x, new_kv <- scope@model do
     x <- embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null

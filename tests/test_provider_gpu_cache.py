@@ -70,9 +70,6 @@ def test_gpu_cached_provider_uses_fractional_auto_budget(monkeypatch: pytest.Mon
 
 
 def test_gpu_cached_provider_rejects_unavailable_cuda_backend() -> None:
-    if torch.cuda.is_available():
-        pytest.skip("CUDA is available in this environment; unavailability test not applicable")
-
     base_provider = InMemoryStateDictProvider({}, max_io_workers=1)
     base_sd = base_provider.get_or_create_alias_state_dict("model")
     base_sd["x"] = torch.ones(1, dtype=torch.float32)
@@ -81,8 +78,12 @@ def test_gpu_cached_provider_rejects_unavailable_cuda_backend() -> None:
         base_provider,
         cache_config=GpuCacheConfig(device="cuda", max_cache_bytes=1024),
     )
-    with pytest.raises(ProviderError, match="not available"):
-        cached_provider.get_state_dict("model")
+    if torch.cuda.is_available():
+        cached_sd = cached_provider.get_state_dict("model")
+        assert torch.equal(cached_sd["x"].cpu(), torch.ones(1, dtype=torch.float32))
+    else:
+        with pytest.raises(ProviderError, match="not available"):
+            cached_provider.get_state_dict("model")
 
 
 def test_gpu_cached_provider_debug_logs_timing_by_model_part(

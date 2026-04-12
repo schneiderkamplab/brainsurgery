@@ -40,7 +40,7 @@ gptj_block x pos_ids attn_mask past_kv = do
 
 gpt_j :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gpt_j input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids null past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
   x, new_kv <- scope@transformer do
     x <- embedding@wte input_ids dim=D
     new_kv <- use_cache ? Cache.init : null

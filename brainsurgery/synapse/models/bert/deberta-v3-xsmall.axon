@@ -52,7 +52,7 @@ deberta_modern_head x = do
 
 deberta_v2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 deberta_v2 input_ids attn_mask = do
-  pos_ids <- position_ids input_ids null
+  pos_ids <- position_ids input_ids
   tok_type_ids <- zeros_like input_ids
   tok <- embedding@deberta.embeddings.word_embeddings input_ids dim=E
   pos <- zeros_like tok

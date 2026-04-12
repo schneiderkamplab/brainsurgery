@@ -91,13 +91,13 @@ t5gemma_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_atte
 
 t5gemma :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
 t5gemma input_ids attention_mask decoder_input_ids decoder_attention_mask = do
-  enc_pos_ids <- position_ids input_ids attention_mask use_attention_mask=false
+  enc_pos_ids <- position_ids input_ids
   enc_hidden <- embedding@model.encoder.embed_tokens input_ids dim=D scale=EMB_SCALE
   for@model.encoder.layers i <- [0..L_ENC) do
     enc_hidden <- t5gemma_encoder_block enc_hidden i enc_pos_ids attention_mask
   enc_hidden <- rmsnorm@model.encoder.norm enc_hidden eps=EPS cast_float=true unit_offset=true
 
-  dec_pos_ids <- position_ids decoder_input_ids decoder_attention_mask use_attention_mask=false
+  dec_pos_ids <- position_ids decoder_input_ids
   dec_hidden <- embedding@model.decoder.embed_tokens decoder_input_ids dim=D scale=EMB_SCALE
   for@model.decoder.layers i <- [0..L_DEC) do
     dec_hidden <- t5gemma_decoder_block dec_hidden enc_hidden i dec_pos_ids attention_mask decoder_attention_mask

@@ -28,7 +28,7 @@ distil_block x attn_mask = do
 
 distilbert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 distilbert input_ids attn_mask = do
-  pos_ids <- position_ids input_ids null
+  pos_ids <- position_ids input_ids
   tok <- embedding@distilbert.embeddings.word_embeddings input_ids dim=D
   pos <- embedding@distilbert.embeddings.position_embeddings pos_ids dim=D
   x <- tok + pos

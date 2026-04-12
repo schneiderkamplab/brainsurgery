@@ -32,7 +32,7 @@ gpt2_block x attn_mask past_kv = do
 gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gpt2 input_ids attn_mask past_kv use_cache = do
   tok <- embedding@wte input_ids dim=D
-  pos <- position_ids input_ids attn_mask past_length=(past_length past_kv) pad_fill=1 |> embedding@wpe
+  pos <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv) pad_fill=1 |> embedding@wpe
   x <- tok + pos
   new_kv <- use_cache ? Cache.init : null
   for@h i <- [0..L) do

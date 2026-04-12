@@ -65,13 +65,8 @@ def test_generic_t5gemma_ul2_uses_mask_independent_position_ids(repo_root: Path)
         repo_root / "brainsurgery/synapse/models/t5gemma/generic-t5gemma-ul2.axon"
     ).read_text(encoding="utf-8")
 
-    assert (
-        "enc_pos_ids <- position_ids input_ids attention_mask use_attention_mask=false" in t5gemma
-    )
-    assert (
-        "dec_pos_ids <- position_ids decoder_input_ids decoder_attention_mask use_attention_mask=false"
-        in t5gemma
-    )
+    assert "enc_pos_ids <- position_ids input_ids" in t5gemma
+    assert "dec_pos_ids <- position_ids decoder_input_ids" in t5gemma
 
 
 def test_axon_test_auto_infers_seq2seq_for_generic_t5gemma(repo_root: Path) -> None:

@@ -45,7 +45,7 @@ xglm_block x attn_mask past_kv = do
 
 xglm :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 xglm input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv) pad_fill=(-1) use_attention_mask=true
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv) pad_fill=(-1)
   pos_ids_rope <- pos_ids + 2
   x, new_kv <- scope@model do
     tok <- embedding@embed_tokens input_ids dim=D

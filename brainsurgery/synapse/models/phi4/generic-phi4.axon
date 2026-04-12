@@ -61,7 +61,7 @@ phi4_block x pos_ids attn_mask past_kv = do
 
 phi4 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 phi4 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv)
   x, new_kv <- scope@model root=PARAM_ROOT do
     x <- embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null

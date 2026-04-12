@@ -10,16 +10,8 @@ from brainsurgery.engine.plan import compile_plan
 
 
 @pytest.fixture
-def gpt_model_path() -> Path:
-    repo_root = Path(__file__).resolve().parents[1]
-    candidates = [
-        repo_root / "models" / "gpt" / "model.safetensors",
-        repo_root / "models" / "gpt2" / "model.safetensors",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    pytest.skip("missing models/gpt/model.safetensors (or models/gpt2/model.safetensors)")
+def gpt_model_path(gpt2_local_paths: tuple[Path, Path]) -> Path:
+    return gpt2_local_paths[0]
 
 
 def _run_pipeline(raw_plan: dict[str, object], provider) -> tuple[bool, list[dict[str, object]]]:

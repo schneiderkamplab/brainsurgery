@@ -15,7 +15,7 @@ LOCAL_WIN = 64.0
 THETA_FULL = 160000.0
 THETA_LOCAL = 10000.0
 
-modernbert_layer :: Tensor[B,S,D] -> Int -> TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,D]
+modernbert_layer :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> Tensor[B,S,D]
 modernbert_layer x i pos_ids attn_mask = do
   xn <- (i == 0) ? x : layernorm@attn_norm x eps=EPS bias=false
   a <- scope@attn do

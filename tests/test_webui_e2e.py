@@ -11,7 +11,6 @@ from typing import Any
 from urllib import request
 from urllib.error import HTTPError
 
-import pytest
 import torch
 from safetensors.torch import save_file
 
@@ -73,7 +72,7 @@ def _running_webui(tmp_path: Path) -> Iterator[str]:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_factory(session))
     except PermissionError as exc:
         provider.close()
-        pytest.skip(f"local webui bind is not permitted in this environment: {exc}")
+        raise RuntimeError(f"local webui bind is not permitted in this environment: {exc}") from exc
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"

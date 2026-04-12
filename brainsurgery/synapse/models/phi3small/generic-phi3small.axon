@@ -69,7 +69,7 @@ phi3small_block x i pos_ids attn_mask past_kv = do
 
 phi3small :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 phi3small input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids null past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
   x, new_kv <- scope@model root=PARAM_ROOT do
     x <- embedding@embed_tokens input_ids dim=D
     x <- (MUP_EMBED_MULT > 0.0) ? (x * MUP_EMBED_MULT) : x

@@ -29,7 +29,7 @@ albert_block x attn_mask = do
 
 albert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 albert input_ids attn_mask = do
-  pos_ids <- position_ids input_ids null
+  pos_ids <- position_ids input_ids
   tok_type_ids <- zeros_like input_ids
   tok <- embedding@albert.embeddings.word_embeddings input_ids dim=E
   pos <- embedding@albert.embeddings.position_embeddings pos_ids dim=E

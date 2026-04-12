@@ -78,7 +78,7 @@ opt_decode_decoder input_ids pos_ids attn_mask past_kv use_cache = do
 
 opt :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 opt input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv) pad_fill=-1 use_attention_mask=true
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv) pad_fill=-1
   pos_ids <- pos_ids + 2
   x, new_kv <- HAS_DECODER_ROOT ? (opt_decode_decoder input_ids pos_ids attn_mask past_kv use_cache) : (opt_decode_model input_ids pos_ids attn_mask past_kv use_cache)
   logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V bias=false) : (HAS_DECODER_ROOT ? (linear@decoder.embed_tokens x dim=V) : (linear@model.decoder.embed_tokens x dim=V))

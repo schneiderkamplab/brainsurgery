@@ -59,7 +59,7 @@ mbart_decoder_layer x enc_hidden encoder_attention_mask decoder_attention_mask =
 
 mbart :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
 mbart input_ids attention_mask decoder_input_ids decoder_attention_mask = do
-  enc_pos_ids <- position_ids input_ids null
+  enc_pos_ids <- position_ids input_ids
   enc_pos_ids <- enc_pos_ids + POS_OFFSET
   enc_tok <- embedding@model.shared input_ids dim=D scale=EMB_SCALE
   enc_pos <- embedding@model.encoder.embed_positions enc_pos_ids dim=D
@@ -69,7 +69,7 @@ mbart input_ids attention_mask decoder_input_ids decoder_attention_mask = do
     enc_hidden <- mbart_encoder_layer enc_hidden attention_mask
   enc_hidden <- layernorm@model.encoder.layer_norm enc_hidden eps=EPS
 
-  dec_pos_ids <- position_ids decoder_input_ids null
+  dec_pos_ids <- position_ids decoder_input_ids
   dec_pos_ids <- dec_pos_ids + POS_OFFSET
   dec_tok <- embedding@model.shared decoder_input_ids dim=D scale=EMB_SCALE
   dec_pos <- embedding@model.decoder.embed_positions dec_pos_ids dim=D

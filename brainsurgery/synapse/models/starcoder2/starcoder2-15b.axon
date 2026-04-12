@@ -50,7 +50,7 @@ starcoder2_block x pos_ids attn_mask past_kv = do
 
 starcoder2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 starcoder2 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids null past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
   x, new_kv <- scope@model do
     x <- embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null

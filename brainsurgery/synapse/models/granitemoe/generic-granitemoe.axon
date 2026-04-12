@@ -52,7 +52,7 @@ granitemoe_block x pos_ids attn_mask past_kv = do
 
 granitemoe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 granitemoe input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv)
   x, new_kv <- scope@model do
     x <- embedding@embed_tokens input_ids dim=D
     x <- x * EMBED_MUL

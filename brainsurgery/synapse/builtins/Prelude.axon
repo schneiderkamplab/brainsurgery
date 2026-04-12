@@ -1,5 +1,6 @@
 import Derived (
   merge_heads_basic,
+  position_ids_basic,
   reshape_head_basic
 )
 
@@ -69,8 +70,8 @@ bidirectional_mask = _bidirectional_mask
 attention :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,HD]
 attention = _attention
 
-position_ids :: TokenIds[B,T] -> ?Tensor[B,T] -> Tensor[B,T]
-position_ids = _position_ids
+position_ids :: TokenIds[B,T] -> ?Tensor[B,SM] -> ?Int -> ?Int -> Tensor[B,T]
+position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = position_ids_basic x attn_mask=attn_mask past_length=past_length pad_fill=pad_fill
 
 rope_pair :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
 rope_pair = _rope_pair

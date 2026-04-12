@@ -58,14 +58,14 @@ marian_decoder_layer x enc_hidden encoder_attention_mask decoder_attention_mask 
 
 marian :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
 marian input_ids attention_mask decoder_input_ids decoder_attention_mask = do
-  enc_pos_ids <- position_ids input_ids null
+  enc_pos_ids <- position_ids input_ids
   enc_tok <- embedding@model.shared input_ids dim=D scale=EMB_SCALE
   enc_pos <- embedding@model.encoder.embed_positions enc_pos_ids dim=D
   enc_hidden <- enc_tok + enc_pos
   for@model.encoder.layers i <- [0..L_ENC) do
     enc_hidden <- marian_encoder_layer enc_hidden attention_mask
 
-  dec_pos_ids <- position_ids decoder_input_ids null
+  dec_pos_ids <- position_ids decoder_input_ids
   dec_tok <- embedding@model.shared decoder_input_ids dim=D scale=EMB_SCALE
   dec_pos <- embedding@model.decoder.embed_positions dec_pos_ids dim=D
   dec_hidden <- dec_tok + dec_pos

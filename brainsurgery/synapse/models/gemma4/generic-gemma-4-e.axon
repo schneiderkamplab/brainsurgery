@@ -114,7 +114,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
 
 gemma4_e :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gemma4_e input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask past_length=(past_length past_kv) use_attention_mask=false
+  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
   logits, new_kv <- scope@language_model root="model" do
     x <- embedding@embed_tokens input_ids dim=D scale=(sqrt D)
     per_layer_inputs <- gemma4_per_layer_inputs input_ids x num_layers=L per_layer_dim=PLI embed_scale=(sqrt PLI) projection_scale=PER_LAYER_PROJ_SCALE combine_scale=PER_LAYER_INPUT_SCALE rms_eps=EPS
