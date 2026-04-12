@@ -122,11 +122,27 @@ attention_basic_hf q k v keep ?rel_bias=null ?scale=(1.0 / sqrt HD) = do
 
 
 -- === ROPE HELPERS ===
-rope_rotate_half_basic :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
-rope_rotate_half_basic x = do
+rope_rotate_half_noninterleaved_basic :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
+rope_rotate_half_noninterleaved_basic x = do
   x1 <- slice x dim=-1 start=0 end=(R / 2)
   x2 <- slice x dim=-1 start=(R / 2) end=R
   return concat (0 - x2) x1 dim=-1
+
+
+rope_rotate_half_interleaved_basic :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
+rope_rotate_half_interleaved_basic x = do
+  pair <- reshape x shape=[B, H, S, (R / 2), 2]
+  even <- slice pair dim=-1 start=0 end=1 |> reshape shape=[B, H, S, (R / 2)]
+  odd <- slice pair dim=-1 start=1 end=2 |> reshape shape=[B, H, S, (R / 2)]
+  neg_odd <- reshape (0 - odd) shape=[B, H, S, (R / 2), 1]
+  even <- reshape even shape=[B, H, S, (R / 2), 1]
+  return concat neg_odd even dim=-1 |> reshape shape=[B, H, S, R]
+
+
+rope_rotate_half_basic :: Tensor[B,H,S,R] -> ?Bool -> Tensor[B,H,S,R]
+rope_rotate_half_basic x ?interleaved=false = interleaved
+  ? (rope_rotate_half_interleaved_basic x)
+  : (rope_rotate_half_noninterleaved_basic x)
 
 
 rope_expand_half_basic :: Tensor[B,S,RH] -> Tensor[B,1,S,R]
@@ -134,41 +150,50 @@ rope_expand_half_basic x = do
   return concat x x dim=-1 |> reshape shape=[B, 1, S, (2 * RH)]
 
 
+rope_expand_half_interleaved_basic :: Tensor[B,S,RH] -> Tensor[B,1,S,R]
+rope_expand_half_interleaved_basic x = do
+  pair <- reshape x shape=[B, S, RH, 1]
+  pair <- concat pair pair dim=-1
+  return reshape pair shape=[B, 1, S, (2 * RH)]
 
-rope_apply_raw_basic :: Tensor[B,H,S,R] -> Tensor[B,SM] -> Float -> Tensor[B,H,S,R]
-rope_apply_raw_basic x position_ids theta = do
+
+
+rope_apply_raw_basic :: Tensor[B,H,S,R] -> Tensor[B,SM] -> Float -> ?Bool -> Tensor[B,H,S,R]
+rope_apply_raw_basic x position_ids theta ?interleaved=false = do
   ref <- slice x dim=1 start=0 end=1 |> reshape shape=[B, S, R]
   emb <- sinusoidal_positions ref position_ids theta=theta offset=0 padding_idx=null mode="rope"
-  sin <- slice emb dim=-1 start=0 end=(R / 2) |> rope_expand_half_basic
-  cos <- slice emb dim=-1 start=(R / 2) end=R |> rope_expand_half_basic
-  return (x * cos) + ((rope_rotate_half_basic x) * sin)
+  sin_half <- slice emb dim=-1 start=0 end=(R / 2)
+  cos_half <- slice emb dim=-1 start=(R / 2) end=R
+  sin <- interleaved ? (rope_expand_half_interleaved_basic sin_half) : (rope_expand_half_basic sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved_basic cos_half) : (rope_expand_half_basic cos_half)
+  return (x * cos) + ((rope_rotate_half_basic x interleaved=interleaved) * sin)
 
 
 
-rope_apply_prefix_basic :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Int -> Tensor[B,H,S,HD]
-rope_apply_prefix_basic x position_ids theta rot = do
+rope_apply_prefix_basic :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Int -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_prefix_basic x position_ids theta rot ?interleaved=false = do
   x_rot <- slice x dim=-1 start=0 end=rot
   x_tail <- slice x dim=-1 start=rot end=HD
-  x_rot <- rope_apply_raw_basic x_rot position_ids theta
+  x_rot <- rope_apply_raw_basic x_rot position_ids theta interleaved=interleaved
   return concat x_rot x_tail dim=-1
 
 
 
-rope_apply_with_partial_basic :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Float -> Tensor[B,H,S,HD]
-rope_apply_with_partial_basic x position_ids theta partial_rotary_factor = do
+rope_apply_with_partial_basic :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Float -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_with_partial_basic x position_ids theta partial_rotary_factor ?interleaved=false = do
   rot <- floor (HD * partial_rotary_factor)
   rot <- (rot < 0) ? 0 : rot
   rot <- (rot > HD) ? HD : rot
   return (rot <= 0) ? x : (
-    (rot >= HD) ? (rope_apply_raw_basic x position_ids theta) : (rope_apply_prefix_basic x position_ids theta rot)
+    (rot >= HD) ? (rope_apply_raw_basic x position_ids theta interleaved=interleaved) : (rope_apply_prefix_basic x position_ids theta rot interleaved=interleaved)
   )
 
 
 
-rope_apply_basic :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> ?Float -> Tensor[B,H,S,HD]
-rope_apply_basic x position_ids theta ?partial_rotary_factor=null = (partial_rotary_factor == null)
-  ? (rope_apply_raw_basic x position_ids theta)
-  : (rope_apply_with_partial_basic x position_ids theta partial_rotary_factor)
+rope_apply_basic :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> ?Float -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_basic x position_ids theta ?partial_rotary_factor=null ?interleaved=false = (partial_rotary_factor == null)
+  ? (rope_apply_raw_basic x position_ids theta interleaved=interleaved)
+  : (rope_apply_with_partial_basic x position_ids theta partial_rotary_factor interleaved=interleaved)
 
 
 
@@ -179,11 +204,11 @@ position_ids_scale_basic position_ids scale_factor = do
 
 
 -- === ROPE BASE ===
-rope_pair_base_basic :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
-rope_pair_base_basic q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null = do
+rope_pair_base_basic :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
+rope_pair_base_basic q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null ?interleaved=false = do
   position_ids_eff <- (scale_factor == null) ? position_ids : (position_ids_scale_basic position_ids scale_factor)
-  q_rot <- rope_apply_basic q position_ids_eff theta partial_rotary_factor=partial_rotary_factor
-  k_rot <- rope_apply_basic k position_ids_eff theta partial_rotary_factor=partial_rotary_factor
+  q_rot <- rope_apply_basic q position_ids_eff theta partial_rotary_factor=partial_rotary_factor interleaved=interleaved
+  k_rot <- rope_apply_basic k position_ids_eff theta partial_rotary_factor=partial_rotary_factor interleaved=interleaved
   return q_rot, k_rot
 
 
