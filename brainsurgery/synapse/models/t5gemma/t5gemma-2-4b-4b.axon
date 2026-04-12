@@ -43,7 +43,7 @@ t5gemma2_encoder_block x i pos_ids attention_mask = do
     full_attn <- ((i + 1) % ROPE_PERIOD_ENC) == 0
     theta <- full_attn ? THETA_FULL_ENC : THETA_SLIDE_ENC
     rope_scale <- full_attn ? ROPE_SCALE_FULL_ENC : 1.0
-    q, k <- rope_pair q k position_ids=pos_ids theta=theta scale_factor=rope_scale
+    q, k <- rope_pair_base q k pos_ids theta scale_factor=rope_scale
     k <- repeat k repeats=(H / KVH)
     v <- repeat v repeats=(H / KVH)
     window <- full_attn ? WIN_FULL_ENC : WIN_SLIDE_ENC
@@ -69,7 +69,7 @@ t5gemma2_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_att
     full_attn <- ((i + 1) % ROPE_PERIOD_DEC) == 0
     theta <- full_attn ? THETA_FULL_DEC : THETA_SLIDE_DEC
     rope_scale <- full_attn ? ROPE_SCALE_FULL_DEC : 1.0
-    q, k_self <- rope_pair q k_self position_ids=pos_ids theta=theta scale_factor=rope_scale
+    q, k_self <- rope_pair_base q k_self pos_ids theta scale_factor=rope_scale
     k_cross <- linear@k_proj enc_hidden dim=KVD bias=false |> reshape_heads heads=KVH |> rmsnorm@k_norm eps=EPS dim=HD cast_float=true unit_offset=true
     v_cross <- linear@v_proj enc_hidden dim=KVD bias=false |> reshape_heads heads=KVH
     k_merged <- concat k_self k_cross dim=2

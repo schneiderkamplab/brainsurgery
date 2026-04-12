@@ -31,7 +31,7 @@ gemma3_block x i pos_ids attn_mask past_kv = do
     long <- ((i + 1) % ROPE_PERIOD) == 0
     theta <- long ? THETA_LONG : THETA_BASE
     rope_scale <- long ? ROPE_LONG_SCALE : 1.0
-    q, k <- rope_pair q k position_ids=pos_ids theta=theta scale_factor=rope_scale
+    q, k <- rope_pair_base q k pos_ids theta scale_factor=rope_scale
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k repeats=(H / KVH)
     v <- repeat v repeats=(H / KVH)

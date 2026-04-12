@@ -851,6 +851,15 @@ def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str
         return None
     if parse_callee in ctx.block_signatures:
         return parse_callee, {}
+    if "@" not in parse_callee and "." not in parse_callee and "::" not in parse_callee:
+        current_module = ctx.current_module if isinstance(ctx.current_module, str) else ""
+        current_namespace = (
+            current_module.rsplit(".", 1)[0] if "." in current_module else current_module
+        )
+        if current_namespace:
+            namespaced_callee = f"{current_namespace}.{parse_callee}"
+            if namespaced_callee in ctx.block_signatures:
+                return namespaced_callee, {}
     if "." in parse_callee and "@" not in parse_callee:
         member = parse_callee.rsplit(".", 1)[1]
         namespace = parse_callee.rsplit(".", 1)[0]
@@ -882,17 +891,28 @@ def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str
         if member in ctx.block_signatures and namespace in ctx.imported_namespaces:
             base = member
     if base not in ctx.block_signatures and "." not in base:
-        imported_namespaces = ctx.imported_member_namespaces.get(base, set())
-        if imported_namespaces:
-            if len(imported_namespaces) > 1:
-                choices = ", ".join(sorted(imported_namespaces))
-                raise ValueError(
-                    f"ambiguous imported member {base!r}; found in namespaces: {choices}"
-                )
-            namespace = next(iter(imported_namespaces))
-            namespaced_base = f"{namespace}.{base}"
+        current_module = ctx.current_module if isinstance(ctx.current_module, str) else ""
+        current_namespace = (
+            current_module.rsplit(".", 1)[0] if "." in current_module else current_module
+        )
+        if current_namespace:
+            namespaced_base = f"{current_namespace}.{base}"
             if namespaced_base in ctx.block_signatures:
                 base = namespaced_base
+        if base in ctx.block_signatures:
+            pass
+        else:
+            imported_namespaces = ctx.imported_member_namespaces.get(base, set())
+            if imported_namespaces:
+                if len(imported_namespaces) > 1:
+                    choices = ", ".join(sorted(imported_namespaces))
+                    raise ValueError(
+                        f"ambiguous imported member {base!r}; found in namespaces: {choices}"
+                    )
+                namespace = next(iter(imported_namespaces))
+                namespaced_base = f"{namespace}.{base}"
+                if namespaced_base in ctx.block_signatures:
+                    base = namespaced_base
     if base not in ctx.block_signatures:
         return None
     path_params = (

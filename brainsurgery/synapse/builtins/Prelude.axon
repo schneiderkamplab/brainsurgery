@@ -2,6 +2,7 @@ import Derived (
   merge_heads_basic,
   position_ids_basic,
   rope_pair_base_basic,
+  rope_pair_freq_scale_basic,
   reshape_head_basic
 )
 
@@ -77,8 +78,11 @@ position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = position_ids_basic x
 rope_pair :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
 rope_pair = _rope_pair
 
-rope_pair_base :: Tensor[B,HQ,T,HD] -> Tensor[B,HK,T,HD] -> Tensor[B,SM] -> ?Float -> (Tensor[B,HQ,T,HD], Tensor[B,HK,T,HD])
-rope_pair_base q k position_ids ?theta=10000.0 = rope_pair_base_basic q k position_ids theta
+rope_pair_base :: Tensor[B,HQ,T,HD] -> Tensor[B,HK,T,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> (Tensor[B,HQ,T,HD], Tensor[B,HK,T,HD])
+rope_pair_base q k position_ids ?theta=10000.0 ?scale_factor=null = rope_pair_base_basic q k position_ids theta scale_factor
+
+rope_pair_freq_scale :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Int -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
+rope_pair_freq_scale q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context = rope_pair_freq_scale_basic q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context
 
 linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
 linear_position_bias = _linear_position_bias
@@ -115,6 +119,18 @@ slice x ?dim=null ?start=null ?end=null = _slice x dim start end
 
 sqrt :: Float -> Float
 sqrt = _sqrt
+
+pow :: Any -> Any -> Any
+pow = _pow
+
+exp :: Tensor -> Tensor
+exp = _exp
+
+sin :: Tensor -> Tensor
+sin = _sin
+
+cos :: Tensor -> Tensor
+cos = _cos
 
 softmax :: Tensor -> ?Int -> ?String -> Tensor
 softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype

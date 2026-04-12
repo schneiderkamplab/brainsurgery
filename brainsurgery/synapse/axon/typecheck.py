@@ -2410,6 +2410,14 @@ def _infer_expr_type(
             rigid_symbols=rigid_symbols,
         )
         if expr.op in {"==", "!=", "<", "<=", ">", ">=", "and", "or"}:
+            tensor_result = _tensor_like_binary_result(
+                left,
+                right,
+                dim_symbols=dim_symbols,
+                rigid_symbols=rigid_symbols,
+            )
+            if tensor_result is not None:
+                return tensor_result
             return TypeBool()
         if is_numeric_type(left) and is_numeric_type(right):
             if isinstance(left, TypeFloat) or isinstance(right, TypeFloat):
