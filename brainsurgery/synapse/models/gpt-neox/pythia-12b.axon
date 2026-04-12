@@ -26,7 +26,7 @@ gpt_neox_block x pos_ids attn_mask past_kv = do
   a, new_kv <- scope@attention do
     qkv <- linear@query_key_value xn dim=(3 * D) bias=true
     q, k, v <- split_qkv_heads qkv heads=H layout=interleaved
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA partial_rotary_factor=ROTARY_PCT
+    q, k <- rope_pair_base q k pos_ids theta=THETA partial_rotary_factor=ROTARY_PCT
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
     a <- attention q k v mask=mask |> merge_heads |> linear@dense dim=D bias=true

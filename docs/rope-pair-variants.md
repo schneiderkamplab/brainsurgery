@@ -107,3 +107,23 @@ Still needed for faithful full coverage (freq-split/beta/longrope/yarn exactness
 - path/list-to-tensor helper for `long_factor`/`short_factor` lists in longrope modes
 
 If you want, I can implement these in `Derived.axon` next as concrete modules plus the minimal new primitive(s), then migrate model call sites variant-by-variant.
+
+## Current Deprecated `rope_pair` Coverage vs Existing Derived Variants
+
+Based on current model call sites that still use deprecated `rope_pair` directly.
+
+| Semantic group (remaining deprecated) | Files | Covered by existing derived as-is? | Safest extension target |
+|---|---:|---|---|
+| Base RoPE interleaved | 3 | No | `rope_pair_base_basic` with `?interleaved` |
+| Base RoPE with explicit `interleaved=false, truncate=false` | 2 | No | `rope_pair_base_basic` (`truncate` behavior) |
+| Partial rotary RoPE (classic GPT-J/NeoX/GLM) | 13 | No | `rope_pair_base_basic` with `?partial_rotary_factor` |
+| Proportional scaled + partial rotary (Gemma4-style) | 7 | No | `rope_pair_base_basic` with `?rope_mode`, `?partial_rotary_factor` |
+| Llama3 freq-split (`low/high/original`) | 3 | Mostly (close) | `rope_pair_freq_scale_basic` (optionally `?interleaved`) |
+| YaRN beta scaling (`beta_fast/beta_slow/original`) | 3 | No | `rope_pair_freq_scale_basic` |
+| YaRN beta+mscale | 11 | No | `rope_pair_freq_scale_basic` |
+| HF-YaRN (`rope_mode=hf_yarn`, `attention_factor`) | 3 | No | `rope_pair_freq_scale_basic` |
+| LongRoPE | 6 | No | `rope_pair_freq_scale_basic` (or helper under it) |
+| LongRoPE + partial rotary | 3 | No | `rope_pair_freq_scale_basic` + `partial_rotary_factor` |
+| LongRoPE + mscale | 3 | No | `rope_pair_freq_scale_basic` |
+
+Summary: 11 semantic groups remain; all are feasibly coverable by extending the two existing derived variants (`base` and `freq_scale`) without introducing a new primitive.
