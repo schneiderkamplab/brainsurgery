@@ -105,8 +105,29 @@ attention_basic_hf q k v keep ?rel_bias=null ?scale=(1.0 / sqrt HD) = do
   return cast out dtype="float32"
 
 
+rope_rotate_half_basic :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
+rope_rotate_half_basic x = do
+  x1 <- slice x dim=-1 start=0 end=(R / 2)
+  x2 <- slice x dim=-1 start=(R / 2) end=R
+  return concat (0 - x2) x1 dim=-1
+
+
+rope_apply_basic :: Tensor[B,H,S,R] -> Tensor[B,S] -> Float -> Tensor[B,H,S,R]
+rope_apply_basic x pos_ids theta = do
+  ref <- slice x dim=1 start=0 end=1 |> reshape shape=[B, S, R]
+  emb <- sinusoidal_positions ref pos_ids theta=theta offset=0 padding_idx=null mode="rope"
+  sin_half <- slice emb dim=-1 start=0 end=(R / 2)
+  cos_half <- slice emb dim=-1 start=(R / 2) end=R
+  sin <- concat sin_half sin_half dim=-1 |> reshape shape=[B, 1, S, R]
+  cos <- concat cos_half cos_half dim=-1 |> reshape shape=[B, 1, S, R]
+  return (x * cos) + ((rope_rotate_half_basic x) * sin)
+
+
 rope_pair_basic :: Tensor[B,H,S,HD] -> Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> (Tensor[B,H,S,HD], Tensor[B,H,S,HD])
-rope_pair_basic q k pos_ids theta = rope_pair q k position_ids=pos_ids theta=theta
+rope_pair_basic q k pos_ids theta = do
+  q_rot <- rope_apply_basic q pos_ids theta
+  k_rot <- rope_apply_basic k pos_ids theta
+  return q_rot, k_rot
 
 
 rope_pair_freq_scale_basic :: Tensor[B,H,S,HD] -> Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> Float -> Float -> Float -> Int -> (Tensor[B,H,S,HD], Tensor[B,H,S,HD])

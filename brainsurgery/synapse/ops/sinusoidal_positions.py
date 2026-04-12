@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 OP_NAME = "sinusoidal_positions"
-LOWERING_ARITY = (2, 5)
+LOWERING_ARITY = (2, 6)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {}
@@ -59,6 +59,25 @@ def _resolve_float(
     return float(value)
 
 
+def _resolve_mode(
+    model: Any,
+    raw: Any,
+    env: dict[str, Any],
+    symbols: dict[str, int],
+) -> str:
+    value = model._eval_expr(raw, env, symbols)
+    if value is None:
+        return "legacy"
+    if not isinstance(value, str):
+        raise ValueError("sinusoidal_positions.mode must resolve to string or null")
+    mode = value.strip().lower()
+    if mode in {"", "legacy"}:
+        return "legacy"
+    if mode == "rope":
+        return "rope"
+    raise ValueError("sinusoidal_positions.mode must be one of: legacy, rope, or null")
+
+
 def _build_sinusoidal_positions(
     ref: torch.Tensor,
     position_ids: torch.Tensor,
@@ -66,6 +85,7 @@ def _build_sinusoidal_positions(
     theta: float,
     offset: int,
     padding_idx: int | None,
+    mode: str = "legacy",
 ) -> torch.Tensor:
     if ref.ndim != 3:
         raise ValueError("sinusoidal_positions.ref must be rank-3 [batch, seq, dim]")
@@ -84,10 +104,13 @@ def _build_sinusoidal_positions(
 
     pos = position_ids.to(torch.float32) + float(offset)
     freq_idx = torch.arange(half, dtype=torch.float32, device=ref.device)
-    inv_freq = torch.exp(
-        (-torch.log(torch.tensor(theta, dtype=torch.float32, device=ref.device)) * freq_idx)
-        / float(max(1, half - 1))
-    )
+    if mode == "rope":
+        inv_freq = 1.0 / (theta ** (freq_idx / float(max(1, half))))
+    else:
+        inv_freq = torch.exp(
+            (-torch.log(torch.tensor(theta, dtype=torch.float32, device=ref.device)) * freq_idx)
+            / float(max(1, half - 1))
+        )
     angles = pos.unsqueeze(-1) * inv_freq.view(1, 1, half)
     sin_part = torch.sin(angles)
     cos_part = torch.cos(angles)
@@ -122,9 +145,9 @@ def lowering_validate_signature(
     if kwargs:
         unknown = ", ".join(sorted(str(key) for key in kwargs))
         raise ValueError(f"sinusoidal_positions unsupported kwargs: {unknown}")
-    if len(args) < 2 or len(args) > 5:
+    if len(args) < 2 or len(args) > 6:
         raise ValueError(
-            "sinusoidal_positions requires positional args: ref position_ids [theta offset padding_idx]"
+            "sinusoidal_positions requires positional args: ref position_ids [theta offset padding_idx mode]"
         )
 
 
@@ -158,9 +181,9 @@ def interpret(
 ) -> None:
     del node_path, scope
     args = _raw_args(node_spec)
-    if len(args) < 2 or len(args) > 5:
+    if len(args) < 2 or len(args) > 6:
         raise ValueError(
-            "sinusoidal_positions requires positional args: ref position_ids [theta offset padding_idx]"
+            "sinusoidal_positions requires positional args: ref position_ids [theta offset padding_idx mode]"
         )
     ref = model._read_tensor_input(args[0], env)
     position_ids = model._read_tensor_input(args[1], env)
@@ -169,6 +192,7 @@ def interpret(
     padding_idx = _resolve_int_or_none(
         model, _arg_or_default(args, 4, None), env, symbols, field="padding_idx"
     )
+    mode = _resolve_mode(model, _arg_or_default(args, 5, None), env, symbols)
     out = model._require_name(node_spec.get("_bind"), field="sinusoidal_positions._bind")
     env[out] = _build_sinusoidal_positions(
         ref,
@@ -176,6 +200,7 @@ def interpret(
         theta=theta,
         offset=(2 if offset is None else offset),
         padding_idx=padding_idx,
+        mode=mode,
     )
 
 
@@ -190,19 +215,21 @@ def compile(
 ) -> list[str]:
     del node_path_var, scope_var
     args = _raw_args(node_spec)
-    if len(args) < 2 or len(args) > 5:
+    if len(args) < 2 or len(args) > 6:
         raise ValueError(
-            "sinusoidal_positions requires positional args: ref position_ids [theta offset padding_idx]"
+            "sinusoidal_positions requires positional args: ref position_ids [theta offset padding_idx mode]"
         )
     ref = emitter._read_env_var(env, str(args[0]))
     pos = emitter._read_env_var(env, str(args[1]))
     theta_expr = emitter._expr_code(_arg_or_default(args, 2, 10000.0), env)
     offset_expr = emitter._expr_code(_arg_or_default(args, 3, 2), env)
     padding_expr = emitter._expr_code(_arg_or_default(args, 4, None), env)
+    mode_expr = emitter._expr_code(_arg_or_default(args, 5, None), env)
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
     theta_var = emitter._fresh("sinpos_theta")
     offset_var = emitter._fresh("sinpos_offset")
     padding_var = emitter._fresh("sinpos_padding_idx")
+    mode_var = emitter._fresh("sinpos_mode")
     d_var = emitter._fresh("sinpos_d")
     half_var = emitter._fresh("sinpos_half")
     pos_var = emitter._fresh("sinpos_pos")
@@ -227,13 +254,20 @@ def compile(
         f"{indent}{offset_var} = 2 if {offset_var} is None else int({offset_var})",
         f"{indent}{padding_var} = {padding_expr}",
         f"{indent}{padding_var} = None if {padding_var} is None else int({padding_var})",
+        f"{indent}{mode_var} = {mode_expr}",
+        f"{indent}{mode_var} = 'legacy' if {mode_var} is None else str({mode_var}).strip().lower()",
+        f"{indent}if {mode_var} not in ('legacy', '', 'rope'):",
+        f"{indent}    raise ValueError('sinusoidal_positions.mode must be one of: legacy, rope, or null')",
         f"{indent}{d_var} = int({ref}.shape[-1])",
         f"{indent}{half_var} = int({d_var} // 2)",
         f"{indent}if {half_var} < 1:",
         f"{indent}    raise ValueError('sinusoidal_positions requires ref last dim >= 2')",
         f"{indent}{pos_var} = {pos}.to(torch.float32) + float({offset_var})",
         f"{indent}{freq_idx} = torch.arange({half_var}, dtype=torch.float32, device={ref}.device)",
-        f"{indent}{inv_freq} = torch.exp((-torch.log(torch.tensor({theta_var}, dtype=torch.float32, device={ref}.device)) * {freq_idx}) / float(max(1, {half_var} - 1)))",
+        f"{indent}if {mode_var} == 'rope':",
+        f"{indent}    {inv_freq} = 1.0 / ({theta_var} ** ({freq_idx} / float(max(1, {half_var}))))",
+        f"{indent}else:",
+        f"{indent}    {inv_freq} = torch.exp((-torch.log(torch.tensor({theta_var}, dtype=torch.float32, device={ref}.device)) * {freq_idx}) / float(max(1, {half_var} - 1)))",
         f"{indent}{angles} = {pos_var}.unsqueeze(-1) * {inv_freq}.view(1, 1, {half_var})",
         f"{indent}{sin_part} = torch.sin({angles})",
         f"{indent}{cos_part} = torch.cos({angles})",
@@ -248,7 +282,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "Any", "Any", "Any", "Any"),
+    "args": ("Any", "Any", "Any", "Any", "Any", "Any"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": ("Tensor",),
 }

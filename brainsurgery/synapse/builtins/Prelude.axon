@@ -49,8 +49,8 @@ expand x ?shape=null = _expand x shape
 arange :: Tensor -> ?Int -> ?Int -> IdxTensor
 arange x ?start=0 ?end=null = _arange x start end
 
-sinusoidal_positions :: Tensor -> Tensor -> ?Float -> ?Int -> ?Int -> Tensor
-sinusoidal_positions ref position_ids ?theta=10000.0 ?offset=2 ?padding_idx=null = _sinusoidal_positions ref position_ids theta offset padding_idx
+sinusoidal_positions :: Tensor -> Tensor -> ?Float -> ?Int -> ?Int -> ?String -> Tensor
+sinusoidal_positions ref position_ids ?theta=10000.0 ?offset=2 ?padding_idx=null ?mode=null = _sinusoidal_positions ref position_ids theta offset padding_idx mode
 
 cast :: Tensor -> ?String -> Tensor
 cast x ?dtype=null = _cast x dtype
@@ -84,6 +84,9 @@ repeat x ?repeats=2 ?dim=1 = _repeat x repeats dim
 
 mul :: Tensor[B,T,D] -> Tensor[B,T,D] -> Tensor[B,T,D]
 mul = _mul
+
+concat :: Tensor -> Tensor -> ?Int -> Tensor
+concat x y ?dim=-1 = _concat x y dim=dim
 
 matmul :: Tensor -> Tensor -> Tensor
 matmul = _matmul
