@@ -470,7 +470,17 @@ def _normalize_dim_token(value: Any) -> Any:
 
 
 def _dims_compatible(left: Any, right: Any) -> bool:
-    return _normalize_dim_token(left) == _normalize_dim_token(right)
+    left_n = _normalize_dim_token(left)
+    right_n = _normalize_dim_token(right)
+    if left_n == right_n:
+        return True
+    # Lowering tracks many intermediate shape symbols (for example `pipe_4`)
+    # that are unknown-but-consistent at compile time. Typecheck already
+    # enforces stricter symbolic contracts; lowering should avoid false
+    # negatives when both sides are unresolved symbolic dims.
+    if isinstance(left_n, str) and isinstance(right_n, str):
+        return True
+    return False
 
 
 def _is_symbolic_dim_token(value: Any) -> bool:

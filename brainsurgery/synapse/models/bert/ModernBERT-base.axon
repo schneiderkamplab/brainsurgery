@@ -26,7 +26,7 @@ modernbert_layer x i pos_ids attn_mask = do
     v <- reshape_heads v heads=H
     full <- (FULL_EVERY <= 0) or ((i % FULL_EVERY) == 0)
     theta <- full ? THETA_FULL : THETA_LOCAL
-    q, k <- rope_pair q k position_ids=pos_ids theta=theta
+    q, k <- rope_pair_base q k pos_ids theta
     mask <- if full then bidirectional_mask q k padding_mask=attn_mask else bidirectional_mask q k window=LOCAL_WIN padding_mask=attn_mask
     return attention q k v mask=mask causal=false eager=true |> merge_heads |> linear@Wo dim=D bias=false
   x <- x + a

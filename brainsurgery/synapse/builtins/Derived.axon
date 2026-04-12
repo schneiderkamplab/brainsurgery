@@ -112,7 +112,7 @@ rope_rotate_half_basic x = do
   return concat (0 - x2) x1 dim=-1
 
 
-rope_apply_basic :: Tensor[B,H,S,R] -> Tensor[B,S] -> Float -> Tensor[B,H,S,R]
+rope_apply_basic :: Tensor[B,H,S,R] -> Tensor[B,SM] -> Float -> Tensor[B,H,S,R]
 rope_apply_basic x pos_ids theta = do
   ref <- slice x dim=1 start=0 end=1 |> reshape shape=[B, S, R]
   emb <- sinusoidal_positions ref pos_ids theta=theta offset=0 padding_idx=null mode="rope"
@@ -123,10 +123,10 @@ rope_apply_basic x pos_ids theta = do
   return (x * cos) + ((rope_rotate_half_basic x) * sin)
 
 
-rope_pair_basic :: Tensor[B,H,S,HD] -> Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> (Tensor[B,H,S,HD], Tensor[B,H,S,HD])
-rope_pair_basic q k pos_ids theta = do
-  q_rot <- rope_apply_basic q pos_ids theta
-  k_rot <- rope_apply_basic k pos_ids theta
+rope_pair_base_basic :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> ?Float -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
+rope_pair_base_basic q k position_ids ?theta=10000.0 = do
+  q_rot <- rope_apply_basic q position_ids theta
+  k_rot <- rope_apply_basic k position_ids theta
   return q_rot, k_rot
 
 

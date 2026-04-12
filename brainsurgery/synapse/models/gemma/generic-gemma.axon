@@ -32,7 +32,7 @@ gemma_block x pos_ids attn_mask past_kv = do
     q <- linear@q_proj xn dim=D |> reshape_heads heads=H
     k <- linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
     v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA
+    q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k repeats=(H / KVH)
     v <- repeat v repeats=(H / KVH)

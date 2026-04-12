@@ -69,7 +69,7 @@ qwen3_moe_block x pos_ids attn_mask past_kv layer_idx = do
     q <- linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H |> head_rms@q_norm
     k <- linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> head_rms@k_norm
     v <- linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA
+    q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k repeats=(H / KVH)
     v <- repeat v repeats=(H / KVH)

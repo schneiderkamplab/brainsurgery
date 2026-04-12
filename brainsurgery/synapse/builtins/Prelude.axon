@@ -1,6 +1,7 @@
 import Derived (
   merge_heads_basic,
   position_ids_basic,
+  rope_pair_base_basic,
   reshape_head_basic
 )
 
@@ -75,6 +76,9 @@ position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = position_ids_basic x
 
 rope_pair :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
 rope_pair = _rope_pair
+
+rope_pair_base :: Tensor[B,HQ,T,HD] -> Tensor[B,HK,T,HD] -> Tensor[B,SM] -> ?Float -> (Tensor[B,HQ,T,HD], Tensor[B,HK,T,HD])
+rope_pair_base q k position_ids ?theta=10000.0 = rope_pair_base_basic q k position_ids theta
 
 linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
 linear_position_bias = _linear_position_bias

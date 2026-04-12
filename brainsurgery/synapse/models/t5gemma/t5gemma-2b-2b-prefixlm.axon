@@ -42,7 +42,7 @@ t5gemma_encoder_block x i pos_ids attention_mask = do
     q <- linear@q_proj xn dim=QD_ENC bias=false |> reshape_heads heads=H_ENC
     k <- linear@k_proj xn dim=KVD_ENC bias=false |> reshape_heads heads=KVH_ENC
     v <- linear@v_proj xn dim=KVD_ENC bias=false |> reshape_heads heads=KVH_ENC
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA_ENC
+    q, k <- rope_pair_base q k pos_ids THETA_ENC
     k <- repeat k repeats=(H_ENC / KVH_ENC)
     v <- repeat v repeats=(H_ENC / KVH_ENC)
     full_attn <- ((i + 1) % ROPE_PERIOD_ENC) == 0
@@ -66,7 +66,7 @@ t5gemma_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_atte
     q <- linear@q_proj xn dim=QD_DEC bias=false |> reshape_heads heads=H_DEC
     k <- linear@k_proj xn dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
     v <- linear@v_proj xn dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA_DEC
+    q, k <- rope_pair_base q k pos_ids THETA_DEC
     k <- repeat k repeats=(H_DEC / KVH_DEC)
     v <- repeat v repeats=(H_DEC / KVH_DEC)
     full_attn <- ((i + 1) % ROPE_PERIOD_DEC) == 0
