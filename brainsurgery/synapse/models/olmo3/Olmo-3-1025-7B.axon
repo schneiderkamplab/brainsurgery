@@ -30,7 +30,7 @@ olmo3_block x i pos_ids attn_mask past_kv = do
     q <- linear@q_proj x dim=(H * HD) |> rmsnorm@q_norm eps=EPS cast_float=true |> reshape_heads heads=H
     k <- linear@k_proj x dim=(KVH * HD) |> rmsnorm@k_norm eps=EPS cast_float=true |> reshape_heads heads=KVH
     v <- linear@v_proj x dim=(KVH * HD) |> reshape_heads heads=KVH
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE beta_fast=ROPE_BETA_FAST beta_slow=ROPE_BETA_SLOW original_context=ROPE_CONTEXT
+    q, k <- rope_pair_yarn q k pos_ids THETA ROPE_SCALE ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k repeats=(H / KVH)
     v <- repeat v repeats=(H / KVH)

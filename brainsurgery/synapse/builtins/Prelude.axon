@@ -13,6 +13,14 @@ import Derived (
 linear :: @Path -> Tensor -> ?Int -> ?Bool -> ?Bool -> ?Int -> ?Path -> ?Path -> Tensor
 linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=null ?bias_path=null = _linear@path x dim bias transpose expert weight_path bias_path
 
+param :: Path -> Tensor
+param path = _param path
+
+param_scale :: Tensor -> Path -> Tensor
+param_scale x scale = do
+  s <- param scale |> cast_like x
+  return mul x s
+
 embedding :: @Path -> Tensor -> ?Int -> ?Float -> Tensor
 embedding@path x ?dim=null ?scale=null = _embedding@path x dim scale
 
@@ -84,9 +92,6 @@ attention = _attention
 
 position_ids :: TokenIds[B,T] -> ?Tensor[B,SM] -> ?Int -> ?Int -> Tensor[B,T]
 position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = position_ids_basic x attn_mask=attn_mask past_length=past_length pad_fill=pad_fill
-
-rope_pair :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
-rope_pair = _rope_pair
 
 rope_pair_base :: Tensor[B,HQ,T,HD] -> Tensor[B,HK,T,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,T,HD], Tensor[B,HK,T,HD])
 rope_pair_base q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null ?interleaved=false = rope_pair_base_basic q k position_ids theta scale_factor partial_rotary_factor interleaved

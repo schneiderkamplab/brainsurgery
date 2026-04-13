@@ -99,7 +99,7 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
   h <- h1 + h2
   h <- rms@post_feedforward_layernorm h
   x <- x + h
-  x <- param_scale x scale="@layer_scalar"
+  x <- param_scale x scale=@layer_scalar
   return x, new_kv
 
 gemma4_moe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

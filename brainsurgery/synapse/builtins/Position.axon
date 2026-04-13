@@ -1,9 +1,6 @@
 position_ids :: TokenIds[B,T] -> ?Tensor[B,T] -> Tensor[B,T]
 position_ids = _position_ids
 
-rope_pair :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
-rope_pair = _rope_pair
-
 linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
 linear_position_bias = _linear_position_bias
 
