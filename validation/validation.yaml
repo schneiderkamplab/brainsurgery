@@ -2,79 +2,135 @@ inputs:  # Define input checkpoints to load before transforms execute.
   - models/test/gpt2  # Use local GPT-2 test checkpoint as the primary model alias.
 output: { path: models/test/validation, shard: 100MB }  # Save final model output to models/test with 100MB shard size.
 transforms:  # Ordered transform pipeline; each item runs sequentially.
+
+  # transform_set
   - set: {}  # Print current runtime flags and verify set command works with empty payload.
   - set: { dry-run: false, preview: false, verbose: false }  # Force deterministic runtime flags for repeatable validation.
+
+  # transform_help_diff
   - help: diff  # Smoke-test help lookup for the diff transform.
+
+  # transform_dump_compact
   - dump: { target: ["*all"], format: compact }  # Smoke-test compact dump formatting across loaded aliases.
 
+  # transform_prefixes_list
   - prefixes: { mode: list }  # Confirm prefix registry can be listed.
+
+  # transform_prefixes_add + transform_zeroes + assert_shape + assert_iszero
   - prefixes: { mode: add, alias: scratch }  # Add a scratch alias to validate alias lifecycle operations.
   - zeroes: { target: scratch::z, shape: [4] }  # Create a zero-initialized tensor in scratch alias.
-  - ones: { target: scratch::o, shape: [4] }  # Create a one-initialized tensor in scratch alias.
-  - rand: { target: scratch::r, shape: [4], distribution: uniform, low: 0.1, high: 0.2, seed: 7 }  # Create deterministic random tensor in scratch alias.
   - assert: { shape: { of: scratch::z, is: [4] } }  # Verify zero tensor has expected shape.
-  - assert: { shape: { of: scratch::o, is: [4] } }  # Verify ones tensor has expected shape.
-  - assert: { shape: { of: scratch::r, is: [4] } }  # Verify random tensor has expected shape.
   - assert: { iszero: scratch::z }  # Verify zero tensor values are all zeros.
+
+  # transform_ones + assert_shape + assert_not_iszero
+  - ones: { target: scratch::o, shape: [4] }  # Create a one-initialized tensor in scratch alias.
+  - assert: { shape: { of: scratch::o, is: [4] } }  # Verify ones tensor has expected shape.
   - assert: { not: { iszero: scratch::o } }  # Verify ones tensor is not all zeros.
+
+  # transform_rand + assert_shape + assert_not_iszero
+  - rand: { target: scratch::r, shape: [4], distribution: uniform, low: 0.1, high: 0.2, seed: 7 }  # Create deterministic random tensor in scratch alias.
+  - assert: { shape: { of: scratch::r, is: [4] } }  # Verify random tensor has expected shape.
   - assert: { not: { iszero: scratch::r } }  # Verify random tensor is not all zeros.
+
+  # transform_prefixes_rename + assert_exists
   - prefixes: { mode: rename, from: scratch, to: scratch2 }  # Validate alias rename semantics.
   - assert: { exists: scratch2::z }  # Confirm tensor remains accessible under renamed alias.
+
+  # transform_prefixes_remove
   - prefixes: { mode: remove, alias: scratch2 }  # Validate alias removal semantics.
+
+  # transform_prefixes_add (again) + transform_zeroes (again) + assert_iszero
   - prefixes: { mode: add, alias: scratch2 }  # Recreate alias so subsequent tests can use it.
   - zeroes: { target: scratch2::z2, shape: [1] }  # Recreate a simple tensor in recreated alias.
   - assert: { iszero: scratch2::z2 }  # Confirm recreated alias writes are valid.
 
+  # transform_copy (seed tensors)
   - copy: { from: "ln_f.weight::[:8]", to: demo.x }  # Seed demo.x with a stable source slice.
   - copy: { from: "ln_f.weight::[:8]", to: demo.y }  # Seed demo.y from same source for controlled comparisons.
+
+  # transform_scale_ (prepare expected target)
   - scale_: { target: demo.y, by: 2.0 }  # Convert demo.y into 2*x expected target for arithmetic checks.
+
+  # transform_copy (pre-create arithmetic destinations)
   - copy: { from: demo.x, to: demo.sum }  # Pre-create add destination because add writes into existing tensor.
   - copy: { from: demo.x, to: demo.diff }  # Pre-create subtract destination because subtract writes into existing tensor.
   - copy: { from: demo.x, to: demo.prod }  # Pre-create multiply destination because multiply writes into existing tensor.
+
+  # transform_add + assert_equal
   - add: { from_a: demo.x, from_b: demo.x, to: demo.sum }  # Compute sum = x + x.
   - assert: { equal: { left: demo.sum, right: demo.y } }  # Verify sum matches expected doubled tensor.
+
+  # transform_subtract + assert_equal
   - subtract: { from_a: demo.sum, from_b: demo.x, to: demo.diff }  # Compute diff = sum - x.
   - assert: { equal: { left: demo.diff, right: demo.x } }  # Verify subtraction restores original x.
+
+  # transform_multiply
   - multiply: { from_a: demo.x, from_b: demo.x, to: demo.prod }  # Compute elementwise product for multiply coverage.
+
+  # transform_add_ + assert_equal
   - add_: { from: demo.x, to: demo.diff }  # In-place add x into diff.
   - assert: { equal: { left: demo.diff, right: demo.y } }  # Verify in-place add produced doubled tensor.
+
+  # transform_subtract_ + assert_equal
   - subtract_: { from: demo.x, to: demo.diff }  # In-place subtract x from diff.
   - assert: { equal: { left: demo.diff, right: demo.x } }  # Verify in-place subtract returns to x.
+
+  # transform_scale + assert_equal
   - scale: { from: demo.x, to: demo.scaled, by: 2.0 }  # Create scaled copy using out-of-place scale.
   - assert: { equal: { left: demo.scaled, right: demo.y } }  # Verify out-of-place scale output.
+
+  # transform_scale_ + assert_equal
   - scale_: { target: demo.scaled, by: 0.5 }  # In-place rescale by reciprocal factor.
   - assert: { equal: { left: demo.scaled, right: demo.x } }  # Verify in-place scale roundtrip.
 
+  # transform_fill_constant + assert_not_iszero
   - fill: { from: demo.x, to: demo.fill_const, mode: constant, value: 1.0 }  # Fill new tensor with constant value using source shape.
   - assert: { not: { iszero: demo.fill_const } }  # Verify constant fill is not all zeros.
+
+  # transform_fill_rand + assert_shape
   - fill: { from: demo.x, to: demo.fill_rand, mode: rand, distribution: normal, mean: 0.0, std: 0.1, seed: 11 }  # Fill new tensor with deterministic normal samples.
   - assert: { shape: { of: demo.fill_rand, is: [8] } }  # Verify random fill preserves source shape.
+
+  # transform_fill_tensor_
   - fill_: { target: demo.fill_const, mode: tensor, values: [0, 1, 2, 3, 4, 5, 6, 7] }  # In-place tensor-value fill for explicit content.
+
+  # transform_clamp + transform_clamp_
   - clamp: { from: demo.fill_const, to: demo.clamped, min: 2.0, max: 5.0 }  # Out-of-place clamp into bounded range.
   - clamp_: { target: demo.clamped, min: 3.0, max: 4.0 }  # In-place tighten clamped range.
+
+  # transform_cast + assert_dtype
   - cast: { from: demo.clamped, to: demo.cast16, dtype: float16 }  # Out-of-place cast to float16.
   - assert: { dtype: { of: demo.cast16, is: float16 } }  # Verify cast dtype is float16.
+
+  # transform_cast_ + assert_dtype
   - cast_: { target: demo.cast16, to: float32 }  # In-place cast back to float32.
   - assert: { dtype: { of: demo.cast16, is: float32 } }  # Verify in-place cast dtype is float32.
 
+  # transform_split + transform_concat + assert_equal
   - split: { from: demo.fill_const, to: [demo.left, demo.right], sizes: [4, 4] }  # Split tensor into two equal parts.
   - concat: { from: [demo.left, demo.right], to: demo.rebuilt, dim: 0 }  # Re-concatenate split outputs.
   - assert: { equal: { left: demo.rebuilt, right: demo.fill_const } }  # Verify split+concat roundtrip.
+
+  # transform_reshape + transform_reshape_ + transform_permute + transform_matmul + assert_shape
   - reshape: { from: demo.fill_const, to: demo.two_by_four, shape: [2, 4] }  # Out-of-place reshape to matrix form.
   - reshape_: { target: demo.two_by_four, shape: [4, 2] }  # In-place reshape to transposed dimensions.
   - permute: { from: demo.two_by_four, to: demo.permuted, order: [1, 0] }  # Permute dimensions to prepare matrix multiply.
   - matmul: { from_a: demo.two_by_four, from_b: demo.permuted, to: demo.matmul }  # Matrix multiply two compatible tensors.
   - assert: { shape: { of: demo.matmul, is: [4, 4] } }  # Verify matmul result shape.
 
+  # transform_copy + transform_move + assert_exists + assert_not_exists
   - copy: { from: "ln_f.weight::[:8]", to: demo.move_src }  # Create source tensor for move test.
   - move: { from: demo.move_src, to: demo.move_dst }  # Move tensor to new name.
   - assert: { exists: demo.move_dst }  # Verify destination exists after move.
   - assert: { not: { exists: demo.move_src } }  # Verify source removed after move.
+
+  # transform_copy + transform_assign + assert_equal
   - copy: { from: demo.x, to: demo.assign_src }  # Create source tensor for assign test.
   - copy: { from: demo.y, to: demo.assign_dst }  # Create destination tensor for assign overwrite.
   - assign: { from: demo.assign_src, to: demo.assign_dst }  # Overwrite destination values from source.
   - assert: { equal: { left: demo.assign_src, right: demo.assign_dst } }  # Verify assign produced equal tensors.
 
+  # transform_copy + transform_phlora_ + transform_copy + transform_phlora + shape/iszero asserts
   - copy: { from: "h.0.attn.c_proj.weight::[:4,:4]", to: demo.matrix.weight }  # Seed 2D matrix for PHLoRA tests.
   - phlora_: { target: demo.matrix.weight, rank: 2 }  # In-place low-rank reconstruction on matrix.
   - copy: { from: demo.matrix.weight, to: demo.matrix.source.weight }  # Duplicate reconstructed matrix for split PHLoRA path.
@@ -85,13 +141,17 @@ transforms:  # Ordered transform pipeline; each item runs sequentially.
   - assert: { not: { iszero: demo.matrix.a.weight } }  # Verify A factor carries non-zero signal.
   - assert: { not: { iszero: demo.matrix.b.weight } }  # Verify B factor carries non-zero signal.
 
+  # transform_save_tensor + transform_load_tensor + assert_equal
   - save: { path: /tmp/brainsurgery_validation_x.safetensors, target: demo.x }  # Save single tensor to safetensors artifact.
   - load: { path: /tmp/brainsurgery_validation_x.safetensors, to: demo.x_loaded, format: safetensors }  # Reload saved tensor into new destination.
   - assert: { equal: { left: demo.x_loaded, right: demo.x } }  # Verify save/load roundtrip identity.
+
+  # transform_load_alias_from_state_dict + transform_diff_aliases + assert_equal_regex_map
   - load: { path: models/test/gpt2, alias: orig }  # Load pristine checkpoint under separate alias.
   - diff: { mode: aliases, left_alias: model, right_alias: orig }  # Diff full alias namespaces for reporting.
   - assert: { equal: { left: "orig::(.+)", right: "\\1" } }  # Assert every orig tensor equals corresponding model tensor.
 
+  # transform_execute (nested)
   - execute:  # Validate nested execution path using inline transform list.
       transforms:  # Nested transforms to execute atomically inside execute command.
         - copy: { from: "model::ln_f.weight::[:8]", to: model::demo.exec.base }  # Seed execute-local base tensor with explicit alias.
@@ -100,11 +160,15 @@ transforms:  # Ordered transform pipeline; each item runs sequentially.
         - add: { from_a: model::demo.exec.base, from_b: model::demo.exec.base, to: model::demo.exec.sum }  # Compute nested sum.
         - assert: { equal: { left: model::demo.exec.double, right: model::demo.exec.sum } }  # Verify nested execute arithmetic.
 
+  # transform_copy + transform_delete + assert_not_exists
   - copy: { from: demo.x, to: demo.to_delete }  # Create tensor explicitly for delete validation.
   - delete: { target: demo.to_delete }  # Delete one known tensor.
   - assert: { not: { exists: demo.to_delete } }  # Verify deleted tensor is absent.
+
+  # transform_delete (regex cleanup)
   - delete: { target: "demo\\..+" }  # Delete all remaining demo namespace artifacts.
   - delete: { target: "orig::(.+)" }  # Delete all tensors from orig alias.
   - delete: { target: "scratch2::(.+)" }  # Delete all tensors from scratch2 alias.
 
+  # transform_exit
   - exit: {}  # End execution loop explicitly; keep as the final transform.
