@@ -53,7 +53,7 @@ deepseek_v3_attn x pos_ids attn_mask past_kv = do
     kv <- linear@kv_b_proj kv_latent dim=KVPROJ bias=false |> reshape_heads heads=H
     k_nope, v <- split kv sizes=[QKNOPE, VHD]
     k_pe <- reshape_heads k_pe_base heads=1 |> repeat repeats=H
-    q_pe, k_pe <- rope_pair q_pe k_pe position_ids=pos_ids theta=THETA interleaved=true scale_factor=ROPE_SCALE beta_fast=ROPE_BETA_FAST beta_slow=ROPE_BETA_SLOW mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM original_context=ROPE_CONTEXT
+    q_pe, k_pe <- rope_pair_yarn q_pe k_pe pos_ids THETA ROPE_SCALE ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM interleaved=true
     q_full <- concat q_nope q_pe dim=-1
     k_full <- concat k_nope k_pe dim=-1
     k_all, v_all, new_kv <- Cache.update past_kv k_full v

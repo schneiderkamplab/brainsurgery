@@ -46,7 +46,7 @@ gemma4_apply_per_layer_input x per_layer_inputs i = do
 
 gemma4_shared_qk :: Tensor -> Tensor -> Tensor[B,S] -> Bool -> (Tensor, Tensor)
 gemma4_shared_qk q k pos_ids full = do
-  q_rot, _ <- rope_pair q q position_ids=pos_ids theta=(full ? THETA_FULL : THETA_LOCAL) scale_factor=(full ? ROPE_SCALE_FULL : 1.0) rope_mode=(full ? "proportional" : "") partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0)
+  q_rot, _ <- rope_pair_proportional q q pos_ids theta=(full ? THETA_FULL : THETA_LOCAL) scale_factor=(full ? ROPE_SCALE_FULL : 1.0) partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0)
   return q_rot, k
 
 gemma4_e_block :: Tensor[B,S,D] -> Tensor -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> ?Tensor -> ?Tensor -> ?Tensor -> ?Tensor -> ?Bool -> (Tensor[B,S,D], ?CacheLayer, ?Tensor, ?Tensor, ?Tensor, ?Tensor)
@@ -63,7 +63,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
   a, new_kv, shared_k, shared_v <- scope@self_attn do
     q <- linear@q_proj xn dim=q_dim bias=false |> reshape_heads heads=H |> rmsnorm@q_norm dim=hd cast_float=true
     k, v <- if shared_layer then (full ? (shared_full_k, shared_full_v) : (shared_sliding_k, shared_sliding_v)) else gemma4_kv xn kv_dim hd
-    q, k <- shared_layer ? (gemma4_shared_qk q k pos_ids full) : (rope_pair q k position_ids=pos_ids theta=theta scale_factor=(full ? ROPE_SCALE_FULL : 1.0) rope_mode=(full ? "proportional" : "") partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0))
+    q, k <- shared_layer ? (gemma4_shared_qk q k pos_ids full) : (rope_pair_proportional q k pos_ids theta=theta scale_factor=(full ? ROPE_SCALE_FULL : 1.0) partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0))
     k, v, new_kv <- if shared_layer then (k, v, null) else Cache.update past_kv k v
     shared_k <- k
     shared_v <- v

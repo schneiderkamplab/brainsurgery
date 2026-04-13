@@ -46,7 +46,7 @@ mistral3_block x pos_ids attn_mask past_kv = do
     q <- linear@q_proj xn dim=D |> reshape_heads heads=H
     k <- linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
     v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_FACTOR beta_fast=ROPE_BETA_FAST beta_slow=ROPE_BETA_SLOW original_context=ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM
+    q, k <- rope_pair_yarn q k pos_ids THETA ROPE_FACTOR ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM
     q_scale <- mistral3_query_scale pos_ids
     q <- q * q_scale
     k, v, new_kv <- Cache.update past_kv k v

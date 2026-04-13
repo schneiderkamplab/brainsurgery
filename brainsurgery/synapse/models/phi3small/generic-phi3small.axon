@@ -52,7 +52,7 @@ phi3small_block x i pos_ids attn_mask past_kv = do
   a, new_kv <- scope@self_attn do
     qkv <- linear@query_key_value xn dim=(QD + KVD + KVD) bias=true
     q, k, v <- split_qkv_grouped qkv heads=H kv_heads=KVH
-    q, k <- HAS_LONGROPE ? (rope_pair q k position_ids=pos_ids theta=THETA rope_mode="longrope" original_context=ROPE_ORIGINAL_CONTEXT max_context=ROPE_MAX_CONTEXT long_factor=ROPE_LONG_FACTOR short_factor=ROPE_SHORT_FACTOR long_mscale=ROPE_LONG_MSCALE short_mscale=ROPE_SHORT_MSCALE inv_freq_dtype="bfloat16") : (rope_pair q k position_ids=pos_ids theta=THETA inv_freq_dtype="bfloat16")
+    q, k <- HAS_LONGROPE ? (rope_pair_longrope q k pos_ids THETA ROPE_ORIGINAL_CONTEXT ROPE_MAX_CONTEXT ROPE_LONG_FACTOR ROPE_SHORT_FACTOR long_mscale=ROPE_LONG_MSCALE short_mscale=ROPE_SHORT_MSCALE) : (rope_pair_base q k pos_ids theta=THETA)
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k repeats=(H / KVH)
     v <- repeat v repeats=(H / KVH)

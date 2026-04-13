@@ -44,7 +44,7 @@ phimoe_block x pos_ids attn_mask past_kv = do
     k <- linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
     v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
     q, k <- HAS_LONGROPE
-      ? (rope_pair q k position_ids=pos_ids theta=THETA rope_mode=ROPE_MODE original_context=ROPE_ORIGINAL_CONTEXT max_context=ROPE_MAX_CONTEXT long_factor=ROPE_LONG_FACTOR short_factor=ROPE_SHORT_FACTOR attention_factor=ROPE_ATTENTION_FACTOR)
+      ? (rope_pair_longrope q k pos_ids THETA ROPE_ORIGINAL_CONTEXT ROPE_MAX_CONTEXT ROPE_LONG_FACTOR ROPE_SHORT_FACTOR attention_factor=ROPE_ATTENTION_FACTOR)
       : (rope_pair_base q k pos_ids THETA)
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k repeats=(H / KVH)

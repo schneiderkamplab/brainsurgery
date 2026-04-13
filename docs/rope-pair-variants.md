@@ -110,22 +110,21 @@ If you want, I can implement these in `Derived.axon` next as concrete modules pl
 
 ## Current Deprecated `rope_pair` Coverage vs Existing Derived Variants
 
-Based on current model call sites that still use deprecated `rope_pair` directly.
+Snapshot from current `brainsurgery/synapse/models/**/*.axon` call sites.
 
-Total remaining deprecated `rope_pair` rows: 39.
+Total `rope_pair` call lines currently present: 3.
 
-| Semantic group (remaining deprecated) | Rows | Files | Covered by existing derived as-is? | Safest extension target |
+- 3 are direct deprecated-only `rope_pair` lines.
+
+### Remaining Deprecated Patterns
+
+| Semantic group (remaining deprecated) | Rows | Files | Covered by existing derived as-is? | Recommended migration target |
 |---|---:|---:|---|---|
-| YaRN beta+mscale | 11 | 11 | No | `rope_pair_freq_scale_basic` |
-| Proportional scaled + partial rotary (Gemma4-style) | 10 | 7 | No | `rope_pair_base_basic` (`rope_mode=proportional` + partial) |
-| LongRoPE | 6 | 6 | No | `rope_pair_freq_scale_basic` |
-| LongRoPE + partial rotary | 3 | 3 | No | `rope_pair_freq_scale_basic` (+ `partial_rotary_factor`) |
-| LongRoPE + mscale | 3 | 3 | No | `rope_pair_freq_scale_basic` |
-| YaRN beta scaling | 3 | 3 | No | `rope_pair_freq_scale_basic` |
-| HF-YaRN (`rope_mode=hf_yarn`) | 3 | 3 | No | `rope_pair_freq_scale_basic` |
+| YaRN beta scaling (OLMo3 style, no mscale kwargs) | 3 | 3 | Partially (`rope_pair_yarn_basic` exists but not parity-matched for this profile) | Tune/add OLMo3-safe `rope_pair_yarn_basic` path |
 
-Recent grooming in this pass:
-- migrated base-compatible remnants to `rope_pair_base` (GLM MoE fallback, Phi-4 non-longrope branch, DeepSeek-V1 base)
-- migrated Llama4 freq-split path to `rope_pair_freq_scale` with `?interleaved`
+### Files Still Containing Deprecated `rope_pair`
 
-Summary: remaining deprecated sites are now all in unsupported variant families (LongRoPE/YaRN/Gemma4-proportional); no remaining plain base/freq-split cases.
+#### YaRN beta (OLMo3 style)
+- `brainsurgery/synapse/models/olmo3/Olmo-3-1025-7B.axon`
+- `brainsurgery/synapse/models/olmo3/Olmo-3-1125-32B.axon`
+- `brainsurgery/synapse/models/olmo3/generic-olmo3.axon`

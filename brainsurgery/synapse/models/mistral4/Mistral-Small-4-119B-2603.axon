@@ -68,7 +68,7 @@ mistral4_attn x pos_ids attn_mask past_kv = do
     kv <- linear@kv_b_proj kv_latent dim=(H * (QKNOPE + VHD)) bias=false |> reshape_heads heads=H
     k_pass, v <- split kv sizes=[QKNOPE, VHD]
     k_rot <- reshape_heads k_rot_base heads=1 |> repeat repeats=H
-    q_rot, k_rot <- rope_pair q_rot k_rot position_ids=pos_ids theta=THETA interleaved=true scale_factor=ROPE_FACTOR beta_fast=ROPE_BETA_FAST beta_slow=ROPE_BETA_SLOW original_context=ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM
+    q_rot, k_rot <- rope_pair_yarn q_rot k_rot pos_ids THETA ROPE_FACTOR ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM interleaved=true
     q <- concat q_pass q_rot dim=-1
     k <- concat k_pass k_rot dim=-1
     q_scale <- mistral4_query_scale pos_ids

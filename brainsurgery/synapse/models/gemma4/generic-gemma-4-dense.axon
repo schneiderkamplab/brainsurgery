@@ -76,7 +76,7 @@ gemma4_dense_block x i pos_ids attn_mask past_kv = do
       reshape_heads heads=H |>
       rmsnorm@q_norm dim=hd cast_float=true
     k, v <- if full then gemma4_kv_shared xn kv_dim kv_heads hd else gemma4_kv_separate xn kv_dim kv_heads hd
-    q, k <- rope_pair q k position_ids=pos_ids theta=theta scale_factor=(full ? ROPE_SCALE_FULL : 1.0) rope_mode=(full ? "proportional" : "") partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0)
+    q, k <- rope_pair_proportional q k pos_ids theta=theta scale_factor=(full ? ROPE_SCALE_FULL : 1.0) partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0)
     k, v, new_kv <- Cache.update past_kv k v
     k <- repeat k repeats=(H / kv_heads)
     v <- repeat v repeats=(H / kv_heads)

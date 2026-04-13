@@ -2,7 +2,11 @@ import Derived (
   merge_heads_basic,
   position_ids_basic,
   rope_pair_base_basic,
+  rope_pair_proportional_basic,
   rope_pair_freq_scale_basic,
+  rope_pair_longrope_basic,
+  rope_pair_hf_yarn_basic,
+  rope_pair_yarn_basic,
   reshape_head_basic
 )
 
@@ -57,6 +61,12 @@ sinusoidal_positions ref position_ids ?theta=10000.0 ?offset=2 ?padding_idx=null
 cast :: Tensor -> ?String -> Tensor
 cast x ?dtype=null = _cast x dtype
 
+cast_like :: Tensor -> Tensor -> Tensor
+cast_like x ref = _cast_like x ref
+
+tensor_like :: Any -> Tensor -> ?String -> Tensor
+tensor_like value ref ?dtype=null = _tensor_like value ref dtype
+
 cumsum :: Tensor -> ?Int -> Tensor
 cumsum x ?dim=-1 = _cumsum x dim
 
@@ -81,8 +91,20 @@ rope_pair = _rope_pair
 rope_pair_base :: Tensor[B,HQ,T,HD] -> Tensor[B,HK,T,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,T,HD], Tensor[B,HK,T,HD])
 rope_pair_base q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null ?interleaved=false = rope_pair_base_basic q k position_ids theta scale_factor partial_rotary_factor interleaved
 
+rope_pair_proportional :: Tensor[B,HQ,T,HD] -> Tensor[B,HK,T,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> (Tensor[B,HQ,T,HD], Tensor[B,HK,T,HD])
+rope_pair_proportional q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 = rope_pair_proportional_basic q k position_ids theta scale_factor partial_rotary_factor
+
 rope_pair_freq_scale :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Int -> ?Bool -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
 rope_pair_freq_scale q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context ?interleaved=false = rope_pair_freq_scale_basic q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context interleaved
+
+rope_pair_longrope :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> Tensor[B,SM] -> Float -> Int -> Int -> Any -> Any -> ?Float -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
+rope_pair_longrope q k position_ids theta original_context max_context long_factor short_factor ?attention_factor=null ?long_mscale=null ?short_mscale=null ?partial_rotary_factor=null ?interleaved=false = rope_pair_longrope_basic q k position_ids theta original_context max_context long_factor short_factor attention_factor long_mscale short_mscale partial_rotary_factor interleaved
+
+rope_pair_yarn :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Int -> ?Float -> ?Float -> ?Bool -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
+rope_pair_yarn q k position_ids theta scale_factor beta_fast beta_slow original_context ?mscale=null ?mscale_all_dim=null ?interleaved=false = rope_pair_yarn_basic q k position_ids theta scale_factor beta_fast beta_slow original_context mscale mscale_all_dim interleaved
+
+rope_pair_hf_yarn :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Int -> ?Float -> ?Bool -> ?Bool -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD])
+rope_pair_hf_yarn q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context ?attention_factor=1.0 ?truncate=true ?interleaved=false = rope_pair_hf_yarn_basic q k position_ids theta scale_factor low_freq_factor high_freq_factor original_context attention_factor truncate interleaved
 
 linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
 linear_position_bias = _linear_position_bias

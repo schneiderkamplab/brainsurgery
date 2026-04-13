@@ -39,7 +39,7 @@ gpt_oss_block x i pos_ids attn_mask past_kv = do
     q <- linear@q_proj xn dim=QD bias=true |> reshape_heads heads=H
     k <- linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
     v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
-    q, k <- rope_pair q k position_ids=pos_ids theta=THETA scale_factor=ROPE_SCALE low_freq_factor=ROPE_LOW_FREQ high_freq_factor=ROPE_HIGH_FREQ original_context=ROPE_CONTEXT attention_factor=ROPE_ATTN_FACTOR rope_mode=hf_yarn truncate=false
+    q, k <- rope_pair_hf_yarn q k pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT attention_factor=ROPE_ATTN_FACTOR truncate=false
     k_ctx, v_ctx, new_kv <- Cache.update past_kv k v
     k_ctx <- repeat k_ctx repeats=(H / KVH)
     v_ctx <- repeat v_ctx repeats=(H / KVH)
