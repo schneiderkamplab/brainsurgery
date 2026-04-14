@@ -1,8 +1,11 @@
 import Activations silu
 import Math (mul)
 
-unsqueeze :: Tensor -> ?Int -> Tensor
-unsqueeze x ?dim=0 = _unsqueeze x dim
+unsqueeze :: Tensor -> Int -> Tensor
+unsqueeze x dim = _unsqueeze x dim
+
+unsqueeze1 :: Tensor -> Tensor
+unsqueeze1 x = _unsqueeze x 1
 
 select :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Int -> (Tensor[N,D], Tensor[N], Tensor[N], Tensor[N])
 select hidden topk_scores topk_indices expert = do
@@ -23,7 +26,7 @@ grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts ?gate_up_weight
   routed <- hidden * 0.0
   for e <- [0..experts) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
-    sel_scale <- unsqueeze sel_scores dim=1
+    sel_scale <- unsqueeze1 sel_scores
     x_in <- pre_scale_input ? (x_sel * sel_scale) : x_sel
     gate_up <- linear@w1 x_in dim=null bias=false transpose=transpose expert=e weight_path=gate_up_weight
     gate, up <- chunk gate_up parts=2

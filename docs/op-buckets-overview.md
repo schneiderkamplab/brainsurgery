@@ -12,7 +12,6 @@ Rule update: direct primitive calls are now enforced as `_xyz` syntax and only f
 | --- | --- | --- | ---: | ---: | ---: | --- |
 | gelu | alias | Keep as-is. | 0 | 67 | 0 |  |
 | gelu_new | alias | Keep as-is. | 0 | 55 | 0 |  |
-| gelu_fast | alias | Keep as-is. | 0 | 2 | 0 |  |
 | gelu_pytorch_tanh | alias | Keep as-is. | 0 | 52 | 0 |  |
 | gegelu | wrapper | Keep as-is. | 0 | 3 | 0 |  |
 | relu | alias | Keep as-is. | 0 | 46 | 0 |  |
@@ -52,48 +51,39 @@ Rule update: direct primitive calls are now enforced as `_xyz` syntax and only f
 | --- | --- | --- | ---: | ---: | ---: | --- |
 | reshape_head_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
 | merge_heads_basic | derived | Keep as-is. | 10 | 272 | 0 |  |
-| mask_to_additive_basic | derived | Keep as-is. | 20 | 526 | 0 |  |
-| position_ids_basic_masked | derived | Keep as-is. | 10 | 263 | 0 |  |
-| position_ids_basic_nomask | derived | Keep as-is. | 10 | 263 | 0 |  |
-| position_ids_basic | derived | Keep as-is. | 10 | 266 | 0 |  |
-| causal_mask_basic_nomask | derived | Keep as-is. | 20 | 526 | 0 |  |
-| causal_mask_basic_masked | derived | Keep as-is. | 10 | 263 | 0 |  |
-| causal_mask_basic | derived | Keep as-is. | 0 | 4 | 0 |  |
-| bidirectional_mask_basic_nomask | derived | Keep as-is. | 20 | 526 | 0 |  |
-| bidirectional_mask_basic_masked | derived | Keep as-is. | 10 | 263 | 0 |  |
-| bidirectional_mask_basic | derived | Keep as-is. | 0 | 5 | 0 |  |
+| position_ids_basic_masked | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 0 | 0 | Delegates to `Positions.position_ids_basic_masked`. |
+| position_ids_basic_nomask | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 0 | 0 | Delegates to `Positions.position_ids_basic_nomask`. |
+| position_ids_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 5 | 0 | 0 | Delegates to `Positions.position_ids_basic`. |
 | attention_basic | derived | Keep as-is. | 0 | 9 | 0 |  |
 | attention_basic_hf | derived | Deprecated; remove. | 0 | 0 | 0 |  |
-| rope_rotate_half_noninterleaved_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_rotate_half_interleaved_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_rotate_half_basic | derived | Keep as-is. | 40 | 1052 | 0 |  |
-| rope_expand_half_basic | derived | Keep as-is. | 40 | 1052 | 0 |  |
-| rope_expand_half_interleaved_basic | derived | Keep as-is. | 40 | 1052 | 0 |  |
-| rope_apply_raw_basic | derived | Keep as-is. | 30 | 789 | 0 |  |
-| rope_apply_prefix_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_apply_with_partial_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_apply_basic | derived | Keep as-is. | 20 | 526 | 0 |  |
-| position_ids_scale_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_pair_base_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_pair_proportional_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_inv_freq_base_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_inv_freq_freq_scale_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_apply_inv_freq_basic | derived | Keep as-is. | 100 | 2630 | 0 |  |
-| rope_apply_inv_freq_prefix_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_apply_inv_freq_with_partial_basic | derived | Keep as-is. | 20 | 526 | 0 |  |
-| rope_pair_freq_scale_basic | derived | Keep as-is. | 10 | 264 | 0 |  |
-| rope_max_pos_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_longrope_use_long_basic | derived | Keep as-is. | 20 | 526 | 0 |  |
-| rope_inv_freq_longrope_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_attention_factor_longrope_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_pair_longrope_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_inv_freq_yarn_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_attention_factor_yarn_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_pair_yarn_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_inv_freq_hf_yarn_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| rope_pair_hf_yarn_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| relative_position_buckets_basic | derived | Keep as-is. | 10 | 263 | 0 |  |
-| relative_position_bias_basic | derived | Keep as-is. | 0 | 4 | 0 |  |
+| mask_to_additive_basic | wrapper | Compatibility forward; eventually import/use `Masking.*` directly where practical. | 7 | 0 | 0 | Delegates to `Masking.mask_to_additive_basic`. |
+| causal_mask_basic_nomask | wrapper | Compatibility forward; eventually import/use `Masking.*` directly where practical. | 7 | 0 | 0 | Delegates to `Masking.causal_mask_basic_nomask`. |
+| causal_mask_basic_masked | wrapper | Compatibility forward; eventually import/use `Masking.*` directly where practical. | 6 | 0 | 0 | Delegates to `Masking.causal_mask_basic_masked`. |
+| causal_mask_basic | wrapper | Compatibility forward; eventually import/use `Masking.*` directly where practical. | 5 | 7 | 0 | Delegates to `Masking.causal_mask_basic`. |
+| bidirectional_mask_basic_nomask | wrapper | Compatibility forward; eventually import/use `Masking.*` directly where practical. | 7 | 0 | 0 | Delegates to `Masking.bidirectional_mask_basic_nomask`. |
+| bidirectional_mask_basic_masked | wrapper | Compatibility forward; eventually import/use `Masking.*` directly where practical. | 6 | 0 | 0 | Delegates to `Masking.bidirectional_mask_basic_masked`. |
+| bidirectional_mask_basic | wrapper | Compatibility forward; eventually import/use `Masking.*` directly where practical. | 5 | 7 | 0 | Delegates to `Masking.bidirectional_mask_basic`. |
+| position_ids_scale_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 0 | 0 |  |
+| rope_pair_base_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 0 | 0 |  |
+| rope_pair_proportional_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 0 | 0 |  |
+| rope_pair_freq_scale_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 2 | 0 |  |
+| rope_pair_longrope_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 0 | 0 |  |
+| rope_pair_yarn_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 0 | 0 |  |
+| rope_pair_hf_yarn_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 0 | 0 |  |
+| relative_position_buckets_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 6 | 0 | 0 |  |
+| relative_position_bias_basic | wrapper | Compatibility forward; canonical home is now `Positions.axon`. | 5 | 5 | 0 |  |
+
+## Masking.axon
+
+| Op | Type | Suggestion | Use in builtins | Use in models | Use in operators | Comment |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| mask_to_additive_basic | derived | Keep as-is. | 7 | 0 | 0 |  |
+| causal_mask_basic_nomask | derived | Keep as-is. | 7 | 0 | 0 |  |
+| causal_mask_basic_masked | derived | Keep as-is. | 6 | 0 | 0 |  |
+| causal_mask_basic | derived | Keep as-is. | 5 | 7 | 0 |  |
+| bidirectional_mask_basic_nomask | derived | Keep as-is. | 7 | 0 | 0 |  |
+| bidirectional_mask_basic_masked | derived | Keep as-is. | 6 | 0 | 0 |  |
+| bidirectional_mask_basic | derived | Keep as-is. | 5 | 7 | 0 |  |
 
 ## List.axon
 
@@ -139,13 +129,25 @@ Rule update: direct primitive calls are now enforced as `_xyz` syntax and only f
 | root | wrapper | Deprecated; remove after remaining callers (if any) migrate to `has_root`/explicit roots. | 0 | 0 | 0 |  |
 | param_scale | wrapper | Keep as canonical home for parameter scaling. | 0 | 0 | 0 |  |
 
-## Positions.axon (GROOM and integrate all positions stuff + split a new Masking.axon)
+## Positions.axon
 
 | Op | Type | Suggestion | Use in builtins | Use in models | Use in operators | Comment |
 | --- | --- | --- | ---: | ---: | ---: | --- |
 | position_ids | derived | Keep as-is. | 0 | 245 | 0 | Derived from basic ops (`cast/cumsum/where/slice/arange/reshape/expand`). |
+| position_ids_basic_masked | derived | Keep as-is. | 6 | 0 | 0 |  |
+| position_ids_basic_nomask | derived | Keep as-is. | 6 | 0 | 0 |  |
+| position_ids_basic | derived | Keep as-is. | 5 | 0 | 0 |  |
 | linear_position_bias | alias | Deprecated facade; migrate to Prelude/Derived replacements. | 0 | 14 | 0 |  |
-| relative_bias_t5 | alias | Deprecated facade; migrate to `Derived.relative_position_bias_basic` where possible. | 1 | 0 | 0 | Kept for compatibility wrappers. |
+| position_ids_scale_basic | derived | Keep as-is. | 6 | 0 | 0 |  |
+| relative_position_buckets_basic | derived | Keep as-is. | 6 | 0 | 0 |  |
+| relative_position_bias_basic | derived | Keep as-is. | 5 | 5 | 0 |  |
+| rope_pair_base_basic | derived | Keep as-is. | 6 | 0 | 0 |  |
+| rope_pair_proportional_basic | derived | Keep as-is. | 6 | 0 | 0 |  |
+| rope_pair_freq_scale_basic | derived | Keep as-is. | 6 | 2 | 0 |  |
+| rope_pair_longrope_basic | derived | Keep as-is. | 6 | 0 | 0 |  |
+| rope_pair_yarn_basic | derived | Keep as-is. | 6 | 0 | 0 |  |
+| rope_pair_hf_yarn_basic | derived | Keep as-is. | 6 | 0 | 0 |  |
+| relative_bias_t5 | alias | Deprecated facade; migrate to `Positions.relative_position_bias_basic` where possible. | 1 | 0 | 0 | Kept for compatibility wrappers. |
 | relative_bias_disentangled | alias | Keep as wrapper path for DeBERTa until a Derived replacement exists. | 2 | 2 | 0 | Models now call this alias (not primitive form). |
 
 ## Prelude.axon
@@ -186,7 +188,7 @@ Rule update: direct primitive calls are now enforced as `_xyz` syntax and only f
 | rope_pair_yarn | alias | Keep as-is. | 0 | 14 | 0 |  |
 | rope_pair_hf_yarn | alias | Keep as-is. | 0 | 3 | 0 |  |
 | linear_position_bias | alias | Deprecated facade; migrate callers to derived equivalents. | 0 | 14 | 0 |  |
-| relative_bias_t5 | alias | Deprecated facade; prefer `Derived.relative_position_bias_basic`. | 0 | 0 | 0 |  |
+| relative_bias_t5 | alias | Deprecated facade; prefer `Positions.relative_position_bias_basic`. | 0 | 0 | 0 |  |
 | relative_bias_disentangled | alias | Keep as-is until a Derived equivalent exists. | 0 | 2 | 0 |  |
 | repeat | wrapper | Keep as-is. | 0 | 376 | 0 |  |
 | concat | wrapper | Keep as-is. | 74 | 2327 | 0 |  |

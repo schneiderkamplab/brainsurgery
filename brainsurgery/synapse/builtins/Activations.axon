@@ -1,13 +1,10 @@
-import Prelude (param)
+import Params (param)
 
 gelu :: Tensor[B,T,D] -> Tensor[B,T,D]
 gelu = _activations_gelu
 
 gelu_new :: Tensor[B,T,D] -> Tensor[B,T,D]
 gelu_new = _activations_gelu_new
-
-gelu_fast :: Tensor[B,T,D] -> Tensor[B,T,D]
-gelu_fast = _activations_gelu_new
 
 gelu_pytorch_tanh :: Tensor[B,T,D] -> Tensor[B,T,D]
 gelu_pytorch_tanh = _activations_gelu_pytorch_tanh

@@ -4,5 +4,8 @@ has_root root = _params_has_root root
 root :: String -> String
 root preferred = _params_root preferred
 
+param :: Path -> ?Path -> Tensor
+param path ?prefix_path=null = _param path prefix_path=prefix_path
+
 param_scale :: Tensor -> ?Path -> Tensor
 param_scale x ?scale_path=@layer_scalar = x * (_param scale_path)

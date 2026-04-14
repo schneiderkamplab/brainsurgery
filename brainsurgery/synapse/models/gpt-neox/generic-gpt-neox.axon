@@ -1,7 +1,7 @@
 {-# CHECKPOINTS ["EleutherAI/gpt-neox-20b", "EleutherAI/pythia-6.9b", "EleutherAI/pythia-12b"] #-}
 {-# TASK "causal_lm" #-}
 import Config
-import Activations (gelu, gelu_fast)
+import Activations (gelu, gelu_new)
 import Cache past_length
 import Cache
 
@@ -36,7 +36,7 @@ gpt_neox_block x pos_ids attn_mask past_kv = do
   xn2 <- neox_ln@post_attention_layernorm (PAR ? x : x_attn)
   m <- scope@mlp do
     h <- linear@dense_h_to_4h xn2 dim=FFN bias=true
-    h_act <- (ACT == "gelu_fast") ? (gelu_fast h) : (gelu h)
+    h_act <- (ACT == "gelu_fast") ? (gelu_new h) : (gelu h)
     return h_act |> linear@dense_4h_to_h dim=D bias=true
   x <- PAR ? (x + a + m) : (x_attn + m)
   return x, new_kv

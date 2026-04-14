@@ -327,6 +327,7 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
 
     builtins_dir = (Path(__file__).resolve().parents[1] / "builtins").resolve()
     prelude_file = (builtins_dir / "Prelude.axon").resolve()
+    builtin_files = tuple(sorted(path for path in builtins_dir.glob("*.axon") if path.is_file()))
     search_paths = _axon_search_paths()
 
     def _load_file_syntax(file_path: Path, *, namespace: str | None = None) -> None:
@@ -352,6 +353,14 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
 
     if prelude_file.exists() and prelude_file != root:
         _load_file_syntax(prelude_file, namespace="Prelude")
+    # For model/user Axon roots, implicitly load all non-Prelude builtins under
+    # their own namespaces (Math, Activations, Tensor, Positions, ...). This
+    # enables namespaced calls like `Math.exp` without explicit import lines.
+    if builtins_dir not in root.parents:
+        for builtin_file in builtin_files:
+            if builtin_file == prelude_file:
+                continue
+            _load_file_syntax(builtin_file, namespace=builtin_file.stem)
     _load_file_syntax(root)
 
     # Local import avoids a parser<->import_loader import cycle at module import time.

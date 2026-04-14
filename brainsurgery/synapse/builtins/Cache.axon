@@ -24,8 +24,4 @@ append :: ?Cache -> ?CacheLayer -> ?Cache
 append values value = (values == null) ? null : ((value == null) ? values : List.append values value)
 
 past_length :: ?Cache -> Int
-past_length cache = (cache == null)
-  ? 0
-  : do
-    k, _ <- List.index cache 0
-    return (k == null) ? 0 : (size k 2)
+past_length cache = (cache == null) ? 0 : do k, _ <- List.index cache 0; return size k 2

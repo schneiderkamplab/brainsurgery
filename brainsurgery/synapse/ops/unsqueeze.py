@@ -39,8 +39,8 @@ def lowering_infer_metadata(
         return False
     if len(args) < 2:
         return False
-    dim = args[1]
-    if not isinstance(dim, int):
+    dim = _coerce_int_literal(args[1])
+    if dim is None:
         return False
     source_name = str(args[0]).strip()
     source_shape = ctx.tensor_shape.get(source_name)
@@ -78,10 +78,11 @@ def interpret(
         raise ValueError("unsqueeze expects two positional args: tensor, dim")
     src = model._read_tensor_input(raw_args[0], env)
     raw_dim = model._eval_expr(raw_args[1], env, symbols)
-    if isinstance(raw_dim, bool) or not isinstance(raw_dim, int):
+    dim = _coerce_int_literal(raw_dim)
+    if dim is None:
         raise ValueError("unsqueeze.dim must be int")
     out = model._require_name(node_spec.get("_bind"), field="unsqueeze._bind")
-    env[out] = torch.unsqueeze(src, int(raw_dim))
+    env[out] = torch.unsqueeze(src, dim)
 
 
 def compile(
@@ -99,10 +100,29 @@ def compile(
         raise ValueError("unsqueeze expects two positional args: tensor, dim")
     src = emitter._read_env_var(env, str(raw_args[0]))
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
-    raw_dim = raw_args[1]
-    if isinstance(raw_dim, bool) or not isinstance(raw_dim, int):
+    dim = _coerce_int_literal(raw_args[1])
+    if dim is None:
         raise ValueError("unsqueeze.dim must be int")
-    return [f"{indent}{out_var} = torch.unsqueeze({src}, {int(raw_dim)})"]
+    return [f"{indent}{out_var} = torch.unsqueeze({src}, {dim})"]
+
+
+def _coerce_int_literal(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return None
+        if token.startswith("-"):
+            digits = token[1:]
+            if digits.isdigit():
+                return -int(digits)
+            return None
+        if token.isdigit():
+            return int(token)
+    return None
 
 
 LOWERING_TYPE_SIGNATURE = {

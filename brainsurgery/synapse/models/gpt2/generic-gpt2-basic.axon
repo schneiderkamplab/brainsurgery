@@ -5,9 +5,11 @@ import Math
 import Config
 import Activations gelu_new
 import Cache past_length
+import Masking (
+  causal_mask_basic,
+)
 import Derived (
   merge_heads_basic,
-  causal_mask_basic,
   attention_basic,
 )
 

@@ -65,7 +65,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
     q <- linear@q_proj xn dim=q_dim bias=false |> reshape_heads heads=H |> rmsnorm@q_norm dim=hd cast_float=true
     k, v <- if shared_layer then (full ? (shared_full_k, shared_full_v) : (shared_sliding_k, shared_sliding_v)) else gemma4_kv xn kv_dim hd
     q, k <- shared_layer ? (gemma4_shared_qk q k pos_ids full) : (rope_pair_proportional q k pos_ids theta=theta scale_factor=(full ? ROPE_SCALE_FULL : 1.0) partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0))
-    k, v, new_kv <- if shared_layer then (k, v, null) else Cache.update past_kv k v
+    k, v, new_kv <- if shared_layer then (k, v, (k, v)) else Cache.update past_kv k v
     shared_k <- k
     shared_v <- v
     k <- repeat k repeats=(H / KVH)

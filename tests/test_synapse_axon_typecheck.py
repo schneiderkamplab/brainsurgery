@@ -93,12 +93,10 @@ main x = do
 
 def test_typecheck_allows_log_on_int_input_via_numeric_promotion(tmp_path: Path) -> None:
     source = """
-import Math
-
 main :: Tensor[B,S,D] -> Tensor[B,S,D]
 main x = do
   d <- 640
-  s <- log d
+  s <- Math.log d
   return x
 """
     modules = _parse_from_tmp_source(tmp_path, source)
@@ -108,12 +106,10 @@ main x = do
 
 def test_typecheck_allows_floor_on_int_input_via_numeric_promotion(tmp_path: Path) -> None:
     source = """
-import Math
-
 main :: Tensor[B,S,D] -> Tensor[B,S,D]
 main x = do
   d <- 640
-  s <- floor d
+  s <- Math.floor d
   return x
 """
     modules = _parse_from_tmp_source(tmp_path, source)

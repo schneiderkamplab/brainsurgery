@@ -4,9 +4,11 @@ import Math
 
 import Config
 import Activations gelu
+import Masking (
+  bidirectional_mask_basic,
+)
 import Derived (
   merge_heads_basic,
-  bidirectional_mask_basic,
   attention_basic,
 )
 

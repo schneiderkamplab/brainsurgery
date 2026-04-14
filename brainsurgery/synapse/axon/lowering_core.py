@@ -295,7 +295,6 @@ def _const_fold_dim_expr(expr: AxonExpr, ctx: "_LowerCtx", *, allow_bare_name: b
 _IMPLICIT_ACTIVATION_ALIASES: dict[str, tuple[str, int]] = {
     "gelu": ("_activations_gelu", 0),
     "gelu_new": ("_activations_gelu_new", 0),
-    "gelu_fast": ("_activations_gelu_new", 0),
     "gelu_pytorch_tanh": ("_activations_gelu_pytorch_tanh", 0),
     "gegelu": ("_activations_gegelu", 0),
     "relu": ("_activations_relu", 0),
@@ -325,6 +324,7 @@ _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Config",
     "Params",
     "Positions",
+    "Tensor",
     "Derived",
     "Math",
 }
@@ -2535,6 +2535,10 @@ def _new_lower_ctx(
                 continue
             bucket = imported_member_namespaces.setdefault(member, set())
             bucket.add("Prelude")
+    module_namespace = module.name.split(".", 1)[0] if "." in module.name else module.name
+    implicit_builtin_namespaces: set[str] = set()
+    if module_namespace not in _BUILTIN_MODULE_NAMESPACES:
+        implicit_builtin_namespaces = set(_BUILTIN_MODULE_NAMESPACES) - {"Prelude"}
     symbol_values = dict(imported_symbol_values or {})
     if isinstance(module.symbols, dict):
         symbol_values.update(module.symbols)
@@ -2557,7 +2561,7 @@ def _new_lower_ctx(
         tensor_heads=_module_initial_heads(module, returns),
         tensor_shape=_module_initial_shapes(module, returns),
         path_param_names=_module_path_param_names(module),
-        imported_namespaces=set(module.imports) | {"Prelude"},
+        imported_namespaces=set(module.imports) | {"Prelude"} | implicit_builtin_namespaces,
         imported_member_namespaces=imported_member_namespaces,
         prelude_aliases=dict(prelude_aliases or {}),
         primitive_aliases=dict(primitive_aliases or {}),
@@ -2979,6 +2983,15 @@ def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
         return ["weight"]
     if op == "glm4_router":
         return ["weight", "e_score_correction_bias"]
+    if op == "causal_conv1d":
+        return ["weight", "bias"]
+    if op == "mamba_scan":
+        names: list[str] = []
+        if _has_explicit_path_arg("A"):
+            names.append("A")
+        if _has_explicit_path_arg("D"):
+            names.append("D")
+        return names
     raise ValueError(f"unsupported param_base resolution for op {op!r}")
 
 

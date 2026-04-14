@@ -78,7 +78,6 @@ _TYPE_EXPR_CLASSES = (
 _IMPLICIT_ACTIVATION_ALIASES: dict[str, str] = {
     "gelu": "_activations_gelu",
     "gelu_new": "_activations_gelu_new",
-    "gelu_fast": "_activations_gelu_new",
     "gelu_pytorch_tanh": "_activations_gelu_pytorch_tanh",
     "gegelu": "_activations_gegelu",
     "relu": "_activations_relu",
@@ -96,6 +95,7 @@ _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Config",
     "Params",
     "Positions",
+    "Tensor",
     "Derived",
     "Math",
 }
@@ -1980,15 +1980,6 @@ def _call_return_type(
                 member_sig = signatures.get(member_base)
                 if member_sig is not None and member_sig.path_param_count == len(path_parts):
                     return True
-            if "." not in base:
-                matches = [
-                    module_sig
-                    for module_name, module_sig in signatures.items()
-                    if module_name.rsplit(".", 1)[-1] == base
-                    and module_sig.path_param_count == len(path_parts)
-                ]
-                if len(matches) == 1:
-                    return True
         return False
 
     raw_resolved_name = _resolve_unqualified_import_member(raw_callee)
@@ -2021,23 +2012,6 @@ def _call_return_type(
             if member_sig is not None and member_sig.path_param_count == len(callee_paths):
                 call_sig = member_sig
                 callee = member_base
-    if call_sig is None:
-        callee_parts = callee.split("@")
-        callee_base = callee_parts[0]
-        callee_paths = callee_parts[1:]
-        if "." not in callee_base:
-            candidates: list[tuple[str, ModuleSignature]] = []
-            for module_name, module_sig in signatures.items():
-                leaf = module_name.rsplit(".", 1)[-1]
-                if leaf != callee_base:
-                    continue
-                if module_sig.path_param_count != len(callee_paths):
-                    continue
-                candidates.append((module_name, module_sig))
-            if len(candidates) == 1:
-                chosen_name, chosen_sig = candidates[0]
-                call_sig = chosen_sig
-                callee = chosen_name
     if call_sig is not None:
         if len(args) > len(call_sig.params):
             raise _error(

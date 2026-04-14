@@ -38,7 +38,7 @@ attn_core x = do
   k <- repeat k repeats=H / KVH
   v <- linear@self_attn.v_proj x_norm dim=KVH * HD |> reshape_heads heads=KVH
   v <- repeat v repeats=H / KVH
-  a <- _attention q k v scale=SCALE causal=true eager=true |> merge_heads
+  a <- attention_causal_scaled q k v SCALE true |> merge_heads
   a <- linear@self_attn.o_proj a dim=D
   return x + a
 

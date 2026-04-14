@@ -4,12 +4,16 @@ import Math
 
 import Activations relu
 import Config
-import Derived (
-  merge_heads_basic,
+import Masking (
   bidirectional_mask_basic,
   causal_mask_basic,
-  attention_basic,
+)
+import Positions (
   relative_position_bias_basic,
+)
+import Derived (
+  merge_heads_basic,
+  attention_basic,
 )
 
 D = Config.int "d_model" default=512
