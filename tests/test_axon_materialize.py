@@ -109,7 +109,7 @@ def test_generic_materialize_works_for_non_gemma3_with_config_and_params(tmp_pat
                 "import Config",
                 "import Params",
                 "",
-                'CFG = (Config.has "text_config") ? "text_config" : ""',
+                'CFG = (Config.has_key "text_config") ? "text_config" : ""',
                 'ROOT = Params.root "language_model" default=""',
                 'D = Config.int "hidden_size" root=CFG default=16',
                 "",

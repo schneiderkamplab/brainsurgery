@@ -249,7 +249,10 @@ def _is_direct_symbol_default_call(expr: AxonExpr) -> bool:
         "Config.int",
         "Config.float",
         "Config.str",
-        "Config.has",
+        "Config.bool",
+        "Config.list",
+        "Config.has_key",
+        "Config.has_value",
         "Params.root",
         "Params.has_root",
     }
@@ -593,7 +596,29 @@ def _eval_symbol_default_expr(
             if not isinstance(default, str):
                 raise ValueError("Config.str symbol-default call expects string default")
             return default
-        if callee in {"Config.has", "Params.has_root"}:
+        if callee == "Config.bool":
+            default = kw_values.get("default")
+            if default is None:
+                return False
+            if isinstance(default, bool):
+                return default
+            if isinstance(default, str):
+                raw = default.strip().lower()
+                if raw == "true":
+                    return True
+                if raw == "false":
+                    return False
+            raise ValueError("Config.bool symbol-default call expects bool default")
+        if callee == "Config.list":
+            default = kw_values.get("default")
+            if default is None:
+                return []
+            if isinstance(default, list):
+                return default
+            if isinstance(default, tuple):
+                return list(default)
+            raise ValueError("Config.list symbol-default call expects list default")
+        if callee in {"Config.has_key", "Config.has_value", "Params.has_root"}:
             raise ValueError(f"{callee} cannot be resolved as a static symbol default")
         if callee == "Params.root":
             default = kw_values.get("default")

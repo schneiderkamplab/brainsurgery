@@ -26,7 +26,7 @@ EM     = Config.int "moe_intermediate_size" default=2048
 SE     = Config.int "n_shared_experts" default=1
 NG     = Config.int "n_group" default=8
 TKG    = Config.int "topk_group" default=4
-NTP    = Config.value "norm_topk_prob" default=true
+NTP    = Config.bool "norm_topk_prob" default=true
 RSC    = Config.float "routed_scaling_factor" default=2.5
 EPS    = Config.float "rms_norm_eps" default=1e-06
 THETA  = Config.float "rope_theta" default=10000.0

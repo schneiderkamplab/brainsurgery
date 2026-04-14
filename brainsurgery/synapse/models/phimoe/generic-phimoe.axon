@@ -14,8 +14,8 @@ V = Config.int "vocab_size" default=32064
 L = Config.int "num_hidden_layers" default=32
 H = Config.int "num_attention_heads" default=32
 KVH = Config.int "num_key_value_heads" default=8
-HD_RAW = Config.value "head_dim" default=null
-HD = (HD_RAW == null) ? (D / H) : (Config.int "head_dim" default=128)
+HAS_HEAD_DIM = Config.has_value "head_dim"
+HD = HAS_HEAD_DIM ? (Config.int "head_dim" default=128) : (D / H)
 QD = H * HD
 KVD = KVH * HD
 FFN = Config.int "intermediate_size" default=6400
@@ -26,9 +26,9 @@ THETA = Config.float "rope_theta" default=10000.0
 ROPE_MODE = Config.str "rope_type" root="rope_scaling" default=(Config.str "type" root="rope_scaling" default="default")
 ROPE_ORIGINAL_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=(Config.int "original_max_position_embeddings" default=4096)
 ROPE_MAX_CONTEXT = Config.int "max_position_embeddings" default=131072
-ROPE_LONG_FACTOR = Config.value "long_factor" root="rope_scaling" default=[]
-ROPE_SHORT_FACTOR = Config.value "short_factor" root="rope_scaling" default=[]
-HAS_LONGROPE = Config.has "long_factor" root="rope_scaling"
+ROPE_LONG_FACTOR = Config.list "long_factor" root="rope_scaling" default=[]
+ROPE_SHORT_FACTOR = Config.list "short_factor" root="rope_scaling" default=[]
+HAS_LONGROPE = Config.has_key "long_factor" root="rope_scaling"
 ROPE_ATTENTION_FACTOR = Config.float "long_mscale" root="rope_scaling" default=1.0
 WINDOW = Config.int "sliding_window" default=131072
 ROUTER_JITTER = Config.float "router_jitter_noise" default=0.01

@@ -9,7 +9,7 @@ import Cache past_length
 import Cache
 import MoE
 
-CFG = (Config.has "text_config") ? "text_config" : ""
+CFG = (Config.has_key "text_config") ? "text_config" : ""
 ROPE_CFG = (CFG == "") ? "rope_parameters" : "text_config.rope_parameters"
 PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
 

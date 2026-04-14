@@ -10,7 +10,7 @@ import Params
 -- `CFG` selects where textual model settings live in config.json:
 -- - Gemma 3 text-only configs: root keys (CFG = "")
 -- - Gemma 3 multimodal-ish layouts: under `text_config` (CFG = "text_config")
-CFG = (Config.has "text_config") ? "text_config" : ""
+CFG = (Config.has_key "text_config") ? "text_config" : ""
 
 -- Parameter root for checkpoint key lookup.
 -- Some checkpoints namespace everything under `language_model.*`.
@@ -18,7 +18,7 @@ PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
 
 -- Gemma 3 uses either `_sliding_window_pattern` or `sliding_window_pattern`
 -- depending on checkpoint/config exporter version.
-ROPE_PERIOD_KEY = (Config.has "_sliding_window_pattern" root=CFG) ? "_sliding_window_pattern" : "sliding_window_pattern"
+ROPE_PERIOD_KEY = (Config.has_key "_sliding_window_pattern" root=CFG) ? "_sliding_window_pattern" : "sliding_window_pattern"
 
 D = Config.int "hidden_size" root=CFG default=640
 V = Config.int "vocab_size" root=CFG default=262208

@@ -8,7 +8,7 @@ import Activations silu
 import Cache
 import Cache past_length
 
-CFG = (Config.has "text_config") ? "text_config" : ""
+CFG = (Config.has_key "text_config") ? "text_config" : ""
 PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
 
 D = Config.int "hidden_size" root=CFG default=3072
@@ -16,7 +16,7 @@ V = Config.int "vocab_size" root=CFG default=32064
 L = Config.int "num_hidden_layers" root=CFG default=32
 H = Config.int "num_attention_heads" root=CFG default=32
 KVH = Config.int "num_key_value_heads" root=CFG default=32
-HD = (Config.has "head_dim" root=CFG) ? (Config.int "head_dim" root=CFG default=128) : ((D == 5120) ? 128 : 96)
+HD = (Config.has_key "head_dim" root=CFG) ? (Config.int "head_dim" root=CFG default=128) : ((D == 5120) ? 128 : 96)
 QD = H * HD
 KVD = KVH * HD
 FFN = Config.int "intermediate_size" root=CFG default=8192
@@ -25,9 +25,9 @@ THETA = Config.float "rope_theta" root=CFG default=10000.0
 ROPE_MODE = Config.str "type" root="rope_scaling" default=(Config.str "rope_type" root="rope_scaling" default="default")
 ROPE_ORIGINAL_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=(Config.int "original_max_position_embeddings" root=CFG default=4096)
 ROPE_MAX_CONTEXT = Config.int "max_position_embeddings" root=CFG default=4096
-ROPE_LONG_FACTOR = Config.value "long_factor" root="rope_scaling" default=[]
-ROPE_SHORT_FACTOR = Config.value "short_factor" root="rope_scaling" default=[]
-HAS_LONGROPE = Config.has "long_factor" root="rope_scaling"
+ROPE_LONG_FACTOR = Config.list "long_factor" root="rope_scaling" default=[]
+ROPE_SHORT_FACTOR = Config.list "short_factor" root="rope_scaling" default=[]
+HAS_LONGROPE = Config.has_key "long_factor" root="rope_scaling"
 ROPE_ATTENTION_FACTOR = (ROPE_MAX_CONTEXT > ROPE_ORIGINAL_CONTEXT) ? 1.1902380714238083 : 1.0
 WINDOW_LOCAL = Config.int "sliding_window" root=CFG default=2047
 HAS_LM_HEAD = Params.has_root "lm_head"

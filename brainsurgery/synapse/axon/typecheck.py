@@ -87,6 +87,19 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, str] = {
     "swiglu": "_activations_swiglu",
 }
 
+_BUILTIN_MODULE_NAMESPACES: set[str] = {
+    "Prelude",
+    "Activations",
+    "Cache",
+    "List",
+    "MoE",
+    "Config",
+    "Params",
+    "Positions",
+    "Derived",
+    "Math",
+}
+
 _NAMED_LIST_ITEM_TYPES: dict[str, TypeExpr] = {
     "List": TypeAny(),
 }
@@ -1952,6 +1965,35 @@ def _call_return_type(
             return "@".join([prelude_qualified, *path_suffix]) if path_suffix else prelude_qualified
         return name
 
+    def _has_call_signature(name: str) -> bool:
+        if signatures.get(name) is not None:
+            return True
+        if "@" in name:
+            parts = name.split("@")
+            base = parts[0]
+            path_parts = parts[1:]
+            base_sig = signatures.get(base)
+            if base_sig is not None and base_sig.path_param_count == len(path_parts):
+                return True
+            if "." in base:
+                member_base = base.rsplit(".", 1)[1]
+                member_sig = signatures.get(member_base)
+                if member_sig is not None and member_sig.path_param_count == len(path_parts):
+                    return True
+            if "." not in base:
+                matches = [
+                    module_sig
+                    for module_name, module_sig in signatures.items()
+                    if module_name.rsplit(".", 1)[-1] == base
+                    and module_sig.path_param_count == len(path_parts)
+                ]
+                if len(matches) == 1:
+                    return True
+        return False
+
+    raw_resolved_name = _resolve_unqualified_import_member(raw_callee)
+    raw_call_resolves_to_block = _has_call_signature(raw_resolved_name)
+
     callee = _apply_primitive_alias(callee)
     callee = _resolve_unqualified_import_member(callee)
     callee = _apply_primitive_alias(callee)
@@ -2201,6 +2243,30 @@ def _call_return_type(
         return TypeFloat()
 
     raw_base = raw_callee.split("@", 1)[0].strip()
+    op_name_raw = _canonical_primitive_name(raw_callee)
+    primitive_exists = (
+        get_op_lowering_signature(op_name_raw) is not None
+        or get_op_lowering_type_signature(op_name_raw) is not None
+        or get_op_lowering_known_output_arity(op_name_raw) is not None
+    )
+    if primitive_exists and not raw_base.startswith("_") and not raw_call_resolves_to_block:
+        raise _error(
+            module,
+            path,
+            f"direct primitive call must use _xyz syntax, got {raw_base!r}",
+        )
+    if primitive_exists and raw_base.startswith("_"):
+        caller_namespace = (
+            module.name.split(".", 1)[0]
+            if isinstance(module.name, str) and "." in module.name
+            else ""
+        )
+        if caller_namespace not in _BUILTIN_MODULE_NAMESPACES:
+            raise _error(
+                module,
+                path,
+                f"direct primitive call {raw_base!r} is only allowed in builtins (*.axon)",
+            )
     if raw_base == "_linear" and kwargs:
         raise _error(
             module,

@@ -9,9 +9,9 @@ D   = Config.int "hidden_size" default=2048
 V   = Config.int "vocab_size" default=50304
 L   = Config.int "num_hidden_layers" default=24
 H   = Config.int "num_attention_heads" default=32
-FFN_RAW = Config.value "n_inner" default=null
+HAS_N_INNER = Config.has_value "n_inner"
 FFN_INT = Config.int "n_inner" default=0
-FFN = (FFN_RAW == null) ? (4 * D) : ((FFN_INT == 0) ? (4 * D) : FFN_INT)
+FFN = HAS_N_INNER ? ((FFN_INT == 0) ? (4 * D) : FFN_INT) : (4 * D)
 C   = Config.int "max_position_embeddings" default=2048
 falcon_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 falcon_block x attn_mask past_kv = do

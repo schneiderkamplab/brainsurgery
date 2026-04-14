@@ -13,7 +13,7 @@ H = Config.int "n_head" default=16
 FFN = 4 * D
 EPS = Config.float "layer_norm_epsilon" default=1e-05
 MAX_CTX = Config.int "seq_length" default=2048
-POST_LN_RESID = (Config.value "apply_residual_connection_post_layernorm" default=false) == true
+POST_LN_RESID = Config.bool "apply_residual_connection_post_layernorm" default=false
 HAS_LM_HEAD = Params.has_root "lm_head"
 
 bloom_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)

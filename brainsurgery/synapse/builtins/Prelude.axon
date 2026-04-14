@@ -1,6 +1,5 @@
 import Derived (
   merge_heads_basic,
-  position_ids_basic,
   rope_pair_base_basic,
   rope_pair_proportional_basic,
   rope_pair_freq_scale_basic,
@@ -9,15 +8,18 @@ import Derived (
   rope_pair_yarn_basic,
   reshape_head_basic,
 )
+import List
+import Params
+import Positions
 
 linear :: @Path -> Tensor -> ?Int -> ?Bool -> ?Bool -> ?Int -> ?Path -> ?Path -> Tensor
 linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=@weight ?bias_path=@bias = _linear@path x dim bias transpose expert weight_path bias_path
 
-param :: Path -> Tensor
-param path = _param path
+param :: Path -> ?Path -> Tensor
+param path ?prefix_path=null = _param path prefix_path=prefix_path
 
-param_scale :: Tensor -> Path -> Tensor
-param_scale x scale = _param_scale x scale=scale
+param_scale :: Tensor -> ?Path -> Tensor
+param_scale x ?scale_path=@layer_scalar = Params.param_scale x scale_path=scale_path
 
 embedding :: @Path -> Tensor -> ?Int -> ?Float -> Tensor
 embedding@path x ?dim=null ?scale=null = do
@@ -30,7 +32,7 @@ layernorm@path x ?eps=1e-5 ?dim=null ?weight_path=@weight ?bias=true ?bias_path=
 rmsnorm :: @Path -> Tensor -> ?Float -> ?Int -> ?Bool -> ?Bool -> ?Bool -> ?Path -> Tensor
 rmsnorm@path x ?eps=1e-6 ?dim=null ?unit_offset=false ?cast_float=false ?with_scale=true ?scale_path=@weight = do
   y0 <- _rmsnorm@path x eps dim cast_float
-  y <- with_scale ? (_param_scale@path y0 scale=scale_path) : y0
+  y <- with_scale ? (Params.param_scale y0 scale_path=scale_path) : y0
   return ((unit_offset and with_scale) == false) ? y : (y + y0)
 
 split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..S]]
@@ -59,6 +61,12 @@ transpose x ?dim1=1 ?dim2=2 = _transpose x dim1 dim2
 
 reshape :: Any -> ?Any -> Tensor
 reshape x ?shape=null = _reshape x shape
+
+shape :: Tensor -> List[Int]
+shape x = _shape x
+
+size :: Tensor -> Int -> Int
+size x dim = shape x |> List.index dim
 
 expand :: Tensor -> ?List[Dim] -> Tensor
 expand x ?shape=null = _expand x shape
@@ -94,7 +102,7 @@ attention :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,TK,HD] -> Tenso
 attention = _attention
 
 position_ids :: TokenIds[B,T] -> ?Tensor[B,SM] -> ?Int -> ?Int -> Tensor[B,T]
-position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = position_ids_basic x attn_mask=attn_mask past_length=past_length pad_fill=pad_fill
+position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = Positions.position_ids x attn_mask past_length pad_fill
 
 rope_pair_base :: Tensor[B,HQ,T,HD] -> Tensor[B,HK,T,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,T,HD], Tensor[B,HK,T,HD])
 rope_pair_base q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null ?interleaved=false = rope_pair_base_basic q k position_ids theta scale_factor partial_rotary_factor interleaved
@@ -116,6 +124,15 @@ rope_pair_hf_yarn q k position_ids theta scale_factor low_freq_factor high_freq_
 
 linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
 linear_position_bias = _linear_position_bias
+
+relative_bias_t5 :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[1,H,T,TK]
+relative_bias_t5@path q k = Positions.relative_bias_t5@path q k
+
+t5_relative_position_bias :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> ?Int -> ?Int -> ?Bool -> Tensor[1,H,T,TK]
+t5_relative_position_bias@path q k ?num_buckets=32 ?max_distance=128 ?bidirectional=true = Positions.t5_relative_position_bias@path q k num_buckets=num_buckets max_distance=max_distance bidirectional=bidirectional
+
+relative_bias_disentangled :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,TK]
+relative_bias_disentangled@path q k = Positions.relative_bias_disentangled@path q k
 
 repeat :: Tensor[B,KVH,T,HD] -> ?Int -> ?Int -> Tensor[B,H,T,HD]
 repeat x ?repeats=2 ?dim=1 = _repeat x repeats dim
@@ -149,6 +166,9 @@ softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype
 
 topk :: Tensor -> Int -> ?Int -> ?Bool -> ?Bool -> (Tensor, IdxTensor)
 topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted
+
+glm4_router :: @Path -> Tensor -> Int -> ?Int -> ?Int -> ?Bool -> ?Float -> (Tensor, IdxTensor)
+glm4_router@path x top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 = _glm4_router@path x top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor
 
 dtype_value :: Tensor -> String -> Float
 dtype_value x kind = _dtype_value x kind

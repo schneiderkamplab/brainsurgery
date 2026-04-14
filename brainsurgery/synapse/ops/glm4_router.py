@@ -69,7 +69,13 @@ def _read_params(
     for key in ("weight", "e_score_correction_bias"):
         override = local_spec.get(key)
         if isinstance(override, str):
-            params[key] = override
+            token = override.strip()
+            # Lowering can materialize symbolic placeholders like "weight" / "e_score_correction_bias".
+            # Treat those as unresolved and fall back to declared/default param candidates.
+            if token and token != key:
+                params[key] = token
+            elif key not in params:
+                params[key] = _default_param_candidates(key)
         elif key not in params:
             params[key] = _default_param_candidates(key)
     local_spec["_params"] = params

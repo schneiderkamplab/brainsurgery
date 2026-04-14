@@ -5,10 +5,10 @@ from typing import Any
 import torch
 
 OP_NAME = "unsqueeze"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"dim"}
-LOWERING_REQUIRED_KWARGS: set[str] = {"dim"}
-LOWERING_KWARG_KINDS: dict[str, Any] = {"dim": "int"}
+LOWERING_ARITY = (2, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
+LOWERING_REQUIRED_KWARGS: set[str] = set()
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -19,11 +19,13 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
 def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
-    del args, ctx
+    del ctx
     if not isinstance(out, str):
         raise ValueError("unsqueeze requires a single scalar output binding")
-    if "dim" not in kwargs:
-        raise ValueError("unsqueeze requires dim")
+    if kwargs:
+        raise ValueError("unsqueeze does not accept kwargs")
+    if len(args) != 2:
+        raise ValueError("unsqueeze requires exactly two positional args: tensor, dim")
 
 
 def lowering_infer_metadata(
@@ -35,7 +37,9 @@ def lowering_infer_metadata(
 ) -> bool:
     if not isinstance(out, str) or not args:
         return False
-    dim = kwargs.get("dim")
+    if len(args) < 2:
+        return False
+    dim = args[1]
     if not isinstance(dim, int):
         return False
     source_name = str(args[0]).strip()
@@ -68,9 +72,12 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    del node_path, scope, symbols
-    src = model._read_tensor_input(node_spec.get("_args"), env)
-    raw_dim = node_spec.get("dim")
+    del node_path, scope
+    raw_args = node_spec.get("_args")
+    if not isinstance(raw_args, list) or len(raw_args) != 2:
+        raise ValueError("unsqueeze expects two positional args: tensor, dim")
+    src = model._read_tensor_input(raw_args[0], env)
+    raw_dim = model._eval_expr(raw_args[1], env, symbols)
     if isinstance(raw_dim, bool) or not isinstance(raw_dim, int):
         raise ValueError("unsqueeze.dim must be int")
     out = model._require_name(node_spec.get("_bind"), field="unsqueeze._bind")
@@ -87,17 +94,20 @@ def compile(
     indent: str,
 ) -> list[str]:
     del node_path_var, scope_var
-    src = emitter._read_env_var(env, str(node_spec.get("_args")))
+    raw_args = node_spec.get("_args")
+    if not isinstance(raw_args, list) or len(raw_args) != 2:
+        raise ValueError("unsqueeze expects two positional args: tensor, dim")
+    src = emitter._read_env_var(env, str(raw_args[0]))
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
-    raw_dim = node_spec.get("dim")
+    raw_dim = raw_args[1]
     if isinstance(raw_dim, bool) or not isinstance(raw_dim, int):
         raise ValueError("unsqueeze.dim must be int")
     return [f"{indent}{out_var} = torch.unsqueeze({src}, {int(raw_dim)})"]
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any",),
-    "kwargs": dict(LOWERING_KWARG_KINDS),
+    "args": ("Any", "int"),
+    "kwargs": {},
     "returns": ("Tensor",),
 }
 

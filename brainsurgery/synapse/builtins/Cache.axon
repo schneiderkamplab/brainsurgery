@@ -1,5 +1,5 @@
 import List
-import Prelude (concat)
+import Prelude (concat, size)
 
 type CacheLayer = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
 type Cache = List[CacheLayer]
@@ -23,5 +23,9 @@ index values i = (values == null) ? null : List.index values i
 append :: ?Cache -> ?CacheLayer -> ?Cache
 append values value = (values == null) ? null : ((value == null) ? values : List.append values value)
 
-past_length :: ?List[(Tensor[B,H,T,DH], Tensor[B,H,T,DH])] -> Int
-past_length cache = (cache == null) ? 0 : do k, _ <- List.index cache 0; return (k == null) ? 0 : T
+past_length :: ?Cache -> Int
+past_length cache = (cache == null)
+  ? 0
+  : do
+    k, _ <- List.index cache 0
+    return (k == null) ? 0 : (size k 2)

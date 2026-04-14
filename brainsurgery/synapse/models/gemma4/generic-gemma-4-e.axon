@@ -7,7 +7,7 @@ import Cache past_length
 import Config
 import Params
 
-CFG = (Config.has "text_config") ? "text_config" : ""
+CFG = (Config.has_key "text_config") ? "text_config" : ""
 PARAM_ROOT = (Params.has_root "model.language_model") ? "model" : ""
 
 D = Config.int "hidden_size" root=CFG default=5376
@@ -15,11 +15,11 @@ V = Config.int "vocab_size" root=CFG default=262144
 L = Config.int "num_hidden_layers" root=CFG default=60
 H = Config.int "num_attention_heads" root=CFG default=32
 KVH = Config.int "num_key_value_heads" root=CFG default=16
-RAW_GKVH = Config.value "num_global_key_value_heads" root=CFG default=null
-GKVH = (RAW_GKVH == null) ? KVH : (Config.int "num_global_key_value_heads" root=CFG default=4)
+HAS_GLOBAL_KVH = Config.has_value "num_global_key_value_heads" root=CFG
+GKVH = HAS_GLOBAL_KVH ? (Config.int "num_global_key_value_heads" root=CFG default=4) : KVH
 HD = Config.int "head_dim" root=CFG default=256
-RAW_GHD = Config.value "global_head_dim" root=CFG default=null
-GHD = (RAW_GHD == null) ? HD : (Config.int "global_head_dim" root=CFG default=512)
+HAS_GLOBAL_HD = Config.has_value "global_head_dim" root=CFG
+GHD = HAS_GLOBAL_HD ? (Config.int "global_head_dim" root=CFG default=512) : HD
 FFN = Config.int "intermediate_size" root=CFG default=21504
 MOE_FFN = Config.int "moe_intermediate_size" root=CFG default=1408
 PLI = Config.int "hidden_size_per_layer_input" root=CFG default=0
@@ -31,17 +31,17 @@ THETA_FULL = Config.float "rope_parameters.full_attention.rope_theta" root=CFG d
 ROPE_SCALE_FULL = Config.float "rope_parameters.full_attention.factor" root=CFG default=1.0
 ROTARY_PARTIAL_FULL = Config.float "rope_parameters.full_attention.partial_rotary_factor" root=CFG default=0.25
 ROPE_PERIOD = Config.int "sliding_window_pattern" root=CFG default=(USE_DOUBLE_WIDE_MLP ? 5 : 6)
-ATTN_K_EQ_V = (Config.value "attention_k_eq_v" root=CFG default=false) == true
+ATTN_K_EQ_V = Config.bool "attention_k_eq_v" root=CFG default=false
 LOGIT_SOFTCAP = Config.float "final_logit_softcapping" root=CFG default=30.0
 HAS_PLI = PLI > 0
 PER_LAYER_INPUT_SCALE = 0.7071067811865476
 PER_LAYER_PROJ_SCALE = 1.0 / Math.sqrt D
 NUM_KV_SHARED = Config.int "num_kv_shared_layers" root=CFG default=0
-USE_DOUBLE_WIDE_MLP = (Config.value "use_double_wide_mlp" root=CFG default=false) == true
-RAW_TOPK_EXPERTS = Config.value "top_k_experts" root=CFG default=null
-TOPK_EXPERTS = (RAW_TOPK_EXPERTS == null) ? 8 : (Config.int "top_k_experts" root=CFG default=8)
-RAW_NUM_EXPERTS = Config.value "num_experts" root=CFG default=null
-NUM_EXPERTS = (RAW_NUM_EXPERTS == null) ? 128 : (Config.int "num_experts" root=CFG default=128)
+USE_DOUBLE_WIDE_MLP = Config.bool "use_double_wide_mlp" root=CFG default=false
+HAS_TOPK_EXPERTS = Config.has_value "top_k_experts" root=CFG
+TOPK_EXPERTS = HAS_TOPK_EXPERTS ? (Config.int "top_k_experts" root=CFG default=8) : 8
+HAS_NUM_EXPERTS = Config.has_value "num_experts" root=CFG
+NUM_EXPERTS = HAS_NUM_EXPERTS ? (Config.int "num_experts" root=CFG default=128) : 128
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x cast_float=true
@@ -106,7 +106,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
   m <- rms@post_feedforward_layernorm m
   x <- x + m
   x <- gemma4_apply_per_layer_input x per_layer_inputs i
-  x <- param_scale x scale=@layer_scalar
+  x <- param_scale x
   shared_full_k <- (use_cache and (shared_layer == false) and full) ? shared_k : shared_full_k
   shared_full_v <- (use_cache and (shared_layer == false) and full) ? shared_v : shared_full_v
   shared_sliding_k <- (use_cache and (shared_layer == false) and (full == false)) ? shared_k : shared_sliding_k

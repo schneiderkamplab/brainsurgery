@@ -12,14 +12,14 @@ V    = Config.int "vocab_size" default=151936
 L    = Config.int "num_hidden_layers" default=24
 H    = Config.int "num_attention_heads" default=14
 KVH  = Config.int "num_key_value_heads" default=2
-HD_RAW = Config.value "head_dim" default=null
-HD   = (HD_RAW == null) ? (D / H) : (Config.int "head_dim" default=64)
+HAS_HEAD_DIM = Config.has_value "head_dim"
+HD   = HAS_HEAD_DIM ? (Config.int "head_dim" default=64) : (D / H)
 KVD  = KVH * HD
 FFN  = Config.int "intermediate_size" default=4864
 EPS  = Config.float "rms_norm_eps" default=1e-06
 THETA = Config.float "rope_theta" default=1000000.0
 C    = Config.int "max_position_embeddings" default=32768
-TIE  = Config.value "tie_word_embeddings" default=false
+TIE  = Config.bool "tie_word_embeddings" default=false
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS

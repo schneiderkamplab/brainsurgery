@@ -32,7 +32,7 @@ gptj_block x pos_ids attn_mask past_kv = do
     a <- attention q k v mask=mask eager=true |> merge_heads |> linear@out_proj dim=D bias=false
     return a, new_kv
   m <- scope@mlp do
-    return linear@fc_in xn dim=FFN bias=true |> gelu_new fp32_accum=true |> linear@fc_out dim=D bias=true
+    return linear@fc_in xn dim=FFN bias=true |> gelu_new |> linear@fc_out dim=D bias=true
   x <- x + a + m
   return x, new_kv
 

@@ -3,11 +3,11 @@
 
 import Config
 import Params
-import Activations gegelu_limit
+import Activations gegelu
 import Cache
 import Cache past_length
 
-CFG = (Config.has "text_config") ? "text_config" : ""
+CFG = (Config.has_key "text_config") ? "text_config" : ""
 PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
 
 D = Config.int "hidden_size" root=CFG default=4096
@@ -15,7 +15,7 @@ V = Config.int "vocab_size" root=CFG default=100352
 L = Config.int "num_hidden_layers" root=CFG default=32
 H = Config.int "num_attention_heads" root=CFG default=32
 KVH = Config.int "num_key_value_heads" root=CFG default=8
-HD = (Config.has "head_dim" root=CFG) ? (Config.int "head_dim" root=CFG default=128) : 128
+HD = (Config.has_key "head_dim" root=CFG) ? (Config.int "head_dim" root=CFG default=128) : 128
 QD = H * HD
 KVD = KVH * HD
 FFN = Config.int "ff_intermediate_size" root=CFG default=14336
@@ -24,11 +24,11 @@ THETA = Config.float "rope_embedding_base" root=CFG default=1000000.0
 ROPE_MODE = Config.str "type" root="rope_scaling" default=(Config.str "rope_type" root="rope_scaling" default="default")
 ROPE_ORIGINAL_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=(Config.int "original_max_position_embeddings" root=CFG default=8192)
 ROPE_MAX_CONTEXT = Config.int "max_position_embeddings" root=CFG default=8192
-ROPE_LONG_FACTOR = Config.value "long_factor" root="rope_scaling" default=[]
-ROPE_SHORT_FACTOR = Config.value "short_factor" root="rope_scaling" default=[]
+ROPE_LONG_FACTOR = Config.list "long_factor" root="rope_scaling" default=[]
+ROPE_SHORT_FACTOR = Config.list "short_factor" root="rope_scaling" default=[]
 ROPE_LONG_MSCALE = Config.float "long_mscale" root="rope_scaling" default=-1.0
 ROPE_SHORT_MSCALE = Config.float "short_mscale" root="rope_scaling" default=-1.0
-HAS_LONGROPE = Config.has "long_factor" root="rope_scaling"
+HAS_LONGROPE = Config.has_key "long_factor" root="rope_scaling"
 GEGELU_LIMIT = Config.float "gegelu_limit" root=CFG default=20.0
 MUP_ATTN_MULT = Config.float "mup_attn_multiplier" root=CFG default=1.0
 MUP_EMBED_MULT = Config.float "mup_embedding_multiplier" root=CFG default=10.0
@@ -37,7 +37,7 @@ ATTN_SCALE = MUP_ATTN_MULT / HD
 BS_LOCAL_BLOCKS = Config.int "blocksparse_num_local_blocks" root=CFG default=16
 BS_BLOCK_SIZE = Config.int "blocksparse_block_size" root=CFG default=64
 BS_VERT_STRIDE = Config.int "blocksparse_vert_stride" root=CFG default=8
-BS_HOMO_HEAD = (Config.value "blocksparse_homo_head_pattern" root=CFG default=false) == true
+BS_HOMO_HEAD = Config.bool "blocksparse_homo_head_pattern" root=CFG default=false
 WINDOW_LOCAL = BS_LOCAL_BLOCKS * BS_BLOCK_SIZE
 WINDOW_GLOBAL = Config.int "max_position_embeddings" root=CFG default=8192
 DENSE_EVERY = Config.int "dense_attention_every_n_layers" root=CFG default=2
@@ -64,7 +64,7 @@ phi3small_block x i pos_ids attn_mask past_kv = do
   xn <- phi3small_norm@post_attention_layernorm x
   m <- scope@mlp do
     u <- linear@up_proj xn dim=(2 * FFN) bias=true
-    return u |> gegelu_limit limit=GEGELU_LIMIT |> linear@down_proj dim=D bias=true
+    return u |> gegelu limit=GEGELU_LIMIT |> linear@down_proj dim=D bias=true
   return x + m, new_kv
 
 phi3small :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

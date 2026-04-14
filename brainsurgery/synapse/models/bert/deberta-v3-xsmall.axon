@@ -22,7 +22,7 @@ deberta_block x attn_mask = do
     q0 <- linear@self.query_proj x dim=D bias=true |> reshape_heads heads=H
     k <- linear@self.key_proj x dim=D bias=true |> reshape_heads heads=H
     v <- linear@self.value_proj x dim=D bias=true |> reshape_heads heads=H
-    rel_bias <- disentangled_relative_bias@self q0 k rel_embeddings="@@deberta.encoder.rel_embeddings.weight" position_buckets=POS_BUCKETS max_relative_positions=MAX_REL share_att_key=true c2p=true p2c=true query_weight="self.query_proj.weight" query_bias="self.query_proj.bias" key_weight="self.key_proj.weight" key_bias="self.key_proj.bias" apply_rel_layernorm=true rel_norm_weight="@@deberta.encoder.LayerNorm.weight" rel_norm_bias="@@deberta.encoder.LayerNorm.bias" rel_norm_eps=EPS
+    rel_bias <- relative_bias_disentangled@self q0 k rel_embeddings="@@deberta.encoder.rel_embeddings.weight" position_buckets=POS_BUCKETS max_relative_positions=MAX_REL share_att_key=true c2p=true p2c=true query_weight="self.query_proj.weight" query_bias="self.query_proj.bias" key_weight="self.key_proj.weight" key_bias="self.key_proj.bias" apply_rel_layernorm=true rel_norm_weight="@@deberta.encoder.LayerNorm.weight" rel_norm_bias="@@deberta.encoder.LayerNorm.bias" rel_norm_eps=EPS
     q <- q0 * 0.5773502691896257
     pad_bias <- bidirectional_mask q0 k padding_mask=attn_mask
     full_bias <- Math.add rel_bias pad_bias

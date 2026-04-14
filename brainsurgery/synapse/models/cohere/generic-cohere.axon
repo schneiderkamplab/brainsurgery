@@ -13,8 +13,8 @@ V = Config.int "vocab_size" default=256000
 L = Config.int "num_hidden_layers" default=40
 H = Config.int "num_attention_heads" default=32
 KVH = Config.int "num_key_value_heads" default=8
-HD_RAW = Config.value "head_dim" default=null
-HD = (HD_RAW == null) ? (D / H) : (Config.int "head_dim" default=128)
+HAS_HEAD_DIM = Config.has_value "head_dim"
+HD = HAS_HEAD_DIM ? (Config.int "head_dim" default=128) : (D / H)
 QD = H * HD
 KVD = KVH * HD
 FFN = Config.int "intermediate_size" default=14336

@@ -392,17 +392,53 @@ def _eval_expr(
             if not args or any(not _is_number(arg) for arg in args):
                 raise ValueError("max expects numeric arguments")
             return max(_as_number(arg) for arg in args)
-        if callee in {"Config.has", "Config.int", "Config.float", "Config.str", "Config.value"}:
+        if callee == "Config.value":
+            if kwargs:
+                raise ValueError("Config.value does not support kwargs")
+            if len(args) < 1 or len(args) > 3 or not isinstance(args[0], str) or not args[0]:
+                raise ValueError(
+                    "Config.value expects positional arguments: key [, root [, default]]"
+                )
+            key = args[0]
+            if len(args) >= 2:
+                root_raw = args[1]
+                if not isinstance(root_raw, str):
+                    raise ValueError("Config.value root argument must be string")
+                root_str = root_raw
+            else:
+                root_str = ""
+            has_default = len(args) >= 3
+            default_value = args[2] if has_default else None
+            found, value = _expr_config_lookup(config, key, root=root_str)
+            if not found:
+                if not has_default:
+                    full_key = f"{root_str}.{key}" if root_str else key
+                    raise KeyError(f"missing required config key: {full_key}")
+                value = default_value
+            return value
+        if callee in {
+            "Config.has_key",
+            "Config.has_value",
+            "Config.int",
+            "Config.float",
+            "Config.str",
+            "Config.bool",
+            "Config.list",
+        }:
             if len(args) != 1 or not isinstance(args[0], str) or not args[0]:
                 raise ValueError(f"{callee} expects one non-empty string key")
             key = args[0]
             root = kwargs.get("root", "")
             root_str = root if isinstance(root, str) else ""
             found, value = _expr_config_lookup(config, key, root=root_str)
-            if callee == "Config.has":
+            if callee == "Config.has_key":
                 if "default" in kwargs:
-                    raise ValueError("Config.has does not support default")
+                    raise ValueError("Config.has_key does not support default")
                 return bool(found)
+            if callee == "Config.has_value":
+                if "default" in kwargs:
+                    raise ValueError("Config.has_value does not support default")
+                return bool(found) and value is not None
             if not found:
                 if "default" not in kwargs:
                     full_key = f"{root_str}.{key}" if root_str else key
@@ -430,7 +466,23 @@ def _eval_expr(
                 if not isinstance(value, str):
                     raise ValueError("Config.str expected string")
                 return value
-            return value
+            if callee == "Config.bool":
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    raw = value.strip().lower()
+                    if raw == "true":
+                        return True
+                    if raw == "false":
+                        return False
+                raise ValueError("Config.bool expected bool")
+            if callee == "Config.list":
+                if isinstance(value, list):
+                    return value
+                if isinstance(value, tuple):
+                    return list(value)
+                raise ValueError("Config.list expected list")
+            raise ValueError(f"Unsupported config expression call: {callee}")
         if callee in {"Params.has_root", "Params.root"}:
             if len(args) != 1 or not isinstance(args[0], str):
                 raise ValueError(f"{callee} expects one string root argument")

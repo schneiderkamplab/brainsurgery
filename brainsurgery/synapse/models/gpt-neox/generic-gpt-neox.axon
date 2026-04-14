@@ -15,8 +15,8 @@ EPS = Config.float "layer_norm_eps" default=1e-05
 THETA = Config.float "rope_theta" default=10000.0
 ROTARY_PCT = Config.float "rotary_pct" default=0.25
 C = Config.int "max_position_embeddings" default=2048
-PAR = Config.value "use_parallel_residual" default=true
-ACT = Config.value "hidden_act" default="gelu"
+PAR = Config.bool "use_parallel_residual" default=true
+ACT = Config.str "hidden_act" default="gelu"
 
 neox_ln :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 neox_ln@path x = layernorm@path x eps=EPS

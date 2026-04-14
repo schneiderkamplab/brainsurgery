@@ -1,46 +1,20 @@
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import torch
 from torch.nn import functional as F
 
 OP_NAME = "activation"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"fp32_accum", "limit"}
+LOWERING_ARITY = (1, 5)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"fp32_accum": "bool", "limit": "number"}
-
-_XIELU_ALPHA_P_INIT = 0.8
-_XIELU_ALPHA_N_INIT = 0.8
-_XIELU_BETA_INIT = 0.5
-_XIELU_EPS_INIT = -1.0e-6
-_XIELU_ALPHA_P_PARAM_DEFAULT = math.log(math.expm1(_XIELU_ALPHA_P_INIT))
-_XIELU_ALPHA_N_PARAM_DEFAULT = math.log(math.expm1(_XIELU_ALPHA_N_INIT - _XIELU_BETA_INIT))
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
-    del emitter
-    op_name = node_spec.get("_op")
-    return op_name == "activations_xielu"
-
-
-def _resolve_xielu_param(
-    *,
-    model: Any,
-    node_spec: dict[str, Any],
-    node_path: str,
-    param_name: str,
-    default: float,
-    x: torch.Tensor,
-) -> torch.Tensor:
-    target_dtype = x.dtype if x.is_floating_point() else torch.float32
-    param_path = model._infer_param_path(node_spec, node_path=node_path, param_name=param_name)
-    param_value = model._state.get(param_path)
-    if torch.is_tensor(param_value):
-        return param_value.to(device=x.device, dtype=target_dtype)
-    return torch.tensor(default, device=x.device, dtype=target_dtype)
+    del emitter, node_spec
+    return False
 
 
 def lowering_infer_metadata(
@@ -70,13 +44,21 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    x = model._read_tensor_input(node_spec.get("_args"), env)
+    del node_path, scope
+    raw_args = node_spec.get("_args")
+    arg_list = raw_args if isinstance(raw_args, list) else [raw_args]
+    if not arg_list:
+        raise ValueError("activation requires at least one positional arg")
+    x = model._read_tensor_input(arg_list[0], env)
     op_name = node_spec.get("_op")
     if not isinstance(op_name, str) or not op_name.startswith("activations_"):
         raise ValueError("legacy activation node name; use _op: activations_<kind>")
     kind = op_name[len("activations_") :]
     out = model._require_name(node_spec.get("_bind"), field="activation._bind")
-    align_activation_fp32 = bool(node_spec.get("fp32_accum", False))
+    align_activation_fp32 = False
+    if "fp32_accum" in node_spec:
+        raise ValueError("activation primitive does not accept kwargs; use positional args only")
+
     if kind == "gelu_new" or kind == "gelu_pytorch_tanh":
         if (
             align_activation_fp32
@@ -102,7 +84,7 @@ def interpret(
             raise ValueError("gegelu requires even last dimension")
         x_gelu = x[..., ::2]
         x_linear = x[..., 1::2]
-        limit_expr = node_spec.get("limit")
+        limit_expr = arg_list[1] if len(arg_list) >= 2 else None
         limit_value = (
             None if limit_expr is None else float(model._eval_expr(limit_expr, env, symbols))
         )
@@ -151,40 +133,28 @@ def interpret(
     elif kind == "tanh":
         env[out] = torch.tanh(x)
     elif kind == "xielu":
-        alpha_p_param = _resolve_xielu_param(
-            model=model,
-            node_spec=node_spec,
-            node_path=node_path,
-            param_name="alpha_p",
-            default=_XIELU_ALPHA_P_PARAM_DEFAULT,
-            x=x,
-        )
-        alpha_n_param = _resolve_xielu_param(
-            model=model,
-            node_spec=node_spec,
-            node_path=node_path,
-            param_name="alpha_n",
-            default=_XIELU_ALPHA_N_PARAM_DEFAULT,
-            x=x,
-        )
-        beta = _resolve_xielu_param(
-            model=model,
-            node_spec=node_spec,
-            node_path=node_path,
-            param_name="beta",
-            default=_XIELU_BETA_INIT,
-            x=x,
-        )
-        eps = _resolve_xielu_param(
-            model=model,
-            node_spec=node_spec,
-            node_path=node_path,
-            param_name="eps",
-            default=_XIELU_EPS_INIT,
-            x=x,
-        )
-        alpha_p = F.softplus(alpha_p_param)
-        alpha_n = beta + F.softplus(alpha_n_param)
+        if len(arg_list) != 5:
+            raise ValueError("activations_xielu expects exactly 5 positional args")
+
+        def _as_xielu_value(value: Any, *, name: str) -> torch.Tensor:
+            target_dtype = x.dtype if x.is_floating_point() else torch.float32
+            if torch.is_tensor(value):
+                return value.to(device=x.device, dtype=target_dtype)
+            if isinstance(value, (int, float)):
+                return torch.tensor(value, device=x.device, dtype=target_dtype)
+            raise ValueError(
+                f"activations_xielu arg {name} must resolve to tensor/int/float, got {type(value).__name__}"
+            )
+
+        alpha_p_value = model._eval_expr(arg_list[1], env, symbols)
+        alpha_n_value = model._eval_expr(arg_list[2], env, symbols)
+        beta_value = model._eval_expr(arg_list[3], env, symbols)
+        eps_value = model._eval_expr(arg_list[4], env, symbols)
+        alpha_p = F.softplus(_as_xielu_value(alpha_p_value, name="alpha_p"))
+        alpha_n_raw = _as_xielu_value(alpha_n_value, name="alpha_n")
+        beta = _as_xielu_value(beta_value, name="beta")
+        eps = _as_xielu_value(eps_value, name="eps")
+        alpha_n = beta + F.softplus(alpha_n_raw)
         env[out] = torch.where(
             x > 0,
             alpha_p * x * x + beta * x,
@@ -204,6 +174,7 @@ def compile(
     scope_var: str,
     indent: str,
 ) -> list[str]:
+    del node_path_var
     lines: list[str] = []
 
     def assign_out_var(out_name: str) -> str:
@@ -212,7 +183,11 @@ def compile(
     def read(name: str) -> str:
         return emitter._read_env_var(env, name)
 
-    src = read(str(node_spec.get("_args")))
+    raw_args = node_spec.get("_args")
+    arg_list = raw_args if isinstance(raw_args, list) else [raw_args]
+    if not arg_list:
+        raise ValueError("activation requires at least one positional arg")
+    src = read(str(arg_list[0]))
     out_name = str(node_spec.get("_bind"))
     op_name = node_spec.get("_op")
     if not isinstance(op_name, str) or not op_name.startswith("activations_"):
@@ -220,27 +195,16 @@ def compile(
     kind = op_name[len("activations_") :]
     out_var = assign_out_var(out_name)
     relu2_tmp = emitter._fresh("relu2_tmp")
+    if "fp32_accum" in node_spec:
+        raise ValueError("activation primitive does not accept kwargs; use positional args only")
     if kind in {"gelu_new", "gelu_pytorch_tanh"}:
-        if bool(node_spec.get("fp32_accum", False)):
-            lines.append(
-                f"{indent}if {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
-            )
-            lines.append(f"{indent}    _x_fp32 = {src}.float()")
-            lines.append(
-                f"{indent}    {out_var} = (0.5 * _x_fp32 * (1.0 + torch.tanh(0.7978845608028654 * (_x_fp32 + 0.044715 * _x_fp32 * _x_fp32 * _x_fp32)))).to(dtype={src}.dtype)"
-            )
-            lines.append(f"{indent}else:")
-            lines.append(
-                f"{indent}    {out_var} = 0.5 * {src} * (1.0 + torch.tanh(0.7978845608028654 * ({src} + 0.044715 * {src} * {src} * {src})))"
-            )
-        else:
-            lines.append(
-                f"{indent}{out_var} = 0.5 * {src} * (1.0 + torch.tanh(0.7978845608028654 * ({src} + 0.044715 * {src} * {src} * {src})))"
-            )
+        lines.append(
+            f"{indent}{out_var} = 0.5 * {src} * (1.0 + torch.tanh(0.7978845608028654 * ({src} + 0.044715 * {src} * {src} * {src})))"
+        )
     elif kind == "gegelu":
         x_gelu_var = emitter._fresh("gegelu_x_gelu")
         x_linear_var = emitter._fresh("gegelu_x_linear")
-        limit_expr = emitter._expr_code(node_spec.get("limit"), env)
+        limit_expr = emitter._expr_code(arg_list[1] if len(arg_list) >= 2 else None, env)
         limit_var = emitter._fresh("gegelu_limit")
         lines.append(f"{indent}if ({src}.shape[-1] % 2) != 0:")
         lines.append(f"{indent}    raise ValueError('gegelu requires even last dimension')")
@@ -254,33 +218,11 @@ def compile(
         lines.append(
             f"{indent}    {x_linear_var} = torch.where(torch.isinf({x_linear_var}), {x_linear_var}, {x_linear_var}.clamp(min=-float({limit_var}), max=float({limit_var})))"
         )
-        if bool(node_spec.get("fp32_accum", False)):
-            lines.append(
-                f"{indent}if {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
-            )
-            lines.append(f"{indent}    _x_gelu_fp32 = {x_gelu_var}.float()")
-            lines.append(f"{indent}    _x_linear_fp32 = {x_linear_var}.float()")
-            lines.append(
-                f"{indent}    {out_var} = (_x_gelu_fp32 * torch.sigmoid(1.702 * _x_gelu_fp32) * (_x_linear_fp32 + 1.0)).to(dtype={src}.dtype)"
-            )
-            lines.append(f"{indent}else:")
-            lines.append(
-                f"{indent}    {out_var} = {x_gelu_var} * torch.sigmoid(1.702 * {x_gelu_var}) * ({x_linear_var} + 1.0)"
-            )
-        else:
-            lines.append(
-                f"{indent}{out_var} = {x_gelu_var} * torch.sigmoid(1.702 * {x_gelu_var}) * ({x_linear_var} + 1.0)"
-            )
+        lines.append(
+            f"{indent}{out_var} = {x_gelu_var} * torch.sigmoid(1.702 * {x_gelu_var}) * ({x_linear_var} + 1.0)"
+        )
     elif kind == "gelu":
-        if bool(node_spec.get("fp32_accum", False)):
-            lines.append(
-                f"{indent}if {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
-            )
-            lines.append(f"{indent}    {out_var} = F.gelu({src}.float()).to(dtype={src}.dtype)")
-            lines.append(f"{indent}else:")
-            lines.append(f"{indent}    {out_var} = F.gelu({src})")
-        else:
-            lines.append(f"{indent}{out_var} = F.gelu({src})")
+        lines.append(f"{indent}{out_var} = F.gelu({src})")
     elif kind == "relu2":
         lines.append(f"{indent}{relu2_tmp} = F.relu({src})")
         lines.append(f"{indent}{out_var} = {relu2_tmp} * {relu2_tmp}")
@@ -295,96 +237,62 @@ def compile(
     elif kind == "tanh":
         lines.append(f"{indent}{out_var} = torch.tanh({src})")
     elif kind == "xielu":
+        if len(arg_list) != 5:
+            raise ValueError("activations_xielu expects exactly 5 positional args")
         target_dtype = f"({src}.dtype if {src}.is_floating_point() else torch.float32)"
-        alpha_p_path_var = emitter._fresh("xielu_alpha_p_path")
-        alpha_n_path_var = emitter._fresh("xielu_alpha_n_path")
-        beta_path_var = emitter._fresh("xielu_beta_path")
-        eps_path_var = emitter._fresh("xielu_eps_path")
-        alpha_p_param_var = emitter._fresh("xielu_alpha_p_param")
-        alpha_n_param_var = emitter._fresh("xielu_alpha_n_param")
+        alpha_p_input_var = emitter._fresh("xielu_alpha_p_input")
+        alpha_n_input_var = emitter._fresh("xielu_alpha_n_input")
+        beta_input_var = emitter._fresh("xielu_beta_input")
+        eps_input_var = emitter._fresh("xielu_eps_input")
+        alpha_p_value_var = emitter._fresh("xielu_alpha_p")
+        alpha_n_value_var = emitter._fresh("xielu_alpha_n")
         beta_var = emitter._fresh("xielu_beta")
         eps_var = emitter._fresh("xielu_eps")
-        alpha_p_var = emitter._fresh("xielu_alpha_p")
-        alpha_n_var = emitter._fresh("xielu_alpha_n")
-
-        alpha_p_path = emitter._hoisted_param_path(
-            node_spec=node_spec,
-            node_path_var=node_path_var,
-            param_name="alpha_p",
-            lines=lines,
-            indent=indent,
-        )
-        alpha_n_path = emitter._hoisted_param_path(
-            node_spec=node_spec,
-            node_path_var=node_path_var,
-            param_name="alpha_n",
-            lines=lines,
-            indent=indent,
-        )
-        beta_path = emitter._hoisted_param_path(
-            node_spec=node_spec,
-            node_path_var=node_path_var,
-            param_name="beta",
-            lines=lines,
-            indent=indent,
-        )
-        eps_path = emitter._hoisted_param_path(
-            node_spec=node_spec,
-            node_path_var=node_path_var,
-            param_name="eps",
-            lines=lines,
-            indent=indent,
-        )
-
-        lines.append(f"{indent}{alpha_p_path_var} = {alpha_p_path}")
-        lines.append(f"{indent}{alpha_n_path_var} = {alpha_n_path}")
-        lines.append(f"{indent}{beta_path_var} = {beta_path}")
-        lines.append(f"{indent}{eps_path_var} = {eps_path}")
-
-        lines.append(f"{indent}{alpha_p_param_var} = self._state.get({alpha_p_path})")
-        lines.append(f"{indent}if {alpha_p_param_var} is None:")
+        alpha_p_expr = emitter._expr_code(arg_list[1] if len(arg_list) >= 2 else None, env)
+        alpha_n_expr = emitter._expr_code(arg_list[2] if len(arg_list) >= 3 else None, env)
+        beta_expr = emitter._expr_code(arg_list[3] if len(arg_list) >= 4 else None, env)
+        eps_expr = emitter._expr_code(arg_list[4] if len(arg_list) >= 5 else None, env)
+        lines.append(f"{indent}{alpha_p_input_var} = {alpha_p_expr}")
+        lines.append(f"{indent}{alpha_n_input_var} = {alpha_n_expr}")
+        lines.append(f"{indent}{beta_input_var} = {beta_expr}")
+        lines.append(f"{indent}{eps_input_var} = {eps_expr}")
+        lines.append(f"{indent}if torch.is_tensor({alpha_p_input_var}):")
         lines.append(
-            f"{indent}    {alpha_p_param_var} = torch.tensor({_XIELU_ALPHA_P_PARAM_DEFAULT!r}, dtype={target_dtype}, device={src}.device)"
+            f"{indent}    {alpha_p_value_var} = {alpha_p_input_var}.to(device={src}.device, dtype={target_dtype})"
         )
         lines.append(f"{indent}else:")
         lines.append(
-            f"{indent}    {alpha_p_param_var} = {alpha_p_param_var}.to(device={src}.device, dtype={target_dtype})"
+            f"{indent}    {alpha_p_value_var} = torch.tensor({alpha_p_input_var}, dtype={target_dtype}, device={src}.device)"
         )
-
-        lines.append(f"{indent}{alpha_n_param_var} = self._state.get({alpha_n_path})")
-        lines.append(f"{indent}if {alpha_n_param_var} is None:")
+        lines.append(f"{indent}if torch.is_tensor({alpha_n_input_var}):")
         lines.append(
-            f"{indent}    {alpha_n_param_var} = torch.tensor({_XIELU_ALPHA_N_PARAM_DEFAULT!r}, dtype={target_dtype}, device={src}.device)"
+            f"{indent}    {alpha_n_value_var} = {alpha_n_input_var}.to(device={src}.device, dtype={target_dtype})"
         )
         lines.append(f"{indent}else:")
         lines.append(
-            f"{indent}    {alpha_n_param_var} = {alpha_n_param_var}.to(device={src}.device, dtype={target_dtype})"
+            f"{indent}    {alpha_n_value_var} = torch.tensor({alpha_n_input_var}, dtype={target_dtype}, device={src}.device)"
         )
-
-        lines.append(f"{indent}{beta_var} = self._state.get({beta_path})")
-        lines.append(f"{indent}if {beta_var} is None:")
+        lines.append(f"{indent}if torch.is_tensor({beta_input_var}):")
         lines.append(
-            f"{indent}    {beta_var} = torch.tensor({_XIELU_BETA_INIT!r}, dtype={target_dtype}, device={src}.device)"
+            f"{indent}    {beta_var} = {beta_input_var}.to(device={src}.device, dtype={target_dtype})"
         )
         lines.append(f"{indent}else:")
         lines.append(
-            f"{indent}    {beta_var} = {beta_var}.to(device={src}.device, dtype={target_dtype})"
+            f"{indent}    {beta_var} = torch.tensor({beta_input_var}, dtype={target_dtype}, device={src}.device)"
         )
-
-        lines.append(f"{indent}{eps_var} = self._state.get({eps_path})")
-        lines.append(f"{indent}if {eps_var} is None:")
+        lines.append(f"{indent}if torch.is_tensor({eps_input_var}):")
         lines.append(
-            f"{indent}    {eps_var} = torch.tensor({_XIELU_EPS_INIT!r}, dtype={target_dtype}, device={src}.device)"
+            f"{indent}    {eps_var} = {eps_input_var}.to(device={src}.device, dtype={target_dtype})"
         )
         lines.append(f"{indent}else:")
         lines.append(
-            f"{indent}    {eps_var} = {eps_var}.to(device={src}.device, dtype={target_dtype})"
+            f"{indent}    {eps_var} = torch.tensor({eps_input_var}, dtype={target_dtype}, device={src}.device)"
         )
 
-        lines.append(f"{indent}{alpha_p_var} = F.softplus({alpha_p_param_var})")
-        lines.append(f"{indent}{alpha_n_var} = {beta_var} + F.softplus({alpha_n_param_var})")
+        lines.append(f"{indent}{alpha_p_value_var} = F.softplus({alpha_p_value_var})")
+        lines.append(f"{indent}{alpha_n_value_var} = {beta_var} + F.softplus({alpha_n_value_var})")
         lines.append(
-            f"{indent}{out_var} = torch.where({src} > 0, {alpha_p_var} * {src} * {src} + {beta_var} * {src}, (torch.expm1(torch.minimum({src}, {eps_var})) - {src}) * {alpha_n_var} + {beta_var} * {src})"
+            f"{indent}{out_var} = torch.where({src} > 0, {alpha_p_value_var} * {src} * {src} + {beta_var} * {src}, (torch.expm1(torch.minimum({src}, {eps_var})) - {src}) * {alpha_n_value_var} + {beta_var} * {src})"
         )
     else:
         raise ValueError(f"Unsupported activation kind: {kind}")

@@ -1,6 +1,9 @@
 import Activations silu
 import Math (mul)
 
+unsqueeze :: Tensor -> ?Int -> Tensor
+unsqueeze x ?dim=0 = _unsqueeze x dim
+
 select :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Int -> (Tensor[N,D], Tensor[N], Tensor[N], Tensor[N])
 select hidden topk_scores topk_indices expert = do
   selected_hidden, token_idx, topk_pos, selected_scores <- _moe_select hidden topk_scores topk_indices expert=expert

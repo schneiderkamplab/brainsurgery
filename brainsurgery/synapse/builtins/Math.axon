@@ -31,4 +31,4 @@ sqrt :: Float -> Float
 sqrt = _sqrt
 
 clamp :: T -> ?T -> ?T -> T
-clamp x ?min=null ?max=null = _clamp x min=min max=max
+clamp x ?min=null ?max=null = _clamp x min max

@@ -26,31 +26,6 @@ mask_to_additive_basic :: Tensor -> Tensor -> Tensor
 mask_to_additive_basic ref keep = where keep (zeros_like ref) (min_like ref)
 
 
--- === POSITION IDS ===
-position_ids_basic_masked :: TokenIds[B,S] -> Tensor[B,SM] -> Int -> Tensor[B,S]
-position_ids_basic_masked x attn_mask pad_fill = do
-  pos <- cast attn_mask dtype="long" |> cumsum dim=-1
-  pos <- where (eq attn_mask 0) pad_fill (pos - 1)
-  return slice pos dim=-1 start=(SM - S) end=SM
-
-
-
-position_ids_basic_nomask :: TokenIds[B,S] -> Int -> Tensor[B,S]
-position_ids_basic_nomask x past_length = do
-  return arange x start=past_length end=(past_length + S) |>
-    cast dtype="long" |>
-    reshape shape=[1, S] |>
-    expand shape=[B, S]
-
-
-
-position_ids_basic :: TokenIds[B,S] -> ?Tensor[B,SM] -> ?Int -> ?Int -> Tensor[B,S]
-position_ids_basic x ?attn_mask=null ?past_length=0 ?pad_fill=0 = if attn_mask == null then
-    position_ids_basic_nomask x past_length
-  else
-    position_ids_basic_masked x attn_mask pad_fill
-
-
 -- === CAUSAL MASK ===
 causal_mask_basic_nomask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K]
 causal_mask_basic_nomask q k = do

@@ -8,15 +8,15 @@ import Activations silu
 import Cache
 import Cache past_length
 
-CFG = (Config.has "text_config") ? "text_config" : ""
+CFG = (Config.has_key "text_config") ? "text_config" : ""
 
 D = Config.int "hidden_size" root=CFG default=2048
 V = Config.int "vocab_size" root=CFG default=49152
 L = Config.int "num_hidden_layers" root=CFG default=40
 H = Config.int "num_attention_heads" root=CFG default=32
 KVH = Config.int "num_key_value_heads" root=CFG default=8
-HD_RAW = Config.value "head_dim" root=CFG default=null
-HD = (HD_RAW == null) ? (D / H) : (Config.int "head_dim" root=CFG default=64)
+HAS_HEAD_DIM = Config.has_value "head_dim" root=CFG
+HD = HAS_HEAD_DIM ? (Config.int "head_dim" root=CFG default=64) : (D / H)
 QD = H * HD
 KVD = KVH * HD
 FFN = Config.int "intermediate_size" root=CFG default=8192

@@ -6,7 +6,6 @@ import Config
 import Activations gelu
 import Derived (
   merge_heads_basic,
-  position_ids_basic,
   bidirectional_mask_basic,
   attention_basic,
 )
@@ -37,7 +36,7 @@ bert_block x attn_mask = do
 
 bert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 bert input_ids attn_mask = do
-  pos_ids <- position_ids_basic input_ids attn_mask=null past_length=0 pad_fill=1
+  pos_ids <- position_ids input_ids attn_mask=null past_length=0 pad_fill=1
   tok_type_ids <- zeros_like input_ids
   tok <- embedding@bert.embeddings.word_embeddings input_ids dim=D
   pos <- embedding@bert.embeddings.position_embeddings pos_ids dim=D

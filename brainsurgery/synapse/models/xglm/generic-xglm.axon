@@ -17,8 +17,8 @@ HD = D / H
 FFN = Config.int "ffn_dim" default=4096
 EPS = Config.float "layer_norm_eps" default=1e-05
 C = Config.int "max_position_embeddings" default=2048
-ACT = Config.value "activation_function" default="gelu"
-SCALE_EMB = Config.value "scale_embedding" default=true
+ACT = Config.str "activation_function" default="gelu"
+SCALE_EMB = Config.bool "scale_embedding" default=true
 EMB_SCALE = SCALE_EMB ? (Math.sqrt D) : 1.0
 ATTN_SCALE = 1.0 / Math.sqrt HD
 

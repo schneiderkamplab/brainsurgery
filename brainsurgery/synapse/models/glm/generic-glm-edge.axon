@@ -21,10 +21,9 @@ EPS  = Config.float "rms_norm_eps" default=1e-05
 THETA = Config.float "rope_theta" default=10000.0
 C    = Config.int "max_position_embeddings" default=8192
 PROPE = Config.float "partial_rotary_factor" default=1.0
-ATTN_BIAS_RAW = Config.value "attention_bias" default=false
-ATTN_BIAS = ATTN_BIAS_RAW != false
+ATTN_BIAS = Config.bool "attention_bias" default=false
 HAS_LM_HEAD = Params.has_root "lm_head"
-TIE = Config.value "tie_word_embeddings" default=false
+TIE = Config.bool "tie_word_embeddings" default=false
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS

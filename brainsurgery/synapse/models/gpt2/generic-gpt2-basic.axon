@@ -7,7 +7,6 @@ import Activations gelu_new
 import Cache past_length
 import Derived (
   merge_heads_basic,
-  position_ids_basic,
   causal_mask_basic,
   attention_basic,
 )
@@ -35,13 +34,13 @@ gpt2_block x attn_mask past_kv = do
   x <- x + a
   x3 <- layernorm@ln_2 x
   m <- scope@mlp do
-    return linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new fp32_accum=true |> linear@c_proj dim=D bias=true transpose=true
+    return linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new |> linear@c_proj dim=D bias=true transpose=true
   return x + m, new_kv
 
 gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gpt2 input_ids attn_mask past_kv use_cache = do
   tok <- embedding@wte input_ids dim=D
-  pos <- position_ids_basic input_ids attn_mask=attn_mask past_length=(past_length past_kv) pad_fill=PAD_FILL |> embedding@wpe
+  pos <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv) pad_fill=PAD_FILL |> embedding@wpe
   x <- tok + pos
   new_kv <- use_cache ? Cache.init : null
   for@h i <- [0..L) do

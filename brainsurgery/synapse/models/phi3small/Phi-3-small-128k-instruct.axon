@@ -2,7 +2,7 @@
 {-# TASK "causal_lm" #-}
 
 import Activations
-import Activations (gegelu_limit)
+import Activations (gegelu)
 import Cache
 import Cache (past_length)
 
@@ -56,7 +56,7 @@ phi3small_block x i pos_ids attn_mask past_kv = do
   xn <- phi3small_norm@post_attention_layernorm x
   m <- scope@mlp do
     u <- linear@up_proj xn dim=(2 * FFN) bias=true
-    return u |> gegelu_limit limit=GEGELU_LIMIT |> linear@down_proj dim=D bias=true
+    return u |> gegelu limit=GEGELU_LIMIT |> linear@down_proj dim=D bias=true
   return x + m, new_kv
 
 phi3small :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

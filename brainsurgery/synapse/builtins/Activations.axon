@@ -1,3 +1,5 @@
+import Prelude (param)
+
 gelu :: Tensor[B,T,D] -> Tensor[B,T,D]
 gelu = _activations_gelu
 
@@ -10,11 +12,8 @@ gelu_fast = _activations_gelu_new
 gelu_pytorch_tanh :: Tensor[B,T,D] -> Tensor[B,T,D]
 gelu_pytorch_tanh = _activations_gelu_pytorch_tanh
 
-gegelu :: Tensor[B,T,D] -> Tensor[B,T,D]
-gegelu = _activations_gegelu
-
-gegelu_limit :: Tensor[B,T,D] -> Float -> Tensor[B,T,D]
-gegelu_limit x limit = _activations_gegelu x limit=limit
+gegelu :: Tensor[B,T,D] -> ?Float -> Tensor[B,T,D]
+gegelu x ?limit=null = _activations_gegelu x limit
 
 relu :: Tensor[B,T,D] -> Tensor[B,T,D]
 relu = _activations_relu
@@ -34,5 +33,11 @@ silu = _activations_silu
 swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
 swiglu = _activations_swiglu
 
-xielu :: @Path -> Tensor[B,T,D] -> Tensor[B,T,D]
-xielu@path x = _activations_xielu@path x
+xielu :: @Path -> Tensor[B,T,D] -> ?Path -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor[B,T,D]
+xielu@path x ?alpha_p_path="alpha_p" ?alpha_n_path="alpha_n" ?beta_path="beta" ?eps_path="eps" ?prefix_path=null = do
+  prefix <- (prefix_path == null) ? path : prefix_path
+  alpha_p <- param alpha_p_path prefix_path=prefix
+  alpha_n <- param alpha_n_path prefix_path=prefix
+  beta <- param beta_path prefix_path=prefix
+  eps <- param eps_path prefix_path=prefix
+  return _activations_xielu x alpha_p alpha_n beta eps

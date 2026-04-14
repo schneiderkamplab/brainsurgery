@@ -2,11 +2,7 @@ init :: List[_T]
 init = _list_init
 
 index :: List[_T] -> Int -> _T
-index values i = do
-  item <- _list_index values i
-  return item
+index = _list_index
 
 append :: List[_T] -> _T -> List[_T]
-append values value = do
-  out <- _list_append values value
-  return out
+append = _list_append

@@ -19,7 +19,7 @@ FFN  = Config.int "intermediate_size" default=17408
 EPS  = Config.float "rms_norm_eps" default=1e-06
 THETA = Config.float "rope_theta" default=1000000.0
 C    = Config.int "max_position_embeddings" default=40960
-TIE  = Config.value "tie_word_embeddings" default=false
+TIE  = Config.bool "tie_word_embeddings" default=false
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS cast_float=true

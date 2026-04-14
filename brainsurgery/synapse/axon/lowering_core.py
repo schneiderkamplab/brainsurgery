@@ -9,6 +9,7 @@ from ..ops import (
     get_op_lowering_known_output_arity,
     get_op_lowering_normalizer,
     get_op_lowering_signature,
+    get_op_lowering_type_signature,
     get_op_lowering_validator,
 )
 from ..type_inference import annotate_spec_with_block_io_types, infer_block_io_types_from_modules
@@ -323,7 +324,7 @@ _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "MoE",
     "Config",
     "Params",
-    "Position",
+    "Positions",
     "Derived",
     "Math",
 }
@@ -1313,6 +1314,7 @@ def _lower_simple_call(
     ctx: _LowerCtx,
     *,
     guard: str | None = None,
+    enforce_source_primitive_syntax: bool = True,
 ) -> list[dict[str, Any]]:
     callee = callee.strip()
     raw_callee = callee
@@ -1320,13 +1322,31 @@ def _lower_simple_call(
     callee = _rewrite_prelude_alias_callee(callee, kwargs_expr, ctx)
     callee = _rewrite_primitive_alias_callee(callee, kwargs_expr, ctx)
     raw_base = raw_callee.split("@", 1)[0].strip()
-    if raw_base.startswith("_"):
+    op_name_raw = _canonical_op_name(raw_callee)
+    raw_call_resolves_to_block = _resolve_block_call(raw_callee, ctx) is not None
+    primitive_exists = (
+        get_op_lowering_signature(op_name_raw) is not None
+        or get_op_lowering_type_signature(op_name_raw) is not None
+        or get_op_lowering_known_output_arity(op_name_raw) is not None
+    )
+    if (
+        enforce_source_primitive_syntax
+        and primitive_exists
+        and not raw_base.startswith("_")
+        and not raw_call_resolves_to_block
+    ):
+        raise ValueError(f"direct primitive call must use _xyz syntax, got {raw_base!r}")
+    if enforce_source_primitive_syntax and raw_base.startswith("_"):
         caller_namespace = (
             ctx.current_module.split(".", 1)[0]
             if isinstance(ctx.current_module, str) and ctx.current_module
             else ""
         )
-        if "." in (ctx.current_module or "") and caller_namespace not in _BUILTIN_MODULE_NAMESPACES:
+        if (
+            primitive_exists
+            and "." in (ctx.current_module or "")
+            and caller_namespace not in _BUILTIN_MODULE_NAMESPACES
+        ):
             raise ValueError(
                 f"direct primitive call {raw_base!r} is only allowed in builtins (*.axon)"
             )
@@ -2161,6 +2181,7 @@ def _lower_expr(
                 out,
                 ctx,
                 guard=guard,
+                enforce_source_primitive_syntax=False,
             )
         )
         return binary_graph
@@ -2956,6 +2977,8 @@ def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
         return ["alpha_p", "alpha_n", "beta", "eps"]
     if op == "t5_relative_position_bias":
         return ["weight"]
+    if op == "glm4_router":
+        return ["weight", "e_score_correction_bias"]
     raise ValueError(f"unsupported param_base resolution for op {op!r}")
 
 
@@ -3199,6 +3222,20 @@ def _resolve_paths_at_lowering_time(
         if not isinstance(graph, list) or not bindings:
             return
 
+        def _rewrite_bound_exprs(value: Any) -> Any:
+            if isinstance(value, list):
+                return [_rewrite_bound_exprs(item) for item in value]
+            if isinstance(value, dict):
+                expr_kind = value.get("_expr")
+                if expr_kind == "name":
+                    ident = value.get("id")
+                    if isinstance(ident, str):
+                        concrete = bindings.get(ident)
+                        if isinstance(concrete, str) and concrete:
+                            return {"_expr": "string", "value": concrete}
+                return {k: _rewrite_bound_exprs(v) for k, v in value.items()}
+            return value
+
         def _rewrite_token(value: str) -> str:
             token = value.strip()
             for name, concrete in bindings.items():
@@ -3217,6 +3254,10 @@ def _resolve_paths_at_lowering_time(
             _, node_spec = next(iter(item.items()))
             if not isinstance(node_spec, dict):
                 continue
+            rewritten_node = _rewrite_bound_exprs(node_spec)
+            if isinstance(rewritten_node, dict):
+                node_spec.clear()
+                node_spec.update(rewritten_node)
             params = node_spec.get("_params")
             if isinstance(params, dict):
                 rewritten: dict[str, Any] = {}
@@ -3261,6 +3302,14 @@ def _resolve_paths_at_lowering_time(
                     token = _as_concrete_path(raw_value)
                     if token == path_name:
                         node_spec[path_name] = concrete_path
+                if node_spec.get("_op") == "_ir_alias":
+                    alias_src = node_spec.get("_args")
+                    if isinstance(alias_src, str):
+                        concrete_alias = inherited_path_bindings.get(alias_src)
+                        if isinstance(concrete_alias, str) and concrete_alias:
+                            node_spec.pop("_args", None)
+                            node_spec["_op"] = "_ir_expr"
+                            node_spec["value"] = {"_expr": "string", "value": concrete_alias}
 
             param_base = node_spec.get("param_base")
             if isinstance(param_base, str) and param_base in inherited_path_bindings:

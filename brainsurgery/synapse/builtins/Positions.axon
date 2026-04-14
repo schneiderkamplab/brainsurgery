@@ -1,0 +1,32 @@
+position_ids_masked :: TokenIds[B,S] -> Tensor[B,SM] -> Int -> Tensor[B,S]
+position_ids_masked x attn_mask pad_fill = do
+  pos <- cast attn_mask dtype="long" |> cumsum dim=-1
+  pos <- where (eq attn_mask 0) pad_fill (pos - 1)
+  return slice pos dim=-1 start=(SM - S) end=SM
+
+
+position_ids_nomask :: TokenIds[B,S] -> Int -> Tensor[B,S]
+position_ids_nomask x past_length = do
+  return arange x start=past_length end=(past_length + S) |>
+    cast dtype="long" |>
+    reshape shape=[1, S] |>
+    expand shape=[B, S]
+
+
+position_ids :: TokenIds[B,S] -> ?Tensor[B,SM] -> ?Int -> ?Int -> Tensor[B,S]
+position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = if attn_mask == null then
+    position_ids_nomask x past_length
+  else
+    position_ids_masked x attn_mask pad_fill
+
+linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
+linear_position_bias = _linear_position_bias
+
+relative_bias_t5 :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[1,H,T,TK]
+relative_bias_t5@path q k = _t5_relative_position_bias@path q k
+
+t5_relative_position_bias :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> ?Int -> ?Int -> ?Bool -> Tensor[1,H,T,TK]
+t5_relative_position_bias@path q k ?num_buckets=32 ?max_distance=128 ?bidirectional=true = _t5_relative_position_bias@path q k num_buckets=num_buckets max_distance=max_distance bidirectional=bidirectional
+
+relative_bias_disentangled :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,TK]
+relative_bias_disentangled@path q k = _disentangled_relative_bias@path q k

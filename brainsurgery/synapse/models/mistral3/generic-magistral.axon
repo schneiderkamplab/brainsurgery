@@ -15,15 +15,14 @@ V = Config.int "vocab_size" root=CFG default=131072
 L = Config.int "num_hidden_layers" root=CFG default=40
 H = Config.int "num_attention_heads" root=CFG default=32
 KVH = Config.int "num_key_value_heads" root=CFG default=8
-HD_RAW = Config.value "head_dim" root=CFG default=null
-HD = (HD_RAW == null) ? (D / H) : (Config.int "head_dim" root=CFG default=128)
+HAS_HEAD_DIM = Config.has_value "head_dim" root=CFG
+HD = HAS_HEAD_DIM ? (Config.int "head_dim" root=CFG default=128) : (D / H)
 KVD = KVH * HD
 FFN = Config.int "intermediate_size" root=CFG default=32768
 EPS = Config.float "rms_norm_eps" root=CFG default=1e-05
 THETA = Config.float "rope_theta" root=CFG default=1000000000.0
-WINDOW_RAW = Config.value "sliding_window" root=CFG default=null
-HAS_WINDOW = (WINDOW_RAW == null) ? false : true
-C = (WINDOW_RAW == null) ? 0 : (Config.int "sliding_window" root=CFG default=4096)
+HAS_WINDOW = Config.has_value "sliding_window" root=CFG
+C = HAS_WINDOW ? (Config.int "sliding_window" root=CFG default=4096) : 0
 
 magistral_norm :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 magistral_norm@path x = rmsnorm@path x eps=EPS

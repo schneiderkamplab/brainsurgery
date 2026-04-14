@@ -22,7 +22,7 @@ gpt2_block x attn_mask = do
   x <- x + a
   x3 <- layernorm@ln_2 x
   m <- scope@mlp do
-    return linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new fp32_accum=true |> linear@c_proj dim=D bias=true transpose=true
+    return linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new |> linear@c_proj dim=D bias=true transpose=true
   return x + m
 
 gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]

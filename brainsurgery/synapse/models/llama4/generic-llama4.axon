@@ -31,8 +31,8 @@ ROPE_CONTEXT = Config.int "rope_scaling.original_max_position_embeddings" root=C
 HAS_LLAMA3_FREQ_SPLIT = ROPE_HIGH_FREQ >= ROPE_LOW_FREQ
 NO_ROPE_INTERVAL = Config.int "no_rope_layer_interval" root=CFG default=4
 ATTN_CHUNK = Config.int "attention_chunk_size" root=CFG default=8192
-USE_QK_NORM = (Config.value "use_qk_norm" root=CFG default=true) == true
-USE_TEMP_TUNING = (Config.value "attn_temperature_tuning" root=CFG default=true) == true
+USE_QK_NORM = Config.bool "use_qk_norm" root=CFG default=true
+USE_TEMP_TUNING = Config.bool "attn_temperature_tuning" root=CFG default=true
 FLOOR_SCALE = Config.float "floor_scale" root=CFG default=8192.0
 ATTN_TEMP_SCALE = Config.float "attn_scale" root=CFG default=0.1
 ATTN_SCALE = 1.0 / Math.sqrt HD
