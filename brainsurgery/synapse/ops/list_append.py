@@ -34,11 +34,13 @@ def interpret(
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
         raise ValueError("list_append expects [list_name, item_name]")
-    base_value = env.get(ins[0])
+    base_name = str(ins[0])
+    if base_name not in env:
+        raise ValueError(f"list_append missing input {base_name!r}")
+    base_value = env[base_name]
     out_name = model._require_name(node_spec.get("_bind"), field="list_append._bind")
     if base_value is None:
-        env[out_name] = None
-        return
+        raise ValueError("list_append expects non-null list input")
     base_list = list(base_value)
     base_list.append(env[ins[1]])
     env[out_name] = base_list
@@ -70,17 +72,16 @@ def compile(
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     lines.append(f"{indent}if {base} is None:")
-    lines.append(f"{indent}    {out_var} = None")
-    lines.append(f"{indent}else:")
-    lines.append(f"{indent}    {out_var} = list({base})")
-    lines.append(f"{indent}    {out_var}.append({item})")
+    lines.append(f"{indent}    raise ValueError('list_append expects non-null list input')")
+    lines.append(f"{indent}{out_var} = list({base})")
+    lines.append(f"{indent}{out_var}.append({item})")
     return lines
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "Any"),
+    "args": ("List[_T]", "_T"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
-    "returns": ("List[Any]",),
+    "returns": ("List[_T]",),
 }
 
 __all__ = [

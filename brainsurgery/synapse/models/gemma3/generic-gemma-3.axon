@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["google/gemma-3-270m", "google/gemma-3-270m-it", "google/gemma-3-1b-pt", "google/gemma-3-1b-it", "google/gemma-3-4b-pt", "google/gemma-3-4b-it", "google/gemma-3-12b-pt", "google/gemma-3-12b-it", "google/gemma-3-27b-pt", "google/gemma-3-27b-it"] #-}
 
 import Activations gelu_pytorch_tanh
@@ -32,8 +33,8 @@ THETA_LONG = Config.float "rope_theta" root=CFG default=1000000.0
 ROPE_LONG_SCALE = Config.float "rope_scaling.factor" root=CFG default=1.0
 WIN_LOCAL = Config.int "sliding_window" root=CFG default=512
 WIN_LONG = Config.int "max_position_embeddings" root=CFG default=131072
-ATTN_SCALE = 1.0 / sqrt (Config.float "query_pre_attn_scalar" root=CFG default=256.0)
-EMB_SCALE = sqrt D
+ATTN_SCALE = 1.0 / Math.sqrt (Config.float "query_pre_attn_scalar" root=CFG default=256.0)
+EMB_SCALE = Math.sqrt D
 
 gemma3_block :: Tensor -> Int -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
 gemma3_block x i pos_ids attn_mask past_kv = do
@@ -59,7 +60,7 @@ gemma3_block x i pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN
     u <- linear@up_proj xn dim=FFN
-    return gelu_pytorch_tanh g |> mul u |> linear@down_proj dim=D
+    return gelu_pytorch_tanh g |> Math.mul u |> linear@down_proj dim=D
   m <- rmsnorm@post_feedforward_layernorm m cast_float=true unit_offset=true
   return x + m, new_kv
 

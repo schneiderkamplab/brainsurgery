@@ -10,6 +10,8 @@ from torch import nn
 from .pipeline_backend import (
     PipelinePlan,
     PipelineStage,
+    available_pipeline_devices,
+    build_pipeline_plan,
     build_pipeline_stage_spec,
     build_pipeline_stage_specs,
 )
@@ -136,6 +138,14 @@ class _PipelineStateView(Mapping[str, torch.Tensor]):
         self._cache: dict[str, torch.Tensor] = {}
         self._accessed_keys: set[str] = set()
 
+    @staticmethod
+    def _normalize_key(key: str) -> str:
+        if key.startswith("@@"):
+            return key[2:]
+        if key.startswith("@"):
+            return key[1:]
+        return key
+
     def _validate_key(self, key: str) -> None:
         match = _LAYER_KEY_RE.search(key)
         if match is None:
@@ -149,6 +159,7 @@ class _PipelineStateView(Mapping[str, torch.Tensor]):
         )
 
     def __getitem__(self, key: str) -> torch.Tensor:
+        key = self._normalize_key(key)
         self._validate_key(key)
         cached = self._cache.get(key)
         if cached is not None:
@@ -160,12 +171,15 @@ class _PipelineStateView(Mapping[str, torch.Tensor]):
         return tensor
 
     def __contains__(self, key: object) -> bool:
-        return key in self._base
+        if not isinstance(key, str):
+            return False
+        return self._normalize_key(key) in self._base
 
     def keys(self) -> KeysView[str]:
         return self._base.keys()
 
     def get(self, key: str, default: Any = None) -> Any:
+        key = self._normalize_key(key)
         if key not in self._base:
             return default
         return self[key]
@@ -207,7 +221,47 @@ class SynapsePipelineModel(nn.Module):
         requested_device: str | torch.device = "cuda",
         runtime_state_dict: Any | None = None,
     ) -> "SynapsePipelineModel":
-        plan, stage_specs = build_pipeline_stage_specs(spec, requested_device=requested_device)
+        try:
+            plan, stage_specs = build_pipeline_stage_specs(spec, requested_device=requested_device)
+        except ValueError:
+            # For pp=1 / single visible CUDA device, allow a no-split pipeline
+            # fallback that executes the full graph as one stage.
+            devices = available_pipeline_devices(requested_device)
+            if len(devices) != 1:
+                raise
+            device = devices[0]
+            try:
+                base_plan = build_pipeline_plan(spec, requested_device=requested_device)
+                stage = PipelineStage(
+                    index=0,
+                    device=device,
+                    layer_start=0,
+                    layer_stop=max(1, int(base_plan.total_layers)),
+                )
+                plan = PipelinePlan(
+                    devices=(device,),
+                    layers_var=base_plan.layers_var,
+                    layers_scope=base_plan.layers_scope,
+                    total_layers=max(1, int(base_plan.total_layers)),
+                    stages=(stage,),
+                )
+            except ValueError:
+                # Last-resort single-stage runtime execution when the model has
+                # no discoverable top-level layer loop.
+                stage = PipelineStage(
+                    index=0,
+                    device=device,
+                    layer_start=0,
+                    layer_stop=2**31 - 1,
+                )
+                plan = PipelinePlan(
+                    devices=(device,),
+                    layers_var="i",
+                    layers_scope="layers",
+                    total_layers=2**31 - 1,
+                    stages=(stage,),
+                )
+            stage_specs = (spec,)
         stages: list[nn.Module] = []
         for stage, stage_spec in zip(plan.stages, stage_specs, strict=True):
             model = _PipelineStageModel(
@@ -503,6 +557,12 @@ def build_hf_device_map_from_pipeline_usage(
         ),
         None,
     )
+    first_device = plan.stages[0].device
+    # Some HF models keep RoPE buffers in a module without parameters.
+    # Ensure these modules are explicitly placed with the first stage.
+    device_map.setdefault("rotary_emb", first_device)
+    device_map.setdefault("model.rotary_emb", first_device)
+    device_map.setdefault("transformer.rotary_emb", first_device)
     if embed_device is not None:
         lm_head_device = embed_device if "lm_head.weight" not in state_dict else last_device
         device_map.setdefault("lm_head", lm_head_device)

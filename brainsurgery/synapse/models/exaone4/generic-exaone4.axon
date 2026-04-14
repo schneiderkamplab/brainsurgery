@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["LGAI-EXAONE/EXAONE-4.0-1.2B", "LGAI-EXAONE/EXAONE-4.0-32B"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -50,7 +51,7 @@ exaone4_block i x pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj x dim=FFN bias=false
     u <- linear@up_proj x dim=FFN bias=false
-    return g |> silu |> mul u |> linear@down_proj dim=D bias=false
+    return g |> silu |> Math.mul u |> linear@down_proj dim=D bias=false
   m <- exaone4_rms@post_feedforward_layernorm m
   return x + m, new_kv
 

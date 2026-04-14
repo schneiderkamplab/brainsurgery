@@ -344,10 +344,42 @@ def _eval_expr(
             for arg in expr.args
         ]
         kwargs = {key: _eval_kwarg_value(value) for key, value in expr.kwargs.items()}
-        if callee in {"sqrt", "Prelude.sqrt"}:
+        if callee in {
+            "sqrt",
+            "Prelude.sqrt",
+            "Math.sqrt",
+            "log",
+            "Prelude.log",
+            "Math.log",
+            "exp",
+            "Prelude.exp",
+            "Math.exp",
+            "sin",
+            "Prelude.sin",
+            "Math.sin",
+            "cos",
+            "Prelude.cos",
+            "Math.cos",
+        }:
             if len(args) != 1 or not _is_number(args[0]):
-                raise ValueError("sqrt expects one numeric argument")
-            return math.sqrt(float(_as_number(args[0])))
+                raise ValueError(f"{callee} expects one numeric argument")
+            arg = float(_as_number(args[0]))
+            fn_name = callee.split(".", 1)[-1]
+            if fn_name == "sqrt":
+                return math.sqrt(arg)
+            if fn_name == "log":
+                return math.log(arg)
+            if fn_name == "exp":
+                return math.exp(arg)
+            if fn_name == "sin":
+                return math.sin(arg)
+            if fn_name == "cos":
+                return math.cos(arg)
+            raise ValueError(f"unsupported unary expression call: {callee!r}")
+        if callee in {"pow", "Prelude.pow", "Math.pow"}:
+            if len(args) != 2 or not _is_number(args[0]) or not _is_number(args[1]):
+                raise ValueError("pow expects two numeric arguments")
+            return math.pow(float(_as_number(args[0])), float(_as_number(args[1])))
         if callee in {"abs", "Prelude.abs"}:
             if len(args) != 1 or not _is_number(args[0]):
                 raise ValueError("abs expects one numeric argument")

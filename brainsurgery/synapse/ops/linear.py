@@ -44,6 +44,23 @@ def _path_override(args: list[Any], index: int) -> str | None:
     return None
 
 
+def _is_default_path_token(token: str, *, kind: str) -> bool:
+    t = token.strip()
+    if kind == "weight":
+        return t in {"@weight", "weight"}
+    if kind == "bias":
+        return t in {"@bias", "bias"}
+    return False
+
+
+def _has_explicit_path(path_spec: dict[str, Any], key: str) -> bool:
+    value = path_spec.get(key)
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    return bool(stripped) and stripped.lower() != "null"
+
+
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter
     args = _raw_args(node_spec)
@@ -125,32 +142,30 @@ def interpret(
     expert_expr = _arg_or_default(args, 4, None)
     weight_override = _path_override(args, 5)
     bias_override = _path_override(args, 6)
-    if weight_override in {"weight_path", "bias_path"}:
-        weight_override = None
-    if bias_override in {"weight_path", "bias_path"}:
-        bias_override = None
 
     path_spec = dict(node_spec)
-    weight_param = "weight"
+    weight_param = "weight_path" if _has_explicit_path(path_spec, "weight_path") else "weight"
     if weight_override is not None:
         if weight_override.isidentifier():
             resolved = env.get(weight_override)
             if isinstance(resolved, str):
-                path_spec["weight_path"] = resolved
-                weight_param = "weight_path"
+                if not _is_default_path_token(resolved, kind="weight"):
+                    path_spec["weight_path"] = resolved
+                    weight_param = "weight_path"
             else:
                 path_spec["weight_path"] = weight_override
                 weight_param = "weight_path"
         else:
             path_spec["weight_path"] = weight_override
             weight_param = "weight_path"
-    bias_param = "bias"
+    bias_param = "bias_path" if _has_explicit_path(path_spec, "bias_path") else "bias"
     if bias_override is not None:
         if bias_override.isidentifier():
             resolved = env.get(bias_override)
             if isinstance(resolved, str):
-                path_spec["bias_path"] = resolved
-                bias_param = "bias_path"
+                if not _is_default_path_token(resolved, kind="bias"):
+                    path_spec["bias_path"] = resolved
+                    bias_param = "bias_path"
             else:
                 path_spec["bias_path"] = bias_override
                 bias_param = "bias_path"
@@ -164,8 +179,12 @@ def interpret(
         param_name=weight_param,
     )
     weight = model._state[linear_weight_path]
+    expert_idx: int | None = None
     if expert_expr is not None:
-        expert_idx = int(model._eval_expr(expert_expr, env, symbols))
+        expert_value = model._eval_expr(expert_expr, env, symbols)
+        if expert_value is not None:
+            expert_idx = int(expert_value)
+    if expert_idx is not None:
         if weight.ndim < 2:
             raise ValueError("linear expert selection requires at least rank-2 weight tensor")
         if expert_idx < 0 or expert_idx >= int(weight.shape[0]):
@@ -182,7 +201,7 @@ def interpret(
             param_name=bias_param,
         )
         bias = model._state_tensor_from_resolved_path(bias_path, field="linear.bias")
-        if bias is not None and expert_expr is not None and bias.ndim >= 2:
+        if bias is not None and expert_idx is not None and bias.ndim >= 2:
             bias = bias[expert_idx]
 
     transpose = bool(model._eval_expr(transpose_expr, env, symbols))
@@ -248,31 +267,23 @@ def compile(
     expert_expr = _arg_or_default(args, 4, None)
     weight_override = _path_override(args, 5)
     bias_override = _path_override(args, 6)
-    if weight_override in {"weight_path", "bias_path"}:
-        weight_override = None
-    if bias_override in {"weight_path", "bias_path"}:
-        bias_override = None
 
     path_spec = dict(node_spec)
-    weight_param = "weight"
+    weight_param = "weight_path" if _has_explicit_path(path_spec, "weight_path") else "weight"
     weight_param_expr: str | None = None
+    weight_override_name: str | None = None
     if weight_override is not None:
         if weight_override.isidentifier() and weight_override in env:
-            weight_param_expr = (
-                f"self._param(self._resolve_state_path("
-                f"node_path={node_path_var}, raw_path={read(weight_override)}))"
-            )
+            weight_override_name = weight_override
         else:
             path_spec["weight_path"] = weight_override
             weight_param = "weight_path"
-    bias_param = "bias"
+    bias_param = "bias_path" if _has_explicit_path(path_spec, "bias_path") else "bias"
     bias_param_expr: str | None = None
+    bias_override_name: str | None = None
     if bias_override is not None:
         if bias_override.isidentifier() and bias_override in env:
-            bias_param_expr = (
-                f"self._state_tensor_from_path("
-                f"node_path={node_path_var}, raw_path={read(bias_override)}, field='linear.bias')"
-            )
+            bias_override_name = bias_override
         else:
             path_spec["bias_path"] = bias_override
             bias_param = "bias_path"
@@ -285,12 +296,22 @@ def compile(
     selected_weight = (
         weight_param_expr
         if isinstance(weight_param_expr, str)
-        else emitter._hoisted_param(
-            node_spec=path_spec,
-            node_path_var=node_path_var,
-            param_name=weight_param,
-            lines=lines,
-            indent=indent,
+        else (
+            emitter._hoisted_optional_param(
+                node_spec=path_spec,
+                node_path_var=node_path_var,
+                param_name=weight_param,
+                lines=lines,
+                indent=indent,
+            )
+            if weight_override_name is not None
+            else emitter._hoisted_param(
+                node_spec=path_spec,
+                node_path_var=node_path_var,
+                param_name=weight_param,
+                lines=lines,
+                indent=indent,
+            )
         )
     )
     selected_bias = (
@@ -304,25 +325,64 @@ def compile(
             indent=indent,
         )
     )
-    if expert_code is not None:
-        selected_weight = f"{selected_weight}[int({expert_code})]"
-        selected_bias = (
-            f"(({selected_bias})[int({expert_code})] "
-            f"if ({selected_bias}) is not None and ({selected_bias}).ndim >= 2 "
-            f"else ({selected_bias}))"
-        )
-    out_dim_expr = (
-        f"{selected_weight}.shape[-1]"
-        if str(transpose_expr).lower() in {"true", "1"}
-        else f"{selected_weight}.shape[0]"
-    )
     weight_var = emitter._fresh("weight")
     bias_var = emitter._fresh("bias")
+    resolved_weight_var = emitter._fresh("resolved_weight")
+    resolved_bias_var = emitter._fresh("resolved_bias")
     weight_run_var = emitter._fresh("weight_run")
     bias_run_var = emitter._fresh("bias_run")
+    out_dim_expr = (
+        f"{weight_var}.shape[-1]"
+        if str(transpose_expr).lower() in {"true", "1"}
+        else f"{weight_var}.shape[0]"
+    )
 
-    lines.append(f"{indent}{weight_var} = {selected_weight}")
-    lines.append(f"{indent}{bias_var} = {selected_bias}")
+    lines.append(f"{indent}{resolved_weight_var} = {selected_weight}")
+    lines.append(f"{indent}{resolved_bias_var} = {selected_bias}")
+    if weight_override_name is not None:
+        raw_weight_override = emitter._fresh("raw_weight_override")
+        lines.append(f"{indent}{raw_weight_override} = {read(weight_override_name)}")
+        lines.append(
+            f"{indent}if isinstance({raw_weight_override}, str) and "
+            f"{raw_weight_override}.strip() not in ('@weight', 'weight'):"
+        )
+        lines.append(
+            f"{indent}    {resolved_weight_var} = emitter._param(self._resolve_state_path("
+            f"node_path={node_path_var}, raw_path={raw_weight_override}))"
+        )
+    if bias_override_name is not None:
+        raw_bias_override = emitter._fresh("raw_bias_override")
+        lines.append(f"{indent}{raw_bias_override} = {read(bias_override_name)}")
+        lines.append(
+            f"{indent}if isinstance({raw_bias_override}, str) and "
+            f"{raw_bias_override}.strip() not in ('@bias', 'bias'):"
+        )
+        lines.append(
+            f"{indent}    {resolved_bias_var} = self._state_tensor_from_path("
+            f"node_path={node_path_var}, raw_path={raw_bias_override}, field='linear.bias')"
+        )
+    lines.append(f"{indent}if {resolved_weight_var} is None:")
+    lines.append(
+        f"{indent}    raise ValueError('linear.weight tensor not found for resolved path')"
+    )
+    if expert_code is not None:
+        expert_value_var = emitter._fresh("expert_value")
+        expert_idx_var = emitter._fresh("expert_idx")
+        lines.append(f"{indent}{expert_value_var} = {expert_code}")
+        lines.append(f"{indent}if {expert_value_var} is None:")
+        lines.append(f"{indent}    {weight_var} = {resolved_weight_var}")
+        lines.append(f"{indent}    {bias_var} = {resolved_bias_var}")
+        lines.append(f"{indent}else:")
+        lines.append(f"{indent}    {expert_idx_var} = int({expert_value_var})")
+        lines.append(f"{indent}    {weight_var} = ({resolved_weight_var})[{expert_idx_var}]")
+        lines.append(
+            f"{indent}    {bias_var} = (({resolved_bias_var})[{expert_idx_var}] "
+            f"if ({resolved_bias_var}) is not None and ({resolved_bias_var}).ndim >= 2 "
+            f"else ({resolved_bias_var}))"
+        )
+    else:
+        lines.append(f"{indent}{weight_var} = {resolved_weight_var}")
+        lines.append(f"{indent}{bias_var} = {resolved_bias_var}")
     lines.append(f"{indent}if not bool({has_bias_code}):")
     lines.append(f"{indent}    {bias_var} = None")
     lines.append(f"{indent}elif {bias_var} is None:")

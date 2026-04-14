@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "zai-org/glm-edge-4b-chat" #-}
 {-# TASK "causal_lm" #-}
 
@@ -46,7 +47,7 @@ glm_edge_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 glm_edge_ffn x = do
   gu <- linear@gate_up_proj x dim=(2 * FFN) bias=false
   g, u <- split gu sizes=[FFN, FFN]
-  return g |> silu |> mul u |> linear@down_proj dim=D bias=false
+  return g |> silu |> Math.mul u |> linear@down_proj dim=D bias=false
 
 glm_edge_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 glm_edge_block x pos_ids attn_mask past_kv = do

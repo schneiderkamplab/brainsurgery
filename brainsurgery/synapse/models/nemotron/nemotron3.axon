@@ -47,8 +47,8 @@ nemotron_h_attention x attn_mask = do
   q <- linear@q_proj x dim=(H * HD) bias=false |> reshape_heads heads=H
   k <- linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> repeat repeats=(H / KVH)
   v <- linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> repeat repeats=(H / KVH)
-  mask <- causal_mask q k window=C padding_mask=attn_mask
-  return attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=MODEL_D bias=false
+  mask <- causal_mask q k
+  return _attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=MODEL_D bias=false
 
 nemotron_h_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_moe xn = do

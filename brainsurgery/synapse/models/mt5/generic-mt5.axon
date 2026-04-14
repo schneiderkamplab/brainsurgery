@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["google/mt5-small", "google/mt5-base", "google/mt5-large", "google/mt5-xl", "google/mt5-xxl"] #-}
 {-# TASK "seq2seq_lm" #-}
 
@@ -31,7 +32,7 @@ mt5_encoder_block x attention_mask = do
     x_norm <- rmsnorm@layer_norm x eps=EPS cast_float=true
     g <- linear@DenseReluDense.wi_0 x_norm dim=FFN bias=false |> gelu_new
     u <- linear@DenseReluDense.wi_1 x_norm dim=FFN bias=false
-    x_ffn <- g |> mul u
+    x_ffn <- g |> Math.mul u
     return linear@DenseReluDense.wo x_ffn dim=D bias=false
   y <- x + ffn
   return y
@@ -60,7 +61,7 @@ mt5_decoder_block x enc_hidden encoder_attention_mask decoder_attention_mask = d
     x_norm <- rmsnorm@layer_norm x eps=EPS cast_float=true
     g <- linear@DenseReluDense.wi_0 x_norm dim=FFN bias=false |> gelu_new
     u <- linear@DenseReluDense.wi_1 x_norm dim=FFN bias=false
-    x_ffn <- g |> mul u
+    x_ffn <- g |> Math.mul u
     return linear@DenseReluDense.wo x_ffn dim=D bias=false
   y <- x + ffn
   return y
@@ -83,7 +84,7 @@ mt5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       x_norm <- rmsnorm@layer_norm enc_hidden eps=EPS cast_float=true
       g <- linear@DenseReluDense.wi_0 x_norm dim=FFN bias=false |> gelu_new
       u <- linear@DenseReluDense.wi_1 x_norm dim=FFN bias=false
-      x_ffn <- g |> mul u
+      x_ffn <- g |> Math.mul u
       return linear@DenseReluDense.wo x_ffn dim=D bias=false
     enc_hidden <- enc_hidden + ffn
   enc_hidden <- rmsnorm@encoder.final_layer_norm enc_hidden eps=EPS
@@ -112,7 +113,7 @@ mt5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       x_norm <- rmsnorm@layer_norm dec_hidden eps=EPS cast_float=true
       g <- linear@DenseReluDense.wi_0 x_norm dim=FFN bias=false |> gelu_new
       u <- linear@DenseReluDense.wi_1 x_norm dim=FFN bias=false
-      x_ffn <- g |> mul u
+      x_ffn <- g |> Math.mul u
       return linear@DenseReluDense.wo x_ffn dim=D bias=false
     dec_hidden <- dec_hidden + ffn
   dec_hidden <- rmsnorm@decoder.final_layer_norm dec_hidden eps=EPS

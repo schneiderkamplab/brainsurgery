@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["HuggingFaceTB/SmolLM2-1.7B", "HuggingFaceTB/SmolLM2-1.7B-Instruct"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -40,7 +41,7 @@ smollm_block x pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN
     u <- linear@up_proj xn dim=FFN
-    return g |> silu |> mul u |> linear@down_proj dim=D
+    return g |> silu |> Math.mul u |> linear@down_proj dim=D
   return x + m, new_kv
 
 smollm :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

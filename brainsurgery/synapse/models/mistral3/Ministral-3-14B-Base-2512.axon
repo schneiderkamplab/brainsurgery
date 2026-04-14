@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "mistralai/Ministral-3-14B-Base-2512" #-}
 {-# TASK "causal_lm" #-}
 
@@ -30,9 +31,9 @@ mistral3_norm@path x = rmsnorm@path x eps=EPS
 mistral3_query_scale :: Tensor[B,S] -> Tensor[B,1,S,1]
 mistral3_query_scale pos_ids = do
   scaled <- pos_ids / ROPE_CONTEXT
-  bucket <- floor scaled
+  bucket <- Math.floor scaled
   shifted <- bucket + 1.0
-  logged <- log shifted
+  logged <- Math.log shifted
   beta_scaled <- logged * Q_SCALE_BETA
   gain <- beta_scaled + 1.0
   gain3 <- unsqueeze gain dim=1
@@ -60,7 +61,7 @@ mistral3_block x pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN
     u <- linear@up_proj xn dim=FFN
-    return g |> silu |> mul u |> linear@down_proj dim=D
+    return g |> silu |> Math.mul u |> linear@down_proj dim=D
   return x + m, new_kv
 
 mistral3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

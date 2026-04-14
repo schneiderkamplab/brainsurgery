@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["google-t5/t5-small", "google-t5/t5-base", "google-t5/t5-large", "google-t5/t5-3b", "google-t5/t5-11b"] #-}
 {-# TASK "seq2seq_lm" #-}
 
@@ -14,7 +15,7 @@ FFN = Config.int "d_ff" default=2048
 EPS = Config.float "layer_norm_epsilon" default=1e-06
 NUM_BUCKETS = Config.int "relative_attention_num_buckets" default=32
 MAX_DISTANCE = Config.int "relative_attention_max_distance" default=128
-LM_SCALE_DERIVED = 1.0 / sqrt D
+LM_SCALE_DERIVED = 1.0 / Math.sqrt D
 LM_SCALE_OVERRIDE = Config.float "output_logit_scale" default=-1.0
 LM_SCALE = (LM_SCALE_OVERRIDE > 0.0) ? LM_SCALE_OVERRIDE : LM_SCALE_DERIVED
 

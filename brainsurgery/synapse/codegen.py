@@ -6,7 +6,7 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
-from .axon.type_system import TypeTensor, parse_type_expr
+from .axon.type_system import TypeList, TypeOptional, TypeTensor, TypeTuple, parse_type_expr
 from .ops import get_op_module
 from .spec_normalize import normalize_synapse_spec_expressions
 
@@ -77,6 +77,24 @@ class _Emitter:
         self, *, env: dict[str, str], input_types: dict[str, Any]
     ) -> dict[str, str]:
         aliases: dict[str, str] = {}
+
+        def _collect_aliases(type_expr: Any, src_expr: str) -> None:
+            if isinstance(type_expr, TypeOptional):
+                _collect_aliases(type_expr.inner, src_expr)
+                return
+            if isinstance(type_expr, TypeTensor):
+                for axis, dim in enumerate(type_expr.dims):
+                    if isinstance(dim, str) and dim not in env and dim not in aliases:
+                        aliases[dim] = f"int({src_expr}.shape[{axis}])"
+                return
+            if isinstance(type_expr, TypeList):
+                _collect_aliases(type_expr.item, f"{src_expr}[0]")
+                return
+            if isinstance(type_expr, TypeTuple):
+                for idx, item in enumerate(type_expr.items):
+                    _collect_aliases(item, f"{src_expr}[{idx}]")
+                return
+
         for input_name, type_expr in input_types.items():
             if input_name not in env or not isinstance(type_expr, str):
                 continue
@@ -84,12 +102,8 @@ class _Emitter:
                 parsed = parse_type_expr(type_expr)
             except Exception:
                 continue
-            if not isinstance(parsed, TypeTensor):
-                continue
             src = env[input_name]
-            for axis, dim in enumerate(parsed.dims):
-                if isinstance(dim, str) and dim not in env and dim not in aliases:
-                    aliases[dim] = f"int({src}.shape[{axis}])"
+            _collect_aliases(parsed, src)
         return aliases
 
     def render(self) -> str:
@@ -135,8 +149,7 @@ class _Emitter:
                 "        self._state = loaded",
                 "",
                 "    def _param(self, path: str) -> torch.Tensor:",
-                "        resolved = path[2:] if isinstance(path, str) and path.startswith('@@') else path",
-                "        return self._state[resolved]",
+                "        return self._state_tensor_from_resolved_path(path, field='_param')",
                 "",
                 "    def _join_scope(self, left: str, right: str) -> str:",
                 "        if not left:",
@@ -183,12 +196,62 @@ class _Emitter:
                 "    def _state_tensor_from_resolved_path(self, path: str, *, field: str) -> torch.Tensor:",
                 "        resolved = path[2:] if isinstance(path, str) and path.startswith('@@') else path",
                 "        if resolved not in self._state:",
-                "            raise ValueError(f'{field} tensor not found at path: {resolved}')",
+                "            alternatives = self._state_key_alternatives(resolved, limit=8)",
+                "            alt_text = ', '.join(alternatives) if alternatives else '<none>'",
+                "            raise ValueError(f'{field} tensor not found at path: {resolved}. Alternatives: {alt_text}')",
                 "        return self._state[resolved]",
                 "",
                 "    def _state_tensor_from_path(self, *, node_path: str, raw_path: str, field: str) -> torch.Tensor:",
                 "        path = self._resolve_state_path(node_path=node_path, raw_path=raw_path)",
                 "        return self._state_tensor_from_resolved_path(path, field=field)",
+                "",
+                "    def _state_key_alternatives(self, key: str, *, limit: int = 8) -> list[str]:",
+                "        if not isinstance(key, str) or not key:",
+                "            return []",
+                "        keys = [k for k in self._state.keys() if isinstance(k, str)]",
+                "        if not keys:",
+                "            return []",
+                "        out: list[str] = []",
+                "        seen: set[str] = set()",
+                "",
+                "        def _add(candidate: str) -> None:",
+                "            if candidate in seen:",
+                "                return",
+                "            seen.add(candidate)",
+                "            out.append(candidate)",
+                "",
+                "        segments = key.split('.')",
+                "        leaf = segments[-1]",
+                "        for existing in keys:",
+                "            if existing.endswith('.' + leaf) or existing == leaf:",
+                "                _add(existing)",
+                "                if len(out) >= limit:",
+                "                    return out",
+                "        if len(segments) >= 2:",
+                "            tail2 = '.'.join(segments[-2:])",
+                "            for existing in keys:",
+                "                if existing.endswith('.' + tail2) or existing == tail2:",
+                "                    _add(existing)",
+                "                    if len(out) >= limit:",
+                "                        return out",
+                "        for prefix in ('model.', 'transformer.'):",
+                "            prefixed = prefix + key",
+                "            if prefixed in self._state:",
+                "                _add(prefixed)",
+                "            if len(out) >= limit:",
+                "                return out",
+                "        if key.startswith('model.') and key[len('model.'):] in self._state:",
+                "            _add(key[len('model.'):])",
+                "        if key.startswith('transformer.') and key[len('transformer.'):] in self._state:",
+                "            _add(key[len('transformer.'):])",
+                "        if len(out) >= limit:",
+                "            return out",
+                "        for existing in keys:",
+                "            if key in existing or existing in key:",
+                "                _add(existing)",
+                "                if len(out) >= limit:",
+                "                    return out",
+                "        return out",
                 "",
                 "    def _node_scope(self, ambient_scope: str, explicit_scope: str | None = None, abs_path: str | None = None) -> str:",
                 "        if isinstance(abs_path, str) and abs_path:",
@@ -313,7 +376,7 @@ class _Emitter:
                 "        return False",
                 "",
                 "    def _eval_expr_call(self, callee: str, args: list[Any], kwargs: dict[str, Any]) -> Any:",
-                "        if callee in {'sqrt', 'Prelude.sqrt', 'log', 'Prelude.log', 'exp', 'Prelude.exp', 'sin', 'Prelude.sin', 'cos', 'Prelude.cos'}:",
+                "        if callee in {'sqrt', 'Prelude.sqrt', 'Math.sqrt', 'log', 'Prelude.log', 'Math.log', 'exp', 'Prelude.exp', 'Math.exp', 'sin', 'Prelude.sin', 'Math.sin', 'cos', 'Prelude.cos', 'Math.cos'}:",
                 "            fn_name = callee.split('.', 1)[-1]",
                 "            if kwargs:",
                 "                raise ValueError(f'{fn_name} expression call does not support kwargs')",
@@ -334,7 +397,7 @@ class _Emitter:
                 "            if fn_name == 'cos':",
                 "                return math.cos(arg_f)",
                 "            raise ValueError(f'Unsupported unary expression call: {callee!r}')",
-                "        if callee in {'pow', 'Prelude.pow'}:",
+                "        if callee in {'pow', 'Prelude.pow', 'Math.pow'}:",
                 "            if kwargs:",
                 "                raise ValueError('pow expression call does not support kwargs')",
                 "            if len(args) != 2:",

@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["google/gemma-4-E2B", "google/gemma-4-E2B-it", "google/gemma-4-E4B", "google/gemma-4-E4B-it"] #-}
 
 import Activations (gelu_pytorch_tanh, tanh)
@@ -34,7 +35,7 @@ ATTN_K_EQ_V = (Config.value "attention_k_eq_v" root=CFG default=false) == true
 LOGIT_SOFTCAP = Config.float "final_logit_softcapping" root=CFG default=30.0
 HAS_PLI = PLI > 0
 PER_LAYER_INPUT_SCALE = 0.7071067811865476
-PER_LAYER_PROJ_SCALE = 1.0 / sqrt D
+PER_LAYER_PROJ_SCALE = 1.0 / Math.sqrt D
 NUM_KV_SHARED = Config.int "num_kv_shared_layers" root=CFG default=0
 USE_DOUBLE_WIDE_MLP = (Config.value "use_double_wide_mlp" root=CFG default=false) == true
 RAW_TOPK_EXPERTS = Config.value "top_k_experts" root=CFG default=null
@@ -59,7 +60,7 @@ gemma4_apply_per_layer_input :: Tensor[B,S,D] -> Tensor -> Int -> Tensor[B,S,D]
 gemma4_apply_per_layer_input x per_layer_inputs i = do
   p_i <- gemma4_per_layer_input_at per_layer_inputs i
   g <- linear@per_layer_input_gate x dim=PLI bias=false
-  p <- gelu_pytorch_tanh g |> mul p_i |> linear@per_layer_projection dim=D bias=false
+  p <- gelu_pytorch_tanh g |> Math.mul p_i |> linear@per_layer_projection dim=D bias=false
   p <- rms@post_per_layer_input_norm p
   return x + p
 
@@ -101,7 +102,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=ffn_dim bias=false
     u <- linear@up_proj xn dim=ffn_dim bias=false
-    return gelu_pytorch_tanh g |> mul u |> linear@down_proj dim=D bias=false
+    return gelu_pytorch_tanh g |> Math.mul u |> linear@down_proj dim=D bias=false
   m <- rms@post_feedforward_layernorm m
   x <- x + m
   x <- gemma4_apply_per_layer_input x per_layer_inputs i
@@ -116,8 +117,8 @@ gemma4_e :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], 
 gemma4_e input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(past_length past_kv)
   logits, new_kv <- scope@language_model root="model" do
-    x <- embedding@embed_tokens input_ids dim=D scale=(sqrt D)
-    per_layer_inputs <- gemma4_per_layer_inputs input_ids x num_layers=L per_layer_dim=PLI embed_scale=(sqrt PLI) projection_scale=PER_LAYER_PROJ_SCALE combine_scale=PER_LAYER_INPUT_SCALE rms_eps=EPS
+    x <- embedding@embed_tokens input_ids dim=D scale=(Math.sqrt D)
+    per_layer_inputs <- gemma4_per_layer_inputs input_ids x num_layers=L per_layer_dim=PLI embed_scale=(Math.sqrt PLI) projection_scale=PER_LAYER_PROJ_SCALE combine_scale=PER_LAYER_INPUT_SCALE rms_eps=EPS
     new_kv <- use_cache ? Cache.init : null
     shared_full_k <- null
     shared_full_v <- null

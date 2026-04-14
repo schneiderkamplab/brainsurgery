@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["openai/gpt-oss-20b", "openai/gpt-oss-120b"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -27,8 +28,8 @@ ROPE_LOW_FREQ = Config.float "beta_slow" root="rope_scaling" default=1.0 -- YaRN
 ROPE_HIGH_FREQ = Config.float "beta_fast" root="rope_scaling" default=32.0 -- YaRN fast beta
 ROPE_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=4096 -- YaRN train context
 ROPE_ATTN_FACTOR = Config.float "attention_factor" root="rope_scaling" default=1.3465735902799727 -- YaRN attention factor
-ATTN_SCALE = 1.0 / sqrt HD                                          -- qk scaling
-SWIGLU_LIMIT = Config.float "swiglu_limit" default=7.0             -- SwiGLU clamp threshold
+ATTN_SCALE = 1.0 / Math.sqrt HD                                          -- qk scaling
+SWIGLU_LIMIT = Config.float "swiglu_limit" default=7.0             -- SwiGLU Math.clamp threshold
 SWIGLU_ALPHA = Config.float "swiglu_alpha" default=1.702           -- SwiGLU slope
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]

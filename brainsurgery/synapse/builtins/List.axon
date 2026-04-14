@@ -1,8 +1,12 @@
-init :: List[Any]
+init :: List[_T]
 init = _list_init
 
-index :: ?List[Any] -> Int -> ?Any
-index values i = _list_index values i
+index :: List[_T] -> Int -> _T
+index values i = do
+  item <- _list_index values i
+  return item
 
-append :: ?List[Any] -> Any -> ?List[Any]
-append values value = _list_append values value
+append :: List[_T] -> _T -> List[_T]
+append values value = do
+  out <- _list_append values value
+  return out

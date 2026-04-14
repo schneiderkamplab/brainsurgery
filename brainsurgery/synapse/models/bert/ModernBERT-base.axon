@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "answerdotai/ModernBERT-base" #-}
 {-# TASK "masked_lm" #-}
 
@@ -34,7 +35,7 @@ modernbert_layer x i pos_ids attn_mask = do
   m <- scope@mlp do
     wi <- linear@Wi xn dim=2 * FFN bias=false
     u, g <- chunk wi parts=2
-    return gelu u |> mul g |> linear@Wo dim=D bias=false
+    return gelu u |> Math.mul g |> linear@Wo dim=D bias=false
   return x + m
 
 modernbert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]

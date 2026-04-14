@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["google/gemma-3-12b-pt", "google/gemma-3-12b-it"] #-}
 
 import Activations
@@ -45,7 +46,7 @@ gemma3_block x i pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN
     u <- linear@up_proj xn dim=FFN
-    return gelu_pytorch_tanh g |> mul u |> linear@down_proj dim=D
+    return gelu_pytorch_tanh g |> Math.mul u |> linear@down_proj dim=D
   m <- rmsnorm@post_feedforward_layernorm m cast_float=true unit_offset=true
   return x + m, new_kv
 

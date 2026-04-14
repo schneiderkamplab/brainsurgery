@@ -18,8 +18,11 @@ def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
     del args, kwargs, ctx
-    if not isinstance(out, str):
-        raise ValueError("_ir_alias requires a single scalar output binding")
+    if isinstance(out, str):
+        return
+    if isinstance(out, list) and all(isinstance(name, str) for name in out):
+        return
+    raise ValueError("_ir_alias requires a scalar or list output binding")
 
 
 def lowering_infer_metadata(
@@ -45,10 +48,32 @@ def interpret(
     scope: str,
     symbols: dict[str, int],
 ) -> None:
-    del node_path, scope, symbols
+    del node_path, scope
     source = model._require_name(node_spec.get("_args"), field="_ir_alias._args")
-    out_name = model._require_name(node_spec.get("_bind"), field="_ir_alias._bind")
-    env[out_name] = env[source]
+    if source in env:
+        source_value = env[source]
+    elif source in symbols:
+        source_value = symbols[source]
+    else:
+        raise ValueError(f"_ir_alias missing input {source!r}")
+    bind_raw = node_spec.get("_bind")
+    if isinstance(bind_raw, str):
+        env[bind_raw] = source_value
+        return
+    if isinstance(bind_raw, list):
+        value = source_value
+        if not isinstance(value, list | tuple):
+            raise ValueError("_ir_alias list-bind expects tuple/list source value")
+        if len(value) != len(bind_raw):
+            raise ValueError("_ir_alias list-bind arity mismatch")
+        for idx, name in enumerate(bind_raw):
+            if not isinstance(name, str):
+                raise ValueError("_ir_alias list-bind expects string targets")
+            if name == "_":
+                continue
+            env[name] = value[idx]
+        return
+    raise ValueError("_ir_alias._bind must be a name or list of names")
     return
 
 
@@ -63,10 +88,24 @@ def compile(
 ) -> list[str]:
     del node_path_var, scope_var
     source = str(node_spec.get("_args"))
-    out_name = str(node_spec.get("_bind"))
-    source_expr = emitter._read_env_var(env, source)
-    out_var = emitter._assign_out_var(env, out_name)
-    return [f"{indent}{out_var} = {source_expr}"]
+    if source in env:
+        source_expr = emitter._read_env_var(env, source)
+    else:
+        source_expr = emitter._expr_code({"_expr": "name", "id": source}, env)
+    bind_raw = node_spec.get("_bind")
+    if isinstance(bind_raw, str):
+        out_var = emitter._assign_out_var(env, bind_raw)
+        return [f"{indent}{out_var} = {source_expr}"]
+    if isinstance(bind_raw, list):
+        tmp = f"_alias_unpack_{abs(hash((source, tuple(str(x) for x in bind_raw)))):x}"
+        lines: list[str] = [f"{indent}{tmp} = {source_expr}"]
+        for idx, raw_name in enumerate(bind_raw):
+            if not isinstance(raw_name, str) or raw_name == "_":
+                continue
+            out_var = emitter._assign_out_var(env, raw_name)
+            lines.append(f"{indent}{out_var} = {tmp}[{idx}]")
+        return lines
+    raise ValueError("_ir_alias._bind must be a name or list of names")
 
 
 LOWERING_TYPE_SIGNATURE = {

@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "mistralai/Mixtral-8x22B-Instruct-v0.1" #-}
 {-# TASK "causal_lm" #-}
 
@@ -27,7 +28,7 @@ mixtral_expert_ffn :: Tensor[N,D] -> Tensor[N,D]
 mixtral_expert_ffn x = do
   gate <- linear@w1 x dim=FFN
   up <- linear@w3 x dim=FFN
-  return gate |> silu |> mul up |> linear@w2 dim=D bias=false
+  return gate |> silu |> Math.mul up |> linear@w2 dim=D bias=false
 
 mixtral_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 mixtral_block x pos_ids attn_mask past_kv = do

@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "allenai/OLMoE-1B-7B-0924" #-}
 {-# TASK "causal_lm" #-}
 
@@ -16,7 +17,7 @@ EPT  = Config.int "num_experts_per_tok" default=8          -- experts selected p
 C    = Config.int "max_position_embeddings" default=4096   -- context window / max sequence length
 EPS  = 1e-05                                                -- RMSNorm epsilon
 THETA = Config.float "rope_theta" default=10000.0          -- rope theta
-ATTN_SCALE = 1.0 / sqrt HD                                  -- attention scale (1 / sqrt(HD))
+ATTN_SCALE = 1.0 / Math.sqrt HD                                  -- attention scale (1 / Math.sqrt(HD))
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS
@@ -25,7 +26,7 @@ expert_ffn :: Tensor[N,D] -> Tensor[N,D]
 expert_ffn x = do
   gate <- linear@gate_proj x
   up <- linear@up_proj x
-  return gate |> silu |> mul up |> linear@down_proj
+  return gate |> silu |> Math.mul up |> linear@down_proj
 
 olmoe_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 olmoe_decoder_block x pos_ids attn_mask past_kv = do

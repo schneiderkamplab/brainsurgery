@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["facebook/xglm-564M", "facebook/xglm-1.7B", "facebook/xglm-2.9B", "facebook/xglm-4.5B", "facebook/xglm-7.5B"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -18,8 +19,8 @@ EPS = Config.float "layer_norm_eps" default=1e-05
 C = Config.int "max_position_embeddings" default=2048
 ACT = Config.value "activation_function" default="gelu"
 SCALE_EMB = Config.value "scale_embedding" default=true
-EMB_SCALE = SCALE_EMB ? (sqrt D) : 1.0
-ATTN_SCALE = 1.0 / sqrt HD
+EMB_SCALE = SCALE_EMB ? (Math.sqrt D) : 1.0
+ATTN_SCALE = 1.0 / Math.sqrt HD
 
 HAS_POS = Params.has_root "model.embed_positions.weight"
 

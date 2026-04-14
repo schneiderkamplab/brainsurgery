@@ -89,13 +89,72 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, str] = {
 
 _NAMED_LIST_ITEM_TYPES: dict[str, TypeExpr] = {
     "List": TypeAny(),
-    "Cache": TypeOptional(inner=TypeNamed(name="CacheLayer")),
 }
 _LIST_NAMED_ALIASES: set[str] = set(_NAMED_LIST_ITEM_TYPES)
 
 
-def _named_list_item_type(name: str) -> TypeExpr | None:
-    return _NAMED_LIST_ITEM_TYPES.get(name)
+def _named_list_item_type(
+    name: str, *, type_aliases: dict[str, TypeExpr] | None = None
+) -> TypeExpr | None:
+    alias_map = type_aliases if isinstance(type_aliases, dict) else {}
+    builtin = _NAMED_LIST_ITEM_TYPES.get(name)
+    if builtin is not None:
+        return builtin
+    alias = alias_map.get(name)
+    if alias is None:
+        return None
+    expanded = _resolve_type_aliases(alias, type_aliases=alias_map)
+    if isinstance(expanded, TypeList):
+        return expanded.item
+    return None
+
+
+def _build_type_alias_table(modules: tuple[AxonModule, ...]) -> dict[str, TypeExpr]:
+    table: dict[str, TypeExpr] = {}
+    for module in modules:
+        alias_map = module.type_aliases if isinstance(module.type_aliases, dict) else {}
+        for name, alias in alias_map.items():
+            if not isinstance(name, str) or not isinstance(alias, _TYPE_EXPR_CLASSES):
+                continue
+            prev = table.get(name)
+            if prev is None:
+                table[name] = alias
+                continue
+            if prev != alias:
+                raise ValueError(
+                    f"Axon typecheck failed: conflicting type alias {name!r} across modules"
+                )
+    return table
+
+
+def _resolve_type_aliases(
+    tp: TypeExpr,
+    *,
+    type_aliases: dict[str, TypeExpr],
+    stack: tuple[str, ...] = (),
+) -> TypeExpr:
+    if isinstance(tp, TypeNamed):
+        alias = type_aliases.get(tp.name)
+        if alias is None:
+            return tp
+        if tp.name in stack:
+            cycle = " -> ".join((*stack, tp.name))
+            raise ValueError(f"Axon typecheck failed: cyclic type alias detected: {cycle}")
+        return _resolve_type_aliases(alias, type_aliases=type_aliases, stack=(*stack, tp.name))
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(
+            inner=_resolve_type_aliases(tp.inner, type_aliases=type_aliases, stack=stack)
+        )
+    if isinstance(tp, TypeList):
+        return TypeList(item=_resolve_type_aliases(tp.item, type_aliases=type_aliases, stack=stack))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(
+            items=tuple(
+                _resolve_type_aliases(item, type_aliases=type_aliases, stack=stack)
+                for item in tp.items
+            )
+        )
+    return tp
 
 
 @dataclass(frozen=True)
@@ -137,7 +196,7 @@ def _shape_from_param_shape(shape: tuple[DimToken, ...] | None) -> tuple[DimToke
     return tuple(shape)
 
 
-def _module_signature(module: AxonModule) -> ModuleSignature:
+def _module_signature(module: AxonModule, *, type_aliases: dict[str, TypeExpr]) -> ModuleSignature:
     param_types: list[TypeExpr] = []
     param_names: list[str] = []
     optional_flags: list[bool] = []
@@ -148,7 +207,7 @@ def _module_signature(module: AxonModule) -> ModuleSignature:
             raise ValueError(
                 f"Axon typecheck failed in module '{module.name}': parameter {param.name!r} is missing a declared type"
             )
-        param_type = param.type_expr
+        param_type = _resolve_type_aliases(param.type_expr, type_aliases=type_aliases)
         if param.optional:
             param_type = TypeOptional(param_type)
         param_types.append(param_type)
@@ -165,7 +224,10 @@ def _module_signature(module: AxonModule) -> ModuleSignature:
         raise ValueError(
             f"Axon typecheck failed in module '{module.name}': missing declared return type"
         )
-    return_types = list(return_decl.items) if isinstance(return_decl, TypeTuple) else [return_decl]
+    resolved_return = _resolve_type_aliases(return_decl, type_aliases=type_aliases)
+    return_types = (
+        list(resolved_return.items) if isinstance(resolved_return, TypeTuple) else [resolved_return]
+    )
     return_shapes = [_shape_dims_from_type(tp) for tp in return_types]
     return ModuleSignature(
         name=module.name,
@@ -180,7 +242,9 @@ def _module_signature(module: AxonModule) -> ModuleSignature:
     )
 
 
-def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple[str, int]]:
+def _extract_primitive_aliases(
+    modules: tuple[AxonModule, ...], *, type_aliases: dict[str, TypeExpr]
+) -> dict[str, tuple[str, int]]:
     def _module_path_param_names(module: AxonModule) -> tuple[str, ...]:
         if module.path_params:
             return tuple(module.path_params)
@@ -189,8 +253,10 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
         return ()
 
     def _is_identity_alias_call(module: AxonModule, value: AxonExprCall) -> bool:
-        # Defaulted wrapper params change call-surface semantics (especially kwargs),
-        # so do not collapse those wrappers to primitives.
+        # Defaulted/optional wrapper params change call-surface semantics
+        # (especially kwargs), so do not collapse those wrappers to primitives.
+        if any(param.optional for param in module.params):
+            return False
         if any(param.default_expr is not None for param in module.params):
             return False
         callee_parts = value.callee.split("@")
@@ -208,8 +274,8 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
         return True
 
     def _same_module_signature(left: AxonModule, right: AxonModule) -> bool:
-        left_sig = _module_signature(left)
-        right_sig = _module_signature(right)
+        left_sig = _module_signature(left, type_aliases=type_aliases)
+        right_sig = _module_signature(right, type_aliases=type_aliases)
         return (
             left_sig.path_param_count == right_sig.path_param_count
             and left_sig.params == right_sig.params
@@ -222,6 +288,54 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
         )
 
     modules_by_name = {module.name: module for module in modules}
+    called_with_kwargs: set[str] = set()
+    for module in modules:
+        for stmt in module.statements:
+            values: tuple[AxonExpr, ...] = ()
+            if isinstance(stmt, AxonBind):
+                values = (stmt.expr,)
+            elif isinstance(stmt, AxonReturn):
+                values = tuple(stmt.values)
+            if not values:
+                continue
+            stack: list[AxonExpr] = list(values)
+            while stack:
+                expr = stack.pop()
+                if isinstance(expr, AxonExprCall):
+                    if expr.kwargs:
+                        called_with_kwargs.add(expr.callee.split("@", 1)[0])
+                    stack.extend(expr.args)
+                    for kw_value in expr.kwargs.values():
+                        if isinstance(kw_value, AxonExpr):
+                            stack.append(kw_value)
+                elif isinstance(expr, AxonExprParen):
+                    stack.append(expr.inner)
+                elif isinstance(expr, AxonExprPipe):
+                    stack.append(expr.value)
+                    stack.extend(expr.stages)
+                elif isinstance(expr, AxonExprBinary):
+                    stack.append(expr.left)
+                    stack.append(expr.right)
+                elif isinstance(expr, AxonExprIf):
+                    stack.append(expr.cond)
+                    stack.append(expr.true_expr)
+                    stack.append(expr.false_expr)
+                elif isinstance(expr, AxonExprTernary):
+                    stack.append(expr.cond)
+                    stack.append(expr.true_expr)
+                    stack.append(expr.false_expr)
+                elif isinstance(expr, AxonExprList):
+                    stack.extend(expr.items)
+                elif isinstance(expr, AxonExprTuple):
+                    stack.extend(expr.items)
+                elif isinstance(expr, AxonExprDo):
+                    for do_stmt in expr.body:
+                        if isinstance(do_stmt, AxonBind):
+                            stack.append(do_stmt.expr)
+                        elif isinstance(do_stmt, AxonReturn):
+                            stack.extend(do_stmt.values)
+                elif isinstance(expr, AxonExprLambda):
+                    stack.append(expr.body)
     direct_aliases: dict[str, tuple[str, int]] = {}
     for module in modules:
         if not isinstance(module.name, str) or "." not in module.name:
@@ -235,6 +349,9 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
         if not isinstance(value, AxonExprCall):
             continue
         if not _is_identity_alias_call(module, value):
+            continue
+        module_base_name = module.name.rsplit(".", 1)[-1]
+        if module.name in called_with_kwargs or module_base_name in called_with_kwargs:
             continue
         target_base = value.callee.split("@", 1)[0]
         target_module = modules_by_name.get(target_base)
@@ -262,8 +379,10 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
     return aliases
 
 
-def _symbol_dim_table(module: AxonModule) -> dict[str, DimToken]:
-    signature_dim_names = _module_signature_dim_names(module)
+def _symbol_dim_table(
+    module: AxonModule, *, type_aliases: dict[str, TypeExpr]
+) -> dict[str, DimToken]:
+    signature_dim_names = _module_signature_dim_names(module, type_aliases=type_aliases)
     table: dict[str, DimToken] = {}
     if not isinstance(module.symbols, dict):
         return table
@@ -291,7 +410,9 @@ def _symbol_dim_table(module: AxonModule) -> dict[str, DimToken]:
     return table
 
 
-def _module_signature_dim_names(module: AxonModule) -> set[str]:
+def _module_signature_dim_names(
+    module: AxonModule, *, type_aliases: dict[str, TypeExpr]
+) -> set[str]:
     def _type_dim_names(tp: TypeExpr) -> set[str]:
         if isinstance(tp, TypeOptional):
             return _type_dim_names(tp.inner)
@@ -312,12 +433,13 @@ def _module_signature_dim_names(module: AxonModule) -> set[str]:
     signature_dim_names: set[str] = set()
     for param in module.params:
         if isinstance(param.type_expr, _TYPE_EXPR_CLASSES):
-            signature_dim_names.update(_type_dim_names(param.type_expr))
+            resolved_param_type = _resolve_type_aliases(param.type_expr, type_aliases=type_aliases)
+            signature_dim_names.update(_type_dim_names(resolved_param_type))
         if isinstance(param.shape, tuple):
             for dim in param.shape:
                 signature_dim_names.update(dim_token_names(dim))
     if isinstance(module.return_type_expr, _TYPE_EXPR_CLASSES):
-        return_decl = module.return_type_expr
+        return_decl = _resolve_type_aliases(module.return_type_expr, type_aliases=type_aliases)
         if isinstance(return_decl, TypeTuple):
             for ret in return_decl.items:
                 signature_dim_names.update(_type_dim_names(ret))
@@ -571,6 +693,8 @@ def _dims_compatible(
             assert isinstance(right, str)
             prev_dim: DimToken | None = subst.get(right)
             if prev_dim is None:
+                if isinstance(left, str) and left == right:
+                    continue
                 subst[right] = left
                 continue
             if not _dim_equal(prev_dim, left, subst=subst, symbols=symbols):
@@ -580,6 +704,8 @@ def _dims_compatible(
             assert isinstance(left, str)
             prev_dim_left: DimToken | None = subst.get(left)
             if prev_dim_left is None:
+                if isinstance(right, str) and right == left:
+                    continue
                 subst[left] = right
                 continue
             if not _dim_equal(prev_dim_left, right, subst=subst, symbols=symbols):
@@ -725,6 +851,8 @@ def _types_compatible(
         return expected.name in {"Tensor", "IdxTensor"}
     if isinstance(actual, TypeNamed) and isinstance(expected, TypeTensor):
         return actual.name in {"Tensor", "IdxTensor"}
+    if isinstance(actual, TypeNamed) and _is_type_var_name(actual.name):
+        return True
     if type(actual) is type(expected):
         if isinstance(actual, TypeNamed) and isinstance(expected, TypeNamed):
             if {actual.name, expected.name} <= {"Tensor", "IdxTensor"}:
@@ -734,6 +862,129 @@ def _types_compatible(
     if isinstance(actual, TypeNamed) or isinstance(expected, TypeNamed):
         return False
     return False
+
+
+def _is_type_var_name(name: str) -> bool:
+    # Preferred convention: leading underscore + all-caps (e.g. _T, _ELEM).
+    # Keep legacy support for bare all-caps names (e.g. T, U).
+    # Nominal types (Tensor, Cache, Path, CacheLayer, ...) are not all-caps.
+    if not name:
+        return False
+    if name.startswith("_"):
+        tail = name[1:]
+        return bool(tail) and tail.isupper()
+    return name.isupper()
+
+
+def _substitute_type_vars(tp: TypeExpr, type_subst: dict[str, TypeExpr]) -> TypeExpr:
+    if isinstance(tp, TypeNamed):
+        bound = type_subst.get(tp.name)
+        return bound if bound is not None else tp
+    if isinstance(tp, TypeOptional):
+        inner = _substitute_type_vars(tp.inner, type_subst)
+        if isinstance(inner, TypeOptional):
+            return inner
+        return TypeOptional(inner=inner)
+    if isinstance(tp, TypeList):
+        return TypeList(item=_substitute_type_vars(tp.item, type_subst))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(items=tuple(_substitute_type_vars(item, type_subst) for item in tp.items))
+    if isinstance(tp, TypeTensor):
+        return tp
+    return tp
+
+
+def _bind_type_vars(
+    actual: TypeExpr,
+    expected: TypeExpr,
+    *,
+    type_subst: dict[str, TypeExpr],
+    dim_subst: dict[str, DimToken],
+    dim_symbols: dict[str, DimToken],
+    rigid_symbols: set[str],
+    rest_subst: dict[str, tuple[DimToken, ...]] | None = None,
+) -> bool:
+    rest_map = rest_subst if rest_subst is not None else {}
+    if isinstance(expected, TypeNamed) and _is_type_var_name(expected.name):
+        bound = type_subst.get(expected.name)
+        if bound is None:
+            type_subst[expected.name] = actual
+            return True
+        return _types_compatible(
+            actual,
+            bound,
+            dim_subst=dim_subst,
+            dim_symbols=dim_symbols,
+            rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
+        )
+    if isinstance(expected, TypeOptional):
+        if isinstance(actual, TypeNull):
+            return True
+        if isinstance(actual, TypeOptional):
+            return _bind_type_vars(
+                actual.inner,
+                expected.inner,
+                type_subst=type_subst,
+                dim_subst=dim_subst,
+                dim_symbols=dim_symbols,
+                rigid_symbols=rigid_symbols,
+                rest_subst=rest_map,
+            )
+        return _bind_type_vars(
+            actual,
+            expected.inner,
+            type_subst=type_subst,
+            dim_subst=dim_subst,
+            dim_symbols=dim_symbols,
+            rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
+        )
+    if isinstance(actual, TypeOptional):
+        return False
+    if isinstance(expected, TypeList):
+        actual_list = actual
+        if isinstance(actual_list, TypeNamed):
+            alias_item = _named_list_item_type(actual_list.name)
+            if alias_item is None:
+                return False
+            actual_list = TypeList(item=alias_item)
+        if not isinstance(actual_list, TypeList):
+            return False
+        return _bind_type_vars(
+            actual_list.item,
+            expected.item,
+            type_subst=type_subst,
+            dim_subst=dim_subst,
+            dim_symbols=dim_symbols,
+            rigid_symbols=rigid_symbols,
+            rest_subst=rest_map,
+        )
+    if isinstance(actual, TypeNamed) and isinstance(expected, TypeTensor):
+        return actual.name in {"Tensor", "IdxTensor"}
+    if isinstance(actual, TypeTensor) and isinstance(expected, TypeNamed):
+        if _is_type_var_name(expected.name):
+            bound = type_subst.get(expected.name)
+            if bound is None:
+                type_subst[expected.name] = actual
+                return True
+            return _types_compatible(
+                actual,
+                bound,
+                dim_subst=dim_subst,
+                dim_symbols=dim_symbols,
+                rigid_symbols=rigid_symbols,
+                rest_subst=rest_map,
+            )
+        return expected.name in {"Tensor", "IdxTensor"}
+    return _types_compatible(
+        actual,
+        _substitute_type_vars(expected, type_subst),
+        dim_subst=dim_subst,
+        dim_symbols=dim_symbols,
+        rigid_symbols=rigid_symbols,
+        rest_subst=rest_map,
+    )
 
 
 def _is_int_value(value: Any) -> bool:
@@ -886,9 +1137,7 @@ def _primitive_fallback_type(
             return TypeList(item=TypeAny())
         if op_name == "list_append":
             if arg_types:
-                root = (
-                    arg_types[0].inner if isinstance(arg_types[0], TypeOptional) else arg_types[0]
-                )
+                root = arg_types[0]
                 if isinstance(root, TypeNamed):
                     alias_item = _named_list_item_type(root.name)
                     if alias_item is not None:
@@ -898,17 +1147,13 @@ def _primitive_fallback_type(
             return TypeList(item=TypeAny())
         if op_name == "list_index":
             if arg_types:
-                root = (
-                    arg_types[0].inner if isinstance(arg_types[0], TypeOptional) else arg_types[0]
-                )
+                root = arg_types[0]
                 if isinstance(root, TypeNamed):
                     alias_item = _named_list_item_type(root.name)
                     if alias_item is not None:
                         root = TypeList(item=alias_item)
                 if isinstance(root, TypeList):
-                    if isinstance(root.item, TypeOptional):
-                        return root.item
-                    return TypeOptional(inner=root.item)
+                    return root.item
         if op_name in {
             "activation",
             "add",
@@ -1133,7 +1378,13 @@ def _primitive_output_type(
         return TypeList(item=tensor_type)
     if op_name == "list_append":
         list_arg = arg_types[0] if arg_types else TypeAny()
-        list_root = list_arg.inner if isinstance(list_arg, TypeOptional) else list_arg
+        if isinstance(list_arg, TypeOptional):
+            raise _error(
+                module,
+                path,
+                f"list_append expects non-optional List[_], got {render_type(list_arg)}",
+            )
+        list_root = list_arg
         if isinstance(list_root, TypeNamed):
             alias_item = _named_list_item_type(list_root.name)
             if alias_item is not None:
@@ -1159,12 +1410,16 @@ def _primitive_output_type(
                 f"list has {render_type(list_root.item)}, appended {render_type(item_arg)}",
             )
         result = TypeList(item=merged_item)
-        if isinstance(list_arg, TypeOptional):
-            return TypeOptional(inner=result)
         return result
     if op_name == "list_index":
         list_arg = arg_types[0] if arg_types else TypeAny()
-        list_root = list_arg.inner if isinstance(list_arg, TypeOptional) else list_arg
+        if isinstance(list_arg, TypeOptional):
+            raise _error(
+                module,
+                path,
+                f"list_index expects non-optional List[_], got {render_type(list_arg)}",
+            )
+        list_root = list_arg
         if isinstance(list_root, TypeNamed):
             alias_item = _named_list_item_type(list_root.name)
             if alias_item is not None:
@@ -1175,9 +1430,7 @@ def _primitive_output_type(
                 path,
                 f"list_index expects first arg List[_], got {render_type(list_arg)}",
             )
-        if isinstance(list_root.item, TypeOptional):
-            return list_root.item
-        return TypeOptional(inner=list_root.item)
+        return list_root.item
     var_types: dict[str, str] = {}
     input_slots: list[tuple[str, set[str]]] = []
     slot_names = ("x", "y", "z", "a", "b", "c", "d")
@@ -1807,6 +2060,7 @@ def _call_return_type(
             )
         dim_subst: dict[str, DimToken] = {}
         rest_subst: dict[str, tuple[DimToken, ...]] = {}
+        type_subst: dict[str, TypeExpr] = {}
         for idx, param_type in enumerate(call_sig.params):
             arg_expr_maybe = bound_args[idx]
             if arg_expr_maybe is None:
@@ -1881,12 +2135,22 @@ def _call_return_type(
                 continue
             if not _types_compatible(
                 arg_type,
-                param_type,
+                _substitute_type_vars(param_type, type_subst),
                 dim_subst=dim_subst,
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
                 rest_subst=rest_subst,
             ):
+                if _bind_type_vars(
+                    arg_type,
+                    param_type,
+                    type_subst=type_subst,
+                    dim_subst=dim_subst,
+                    dim_symbols=dim_symbols,
+                    rigid_symbols=rigid_symbols,
+                    rest_subst=rest_subst,
+                ):
+                    continue
                 raise _error(
                     module,
                     path,
@@ -1902,7 +2166,7 @@ def _call_return_type(
                         dim_subst["DO"] = dim_token
         substituted_returns = tuple(
             _substitute_type_dims(
-                ret,
+                _substitute_type_vars(ret, type_subst),
                 dim_subst=dim_subst,
                 symbols=dim_symbols,
                 rest_subst=rest_subst,
@@ -2833,15 +3097,16 @@ def typecheck_axon_program(
     if not modules:
         raise ValueError("Axon typecheck failed: program must contain at least one module")
 
+    type_aliases = _build_type_alias_table(modules)
     signatures: dict[str, ModuleSignature] = {
-        module.name: _module_signature(module) for module in modules
+        module.name: _module_signature(module, type_aliases=type_aliases) for module in modules
     }
-    primitive_aliases = _extract_primitive_aliases(modules)
+    primitive_aliases = _extract_primitive_aliases(modules, type_aliases=type_aliases)
     dim_symbols: dict[str, DimToken] = {}
     polymorphic_dim_names: set[str] = set()
     for module in modules:
-        dim_symbols.update(_symbol_dim_table(module))
-        polymorphic_dim_names.update(_module_signature_dim_names(module))
+        dim_symbols.update(_symbol_dim_table(module, type_aliases=type_aliases))
+        polymorphic_dim_names.update(_module_signature_dim_names(module, type_aliases=type_aliases))
     for name in polymorphic_dim_names:
         dim_symbols.pop(name, None)
     rigid_symbols = set(dim_symbols.keys())

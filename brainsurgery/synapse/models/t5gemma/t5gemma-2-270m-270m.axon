@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "google/t5gemma-2-270m-270m" #-}
 {-# TASK "seq2seq_lm" #-}
 {-# PADDING_SIDE "right" #-}
@@ -55,7 +56,7 @@ t5gemma2_encoder_block x i pos_ids attention_mask = do
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN_ENC bias=false |> gelu_pytorch_tanh
     u <- linear@up_proj xn dim=FFN_ENC bias=false
-    return g |> mul u |> linear@down_proj dim=D bias=false
+    return g |> Math.mul u |> linear@down_proj dim=D bias=false
   m <- rmsnorm@post_feedforward_layernorm m eps=EPS cast_float=true unit_offset=true
   return x + m
 
@@ -87,7 +88,7 @@ t5gemma2_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_att
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN_DEC bias=false |> gelu_pytorch_tanh
     u <- linear@up_proj xn dim=FFN_DEC bias=false
-    return g |> mul u |> linear@down_proj dim=D bias=false
+    return g |> Math.mul u |> linear@down_proj dim=D bias=false
   m <- rmsnorm@post_feedforward_layernorm m eps=EPS cast_float=true unit_offset=true
   return x + m
 

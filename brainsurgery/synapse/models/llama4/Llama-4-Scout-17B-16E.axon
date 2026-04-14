@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["meta-llama/Llama-4-Scout-17B-16E", "meta-llama/Llama-4-Scout-17B-16E-Instruct"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -38,8 +39,8 @@ llama4_temp_scale :: Tensor[B,S] -> Tensor[B,1,S,1]
 llama4_temp_scale pos_ids = do
   shifted <- pos_ids + 1.0
   scaled <- shifted / FLOOR_SCALE
-  bucket <- floor scaled
-  logged <- log (bucket + 1.0)
+  bucket <- Math.floor scaled
+  logged <- Math.log (bucket + 1.0)
   gain <- (logged * ATTN_TEMP_SCALE) + 1.0
   gain3 <- unsqueeze gain dim=1
   gain4 <- unsqueeze gain3 dim=3
@@ -50,7 +51,7 @@ llama4_moe x = do
   shared <- scope@shared_expert do
     gate <- linear@gate_proj x dim=FFN_SHARED bias=false
     up <- linear@up_proj x dim=FFN_SHARED bias=false
-    return gate |> silu |> mul up |> linear@down_proj dim=D bias=false
+    return gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
   topk_weights, topk_indices <- sigmoid_topk_router@router x top_k=EPT
   routed <- MoE.grouped_swiglu_ffn_basic x topk_weights topk_indices E transpose=true pre_scale_input=true
   return shared + routed

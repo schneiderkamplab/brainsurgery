@@ -41,9 +41,15 @@ def interpret(
     if value is None:
         env[out_name] = 0
         return
-    if not isinstance(value, tuple) or len(value) < 1 or not torch.is_tensor(value[0]):
-        raise ValueError("cache_seq_len expects kv tuple (k, v)")
-    env[out_name] = int(value[0].shape[-2])
+    if isinstance(value, tuple) and len(value) >= 1 and torch.is_tensor(value[0]):
+        env[out_name] = int(value[0].shape[-2])
+        return
+    if isinstance(value, list) and value:
+        first = value[0]
+        if isinstance(first, tuple) and len(first) >= 1 and torch.is_tensor(first[0]):
+            env[out_name] = int(first[0].shape[-2])
+            return
+    raise ValueError("cache_seq_len expects kv tuple (k, v) or cache list of kv tuples")
     return
 
 
@@ -72,6 +78,8 @@ def compile(
     src = read(ref)
     lines.append(f"{indent}if {src} is None:")
     lines.append(f"{indent}    {out_var} = 0")
+    lines.append(f"{indent}elif isinstance({src}, list):")
+    lines.append(f"{indent}    {out_var} = int({src}[0][0].shape[-2]) if {src} else 0")
     lines.append(f"{indent}else:")
     lines.append(f"{indent}    {out_var} = int({src}[0].shape[-2])")
     return lines

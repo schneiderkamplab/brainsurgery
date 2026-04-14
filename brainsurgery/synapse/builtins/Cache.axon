@@ -1,21 +1,27 @@
 import List
+import Prelude (concat)
 
-update :: ?CacheLayer -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?CacheLayer)
-update past k v = _cache_update past k v
+type CacheLayer = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
+type Cache = List[CacheLayer]
 
-seq_len :: ?Tensor[B,H,T,D] -> Int
-seq_len k = _cache_seq_len k
+update :: ?CacheLayer -> Tensor[B,H,T,DH] -> Tensor[B,H,T,DH] -> (Tensor[B,H,T,DH], Tensor[B,H,T,DH], ?CacheLayer)
+update past k v = (past == null)
+  ? do
+    return k, v, (k, v)
+  : do
+    k_past, v_past <- past
+    k_all <- concat k_past k dim=-2
+    v_all <- concat v_past v dim=-2
+    return k_all, v_all, (k_all, v_all)
 
 init :: Cache
 init = List.init
 
 index :: ?Cache -> Int -> ?CacheLayer
-index = List.index
+index values i = (values == null) ? null : List.index values i
 
 append :: ?Cache -> ?CacheLayer -> ?Cache
-append = List.append
+append values value = (values == null) ? null : ((value == null) ? values : List.append values value)
 
-past_length :: ?Cache -> Int
-past_length cache = do
-  first <- List.index cache 0
-  return _cache_seq_len first
+past_length :: ?List[(Tensor[B,H,T,DH], Tensor[B,H,T,DH])] -> Int
+past_length cache = (cache == null) ? 0 : do k, _ <- List.index cache 0; return (k == null) ? 0 : T

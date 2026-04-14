@@ -12,10 +12,10 @@ from ._config_common import (
 )
 
 OP_NAME = "config_has"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"root"}
+LOWERING_ARITY = (1, 2)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"root": "str"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -43,7 +43,7 @@ def interpret(
     out_name = model._require_name(node_spec.get("_bind"), field="config_has._bind")
     key = _resolve_key(op_name=OP_NAME, node_spec=node_spec, env=env, symbols=symbols)
     config = _config_root(model.spec)
-    root = _resolve_root(node_spec=node_spec, env=env, symbols=symbols)
+    root = _resolve_root(model=model, node_spec=node_spec, env=env, symbols=symbols)
     if root:
         root_found, root_value = _config_lookup(config, root)
         if root_found and isinstance(root_value, dict):
@@ -79,7 +79,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("String",),
+    "args": ("String", "String"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": ("Bool",),
 }

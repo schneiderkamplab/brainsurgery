@@ -6,7 +6,7 @@ import torch
 from torch.nn import functional as F
 
 OP_NAME = "softmax"
-LOWERING_ARITY = (1, 3)
+LOWERING_ARITY = (3, 3)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {}
@@ -22,15 +22,6 @@ def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
     return [raw]
 
 
-def _arg_or_default(args: list[Any], index: int, default: Any) -> Any:
-    if index >= len(args):
-        return default
-    value = args[index]
-    if isinstance(value, str) and value.strip().lower() == "null":
-        return default
-    return value
-
-
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return False
@@ -44,8 +35,8 @@ def lowering_validate_signature(
     if kwargs:
         unknown = ", ".join(sorted(str(key) for key in kwargs))
         raise ValueError(f"softmax unsupported kwargs: {unknown}")
-    if len(args) > 3:
-        raise ValueError(f"softmax expects at most 3 positional args, got {len(args)}")
+    if len(args) != 3:
+        raise ValueError(f"softmax expects exactly 3 positional args, got {len(args)}")
 
 
 def interpret(
@@ -58,12 +49,12 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     args = _raw_args(node_spec)
-    if not args:
-        raise ValueError("softmax requires positional args: x [dim dtype]")
+    if len(args) != 3:
+        raise ValueError("softmax requires positional args: x dim dtype")
     x = model._read_tensor_input(args[0], env)
     out = model._require_name(node_spec.get("_bind"), field="softmax._bind")
-    dim = int(model._eval_expr(_arg_or_default(args, 1, -1), env, symbols))
-    dtype_expr = _arg_or_default(args, 2, None)
+    dim = int(model._eval_expr(args[1], env, symbols))
+    dtype_expr = args[2]
     dtype_name = None if dtype_expr is None else model._eval_expr(dtype_expr, env, symbols)
     if dtype_name is None:
         env[out] = F.softmax(x, dim=dim)
@@ -102,13 +93,13 @@ def compile(
         return emitter._read_env_var(env, name)
 
     args = _raw_args(node_spec)
-    if not args:
-        raise ValueError("softmax requires positional args: x [dim dtype]")
+    if len(args) != 3:
+        raise ValueError("softmax requires positional args: x dim dtype")
     src = read(str(args[0]))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
-    dim = emitter._expr_code(_arg_or_default(args, 1, -1), env)
-    dtype_expr_raw = _arg_or_default(args, 2, None)
+    dim = emitter._expr_code(args[1], env)
+    dtype_expr_raw = args[2]
     if dtype_expr_raw is None:
         lines.append(f"{indent}{out_var} = F.softmax({src}, dim=int({dim}))")
     else:
@@ -139,7 +130,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any",),
+    "args": ("Any", "Any", "Any"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": "dynamic",
 }

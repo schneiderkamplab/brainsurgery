@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["facebook/opt-1.3b", "facebook/opt-6.7b", "facebook/opt-13b"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -17,7 +18,7 @@ EPS = Config.float "layer_norm_eps" default=1e-05
 C = Config.int "max_position_embeddings" default=2048
 DO_PRE_LN = Config.value "do_layer_norm_before" default=true
 ACT = Config.value "activation_function" default="relu"
-ATTN_SCALE = 1.0 / sqrt HD
+ATTN_SCALE = 1.0 / Math.sqrt HD
 HAS_LM_HEAD = Params.has_root "lm_head"
 HAS_DECODER_ROOT = Params.has_root "decoder.embed_tokens"
 

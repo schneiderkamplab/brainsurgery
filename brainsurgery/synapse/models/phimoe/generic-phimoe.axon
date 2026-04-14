@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["microsoft/Phi-3.5-MoE-instruct"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -34,7 +35,7 @@ ROUTER_JITTER = Config.float "router_jitter_noise" default=0.01
 HAS_LM_HEAD = Params.has_root "lm_head"
 HAS_LM_HEAD_BIAS = Params.has_root "lm_head.bias"
 
-ATTN_SCALE = 1.0 / sqrt HD
+ATTN_SCALE = 1.0 / Math.sqrt HD
 
 phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 phimoe_block x pos_ids attn_mask past_kv = do
@@ -59,7 +60,7 @@ phimoe_block x pos_ids attn_mask past_kv = do
     m <- xn * 0.0
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
-      x_upd <- linear@w1 x_sel dim=FFN |> silu |> mul (linear@w3 x_sel dim=FFN) |> linear@w2 dim=D bias=false
+      x_upd <- linear@w1 x_sel dim=FFN |> silu |> Math.mul (linear@w3 x_sel dim=FFN) |> linear@w2 dim=D bias=false
       m <- MoE.scatter_add m token_idx x_upd sel_scores
     return m
   return x + m, new_kv

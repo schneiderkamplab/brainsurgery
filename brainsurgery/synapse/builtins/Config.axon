@@ -1,14 +1,14 @@
-has :: String -> Bool
-has key = _config_has key
+has :: String -> ?String -> Bool
+has key ?root="" = _config_has key root
 
-int :: String -> Int
-int key = _config_int key
+int :: String -> ?String -> ?Int -> Int
+int key ?root="" ?default=null = _config_int key root default
 
-float :: String -> Float
-float key = _config_float key
+float :: String -> ?String -> ?Float -> Float
+float key ?root="" ?default=null = _config_float key root default
 
-str :: String -> String
-str key = _config_str key
+str :: String -> ?String -> ?String -> String
+str key ?root="" ?default=null = _config_str key root default
 
-value :: String -> Any
-value key = _config_value key
+value :: String -> ?String -> ?Any -> Any
+value key ?root="" ?default=null = _config_value key root default

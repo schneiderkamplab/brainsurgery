@@ -6,7 +6,7 @@ import torch
 from torch.nn import functional as F
 
 OP_NAME = "embedding"
-LOWERING_ARITY = (1, 3)
+LOWERING_ARITY = (1, 2)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {}
@@ -67,19 +67,14 @@ def interpret(
 ) -> None:
     args = _raw_args(node_spec)
     if not args:
-        raise ValueError("embedding requires positional args: x [dim scale]")
+        raise ValueError("embedding requires positional args: x [dim]")
     x = model._read_tensor_input(args[0], env)
     weight_path = model._infer_param_path(node_spec, node_path=node_path, param_name="weight")
     weight = model._state_tensor_from_resolved_path(weight_path, field="embedding.weight")
     if torch.is_tensor(weight) and torch.is_tensor(x) and weight.device != x.device:
         weight = weight.to(device=x.device)
     out = model._require_name(node_spec.get("_bind"), field="embedding._bind")
-    y = F.embedding(x, weight)
-    scale_expr = _arg_or_default(args, 2, None)
-    if scale_expr is not None:
-        scale = float(model._eval_expr(scale_expr, env, symbols))
-        y = y * y.new_tensor(scale)
-    env[out] = y
+    env[out] = F.embedding(x, weight)
     return
 
 
@@ -102,7 +97,7 @@ def compile(
 
     args = _raw_args(node_spec)
     if not args:
-        raise ValueError("embedding requires positional args: x [dim scale]")
+        raise ValueError("embedding requires positional args: x [dim]")
     src = read(str(args[0]))
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
@@ -113,15 +108,7 @@ def compile(
         lines=lines,
         indent=indent,
     )
-    scale_expr = _arg_or_default(args, 2, None)
-    if scale_expr is None:
-        lines.append(f"{indent}{out_var} = F.embedding({src}, {weight})")
-    else:
-        scale = emitter._expr_code(scale_expr, env)
-        lines.append(f"{indent}{out_var} = F.embedding({src}, {weight})")
-        lines.append(
-            f"{indent}{out_var} = {out_var} * torch.tensor(float({scale}), dtype={out_var}.dtype, device={out_var}.device)"
-        )
+    lines.append(f"{indent}{out_var} = F.embedding({src}, {weight})")
     return lines
 
 

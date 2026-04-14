@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "mistralai/Mistral-Small-4-119B-2603" #-}
 {-# TASK "causal_lm" #-}
 
@@ -36,7 +37,7 @@ ROPE_MSCALE = Config.float "mscale" root=ROPE_CFG default=1.0
 ROPE_MSCALE_ALL_DIM = Config.float "mscale_all_dim" root=ROPE_CFG default=1.0
 Q_SCALE_BETA = Config.float "llama_4_scaling_beta" root=ROPE_CFG default=0.1
 ROUTE_SCALE = Config.float "routed_scaling_factor" root=CFG default=1.0
-ATTN_SCALE = 1.0 / sqrt QKHD
+ATTN_SCALE = 1.0 / Math.sqrt QKHD
 
 mistral4_norm :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 mistral4_norm@path x = rmsnorm@path x eps=EPS
@@ -50,9 +51,9 @@ mistral4_kv_norm@path x = rmsnorm@path x eps=EPS
 mistral4_query_scale :: Tensor[B,S] -> Tensor[B,1,S,1]
 mistral4_query_scale pos_ids = do
   scaled <- pos_ids / ROPE_CONTEXT
-  bucket <- floor scaled
+  bucket <- Math.floor scaled
   shifted <- bucket + 1.0
-  logged <- log shifted
+  logged <- Math.log shifted
   beta_scaled <- logged * Q_SCALE_BETA
   gain <- beta_scaled + 1.0
   gain3 <- unsqueeze gain dim=1
@@ -93,7 +94,7 @@ mistral4_moe xn = do
   shared <- scope@shared_experts do
     gate <- linear@gate_proj xn dim=(EM * SE) bias=false
     up <- linear@up_proj xn dim=(EM * SE) bias=false
-    return gate |> silu |> mul up |> linear@down_proj dim=D bias=false
+    return gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
   topk_weights, topk_indices <- softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true routed_scaling_factor=ROUTE_SCALE
   routed <- MoE.grouped_swiglu_ffn_basic xn topk_weights topk_indices E
   return shared + routed

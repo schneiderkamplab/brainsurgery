@@ -3,6 +3,15 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
+def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
+    raw = node_spec.get("_args")
+    if isinstance(raw, list):
+        return list(raw)
+    if raw is None:
+        return []
+    return [raw]
+
+
 def _uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     del emitter, node_spec
     return False
@@ -26,7 +35,10 @@ def _resolve_key(
     env: dict[str, Any],
     symbols: Mapping[str, int | float | bool],
 ) -> str:
-    raw_key = node_spec.get("_args")
+    args = _raw_args(node_spec)
+    if not args:
+        raise ValueError(f"{op_name} requires key positional arg")
+    raw_key = args[0]
     key = _resolve_scalar_ref(raw_key, env, symbols)
     if not isinstance(key, str) or not key:
         raise ValueError(f"{op_name} key must resolve to non-empty string")
@@ -40,9 +52,10 @@ def _resolve_default(
     env: dict[str, Any],
     symbols: Mapping[str, int | float | bool],
 ) -> tuple[bool, Any]:
-    if "default" not in node_spec:
+    args = _raw_args(node_spec)
+    if len(args) < 3:
         return False, None
-    raw_default = _resolve_scalar_ref(node_spec.get("default"), env, symbols)
+    raw_default = _resolve_scalar_ref(args[2], env, symbols)
     if isinstance(raw_default, dict) and "_expr" in raw_default:
         return True, model._eval_expr(raw_default, env, symbols)
     return True, raw_default
@@ -50,13 +63,20 @@ def _resolve_default(
 
 def _resolve_root(
     *,
+    model: Any,
     node_spec: dict[str, Any],
     env: dict[str, Any],
     symbols: Mapping[str, int | float | bool],
 ) -> str:
-    if "root" not in node_spec:
+    args = _raw_args(node_spec)
+    if len(args) < 2:
         return ""
-    root = _resolve_scalar_ref(node_spec.get("root"), env, symbols)
+    raw_root = args[1]
+    root = _resolve_scalar_ref(raw_root, env, symbols)
+    if isinstance(root, dict) and "_expr" in root:
+        root = model._eval_expr(root, env, symbols)
+    if root is None:
+        return ""
     if not isinstance(root, str):
         raise ValueError("config root must resolve to string")
     return root
@@ -126,7 +146,7 @@ def _resolve_config_value(
 ) -> tuple[str, bool, Any]:
     key = _resolve_key(op_name=op_name, node_spec=node_spec, env=env, symbols=symbols)
     config = _config_root(model.spec)
-    root = _resolve_root(node_spec=node_spec, env=env, symbols=symbols)
+    root = _resolve_root(model=model, node_spec=node_spec, env=env, symbols=symbols)
     full_key = f"{root}.{key}" if root else key
     if root:
         root_found, root_value = _config_lookup(config, root)
@@ -172,8 +192,13 @@ def _compile_lookup_lines(
     value_var = emitter._fresh("cfg_value")
     part_var = emitter._fresh("cfg_part")
     root_part_var = emitter._fresh("cfg_root_part")
-    key_expr = _compile_value_expr(emitter=emitter, value=node_spec.get("_args"), env=env)
-    root_expr = _compile_value_expr(emitter=emitter, value=node_spec.get("root", ""), env=env)
+    args = _raw_args(node_spec)
+    if not args:
+        raise ValueError(f"{op_name} requires key positional arg")
+    key_expr = _compile_value_expr(emitter=emitter, value=args[0], env=env)
+    root_expr = _compile_value_expr(
+        emitter=emitter, value=args[1] if len(args) >= 2 else "", env=env
+    )
 
     spec = getattr(emitter, "spec", {})
     model = spec.get("model", {}) if isinstance(spec, dict) else {}
@@ -184,7 +209,9 @@ def _compile_lookup_lines(
     lines.append(f"{indent}if not isinstance({root_var}, dict):")
     lines.append(f"{indent}    {root_var} = {{}}")
     lines.append(f"{indent}{lookup_root_var} = {root_expr}")
-    lines.append(f"{indent}if not isinstance({lookup_root_var}, str):")
+    lines.append(f"{indent}if {lookup_root_var} is None:")
+    lines.append(f"{indent}    {lookup_root_var} = ''")
+    lines.append(f"{indent}elif not isinstance({lookup_root_var}, str):")
     lines.append(f"{indent}    raise ValueError('config root must resolve to string')")
     lines.append(f"{indent}{key_var} = {key_expr}")
     lines.append(f"{indent}if not isinstance({key_var}, str) or not {key_var}:")
@@ -227,8 +254,9 @@ def _compile_default_lines(
     value_var: str,
 ) -> list[str]:
     lines: list[str] = []
-    if "default" in node_spec:
-        default_expr = _compile_value_expr(emitter=emitter, value=node_spec.get("default"), env=env)
+    args = _raw_args(node_spec)
+    if len(args) >= 3:
+        default_expr = _compile_value_expr(emitter=emitter, value=args[2], env=env)
         lines.append(f"{indent}if not {found_var}:")
         lines.append(f"{indent}    {value_var} = {default_expr}")
         return lines

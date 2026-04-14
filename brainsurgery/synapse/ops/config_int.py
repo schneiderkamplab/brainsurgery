@@ -11,10 +11,10 @@ from ._config_common import (
 )
 
 OP_NAME = "config_int"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"default", "root"}
+LOWERING_ARITY = (1, 3)
+LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"default": "int", "root": "str"}
+LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -107,7 +107,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("String",),
+    "args": ("String", "String", "Int"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": ("Int",),
 }

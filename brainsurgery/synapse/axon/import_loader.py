@@ -262,6 +262,7 @@ def _apply_namespace(
                 imported_members=module.imported_members,
                 symbols=module.symbols,
                 pragmas=module.pragmas,
+                type_aliases=module.type_aliases,
                 return_type_expr=module.return_type_expr,
                 return_shape=module.return_shape,
             )

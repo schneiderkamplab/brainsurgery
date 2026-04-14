@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["allenai/Flex-math-2x7B-1T", "allenai/Flex-news-2x7B-1T", "allenai/Flex-pes2o-2x7B-1T", "allenai/Flex-code-2x7B-1T", "allenai/Flex-creative-2x7B-1T", "allenai/Flex-reddit-2x7B-1T", "danish-foundation-models/dfm-moe-open-v0-8x7b-pt", "allenai/FlexOlmo-7x7B-1T"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -18,7 +19,7 @@ C    = Config.int "max_position_embeddings" default=4096           -- causal win
 FFN  = Config.int "intermediate_size" default=11008                -- expert FFN width
 EPS  = Config.float "rms_norm_eps" default=1e-06                   -- RMSNorm epsilon
 THETA = Config.float "rope_theta" default=500000.0                 -- RoPE theta
-ATTN_SCALE = 1.0 / sqrt HD                                         -- qk scaling
+ATTN_SCALE = 1.0 / Math.sqrt HD                                         -- qk scaling
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS
@@ -27,7 +28,7 @@ expert_ffn :: Tensor[N,D] -> Tensor[N,D]
 expert_ffn x = do
   gate <- linear@gate_proj x dim=FFN
   up <- linear@up_proj x dim=FFN
-  return gate |> silu |> mul up |> linear@down_proj dim=D
+  return gate |> silu |> Math.mul up |> linear@down_proj dim=D
 
 flexolmo_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 flexolmo_decoder_block x pos_ids attn_mask past_kv = do

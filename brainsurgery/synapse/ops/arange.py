@@ -67,9 +67,13 @@ def _resolve_bound(
     field: str,
 ) -> int:
     value = model._eval_expr(raw, env, symbols)
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool):
         raise ValueError(f"arange.{field} must resolve to int")
-    return int(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float) and float(value).is_integer():
+        return int(value)
+    raise ValueError(f"arange.{field} must resolve to int")
 
 
 def interpret(
@@ -94,10 +98,14 @@ def interpret(
         end_value = model._eval_expr(end_raw, env, symbols)
         if end_value is None:
             end = int(src.shape[-2] if src.ndim >= 2 else src.shape[-1])
-        elif isinstance(end_value, bool) or not isinstance(end_value, int):
+        elif isinstance(end_value, bool):
             raise ValueError("arange.end must resolve to int or null")
-        else:
+        elif isinstance(end_value, int):
             end = int(end_value)
+        elif isinstance(end_value, float) and float(end_value).is_integer():
+            end = int(end_value)
+        else:
+            raise ValueError("arange.end must resolve to int or null")
     out = model._require_name(node_spec.get("_bind"), field="arange._bind")
     env[out] = torch.arange(start, end, device=src.device, dtype=torch.long)
 

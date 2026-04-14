@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "distilbert/distilroberta-base" #-}
 {-# TASK "masked_lm" #-}
 
@@ -31,7 +32,7 @@ roberta :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 roberta input_ids attn_mask = do
   pos_base <- position_ids input_ids attn_mask=attn_mask pad_fill=-1
   pos_shift <- PAD + 1
-  pos_ids <- add pos_base pos_shift
+  pos_ids <- Math.add pos_base pos_shift
   tok_type_ids <- zeros_like input_ids
   tok <- embedding@roberta.embeddings.word_embeddings input_ids dim=D
   pos <- embedding@roberta.embeddings.position_embeddings pos_ids dim=D

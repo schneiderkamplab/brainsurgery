@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["allenai/Olmo-3-1025-7B", "allenai/Olmo-3-7B-Instruct", "allenai/Olmo-3-7B-Think", "allenai/Olmo-3-1125-32B"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -22,7 +23,7 @@ ROPE_SCALE = Config.float "rope_scaling.factor" default=8.0
 ROPE_BETA_FAST = Config.float "rope_scaling.beta_fast" default=32.0
 ROPE_BETA_SLOW = Config.float "rope_scaling.beta_slow" default=1.0
 ROPE_CONTEXT = Config.int "rope_scaling.original_max_position_embeddings" default=8192
-ATTN_SCALE = 1.0 / sqrt HD
+ATTN_SCALE = 1.0 / Math.sqrt HD
 
 olmo3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 olmo3_block x i pos_ids attn_mask past_kv = do
@@ -43,7 +44,7 @@ olmo3_block x i pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj x dim=FFN
     u <- linear@up_proj x dim=FFN
-    return g |> silu |> mul u |> linear@down_proj dim=D
+    return g |> silu |> Math.mul u |> linear@down_proj dim=D
   m <- rmsnorm@post_feedforward_layernorm m eps=EPS cast_float=true
   return x + m, new_kv
 

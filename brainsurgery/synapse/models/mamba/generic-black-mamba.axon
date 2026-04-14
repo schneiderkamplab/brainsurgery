@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["Zyphra/BlackMamba-2.8B"] #-}
 {-# TASK "causal_lm" #-}
 {-# TOKENIZER "EleutherAI/gpt-neox-20b" #-}
@@ -26,7 +27,7 @@ expert_ffn :: Tensor[Nt,D] -> Tensor[Nt,D]
 expert_ffn x = do
   in_proj <- linear@linear_fc1 x dim=2*FF
   gate, up <- split in_proj sizes=[FF, FF]
-  return gate |> silu |> mul up |> linear@linear_fc2 dim=D
+  return gate |> silu |> Math.mul up |> linear@linear_fc2 dim=D
 
 moe_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 moe_ffn x = do
@@ -54,7 +55,7 @@ mamba_mixer x = do
     dt, b, c <- split params sizes=[R, N, N]
     delta <- linear@mixer.dt_proj dt dim=I bias=true
     y_scan <- mamba_scan u_conv delta b c A="mixer.A_log" D="mixer.D" a_is_log=true
-    return y_scan |> mul (silu gate) |> linear@mixer.out_proj dim=D
+    return y_scan |> Math.mul (silu gate) |> linear@mixer.out_proj dim=D
   return x + y
 
 black_mamba :: TokenIds[B,S] -> Tensor[B,S,V]

@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["deepseek-ai/DeepSeek-V2-Lite", "deepseek-ai/DeepSeek-V2-Lite-Chat", "deepseek-ai/DeepSeek-Coder-V2-Lite-Base", "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -67,7 +68,7 @@ deepseek_v2_dense_block x pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     gate <- linear@gate_proj xn dim=FFN bias=false
     up <- linear@up_proj xn dim=FFN bias=false
-    return gate |> silu |> mul up |> linear@down_proj dim=D bias=false
+    return gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
   return x + m, new_kv
 
 deepseek_v2_moe_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
@@ -80,14 +81,14 @@ deepseek_v2_moe_block x pos_ids attn_mask past_kv = do
     shared <- scope@shared_experts do
       gate <- linear@gate_proj xn dim=(EM * SE) bias=false
       up <- linear@up_proj xn dim=(EM * SE) bias=false
-      return gate |> silu |> mul up |> linear@down_proj dim=D bias=false
+      return gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
     topk_scores, topk_indices <- linear@gate xn dim=E bias=false |> softmax dim=-1 dtype="float32" |> topk k=EPT dim=-1 sorted=false
     routed <- zeros_like xn
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
       gate <- linear@gate_proj x_sel dim=EM bias=false
       up <- linear@up_proj x_sel dim=EM bias=false
-      x_upd <- gate |> silu |> mul up |> linear@down_proj dim=D bias=false
+      x_upd <- gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
       routed <- MoE.scatter_add routed token_idx x_upd sel_scores
     return shared + routed
   return x + m, new_kv

@@ -95,8 +95,7 @@ class SynapseProgramModel(nn.Module):
         self._state = loaded
 
     def _param(self, path: str) -> torch.Tensor:
-        resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
-        return self._state[resolved]
+        return self._state_tensor_from_resolved_path(path, field="_param")
 
     def forward(self, input_ids: torch.Tensor | None = None, **inputs: Any) -> Any:
         spec = self.spec
@@ -105,11 +104,21 @@ class SynapseProgramModel(nn.Module):
         symbols: dict[str, SymbolValue] = {
             k: v for k, v in symbols_raw.items() if _is_symbol_value(v)
         }
+        self._refresh_symbols_from_config(model, symbols)
         blocks = model.get("blocks", {})
         input_specs = model.get("inputs", {})
         if not isinstance(input_specs, dict):
             raise ValueError("model.inputs must be a mapping when present")
         env = self._prepare_env(input_ids=input_ids, inputs=inputs, input_specs=input_specs)
+        # Mirror codegen behavior: seed shape symbols from declared main input
+        # tensor types before graph execution so `_ir_alias`/expr name lookups
+        # can resolve symbols like B/T even when not explicitly listed in
+        # model.symbols.
+        self._bind_shape_symbols_from_types(
+            env=env,
+            input_types=self._block_input_types("main"),
+            symbols=symbols,
+        )
         self._validate_input_shapes(env, input_specs, symbols)
         self._run_graph(model.get("graph", []), env, scope="", symbols=symbols, blocks=blocks)
 
@@ -123,6 +132,110 @@ class SynapseProgramModel(nn.Module):
         if "logits" in resolved_outputs and len(resolved_outputs) == 1:
             return resolved_outputs["logits"]
         return resolved_outputs
+
+    def _refresh_symbols_from_config(
+        self,
+        model: dict[str, Any],
+        symbols: dict[str, SymbolValue],
+    ) -> None:
+        config = model.get("config")
+        if not isinstance(config, dict):
+            return
+        graph = model.get("graph")
+        if not isinstance(graph, list):
+            return
+        blocks = model.get("blocks")
+        block_graphs: list[list[Any]] = []
+        if isinstance(blocks, dict):
+            for block in blocks.values():
+                if not isinstance(block, dict):
+                    continue
+                block_graph = block.get("graph")
+                if isinstance(block_graph, list):
+                    block_graphs.append(block_graph)
+
+        loop_symbol_names = self._collect_for_loop_bound_symbol_names([graph, *block_graphs])
+        if not loop_symbol_names:
+            return
+
+        config_candidates: dict[str, tuple[str, ...]] = {
+            "L": ("num_hidden_layers", "num_layers", "n_layer", "n_layers"),
+            "H": ("num_attention_heads", "num_heads", "n_head"),
+            "KVH": ("num_key_value_heads", "num_kv_heads", "n_kv_head"),
+            "D": ("hidden_size", "d_model", "n_embd"),
+            "V": ("vocab_size",),
+            "FFN": ("intermediate_size", "ffn_dim"),
+            "C": ("max_position_embeddings", "n_positions"),
+        }
+        for symbol_name in sorted(loop_symbol_names):
+            if symbol_name not in symbols:
+                continue
+            key_candidates = config_candidates.get(symbol_name)
+            if not key_candidates:
+                continue
+            config_value = self._lookup_first_int_config_value(config, key_candidates)
+            if config_value is not None:
+                symbols[symbol_name] = config_value
+
+    def _collect_for_loop_bound_symbol_names(self, graphs: list[list[Any]]) -> set[str]:
+        out: set[str] = set()
+
+        def _visit(items: list[Any]) -> None:
+            for item in items:
+                if not isinstance(item, dict) or len(item) != 1:
+                    continue
+                _, node_spec = next(iter(item.items()))
+                if not isinstance(node_spec, dict):
+                    continue
+                if node_spec.get("_op") == "for":
+                    to_expr = node_spec.get("_to")
+                    if isinstance(to_expr, str) and to_expr:
+                        out.add(to_expr)
+                    if (
+                        isinstance(to_expr, dict)
+                        and to_expr.get("_expr") == "name"
+                        and isinstance(to_expr.get("id"), str)
+                    ):
+                        out.add(str(to_expr["id"]))
+                    body = node_spec.get("_body")
+                    if isinstance(body, list):
+                        _visit(body)
+                nested = node_spec.get("graph")
+                if isinstance(nested, list):
+                    _visit(nested)
+                then_branch = node_spec.get("_then")
+                if isinstance(then_branch, list):
+                    _visit(then_branch)
+                else_branch = node_spec.get("_else")
+                if isinstance(else_branch, list):
+                    _visit(else_branch)
+
+        for graph in graphs:
+            _visit(graph)
+        return out
+
+    def _lookup_first_int_config_value(
+        self, config: dict[str, Any], key_candidates: tuple[str, ...]
+    ) -> int | None:
+        for key in key_candidates:
+            value: Any = config
+            ok = True
+            for part in key.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    ok = False
+                    break
+                value = value[part]
+            if not ok:
+                continue
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return int(value)
+            if isinstance(value, str):
+                raw = value.strip()
+                if raw and (raw.isdigit() or (raw[0] in {"+", "-"} and raw[1:].isdigit())):
+                    return int(raw)
+        return None
 
     def _resolve_spec(self, spec: dict[str, Any] | None) -> dict[str, Any]:
         resolved = self.SPEC if spec is None else spec
@@ -395,7 +508,9 @@ class SynapseProgramModel(nn.Module):
         if not isinstance(block_spec, dict):
             raise ValueError(f"Unknown block {block_name!r}")
 
-        block_env = dict(env)
+        # Block calls should not implicitly capture caller locals by name.
+        # Only declared inputs/kwargs are bound into the callee environment.
+        block_env: dict[str, Any] = {}
         block_inputs = block_spec.get("inputs", {})
         if not isinstance(block_inputs, dict):
             raise ValueError("block spec must include mapping inputs")
@@ -451,15 +566,18 @@ class SynapseProgramModel(nn.Module):
         ):
             pushed_roots = list(raw_param_root)
             self._param_roots_stack.append(pushed_roots)
+        # Keep shape/type symbol inference local to the block call so that
+        # helper signatures (e.g. Tensor[B,S,D]) do not leak/lock caller symbols.
+        block_symbols = dict(symbols)
         self._bind_shape_symbols_from_types(
             env=block_env,
             input_types=self._block_input_types(block_name),
-            symbols=symbols,
+            symbols=block_symbols,
         )
-        self._validate_input_shapes(block_env, block_inputs, symbols)
+        self._validate_input_shapes(block_env, block_inputs, block_symbols)
         try:
             self._run_graph(
-                block_graph, block_env, scope=call_scope, symbols=symbols, blocks=blocks
+                block_graph, block_env, scope=call_scope, symbols=block_symbols, blocks=blocks
             )
         finally:
             if pushed_roots is not None:
@@ -794,6 +912,11 @@ class SynapseProgramModel(nn.Module):
                 if isinstance(current, bool):
                     raise ValueError(f"Invalid boolean symbol value for {dim!r}")
                 if isinstance(current, int):
+                    # Block-call symbol bindings are local to the callee frame.
+                    # Allow type-driven dimensions to shadow caller-carried values
+                    # when symbol names are reused across blocks.
+                    if current != actual:
+                        symbols[dim] = actual
                     continue
                 symbols[dim] = actual
 
@@ -932,14 +1055,19 @@ class SynapseProgramModel(nn.Module):
         if callee in {
             "sqrt",
             "Prelude.sqrt",
+            "Math.sqrt",
             "log",
             "Prelude.log",
+            "Math.log",
             "exp",
             "Prelude.exp",
+            "Math.exp",
             "sin",
             "Prelude.sin",
+            "Math.sin",
             "cos",
             "Prelude.cos",
+            "Math.cos",
         }:
             fn_name = callee.split(".", 1)[-1]
             if kwargs:
@@ -963,7 +1091,7 @@ class SynapseProgramModel(nn.Module):
             if fn_name == "cos":
                 return math.cos(arg_f)
             raise ValueError(f"Unsupported unary expression call: {callee!r}")
-        if callee in {"pow", "Prelude.pow"}:
+        if callee in {"pow", "Prelude.pow", "Math.pow"}:
             if kwargs:
                 raise ValueError("pow expression call does not support kwargs")
             if len(args) != 2:
@@ -1111,7 +1239,11 @@ class SynapseProgramModel(nn.Module):
     def _state_tensor_from_resolved_path(self, path: str, *, field: str) -> torch.Tensor:
         resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
         if resolved not in self._state:
-            raise ValueError(f"{field} tensor not found at path: {resolved}")
+            alternatives = self._state_key_alternatives(resolved, limit=8)
+            alt_text = ", ".join(alternatives) if alternatives else "<none>"
+            raise ValueError(
+                f"{field} tensor not found at path: {resolved}. Alternatives: {alt_text}"
+            )
         return self._state[resolved]
 
     def _state_tensor_from_path(
@@ -1123,3 +1255,51 @@ class SynapseProgramModel(nn.Module):
     ) -> torch.Tensor:
         path = self._resolve_state_path(node_path=node_path, raw_path=raw_path)
         return self._state_tensor_from_resolved_path(path, field=field)
+
+    def _state_key_alternatives(self, key: str, *, limit: int = 8) -> list[str]:
+        if not isinstance(key, str) or not key:
+            return []
+        keys = [k for k in self._state.keys() if isinstance(k, str)]
+        if not keys:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def _add(candidate: str) -> None:
+            if candidate in seen:
+                return
+            seen.add(candidate)
+            out.append(candidate)
+
+        segments = key.split(".")
+        leaf = segments[-1]
+        for existing in keys:
+            if existing.endswith(f".{leaf}") or existing == leaf:
+                _add(existing)
+                if len(out) >= limit:
+                    return out
+        if len(segments) >= 2:
+            tail2 = ".".join(segments[-2:])
+            for existing in keys:
+                if existing.endswith(f".{tail2}") or existing == tail2:
+                    _add(existing)
+                    if len(out) >= limit:
+                        return out
+        for prefix in ("model.", "transformer."):
+            prefixed = f"{prefix}{key}"
+            if prefixed in self._state:
+                _add(prefixed)
+            if len(out) >= limit:
+                return out
+        if key.startswith("model.") and key[len("model.") :] in self._state:
+            _add(key[len("model.") :])
+        if key.startswith("transformer.") and key[len("transformer.") :] in self._state:
+            _add(key[len("transformer.") :])
+        if len(out) >= limit:
+            return out
+        for existing in keys:
+            if key in existing or existing in key:
+                _add(existing)
+                if len(out) >= limit:
+                    return out
+        return out

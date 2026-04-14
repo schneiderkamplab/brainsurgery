@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "allenai/longformer-base-4096" #-}
 {-# TASK "masked_lm" #-}
 
@@ -33,7 +34,7 @@ longformer :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 longformer input_ids attn_mask = do
   pos_base <- position_ids input_ids attn_mask=attn_mask pad_fill=-1
   pos_shift <- PAD + 1
-  pos_ids <- add pos_base pos_shift
+  pos_ids <- Math.add pos_base pos_shift
   tok_type_ids <- zeros_like input_ids
   tok <- embedding@longformer.embeddings.word_embeddings input_ids dim=D
   pos <- embedding@longformer.embeddings.position_embeddings pos_ids dim=D

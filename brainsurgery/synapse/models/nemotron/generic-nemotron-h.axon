@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["nemotron3"] #-}
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
@@ -13,7 +14,7 @@ L      = Config.int "num_hidden_layers" default=52
 H      = Config.int "num_attention_heads" default=32
 KVH    = Config.int "num_key_value_heads" default=2
 HD     = Config.int "head_dim" default=128
-ATTN_SCALE = 1.0 / sqrt HD
+ATTN_SCALE = 1.0 / Math.sqrt HD
 C      = Config.int "max_position_embeddings" default=262144
 EPS    = Config.float "layer_norm_epsilon" default=1e-5
 
@@ -51,8 +52,8 @@ nemotron_h_attention x attn_mask = do
   q <- linear@q_proj x dim=(H * HD) bias=false |> reshape_heads heads=H
   k <- linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> repeat repeats=(H / KVH)
   v <- linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> repeat repeats=(H / KVH)
-  mask <- causal_mask q k window=C padding_mask=attn_mask
-  return attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=MODEL_D bias=false
+  mask <- causal_mask q k
+  return _attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=MODEL_D bias=false
 
 nemotron_h_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_moe xn = do

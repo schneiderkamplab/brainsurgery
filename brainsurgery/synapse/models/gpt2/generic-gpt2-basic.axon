@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["openai-community/gpt2", "openai-community/gpt2-medium", "openai-community/gpt2-large", "openai-community/gpt2-xl"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -8,7 +9,7 @@ import Derived (
   merge_heads_basic,
   position_ids_basic,
   causal_mask_basic,
-  attention_basic
+  attention_basic,
 )
 
 T   = Config.int "n_positions" default=1024
@@ -17,7 +18,7 @@ L   = Config.int "n_layer" default=12
 H   = Config.int "n_head" default=12
 V   = Config.int "vocab_size" default=50257
 PAD_FILL = 1
-ATTN_SCALE = 1.0 / sqrt (D / H)
+ATTN_SCALE = 1.0 / Math.sqrt (D / H)
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gpt2_block x attn_mask past_kv = do

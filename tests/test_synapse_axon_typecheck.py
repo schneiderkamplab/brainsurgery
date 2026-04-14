@@ -159,3 +159,53 @@ main x = do
     modules = parse_axon_program(source)
     signatures = typecheck_axon_program(modules, main_module="main")
     assert "main" in signatures
+
+
+def test_lowering_infers_split_sizes_from_bind_arity() -> None:
+    source = """
+main :: Tensor[B,S,12] -> Tensor[B,S,12]
+main x = do
+  a, b, c <- split x
+  return a
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    split_nodes = [
+        node
+        for item in spec["model"]["graph"]
+        for node in item.values()
+        if isinstance(node, dict) and node.get("_op") == "split"
+    ]
+    assert len(split_nodes) == 1
+    assert split_nodes[0].get("_args") == ["x", -1, [4, 4, 4]]
+
+
+def test_lowering_infers_chunk_parts_from_bind_arity() -> None:
+    source = """
+main :: Tensor[B,S,12] -> Tensor[B,S,12]
+main x = do
+  a, b, c <- chunk x
+  return a
+"""
+    modules = parse_axon_program(source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    chunk_nodes = [
+        node
+        for item in spec["model"]["graph"]
+        for node in item.values()
+        if isinstance(node, dict) and node.get("_op") == "chunk"
+    ]
+    assert len(chunk_nodes) == 1
+    assert chunk_nodes[0].get("_args") == ["x", -1, 3]
+
+
+def test_lowering_rejects_split_sizes_bind_arity_mismatch() -> None:
+    source = """
+main :: Tensor[B,S,12] -> Tensor[B,S,12]
+main x = do
+  a, b, c <- split x sizes=[6, 6]
+  return a
+"""
+    modules = parse_axon_program(source)
+    with pytest.raises(ValueError, match=r"split sizes length 2 requires 2 outputs, got 3"):
+        lower_axon_program_to_synapse_spec(modules, main_module="main")

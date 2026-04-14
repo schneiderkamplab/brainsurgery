@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "ai21labs/AI21-Jamba-Reasoning-3B" #-}
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
@@ -27,7 +28,7 @@ dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 dense_ffn x = do
   gate <- linear@feed_forward.gate_proj x dim=FF
   up <- linear@feed_forward.up_proj x dim=FF
-  return gate |> silu |> mul up |> linear@feed_forward.down_proj dim=D
+  return gate |> silu |> Math.mul up |> linear@feed_forward.down_proj dim=D
 
 attn_core :: Tensor[B,S,D] -> Tensor[B,S,D]
 attn_core x = do
@@ -37,7 +38,7 @@ attn_core x = do
   k <- repeat k repeats=H / KVH
   v <- linear@self_attn.v_proj x_norm dim=KVH * HD |> reshape_heads heads=KVH
   v <- repeat v repeats=H / KVH
-  a <- attention q k v scale=SCALE causal=true eager=true |> merge_heads
+  a <- _attention q k v scale=SCALE causal=true eager=true |> merge_heads
   a <- linear@self_attn.o_proj a dim=D
   return x + a
 
@@ -55,7 +56,7 @@ mamba_core x = do
     c <- rmsnorm@mamba.c_layernorm c eps=EPS cast_float=true
     delta <- linear@mamba.dt_proj dt dim=I bias=true
     y_scan <- mamba_scan u_conv delta b c A="mamba.A_log" D="mamba.D" a_is_log=true
-    return y_scan |> mul (silu gate) |> linear@mamba.out_proj dim=D
+    return y_scan |> Math.mul (silu gate) |> linear@mamba.out_proj dim=D
   return x + y
 
 jamba_3b :: TokenIds[B,S] -> Tensor[B,S,V]

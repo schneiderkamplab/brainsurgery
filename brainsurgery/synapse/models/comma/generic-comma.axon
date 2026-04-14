@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["common-pile/comma-v0.1-1t", "danish-foundation-models/dfm-decoder-open-v0-7b-pt"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -40,7 +41,7 @@ comma_block x pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN
     u <- linear@up_proj xn dim=FFN
-    return g |> silu |> mul u |> linear@down_proj dim=D
+    return g |> silu |> Math.mul u |> linear@down_proj dim=D
   return x + m, new_kv
 
 comma :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

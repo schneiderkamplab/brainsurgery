@@ -10,6 +10,7 @@ T = 1024
 D = 1600
 L = 48
 H = 25
+HD = (D / H)
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gpt2_block x attn_mask past_kv = do

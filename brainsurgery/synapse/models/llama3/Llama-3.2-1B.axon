@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["meta-llama/Llama-3.2-1B", "meta-llama/Llama-3.2-1B-Instruct"] #-}
 {-# TASK "causal_lm" #-}
 
@@ -44,7 +45,7 @@ llama3_block x pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN
     u <- linear@up_proj xn dim=FFN
-    return g |> silu |> mul u |> linear@down_proj dim=D
+    return g |> silu |> Math.mul u |> linear@down_proj dim=D
   return x + m, new_kv
 
 llama3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

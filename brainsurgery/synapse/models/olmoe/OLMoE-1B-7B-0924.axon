@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "allenai/OLMoE-1B-7B-0924" #-}
 {-# TASK "causal_lm" #-}
 
@@ -24,7 +25,7 @@ expert_ffn :: Tensor[N,D] -> Tensor[N,D]
 expert_ffn x = do
   gate <- linear@gate_proj x
   up <- linear@up_proj x
-  return gate |> silu |> mul up |> linear@down_proj
+  return gate |> silu |> Math.mul up |> linear@down_proj
 
 olmoe_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 olmoe_decoder_block x pos_ids attn_mask past_kv = do

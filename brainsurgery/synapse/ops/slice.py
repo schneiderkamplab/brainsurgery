@@ -98,9 +98,13 @@ def _resolve_int(
     model: Any, raw: Any, env: dict[str, Any], symbols: dict[str, int], name: str
 ) -> int:
     value = model._eval_expr(raw, env, symbols)
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool):
         raise ValueError(f"slice.{name} must resolve to int")
-    return int(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float) and float(value).is_integer():
+        return int(value)
+    raise ValueError(f"slice.{name} must resolve to int")
 
 
 def interpret(
@@ -165,7 +169,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "Any", "Any", "Any"),
+    "args": ("Tensor", "Int", "Int", "Int"),
     "kwargs": {},
     "returns": ("Tensor",),
 }

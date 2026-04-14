@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "state-spaces/mamba-2.8b-hf" #-}
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
@@ -25,7 +26,7 @@ mamba_mixer x = do
   dt, b, c <- split params sizes=[R, N, N]
   delta <- linear@dt_proj dt dim=I bias=true
   y_scan <- mamba_scan u_conv delta b c A="@A_log" D="@D" a_is_log=true
-  return y_scan |> mul (silu gate) |> linear@out_proj dim=D
+  return y_scan |> Math.mul (silu gate) |> linear@out_proj dim=D
 
 mamba_block :: Tensor[B,S,D] -> Tensor[B,S,D]
 mamba_block x = do

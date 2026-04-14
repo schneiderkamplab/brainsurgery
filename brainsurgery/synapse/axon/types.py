@@ -183,6 +183,7 @@ class AxonModule:
     imported_members: dict[str, tuple[str, ...]] | None = None
     symbols: dict[str, object] | None = None
     pragmas: dict[str, object] | None = None
+    type_aliases: dict[str, TypeExpr] | None = None
     return_type_expr: TypeExpr | None = None
     return_shape: tuple[DimToken, ...] | None = None
 

@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["microsoft/deberta-v3-xsmall"] #-}
 {-# TASK "masked_lm" #-}
 
@@ -23,9 +24,9 @@ deberta_block x attn_mask = do
     k <- linear@self.key_proj x dim=D bias=true |> reshape_heads heads=H
     v <- linear@self.value_proj x dim=D bias=true |> reshape_heads heads=H
     rel_bias <- disentangled_relative_bias@self q0 k rel_embeddings="@@deberta.encoder.rel_embeddings.weight" position_buckets=POS_BUCKETS max_relative_positions=MAX_REL share_att_key=true c2p=true p2c=true query_weight="self.query_proj.weight" query_bias="self.query_proj.bias" key_weight="self.key_proj.weight" key_bias="self.key_proj.bias" apply_rel_layernorm=true rel_norm_weight="@@deberta.encoder.LayerNorm.weight" rel_norm_bias="@@deberta.encoder.LayerNorm.bias" rel_norm_eps=EPS
-    q <- mul q0 REL_Q_SCALE
+    q <- Math.mul q0 REL_Q_SCALE
     pad_bias <- bidirectional_mask q0 k padding_mask=attn_mask
-    full_bias <- add rel_bias pad_bias
+    full_bias <- Math.add rel_bias pad_bias
     return attention q k v mask=full_bias padding_mask=false causal=false |> merge_heads |> linear@output.dense dim=D bias=true
   x <- x + a
   x <- layernorm@attention.output.LayerNorm x eps=EPS

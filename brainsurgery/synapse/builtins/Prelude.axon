@@ -7,28 +7,31 @@ import Derived (
   rope_pair_longrope_basic,
   rope_pair_hf_yarn_basic,
   rope_pair_yarn_basic,
-  reshape_head_basic
+  reshape_head_basic,
 )
 
 linear :: @Path -> Tensor -> ?Int -> ?Bool -> ?Bool -> ?Int -> ?Path -> ?Path -> Tensor
-linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=null ?bias_path=null = _linear@path x dim bias transpose expert weight_path bias_path
+linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=@weight ?bias_path=@bias = _linear@path x dim bias transpose expert weight_path bias_path
 
 param :: Path -> Tensor
 param path = _param path
 
 param_scale :: Tensor -> Path -> Tensor
-param_scale x scale = do
-  s <- param scale |> cast_like x
-  return mul x s
+param_scale x scale = _param_scale x scale=scale
 
 embedding :: @Path -> Tensor -> ?Int -> ?Float -> Tensor
-embedding@path x ?dim=null ?scale=null = _embedding@path x dim scale
+embedding@path x ?dim=null ?scale=null = do
+  y <- _embedding@path x dim
+  return (scale == null) ? y : (y * scale)
 
 layernorm :: @Path -> Tensor -> ?Float -> ?Int -> ?Path -> ?Bool -> ?Path -> Tensor
-layernorm@path x ?eps=1e-5 ?dim=null ?weight_path=null ?bias=true ?bias_path=null = _layernorm@path x eps dim weight_path bias bias_path
+layernorm@path x ?eps=1e-5 ?dim=null ?weight_path=@weight ?bias=true ?bias_path=@bias = _layernorm@path x eps dim weight_path bias bias_path
 
-rmsnorm :: @Path -> Tensor -> ?Float -> ?Int -> ?Bool -> ?Bool -> ?Bool -> Tensor
-rmsnorm@path x ?eps=1e-6 ?dim=null ?unit_offset=false ?cast_float=false ?with_scale=true = _rmsnorm@path x eps dim unit_offset cast_float with_scale
+rmsnorm :: @Path -> Tensor -> ?Float -> ?Int -> ?Bool -> ?Bool -> ?Bool -> ?Path -> Tensor
+rmsnorm@path x ?eps=1e-6 ?dim=null ?unit_offset=false ?cast_float=false ?with_scale=true ?scale_path=@weight = do
+  y0 <- _rmsnorm@path x eps dim cast_float
+  y <- with_scale ? (_param_scale@path y0 scale=scale_path) : y0
+  return ((unit_offset and with_scale) == false) ? y : (y + y0)
 
 split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..S]]
 split x ?dim=-1 ?sizes=null = _split x dim sizes
@@ -117,9 +120,6 @@ linear_position_bias = _linear_position_bias
 repeat :: Tensor[B,KVH,T,HD] -> ?Int -> ?Int -> Tensor[B,H,T,HD]
 repeat x ?repeats=2 ?dim=1 = _repeat x repeats dim
 
-mul :: Tensor[B,T,D] -> Tensor[B,T,D] -> Tensor[B,T,D]
-mul = _mul
-
 concat :: Tensor -> Tensor -> ?Int -> Tensor
 concat x y ?dim=-1 = _concat x y dim=dim
 
@@ -141,28 +141,13 @@ where = _where
 masked_fill :: Tensor -> Tensor -> Tensor -> Tensor
 masked_fill x mask value = where mask value x
 
-slice :: Tensor -> ?Int -> ?Int -> ?Int -> Tensor
-slice x ?dim=null ?start=null ?end=null = _slice x dim start end
-
-sqrt :: Float -> Float
-sqrt = _sqrt
-
-pow :: Any -> Any -> Any
-pow = _pow
-
-exp :: Tensor -> Tensor
-exp = _exp
-
-sin :: Tensor -> Tensor
-sin = _sin
-
-cos :: Tensor -> Tensor
-cos = _cos
+slice :: Tensor -> Int -> Int -> Int -> Tensor
+slice x dim start end = _slice x dim start end
 
 softmax :: Tensor -> ?Int -> ?String -> Tensor
 softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype
 
-topk :: Tensor[B,T,D] -> Int -> ?Int -> ?Bool -> ?Bool -> (Tensor[B,T,K], Tensor[B,T,K])
+topk :: Tensor -> Int -> ?Int -> ?Bool -> ?Bool -> (Tensor, IdxTensor)
 topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted
 
 dtype_value :: Tensor -> String -> Float

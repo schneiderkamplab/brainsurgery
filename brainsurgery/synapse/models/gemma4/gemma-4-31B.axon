@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["google/gemma-4-31B", "google/gemma-4-31B-it"] #-}
 
 import Activations
@@ -64,7 +65,7 @@ gemma4_dense_block x i pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN bias=false
     u <- linear@up_proj xn dim=FFN bias=false
-    return gelu_pytorch_tanh g |> mul u |> linear@down_proj dim=D bias=false
+    return gelu_pytorch_tanh g |> Math.mul u |> linear@down_proj dim=D bias=false
   m <- rms@post_feedforward_layernorm m
   x <- x + m
   x <- param_scale x scale=@layer_scalar
@@ -74,7 +75,7 @@ gemma4_dense :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,
 gemma4_dense input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(past_length past_kv)
   logits, new_kv <- scope@language_model root="model" do
-    x <- embedding@embed_tokens input_ids dim=D scale=(sqrt D)
+    x <- embedding@embed_tokens input_ids dim=D scale=(Math.sqrt D)
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i

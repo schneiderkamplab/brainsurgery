@@ -1907,8 +1907,11 @@ def _run_axon_test_single(
         raise ValueError("axon_backend must be 'codegen', 'runtime', or 'pipeline'")
     axon_backend = backend_token
     if axon_backend == "pipeline":
-        if resolved_model_task != "causal_lm":
-            raise ValueError("axon_backend='pipeline' currently supports only causal_lm models")
+        if resolved_model_task not in {"causal_lm", "masked_lm", "seq2seq_lm"}:
+            raise ValueError(
+                "axon_backend='pipeline' currently supports only "
+                "causal_lm, masked_lm, and seq2seq_lm models"
+            )
         if not str(device).startswith("cuda"):
             raise ValueError("axon_backend='pipeline' currently requires a CUDA device target")
         if compile_axon:

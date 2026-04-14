@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 OP_NAME = "topk"
-LOWERING_ARITY = (2, 5)
+LOWERING_ARITY = (5, 5)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {}
@@ -18,15 +18,6 @@ def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
     if raw is None:
         return []
     return [raw]
-
-
-def _arg_or_default(args: list[Any], index: int, default: Any) -> Any:
-    if index >= len(args):
-        return default
-    value = args[index]
-    if isinstance(value, str) and value.strip().lower() == "null":
-        return default
-    return value
 
 
 def _name_expr(value: str) -> dict[str, Any]:
@@ -63,8 +54,8 @@ def lowering_validate_signature(
     if kwargs:
         unknown = ", ".join(sorted(str(key) for key in kwargs))
         raise ValueError(f"topk unsupported kwargs: {unknown}")
-    if len(args) < 2 or len(args) > 5:
-        raise ValueError(f"topk expects 2..5 positional args, got {len(args)}")
+    if len(args) != 5:
+        raise ValueError(f"topk expects exactly 5 positional args, got {len(args)}")
 
 
 def interpret(
@@ -77,16 +68,16 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     args = _raw_args(node_spec)
-    if len(args) < 2:
-        raise ValueError("topk requires positional args: x k [dim largest sorted]")
+    if len(args) != 5:
+        raise ValueError("topk requires positional args: x k dim largest sorted")
     x = model._read_tensor_input(args[0], env)
     outs = node_spec.get("_bind")
     if not isinstance(outs, list) or len(outs) != 2:
         raise ValueError("topk expects out=[values,indices]")
     k = int(model._eval_expr(args[1], env, symbols))
-    dim = int(model._eval_expr(_arg_or_default(args, 2, -1), env, symbols))
-    largest = bool(model._eval_expr(_arg_or_default(args, 3, True), env, symbols))
-    sorted_flag = bool(model._eval_expr(_arg_or_default(args, 4, True), env, symbols))
+    dim = int(model._eval_expr(args[2], env, symbols))
+    largest = bool(model._eval_expr(args[3], env, symbols))
+    sorted_flag = bool(model._eval_expr(args[4], env, symbols))
     values, indices = torch.topk(x, k, dim=dim, largest=largest, sorted=sorted_flag)
     env[outs[0]] = values
     env[outs[1]] = indices
@@ -114,8 +105,8 @@ def compile(
         return emitter._read_env_var(env, name)
 
     args = _raw_args(node_spec)
-    if len(args) < 2:
-        raise ValueError("topk requires positional args: x k [dim largest sorted]")
+    if len(args) != 5:
+        raise ValueError("topk requires positional args: x k dim largest sorted")
     src = read(str(args[0]))
     outs = node_spec.get("_bind")
     if not isinstance(outs, list) or len(outs) != 2:
@@ -123,9 +114,9 @@ def compile(
     values_var = assign_out_var(str(outs[0]))
     indices_var = assign_out_var(str(outs[1]))
     k = emitter._expr_code(_expr_payload(args[1]), env)
-    dim = emitter._expr_code(_expr_payload(_arg_or_default(args, 2, -1)), env)
-    largest = emitter._expr_code(_expr_payload(_arg_or_default(args, 3, True)), env)
-    sorted_flag = emitter._expr_code(_expr_payload(_arg_or_default(args, 4, True)), env)
+    dim = emitter._expr_code(_expr_payload(args[2]), env)
+    largest = emitter._expr_code(_expr_payload(args[3]), env)
+    sorted_flag = emitter._expr_code(_expr_payload(args[4]), env)
     lines.append(
         f"{indent}{values_var}, {indices_var} = torch.topk({src}, int({k}), dim=int({dim}), largest=bool({largest}), sorted=bool({sorted_flag}))"
     )

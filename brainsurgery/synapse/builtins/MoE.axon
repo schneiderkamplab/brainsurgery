@@ -1,4 +1,5 @@
 import Activations silu
+import Math (mul)
 
 select :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Int -> (Tensor[N,D], Tensor[N], Tensor[N], Tensor[N])
 select hidden topk_scores topk_indices expert = do

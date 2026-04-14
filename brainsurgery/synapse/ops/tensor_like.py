@@ -48,6 +48,23 @@ def _resolve_dtype(dtype_raw: Any) -> torch.dtype | None:
     )
 
 
+def _coerce_scalar_string(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    lowered = text.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"none", "null"}:
+        return None
+    try:
+        if any(ch in text for ch in (".", "e", "E")):
+            return float(text)
+        return int(text)
+    except ValueError:
+        return value
+
+
 def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
@@ -76,6 +93,7 @@ def interpret(
     ref = model._read_tensor_input(args[1], env)
     dtype = _resolve_dtype(model._eval_expr(args[2], env, symbols) if len(args) >= 3 else None)
     target_dtype = ref.dtype if dtype is None else dtype
+    value = _coerce_scalar_string(value)
     if torch.is_tensor(value):
         env[out] = value.to(device=ref.device, dtype=target_dtype)
         return
@@ -124,6 +142,18 @@ def compile(
         f"{indent}    else:",
         f'{indent}        raise ValueError("_tensor_like dtype must be one of: float32, float16, bfloat16, int64, int32, bool, or null")',
         f"{indent}{value_var} = {value_expr}",
+        f"{indent}if isinstance({value_var}, str):",
+        f"{indent}    _sv = {value_var}.strip()",
+        f"{indent}    _sv_l = _sv.lower()",
+        f"{indent}    if _sv_l in ('true', 'false'):",
+        f"{indent}        {value_var} = (_sv_l == 'true')",
+        f"{indent}    elif _sv_l in ('none', 'null'):",
+        f"{indent}        {value_var} = None",
+        f"{indent}    else:",
+        f"{indent}        try:",
+        f"{indent}            {value_var} = float(_sv) if any(ch in _sv for ch in ('.', 'e', 'E')) else int(_sv)",
+        f"{indent}        except ValueError:",
+        f"{indent}            pass",
         f"{indent}if torch.is_tensor({value_var}):",
         f"{indent}    {out_var} = {value_var}.to(device={ref}.device, dtype=({ref}.dtype if {dtype_torch} is None else {dtype_torch}))",
         f"{indent}else:",

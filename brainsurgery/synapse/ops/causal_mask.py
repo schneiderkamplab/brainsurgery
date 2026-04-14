@@ -10,8 +10,8 @@ LOWERING_ALLOWED_KWARGS: set[str] = {"window", "padding_mask", "early_exit", "bo
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {
     "window": "dim",
-    "padding_mask": "str",
-    "early_exit": "any",
+    "padding_mask": "path_or_null",
+    "early_exit": "bool",
     "bool_mask": "bool",
 }
 

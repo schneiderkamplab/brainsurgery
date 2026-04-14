@@ -182,6 +182,22 @@ def _find_bound_int(
         dotted = _lookup_path(base, key)
         return _coerce_int(dotted)
 
+    def _config_symbol_override(symbol_name: str) -> int | None:
+        symbol_to_config_keys: dict[str, tuple[str, ...]] = {
+            "L": ("num_hidden_layers", "num_layers", "n_layer", "n_layers"),
+            "H": ("num_attention_heads", "num_heads", "n_head"),
+            "KVH": ("num_key_value_heads", "num_kv_heads", "n_kv_head"),
+            "D": ("hidden_size", "d_model", "n_embd"),
+            "V": ("vocab_size",),
+            "FFN": ("intermediate_size", "ffn_dim"),
+            "C": ("max_position_embeddings", "n_positions"),
+        }
+        for candidate_key in symbol_to_config_keys.get(symbol_name, ()):
+            value = _lookup_config_int(model_config, candidate_key)
+            if value is not None:
+                return value
+        return None
+
     def _scalar_const(
         value: Any,
         *,
@@ -228,6 +244,10 @@ def _find_bound_int(
         if bind_name in visiting:
             return None
 
+        override_value = _config_symbol_override(bind_name)
+        if override_value is not None:
+            cache[bind_name] = override_value
+            return cache[bind_name]
         if isinstance(model_symbols, dict) and bind_name in model_symbols:
             cache[bind_name] = model_symbols[bind_name]
             return cache[bind_name]
@@ -348,6 +368,9 @@ def _find_bound_int(
             cfg_value = _lookup_config_int(model_config, key, root=node_spec.get("root"))
             if cfg_value is not None:
                 return cfg_value
+    override = _config_symbol_override(name)
+    if override is not None:
+        return override
     if isinstance(model_symbols, dict):
         value = model_symbols.get(name)
         if isinstance(value, int):

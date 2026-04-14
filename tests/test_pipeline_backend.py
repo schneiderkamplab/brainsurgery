@@ -30,6 +30,30 @@ def _load_spec(rel_path: str) -> dict[str, object]:
     return lower_axon_program_to_synapse_spec(modules)
 
 
+def _normalize_pipeline_layer_loop_bounds(spec: dict[str, object], *, total_layers: int) -> None:
+    model = spec.get("model")
+    if not isinstance(model, dict):
+        return
+    symbols = model.get("symbols")
+    if not isinstance(symbols, dict):
+        symbols = {}
+    symbols["L"] = total_layers
+    model["symbols"] = symbols
+    graph = model.get("graph")
+    if not isinstance(graph, list):
+        return
+    for item in graph:
+        if not isinstance(item, dict):
+            continue
+        for node_spec in item.values():
+            if not isinstance(node_spec, dict):
+                continue
+            if node_spec.get("_op") != "for":
+                continue
+            if node_spec.get("_from") is None:
+                node_spec["_from"] = 0
+
+
 def test_partition_layer_ranges_even_split() -> None:
     assert partition_layer_ranges(12, 3) == ((0, 4), (4, 8), (8, 12))
 
@@ -42,6 +66,7 @@ def test_build_pipeline_plan_for_smollm_uses_model_layers_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = _load_spec("brainsurgery/synapse/models/smollm/generic-smollm.axon")
+    _normalize_pipeline_layer_loop_bounds(spec, total_layers=30)
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr("torch.cuda.device_count", lambda: 4)
     plan = build_pipeline_plan(spec, requested_device="cuda")
@@ -55,6 +80,7 @@ def test_build_pipeline_plan_evenly_splits_layers_for_visible_gpu_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = _load_spec("brainsurgery/synapse/models/smollm/generic-smollm.axon")
+    _normalize_pipeline_layer_loop_bounds(spec, total_layers=30)
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr("torch.cuda.device_count", lambda: 6)
     plan = build_pipeline_plan(spec, requested_device="cuda")
@@ -321,6 +347,7 @@ def test_build_pipeline_stage_specs_for_smollm_split_prefix_loop_and_suffix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = _load_spec("brainsurgery/synapse/models/smollm/generic-smollm.axon")
+    _normalize_pipeline_layer_loop_bounds(spec, total_layers=30)
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr("torch.cuda.device_count", lambda: 2)
     plan, stage_specs = build_pipeline_stage_specs(spec, requested_device="cuda")

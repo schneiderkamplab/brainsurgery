@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["google/gemma-4-26B-A4B", "google/gemma-4-26B-A4B-it"] #-}
 
 import Activations
@@ -67,9 +68,9 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     g <- linear@gate_proj xn dim=FFN bias=false
     u <- linear@up_proj xn dim=FFN bias=false
-    return gelu_pytorch_tanh g |> mul u |> linear@down_proj dim=D bias=false
+    return gelu_pytorch_tanh g |> Math.mul u |> linear@down_proj dim=D bias=false
   h1 <- rms@post_feedforward_layernorm_1 m
-  topk_weights, topk_indices <- gemma4_router@router x top_k=TOPK_EXPERTS scalar_root_size=(1.0 / sqrt D) rms_eps=EPS
+  topk_weights, topk_indices <- gemma4_router@router x top_k=TOPK_EXPERTS scalar_root_size=(1.0 / Math.sqrt D) rms_eps=EPS
   xn2 <- rms@pre_feedforward_layernorm_2 x
   h2 <- gemma4_moe_experts@experts xn2 topk_weights topk_indices
   h2 <- rms@post_feedforward_layernorm_2 h2
@@ -83,7 +84,7 @@ gemma4_moe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V]
 gemma4_moe input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(past_length past_kv)
   logits, new_kv <- scope@language_model root="model" do
-    x <- embedding@embed_tokens input_ids dim=D scale=(sqrt D)
+    x <- embedding@embed_tokens input_ids dim=D scale=(Math.sqrt D)
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i

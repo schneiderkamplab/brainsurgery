@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "Qwen/Qwen3-30B-A3B" #-}
 {-# TASK "causal_lm" #-}
 
@@ -43,7 +44,7 @@ dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 dense_ffn x = do
   g <- linear@gate_proj x dim=FFN
   u <- linear@up_proj x dim=FFN
-  return g |> silu |> mul u |> linear@down_proj dim=D
+  return g |> silu |> Math.mul u |> linear@down_proj dim=D
 
 sparse_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 sparse_ffn x = do
@@ -59,7 +60,7 @@ qwen3_moe_expert_ffn :: Tensor[N,D] -> Tensor[N,D]
 qwen3_moe_expert_ffn x = do
   g <- linear@gate_proj x dim=MFFN
   u <- linear@up_proj x dim=MFFN
-  return g |> silu |> mul u |> linear@down_proj dim=D bias=false
+  return g |> silu |> Math.mul u |> linear@down_proj dim=D bias=false
 
 qwen3_moe_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> Int -> (Tensor[B,S,D], ?CacheLayer)
 qwen3_moe_block x pos_ids attn_mask past_kv layer_idx = do

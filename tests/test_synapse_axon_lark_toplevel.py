@@ -4,7 +4,8 @@ import pytest
 
 from brainsurgery.synapse.axon.grammar import ParsedSignature, parse_program_source
 from brainsurgery.synapse.axon.parser import parse_axon_program
-from brainsurgery.synapse.axon.type_system import render_type
+from brainsurgery.synapse.axon.type_system import TypeTuple, render_type
+from brainsurgery.synapse.axon.types import AxonExprTuple
 
 
 def test_parse_program_source_extracts_signature_type() -> None:
@@ -28,6 +29,17 @@ lin@path x dim = linear@path x dim=dim bias=true transpose=true
 def test_parse_program_source_import_parenthesized_members() -> None:
     source = """
 import Activations (gelu_new, silu)
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    parsed = parse_program_source(source)
+    assert parsed.imports == ("Activations",)
+    assert parsed.imported_members == {"Activations": ("gelu_new", "silu")}
+
+
+def test_parse_program_source_import_parenthesized_members_allows_trailing_comma() -> None:
+    source = """
+import Activations (gelu_new, silu,)
 lin :: Tensor[B,S,D] -> Tensor[B,S,D]
 lin x = x
 """
@@ -144,3 +156,29 @@ split_like x = split x
     sig = signature.type_signature
     assert tuple(render_type(arg) for arg in sig.arg_types) == ("Tensor[..S]",)
     assert render_type(sig.return_type) == "List[Tensor[..S]]"
+
+
+def test_parse_program_source_tuple_type_allows_trailing_comma() -> None:
+    source = """
+pair :: Tensor[B,S,D] -> (Tensor[B,S,D], Tensor[B,S,D],)
+pair x = (x, x)
+"""
+    parsed = parse_program_source(source)
+    signature = parsed.modules[0].signature
+    return_type = signature.type_signature.return_type
+    assert isinstance(return_type, TypeTuple)
+    assert tuple(render_type(item) for item in return_type.items) == (
+        "Tensor[B,S,D]",
+        "Tensor[B,S,D]",
+    )
+
+
+def test_parse_program_source_tuple_value_allows_trailing_comma() -> None:
+    source = """
+pair :: Tensor[B,S,D] -> (Tensor[B,S,D], Tensor[B,S,D])
+pair x = (x, x,)
+"""
+    parsed = parse_program_source(source)
+    rhs = parsed.modules[0].definition.rhs
+    assert isinstance(rhs, AxonExprTuple)
+    assert len(rhs.items) == 2

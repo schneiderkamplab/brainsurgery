@@ -657,6 +657,7 @@ def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> Axon
         imported_members=module.imported_members,
         symbols=merged,
         pragmas=module.pragmas,
+        type_aliases=module.type_aliases,
         return_type_expr=module.return_type_expr,
         return_shape=module.return_shape,
     )
@@ -679,6 +680,7 @@ def _inject_pragmas(module: AxonModule, pragmas: dict[str, object]) -> AxonModul
         imported_members=module.imported_members,
         symbols=module.symbols,
         pragmas=merged,
+        type_aliases=module.type_aliases,
         return_type_expr=module.return_type_expr,
         return_shape=module.return_shape,
     )
@@ -839,6 +841,7 @@ def _build_module_from_source(
     top_runtime_constants: tuple[tuple[str, AxonExpr], ...],
     imports: tuple[str, ...],
     imported_members: dict[str, tuple[str, ...]],
+    type_aliases: dict[str, TypeExpr],
 ) -> AxonModule:
     (
         module_name,
@@ -898,6 +901,7 @@ def _build_module_from_source(
         imported_members=imported_members or None,
         symbols=None,
         pragmas=None,
+        type_aliases=type_aliases or None,
         return_type_expr=return_type_expr,
         return_shape=return_shape,
     )
@@ -948,6 +952,7 @@ def build_axon_modules_from_parsed_source(
                 top_runtime_constants=top_runtime_constants,
                 imports=top_imports,
                 imported_members=top_imported_members,
+                type_aliases=parsed_source.type_aliases,
             )
         )
     out = tuple(modules_list)

@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS "microsoft/Phi-3-medium-4k-instruct" #-}
 {-# TASK "causal_lm" #-}
 
@@ -51,7 +52,7 @@ phi3minimedium_block x pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     gate_up <- linear@gate_up_proj xn dim=(2 * FFN)
     g, u <- split gate_up sizes=[FFN, FFN]
-    return g |> silu |> mul u |> linear@down_proj dim=D
+    return g |> silu |> Math.mul u |> linear@down_proj dim=D
   return x + m, new_kv
 
 phi3minimedium :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

@@ -1,4 +1,13 @@
-PI = 3.141592653589793
+import Math (
+  PI,
+  add,
+  cos,
+  exp,
+  floor,
+  log,
+  sin,
+  sqrt,
+)
 
 
 -- === HEAD LAYOUT ===
@@ -300,8 +309,8 @@ rope_pair_freq_scale_basic q k pos_ids theta scale_factor low_freq_factor high_f
 -- === ROPE LONGROPE ===
 rope_max_pos_basic :: Tensor[B,SM] -> Any
 rope_max_pos_basic pos_ids = do
-  row_max, _ <- _topk pos_ids 1 -1
-  all_max, _ <- _topk row_max 1 0
+  row_max, _ <- topk pos_ids 1 dim=-1
+  all_max, _ <- topk row_max 1 dim=0
   return all_max
 
 

@@ -96,6 +96,7 @@ class ParsedProgramSource:
     imported_members: dict[str, tuple[str, ...]]
     pragmas: dict[str, object]
     constants: dict[str, AxonExpr]
+    type_aliases: dict[str, TypeExpr]
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,7 @@ top_item: module_decl
     | import_decl
     | pragma
     | constant
+    | type_alias_decl
 
 module_decl: signature _NL definition
 signature: mod_decl TYPE_SEP signature_type
@@ -248,7 +250,7 @@ path_type_annotation: "@" NAME ":" type_expr -> path_type_named
     | type_list
     | type_tensor
     | type_name -> type_named
-type_tuple: LPAR type_expr "," type_expr ("," type_expr)* RPAR
+type_tuple: LPAR type_expr "," type_expr ("," type_expr)* ","? RPAR
 type_list: "List" LSQB type_expr RSQB
 type_tensor: type_name LSQB type_dim_expr ("," type_dim_expr)* RSQB
 type_name: NAME
@@ -272,7 +274,7 @@ module_name: NAME ("." NAME)*
 
 import_decl: IMPORT module_name [import_members]
 import_members: import_members_paren | import_members_bare
-import_members_paren: LPAR [NAME ("," NAME)*] RPAR
+import_members_paren: LPAR [NAME ("," NAME)* ","?] RPAR
 import_members_bare: NAME+
 
 pragma: "{-#" NAME pragma_value "#-}"
@@ -280,6 +282,7 @@ pragma: "{-#" NAME pragma_value "#-}"
     | list_expr
     | literal
 constant: NAME "=" expr
+type_alias_decl: TYPE_KW NAME "=" type_expr
 
 ?statement: for_statement
     | scope_bind_statement
@@ -360,6 +363,7 @@ path_lit: PATH_LIT
     | arg_or "?" arg_ws? arg_expr arg_ws? ":" arg_ws? arg_expr -> ternary
     | arg_or INDENT "?" arg_ws? arg_expr arg_ws? ":" arg_ws? arg_expr DEDENT -> ternary
 ?def_param_simple: literal
+    | path_lit
     | name_ref
 ?arg_if: "if" arg_ws? arg_expr arg_ws? "then" arg_ws? arg_expr arg_ws? "else" arg_ws? arg_expr -> if_expr
     | "if" arg_ws? arg_expr arg_ws? "then" INDENT arg_expr DEDENT arg_ws? "else" INDENT arg_expr DEDENT -> if_expr
@@ -375,7 +379,7 @@ path_lit: PATH_LIT
 ?arg_mul: atom_no_tuple
     | arg_mul MUL_OP atom_no_tuple -> mul_expr
 
-?tuple_value: expr "," expr ("," expr)* -> tuple_value
+?tuple_value: expr "," expr ("," expr)* ","? -> tuple_value
     | expr
 
 lambda_expr: "\\" NAME LAMBDA_ARROW expr -> lambda_expr
@@ -393,7 +397,7 @@ lambda_expr: "\\" NAME LAMBDA_ARROW expr -> lambda_expr
 
 list_expr: LSQB [expr ("," expr)* ","?] RSQB
 
-tuple_expr: LPAR expr "," expr ("," expr)* RPAR
+tuple_expr: LPAR expr "," expr ("," expr)* ","? RPAR
 name_ref: callable -> name
 callable: NAME
 
@@ -423,6 +427,7 @@ PIPE_OP.3: "|>"
 MONAD_BIND.3: ">>="
 RANGE_DOTS.3: ".."
 IMPORT.3: "import"
+TYPE_KW.3: "type"
 FOR.3: "for"
 STEP.3: "step"
 DO.3: "do"
@@ -633,6 +638,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         imported_members: dict[str, tuple[str, ...]] = {}
         pragmas: dict[str, object] = {}
         constants: dict[str, AxonExpr] = {}
+        type_aliases: dict[str, TypeExpr] = {}
         for child in children:
             if isinstance(child, ParsedModuleSource):
                 modules.append(child)
@@ -667,14 +673,20 @@ class _ProgramTransformer(Transformer[Token, object]):
                 continue
             if isinstance(child, tuple) and len(child) == 3 and child[0] == "constant":
                 name = cast(str, child[1])
-                value = cast(AxonExpr, child[2])
-                constants[name] = value
+                constant_value = cast(AxonExpr, child[2])
+                constants[name] = constant_value
+                continue
+            if isinstance(child, tuple) and len(child) == 3 and child[0] == "type_alias":
+                name = cast(str, child[1])
+                type_value = cast(TypeExpr, child[2])
+                type_aliases[name] = type_value
         return ParsedProgramSource(
             modules=tuple(modules),
             imports=tuple(dict.fromkeys(imports)),
             imported_members=imported_members,
             pragmas=pragmas,
             constants=constants,
+            type_aliases=type_aliases,
         )
 
     def top_item(self, children: list[object]) -> object:
@@ -926,6 +938,19 @@ class _ProgramTransformer(Transformer[Token, object]):
         name = str(cast(Token, children[0]))
         value = self._as_expr(children[1])
         return ("constant", name, value)
+
+    def type_alias_decl(self, children: list[object]) -> tuple[str, str, TypeExpr]:
+        name_token = next(
+            (child for child in children if isinstance(child, Token) and child.type == "NAME"),
+            None,
+        )
+        alias_type = next(
+            (self._as_type(child) for child in children if self._is_type(child)), None
+        )
+        if not isinstance(name_token, Token) or alias_type is None:
+            raise ValueError("invalid type alias syntax")
+        name = str(name_token)
+        return ("type_alias", name, alias_type)
 
     def target_list(self, children: list[object]) -> tuple[str, ...]:
         out = [str(child) for child in children if isinstance(child, Token)]

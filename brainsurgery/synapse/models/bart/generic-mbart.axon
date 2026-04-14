@@ -1,3 +1,4 @@
+import Math
 {-# CHECKPOINTS ["facebook/mbart-large-50-many-to-many-mmt"] #-}
 {-# TASK "seq2seq_lm" #-}
 
@@ -14,7 +15,7 @@ FFN_ENC = Config.int "encoder_ffn_dim" default=4096
 FFN_DEC = Config.int "decoder_ffn_dim" default=4096
 EPS = Config.float "layernorm_embedding_eps" default=1e-05
 POS_OFFSET = Config.int "learned_pos_offset" default=2
-EMB_SCALE_DERIVED = sqrt D
+EMB_SCALE_DERIVED = Math.sqrt D
 EMB_SCALE = Config.float "embed_scale" default=EMB_SCALE_DERIVED
 
 mbart_encoder_layer :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]

@@ -34,16 +34,18 @@ def interpret(
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
         raise ValueError("list_index expects [collection, index]")
-    collection = env.get(ins[0])
+    collection_name = str(ins[0])
+    if collection_name not in env:
+        raise ValueError(f"list_index missing input {collection_name!r}")
+    collection = env[collection_name]
     out_name = model._require_name(node_spec.get("_bind"), field="list_index._bind")
     if collection is None:
-        env[out_name] = None
-        return
+        raise ValueError("list_index expects non-null list input")
     idx = int(model._eval_expr(ins[1], env, symbols))
     try:
         env[out_name] = collection[idx]
-    except (IndexError, KeyError, TypeError):
-        env[out_name] = None
+    except (IndexError, KeyError, TypeError) as exc:
+        raise ValueError(f"list_index invalid access at index {idx}") from exc
     return
 
 
@@ -72,19 +74,15 @@ def compile(
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     lines.append(f"{indent}if {coll} is None:")
-    lines.append(f"{indent}    {out_var} = None")
-    lines.append(f"{indent}else:")
-    lines.append(f"{indent}    try:")
-    lines.append(f"{indent}        {out_var} = {coll}[int({idx_expr})]")
-    lines.append(f"{indent}    except (IndexError, KeyError, TypeError):")
-    lines.append(f"{indent}        {out_var} = None")
+    lines.append(f"{indent}    raise ValueError('list_index expects non-null list input')")
+    lines.append(f"{indent}{out_var} = {coll}[int({idx_expr})]")
     return lines
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "Any"),
+    "args": ("List[_T]", "Int"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
-    "returns": ("Any",),
+    "returns": ("_T",),
 }
 
 __all__ = [
