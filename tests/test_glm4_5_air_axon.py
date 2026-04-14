@@ -12,7 +12,7 @@ def _load_axon_spec(path: Path) -> dict[str, Any]:
 
 
 def test_glm4_5_air_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
-    spec = _load_axon_spec(repo_root / "examples" / "glm_4_5_air.axon")
+    spec = _load_axon_spec(repo_root / "brainsurgery" / "synapse" / "models" / "glm" / "glm_4_5_air.axon")
 
     assert spec.get("synapse") == 1
     model = spec.get("model", {})
@@ -24,7 +24,6 @@ def test_glm4_5_air_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
     assert symbols.get("L") == 46
     assert symbols.get("H") == 96
     assert symbols.get("KVH") == 8
-    assert symbols.get("HD") == 128
     assert symbols.get("QD") == 12288
     assert symbols.get("KVD") == 1024
     assert symbols.get("FFN") == 10944
@@ -36,8 +35,8 @@ def test_glm4_5_air_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
     assert symbols.get("C") == 131072
 
     blocks = model.get("blocks", {})
-    assert "glm4_5_air_attn" in blocks
-    assert "glm4_5_air_dense_block" in blocks
-    assert "glm4_5_air_moe_block" in blocks
+    assert "glm4_moe_attn" in blocks
+    assert "glm4_moe_dense_block" in blocks
+    assert "glm4_moe_sparse_block" in blocks
     assert "routed_expert_ffn" in blocks
     assert "dense_ffn" in blocks

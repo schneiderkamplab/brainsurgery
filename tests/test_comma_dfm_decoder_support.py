@@ -63,7 +63,7 @@ def test_matrix_resolves_comma_to_shared_dfm_decoder_axon(
 
 
 def test_dfm_decoder_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
-    spec = _load_axon_spec(repo_root / "examples" / "dfm_decoder.axon")
+    spec = _load_axon_spec(repo_root / "brainsurgery" / "synapse" / "models" / "comma" / "comma-v0.1-1t.axon")
     assert spec.get("synapse") == 1
 
     model = spec.get("model", {})
@@ -82,7 +82,7 @@ def test_dfm_decoder_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
     assert symbols.get("C") == 16384
 
     blocks = model.get("blocks", {})
-    assert "dfm_block" in blocks
+    assert "comma_block" in blocks
 
 
 def test_dfm_decoder_rope_normalization_preserves_nondefault_theta(repo_root: Path) -> None:

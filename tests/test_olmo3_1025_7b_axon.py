@@ -12,7 +12,9 @@ def _load_axon_spec(path: Path) -> dict[str, Any]:
 
 
 def test_olmo3_1025_7b_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
-    spec = _load_axon_spec(repo_root / "examples" / "olmo3.axon")
+    spec = _load_axon_spec(
+        repo_root / "brainsurgery" / "synapse" / "models" / "olmo3" / "Olmo-3-1025-7B.axon"
+    )
 
     assert spec.get("synapse") == 1
     model = spec.get("model", {})

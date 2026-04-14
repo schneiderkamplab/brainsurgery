@@ -37,8 +37,8 @@ def test_glm4_5_air_axon_key_alignment(repo_root: Path, glm4_5_air_local_path: P
     assert "model.layers.1.mlp.shared_experts.gate_proj.weight" in keys
     assert "model.layers.1.mlp.experts.0.gate_proj.weight" in keys
 
-    spec = _load_axon_spec(repo_root / "examples" / "glm_4_5_air.axon")
+    spec = _load_axon_spec(repo_root / "brainsurgery" / "synapse" / "models" / "glm" / "glm_4_5_air.axon")
     model = spec.get("model", {})
     blocks = model.get("blocks", {})
-    assert "glm4_5_air_dense_block" in blocks
-    assert "glm4_5_air_moe_block" in blocks
+    assert "glm4_moe_dense_block" in blocks
+    assert "glm4_moe_sparse_block" in blocks

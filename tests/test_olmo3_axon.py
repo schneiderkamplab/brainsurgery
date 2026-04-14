@@ -12,19 +12,21 @@ def _load_axon_spec(path: Path) -> dict[str, Any]:
 
 
 def test_olmo3_axon_lowers_with_expected_symbols(repo_root: Path) -> None:
-    spec = _load_axon_spec(repo_root / "examples" / "olmo3.axon")
+    spec = _load_axon_spec(
+        repo_root / "brainsurgery" / "synapse" / "models" / "olmo3" / "Olmo-3-1125-32B.axon"
+    )
 
     assert spec.get("synapse") == 1
     model = spec.get("model", {})
     assert model.get("outputs") == {"logits": "logits", "new_kv": "new_kv"}
 
     symbols = model.get("symbols", {})
-    assert symbols.get("D") == 4096
+    assert symbols.get("D") == 5120
     assert symbols.get("V") == 100278
-    assert symbols.get("L") == 32
-    assert symbols.get("H") == 32
-    assert symbols.get("KVH") == 32
-    assert symbols.get("FFN") == 11008
+    assert symbols.get("L") == 64
+    assert symbols.get("H") == 40
+    assert symbols.get("KVH") == 8
+    assert symbols.get("FFN") == 27648
     assert symbols.get("EPS") == 1.0e-06
     assert symbols.get("THETA") == 500000.0
     assert symbols.get("C") == 65536
