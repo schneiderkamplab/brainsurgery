@@ -1,7 +1,9 @@
 import List
+import Math (floor)
 export (
   and,
   arange,
+  arange_step,
   cast,
   cast_like,
   chunk,
@@ -56,6 +58,22 @@ expand x ?shape=null = _expand x shape
 
 arange :: Tensor -> ?Int -> ?Int -> IdxTensor
 arange x ?start=0 ?end=null = _arange x start end
+
+arange_step :: Tensor -> ?Int -> ?Int -> ?Int -> IdxTensor
+arange_step x ?start=0 ?end=null ?stride=1 = do
+  ref <- arange x
+  ref_shape <- shape ref
+  ref_end <- ref_shape |> List.index 0
+  end_value <- ((end == null) ? ref_end : end)
+  fwd <- (stride > 0)
+  base <- (fwd ? (arange x start=start end=end_value) : (arange x start=end_value end=start))
+  base_shape <- shape base
+  base_len <- base_shape |> List.index 0
+  stride_abs <- (fwd ? stride : (0 - stride))
+  count <- floor ((base_len + stride_abs - 1) / stride_abs)
+  idx <- arange base start=0 end=count
+
+  return (fwd ? ((idx * stride_abs) + start) : (start - (idx * stride_abs)))
 
 cast :: Tensor -> ?String -> Tensor
 cast x ?dtype=null = _cast x dtype

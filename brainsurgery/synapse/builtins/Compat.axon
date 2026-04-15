@@ -6,12 +6,8 @@ export (
   gemma4_per_layer_input_at,
   gemma4_per_layer_inputs,
   glm4_router,
-  linear_position_bias,
   mamba_scan,
-  relative_bias_disentangled,
-  sinusoidal_positions,
   split_qkv_heads,
-  t5_relative_position_bias,
 )
 
 -- Deprecated Prelude facades
@@ -41,9 +37,6 @@ attention q k v ?mask=null ?padding_mask=false ?causal=false ?scale=null ?eager=
   return pad
     ? (_attention q k v mask=mask padding_mask=true causal=c scale=scale eager=eg softcap=softcap sink=sink sink_path=sink_path)
     : (_attention q k v mask=mask causal=c scale=scale eager=eg softcap=softcap sink=sink sink_path=sink_path)
-
-linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
-linear_position_bias = _linear_position_bias
 
 t5_relative_position_bias :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> ?Int -> ?Int -> ?Bool -> Tensor[1,H,T,TK]
 t5_relative_position_bias@path q k ?num_buckets=32 ?max_distance=128 ?bidirectional=true = _t5_relative_position_bias@path q k num_buckets=num_buckets max_distance=max_distance bidirectional=bidirectional

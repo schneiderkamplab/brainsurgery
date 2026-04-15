@@ -7,9 +7,9 @@ import Activations (gelu)
 import Activations (relu)
 import Cache
 import Attention (reshape_heads, merge_heads)
-import Compat (attention, sinusoidal_positions)
+import Compat (attention)
 import Masking (causal_mask)
-import Positions (position_ids)
+import Positions (position_ids, sinusoidal_positions)
 import Math (sqrt)
 
 D = Config.int "d_model" default=1024

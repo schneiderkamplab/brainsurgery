@@ -9,7 +9,8 @@ import Tensor
 import Attention
 import Attention (mask_to_additive, merge_heads)
 import Cache
-import Compat (attention, linear_position_bias, split_qkv_heads)
+import Compat (attention, split_qkv_heads)
+import Positions (linear_position_bias)
 import Masking
 import Masking (causal_mask)
 

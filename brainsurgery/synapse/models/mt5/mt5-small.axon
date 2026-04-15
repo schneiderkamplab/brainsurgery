@@ -5,7 +5,7 @@ import Activations
 import Activations (gelu_new)
 import Attention (attention, reshape_heads, merge_heads)
 import Masking (causal_mask, bidirectional_mask)
-import Compat (t5_relative_position_bias)
+import Positions (relative_position_bias)
 import Math (mul)
 
 D = 512
@@ -25,7 +25,7 @@ mt5_encoder_block x attention_mask = do
     q <- NN.linear@SelfAttention.q x_norm dim=D bias=false |> reshape_heads heads=H
     k <- NN.linear@SelfAttention.k x_norm dim=D bias=false |> reshape_heads heads=H
     v <- NN.linear@SelfAttention.v x_norm dim=D bias=false |> reshape_heads heads=H
-    rel_bias <- t5_relative_position_bias@@encoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=true
+    rel_bias <- relative_position_bias@@encoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=true
     keep <- bidirectional_mask q k padding_mask=attention_mask
     return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=D bias=false
   x <- x + self_attn
@@ -45,7 +45,7 @@ mt5_decoder_block x enc_hidden encoder_attention_mask decoder_attention_mask = d
     q <- NN.linear@SelfAttention.q x_norm dim=D bias=false |> reshape_heads heads=H
     k <- NN.linear@SelfAttention.k x_norm dim=D bias=false |> reshape_heads heads=H
     v <- NN.linear@SelfAttention.v x_norm dim=D bias=false |> reshape_heads heads=H
-    rel_bias <- t5_relative_position_bias@@decoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=false
+    rel_bias <- relative_position_bias@@decoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=false
     keep <- causal_mask q k window=1048576 padding_mask=decoder_attention_mask
     return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=D bias=false
   x <- x + self_attn
@@ -75,7 +75,7 @@ mt5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       q <- NN.linear@SelfAttention.q x_norm dim=D bias=false |> reshape_heads heads=H
       k <- NN.linear@SelfAttention.k x_norm dim=D bias=false |> reshape_heads heads=H
       v <- NN.linear@SelfAttention.v x_norm dim=D bias=false |> reshape_heads heads=H
-      rel_bias <- t5_relative_position_bias@@encoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=true
+      rel_bias <- relative_position_bias@@encoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=true
       keep <- bidirectional_mask q k padding_mask=attention_mask
       return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=D bias=false
     enc_hidden <- enc_hidden + self_attn
@@ -94,7 +94,7 @@ mt5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       q <- NN.linear@SelfAttention.q x_norm dim=D bias=false |> reshape_heads heads=H
       k <- NN.linear@SelfAttention.k x_norm dim=D bias=false |> reshape_heads heads=H
       v <- NN.linear@SelfAttention.v x_norm dim=D bias=false |> reshape_heads heads=H
-      rel_bias <- t5_relative_position_bias@@decoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=false
+      rel_bias <- relative_position_bias@@decoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=false
       keep <- causal_mask q k window=1048576 padding_mask=decoder_attention_mask
       return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=D bias=false
     dec_hidden <- dec_hidden + self_attn
