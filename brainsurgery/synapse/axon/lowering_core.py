@@ -14,7 +14,15 @@ from ..ops import (
 )
 from ..type_inference import annotate_spec_with_block_io_types, infer_block_io_types_from_modules
 from .expression_codec import axon_expr_to_runtime_value as _expr_to_runtime_value
-from .typecheck import typecheck_axon_program
+from .type_system import (
+    TypeExpr,
+    TypeList,
+    TypeOptional,
+    TypeTensor,
+    TypeTuple,
+    dim_token_names,
+)
+from .typecheck import ModuleSignature, typecheck_axon_program
 from .types import (
     AxonBind,
     AxonExpr,
@@ -617,6 +625,7 @@ class _LowerCtx:
     current_module: str | None = None
     param_names: set[str] = field(default_factory=set)
     symbol_names: set[str] = field(default_factory=set)
+    dim_symbol_names: set[str] = field(default_factory=set)
     symbol_values: dict[str, Any] = field(default_factory=dict)
     runtime_bound_symbol_names: set[str] = field(default_factory=set)
 
@@ -2347,6 +2356,33 @@ def _module_path_param_names(module: AxonModule) -> set[str]:
     return names
 
 
+def _type_dim_names(tp: TypeExpr) -> set[str]:
+    if isinstance(tp, TypeOptional):
+        return _type_dim_names(tp.inner)
+    if isinstance(tp, TypeTensor):
+        names: set[str] = set()
+        for dim in tp.dims:
+            names.update(dim_token_names(dim))
+        return names
+    if isinstance(tp, TypeList):
+        return _type_dim_names(tp.item)
+    if isinstance(tp, TypeTuple):
+        tuple_names: set[str] = set()
+        for item in tp.items:
+            tuple_names.update(_type_dim_names(item))
+        return tuple_names
+    return set()
+
+
+def _signature_dim_names(signature: ModuleSignature) -> set[str]:
+    names: set[str] = set()
+    for param in signature.params:
+        names.update(_type_dim_names(param))
+    for ret in signature.returns:
+        names.update(_type_dim_names(ret))
+    return names
+
+
 def _ensure_outputs_from_returns(outputs: dict[str, str], returns: tuple[str, ...]) -> None:
     if outputs:
         return
@@ -2548,6 +2584,7 @@ def _new_lower_ctx(
     prelude_aliases: dict[str, tuple[str, int]] | None = None,
     primitive_aliases: dict[str, tuple[str, int]] | None = None,
     imported_symbol_values: dict[str, Any] | None = None,
+    module_dim_symbol_names: set[str] | None = None,
 ) -> _LowerCtx:
     imported_member_namespaces: dict[str, set[str]] = {}
     if module.imported_members:
@@ -2573,6 +2610,7 @@ def _new_lower_ctx(
     symbol_values = dict(imported_symbol_values or {})
     if isinstance(module.symbols, dict):
         symbol_values.update(module.symbols)
+    dim_symbol_names = set(module_dim_symbol_names or set())
     runtime_bound_symbol_names: set[str] = set()
     for stmt in module.statements:
         if isinstance(stmt, AxonBind):
@@ -2598,14 +2636,15 @@ def _new_lower_ctx(
         primitive_aliases=dict(primitive_aliases or {}),
         current_module=module.name,
         param_names={param.name for param in module.params},
-        symbol_names=set(symbol_values.keys()),
+        symbol_names=set(symbol_values.keys()) | dim_symbol_names,
+        dim_symbol_names=dim_symbol_names,
         symbol_values=symbol_values,
         runtime_bound_symbol_names=runtime_bound_symbol_names,
     )
 
 
 def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
-    typecheck_axon_program((module,), main_module=module.name)
+    typed_signatures = typecheck_axon_program((module,), main_module=module.name)
     inputs = _module_inputs(module)
     graph: list[dict[str, Any]] = []
     outputs: dict[str, str] = {}
@@ -2626,6 +2665,7 @@ def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
         implicit_prelude_members=set(),
         prelude_aliases={},
         imported_symbol_values={},
+        module_dim_symbol_names=_signature_dim_names(typed_signatures[module.name]),
     )
 
     _lower_statements(
@@ -3564,6 +3604,7 @@ def lower_axon_program_to_synapse_spec(
     block_optional_inputs: dict[str, set[str]] = {}
     block_default_inputs: dict[str, dict[str, AxonExpr]] = {}
     module_output_names: dict[str, tuple[str, ...]] = {}
+    module_dim_symbol_names: dict[str, set[str]] = {}
     for module in modules:
         input_names = [param.name for param in module.params]
         path_params = module.path_params
@@ -3589,6 +3630,7 @@ def lower_axon_program_to_synapse_spec(
             for param in module.params
             if isinstance(param.default_expr, AxonExpr)
         }
+        module_dim_symbol_names[module.name] = _signature_dim_names(typed_signatures[module.name])
     primitive_aliases = _extract_primitive_aliases(modules)
     prelude_aliases = _extract_prelude_aliases(modules)
     implicit_prelude_members = {
@@ -3622,6 +3664,7 @@ def lower_axon_program_to_synapse_spec(
             prelude_aliases=prelude_aliases,
             primitive_aliases=primitive_aliases,
             imported_symbol_values=_collect_imported_symbol_values(main, by_name),
+            module_dim_symbol_names=module_dim_symbol_names.get(main.name, set()),
         ),
     )
     _ensure_outputs_from_returns(main_outputs, main_returns)
@@ -3673,6 +3716,7 @@ def lower_axon_program_to_synapse_spec(
                 prelude_aliases=prelude_aliases,
                 primitive_aliases=primitive_aliases,
                 imported_symbol_values=_collect_imported_symbol_values(module, by_name),
+                module_dim_symbol_names=module_dim_symbol_names.get(module.name, set()),
             ),
         )
         _ensure_outputs_from_returns(block_outputs, block_returns)

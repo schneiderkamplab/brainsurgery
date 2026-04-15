@@ -2433,6 +2433,8 @@ def _infer_expr_type(
     if isinstance(expr, AxonExprName):
         if expr.name in env:
             return env[expr.name]
+        if expr.name in dim_symbols:
+            return TypeInt()
         return TypeAny()
     if isinstance(expr, AxonExprList):
         if not expr.items:

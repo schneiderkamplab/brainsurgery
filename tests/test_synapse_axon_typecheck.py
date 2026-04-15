@@ -178,6 +178,35 @@ main x = do
     assert "main" in signatures
 
 
+def test_typecheck_and_lowering_allow_value_level_dim_symbol_from_alias(tmp_path: Path) -> None:
+    source = """
+type CacheLayer = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
+type Cache = List[CacheLayer]
+
+past_length :: ?Cache -> Int
+past_length cache = (cache == null) ? 0 : T
+
+main :: ?Cache -> Int
+main cache = past_length cache
+"""
+    modules = _parse_from_tmp_source(tmp_path, source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "past_length" in signatures
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    block_graph = spec["model"]["blocks"]["past_length"]["graph"]
+
+    def _contains_t_expr(value: object) -> bool:
+        if isinstance(value, dict):
+            if value.get("_op") == "_ir_expr" and value.get("value") == "T":
+                return True
+            return any(_contains_t_expr(item) for item in value.values())
+        if isinstance(value, list):
+            return any(_contains_t_expr(item) for item in value)
+        return False
+
+    assert _contains_t_expr(block_graph)
+
+
 def test_lowering_infers_split_sizes_from_bind_arity(tmp_path: Path) -> None:
     source = """
 import Prelude
