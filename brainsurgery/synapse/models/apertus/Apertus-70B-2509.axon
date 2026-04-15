@@ -4,7 +4,11 @@
 import Activations
 import Activations (xielu)
 import Cache
-import Cache (past_length)
+import Cache
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids, rope_pair_freq_scale)
 
 D = 8192
 V = 131072
@@ -24,33 +28,33 @@ ROPE_HIGH_FREQ = 4.0
 ROPE_CONTEXT = 8192
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = rmsnorm@path x eps=EPS dim=D cast_float=true
+rms@path x = NN.rmsnorm@path x eps=EPS dim=D cast_float=true
 
 apertus_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 apertus_block x pos_ids attn_mask past_kv = do
   xn <- rms@attention_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H |> rmsnorm@q_norm eps=EPS dim=HD cast_float=true
-    k <- linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> rmsnorm@k_norm eps=EPS dim=HD cast_float=true
-    v <- linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
+    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H |> NN.rmsnorm@q_norm eps=EPS dim=HD cast_float=true
+    k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> NN.rmsnorm@k_norm eps=EPS dim=HD cast_float=true
+    v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     q, k <- rope_pair_freq_scale q k pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k repeats=(H / KVH)
-    v <- repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(H / KVH)
+    v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask=mask eager=true |> merge_heads |> linear@o_proj dim=D bias=false
+    a <- attention q k v mask=mask eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   x <- x + a
   xn <- rms@feedforward_layernorm x
   m <- scope@mlp do
-    return linear@up_proj xn dim=FFN bias=false |> xielu@act_fn |> linear@down_proj dim=D bias=false
+    return NN.linear@up_proj xn dim=FFN bias=false |> xielu@act_fn |> NN.linear@down_proj dim=D bias=false
   return x + m, new_kv
 
 apertus :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 apertus input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i
@@ -58,5 +62,5 @@ apertus input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- rms@norm x
     return x, new_kv
-  logits <- linear@lm_head x dim=V bias=false
+  logits <- NN.linear@lm_head x dim=V bias=false
   return logits, new_kv

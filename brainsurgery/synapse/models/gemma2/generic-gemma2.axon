@@ -1,12 +1,14 @@
-import Math
 {-# CHECKPOINTS ["google/gemma-2-2b", "google/gemma-2-2b-it", "google/gemma-2-9b", "google/gemma-2-9b-it", "google/gemma-2-27b", "google/gemma-2-27b-it"] #-}
 {-# TASK "causal_lm" #-}
 
 import Config
 import Params
 import Activations (gelu_pytorch_tanh, tanh)
-import Cache past_length
 import Cache
+import Positions (position_ids, rope_pair_base)
+import Math (sqrt, mul)
+import Attention (attention, attention_gemma2, reshape_heads, merge_heads)
+import Masking (causal_mask)
 
 D = Config.int "hidden_size" default=2304
 V = Config.int "vocab_size" default=256000
@@ -22,53 +24,53 @@ THETA = Config.float "rope_theta" default=10000.0
 HAS_SLIDING_WINDOW = Config.has_value "sliding_window"
 C_LOCAL = HAS_SLIDING_WINDOW ? (Config.int "sliding_window" default=4096) : (Config.int "max_position_embeddings" default=8192)
 C_FULL = Config.int "max_position_embeddings" default=8192
-ATTN_SCALE = 1.0 / Math.sqrt (Config.float "query_pre_attn_scalar" default=256.0)
+ATTN_SCALE = 1.0 / sqrt (Config.float "query_pre_attn_scalar" default=256.0)
 ATTN_LOGIT_SOFTCAP = Config.float "attn_logit_softcapping" default=50.0
 LOGIT_SOFTCAP = Config.float "final_logit_softcapping" default=30.0
-EMB_SCALE = Math.sqrt D
+EMB_SCALE = sqrt D
 HAS_LM_HEAD = Params.has_root "lm_head"
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = rmsnorm@path x eps=EPS cast_float=true unit_offset=true
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true unit_offset=true
 
 gemma2_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gemma2_block x i pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj xn dim=D |> reshape_heads heads=H
-    k <- linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
-    v <- linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
+    q <- NN.linear@q_proj xn dim=D |> reshape_heads heads=H
+    k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k repeats=(H / KVH)
-    v <- repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(H / KVH)
+    v <- Tensor.repeat v repeats=(H / KVH)
     window <- (i % 2) == 0 ? C_LOCAL : C_FULL
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- ((Config.str "_attn_implementation" default="") == "eager") ? (attention q k v mask=mask scale=ATTN_SCALE softcap=ATTN_LOGIT_SOFTCAP eager=true) : (attention q k v mask=mask scale=ATTN_SCALE eager=false)
-    a <- a |> merge_heads |> linear@o_proj dim=D
+    a <- ((Config.str "_attn_implementation" default="") == "eager") ? (attention_gemma2 q k v mask softcap=ATTN_LOGIT_SOFTCAP scale=ATTN_SCALE) : (attention q k v mask scale=ATTN_SCALE)
+    a <- a |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   a <- rms@post_attention_layernorm a
   x <- x + a
   xn <- rms@pre_feedforward_layernorm x
   m <- scope@mlp do
-    g <- linear@gate_proj xn dim=FFN
-    u <- linear@up_proj xn dim=FFN
-    return gelu_pytorch_tanh g |> Math.mul u |> linear@down_proj dim=D
+    g <- NN.linear@gate_proj xn dim=FFN
+    u <- NN.linear@up_proj xn dim=FFN
+    return gelu_pytorch_tanh g |> mul u |> NN.linear@down_proj dim=D
   m <- rms@post_feedforward_layernorm m
   return x + m, new_kv
 
 gemma2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gemma2 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D scale=EMB_SCALE
+    x <- NN.embedding@embed_tokens input_ids dim=D scale=EMB_SCALE
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i
       x, new_i <- gemma2_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
     x <- rms@norm x
-    logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V weight_path=@@lm_head.weight) : (linear@embed_tokens x dim=V)
+    logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V weight_path=@@lm_head.weight) : (NN.linear@embed_tokens x dim=V)
     logits <- logits / LOGIT_SOFTCAP
     logits <- tanh logits
     logits <- logits * LOGIT_SOFTCAP

@@ -317,6 +317,7 @@ _CACHE_PRIMITIVE_ALIASES: dict[str, str] = {
 }
 _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Prelude",
+    "Compat",
     "Activations",
     "Cache",
     "List",
@@ -325,8 +326,9 @@ _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Params",
     "Positions",
     "Tensor",
-    "Derived",
+    "Attention",
     "Math",
+    "NN",
 }
 
 
@@ -849,6 +851,12 @@ def _validate_normalized_kwargs(op_name: str, kwargs: dict[str, Any], args: list
 
 def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str]] | None:
     parse_callee = callee.replace("@@", "@", 1) if "@@" in callee else callee
+    parse_base = parse_callee.split("@", 1)[0]
+    if "." in parse_base:
+        namespace, member = parse_base.rsplit(".", 1)
+        imported_for_member = ctx.imported_member_namespaces.get(member, set())
+        if namespace in ctx.imported_namespaces and namespace not in imported_for_member:
+            raise ValueError(f"namespaced call {parse_base!r} not exported by {namespace!r}")
     if not ctx.block_signatures:
         return None
     if parse_callee in ctx.block_signatures:
@@ -865,8 +873,15 @@ def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str
     if "." in parse_callee and "@" not in parse_callee:
         member = parse_callee.rsplit(".", 1)[1]
         namespace = parse_callee.rsplit(".", 1)[0]
-        if member in ctx.block_signatures and namespace in ctx.imported_namespaces:
+        imported_for_member = ctx.imported_member_namespaces.get(member, set())
+        if (
+            member in ctx.block_signatures
+            and namespace in ctx.imported_namespaces
+            and namespace in imported_for_member
+        ):
             return member, {}
+        if namespace in ctx.imported_namespaces and namespace not in imported_for_member:
+            raise ValueError(f"namespaced call {parse_callee!r} not exported by {namespace!r}")
     if "@" not in parse_callee and "." not in parse_callee and "::" not in parse_callee:
         imported_namespaces = ctx.imported_member_namespaces.get(parse_callee, set())
         if imported_namespaces:
@@ -890,8 +905,15 @@ def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str
     concrete_paths = parts[1:]
     if base not in ctx.block_signatures and "." in base:
         namespace, member = base.rsplit(".", 1)
-        if member in ctx.block_signatures and namespace in ctx.imported_namespaces:
+        imported_for_member = ctx.imported_member_namespaces.get(member, set())
+        if (
+            member in ctx.block_signatures
+            and namespace in ctx.imported_namespaces
+            and namespace in imported_for_member
+        ):
             base = member
+        elif namespace in ctx.imported_namespaces and namespace not in imported_for_member:
+            raise ValueError(f"namespaced call {callee!r} not exported by {namespace!r}")
     if base not in ctx.block_signatures and "." not in base:
         current_module = ctx.current_module if isinstance(ctx.current_module, str) else ""
         current_namespace = (
@@ -938,9 +960,13 @@ def _validate_namespaced_block_call(callee: str, ctx: _LowerCtx) -> None:
     if not ctx.block_signatures or callee not in ctx.block_signatures:
         return
     namespace = callee.split(".", 1)[0].strip()
+    member = callee.split(".", 1)[1].strip()
     if not namespace:
         return
     if namespace in ctx.imported_namespaces:
+        imported_for_member = ctx.imported_member_namespaces.get(member, set())
+        if imported_for_member and namespace not in imported_for_member:
+            raise ValueError(f"namespaced call {callee!r} not exported by {namespace!r}")
         return
     if isinstance(ctx.current_module, str) and ctx.current_module.startswith(f"{namespace}."):
         return
@@ -2536,9 +2562,14 @@ def _new_lower_ctx(
             bucket = imported_member_namespaces.setdefault(member, set())
             bucket.add("Prelude")
     module_namespace = module.name.split(".", 1)[0] if "." in module.name else module.name
-    implicit_builtin_namespaces: set[str] = set()
-    if module_namespace not in _BUILTIN_MODULE_NAMESPACES:
-        implicit_builtin_namespaces = set(_BUILTIN_MODULE_NAMESPACES) - {"Prelude"}
+    implicit_builtin_namespaces: set[str] = set(_BUILTIN_MODULE_NAMESPACES) - {"Prelude"}
+    if module_namespace in implicit_builtin_namespaces:
+        implicit_builtin_namespaces.remove(module_namespace)
+    imported_namespaces = set(module.imports) | {"Prelude"} | implicit_builtin_namespaces
+    if signatures:
+        for member_name in imported_member_namespaces:
+            if any(name.startswith(f"{member_name}.") for name in signatures):
+                imported_namespaces.add(member_name)
     symbol_values = dict(imported_symbol_values or {})
     if isinstance(module.symbols, dict):
         symbol_values.update(module.symbols)
@@ -2561,7 +2592,7 @@ def _new_lower_ctx(
         tensor_heads=_module_initial_heads(module, returns),
         tensor_shape=_module_initial_shapes(module, returns),
         path_param_names=_module_path_param_names(module),
-        imported_namespaces=set(module.imports) | {"Prelude"} | implicit_builtin_namespaces,
+        imported_namespaces=imported_namespaces,
         imported_member_namespaces=imported_member_namespaces,
         prelude_aliases=dict(prelude_aliases or {}),
         primitive_aliases=dict(primitive_aliases or {}),
@@ -2986,12 +3017,12 @@ def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
     if op == "causal_conv1d":
         return ["weight", "bias"]
     if op == "mamba_scan":
-        names: list[str] = []
+        path_names: list[str] = []
         if _has_explicit_path_arg("A"):
-            names.append("A")
+            path_names.append("A")
         if _has_explicit_path_arg("D"):
-            names.append("D")
-        return names
+            path_names.append("D")
+        return path_names
     raise ValueError(f"unsupported param_base resolution for op {op!r}")
 
 

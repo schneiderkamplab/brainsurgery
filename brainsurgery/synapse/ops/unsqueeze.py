@@ -101,9 +101,19 @@ def compile(
     src = emitter._read_env_var(env, str(raw_args[0]))
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
     dim = _coerce_int_literal(raw_args[1])
-    if dim is None:
+    if dim is not None:
+        return [f"{indent}{out_var} = torch.unsqueeze({src}, {dim})"]
+    dim_name = str(raw_args[1])
+    if dim_name not in env:
         raise ValueError("unsqueeze.dim must be int")
-    return [f"{indent}{out_var} = torch.unsqueeze({src}, {dim})"]
+    dim_expr = emitter._read_env_var(env, dim_name)
+    dim_var = emitter._fresh("dim")
+    return [
+        f"{indent}{dim_var} = {dim_expr}",
+        f"{indent}if isinstance({dim_var}, bool) or not isinstance({dim_var}, int):",
+        f"{indent}    raise ValueError('unsqueeze.dim must be int')",
+        f"{indent}{out_var} = torch.unsqueeze({src}, int({dim_var}))",
+    ]
 
 
 def _coerce_int_literal(value: Any) -> int | None:

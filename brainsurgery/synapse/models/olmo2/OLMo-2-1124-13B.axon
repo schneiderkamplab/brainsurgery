@@ -1,11 +1,15 @@
-import Math
 {-# CHECKPOINTS "allenai/OLMo-2-1124-13B" #-}
 {-# TASK "causal_lm" #-}
 
 import Activations
 import Activations (silu)
 import Cache
-import Cache (past_length)
+import Cache
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids, rope_pair_base)
+import Math (mul)
 
 D = 5120
 V = 100352
@@ -21,35 +25,35 @@ ROPE_SCALE = 1.0
 ATTN_SCALE = 0.08838834764831843
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = rmsnorm@path x eps=EPS
+rms@path x = NN.rmsnorm@path x eps=EPS
 
 olmo2_block :: Tensor -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
 olmo2_block x pos_ids attn_mask past_kv = do
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj x dim=(H * HD) |> rms@q_norm |> reshape_heads heads=H
-    k <- linear@k_proj x dim=(KVH * HD) |> rms@k_norm |> reshape_heads heads=KVH
-    v <- linear@v_proj x dim=(KVH * HD) |> reshape_heads heads=KVH
+    q <- NN.linear@q_proj x dim=(H * HD) |> rms@q_norm |> reshape_heads heads=H
+    k <- NN.linear@k_proj x dim=(KVH * HD) |> rms@k_norm |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj x dim=(KVH * HD) |> reshape_heads heads=KVH
     q, k <- rope_pair_base q k pos_ids THETA scale_factor=ROPE_SCALE
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k repeats=(H / KVH)
-    v <- repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(H / KVH)
+    v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads |> linear@o_proj dim=D
+    a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   a <- rms@post_attention_layernorm a
   x <- x + a
   m <- scope@mlp do
-    g <- linear@gate_proj x dim=FFN
-    u <- linear@up_proj x dim=FFN
-    return g |> silu |> Math.mul u |> linear@down_proj dim=D
+    g <- NN.linear@gate_proj x dim=FFN
+    u <- NN.linear@up_proj x dim=FFN
+    return g |> silu |> mul u |> NN.linear@down_proj dim=D
   m <- rms@post_feedforward_layernorm m
   return x + m, new_kv
 
 olmo2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 olmo2 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i
@@ -57,5 +61,5 @@ olmo2 input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- rms@norm x
     return x, new_kv
-  logits <- linear@lm_head x dim=V
+  logits <- NN.linear@lm_head x dim=V
   return logits, new_kv

@@ -126,6 +126,12 @@ def interpret(
     symbols: dict[str, int],
 ) -> None:
     del scope
+
+    def _eval_bool_kwarg(key: str, default: bool) -> bool:
+        raw = node_spec.get(key, default)
+        resolved = model._eval_expr(raw, env, symbols)
+        return bool(default if resolved is None else resolved)
+
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 3:
         raise ValueError("attention expects [q, k, v]")
@@ -139,7 +145,7 @@ def interpret(
         mask = env.get(mask_name)
     if torch.is_tensor(mask):
         mask = _normalize_mask_contract(model, mask)
-    if bool(node_spec.get("padding_mask", False)):
+    if _eval_bool_kwarg("padding_mask", False):
         if mask is not None and not torch.is_tensor(mask):
             raise ValueError("attention padding_mask expects tensor or null mask input")
         if torch.is_tensor(mask):
@@ -151,27 +157,37 @@ def interpret(
         if sink_name not in env:
             raise ValueError(f"attention.sink input not found in env: {sink_name}")
         sink = env[sink_name]
-    if sink is None and isinstance(node_spec.get("sink_path"), str):
-        sink = model._state_tensor_from_path(
-            node_path=node_path,
-            raw_path=str(node_spec["sink_path"]),
-            field="attention.sink_path",
-        )
+    if sink is None:
+        sink_path_expr = node_spec.get("sink_path")
+        if sink_path_expr is not None:
+            sink_path_value = model._eval_expr(sink_path_expr, env, symbols)
+            if isinstance(sink_path_value, str) and sink_path_value.strip():
+                sink = model._state_tensor_from_path(
+                    node_path=node_path,
+                    raw_path=sink_path_value,
+                    field="attention.sink_path",
+                )
 
     scale_expr = node_spec.get("scale")
-    scale_value = None if scale_expr is None else float(model._eval_expr(scale_expr, env, symbols))
+    if scale_expr is None:
+        scale_value = None
+    else:
+        resolved_scale = model._eval_expr(scale_expr, env, symbols)
+        scale_value = None if resolved_scale is None else float(resolved_scale)
     if scale_value is None:
         scale_value = float(q.shape[-1]) ** -0.5
     softcap_expr = node_spec.get("softcap")
-    softcap_value = (
-        None if softcap_expr is None else float(model._eval_expr(softcap_expr, env, symbols))
-    )
+    if softcap_expr is None:
+        softcap_value = None
+    else:
+        resolved_softcap = model._eval_expr(softcap_expr, env, symbols)
+        softcap_value = None if resolved_softcap is None else float(resolved_softcap)
 
     causal_expr = node_spec.get("causal", True)
     causal_flag = bool(model._eval_expr(causal_expr, env, symbols))
-    eager_kw = node_spec.get("eager")
-    float_mask_additive = bool(node_spec.get("float_mask_additive", False))
-    float_mask_floor_keep = bool(node_spec.get("float_mask_floor_keep", False))
+    eager_kw = model._eval_expr(node_spec.get("eager"), env, symbols)
+    float_mask_additive = _eval_bool_kwarg("float_mask_additive", False)
+    float_mask_floor_keep = _eval_bool_kwarg("float_mask_floor_keep", False)
     use_eager = (
         bool(eager_kw)
         if eager_kw is not None

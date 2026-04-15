@@ -1,9 +1,12 @@
-import Math
 {-# CHECKPOINTS ["allenai/longformer-base-4096"] #-}
 {-# TASK "masked_lm" #-}
 
 import Config
-import Activations gelu
+import Activations (gelu)
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask, bidirectional_mask)
+import Positions (position_ids)
 
 D   = Config.int "hidden_size" default=768
 V   = Config.int "vocab_size" default=50265
@@ -17,17 +20,17 @@ WIN = 256
 longformer_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 longformer_block x attn_mask = do
   a <- scope@attention do
-    q <- linear@self.query x dim=D bias=true |> reshape_heads heads=H
-    k <- linear@self.key x dim=D bias=true |> reshape_heads heads=H
-    v <- linear@self.value x dim=D bias=true |> reshape_heads heads=H
+    q <- NN.linear@self.query x dim=D bias=true |> reshape_heads heads=H
+    k <- NN.linear@self.key x dim=D bias=true |> reshape_heads heads=H
+    v <- NN.linear@self.value x dim=D bias=true |> reshape_heads heads=H
     mask <- bidirectional_mask q k window=WIN padding_mask=attn_mask
-    return attention q k v mask=mask causal=false eager=true |> merge_heads |> linear@output.dense dim=D bias=true
+    return attention q k v mask=mask causal=false eager=true |> merge_heads |> NN.linear@output.dense dim=D bias=true
   x <- x + a
-  x <- layernorm@attention.output.LayerNorm x eps=EPS
-  m <- linear@intermediate.dense x dim=FFN bias=true |> gelu
-  m <- linear@output.dense m dim=D bias=true
+  x <- NN.layernorm@attention.output.LayerNorm x eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=D bias=true
   y <- x + m
-  y <- layernorm@output.LayerNorm y eps=EPS
+  y <- NN.layernorm@output.LayerNorm y eps=EPS
   return y
 
 longformer :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
@@ -35,17 +38,17 @@ longformer input_ids attn_mask = do
   pos_base <- position_ids input_ids attn_mask=attn_mask pad_fill=-1
   pos_shift <- PAD + 1
   pos_ids <- Math.add pos_base pos_shift
-  tok_type_ids <- zeros_like input_ids
-  tok <- embedding@longformer.embeddings.word_embeddings input_ids dim=D
-  pos <- embedding@longformer.embeddings.position_embeddings pos_ids dim=D
-  typ <- embedding@longformer.embeddings.token_type_embeddings tok_type_ids dim=D
+  tok_type_ids <- Tensor.zeros_like input_ids
+  tok <- NN.embedding@longformer.embeddings.word_embeddings input_ids dim=D
+  pos <- NN.embedding@longformer.embeddings.position_embeddings pos_ids dim=D
+  typ <- NN.embedding@longformer.embeddings.token_type_embeddings tok_type_ids dim=D
   x <- tok + pos
   x <- x + typ
-  x <- layernorm@longformer.embeddings.LayerNorm x eps=EPS
+  x <- NN.layernorm@longformer.embeddings.LayerNorm x eps=EPS
   for@longformer.encoder.layer i <- [0..L) do
     x <- longformer_block x attn_mask
   logits <- scope@lm_head do
-    x <- linear@dense x dim=D bias=true |> gelu
-    x <- layernorm@layer_norm x eps=EPS
-    return linear@decoder x dim=V bias=true weight_path=@@longformer.embeddings.word_embeddings.weight bias_path=@@lm_head.bias
+    x <- NN.linear@dense x dim=D bias=true |> gelu
+    x <- NN.layernorm@layer_norm x eps=EPS
+    return NN.linear@decoder x dim=V bias=true weight_path=@@longformer.embeddings.word_embeddings.weight bias_path=@@lm_head.bias
   return logits

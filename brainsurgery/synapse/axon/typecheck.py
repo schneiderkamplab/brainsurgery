@@ -88,6 +88,7 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, str] = {
 
 _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Prelude",
+    "Compat",
     "Activations",
     "Cache",
     "List",
@@ -96,8 +97,9 @@ _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Params",
     "Positions",
     "Tensor",
-    "Derived",
+    "Attention",
     "Math",
+    "NN",
 }
 
 _NAMED_LIST_ITEM_TYPES: dict[str, TypeExpr] = {
@@ -1181,7 +1183,6 @@ def _primitive_fallback_type(
             "unsqueeze",
             "merge_heads",
             "repeat",
-            "reshape_heads",
             "attention",
             "causal_mask",
             "concat",
@@ -1316,7 +1317,6 @@ def _primitive_output_type(
         return isinstance(tp, TypeNamed) and tp.name in {"Tensor", "IdxTensor"}
 
     generic_tensor_inference_ops = {
-        "reshape_heads",
         "repeat",
         "merge_heads",
         "rope_pair",
@@ -1965,6 +1965,16 @@ def _call_return_type(
             return "@".join([prelude_qualified, *path_suffix]) if path_suffix else prelude_qualified
         return name
 
+    def _namespaced_member_is_visible(namespace: str, member: str) -> bool:
+        current_module = module.name if isinstance(module.name, str) else ""
+        if current_module.startswith(f"{namespace}."):
+            return True
+        if isinstance(module.imported_members, dict):
+            members = module.imported_members.get(namespace)
+            if members is not None:
+                return member in members
+        return False
+
     def _has_call_signature(name: str) -> bool:
         if signatures.get(name) is not None:
             return True
@@ -1984,10 +1994,32 @@ def _call_return_type(
 
     raw_resolved_name = _resolve_unqualified_import_member(raw_callee)
     raw_call_resolves_to_block = _has_call_signature(raw_resolved_name)
+    raw_base = raw_callee.split("@", 1)[0]
+    if "." in raw_base:
+        raw_namespace, raw_member = raw_base.rsplit(".", 1)
+        raw_namespace_imported = raw_namespace in set(module.imports)
+        raw_member_visible = _namespaced_member_is_visible(raw_namespace, raw_member)
+        if raw_namespace_imported and not raw_member_visible:
+            raise _error(
+                module,
+                path,
+                f"namespaced call {raw_base!r} not exported by {raw_namespace!r}",
+            )
 
     callee = _apply_primitive_alias(callee)
     callee = _resolve_unqualified_import_member(callee)
     callee = _apply_primitive_alias(callee)
+    callee_base_raw = callee.split("@", 1)[0]
+    if "." in callee_base_raw:
+        namespace, member = callee_base_raw.rsplit(".", 1)
+        namespace_imported = namespace in set(module.imports)
+        member_visible = _namespaced_member_is_visible(namespace, member)
+        if namespace_imported and not member_visible:
+            raise _error(
+                module,
+                path,
+                f"namespaced call {callee_base_raw!r} not exported by {namespace!r}",
+            )
     base = callee.split("@", 1)[0]
     implicit_activation = _IMPLICIT_ACTIVATION_ALIASES.get(base)
     if implicit_activation is not None and "@" not in callee:
@@ -2007,11 +2039,20 @@ def _call_return_type(
         callee_base = callee_parts[0]
         callee_paths = callee_parts[1:]
         if "." in callee_base:
-            member_base = callee_base.rsplit(".", 1)[1]
-            member_sig = signatures.get(member_base)
-            if member_sig is not None and member_sig.path_param_count == len(callee_paths):
-                call_sig = member_sig
-                callee = member_base
+            namespace, member_base = callee_base.rsplit(".", 1)
+            namespace_imported = namespace in set(module.imports)
+            member_visible = _namespaced_member_is_visible(namespace, member_base)
+            if namespace_imported and not member_visible:
+                raise _error(
+                    module,
+                    path,
+                    f"namespaced call {callee_base!r} not exported by {namespace!r}",
+                )
+            if member_visible:
+                member_sig = signatures.get(member_base)
+                if member_sig is not None and member_sig.path_param_count == len(callee_paths):
+                    call_sig = member_sig
+                    callee = member_base
     if call_sig is not None:
         if len(args) > len(call_sig.params):
             raise _error(
@@ -2287,7 +2328,7 @@ def _call_return_type(
         raise _error(
             module,
             path,
-            "_sinusoidal_positions only accepts positional arguments; use Prelude.sinusoidal_positions for keyword/default syntax",
+            "_sinusoidal_positions only accepts positional arguments; use Compat.sinusoidal_positions for keyword/default syntax",
         )
     if raw_base == "_expand" and kwargs:
         raise _error(

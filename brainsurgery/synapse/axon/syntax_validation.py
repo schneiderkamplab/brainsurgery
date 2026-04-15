@@ -124,6 +124,9 @@ def validate_parsed_program_source(parsed_source: ParsedProgramSource) -> None:
                 "Axon syntax validation failed: imported-members entry without matching "
                 f"'import {namespace}'"
             )
+    for exported in parsed_source.exports:
+        if not _is_ident(exported):
+            raise ValueError(f"Axon syntax validation failed: invalid exported symbol {exported!r}")
 
 
 __all__ = ["validate_parsed_program_source"]

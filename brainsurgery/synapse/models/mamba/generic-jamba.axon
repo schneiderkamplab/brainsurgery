@@ -1,9 +1,13 @@
-import Math
 {-# CHECKPOINTS ["ai21labs/AI21-Jamba-Reasoning-3B"] #-}
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
 import Config
-import Activations silu
+import Activations (silu)
+import Compat attention_causal_scaled causal_conv1d mamba_scan
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Math (mul, sqrt)
 
 -- Jamba-3B architecture constants.
 D = Config.int "hidden_size" default=2560                          -- residual hidden size
@@ -12,7 +16,7 @@ L = Config.int "num_hidden_layers" default=28                      -- decoder de
 H = Config.int "num_attention_heads" default=20                    -- query heads
 KVH = Config.int "num_key_value_heads" default=1                   -- key/value heads
 HD = D / H                                                         -- per-head dimension
-SCALE = 1.0 / Math.sqrt HD                                              -- qk scaling
+SCALE = 1.0 / sqrt HD                                              -- qk scaling
 FF = Config.int "intermediate_size" default=8192                   -- FFN width
 I = D * (Config.int "mamba_expand" default=2)                      -- mamba inner width
 N = Config.int "mamba_d_state" default=16                          -- state-space width
@@ -22,51 +26,51 @@ ATTN_OFFSET = Config.int "attn_layer_offset" default=7             -- attention 
 EPS = Config.float "rms_norm_eps" default=1e-6                     -- RMSNorm epsilon
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = rmsnorm@path x eps=EPS cast_float=true
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
 dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 dense_ffn x = do
-  gate <- linear@feed_forward.gate_proj x dim=FF
-  up <- linear@feed_forward.up_proj x dim=FF
-  return gate |> silu |> Math.mul up |> linear@feed_forward.down_proj dim=D
+  gate <- NN.linear@feed_forward.gate_proj x dim=FF
+  up <- NN.linear@feed_forward.up_proj x dim=FF
+  return gate |> silu |> mul up |> NN.linear@feed_forward.down_proj dim=D
 
 attn_core :: Tensor[B,S,D] -> Tensor[B,S,D]
 attn_core x = do
   x_norm <- rms@input_layernorm x
-  q <- linear@self_attn.q_proj x_norm dim=(H * HD) |> reshape_heads heads=H
-  k <- linear@self_attn.k_proj x_norm dim=(KVH * HD) |> reshape_heads heads=KVH
-  k <- repeat k repeats=(H / KVH)
-  v <- linear@self_attn.v_proj x_norm dim=(KVH * HD) |> reshape_heads heads=KVH
-  v <- repeat v repeats=(H / KVH)
+  q <- NN.linear@self_attn.q_proj x_norm dim=(H * HD) |> reshape_heads heads=H
+  k <- NN.linear@self_attn.k_proj x_norm dim=(KVH * HD) |> reshape_heads heads=KVH
+  k <- Tensor.repeat k repeats=(H / KVH)
+  v <- NN.linear@self_attn.v_proj x_norm dim=(KVH * HD) |> reshape_heads heads=KVH
+  v <- Tensor.repeat v repeats=(H / KVH)
   a <- attention_causal_scaled q k v SCALE true |> merge_heads
-  a <- linear@self_attn.o_proj a dim=D
+  a <- NN.linear@self_attn.o_proj a dim=D
   return x + a
 
 mamba_core :: Tensor[B,S,D] -> Tensor[B,S,D]
 mamba_core x = do
   x_norm <- rms@input_layernorm x
   y <- do
-    in_proj <- linear@mamba.in_proj x_norm dim=2*I
-    u, gate <- split in_proj sizes=[I, I]
+    in_proj <- NN.linear@mamba.in_proj x_norm dim=2*I
+    u, gate <- Tensor.split in_proj sizes=[I, I]
     u_conv <- causal_conv1d@mamba.conv1d u activation=silu
-    params <- linear@mamba.x_proj u_conv dim=R + 2*N
-    dt, b, c <- split params sizes=[R, N, N]
-    dt <- rmsnorm@mamba.dt_layernorm dt eps=EPS cast_float=true
-    b <- rmsnorm@mamba.b_layernorm b eps=EPS cast_float=true
-    c <- rmsnorm@mamba.c_layernorm c eps=EPS cast_float=true
-    delta <- linear@mamba.dt_proj dt dim=I bias=true
+    params <- NN.linear@mamba.x_proj u_conv dim=R + 2*N
+    dt, b, c <- Tensor.split params sizes=[R, N, N]
+    dt <- NN.rmsnorm@mamba.dt_layernorm dt eps=EPS cast_float=true
+    b <- NN.rmsnorm@mamba.b_layernorm b eps=EPS cast_float=true
+    c <- NN.rmsnorm@mamba.c_layernorm c eps=EPS cast_float=true
+    delta <- NN.linear@mamba.dt_proj dt dim=I bias=true
     y_scan <- mamba_scan u_conv delta b c A="mamba.A_log" D="mamba.D" a_is_log=true
-    return y_scan |> Math.mul (silu gate) |> linear@mamba.out_proj dim=D
+    return y_scan |> mul (silu gate) |> NN.linear@mamba.out_proj dim=D
   return x + y
 
 jamba_3b :: TokenIds[B,S] -> Tensor[B,S,V]
 jamba_3b input_ids = do
-  x <- embedding@model.embed_tokens input_ids dim=D
+  x <- NN.embedding@model.embed_tokens input_ids dim=D
   for@model.layers i <- [0..L) do
     x <- ((i % ATTN_PERIOD) == ATTN_OFFSET) ? attn_core x : mamba_core x
     x_ff <- rms@pre_ff_layernorm x
     m <- dense_ffn x_ff
     x <- x + m
   x <- rms@model.final_layernorm x
-  logits <- linear@lm_head x dim=V
+  logits <- NN.linear@lm_head x dim=V
   return logits

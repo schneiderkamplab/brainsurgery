@@ -1,11 +1,15 @@
-import Math
 {-# CHECKPOINTS "CohereLabs/aya-expanse-32b" #-}
 {-# TASK "causal_lm" #-}
 
 import Activations
 import Activations (silu)
 import Cache
-import Cache (past_length)
+import Cache
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids, rope_pair_base)
+import Math (mul)
 
 D = 8192
 V = 256000
@@ -22,33 +26,33 @@ LOGIT_SCALE = 0.0625
 HAS_LM_HEAD = false
 
 cohere_ln :: @Path -> Tensor -> Tensor
-cohere_ln@path x = layernorm@path x eps=EPS bias=false
+cohere_ln@path x = NN.layernorm@path x eps=EPS bias=false
 
 cohere_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 cohere_block x pos_ids attn_mask past_kv = do
   xn <- cohere_ln@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H
-    k <- linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
-    v <- linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
+    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H
+    k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     q, k <- rope_pair_base q k pos_ids theta=THETA interleaved=true
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k repeats=(H / KVH)
-    v <- repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(H / KVH)
+    v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask=mask eager=true |> merge_heads |> linear@o_proj dim=D bias=false
+    a <- attention q k v mask=mask eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   m <- scope@mlp do
-    g <- linear@gate_proj xn dim=FFN bias=false
-    u <- linear@up_proj xn dim=FFN bias=false
-    return g |> silu |> Math.mul u |> linear@down_proj dim=D bias=false
+    g <- NN.linear@gate_proj xn dim=FFN bias=false
+    u <- NN.linear@up_proj xn dim=FFN bias=false
+    return g |> silu |> mul u |> NN.linear@down_proj dim=D bias=false
   return x + a + m, new_kv
 
 cohere :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 cohere input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i
@@ -56,6 +60,6 @@ cohere input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- cohere_ln@norm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V) : (linear@model.embed_tokens x dim=V)
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@model.embed_tokens x dim=V)
   logits <- logits * LOGIT_SCALE
   return logits, new_kv

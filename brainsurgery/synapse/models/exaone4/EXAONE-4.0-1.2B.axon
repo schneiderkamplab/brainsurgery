@@ -1,11 +1,15 @@
-import Math
 {-# CHECKPOINTS "LGAI-EXAONE/EXAONE-4.0-1.2B" #-}
 {-# TASK "causal_lm" #-}
 
 import Activations
 import Activations (silu)
 import Cache
-import Cache (past_length)
+import Cache
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids, rope_pair_freq_scale)
+import Math (mul)
 
 D = 2048
 V = 102400
@@ -25,38 +29,38 @@ HAS_LLLG = false
 HAS_LM_HEAD = false
 
 exaone4_rms :: @Path -> Tensor -> Tensor
-exaone4_rms@path x = rmsnorm@path x eps=EPS
+exaone4_rms@path x = NN.rmsnorm@path x eps=EPS
 
 exaone4_block :: Int -> Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 exaone4_block i x pos_ids attn_mask past_kv = do
   apply_rope <- HAS_LLLG ? (((i + 1) % 4) != 0) : true
   sliding <- HAS_LLLG ? (((i + 1) % 4) != 0) : false
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj x dim=D bias=false |> reshape_heads heads=H |> exaone4_rms@q_norm
-    k <- linear@k_proj x dim=KVD bias=false |> reshape_heads heads=KVH |> exaone4_rms@k_norm
-    v <- linear@v_proj x dim=KVD bias=false |> reshape_heads heads=KVH
+    q <- NN.linear@q_proj x dim=D bias=false |> reshape_heads heads=H |> exaone4_rms@q_norm
+    k <- NN.linear@k_proj x dim=KVD bias=false |> reshape_heads heads=KVH |> exaone4_rms@k_norm
+    v <- NN.linear@v_proj x dim=KVD bias=false |> reshape_heads heads=KVH
     q, k <- apply_rope ? (rope_pair_freq_scale q k pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT) : (q, k)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k repeats=(H / KVH)
-    v <- repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(H / KVH)
+    v <- Tensor.repeat v repeats=(H / KVH)
     window <- sliding ? 4096 : C
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- attention q k v mask=mask eager=true |> merge_heads |> linear@o_proj dim=D bias=false
+    a <- attention q k v mask=mask eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   a <- exaone4_rms@post_attention_layernorm a
   x <- x + a
   m <- scope@mlp do
-    g <- linear@gate_proj x dim=FFN bias=false
-    u <- linear@up_proj x dim=FFN bias=false
-    return g |> silu |> Math.mul u |> linear@down_proj dim=D bias=false
+    g <- NN.linear@gate_proj x dim=FFN bias=false
+    u <- NN.linear@up_proj x dim=FFN bias=false
+    return g |> silu |> mul u |> NN.linear@down_proj dim=D bias=false
   m <- exaone4_rms@post_feedforward_layernorm m
   return x + m, new_kv
 
 exaone4 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 exaone4 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i
@@ -64,5 +68,5 @@ exaone4 input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- exaone4_rms@norm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V) : (linear@model.embed_tokens x dim=V)
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@model.embed_tokens x dim=V)
   return logits, new_kv

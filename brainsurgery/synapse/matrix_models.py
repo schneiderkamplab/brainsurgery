@@ -569,15 +569,10 @@ def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
     pytorch_index_path = model_dir / "pytorch_model.bin.index.json"
     single_path = model_dir / "model.safetensors"
     pytorch_bin_path = model_dir / "pytorch_model.bin"
-    pt_files = (
-        sorted(model_dir.glob("*.pt"))
-        + sorted(model_dir.glob("*.pth"))
-        + sorted(model_dir.glob("*.bin"))
-    )
-    safetensor_files = sorted(model_dir.glob("*.safetensors"))
 
-    if pt_files and safetensor_files:
-        return False
+    # Some model dirs can legitimately contain both legacy .bin shards and
+    # normalized .safetensors shards after migration. Treat this as complete
+    # when one full weight set is present, instead of forcing a redownload loop.
 
     has_weights = False
     if index_path.exists():

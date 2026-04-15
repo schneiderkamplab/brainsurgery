@@ -4,7 +4,10 @@
 import Activations
 import Activations (gelu, relu)
 import Cache
-import Cache (past_length)
+import Attention (reshape_heads, merge_heads)
+import Compat (attention, sinusoidal_positions)
+import Masking (causal_mask)
+import Positions (position_ids)
 
 D = 2048
 V = 256008
@@ -23,36 +26,36 @@ xglm_act x = (ACT == "relu") ? (relu x) : (gelu x)
 
 xglm_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 xglm_block x attn_mask past_kv = do
-  xn <- layernorm@self_attn_layer_norm x eps=EPS
+  xn <- NN.layernorm@self_attn_layer_norm x eps=EPS
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj xn dim=D bias=true |> reshape_heads heads=H
-    k <- linear@k_proj xn dim=D bias=true |> reshape_heads heads=H
-    v <- linear@v_proj xn dim=D bias=true |> reshape_heads heads=H
+    q <- NN.linear@q_proj xn dim=D bias=true |> reshape_heads heads=H
+    k <- NN.linear@k_proj xn dim=D bias=true |> reshape_heads heads=H
+    v <- NN.linear@v_proj xn dim=D bias=true |> reshape_heads heads=H
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@out_proj dim=D bias=true
+    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@out_proj dim=D bias=true
     return a, new_kv
   x <- x + a
-  xn2 <- layernorm@final_layer_norm x eps=EPS
-  m <- linear@fc1 xn2 dim=FFN bias=true |> xglm_act |> linear@fc2 dim=D bias=true
+  xn2 <- NN.layernorm@final_layer_norm x eps=EPS
+  m <- NN.linear@fc1 xn2 dim=FFN bias=true |> xglm_act |> NN.linear@fc2 dim=D bias=true
   x <- x + m
   return x, new_kv
 
 xglm :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 xglm input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv) pad_fill=-1
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=-1
   pos_ids_rope <- pos_ids + 2
   x, new_kv <- scope@model do
-    tok <- embedding@embed_tokens input_ids dim=D
+    tok <- NN.embedding@embed_tokens input_ids dim=D
     x <- tok * EMB_SCALE
-    pos <- HAS_POS ? (embedding@embed_positions pos_ids_rope dim=D) : (sinusoidal_positions x pos_ids_rope theta=10000.0 offset=0 padding_idx=null)
+    pos <- HAS_POS ? (NN.embedding@embed_positions pos_ids_rope dim=D) : (sinusoidal_positions x pos_ids_rope theta=10000.0 offset=0 padding_idx=null)
     x <- x + pos
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i
       x, new_i <- xglm_block x attn_mask past_i
       new_kv <- Cache.append new_kv new_i
-    x <- layernorm@layer_norm x eps=EPS
+    x <- NN.layernorm@layer_norm x eps=EPS
     return x, new_kv
-  logits <- linear@lm_head x dim=V bias=false
+  logits <- NN.linear@lm_head x dim=V bias=false
   return logits, new_kv

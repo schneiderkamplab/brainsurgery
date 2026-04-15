@@ -1,9 +1,13 @@
-import Math
 {-# CHECKPOINTS ["google/t5gemma-xl-xl-prefixlm", "google/t5gemma-xl-xl-prefixlm-it", "google/t5gemma-2b-2b-prefixlm", "google/t5gemma-2b-2b-prefixlm-it", "google/t5gemma-9b-2b-prefixlm", "google/t5gemma-9b-2b-prefixlm-it", "google/t5gemma-9b-9b-prefixlm", "google/t5gemma-9b-9b-prefixlm-it"] #-}
 {-# TASK "seq2seq_lm" #-}
 
 import Activations (gelu_pytorch_tanh, sigmoid)
 import Config
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask, bidirectional_mask)
+import Positions (position_ids, rope_pair_base)
+import Math (mul, sqrt)
 
 D_ENC = Config.int "hidden_size" root="encoder" default=512
 D_DEC = Config.int "hidden_size" root="decoder" default=512
@@ -32,89 +36,89 @@ WIN_FULL_ENC = Config.int "max_position_embeddings" root="encoder" default=8192
 WIN_FULL_DEC = Config.int "max_position_embeddings" root="decoder" default=8192
 ROPE_PERIOD_ENC = Config.int "sliding_window_pattern" root="encoder" default=2
 ROPE_PERIOD_DEC = Config.int "sliding_window_pattern" root="decoder" default=2
-ATTN_SCALE_ENC = 1.0 / Math.sqrt (Config.float "query_pre_attn_scalar" root="encoder" default=64.0)
-ATTN_SCALE_DEC = 1.0 / Math.sqrt (Config.float "query_pre_attn_scalar" root="decoder" default=64.0)
-EMB_SCALE_ENC = Math.sqrt D_ENC
-EMB_SCALE_DEC = Math.sqrt D_DEC
+ATTN_SCALE_ENC = 1.0 / sqrt (Config.float "query_pre_attn_scalar" root="encoder" default=64.0)
+ATTN_SCALE_DEC = 1.0 / sqrt (Config.float "query_pre_attn_scalar" root="decoder" default=64.0)
+EMB_SCALE_ENC = sqrt D_ENC
+EMB_SCALE_DEC = sqrt D_DEC
 LOGIT_SOFTCAP = Config.float "final_logit_softcapping" root="decoder" default=30.0
 
 t5gemma_encoder_block :: Tensor[B,S,D_ENC] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> Tensor[B,S,D_ENC]
 t5gemma_encoder_block x i pos_ids attention_mask = do
-  xn <- rmsnorm@pre_self_attn_layernorm x eps=EPS_ENC cast_float=true unit_offset=true
+  xn <- NN.rmsnorm@pre_self_attn_layernorm x eps=EPS_ENC cast_float=true unit_offset=true
   a <- scope@self_attn do
-    q <- linear@q_proj xn dim=QD_ENC bias=false |> reshape_heads heads=H_ENC
-    k <- linear@k_proj xn dim=KVD_ENC bias=false |> reshape_heads heads=KVH_ENC
-    v <- linear@v_proj xn dim=KVD_ENC bias=false |> reshape_heads heads=KVH_ENC
+    q <- NN.linear@q_proj xn dim=QD_ENC bias=false |> reshape_heads heads=H_ENC
+    k <- NN.linear@k_proj xn dim=KVD_ENC bias=false |> reshape_heads heads=KVH_ENC
+    v <- NN.linear@v_proj xn dim=KVD_ENC bias=false |> reshape_heads heads=KVH_ENC
     q, k <- rope_pair_base q k pos_ids THETA_ENC
-    k <- repeat k repeats=(H_ENC / KVH_ENC)
-    v <- repeat v repeats=(H_ENC / KVH_ENC)
+    k <- Tensor.repeat k repeats=(H_ENC / KVH_ENC)
+    v <- Tensor.repeat v repeats=(H_ENC / KVH_ENC)
     full_attn <- ((i + 1) % ROPE_PERIOD_ENC) == 0
     window <- full_attn ? WIN_FULL_ENC : WIN_SLIDE_ENC
     mask <- bidirectional_mask q k window=window padding_mask=attention_mask
-    return attention q k v mask=mask causal=false scale=ATTN_SCALE_ENC |> merge_heads |> linear@o_proj dim=D_ENC bias=false
-  a <- rmsnorm@post_self_attn_layernorm a eps=EPS_ENC cast_float=true unit_offset=true
+    return attention q k v mask=mask causal=false scale=ATTN_SCALE_ENC |> merge_heads |> NN.linear@o_proj dim=D_ENC bias=false
+  a <- NN.rmsnorm@post_self_attn_layernorm a eps=EPS_ENC cast_float=true unit_offset=true
   x <- x + a
 
-  xn <- rmsnorm@pre_feedforward_layernorm x eps=EPS_ENC cast_float=true unit_offset=true
+  xn <- NN.rmsnorm@pre_feedforward_layernorm x eps=EPS_ENC cast_float=true unit_offset=true
   m <- scope@mlp do
-    g <- linear@gate_proj xn dim=FFN_ENC bias=false |> gelu_pytorch_tanh
-    u <- linear@up_proj xn dim=FFN_ENC bias=false
-    return g |> Math.mul u |> linear@down_proj dim=D_ENC bias=false
-  m <- rmsnorm@post_feedforward_layernorm m eps=EPS_ENC cast_float=true unit_offset=true
+    g <- NN.linear@gate_proj xn dim=FFN_ENC bias=false |> gelu_pytorch_tanh
+    u <- NN.linear@up_proj xn dim=FFN_ENC bias=false
+    return g |> mul u |> NN.linear@down_proj dim=D_ENC bias=false
+  m <- NN.rmsnorm@post_feedforward_layernorm m eps=EPS_ENC cast_float=true unit_offset=true
   return x + m
 
 t5gemma_decoder_block :: Tensor[B,SDEC,D_DEC] -> Tensor[B,SENC,D_ENC] -> Int -> Tensor[B,SDEC] -> ?Tensor[B,SENC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,D_DEC]
 t5gemma_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_attention_mask = do
-  xn <- rmsnorm@pre_self_attn_layernorm x eps=EPS_DEC cast_float=true unit_offset=true
+  xn <- NN.rmsnorm@pre_self_attn_layernorm x eps=EPS_DEC cast_float=true unit_offset=true
   a <- scope@self_attn do
-    q <- linear@q_proj xn dim=QD_DEC bias=false |> reshape_heads heads=H_DEC
-    k <- linear@k_proj xn dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
-    v <- linear@v_proj xn dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
+    q <- NN.linear@q_proj xn dim=QD_DEC bias=false |> reshape_heads heads=H_DEC
+    k <- NN.linear@k_proj xn dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
+    v <- NN.linear@v_proj xn dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
     q, k <- rope_pair_base q k pos_ids THETA_DEC
-    k <- repeat k repeats=(H_DEC / KVH_DEC)
-    v <- repeat v repeats=(H_DEC / KVH_DEC)
+    k <- Tensor.repeat k repeats=(H_DEC / KVH_DEC)
+    v <- Tensor.repeat v repeats=(H_DEC / KVH_DEC)
     full_attn <- ((i + 1) % ROPE_PERIOD_DEC) == 0
     window <- full_attn ? WIN_FULL_DEC : WIN_SLIDE_DEC
     mask <- causal_mask q k window=window padding_mask=decoder_attention_mask
-    return attention q k v mask=mask causal=false scale=ATTN_SCALE_DEC |> merge_heads |> linear@o_proj dim=D_DEC bias=false
-  a <- rmsnorm@post_self_attn_layernorm a eps=EPS_DEC cast_float=true unit_offset=true
+    return attention q k v mask=mask causal=false scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
+  a <- NN.rmsnorm@post_self_attn_layernorm a eps=EPS_DEC cast_float=true unit_offset=true
   x <- x + a
 
-  xn <- rmsnorm@pre_cross_attn_layernorm x eps=EPS_DEC cast_float=true unit_offset=true
+  xn <- NN.rmsnorm@pre_cross_attn_layernorm x eps=EPS_DEC cast_float=true unit_offset=true
   a <- scope@cross_attn do
-    q <- linear@q_proj xn dim=QD_DEC bias=false |> reshape_heads heads=H_DEC
-    k <- linear@k_proj enc_hidden dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
-    v <- linear@v_proj enc_hidden dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
-    k <- repeat k repeats=(H_DEC / KVH_DEC)
-    v <- repeat v repeats=(H_DEC / KVH_DEC)
+    q <- NN.linear@q_proj xn dim=QD_DEC bias=false |> reshape_heads heads=H_DEC
+    k <- NN.linear@k_proj enc_hidden dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
+    v <- NN.linear@v_proj enc_hidden dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
+    k <- Tensor.repeat k repeats=(H_DEC / KVH_DEC)
+    v <- Tensor.repeat v repeats=(H_DEC / KVH_DEC)
     mask <- bidirectional_mask q k padding_mask=encoder_attention_mask
-    return attention q k v mask=mask causal=false scale=ATTN_SCALE_DEC |> merge_heads |> linear@o_proj dim=D_DEC bias=false
-  a <- rmsnorm@post_cross_attn_layernorm a eps=EPS_DEC cast_float=true unit_offset=true
+    return attention q k v mask=mask causal=false scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
+  a <- NN.rmsnorm@post_cross_attn_layernorm a eps=EPS_DEC cast_float=true unit_offset=true
   x <- x + a
 
-  xn <- rmsnorm@pre_feedforward_layernorm x eps=EPS_DEC cast_float=true unit_offset=true
+  xn <- NN.rmsnorm@pre_feedforward_layernorm x eps=EPS_DEC cast_float=true unit_offset=true
   m <- scope@mlp do
-    g <- linear@gate_proj xn dim=FFN_DEC bias=false |> gelu_pytorch_tanh
-    u <- linear@up_proj xn dim=FFN_DEC bias=false
-    return g |> Math.mul u |> linear@down_proj dim=D_DEC bias=false
-  m <- rmsnorm@post_feedforward_layernorm m eps=EPS_DEC cast_float=true unit_offset=true
+    g <- NN.linear@gate_proj xn dim=FFN_DEC bias=false |> gelu_pytorch_tanh
+    u <- NN.linear@up_proj xn dim=FFN_DEC bias=false
+    return g |> mul u |> NN.linear@down_proj dim=D_DEC bias=false
+  m <- NN.rmsnorm@post_feedforward_layernorm m eps=EPS_DEC cast_float=true unit_offset=true
   return x + m
 
 t5gemma :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
 t5gemma input_ids attention_mask decoder_input_ids decoder_attention_mask = do
   enc_pos_ids <- position_ids input_ids
-  enc_hidden <- embedding@model.encoder.embed_tokens input_ids dim=D_ENC scale=EMB_SCALE_ENC
+  enc_hidden <- NN.embedding@model.encoder.embed_tokens input_ids dim=D_ENC scale=EMB_SCALE_ENC
   for@model.encoder.layers i <- [0..L_ENC) do
     enc_hidden <- t5gemma_encoder_block enc_hidden i enc_pos_ids attention_mask
-  enc_hidden <- rmsnorm@model.encoder.norm enc_hidden eps=EPS_ENC cast_float=true unit_offset=true
+  enc_hidden <- NN.rmsnorm@model.encoder.norm enc_hidden eps=EPS_ENC cast_float=true unit_offset=true
 
   dec_pos_ids <- position_ids decoder_input_ids
-  dec_hidden <- embedding@model.decoder.embed_tokens decoder_input_ids dim=D_DEC scale=EMB_SCALE_DEC
+  dec_hidden <- NN.embedding@model.decoder.embed_tokens decoder_input_ids dim=D_DEC scale=EMB_SCALE_DEC
   for@model.decoder.layers i <- [0..L_DEC) do
     dec_hidden <- t5gemma_decoder_block dec_hidden enc_hidden i dec_pos_ids attention_mask decoder_attention_mask
-  dec_hidden <- rmsnorm@model.decoder.norm dec_hidden eps=EPS_DEC cast_float=true unit_offset=true
+  dec_hidden <- NN.rmsnorm@model.decoder.norm dec_hidden eps=EPS_DEC cast_float=true unit_offset=true
 
-  logits <- linear@model.decoder.embed_tokens dec_hidden dim=V bias=false
+  logits <- NN.linear@model.decoder.embed_tokens dec_hidden dim=V bias=false
   logits <- logits / LOGIT_SOFTCAP
   logits <- logits * 2.0 |> sigmoid
   logits <- (logits * 2.0) - 1.0

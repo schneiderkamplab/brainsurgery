@@ -4,8 +4,11 @@
 import Activations
 import Activations (gelu, gelu_pytorch_tanh)
 import Cache
-import Cache (past_length)
 import Params
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids, rope_pair_base)
 
 D = 3072
 V = 49152
@@ -22,7 +25,7 @@ HAS_LM_HEAD = false
 HAS_LM_HEAD_BIAS = Params.has_root "lm_head.bias"
 
 starcoder2_ln :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-starcoder2_ln@path x = layernorm@path x eps=EPS
+starcoder2_ln@path x = NN.layernorm@path x eps=EPS
 
 starcoder2_mlp_act :: Tensor[B,S,FFN] -> Tensor[B,S,FFN]
 starcoder2_mlp_act x = (ACT == "gelu_pytorch_tanh") ? (gelu_pytorch_tanh x) : (gelu x)
@@ -31,28 +34,28 @@ starcoder2_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer 
 starcoder2_block x pos_ids attn_mask past_kv = do
   xn <- starcoder2_ln@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj xn dim=D bias=true |> reshape_heads heads=H
-    k <- linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
-    v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    q <- NN.linear@q_proj xn dim=D bias=true |> reshape_heads heads=H
+    k <- NN.linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k repeats=(H / KVH)
-    v <- repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(H / KVH)
+    v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=SW padding_mask=attn_mask
-    a <- attention q k v mask=mask eager=false |> merge_heads |> linear@o_proj dim=D bias=true
+    a <- attention q k v mask=mask eager=false |> merge_heads |> NN.linear@o_proj dim=D bias=true
     return a, new_kv
   x <- x + a
   xn2 <- starcoder2_ln@post_attention_layernorm x
   m <- scope@mlp do
-    h <- linear@c_fc xn2 dim=FFN bias=true
-    return starcoder2_mlp_act h |> linear@c_proj dim=D bias=true
+    h <- NN.linear@c_fc xn2 dim=FFN bias=true
+    return starcoder2_mlp_act h |> NN.linear@c_proj dim=D bias=true
   return x + m, new_kv
 
 starcoder2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 starcoder2 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i
@@ -60,5 +63,5 @@ starcoder2 input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- starcoder2_ln@norm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V bias=HAS_LM_HEAD_BIAS) : (linear@model.embed_tokens x dim=V)
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V bias=HAS_LM_HEAD_BIAS) : (NN.linear@model.embed_tokens x dim=V)
   return logits, new_kv

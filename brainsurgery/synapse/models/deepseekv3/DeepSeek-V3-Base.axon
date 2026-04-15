@@ -1,12 +1,16 @@
-import Math
 {-# CHECKPOINTS "deepseek-ai/DeepSeek-V3-Base" #-}
 {-# TASK "causal_lm" #-}
 
 import Activations
 import Activations (silu)
 import Cache
-import Cache (past_length)
+import Cache
 import MoE
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids, rope_pair_yarn)
+import Math (mul)
 
 D = 7168
 V = 129280
@@ -41,26 +45,26 @@ ROPE_CONTEXT = 4096
 ATTN_SCALE = 0.07216878364870323
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = rmsnorm@path x eps=EPS cast_float=true
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
 deepseek_v3_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 deepseek_v3_attn x pos_ids attn_mask past_kv = do
   a, new_kv <- scope@self_attn do
-    q <- linear@q_a_proj x dim=QLR bias=false |> rms@q_a_layernorm |> linear@q_b_proj dim=(H * QHD) bias=false |> reshape_heads heads=H
-    q_nope, q_pe <- split q sizes=[QKNOPE, QKROPE]
-    kv_comp <- linear@kv_a_proj_with_mqa x dim=(KVR + QKROPE) bias=false
-    kv_latent, k_pe_base <- split kv_comp sizes=[KVR, QKROPE]
+    q <- NN.linear@q_a_proj x dim=QLR bias=false |> rms@q_a_layernorm |> NN.linear@q_b_proj dim=(H * QHD) bias=false |> reshape_heads heads=H
+    q_nope, q_pe <- Tensor.split q sizes=[QKNOPE, QKROPE]
+    kv_comp <- NN.linear@kv_a_proj_with_mqa x dim=(KVR + QKROPE) bias=false
+    kv_latent, k_pe_base <- Tensor.split kv_comp sizes=[KVR, QKROPE]
     kv_latent <- rms@kv_a_layernorm kv_latent
-    kv <- linear@kv_b_proj kv_latent dim=KVPROJ bias=false |> reshape_heads heads=H
-    k_nope, v <- split kv sizes=[QKNOPE, VHD]
-    k_pe <- reshape_heads k_pe_base heads=1 |> repeat repeats=H
+    kv <- NN.linear@kv_b_proj kv_latent dim=KVPROJ bias=false |> reshape_heads heads=H
+    k_nope, v <- Tensor.split kv sizes=[QKNOPE, VHD]
+    k_pe <- reshape_heads k_pe_base heads=1 |> Tensor.repeat repeats=H
     q_pe, k_pe <- rope_pair_yarn q_pe k_pe pos_ids THETA ROPE_SCALE ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM interleaved=true
-    q_full <- concat q_nope q_pe dim=-1
-    k_full <- concat k_nope k_pe dim=-1
+    q_full <- Tensor.concat q_nope q_pe dim=-1
+    k_full <- Tensor.concat k_nope k_pe dim=-1
     k_all, v_all, new_kv <- Cache.update past_kv k_full v
     mask <- causal_mask q_full k_all window=C padding_mask=attn_mask
     a <- attention q_full k_all v_all mask=mask scale=ATTN_SCALE eager=true |> merge_heads
-    a <- linear@o_proj a dim=D bias=false
+    a <- NN.linear@o_proj a dim=D bias=false
     return a, new_kv
   return a, new_kv
 
@@ -71,9 +75,9 @@ deepseek_v3_dense_block x pos_ids attn_mask past_kv = do
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
-    gate <- linear@gate_proj xn dim=FFN bias=false
-    up <- linear@up_proj xn dim=FFN bias=false
-    return gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
+    gate <- NN.linear@gate_proj xn dim=FFN bias=false
+    up <- NN.linear@up_proj xn dim=FFN bias=false
+    return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
   return x + m, new_kv
 
 deepseek_v3_moe_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
@@ -84,25 +88,25 @@ deepseek_v3_moe_block x pos_ids attn_mask past_kv = do
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
     shared <- scope@shared_experts do
-      gate <- linear@gate_proj xn dim=(EM * SE) bias=false
-      up <- linear@up_proj xn dim=(EM * SE) bias=false
-      return gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
-    topk_scores, topk_indices <- glm4_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=(NTP == true) routed_scaling_factor=RSC
-    routed <- zeros_like xn
+      gate <- NN.linear@gate_proj xn dim=(EM * SE) bias=false
+      up <- NN.linear@up_proj xn dim=(EM * SE) bias=false
+      return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
+    topk_scores, topk_indices <- Compat.glm4_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=(NTP == true) routed_scaling_factor=RSC
+    routed <- Tensor.zeros_like xn
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
-      gate <- linear@gate_proj x_sel dim=EM bias=false
-      up <- linear@up_proj x_sel dim=EM bias=false
-      x_upd <- gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
+      gate <- NN.linear@gate_proj x_sel dim=EM bias=false
+      up <- NN.linear@up_proj x_sel dim=EM bias=false
+      x_upd <- gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
       routed <- MoE.scatter_add routed token_idx x_upd sel_scores
     return shared + routed
   return x + m, new_kv
 
 deepseek_v3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 deepseek_v3 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..FIRST_DENSE) do
       past_i <- Cache.index past_kv i
@@ -114,5 +118,5 @@ deepseek_v3 input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- rms@norm x
     return x, new_kv
-  logits <- linear@lm_head x dim=V bias=false
+  logits <- NN.linear@lm_head x dim=V bias=false
   return logits, new_kv

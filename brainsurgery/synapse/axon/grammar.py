@@ -94,6 +94,7 @@ class ParsedProgramSource:
     modules: tuple[ParsedModuleSource, ...]
     imports: tuple[str, ...]
     imported_members: dict[str, tuple[str, ...]]
+    exports: tuple[str, ...]
     pragmas: dict[str, object]
     constants: dict[str, AxonExpr]
     type_aliases: dict[str, TypeExpr]
@@ -232,6 +233,7 @@ program: _NL* top_item (_NL+ top_item)* _NL*
 
 top_item: module_decl
     | import_decl
+    | export_decl
     | pragma
     | constant
     | type_alias_decl
@@ -272,10 +274,15 @@ mod_decl: module_name mod_decl_param*
 mod_decl_param: "@" NAME
 module_name: NAME ("." NAME)*
 
-import_decl: IMPORT module_name [import_members]
+import_decl: IMPORT import_item ("," import_item)*
+import_item: module_name [import_members]
 import_members: import_members_paren | import_members_bare
 import_members_paren: LPAR [NAME ("," NAME)* ","?] RPAR
 import_members_bare: NAME+
+export_decl: EXPORT export_members
+export_members: export_members_paren | export_members_bare
+export_members_paren: LPAR [NAME ("," NAME)* ","?] RPAR
+export_members_bare: NAME+
 
 pragma: "{-#" NAME pragma_value "#-}"
 ?pragma_value: tuple_expr
@@ -427,6 +434,7 @@ PIPE_OP.3: "|>"
 MONAD_BIND.3: ">>="
 RANGE_DOTS.3: ".."
 IMPORT.3: "import"
+EXPORT.3: "export"
 TYPE_KW.3: "type"
 FOR.3: "for"
 STEP.3: "step"
@@ -636,6 +644,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         modules: list[ParsedModuleSource] = []
         imports: list[str] = []
         imported_members: dict[str, tuple[str, ...]] = {}
+        exports: list[str] = []
         pragmas: dict[str, object] = {}
         constants: dict[str, AxonExpr] = {}
         type_aliases: dict[str, TypeExpr] = {}
@@ -653,6 +662,29 @@ class _ProgramTransformer(Transformer[Token, object]):
                 imports.append(namespace)
                 prev_members = imported_members.get(namespace, ())
                 imported_members[namespace] = tuple(dict.fromkeys([*prev_members, *members]))
+                continue
+            if isinstance(child, tuple) and len(child) == 2 and child[0] == "imports":
+                import_items = cast(
+                    tuple[tuple[str, str] | tuple[str, str, tuple[str, ...]], ...],
+                    child[1],
+                )
+                for item in import_items:
+                    if len(item) == 2 and item[0] == "import":
+                        namespace = item[1]
+                        imports.append(namespace)
+                        continue
+                    if len(item) == 3 and item[0] == "import_members":
+                        namespace = item[1]
+                        members = item[2]
+                        imports.append(namespace)
+                        prev_members = imported_members.get(namespace, ())
+                        imported_members[namespace] = tuple(
+                            dict.fromkeys([*prev_members, *members])
+                        )
+                continue
+            if isinstance(child, tuple) and len(child) == 2 and child[0] == "export":
+                exported = cast(tuple[str, ...], child[1])
+                exports.extend(exported)
                 continue
             if isinstance(child, tuple) and len(child) == 3 and child[0] == "pragma":
                 pragma_name = cast(str, child[1])
@@ -684,6 +716,7 @@ class _ProgramTransformer(Transformer[Token, object]):
             modules=tuple(modules),
             imports=tuple(dict.fromkeys(imports)),
             imported_members=imported_members,
+            exports=tuple(dict.fromkeys(exports)),
             pragmas=pragmas,
             constants=constants,
             type_aliases=type_aliases,
@@ -912,15 +945,39 @@ class _ProgramTransformer(Transformer[Token, object]):
             str(child) for child in children if isinstance(child, Token) and child.type == "NAME"
         )
 
-    def import_decl(
-        self, children: list[object]
-    ) -> tuple[str, str] | tuple[str, str, tuple[str, ...]]:
+    def import_decl(self, children: list[object]) -> tuple[str, tuple[object, ...]]:
+        values = [child for child in children if not isinstance(child, Token)]
+        specs = cast(tuple[tuple[str, tuple[str, ...] | None], ...], tuple(values))
+        out: list[tuple[str, str] | tuple[str, str, tuple[str, ...]]] = []
+        for namespace, members in specs:
+            if members is None:
+                out.append(("import", namespace))
+            else:
+                out.append(("import_members", namespace, members))
+        return ("imports", tuple(out))
+
+    def import_item(self, children: list[object]) -> tuple[str, tuple[str, ...] | None]:
         values = [child for child in children if not isinstance(child, Token)]
         namespace = cast(str, values[0])
-        if len(values) == 1 or not isinstance(values[1], tuple):
-            return ("import", namespace)
-        members = cast(tuple[str, ...], values[1])
-        return ("import_members", namespace, members)
+        members: tuple[str, ...] | None = None
+        if len(values) > 1 and isinstance(values[1], tuple):
+            members = cast(tuple[str, ...], values[1])
+        return (namespace, members)
+
+    def export_members_paren(self, children: list[object]) -> tuple[str, ...]:
+        return tuple(
+            str(child) for child in children if isinstance(child, Token) and child.type == "NAME"
+        )
+
+    def export_members_bare(self, children: list[object]) -> tuple[str, ...]:
+        return tuple(
+            str(child) for child in children if isinstance(child, Token) and child.type == "NAME"
+        )
+
+    def export_decl(self, children: list[object]) -> tuple[str, tuple[str, ...]]:
+        values = [child for child in children if not isinstance(child, Token)]
+        members = cast(tuple[str, ...], values[0]) if values else ()
+        return ("export", members)
 
     def pragma(self, children: list[object]) -> tuple[str, str, object]:
         if len(children) != 2:

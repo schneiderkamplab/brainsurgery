@@ -4,7 +4,10 @@
 import Activations
 import Activations (gelu_new)
 import Cache
-import Cache (past_length)
+import Positions (position_ids)
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
 
 T = 1024
 D = 1280
@@ -14,31 +17,31 @@ HD = (D / H)
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gpt2_block x attn_mask past_kv = do
-  x1 <- layernorm@ln_1 x
+  x1 <- NN.layernorm@ln_1 x
   a, new_kv <- scope@attn do
-    q_lin, k_lin, v_lin <- chunk (linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
+    q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
     q <- reshape_heads q_lin heads=H
     k <- reshape_heads k_lin heads=H
     v <- reshape_heads v_lin heads=H
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=T padding_mask=attn_mask
-    a <- attention q k v mask=mask |> merge_heads |> linear@c_proj dim=D bias=true transpose=true
+    a <- attention q k v mask=mask |> merge_heads |> NN.linear@c_proj dim=D bias=true transpose=true
     return a, new_kv
   x <- x + a
-  x3 <- layernorm@ln_2 x
+  x3 <- NN.layernorm@ln_2 x
   m <- scope@mlp do
-    return linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new |> linear@c_proj dim=D bias=true transpose=true
+    return NN.linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=D bias=true transpose=true
   return x + m, new_kv
 
 gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gpt2 input_ids attn_mask past_kv use_cache = do
-  tok <- embedding@wte input_ids dim=D
-  pos <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv) pad_fill=1 |> embedding@wpe
+  tok <- NN.embedding@wte input_ids dim=D
+  pos <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=1 |> NN.embedding@wpe
   x <- tok + pos
   new_kv <- use_cache ? Cache.init : null
   for@h i <- [0..L) do
     past_i <- Cache.index past_kv i
     x, new_i <- gpt2_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i
-  logits <- layernorm@ln_f x |> linear@wte
+  logits <- NN.layernorm@ln_f x |> NN.linear@wte
   return logits, new_kv

@@ -1,0 +1,81 @@
+import Params
+export (
+  attention,
+  attention_causal_scaled,
+  causal_conv1d,
+  gemma4_per_layer_input_at,
+  gemma4_per_layer_inputs,
+  glm4_router,
+  linear_position_bias,
+  mamba_scan,
+  relative_bias_disentangled,
+  sinusoidal_positions,
+  split_qkv_heads,
+  t5_relative_position_bias,
+)
+
+-- Deprecated Prelude facades
+param_scale :: Tensor -> ?Path -> Tensor
+param_scale x ?scale_path=@layer_scalar = Params.param_scale x scale_path=scale_path
+
+split_qkv_heads :: Tensor[B,T,D] -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD], Tensor[B,H,T,HD])
+split_qkv_heads = _split_qkv_heads
+
+split_qkv_grouped :: Tensor[B,T,D] -> (Tensor[B,H,T,HD], Tensor[B,KVH,T,HD], Tensor[B,KVH,T,HD])
+split_qkv_grouped = _split_qkv_grouped
+
+sinusoidal_positions :: Tensor -> Tensor -> ?Float -> ?Int -> ?Int -> ?String -> Tensor
+sinusoidal_positions ref position_ids ?theta=10000.0 ?offset=2 ?padding_idx=null ?mode=null = _sinusoidal_positions ref position_ids theta offset padding_idx mode
+
+glm4_router :: @Path -> Tensor -> Int -> ?Int -> ?Int -> ?Bool -> ?Float -> (Tensor, IdxTensor)
+glm4_router@path x top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 = _glm4_router@path x top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor
+
+blocksparse_mask :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,TK]
+blocksparse_mask = _blocksparse_mask
+
+attention :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,TK,HD] -> ?Tensor -> ?Bool -> ?Bool -> ?Float -> ?Bool -> ?Float -> ?Bool -> ?Tensor -> ?Path -> Tensor[B,H,T,HD]
+attention q k v ?mask=null ?padding_mask=false ?causal=false ?scale=null ?eager=false ?softcap=null ?top_left_mask=false ?sink=null ?sink_path=null = do
+  pad <- (padding_mask == null) ? false : padding_mask
+  c <- (causal == null) ? false : causal
+  eg <- (eager == null) ? false : eager
+  return pad
+    ? (_attention q k v mask=mask padding_mask=true causal=c scale=scale eager=eg softcap=softcap sink=sink sink_path=sink_path)
+    : (_attention q k v mask=mask causal=c scale=scale eager=eg softcap=softcap sink=sink sink_path=sink_path)
+
+linear_position_bias :: Tensor[B,T] -> Tensor[B,H,1,T]
+linear_position_bias = _linear_position_bias
+
+t5_relative_position_bias :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> ?Int -> ?Int -> ?Bool -> Tensor[1,H,T,TK]
+t5_relative_position_bias@path q k ?num_buckets=32 ?max_distance=128 ?bidirectional=true = _t5_relative_position_bias@path q k num_buckets=num_buckets max_distance=max_distance bidirectional=bidirectional
+
+relative_bias_disentangled :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,TK]
+relative_bias_disentangled@path q k = _disentangled_relative_bias@path q k
+
+relative_bias_t5 :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[1,H,T,TK]
+relative_bias_t5@path q k = _t5_relative_position_bias@path q k
+
+-- Deprecated MoE facades
+grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Tensor[B,T,D]
+grouped_ffn = _moe_grouped_ffn
+
+grouped_swiglu_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Tensor[B,T,D]
+grouped_swiglu_ffn = _moe_grouped_swiglu_ffn
+
+-- Deprecated Params facade
+root :: String -> String
+root preferred = _params_root preferred
+
+attention_causal_scaled :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,TK,HD] -> Float -> ?Bool -> Tensor[B,H,T,HD]
+attention_causal_scaled q k v scale ?eager=false = _attention q k v scale=scale causal=true eager=eager
+
+causal_conv1d :: @Path -> Tensor -> ?Any -> Tensor
+causal_conv1d@path x ?activation=null = _causal_conv1d@path x activation
+
+mamba_scan :: Tensor -> Tensor -> Tensor -> Tensor -> ?Path -> ?Path -> ?Bool -> Tensor
+mamba_scan u delta b c ?A="@A_log" ?D="@D" ?a_is_log=true = _mamba_scan u delta b c A=A D=D a_is_log=a_is_log
+
+gemma4_per_layer_inputs :: Any -> Any -> ?Any -> ?Any -> ?Any -> ?Any -> ?Any -> ?Any -> Tensor
+gemma4_per_layer_inputs input_ids hidden ?num_layers=null ?per_layer_dim=null ?embed_scale=null ?projection_scale=null ?combine_scale=null ?rms_eps=null = _gemma4_per_layer_inputs input_ids hidden num_layers=num_layers per_layer_dim=per_layer_dim embed_scale=embed_scale projection_scale=projection_scale combine_scale=combine_scale rms_eps=rms_eps
+
+gemma4_per_layer_input_at :: Tensor -> Int -> Tensor
+gemma4_per_layer_input_at x i = _gemma4_per_layer_input_at x i

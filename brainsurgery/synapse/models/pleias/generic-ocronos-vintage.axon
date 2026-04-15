@@ -2,7 +2,11 @@
 {-# TASK "causal_lm" #-}
 
 import Config
-import Activations gelu_new
+import Activations (gelu_new)
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids)
 
 T = Config.int "n_positions" default=1024
 D = Config.int "n_embd" default=768
@@ -12,28 +16,28 @@ V = Config.int "vocab_size" default=50257
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 gpt2_block x attn_mask = do
-  x1 <- layernorm@ln_1 x
+  x1 <- NN.layernorm@ln_1 x
   a <- scope@attn do
-    q_lin, k_lin, v_lin <- chunk (linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
+    q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
     q <- reshape_heads q_lin heads=H
     k <- reshape_heads k_lin heads=H
     v <- reshape_heads v_lin heads=H
     mask <- causal_mask q k window=T padding_mask=attn_mask
-    return attention q k v mask=mask |> merge_heads |> linear@c_proj dim=D bias=true transpose=true
+    return attention q k v mask=mask |> merge_heads |> NN.linear@c_proj dim=D bias=true transpose=true
   x <- x + a
-  x3 <- layernorm@ln_2 x
+  x3 <- NN.layernorm@ln_2 x
   m <- scope@mlp do
-    return linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new |> linear@c_proj dim=D bias=true transpose=true
+    return NN.linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=D bias=true transpose=true
   return x + m
 
 gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 gpt2 input_ids attn_mask = do
   logits <- scope@transformer do
-    tok <- embedding@wte input_ids dim=D
-    pos <- position_ids input_ids attn_mask=attn_mask pad_fill=1 |> embedding@wpe
+    tok <- NN.embedding@wte input_ids dim=D
+    pos <- position_ids input_ids attn_mask=attn_mask pad_fill=1 |> NN.embedding@wpe
     x <- tok + pos
     for@h i <- [0..L) do
       x <- gpt2_block x attn_mask
-    logits <- layernorm@ln_f x |> linear@wte
+    logits <- NN.layernorm@ln_f x |> NN.linear@wte
     return logits
   return logits

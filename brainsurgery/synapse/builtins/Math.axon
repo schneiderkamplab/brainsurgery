@@ -1,3 +1,5 @@
+export (PI, add, cos, exp, floor, log, mul, sin, sqrt)
+
 PI = 3.141592653589793
 
 add :: T -> T -> T

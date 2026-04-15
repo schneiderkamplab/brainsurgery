@@ -143,7 +143,9 @@ main x = do
     assert "main" in signatures
 
 
-def test_typecheck_rejects_unsqueeze_outside_builtins(tmp_path: Path) -> None:
+def test_typecheck_allows_unsqueeze_via_prelude_exported_tensor_namespace(
+    tmp_path: Path,
+) -> None:
     source = """
 import Prelude
 
@@ -154,8 +156,8 @@ main x = do
   return z
 """
     modules = _parse_from_tmp_source(tmp_path, source)
-    with pytest.raises(ValueError, match=r"direct primitive call must use _xyz syntax, got 'unsqueeze'"):
-        typecheck_axon_program(modules, main_module="main")
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
 
 
 def test_typecheck_allows_variadic_split_on_4d_tensor(tmp_path: Path) -> None:
@@ -191,7 +193,9 @@ main x = do
         node
         for item in spec["model"]["graph"]
         for node in item.values()
-        if isinstance(node, dict) and node.get("_op") == "call" and node.get("_target") == "Prelude.split"
+        if isinstance(node, dict)
+        and node.get("_op") == "call"
+        and node.get("_target") == "Tensor.split"
     ]
     assert len(split_calls) == 1
     assert split_calls[0].get("_args") == "x"
@@ -214,7 +218,9 @@ main x = do
         node
         for item in spec["model"]["graph"]
         for node in item.values()
-        if isinstance(node, dict) and node.get("_op") == "call" and node.get("_target") == "Prelude.chunk"
+        if isinstance(node, dict)
+        and node.get("_op") == "call"
+        and node.get("_target") == "Tensor.chunk"
     ]
     assert len(chunk_calls) == 1
     assert chunk_calls[0].get("_args") == "x"
@@ -237,7 +243,92 @@ main x = do
         node
         for item in spec["model"]["graph"]
         for node in item.values()
-        if isinstance(node, dict) and node.get("_op") == "call" and node.get("_target") == "Prelude.split"
+        if isinstance(node, dict)
+        and node.get("_op") == "call"
+        and node.get("_target") == "Tensor.split"
     ]
     assert len(split_calls) == 1
     assert split_calls[0].get("sizes") == [6, 6]
+
+
+def test_import_uses_exported_namespace_symbols_from_dependency(tmp_path: Path) -> None:
+    helper_path = tmp_path / "Helper.axon"
+    helper_path.write_text(
+        """
+export helper
+
+helper :: Tensor[B,S,D] -> Tensor[B,S,D]
+helper x = x
+""",
+        encoding="utf-8",
+    )
+    layer_path = tmp_path / "Layer.axon"
+    layer_path.write_text(
+        """
+import Helper
+export Helper
+
+layer :: Tensor[B,S,D] -> Tensor[B,S,D]
+layer x = Helper.helper x
+""",
+        encoding="utf-8",
+    )
+    root_path = tmp_path / "test.axon"
+    root_path.write_text(
+        """
+import Layer
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- Helper.helper x
+  return y
+""",
+        encoding="utf-8",
+    )
+    modules = parse_axon_program_from_path(root_path)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
+
+
+def test_prelude_exports_core_namespaces_without_explicit_imports(tmp_path: Path) -> None:
+    source = """
+main :: @Path -> Tensor[B,S,D] -> Tensor[B,1,S,D]
+main@path x = do
+  y <- NN.rmsnorm@path x
+  z <- Tensor.unsqueeze y 1
+  w <- Math.exp z
+  return w
+"""
+    modules = _parse_from_tmp_source(tmp_path, source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
+
+
+def test_import_namespace_allows_only_exported_members(tmp_path: Path) -> None:
+    source = """
+import Activations
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- Activations.swiglu x
+  return y
+"""
+    modules = _parse_from_tmp_source(tmp_path, source)
+    with pytest.raises(
+        ValueError, match=r"not exported by 'Activations'|not exported by \"Activations\""
+    ):
+        typecheck_axon_program(modules, main_module="main")
+
+
+def test_import_namespace_allows_exported_members(tmp_path: Path) -> None:
+    source = """
+import Config
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  d <- Config.int "hidden_size" default=768
+  return x
+"""
+    modules = _parse_from_tmp_source(tmp_path, source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures

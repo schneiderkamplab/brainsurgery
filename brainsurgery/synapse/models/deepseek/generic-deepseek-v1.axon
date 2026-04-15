@@ -1,13 +1,17 @@
-import Math
 {-# CHECKPOINTS ["deepseek-ai/deepseek-moe-16b-base", "deepseek-ai/deepseek-moe-16b-chat"] #-}
 {-# TASK "causal_lm" #-}
 {-# padding_side "right" #-}
 
 import Config
-import Activations silu
-import Cache past_length
+import Activations (silu)
+import Cache
 import Cache
 import MoE
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids, rope_pair_base)
+import Math (mul)
 
 D     = Config.int "hidden_size" default=2048
 V     = Config.int "vocab_size" default=102400
@@ -26,21 +30,21 @@ C     = Config.int "max_position_embeddings" default=4096
 FIRST_DENSE = Config.int "first_k_dense_replace" default=1
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = rmsnorm@path x eps=EPS cast_float=true
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
 deepseek_v1_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 deepseek_v1_attn x pos_ids attn_mask past_kv = do
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj x dim=D bias=false |> reshape_heads heads=H
-    k <- linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH
-    v <- linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH
+    q <- NN.linear@q_proj x dim=D bias=false |> reshape_heads heads=H
+    k <- NN.linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH
     q, k <- rope_pair_base q k pos_ids theta=THETA interleaved=false
     k_all, v_all, new_kv <- Cache.update past_kv k v
-    k_all <- repeat k_all repeats=(H / KVH)
-    v_all <- repeat v_all repeats=(H / KVH)
+    k_all <- Tensor.repeat k_all repeats=(H / KVH)
+    v_all <- Tensor.repeat v_all repeats=(H / KVH)
     mask <- causal_mask q k_all padding_mask=attn_mask early_exit=true
     a <- attention q k_all v_all mask=mask eager=false |> merge_heads
-    a <- linear@o_proj a dim=D bias=false
+    a <- NN.linear@o_proj a dim=D bias=false
     return a, new_kv
   return a, new_kv
 
@@ -51,9 +55,9 @@ deepseek_v1_dense_block x pos_ids attn_mask past_kv = do
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
-    gate <- linear@gate_proj xn dim=FFN bias=false
-    up <- linear@up_proj xn dim=FFN bias=false
-    return gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
+    gate <- NN.linear@gate_proj xn dim=FFN bias=false
+    up <- NN.linear@up_proj xn dim=FFN bias=false
+    return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
   return x + m, new_kv
 
 deepseek_v1_moe_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
@@ -64,26 +68,26 @@ deepseek_v1_moe_block x pos_ids attn_mask past_kv = do
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
     shared <- scope@shared_experts do
-      gate <- linear@gate_proj xn dim=(EM * SE) bias=false
-      up <- linear@up_proj xn dim=(EM * SE) bias=false
-      return gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
-    topk_scores, topk_indices <- linear@gate xn dim=E bias=false |>
-      softmax dim=-1 dtype="float32" |> topk k=EPT dim=-1 sorted=false
-    routed <- zeros_like xn
+      gate <- NN.linear@gate_proj xn dim=(EM * SE) bias=false
+      up <- NN.linear@up_proj xn dim=(EM * SE) bias=false
+      return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
+    topk_scores, topk_indices <- NN.linear@gate xn dim=E bias=false |>
+      Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=EPT dim=-1 sorted=false
+    routed <- Tensor.zeros_like xn
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
-      gate <- linear@gate_proj x_sel dim=EM bias=false
-      up <- linear@up_proj x_sel dim=EM bias=false
-      x_upd <- gate |> silu |> Math.mul up |> linear@down_proj dim=D bias=false
+      gate <- NN.linear@gate_proj x_sel dim=EM bias=false
+      up <- NN.linear@up_proj x_sel dim=EM bias=false
+      x_upd <- gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
       routed <- MoE.scatter_add routed token_idx x_upd sel_scores
     return shared + routed
   return x + m, new_kv
 
 deepseek_v1 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 deepseek_v1 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..FIRST_DENSE) do
       past_i <- Cache.index past_kv i
@@ -95,5 +99,5 @@ deepseek_v1 input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- rms@norm x
     return x, new_kv
-  logits <- linear@lm_head x dim=V bias=false
+  logits <- NN.linear@lm_head x dim=V bias=false
   return logits, new_kv

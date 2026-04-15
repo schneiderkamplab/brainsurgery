@@ -1,0 +1,127 @@
+import List
+export (
+  and,
+  arange,
+  cast,
+  cast_like,
+  chunk,
+  concat,
+  cumsum,
+  dtype_value,
+  eq,
+  expand,
+  gather,
+  le,
+  matmul,
+  min_like,
+  permute,
+  repeat,
+  reshape,
+  scatter,
+  size,
+  slice,
+  softmax,
+  split,
+  tensor_like,
+  topk,
+  transpose,
+  unsqueeze,
+  where,
+  zeros_like,
+)
+
+split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..S]]
+split x ?dim=-1 ?sizes=null = _split x dim sizes
+
+chunk :: Tensor[..S] -> ?Int -> ?Int -> List[Tensor[..S]]
+chunk x ?dim=-1 ?parts=null = _chunk x dim parts
+
+permute :: Tensor -> ?Any -> Tensor
+permute x ?dims=null = _permute x dims
+
+transpose :: Tensor -> ?Int -> ?Int -> Tensor
+transpose x ?dim1=1 ?dim2=2 = _transpose x dim1 dim2
+
+reshape :: Any -> ?Any -> Tensor
+reshape x ?shape=null = _reshape x shape
+
+shape :: Tensor -> List[Int]
+shape x = _shape x
+
+size :: Tensor -> Int -> Int
+size x dim = shape x |> List.index dim
+
+expand :: Tensor -> ?List[Dim] -> Tensor
+expand x ?shape=null = _expand x shape
+
+arange :: Tensor -> ?Int -> ?Int -> IdxTensor
+arange x ?start=0 ?end=null = _arange x start end
+
+cast :: Tensor -> ?String -> Tensor
+cast x ?dtype=null = _cast x dtype
+
+cast_like :: Tensor -> Tensor -> Tensor
+cast_like x ref = _cast_like x ref
+
+tensor_like :: Any -> Tensor -> ?String -> Tensor
+tensor_like value ref ?dtype=null = _tensor_like value ref dtype
+
+cumsum :: Tensor -> ?Int -> Tensor
+cumsum x ?dim=-1 = _cumsum x dim
+
+unsqueeze :: Tensor -> ?Int -> Tensor
+unsqueeze x ?dim=0 = _unsqueeze x dim
+
+repeat :: Tensor[B,KVH,T,HD] -> ?Int -> ?Int -> Tensor[B,H,T,HD]
+repeat x ?repeats=2 ?dim=1 = _repeat x repeats dim
+
+concat :: Tensor -> Tensor -> ?Int -> Tensor
+concat x y ?dim=-1 = _concat x y dim=dim
+
+matmul :: Tensor -> Tensor -> Tensor
+matmul = _matmul
+
+eq :: Tensor -> Tensor -> Tensor
+eq = _eq
+
+le :: Tensor -> Tensor -> Tensor
+le = _le
+
+and :: Tensor -> Tensor -> Tensor
+and = _and
+
+where :: Tensor -> Any -> Any -> Tensor
+where = _where
+
+masked_fill :: Tensor -> Tensor -> Tensor -> Tensor
+masked_fill x mask value = where mask value x
+
+slice :: Tensor -> Int -> Int -> Int -> Tensor
+slice x dim start end = _slice x dim start end
+
+softmax :: Tensor -> ?Int -> ?String -> Tensor
+softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype
+
+topk :: Tensor -> Int -> ?Int -> ?Bool -> ?Bool -> (Tensor, IdxTensor)
+topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted
+
+dtype_value :: Tensor -> String -> Float
+dtype_value x kind = _dtype_value x kind
+
+empty_like :: Tensor -> ?String -> Tensor
+empty_like x ?dtype=null = _empty_like x dtype
+
+fill :: Tensor -> Any -> ?String -> Tensor
+fill x value ?dtype=null = _fill x value dtype
+
+gather :: Tensor -> IdxTensor -> ?Int -> Tensor
+gather x index ?dim=-1 = _gather x index dim
+
+scatter :: Tensor -> IdxTensor -> Any -> ?Int -> Tensor
+scatter x index src ?dim=-1 = _scatter x index src dim
+
+zeros_like :: Tensor[B,T,D] -> Tensor[B,T,D]
+zeros_like = _zeros_like
+
+min_like :: Tensor[B,T,D] -> Tensor[B,T,D]
+min_like x = fill (empty_like x) (dtype_value x "min")

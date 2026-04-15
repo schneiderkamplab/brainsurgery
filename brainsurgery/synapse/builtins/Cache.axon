@@ -1,5 +1,6 @@
 import List
-import Prelude (concat, size)
+import Prelude
+export (append, index, init, past_length, update)
 
 type CacheLayer = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
 type Cache = List[CacheLayer]
@@ -10,8 +11,8 @@ update past k v = (past == null)
     return k, v, (k, v)
   : do
     k_past, v_past <- past
-    k_all <- concat k_past k dim=-2
-    v_all <- concat v_past v dim=-2
+    k_all <- _concat k_past k dim=-2
+    v_all <- _concat v_past v dim=-2
     return k_all, v_all, (k_all, v_all)
 
 init :: Cache
@@ -24,4 +25,4 @@ append :: ?Cache -> ?CacheLayer -> ?Cache
 append values value = (values == null) ? null : ((value == null) ? values : List.append values value)
 
 past_length :: ?Cache -> Int
-past_length cache = (cache == null) ? 0 : do k, _ <- List.index cache 0; return size k 2
+past_length cache = (cache == null) ? 0 : do k, _ <- List.index cache 0; s <- _shape k; return List.index s 2

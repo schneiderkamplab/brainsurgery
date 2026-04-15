@@ -59,6 +59,30 @@ lin x = x
     assert parsed.imported_members == {"Activations": ("gelu_new", "silu")}
 
 
+def test_parse_program_source_import_multi_module_specs() -> None:
+    source = """
+import NN, Attention (reshape_heads, merge_heads), Math exp log
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    parsed = parse_program_source(source)
+    assert parsed.imports == ("NN", "Attention", "Math")
+    assert parsed.imported_members == {
+        "Attention": ("reshape_heads", "merge_heads"),
+        "Math": ("exp", "log"),
+    }
+
+
+def test_parse_program_source_export_symbols() -> None:
+    source = """
+export (NN, reshape_heads)
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    parsed = parse_program_source(source)
+    assert parsed.exports == ("NN", "reshape_heads")
+
+
 def test_parse_program_source_padding_side_pragma_left_and_right() -> None:
     left = """
 {-# PADDING_SIDE "left" #-}

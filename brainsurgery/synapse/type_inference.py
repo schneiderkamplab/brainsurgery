@@ -200,23 +200,6 @@ def infer_output_types_for_node(
             for out_name in output_vars:
                 inferred[out_name] = accum_type
 
-    if op_name == "reshape_heads":
-        x_type = in_types_by_slot.get("x") or first_type
-        heads_val = node_spec.get("heads")
-        head_dim_val = node_spec.get("head_dim")
-        dims = split_bracket_dims(x_type) if isinstance(x_type, str) else None
-        if isinstance(dims, list) and len(dims) == 3:
-            batch, seq_len, hidden = dims
-            heads = str(heads_val) if isinstance(heads_val, str | int) else None
-            head_dim = str(head_dim_val) if isinstance(head_dim_val, str | int) else None
-            if heads is None and head_dim is not None:
-                heads = f"({hidden}/{head_dim})"
-            if head_dim is None and heads is not None:
-                head_dim = f"({hidden}/{heads})"
-            if heads is not None and head_dim is not None:
-                for out_name in output_vars:
-                    inferred[out_name] = f"Tensor[{batch},{heads},{seq_len},{head_dim}]"
-
     if op_name == "repeat":
         x_type = in_types_by_slot.get("x") or first_type
         repeats_val = node_spec.get("repeats")

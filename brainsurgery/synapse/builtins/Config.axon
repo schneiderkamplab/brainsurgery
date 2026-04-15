@@ -1,4 +1,5 @@
 import List
+export (bool, float, has_key, has_value, int, list, str, value)
 
 has_key :: String -> ?String -> Bool
 has_key key ?root="" = _config_has key root

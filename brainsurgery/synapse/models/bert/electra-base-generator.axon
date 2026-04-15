@@ -3,6 +3,10 @@
 
 import Activations
 import Activations (gelu)
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids)
 
 E = 768
 D = 256
@@ -15,32 +19,32 @@ EPS = 1e-12
 electra_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 electra_block x attn_mask = do
   a <- scope@attention do
-    q <- linear@self.query x dim=D bias=true |> reshape_heads heads=H
-    k <- linear@self.key x dim=D bias=true |> reshape_heads heads=H
-    v <- linear@self.value x dim=D bias=true |> reshape_heads heads=H
-    return attention q k v mask=attn_mask padding_mask=true causal=false |> merge_heads |> linear@output.dense dim=D bias=true
+    q <- NN.linear@self.query x dim=D bias=true |> reshape_heads heads=H
+    k <- NN.linear@self.key x dim=D bias=true |> reshape_heads heads=H
+    v <- NN.linear@self.value x dim=D bias=true |> reshape_heads heads=H
+    return attention q k v mask=attn_mask padding_mask=true causal=false |> merge_heads |> NN.linear@output.dense dim=D bias=true
   x <- x + a
-  x <- layernorm@attention.output.LayerNorm x eps=EPS
-  m <- linear@intermediate.dense x dim=FFN bias=true |> gelu
-  m <- linear@output.dense m dim=D bias=true
+  x <- NN.layernorm@attention.output.LayerNorm x eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=D bias=true
   y <- x + m
-  y <- layernorm@output.LayerNorm y eps=EPS
+  y <- NN.layernorm@output.LayerNorm y eps=EPS
   return y
 
 electra :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 electra input_ids attn_mask = do
   pos_ids <- position_ids input_ids
-  tok_type_ids <- zeros_like input_ids
-  tok <- embedding@electra.embeddings.word_embeddings input_ids dim=E
-  pos <- embedding@electra.embeddings.position_embeddings pos_ids dim=E
-  typ <- embedding@electra.embeddings.token_type_embeddings tok_type_ids dim=E
+  tok_type_ids <- Tensor.zeros_like input_ids
+  tok <- NN.embedding@electra.embeddings.word_embeddings input_ids dim=E
+  pos <- NN.embedding@electra.embeddings.position_embeddings pos_ids dim=E
+  typ <- NN.embedding@electra.embeddings.token_type_embeddings tok_type_ids dim=E
   x <- tok + pos
   x <- x + typ
-  x <- layernorm@electra.embeddings.LayerNorm x eps=EPS
-  x <- (E == D) ? x : linear@electra.embeddings_project x dim=D bias=true
+  x <- NN.layernorm@electra.embeddings.LayerNorm x eps=EPS
+  x <- (E == D) ? x : NN.linear@electra.embeddings_project x dim=D bias=true
   for@electra.encoder.layer i <- [0..L) do
     x <- electra_block x attn_mask
-  x <- linear@generator_predictions.dense x dim=E bias=true |> gelu
-  x <- layernorm@generator_predictions.LayerNorm x eps=EPS
-  logits <- linear@generator_lm_head x dim=V bias=true weight_path=@@electra.embeddings.word_embeddings.weight
+  x <- NN.linear@generator_predictions.dense x dim=E bias=true |> gelu
+  x <- NN.layernorm@generator_predictions.LayerNorm x eps=EPS
+  logits <- NN.linear@generator_lm_head x dim=V bias=true weight_path=@@electra.embeddings.word_embeddings.weight
   return logits

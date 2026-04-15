@@ -53,7 +53,6 @@ _OP_POSITIONAL_ARG_OVERRIDES: dict[str, tuple[str, ...]] = {
     "mul": ("x", "y"),
     "position_ids": ("input_ids", "attn_mask"),
     "repeat": ("x",),
-    "reshape_heads": ("x",),
     "rmsnorm": ("x",),
     "rope_pair": ("q", "k"),
     "softmax": ("x",),

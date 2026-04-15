@@ -1,13 +1,17 @@
-import Math
 {-# CHECKPOINTS ["microsoft/Phi-3.5-MoE-instruct"] #-}
 {-# TASK "causal_lm" #-}
 
 import Config
 import Params
-import Activations silu
+import Activations (silu)
 import Cache
-import Cache past_length
+import Cache
 import MoE
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+import Math (mul, sqrt)
 
 D = Config.int "hidden_size" default=4096
 V = Config.int "vocab_size" default=32064
@@ -35,47 +39,47 @@ ROUTER_JITTER = Config.float "router_jitter_noise" default=0.01
 HAS_LM_HEAD = Params.has_root "lm_head"
 HAS_LM_HEAD_BIAS = Params.has_root "lm_head.bias"
 
-ATTN_SCALE = 1.0 / Math.sqrt HD
+ATTN_SCALE = 1.0 / sqrt HD
 
 phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 phimoe_block x pos_ids attn_mask past_kv = do
-  xn <- layernorm@input_layernorm x eps=EPS bias=true
+  xn <- NN.layernorm@input_layernorm x eps=EPS bias=true
   a, new_kv <- scope@self_attn do
-    q <- linear@q_proj xn dim=QD bias=true |> reshape_heads heads=H
-    k <- linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
-    v <- linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    q <- NN.linear@q_proj xn dim=QD bias=true |> reshape_heads heads=H
+    k <- NN.linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
     q, k <- HAS_LONGROPE
       ? (rope_pair_longrope q k pos_ids THETA ROPE_ORIGINAL_CONTEXT ROPE_MAX_CONTEXT ROPE_LONG_FACTOR ROPE_SHORT_FACTOR attention_factor=ROPE_ATTENTION_FACTOR)
       : (rope_pair_base q k pos_ids THETA)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k repeats=(H / KVH)
-    v <- repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(H / KVH)
+    v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=WINDOW padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@o_proj dim=D bias=true
+    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=true
     return a, new_kv
   x <- x + a
-  xn <- layernorm@post_attention_layernorm x eps=EPS bias=true
+  xn <- NN.layernorm@post_attention_layernorm x eps=EPS bias=true
   m <- scope@block_sparse_moe do
     topk_scores, topk_indices <- MoE.sparsemixer_router xn E ROUTER_JITTER
     m <- xn * 0.0
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
-      x_upd <- linear@w1 x_sel dim=FFN |> silu |> Math.mul (linear@w3 x_sel dim=FFN) |> linear@w2 dim=D bias=false
+      x_upd <- NN.linear@w1 x_sel dim=FFN |> silu |> mul (NN.linear@w3 x_sel dim=FFN) |> NN.linear@w2 dim=D bias=false
       m <- MoE.scatter_add m token_idx x_upd sel_scores
     return m
   return x + m, new_kv
 
 phimoe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 phimoe input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i
       x, new_i <- phimoe_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
-    x <- layernorm@norm x eps=EPS bias=true
+    x <- NN.layernorm@norm x eps=EPS bias=true
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V bias=HAS_LM_HEAD_BIAS) : (linear@model.embed_tokens x dim=V bias=false)
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V bias=HAS_LM_HEAD_BIAS) : (NN.linear@model.embed_tokens x dim=V bias=false)
   return logits, new_kv

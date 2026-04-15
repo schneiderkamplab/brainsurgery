@@ -1,11 +1,14 @@
-import Math
 {-# CHECKPOINTS "microsoft/Phi-4-mini-reasoning" #-}
 {-# TASK "causal_lm" #-}
 
 import Activations
 import Activations (silu)
 import Cache
-import Cache (past_length)
+import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+import Attention (reshape_heads, merge_heads)
+import Compat (attention)
+import Masking (causal_mask)
+import Math (mul)
 
 PARAM_ROOT = ""
 D = 3072
@@ -30,37 +33,37 @@ WINDOW_LOCAL = 262144
 HAS_LM_HEAD = false
 
 phi4_norm :: @Path -> Tensor -> Tensor
-phi4_norm@path x = rmsnorm@path x eps=EPS
+phi4_norm@path x = NN.rmsnorm@path x eps=EPS
 
 phi4_block :: Tensor -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
 phi4_block x pos_ids attn_mask past_kv = do
   xn <- phi4_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
-    qkv <- linear@qkv_proj xn dim=(QD + KVD + KVD) bias=false
-    q, k, v <- split qkv sizes=[QD, KVD, KVD]
+    qkv <- NN.linear@qkv_proj xn dim=(QD + KVD + KVD) bias=false
+    q, k, v <- Tensor.split qkv sizes=[QD, KVD, KVD]
     q <- reshape_heads q heads=H
     k <- reshape_heads k heads=KVH
     v <- reshape_heads v heads=KVH
     q, k <- HAS_LONGROPE ? (rope_pair_longrope q k pos_ids THETA ROPE_ORIGINAL_CONTEXT ROPE_MAX_CONTEXT ROPE_LONG_FACTOR ROPE_SHORT_FACTOR attention_factor=ROPE_ATTENTION_FACTOR partial_rotary_factor=PARTIAL_ROTARY_FACTOR) : (rope_pair_base q k pos_ids theta=THETA partial_rotary_factor=PARTIAL_ROTARY_FACTOR)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k repeats=(H / KVH)
-    v <- repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(H / KVH)
+    v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=WINDOW_LOCAL padding_mask=attn_mask
-    a <- attention q k v mask=mask eager=true |> merge_heads |> linear@o_proj dim=D bias=false
+    a <- attention q k v mask=mask eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   x <- x + a
   xn <- phi4_norm@post_attention_layernorm x
   m <- scope@mlp do
-    gate_up <- linear@gate_up_proj xn dim=(2 * FFN)
-    g, u <- split gate_up sizes=[FFN, FFN]
-    return g |> silu |> Math.mul u |> linear@down_proj dim=D
+    gate_up <- NN.linear@gate_up_proj xn dim=(2 * FFN)
+    g, u <- Tensor.split gate_up sizes=[FFN, FFN]
+    return g |> silu |> mul u |> NN.linear@down_proj dim=D
   return x + m, new_kv
 
 phi4 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 phi4 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model root=PARAM_ROOT do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
       past_i <- Cache.index past_kv i
@@ -68,5 +71,5 @@ phi4 input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- phi4_norm@norm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V) : (linear@model.embed_tokens x dim=V)
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@model.embed_tokens x dim=V)
   return logits, new_kv

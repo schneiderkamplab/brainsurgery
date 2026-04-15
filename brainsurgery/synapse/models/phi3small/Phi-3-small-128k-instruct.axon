@@ -4,7 +4,11 @@
 import Activations
 import Activations (gegelu)
 import Cache
-import Cache (past_length)
+import Cache
+import Attention (merge_heads)
+import Compat (attention, blocksparse_mask, split_qkv_grouped)
+import Masking (causal_mask)
+import Positions (position_ids, rope_pair_base, rope_pair_longrope)
 
 PARAM_ROOT = ""
 D = 4096
@@ -36,34 +40,34 @@ DENSE_EVERY = 2
 HAS_LM_HEAD = false
 
 phi3small_norm :: @Path -> Tensor -> Tensor
-phi3small_norm@path x = layernorm@path x eps=EPS
+phi3small_norm@path x = NN.layernorm@path x eps=EPS
 
 phi3small_block :: Tensor -> Int -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
 phi3small_block x i pos_ids attn_mask past_kv = do
   xn <- phi3small_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
-    qkv <- linear@query_key_value xn dim=(QD + KVD + KVD) bias=true
+    qkv <- NN.linear@query_key_value xn dim=(QD + KVD + KVD) bias=true
     q, k, v <- split_qkv_grouped qkv heads=H kv_heads=KVH
     q, k <- HAS_LONGROPE ? (rope_pair_longrope q k pos_ids THETA ROPE_ORIGINAL_CONTEXT ROPE_MAX_CONTEXT ROPE_LONG_FACTOR ROPE_SHORT_FACTOR long_mscale=ROPE_LONG_MSCALE short_mscale=ROPE_SHORT_MSCALE) : (rope_pair_base q k pos_ids theta=THETA)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- repeat k repeats=(H / KVH)
-    v <- repeat v repeats=(H / KVH)
-    dense <- (DENSE_EVERY > 0) and (((i + 1) % DENSE_EVERY) == 0)
+    k <- Tensor.repeat k repeats=(H / KVH)
+    v <- Tensor.repeat v repeats=(H / KVH)
+    dense <- (DENSE_EVERY > 0) ? (((i + 1) % DENSE_EVERY) == 0) : false
     mask <- dense ? (causal_mask q k window=WINDOW_GLOBAL padding_mask=attn_mask) : (blocksparse_mask q k padding_mask=attn_mask block_size=BS_BLOCK_SIZE local_blocks=BS_LOCAL_BLOCKS vert_stride=BS_VERT_STRIDE homo_head=false)
-    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> linear@dense dim=D bias=true
+    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@dense dim=D bias=true
     return a, new_kv
   x <- x + a
   xn <- phi3small_norm@post_attention_layernorm x
   m <- scope@mlp do
-    u <- linear@up_proj xn dim=(2 * FFN) bias=true
-    return u |> gegelu limit=GEGELU_LIMIT |> linear@down_proj dim=D bias=true
+    u <- NN.linear@up_proj xn dim=(2 * FFN) bias=true
+    return u |> gegelu limit=GEGELU_LIMIT |> NN.linear@down_proj dim=D bias=true
   return x + m, new_kv
 
 phi3small :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 phi3small input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(past_length past_kv)
+  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model root=PARAM_ROOT do
-    x <- embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=D
     x <- (MUP_EMBED_MULT > 0.0) ? (x * MUP_EMBED_MULT) : x
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do
@@ -72,6 +76,6 @@ phi3small input_ids attn_mask past_kv use_cache = do
       new_kv <- Cache.append new_kv new_i
     x <- phi3small_norm@final_layernorm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V) : (linear@model.embed_tokens x dim=V)
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@model.embed_tokens x dim=V)
   logits <- (MUP_WIDTH_MULT > 0.0) ? (logits / MUP_WIDTH_MULT) : logits
   return logits, new_kv

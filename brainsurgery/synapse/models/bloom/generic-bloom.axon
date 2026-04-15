@@ -3,8 +3,12 @@
 
 import Config
 import Params
-import Activations gelu_new
+import Tensor
+import Activations (gelu_new)
 import Cache
+import Attention (mask_to_additive, merge_heads)
+import Compat (attention, linear_position_bias, split_qkv_heads)
+import Masking (causal_mask)
 
 D = Config.int "hidden_size" default=1024
 V = Config.int "vocab_size" default=250880
@@ -18,34 +22,36 @@ HAS_LM_HEAD = Params.has_root "lm_head"
 
 bloom_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 bloom_block x attn_mask past_kv = do
-  xn <- layernorm@input_layernorm x eps=EPS
+  xn <- NN.layernorm@input_layernorm x eps=EPS
   attn_res <- POST_LN_RESID ? xn : x
   a, new_kv <- scope@self_attention do
-    qkv <- linear@query_key_value xn dim=(3 * D) bias=true
+    qkv <- NN.linear@query_key_value xn dim=(3 * D) bias=true
     q, k, v <- split_qkv_heads qkv heads=H layout=interleaved
     k, v, new_kv <- Cache.update past_kv k v
-    causal <- causal_mask q k window=MAX_CTX padding_mask=attn_mask
+    keep <- causal_mask q k window=MAX_CTX padding_mask=attn_mask
     pos_bias <- linear_position_bias attn_mask heads=H
-    mask <- causal + pos_bias
-    a <- attention q k v mask=mask |> merge_heads |> linear@dense dim=D bias=true
+    scores_ref <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
+    causal_bias <- mask_to_additive scores_ref keep
+    mask <- causal_bias + pos_bias
+    a <- attention q k v mask=mask |> merge_heads |> NN.linear@dense dim=D bias=true
     return a, new_kv
   x <- attn_res + a
-  xn <- layernorm@post_attention_layernorm x eps=EPS
+  xn <- NN.layernorm@post_attention_layernorm x eps=EPS
   mlp_res <- POST_LN_RESID ? xn : x
   m <- scope@mlp do
-    h <- linear@dense_h_to_4h xn dim=FFN bias=true |> gelu_new
-    return linear@dense_4h_to_h h dim=D bias=true
+    h <- NN.linear@dense_h_to_4h xn dim=FFN bias=true |> gelu_new
+    return NN.linear@dense_4h_to_h h dim=D bias=true
   return mlp_res + m, new_kv
 
 bloom :: TokenIds[B,S] -> Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 bloom input_ids attn_mask past_kv use_cache = do
-  tok <- embedding@word_embeddings input_ids dim=D
-  x <- layernorm@word_embeddings_layernorm tok eps=EPS
+  tok <- NN.embedding@word_embeddings input_ids dim=D
+  x <- NN.layernorm@word_embeddings_layernorm tok eps=EPS
   new_kv <- use_cache ? Cache.init : null
   for@h i <- [0..L) do
     past_i <- Cache.index past_kv i
     x, new_i <- bloom_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i
-  x <- layernorm@ln_f x eps=EPS
-  logits <- HAS_LM_HEAD ? (linear@lm_head x dim=V) : (linear@word_embeddings x dim=V)
+  x <- NN.layernorm@ln_f x eps=EPS
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@word_embeddings x dim=V)
   return logits, new_kv

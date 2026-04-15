@@ -680,6 +680,7 @@ def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> Axon
         statements=module.statements,
         imports=module.imports,
         imported_members=module.imported_members,
+        exports=module.exports,
         symbols=merged,
         pragmas=module.pragmas,
         type_aliases=module.type_aliases,
@@ -703,6 +704,7 @@ def _inject_pragmas(module: AxonModule, pragmas: dict[str, object]) -> AxonModul
         statements=module.statements,
         imports=module.imports,
         imported_members=module.imported_members,
+        exports=module.exports,
         symbols=module.symbols,
         pragmas=merged,
         type_aliases=module.type_aliases,
@@ -866,6 +868,7 @@ def _build_module_from_source(
     top_runtime_constants: tuple[tuple[str, AxonExpr], ...],
     imports: tuple[str, ...],
     imported_members: dict[str, tuple[str, ...]],
+    exports: tuple[str, ...],
     type_aliases: dict[str, TypeExpr],
 ) -> AxonModule:
     (
@@ -924,6 +927,7 @@ def _build_module_from_source(
         statements=statements,
         imports=imports,
         imported_members=imported_members or None,
+        exports=exports,
         symbols=None,
         pragmas=None,
         type_aliases=type_aliases or None,
@@ -943,6 +947,7 @@ def build_axon_modules_from_parsed_source(
     validate: bool = True,
     extra_constants: dict[str, AxonExpr] | None = None,
     extra_imports: tuple[str, ...] | None = None,
+    extra_imported_members: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[AxonModule, ...]:
     top_pragmas = parsed_source.pragmas
     merged_constants: dict[str, AxonExpr] = dict(parsed_source.constants)
@@ -962,7 +967,11 @@ def build_axon_modules_from_parsed_source(
     top_imports = parsed_source.imports
     if extra_imports:
         top_imports = tuple(dict.fromkeys([*top_imports, *extra_imports]))
-    top_imported_members = parsed_source.imported_members
+    top_imported_members: dict[str, tuple[str, ...]] = dict(parsed_source.imported_members)
+    if extra_imported_members:
+        for namespace, members in extra_imported_members.items():
+            prev_members = top_imported_members.get(namespace, ())
+            top_imported_members[namespace] = tuple(dict.fromkeys([*prev_members, *members]))
     modules_list: list[AxonModule] = []
     for module_source in parsed_source.modules:
         modules_list.append(
@@ -977,6 +986,7 @@ def build_axon_modules_from_parsed_source(
                 top_runtime_constants=top_runtime_constants,
                 imports=top_imports,
                 imported_members=top_imported_members,
+                exports=parsed_source.exports,
                 type_aliases=parsed_source.type_aliases,
             )
         )

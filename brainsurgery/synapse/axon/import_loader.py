@@ -260,6 +260,7 @@ def _apply_namespace(
                 statements=_rewrite_statements(module.statements),
                 imports=module.imports,
                 imported_members=module.imported_members,
+                exports=module.exports,
                 symbols=module.symbols,
                 pragmas=module.pragmas,
                 type_aliases=module.type_aliases,
@@ -370,10 +371,44 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
     loaded_by_namespace: dict[str, _LoadedSyntaxFile] = {
         loaded.namespace: loaded for loaded in ordered_files if loaded.namespace is not None
     }
+    prelude_exports: tuple[str, ...] = ()
+    prelude_loaded = loaded_by_namespace.get("Prelude")
+    if prelude_loaded is not None:
+        prelude_exports = tuple(prelude_loaded.parsed_source.exports)
     for loaded in ordered_files:
+        effective_imported_members: dict[str, tuple[str, ...]] = dict(
+            loaded.parsed_source.imported_members
+        )
+        effective_extra_imports: list[str] = []
+        for namespace in loaded.parsed_source.imports:
+            if namespace in effective_imported_members:
+                continue
+            dep = loaded_by_namespace.get(namespace)
+            if dep is None or not dep.parsed_source.exports:
+                continue
+            effective_imported_members[namespace] = dep.parsed_source.exports
+        # For model/user roots (outside builtins), implicitly expose Prelude
+        # re-exported namespaces and their members so namespaced calls like
+        # `NN.embedding` work without explicit `import NN`.
+        if builtins_dir not in loaded.path.parents and prelude_exports:
+            if "Prelude" not in effective_imported_members:
+                effective_imported_members["Prelude"] = prelude_exports
+            if "Prelude" not in loaded.parsed_source.imports:
+                effective_extra_imports.append("Prelude")
+            for namespace in prelude_exports:
+                dep = loaded_by_namespace.get(namespace)
+                if dep is None:
+                    continue
+                if namespace not in loaded.parsed_source.imports:
+                    effective_extra_imports.append(namespace)
+                if namespace in effective_imported_members:
+                    continue
+                if dep.parsed_source.exports:
+                    effective_imported_members[namespace] = dep.parsed_source.exports
+
         imported_constants: dict[str, AxonExpr] = {}
         imported_constant_imports: list[str] = []
-        for namespace, members in loaded.parsed_source.imported_members.items():
+        for namespace, members in effective_imported_members.items():
             dep = loaded_by_namespace.get(namespace)
             if dep is None:
                 continue
@@ -391,7 +426,14 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
             loaded.parsed_source,
             validate=False,
             extra_constants=imported_constants if imported_constants else None,
-            extra_imports=tuple(imported_constant_imports) if imported_constant_imports else None,
+            extra_imports=tuple(
+                dict.fromkeys([*imported_constant_imports, *effective_extra_imports])
+            )
+            if (imported_constant_imports or effective_extra_imports)
+            else None,
+            extra_imported_members=effective_imported_members
+            if effective_imported_members
+            else None,
         )
         ordered_modules.extend(_apply_namespace(modules, loaded.namespace))
 

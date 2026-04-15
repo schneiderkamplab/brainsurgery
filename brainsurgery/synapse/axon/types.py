@@ -181,6 +181,7 @@ class AxonModule:
     path_params: tuple[str, ...] = ()
     imports: tuple[str, ...] = ()
     imported_members: dict[str, tuple[str, ...]] | None = None
+    exports: tuple[str, ...] = ()
     symbols: dict[str, object] | None = None
     pragmas: dict[str, object] | None = None
     type_aliases: dict[str, TypeExpr] | None = None
