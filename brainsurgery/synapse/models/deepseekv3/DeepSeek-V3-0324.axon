@@ -91,7 +91,7 @@ deepseek_v3_moe_block x pos_ids attn_mask past_kv = do
       gate <- NN.linear@gate_proj xn dim=(EM * SE) bias=false
       up <- NN.linear@up_proj xn dim=(EM * SE) bias=false
       return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
-    topk_scores, topk_indices <- Compat.glm4_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=(NTP == true) routed_scaling_factor=RSC
+    topk_scores, topk_indices <- MoE.glm4_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=(NTP == true) routed_scaling_factor=RSC
     routed <- Tensor.zeros_like xn
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e

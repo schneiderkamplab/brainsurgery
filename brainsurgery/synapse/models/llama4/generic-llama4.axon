@@ -10,7 +10,7 @@ import Attention (reshape_heads, merge_heads)
 import Compat (attention)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_base, rope_pair_freq_scale)
-import Math (mul, sqrt)
+import Math (floor, log, mul, sqrt)
 
 CFG = "text_config"
 
@@ -61,7 +61,7 @@ llama4_moe x = do
     gate <- NN.linear@gate_proj x dim=FFN_SHARED bias=false
     up <- NN.linear@up_proj x dim=FFN_SHARED bias=false
     return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
-  topk_weights, topk_indices <- sigmoid_topk_router@router x top_k=EPT
+  topk_weights, topk_indices <- MoE.sigmoid_topk_router@router x top_k=EPT
   routed <- MoE.grouped_swiglu_ffn_basic x topk_weights topk_indices E transpose=true pre_scale_input=true
   return shared + routed
 
@@ -74,8 +74,8 @@ llama4_block x i pos_ids attn_mask past_kv = do
     k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     q, k <- use_rope ? (HAS_LLAMA3_FREQ_SPLIT ? (rope_pair_freq_scale q k pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT interleaved=true) : (rope_pair_base q k pos_ids theta=THETA scale_factor=ROPE_SCALE interleaved=true)) : (q, k)
-    q <- (USE_QK_NORM and use_rope) ? (l2norm q eps=EPS) : q
-    k <- (USE_QK_NORM and use_rope) ? (l2norm k eps=EPS) : k
+    q <- (USE_QK_NORM and use_rope) ? (NN.l2norm q eps=EPS) : q
+    k <- (USE_QK_NORM and use_rope) ? (NN.l2norm k eps=EPS) : k
     q <- ((USE_TEMP_TUNING and (use_rope == false)) ? (q * (llama4_temp_scale pos_ids)) : q)
     k, v, new_kv <- Cache.update past_kv k v
     k <- Tensor.repeat k repeats=(H / KVH)

@@ -5,8 +5,8 @@ import Activations
 import Activations (gelu)
 import Cache
 import Cache
-import Attention (merge_heads)
-import Compat (attention, split_qkv_heads)
+import Attention (merge_heads, split_qkv_heads)
+import Compat attention
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_base)
 

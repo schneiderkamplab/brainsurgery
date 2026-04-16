@@ -3,7 +3,8 @@
 {-# PADDING_SIDE "right" #-}
 import Config
 import Activations (silu)
-import Compat attention_causal_scaled causal_conv1d mamba_scan
+import Compat attention_causal_scaled
+import SSM causal_conv1d mamba_scan
 import Attention (reshape_heads, merge_heads)
 import Compat (attention)
 import Masking (causal_mask)

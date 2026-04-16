@@ -3,13 +3,17 @@
 import Activations
 import Activations (gelu_pytorch_tanh, tanh)
 import Cache
-import Cache
+import Config
 import Params
-import Compat gemma4_per_layer_inputs gemma4_per_layer_input_at
+import Attention
 import Attention (reshape_heads, merge_heads)
+import Compat
 import Compat (attention)
+import Masking
 import Masking (causal_mask)
+import Positions
 import Positions (position_ids, rope_pair_proportional)
+import Math
 import Math (mul, sqrt)
 
 D = 2560
@@ -36,6 +40,21 @@ USE_DOUBLE_WIDE_MLP = false
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x cast_float=true
+
+gemma4_per_layer_inputs :: TokenIds[B,S] -> Tensor[B,S,D] -> ?Int -> ?Int -> ?Float -> ?Float -> ?Float -> ?Float -> Tensor[B,S,NL,PD]
+gemma4_per_layer_inputs input_ids hidden ?num_layers=null ?per_layer_dim=null ?embed_scale=1.0 ?projection_scale=1.0 ?combine_scale=1.0 ?rms_eps=1e-6 = do
+  model_layers <- (num_layers == null) ? 1 : num_layers
+  layer_dim <- (per_layer_dim == null) ? 1 : per_layer_dim
+  embed <- NN.embedding@embed_tokens_per_layer input_ids dim=(model_layers * layer_dim) scale=embed_scale
+  embed <- Tensor.reshape embed shape=[B, S, model_layers, layer_dim]
+  proj <- NN.linear@per_layer_model_projection hidden dim=(model_layers * layer_dim) bias=false
+  proj <- proj * projection_scale
+  proj <- Tensor.reshape proj shape=[B, S, model_layers, layer_dim]
+  proj <- NN.rmsnorm@per_layer_projection_norm proj eps=rms_eps dim=layer_dim cast_float=true
+  return (proj + embed) * combine_scale
+
+gemma4_per_layer_input_at :: Tensor[B,S,NL,PD] -> Int -> Tensor[B,S,PD]
+gemma4_per_layer_input_at x i = Tensor.slice x dim=2 start=i end=(i + 1) |> Tensor.reshape shape=[B, S, PD]
 
 gemma4_kv :: Tensor[B,S,D] -> Int -> Int -> (Tensor, Tensor)
 gemma4_kv xn kv_dim hd = do

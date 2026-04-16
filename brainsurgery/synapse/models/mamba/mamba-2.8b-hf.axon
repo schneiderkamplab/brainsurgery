@@ -4,7 +4,7 @@
 
 import Activations
 import Activations (silu)
-import Compat causal_conv1d mamba_scan
+import SSM causal_conv1d mamba_scan
 import Math (mul)
 
 D = 2560

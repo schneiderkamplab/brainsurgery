@@ -4,7 +4,7 @@
 
 import Activations
 import Activations (sigmoid, relu2)
-import Compat (causal_conv1d)
+import SSM (causal_conv1d, mamba2_scan)
 import MoE
 import Attention (reshape_heads, merge_heads)
 import Compat (attention)
@@ -52,11 +52,11 @@ nemotron_h_attention x attn_mask = do
   k <- NN.linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
   v <- NN.linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
   mask <- causal_mask q k
-  return _attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=MODEL_D bias=false
+  return attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=MODEL_D bias=false
 
 nemotron_h_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_moe xn = do
-  return nemotron_moe xn top_k=EPT n_group=N_GROUP topk_group=TOPK_GROUP routed_scaling_factor=ROUTE_SCALE norm_topk_prob=(NORM_TOPK_PROB != 0)
+  return MoE.nemotron_moe xn top_k=EPT n_group=N_GROUP topk_group=TOPK_GROUP routed_scaling_factor=ROUTE_SCALE norm_topk_prob=(NORM_TOPK_PROB != 0)
 
 nemotron_h_mamba :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_mamba xn = do
@@ -64,7 +64,7 @@ nemotron_h_mamba xn = do
   gate, conv_in, dt <- Tensor.split proj sizes=[M_I, M_CONV, M_H]
   conv_all <- causal_conv1d@conv1d conv_in activation=silu
   u, b, c <- Tensor.split conv_all sizes=[M_I, M_G * M_N, M_G * M_N]
-  scan <- mamba2_scan u gate dt b c A=@A_log D=@D dt_bias=@dt_bias norm_weight=@norm.weight n_groups=M_G head_dim=M_HD time_step_min=0.0 time_step_max=1e+30
+  scan <- mamba2_scan u gate dt b c a_path=@A_log d_path=@D dt_bias_path=@dt_bias norm_weight_path=@norm.weight n_groups=M_G head_dim=M_HD time_step_min=0.0 time_step_max=1e+30
   return NN.linear@out_proj scan dim=MODEL_D bias=false
 
 nemotron_h_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Int -> Tensor[B,S,D]

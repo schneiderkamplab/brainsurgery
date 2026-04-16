@@ -6,15 +6,19 @@ import NN
 export (
   gemma4_moe_experts,
   gemma4_router,
+  glm4_router,
+  nemotron_moe,
   grouped_ffn,
   grouped_swiglu_ffn_basic,
   grouped_swiglu_ffn_basic_granite,
   scatter_add,
   select,
+  sigmoid_topk_router,
   softmax_topk_router,
   sparsemixer_router,
 )
 
+-- DEPRECATED
 gemma4_router :: Tensor -> Int -> ?Float -> ?Float -> (Tensor, IdxTensor)
 gemma4_router x top_k ?scalar_root_size=null ?rms_eps=null = do
   topk_weights, topk_indices <- scope@router do
@@ -22,23 +26,40 @@ gemma4_router x top_k ?scalar_root_size=null ?rms_eps=null = do
     return w, i
   return topk_weights, topk_indices
 
+-- DEPRECATED
 gemma4_moe_experts :: Tensor -> Tensor -> Tensor -> Tensor
 gemma4_moe_experts hidden topk_weights topk_indices = do
   y <- scope@experts do
     return _gemma4_moe_experts hidden topk_weights topk_indices
   return y
 
+-- DEPRECATED
+glm4_router :: @Path -> Tensor -> Int -> ?Int -> ?Int -> ?Bool -> ?Float -> (Tensor, IdxTensor)
+glm4_router@path x top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 = _glm4_router@path x top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor
+
+-- DEPRECATED
+nemotron_moe :: Tensor[B,S,D] -> Int -> Int -> Int -> Float -> Bool -> Tensor[B,S,D]
+nemotron_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob = _nemotron_moe hidden top_k=top_k n_group=n_group topk_group=topk_group routed_scaling_factor=routed_scaling_factor norm_topk_prob=norm_topk_prob
+
+-- DEPRECATED
 select :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Int -> (Tensor[N,D], Tensor[N], Tensor[N], Tensor[N])
 select hidden topk_scores topk_indices expert = do
   selected_hidden, token_idx, topk_pos, selected_scores <- _moe_select hidden topk_scores topk_indices expert=expert
   return selected_hidden, token_idx, topk_pos, selected_scores
 
+-- DEPRECATED
 scatter_add :: Tensor[B,T,D] -> Tensor[N] -> Tensor[N,D] -> Tensor[N] -> Tensor[B,T,D]
 scatter_add = _moe_scatter_add
 
+-- DEPRECATED
 softmax_topk_router :: @Path -> Tensor -> Int -> ?Bool -> ?Float -> ?Path -> (Tensor, IdxTensor)
 softmax_topk_router@path x top_k ?norm_topk_prob=true ?routed_scaling_factor=1.0 ?weight=@weight = _softmax_topk_router x top_k=top_k norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor weight=weight
 
+-- DEPRECATED
+sigmoid_topk_router :: @Path -> Tensor -> Int -> ?Path -> (Tensor, IdxTensor)
+sigmoid_topk_router@path x top_k ?weight=@weight = _sigmoid_topk_router@path x top_k=top_k weight=weight
+
+-- DEPRECATED
 grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Tensor[B,T,D]
 grouped_ffn = _moe_grouped_ffn
 

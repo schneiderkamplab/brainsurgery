@@ -118,9 +118,9 @@ def _axon_expr_from_node(node_spec: dict[str, Any], *, node_path: str | None = N
     elif op.startswith("activations_"):
         callee = f"_activations_{op[len('activations_') :]}"
     elif op == "cache_update":
-        callee = "_cache_update"
+        callee = "Cache.update"
     elif op == "cache_seq_len":
-        callee = "_cache_seq_len"
+        callee = "Cache.seq_len"
     elif op == "split":
         callee = "split"
     else:

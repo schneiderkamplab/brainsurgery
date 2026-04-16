@@ -5,7 +5,7 @@
 import Config
 
 import Activations (silu)
-import Compat causal_conv1d mamba_scan
+import SSM causal_conv1d mamba_scan
 import MoE
 import Math (mul)
 

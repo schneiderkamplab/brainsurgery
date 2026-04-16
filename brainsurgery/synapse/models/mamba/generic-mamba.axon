@@ -3,7 +3,7 @@
 {-# PADDING_SIDE "right" #-}
 import Config
 import Activations (silu)
-import Compat causal_conv1d mamba_scan
+import SSM causal_conv1d mamba_scan
 import Math (mul)
 
 -- Mamba-2.8B architecture constants.

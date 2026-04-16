@@ -99,7 +99,7 @@ mistral4_moe xn = do
     gate <- NN.linear@gate_proj xn dim=(EM * SE) bias=false
     up <- NN.linear@up_proj xn dim=(EM * SE) bias=false
     return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
-  topk_weights, topk_indices <- softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true routed_scaling_factor=ROUTE_SCALE
+  topk_weights, topk_indices <- MoE.softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true routed_scaling_factor=ROUTE_SCALE
   routed <- MoE.grouped_swiglu_ffn_basic xn topk_weights topk_indices E
   return shared + routed
 

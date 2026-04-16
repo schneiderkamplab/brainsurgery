@@ -6,9 +6,9 @@ import Activations (gelu)
 import NN
 import Tensor
 import Attention
-import Attention (mask_to_additive, merge_heads)
+import Attention (mask_to_additive, merge_heads, split_qkv_heads)
 import Cache
-import Compat (attention, split_qkv_heads)
+import Compat attention
 import Positions (linear_position_bias)
 import Masking
 import Masking (causal_mask)
@@ -27,7 +27,7 @@ falcon_block x attn_mask past_kv = do
 
   a, new_kv <- scope@self_attention do
     qkv <- NN.linear@query_key_value xn dim=(3 * D) bias=true
-    q, k, v <- split_qkv_heads qkv heads=H layout=interleaved
+    q, k, v <- split_qkv_heads qkv heads=H layout="interleaved"
     k, v, new_kv <- Cache.update past_kv k v
     keep <- causal_mask q k window=C padding_mask=attn_mask
     pos_bias <- linear_position_bias attn_mask heads=H scale=0.125

@@ -4,7 +4,7 @@ has_root :: String -> Bool
 has_root root = _params_has_root root
 
 param :: Path -> ?Path -> Tensor
-param path ?prefix_path=null = _param path prefix_path=prefix_path
+param path ?prefix_path=null = _params_param path prefix_path=prefix_path
 
 param_scale :: Tensor -> ?Path -> Tensor
-param_scale x ?scale_path=@layer_scalar = x * (_param scale_path)
+param_scale x ?scale_path=@layer_scalar = x * (param scale_path)

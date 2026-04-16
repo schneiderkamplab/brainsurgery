@@ -55,7 +55,7 @@ mixtral_block x pos_ids attn_mask past_kv = do
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@block_sparse_moe do
-    topk_scores, topk_indices <- softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true weight=@gate.weight
+    topk_scores, topk_indices <- MoE.softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true weight=@gate.weight
     m <- xn * 0.0
     for@experts e <- [0..E) do
       x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e

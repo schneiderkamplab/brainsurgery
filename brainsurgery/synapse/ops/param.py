@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 
-OP_NAME = "param"
+OP_NAME = "params_param"
 LOWERING_ARITY = (1, 1)
 LOWERING_ALLOWED_KWARGS: set[str] = {"prefix_path"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
@@ -21,13 +21,13 @@ def lowering_validate_signature(
 ) -> None:
     del ctx
     if len(args) != 1:
-        raise ValueError(f"param expects exactly 1 positional arg, got {len(args)}")
+        raise ValueError(f"params_param expects exactly 1 positional arg, got {len(args)}")
     unknown = set(kwargs.keys()) - LOWERING_ALLOWED_KWARGS
     if unknown:
         unknown_list = ", ".join(sorted(unknown))
-        raise ValueError(f"param received unknown kwargs: {unknown_list}")
+        raise ValueError(f"params_param received unknown kwargs: {unknown_list}")
     if not isinstance(out, str):
-        raise ValueError("param requires a single output binding")
+        raise ValueError("params_param requires a single output binding")
 
 
 def interpret(
@@ -43,12 +43,14 @@ def interpret(
     raw = node_spec.get("_args")
     path_value = model._eval_expr(raw, env, symbols)
     if not isinstance(path_value, str):
-        raise ValueError(f"param path must resolve to string, got {type(path_value).__name__}")
+        raise ValueError(
+            f"params_param path must resolve to string, got {type(path_value).__name__}"
+        )
     raw_prefix = node_spec.get("prefix_path")
     prefix_value = None if raw_prefix is None else model._eval_expr(raw_prefix, env, symbols)
     if prefix_value is not None and not isinstance(prefix_value, str):
         raise ValueError(
-            f"param prefix_path must resolve to string or null, got {type(prefix_value).__name__}"
+            f"params_param prefix_path must resolve to string or null, got {type(prefix_value).__name__}"
         )
     if prefix_value is None:
         path_spec = dict(node_spec)
@@ -67,7 +69,7 @@ def interpret(
                 raise ValueError("param path cannot be empty")
             prefix_resolved = model._resolve_state_path(node_path=node_path, raw_path=prefix_value)
             resolved = f"{prefix_resolved}.{token}" if prefix_resolved else token
-    out_name = model._require_name(node_spec.get("_bind"), field="param._bind")
+    out_name = model._require_name(node_spec.get("_bind"), field="params_param._bind")
     value = model._state.get(resolved)
     if not torch.is_tensor(value):
         raise ValueError(f"param path is not a tensor: {resolved}")
@@ -99,14 +101,14 @@ def compile(
     lines.append(f"{indent}{prefix_var} = {prefix_expr}")
     lines.append(f"{indent}if not isinstance({path_var}, str):")
     lines.append(
-        f"{indent}    raise ValueError('param path must resolve to string, got ' + type({path_var}).__name__)"
+        f"{indent}    raise ValueError('params_param path must resolve to string, got ' + type({path_var}).__name__)"
     )
     lines.append(f"{indent}if {prefix_var} is not None and not isinstance({prefix_var}, str):")
     lines.append(
-        f"{indent}    raise ValueError('param prefix_path must resolve to string or null, got ' + type({prefix_var}).__name__)"
+        f"{indent}    raise ValueError('params_param prefix_path must resolve to string or null, got ' + type({prefix_var}).__name__)"
     )
     lines.append(f"{indent}if {prefix_var} is None:")
-    lines.append(f"{indent}    {path_spec_var} = {{'_op': 'param', 'value': {path_var}}}")
+    lines.append(f"{indent}    {path_spec_var} = {{'_op': 'params_param', 'value': {path_var}}}")
     if "_scope" in node_spec:
         lines.append(f"{indent}    {path_spec_var}['_scope'] = {node_spec.get('_scope')!r}")
     if "_abs_path" in node_spec:

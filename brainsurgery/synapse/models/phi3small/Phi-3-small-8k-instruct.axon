@@ -5,9 +5,9 @@ import Activations
 import Activations (gegelu)
 import Cache
 import Cache
-import Attention (merge_heads)
-import Compat (attention, blocksparse_mask, split_qkv_grouped)
-import Masking (causal_mask)
+import Attention (merge_heads, split_qkv_grouped)
+import Compat attention
+import Masking (blocksparse_mask, causal_mask)
 import Positions (position_ids, rope_pair_base, rope_pair_longrope)
 
 PARAM_ROOT = ""

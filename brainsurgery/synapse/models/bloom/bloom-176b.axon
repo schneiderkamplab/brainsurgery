@@ -4,8 +4,8 @@
 import Params
 import Activations (gelu_new)
 import Cache
-import Attention (mask_to_additive, merge_heads)
-import Compat (attention, split_qkv_heads)
+import Attention (mask_to_additive, merge_heads, split_qkv_heads)
+import Compat attention
 import Positions (linear_position_bias)
 import Masking (causal_mask)
 
@@ -25,7 +25,7 @@ bloom_block x attn_mask past_kv = do
   attn_res <- POST_LN_RESID ? xn : x
   a, new_kv <- scope@self_attention do
     qkv <- NN.linear@query_key_value xn dim=(3 * D) bias=true
-    q, k, v <- split_qkv_heads qkv heads=H layout=interleaved
+    q, k, v <- split_qkv_heads qkv heads=H layout="interleaved"
     k, v, new_kv <- Cache.update past_kv k v
     causal <- causal_mask q k window=MAX_CTX padding_mask=attn_mask
     pos_bias <- linear_position_bias attn_mask heads=H

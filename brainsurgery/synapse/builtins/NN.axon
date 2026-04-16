@@ -1,5 +1,5 @@
 import Params
-export (embedding, layernorm, linear, rmsnorm)
+export (embedding, l2norm, layernorm, linear, rmsnorm)
 
 linear :: @Path -> Tensor -> ?Int -> ?Bool -> ?Bool -> ?Int -> ?Path -> ?Path -> Tensor
 linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=@weight ?bias_path=@bias = _linear@path x dim bias transpose expert weight_path bias_path
@@ -8,6 +8,9 @@ embedding :: @Path -> Tensor -> ?Int -> ?Float -> Tensor
 embedding@path x ?dim=null ?scale=null = do
   y <- _embedding@path x dim
   return (scale == null) ? y : (y * scale)
+
+l2norm :: Tensor -> ?Float -> Tensor
+l2norm x ?eps=1e-6 = _l2norm x eps=eps
 
 layernorm :: @Path -> Tensor -> ?Float -> ?Int -> ?Path -> ?Bool -> ?Path -> Tensor
 layernorm@path x ?eps=1e-5 ?dim=null ?weight_path=@weight ?bias=true ?bias_path=@bias = _layernorm@path x eps dim weight_path bias bias_path

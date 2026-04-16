@@ -5,8 +5,8 @@ import Activations
 import Activations (gelu)
 import Cache
 import Cache
-import Attention (merge_heads)
-import Compat (attention, split_qkv_heads)
+import Attention (merge_heads, split_qkv_heads)
+import Compat attention
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_base)
 
@@ -29,7 +29,7 @@ gpt_neox_block x pos_ids attn_mask past_kv = do
   xn <- neox_ln@input_layernorm x
   a, new_kv <- scope@attention do
     qkv <- NN.linear@query_key_value xn dim=(3 * D) bias=true
-    q, k, v <- split_qkv_heads qkv heads=H layout=interleaved
+    q, k, v <- split_qkv_heads qkv heads=H layout="interleaved"
     q, k <- rope_pair_base q k pos_ids theta=THETA partial_rotary_factor=ROTARY_PCT
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask

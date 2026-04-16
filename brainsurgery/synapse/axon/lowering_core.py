@@ -319,13 +319,10 @@ _PRIMITIVE_NAME_ALIASES: dict[str, str] = {
     "_moe_grouped_ffn": "moe_grouped_ffn",
     "_moe_grouped_swiglu_ffn": "moe_grouped_swiglu_ffn",
 }
-_CACHE_PRIMITIVE_ALIASES: dict[str, str] = {
-    "update": "cache_update",
-    "seq_len": "cache_seq_len",
-}
 _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Prelude",
     "Compat",
+    "SSM",
     "Activations",
     "Cache",
     "List",
@@ -458,12 +455,6 @@ def _current_param_roots(ctx: "_LowerCtx") -> tuple[str, ...]:
 
 def _canonical_op_name(callee: str) -> str:
     base = callee.split("@", 1)[0] if "@" in callee else callee
-    if base.startswith("_cache_"):
-        cache_suffix = base[len("_cache_") :]
-        alias = _CACHE_PRIMITIVE_ALIASES.get(cache_suffix)
-        if alias is not None:
-            return alias
-        raise ValueError(f"unsupported cache primitive alias: {base!r}")
     alias = _PRIMITIVE_NAME_ALIASES.get(base)
     if alias is not None:
         return alias
@@ -1416,10 +1407,6 @@ def _lower_simple_call(
     if raw_base == "_arange" and kwargs_expr:
         raise ValueError(
             "_arange only accepts positional arguments; use Prelude.arange for keyword/default syntax"
-        )
-    if raw_base == "_sinusoidal_positions" and kwargs_expr:
-        raise ValueError(
-            "_sinusoidal_positions only accepts positional arguments; use Prelude.sinusoidal_positions for keyword/default syntax"
         )
     if raw_base == "_expand" and kwargs_expr:
         raise ValueError(
@@ -3050,19 +3037,8 @@ def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
         return names
     if op == "activations_xielu":
         return ["alpha_p", "alpha_n", "beta", "eps"]
-    if op == "t5_relative_position_bias":
-        return ["weight"]
     if op == "glm4_router":
         return ["weight", "e_score_correction_bias"]
-    if op == "causal_conv1d":
-        return ["weight", "bias"]
-    if op == "mamba_scan":
-        path_names: list[str] = []
-        if _has_explicit_path_arg("A"):
-            path_names.append("A")
-        if _has_explicit_path_arg("D"):
-            path_names.append("D")
-        return path_names
     raise ValueError(f"unsupported param_base resolution for op {op!r}")
 
 

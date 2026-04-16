@@ -1,4 +1,4 @@
-export (PI, add, cos, exp, floor, log, mul, sin, sqrt)
+export (PI, add, clamp, cos, div, exp, floor, log, mul, pow, sin, sqrt)
 
 PI = 3.141592653589793
 
@@ -32,5 +32,5 @@ cos = _cos
 sqrt :: Float -> Float
 sqrt = _sqrt
 
-clamp :: T -> ?T -> ?T -> T
+clamp :: Tensor -> ?Float -> ?Float -> Tensor
 clamp x ?min=null ?max=null = _clamp x min max

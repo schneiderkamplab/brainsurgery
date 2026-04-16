@@ -89,6 +89,7 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, str] = {
 _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Prelude",
     "Compat",
+    "SSM",
     "Activations",
     "Cache",
     "List",
@@ -1144,10 +1145,6 @@ def _primitive_fallback_type(
     tensor_default = tensor_like if tensor_like is not None else TypeNamed(name="Tensor")
 
     if arity == 1:
-        if op_name == "cache_seq_len":
-            return TypeInt()
-        if op_name == "position_ids":
-            return TypeNamed(name="IdxTensor")
         if op_name == "list_init":
             return TypeList(item=TypeAny())
         if op_name == "list_append":
@@ -1188,18 +1185,12 @@ def _primitive_fallback_type(
             "concat",
             "embedding",
             "linear",
-            "linear_position_bias",
             "moe_grouped_ffn",
             "moe_scatter_add",
         }:
             return tensor_default
         return None
 
-    if op_name == "cache_update" and arity == 3:
-        present = _cache_update_present_type(arg_types[0]) if arg_types else tensor_default
-        k_ctx = arg_types[1] if len(arg_types) > 1 else tensor_default
-        v_ctx = arg_types[2] if len(arg_types) > 2 else tensor_default
-        return TypeTuple(items=(k_ctx, v_ctx, present))
     if op_name == "moe_select" and arity == 4:
         return TypeTuple(
             items=(
@@ -1209,16 +1200,10 @@ def _primitive_fallback_type(
                 tensor_default,
             )
         )
-    if op_name == "split_qkv_heads" and arity == 3:
-        return TypeTuple(items=(tensor_default, tensor_default, tensor_default))
-    if op_name == "rope_pair" and arity == 2:
-        q = arg_types[0] if arg_types else tensor_default
-        k = arg_types[1] if len(arg_types) > 1 else tensor_default
-        return TypeTuple(items=(q, k))
     return None
 
 
-def _cache_update_present_type(past_type: TypeExpr) -> TypeExpr:
+def _cache_present_type(past_type: TypeExpr) -> TypeExpr:
     root = past_type.inner if isinstance(past_type, TypeOptional) else past_type
     if isinstance(root, TypeNamed) and root.name == "Cache":
         return TypeOptional(inner=TypeNamed(name="CacheLayer"))
@@ -1282,18 +1267,12 @@ def _check_obsolete_call_syntax(callee: str) -> None:
             f"obsolete call syntax {callee!r}; use _activations_<kind> primitive calls"
         )
     if callee.startswith("cache::"):
-        raise ValueError(f"obsolete call syntax {callee!r}; use _cache_update/_cache_seq_len")
+        raise ValueError(f"obsolete call syntax {callee!r}; use Cache.update/Cache.past_length")
     raise ValueError(f"obsolete namespaced call syntax {callee!r}; '::' is not supported in calls")
 
 
 def _canonical_primitive_name(callee: str) -> str:
     base = callee.split("@", 1)[0] if "@" in callee else callee
-    if base.startswith("_cache_"):
-        suffix = base[len("_cache_") :]
-        if suffix == "update":
-            return "cache_update"
-        if suffix == "seq_len":
-            return "cache_seq_len"
     if base.startswith("_") and len(base) > 1 and base[1].isalpha():
         return _canonical_primitive_name(base[1:])
     return base
@@ -1319,12 +1298,11 @@ def _primitive_output_type(
     generic_tensor_inference_ops = {
         "repeat",
         "merge_heads",
-        "rope_pair",
         "moe_scatter_add",
     }
 
     op_name = _canonical_primitive_name(callee)
-    structural_ops = {"cache_update", "split", "list_append", "list_index"}
+    structural_ops = {"split", "list_append", "list_index"}
     dynamic_from_first_arg = False
     declared_return_items: tuple[TypeExpr, ...] = ()
     op_type_signature = get_op_lowering_type_signature(op_name)
@@ -1373,19 +1351,6 @@ def _primitive_output_type(
         )
         for i, arg in enumerate(args)
     ]
-    if op_name == "cache_update":
-        present = _cache_update_present_type(arg_types[0]) if arg_types else TypeAny()
-        k_ctx = (
-            arg_types[1]
-            if len(arg_types) > 1 and not _is_any_type(arg_types[1])
-            else TypeNamed(name="Tensor")
-        )
-        v_ctx = (
-            arg_types[2]
-            if len(arg_types) > 2 and not _is_any_type(arg_types[2])
-            else TypeNamed(name="Tensor")
-        )
-        return TypeTuple(items=(k_ctx, v_ctx, present))
     if op_name in {"split", "chunk"}:
         tensor_type = arg_types[0] if arg_types else TypeAny()
         return TypeList(item=tensor_type)
@@ -2323,12 +2288,6 @@ def _call_return_type(
             module,
             path,
             "_arange only accepts positional arguments; use Prelude.arange for keyword/default syntax",
-        )
-    if raw_base == "_sinusoidal_positions" and kwargs:
-        raise _error(
-            module,
-            path,
-            "_sinusoidal_positions only accepts positional arguments; use Compat.sinusoidal_positions for keyword/default syntax",
         )
     if raw_base == "_expand" and kwargs:
         raise _error(

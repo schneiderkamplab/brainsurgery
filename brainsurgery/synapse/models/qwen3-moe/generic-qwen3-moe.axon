@@ -53,7 +53,7 @@ dense_ffn x = do
 
 sparse_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 sparse_ffn x = do
-  scores, indices <- softmax_topk_router@gate x top_k=MK norm_topk_prob=true
+  scores, indices <- MoE.softmax_topk_router@gate x top_k=MK norm_topk_prob=true
   out <- x * 0.0
   for@experts e <- [0..ME) do
     x_sel, token_idx, topk_pos, sel_scores <- MoE.select x scores indices e
