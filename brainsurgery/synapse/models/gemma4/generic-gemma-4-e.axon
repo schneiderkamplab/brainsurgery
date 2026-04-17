@@ -91,7 +91,7 @@ gemma4_shared_qk q k pos_ids full = do
 gemma4_e_block :: Tensor[B,S,D] -> Tensor -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> ?Tensor -> ?Tensor -> ?Tensor -> ?Tensor -> ?Bool -> (Tensor[B,S,D], ?CacheLayer, ?Tensor, ?Tensor, ?Tensor, ?Tensor)
 gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shared_full_v shared_sliding_k shared_sliding_v use_cache = do
   full <- ((i + 1) % ROPE_PERIOD) == 0
-  shared_layer <- use_cache and (i >= (L - NUM_KV_SHARED))
+  shared_layer <- i >= (L - NUM_KV_SHARED)
   hd <- full ? GHD : HD
   q_dim <- H * hd
   kv_dim <- KVH * hd
@@ -126,10 +126,10 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
   x <- x + m
   x <- gemma4_apply_per_layer_input x per_layer_inputs i
   x <- Params.param_scale x
-  shared_full_k <- (use_cache and (shared_layer == false) and full) ? shared_k : shared_full_k
-  shared_full_v <- (use_cache and (shared_layer == false) and full) ? shared_v : shared_full_v
-  shared_sliding_k <- (use_cache and (shared_layer == false) and (full == false)) ? shared_k : shared_sliding_k
-  shared_sliding_v <- (use_cache and (shared_layer == false) and (full == false)) ? shared_v : shared_sliding_v
+  shared_full_k <- ((shared_layer == false) and full) ? shared_k : shared_full_k
+  shared_full_v <- ((shared_layer == false) and full) ? shared_v : shared_full_v
+  shared_sliding_k <- ((shared_layer == false) and (full == false)) ? shared_k : shared_sliding_k
+  shared_sliding_v <- ((shared_layer == false) and (full == false)) ? shared_v : shared_sliding_v
   return x, new_kv, shared_full_k, shared_full_v, shared_sliding_k, shared_sliding_v
 
 gemma4_e :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
