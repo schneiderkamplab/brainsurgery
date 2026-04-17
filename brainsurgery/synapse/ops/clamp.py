@@ -108,8 +108,19 @@ def interpret(
     max_arg = _arg_or_none(args, 2)
     if min_arg is None and max_arg is None:
         raise ValueError("clamp requires at least one of min/max")
-    min_value = float(model._eval_expr(min_arg, env, symbols)) if min_arg is not None else None
-    max_value = float(model._eval_expr(max_arg, env, symbols)) if max_arg is not None else None
+
+    def _resolve_bound(raw: Any) -> float | None:
+        if raw is None:
+            return None
+        value = model._eval_expr(raw, env, symbols)
+        if value is None:
+            return None
+        return float(value)
+
+    min_value = _resolve_bound(min_arg)
+    max_value = _resolve_bound(max_arg)
+    if min_value is None and max_value is None:
+        raise ValueError("clamp requires at least one non-null bound")
     env[out] = torch.clamp(x, min=min_value, max=max_value)
 
 

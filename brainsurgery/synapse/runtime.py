@@ -1279,7 +1279,29 @@ class SynapseProgramModel(nn.Module):
                 continue
             break
         normalized_scope = ".".join(scope_parts)
-        return self._join_scope(normalized_scope, token)
+        scoped = self._join_scope(normalized_scope, token)
+        roots = (
+            list(self._param_roots_stack[-1])
+            if self._param_roots_stack
+            and isinstance(self._param_roots_stack[-1], list)
+            and self._param_roots_stack[-1]
+            else [""]
+        )
+
+        def _join_root(root: str, value: str) -> str:
+            if not root:
+                return value
+            if not value:
+                return root
+            if value == root or value.startswith(f"{root}."):
+                return value
+            return self._join_scope(root, value)
+
+        candidates = [_join_root(root, scoped) for root in roots]
+        for candidate in candidates:
+            if candidate in self._state:
+                return candidate
+        return candidates[0]
 
     def _state_tensor_from_resolved_path(self, path: str, *, field: str) -> torch.Tensor:
         resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path

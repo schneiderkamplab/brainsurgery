@@ -17,11 +17,32 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
   - `*` -> `_mul` / `Math.mul`
   - `==` -> `_eq` / `Tensor.eq`
   - `<=` -> `_le` / `Tensor.le`
-  - `and` -> `_logical_and` / `Tensor.and`
+  - `and` -> `_and` / `Tensor.and`
 - Prelude namespace rows (`NN`, `Math`, `Tensor`) count qualified namespace calls (`NN.*`, `Math.*`, `Tensor.*`) across the same AST scope.
 - Notes:
   - These are static call-site/operator counts, not runtime execution counts.
   - Files that intentionally do not parse as module programs (for example `Prelude.axon`) are excluded from call-expression traversal and handled by namespace counting.
+
+## To Be Removed Primitives
+
+| Primitive op (`_xyz`) | Use in builtins | Use in models | Status |
+| --- | ---: | ---: | --- |
+| _attention | 2 | 0 | to be removed (still active via `Compat.attention`) |
+| _glm4_router | 1 | 0 | to be removed (still active via `MoE.glm4_router`) |
+| _nemotron_moe | 1 | 0 | to be removed (still active via `MoE.nemotron_moe`) |
+| _sigmoid_topk_router | 0 | 0 | to be removed |
+| _moe_grouped_ffn | 1 | 0 | to be removed (still active via `MoE.grouped_ffn`) |
+| _disentangled_relative_bias | 0 | 0 | to be removed |
+| _gemma4_router | 0 | 0 | to be removed |
+| _gemma4_moe_experts | 0 | 0 | to be removed |
+| _moe_select | 0 | 0 | to be removed |
+| _moe_scatter_add | 0 | 0 | to be removed |
+| _softmax_topk_router | 0 | 0 | to be removed |
+| _moe_grouped_swiglu_ffn | 0 | 0 | to be removed |
+| _param_scale | 0 | 0 | to be removed |
+
+Notes:
+- `select` is intentionally excluded from this list: it is still used internally for lowering `?:` and `if ... then ... else`.
 
 ## Activations.axon
 
@@ -69,7 +90,6 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
 | Op | Type | Suggestion | Use in builtins | Use in models | Use in operators | Comment |
 | --- | --- | --- | ---: | ---: | ---: | --- |
 | attention | alias | Deprecated; remove after migration. | 0 | 353 | 0 |  |
-| relative_bias_disentangled | alias | Keep as-is. | 0 | 2 | 0 |  |
 | attention_causal_scaled | wrapper | Deprecated; remove after migration. | 0 | 2 | 0 |  |
 
 ## Config.axon
@@ -129,9 +149,10 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
 | gemma4_moe_experts | wrapper | Keep as-is. | 0 | 2 | 0 |  |
 | glm4_router | wrapper | Keep as-is. | 0 | 6 | 0 |  |
 | nemotron_moe | wrapper | Keep as-is. | 0 | 2 | 0 |  |
-| select | wrapper | Keep as-is. | 1 | 27 | 0 |  |
-| scatter_add | alias | Keep as-is. | 1 | 27 | 0 |  |
-| softmax_topk_router | wrapper | Keep as-is. | 0 | 8 | 0 |  |
+| select | derived | Keep as-is. | 2 | 27 | 0 |  |
+| scatter_add | derived | Keep as-is. | 2 | 27 | 0 |  |
+| softmax_topk_router | derived | Keep as-is. | 1 | 8 | 0 |  |
+| sigmoid_topk_router | derived | Keep as-is. | 0 | 3 | 0 |  |
 | grouped_ffn | alias | Keep as-is. | 0 | 3 | 0 |  |
 | grouped_swiglu_ffn_basic | wrapper | Keep as-is. | 1 | 5 | 0 |  |
 | grouped_swiglu_ffn_basic_granite | wrapper | Keep as-is. | 0 | 0 | 0 |  |
@@ -250,6 +271,8 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
 | fill | wrapper | Keep as-is. | 1 | 0 | 0 |  |
 | gather | wrapper | Keep as-is. | 2 | 0 | 0 |  |
 | scatter | wrapper | Keep as-is. | 1 | 0 | 0 |  |
+| where_indices | alias | Keep as-is. | 1 | 0 | 0 |  |
+| index_add | wrapper | Keep as-is. | 1 | 0 | 0 |  |
 | zeros_like | alias | Keep as-is. | 3 | 37 | 0 |  |
 | min_like | derived | Keep as-is. | 1 | 0 | 0 | Built from `empty_like + dtype_value + fill`. |
 
@@ -260,12 +283,12 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
 | _activation | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
 | _add | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 1047 | Inflated: mapped from all `+` binary expressions in Axon ASTs. |
 | _arange | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _attention | primitive | to be removed | Replace with derived ops and remove primitive once migration is complete. | 3 | 0 | 0 |  |
+| _attention | primitive | to be removed | Replace with derived ops and remove primitive once migration is complete. | 2 | 0 | 0 |  |
 | _cast | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _cast_like | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _chunk | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _clamp | primitive | active | Keep as-is. | 3 | 0 | 0 |  |
-| _concat | primitive | active | Keep as-is (or groom incrementally if still coarse). | 3 | 0 | 0 |  |
+| _clamp | primitive | active | Keep as-is. | 1 | 0 | 0 |  |
+| _concat | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _config_bool | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _config_float | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _config_has | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
@@ -286,14 +309,14 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
 | _fill | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _floor | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _gather | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _gemma4_moe_experts | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
+| _gemma4_moe_experts | primitive | to be removed | Replaced by derived `MoE.gemma4_moe_experts`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _gemma4_per_layer_input_at | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
 | _gemma4_per_layer_inputs | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
-| _gemma4_router | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
+| _gemma4_router | primitive | to be removed | Replaced by derived `MoE.gemma4_router`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _glm4_router | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _ir_alias | primitive | internal | Internal compiler op; keep hidden. | 0 | 0 | 0 |  |
-| _ir_const | primitive | internal | Internal compiler op; keep hidden. | 0 | 0 | 0 |  |
-| _l2norm | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
+| _ir_expr | primitive | internal | Internal compiler op; keep hidden. | 0 | 0 | 0 |  |
+| _l2norm | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _layernorm | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _le | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 11 | Inflated: mapped from all `<=` binary expressions in Axon ASTs. |
 | _linear | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
@@ -301,18 +324,17 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
 | _list_index | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _list_init | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _log | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _logical_and | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 44 | Inflated: mapped from boolean `and` expressions. |
+| _and | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 44 | Inflated: mapped from boolean `and` expressions. |
 | _matmul | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _moe_grouped_ffn | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _moe_grouped_swiglu_ffn | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
-| _moe_scatter_add | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _moe_select | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
+| _moe_scatter_add | primitive | to be removed | Replaced by derived `MoE.scatter_add`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
+| _moe_select | primitive | to be removed | Replaced by derived `MoE.select`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _mul | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 498 | Inflated: mapped from all `*` binary expressions in Axon ASTs. |
 | _nemotron_moe | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _param | primitive | active | Keep as-is (or groom incrementally if still coarse). | 2 | 0 | 0 |  |
+| _params_param | primitive | active | Keep as-is. | 1 | 0 | 0 | Canonical parameter lookup primitive (`Params.param`). |
 | _param_scale | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
 | _params_has_root | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _params_root | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
 | _permute | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _pow | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 | Used by expression `pow(...)` evaluators in runtime/codegen/materialization paths. |
 | _repeat | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
@@ -321,11 +343,11 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
 | _scatter | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _select | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
 | _shape | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _sigmoid_topk_router | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
+| _sigmoid_topk_router | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _sin | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _slice | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _softmax | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _softmax_topk_router | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
+| _softmax_topk_router | primitive | to be removed | Replaced by derived `MoE.softmax_topk_router`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _split | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _sqrt | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _tensor_like | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
@@ -333,4 +355,6 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
 | _transpose | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _unsqueeze | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _where | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
+| _where_indices | primitive | active | Keep as-is. | 1 | 0 | 0 | Used by derived MoE token routing selection. |
+| _index_add | primitive | active | Keep as-is. | 1 | 0 | 0 | Used by derived MoE scatter accumulation. |
 | _zeros_like | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |

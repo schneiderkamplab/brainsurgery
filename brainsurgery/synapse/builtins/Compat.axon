@@ -1,7 +1,6 @@
 export (
   attention,
   attention_causal_scaled,
-  relative_bias_disentangled,
 )
 
 -- DEPRECATED
@@ -13,10 +12,6 @@ attention q k v ?mask=null ?padding_mask=false ?causal=false ?scale=null ?eager=
   return pad
     ? (_attention q k v mask=mask padding_mask=true causal=c scale=scale eager=eg softcap=softcap sink=sink sink_path=sink_path)
     : (_attention q k v mask=mask causal=c scale=scale eager=eg softcap=softcap sink=sink sink_path=sink_path)
-
--- DEPRECATED
-relative_bias_disentangled :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,T,TK]
-relative_bias_disentangled@path q k = _disentangled_relative_bias@path q k
 
 -- DEPRECATED
 attention_causal_scaled :: Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> Tensor[B,H,TK,HD] -> Float -> ?Bool -> Tensor[B,H,T,HD]

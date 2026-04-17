@@ -76,11 +76,23 @@ def _resolve_shape(
             raise ValueError("expand.shape must be a non-empty list")
         raw_items = list(evaluated)
     resolved: list[int] = []
-    for item in raw_items:
+    for idx, item in enumerate(raw_items):
         value = model._eval_expr(item, env, symbols)
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError("expand.shape entries must resolve to ints")
-        resolved.append(int(value))
+        if isinstance(value, bool):
+            raise ValueError(
+                "expand.shape entries must resolve to ints "
+                f"(index={idx}, raw={item!r}, value={value!r}, type={type(value).__name__})"
+            )
+        if isinstance(value, int):
+            resolved.append(int(value))
+            continue
+        if isinstance(value, float) and float(value).is_integer():
+            resolved.append(int(value))
+            continue
+        raise ValueError(
+            "expand.shape entries must resolve to ints "
+            f"(index={idx}, raw={item!r}, value={value!r}, type={type(value).__name__})"
+        )
     return tuple(resolved)
 
 

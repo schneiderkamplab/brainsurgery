@@ -50,8 +50,8 @@ def _infer_path(model: Any, node_spec: dict[str, Any], *, node_path: str, key: s
         local_spec[key] = override
         return model._infer_param_path(local_spec, node_path=node_path, param_name=key)
     fallback_map = {
-        "gate_up_weight": "experts.gate_up_proj",
-        "down_weight": "experts.down_proj",
+        "gate_up_weight": "gate_up_proj",
+        "down_weight": "down_proj",
     }
     fallback = fallback_map[key]
     scoped = model._join(model._scope_of(node_path), fallback)
@@ -70,8 +70,8 @@ def _infer_path(model: Any, node_spec: dict[str, Any], *, node_path: str, key: s
 
 def _default_param_candidates(key: str) -> list[str]:
     fallback_map = {
-        "gate_up_weight": "experts.gate_up_proj",
-        "down_weight": "experts.down_proj",
+        "gate_up_weight": "gate_up_proj",
+        "down_weight": "down_proj",
     }
     fallback = fallback_map[key]
     return [

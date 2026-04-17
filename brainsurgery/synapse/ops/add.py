@@ -18,6 +18,26 @@ def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
     return False
 
 
+def _parse_scalar_token(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower() == "true":
+            return True
+        if text.lower() == "false":
+            return False
+        if text.lower() == "null":
+            return None
+        if text and text[0] == "-" and text[1:].isdigit():
+            return int(text)
+        if text.isdigit():
+            return int(text)
+        try:
+            return float(text)
+        except ValueError:
+            return value
+    return value
+
+
 def lowering_validate_signature(
     *, args: list[str], out: str | list[str], kwargs: dict[str, Any], ctx: Any
 ) -> None:
@@ -92,8 +112,18 @@ def interpret(
     if not isinstance(inputs, list) or len(inputs) != 2:
         raise ValueError("add expects two inputs")
     out = model._require_name(node_spec.get("_bind"), field="add._bind")
-    left = env[inputs[0]]
-    right = env[inputs[1]]
+    left_ref = inputs[0]
+    right_ref = inputs[1]
+    left = (
+        env[left_ref]
+        if isinstance(left_ref, str) and left_ref in env
+        else _parse_scalar_token(model._eval_expr(left_ref, env, symbols))
+    )
+    right = (
+        env[right_ref]
+        if isinstance(right_ref, str) and right_ref in env
+        else _parse_scalar_token(model._eval_expr(right_ref, env, symbols))
+    )
     align_add_fp32 = bool(getattr(model, "_hf_align_add_fp32_accum", False))
     if align_add_fp32 and (
         torch.is_tensor(left)
@@ -132,8 +162,18 @@ def compile(
     inputs = node_spec.get("_args")
     if not isinstance(inputs, list) or len(inputs) != 2:
         raise ValueError("add expects two inputs")
-    a = read(str(inputs[0]))
-    b = read(str(inputs[1]))
+    left_ref = inputs[0]
+    right_ref = inputs[1]
+    a = (
+        read(str(left_ref))
+        if isinstance(left_ref, str) and str(left_ref) in env
+        else repr(_parse_scalar_token(left_ref))
+    )
+    b = (
+        read(str(right_ref))
+        if isinstance(right_ref, str) and str(right_ref) in env
+        else repr(_parse_scalar_token(right_ref))
+    )
     out_name = str(node_spec.get("_bind"))
     out_var = assign_out_var(out_name)
     lines.append(

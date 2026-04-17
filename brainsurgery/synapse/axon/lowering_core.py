@@ -3039,6 +3039,8 @@ def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
         return ["alpha_p", "alpha_n", "beta", "eps"]
     if op == "glm4_router":
         return ["weight", "e_score_correction_bias"]
+    if op == "sigmoid_topk_router":
+        return ["weight"]
     raise ValueError(f"unsupported param_base resolution for op {op!r}")
 
 

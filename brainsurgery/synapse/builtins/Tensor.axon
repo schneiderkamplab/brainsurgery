@@ -10,6 +10,7 @@ export (
   concat,
   cumsum,
   dtype_value,
+  deinterleave_last2,
   eq,
   expand,
   gather,
@@ -29,7 +30,9 @@ export (
   transpose,
   unsqueeze,
   where,
+  where_indices,
   zeros_like,
+  index_add,
 )
 
 split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..S]]
@@ -111,6 +114,19 @@ and = _and
 where :: Tensor -> Any -> Any -> Tensor
 where = _where
 
+where_indices :: Tensor -> (IdxTensor, IdxTensor)
+where_indices = _where_indices
+
+deinterleave_last2 :: Tensor[N,W] -> (Tensor[N,H], Tensor[N,H])
+deinterleave_last2 x = do
+  n <- size x 0
+  w <- size x -1
+  h <- w / 2
+  pair <- reshape x shape=[n, h, 2]
+  even <- slice pair dim=-1 start=0 end=1 |> reshape shape=[n, h]
+  odd <- slice pair dim=-1 start=1 end=2 |> reshape shape=[n, h]
+  return even, odd
+
 masked_fill :: Tensor -> Tensor -> Tensor -> Tensor
 masked_fill x mask value = where mask value x
 
@@ -137,6 +153,9 @@ gather x index ?dim=-1 = _gather x index dim
 
 scatter :: Tensor -> IdxTensor -> Any -> ?Int -> Tensor
 scatter x index src ?dim=-1 = _scatter x index src dim
+
+index_add :: Tensor -> IdxTensor -> Tensor -> ?Int -> Tensor
+index_add x index src ?dim=0 = _index_add x index src dim
 
 zeros_like :: Tensor[B,T,D] -> Tensor[B,T,D]
 zeros_like = _zeros_like

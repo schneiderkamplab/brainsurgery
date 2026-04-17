@@ -1,5 +1,5 @@
 import Params
-export (embedding, l2norm, layernorm, linear, rmsnorm)
+export (embedding, l2norm, layernorm, linear, rmsnorm, rmsnorm_noscale)
 
 linear :: @Path -> Tensor -> ?Int -> ?Bool -> ?Bool -> ?Int -> ?Path -> ?Path -> Tensor
 linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=@weight ?bias_path=@bias = _linear@path x dim bias transpose expert weight_path bias_path
@@ -15,8 +15,11 @@ l2norm x ?eps=1e-6 = _l2norm x eps=eps
 layernorm :: @Path -> Tensor -> ?Float -> ?Int -> ?Path -> ?Bool -> ?Path -> Tensor
 layernorm@path x ?eps=1e-5 ?dim=null ?weight_path=@weight ?bias=true ?bias_path=@bias = _layernorm@path x eps dim weight_path bias bias_path
 
-rmsnorm :: @Path -> Tensor -> ?Float -> ?Int -> ?Bool -> ?Bool -> ?Bool -> ?Path -> Tensor
-rmsnorm@path x ?eps=1e-6 ?dim=null ?unit_offset=false ?cast_float=false ?with_scale=true ?scale_path=@weight = do
-  y0 <- _rmsnorm@path x eps dim cast_float
-  y <- with_scale ? (Params.param_scale y0 scale_path=scale_path) : y0
-  return ((unit_offset and with_scale) == false) ? y : (y + y0)
+rmsnorm_noscale :: Tensor -> ?Float -> ?Int -> ?Bool -> Tensor
+rmsnorm_noscale x ?eps=1e-6 ?dim=null ?cast_float=false = _rmsnorm x eps dim cast_float
+
+rmsnorm :: @Path -> Tensor -> ?Float -> ?Int -> ?Bool -> ?Bool -> ?Path -> Tensor
+rmsnorm@path x ?eps=1e-6 ?dim=null ?unit_offset=false ?cast_float=false ?scale_path=@weight = do
+  y0 <- rmsnorm_noscale x eps=eps dim=dim cast_float=cast_float
+  y <- Params.param_scale y0 scale_path=scale_path
+  return unit_offset ? (y + y0) : y

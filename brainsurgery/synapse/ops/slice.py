@@ -99,12 +99,16 @@ def _resolve_int(
 ) -> int:
     value = model._eval_expr(raw, env, symbols)
     if isinstance(value, bool):
-        raise ValueError(f"slice.{name} must resolve to int")
+        raise ValueError(
+            f"slice.{name} must resolve to int (raw={raw!r}, value={value!r}, type={type(value).__name__})"
+        )
     if isinstance(value, int):
         return int(value)
     if isinstance(value, float) and float(value).is_integer():
         return int(value)
-    raise ValueError(f"slice.{name} must resolve to int")
+    raise ValueError(
+        f"slice.{name} must resolve to int (raw={raw!r}, value={value!r}, type={type(value).__name__})"
+    )
 
 
 def interpret(

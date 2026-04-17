@@ -10,7 +10,7 @@ import Attention (reshape_heads, merge_heads)
 import Compat (attention)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_yarn)
-import Math (mul)
+import Math (floor, log, mul)
 
 PARAM_ROOT = "language_model"
 D = 4096
@@ -51,9 +51,9 @@ mistral4_kv_norm@path x = NN.rmsnorm@path x eps=EPS
 mistral4_query_scale :: Tensor[B,S] -> Tensor[B,1,S,1]
 mistral4_query_scale pos_ids = do
   scaled <- pos_ids / ROPE_CONTEXT
-  bucket <- Math.floor scaled
+  bucket <- floor scaled
   shifted <- bucket + 1.0
-  logged <- Math.log shifted
+  logged <- log shifted
   beta_scaled <- logged * Q_SCALE_BETA
   gain <- beta_scaled + 1.0
   gain3 <- Tensor.unsqueeze gain dim=1

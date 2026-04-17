@@ -53,7 +53,7 @@ gemma4_kv_shared :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
 gemma4_kv_shared xn kv_dim kv_heads hd = do
   kv <- NN.linear@k_proj xn dim=kv_dim bias=false |> reshape_heads heads=kv_heads
   k <- NN.rmsnorm@k_norm kv dim=hd cast_float=true
-  v <- NN.rmsnorm@v_norm kv dim=hd cast_float=true with_scale=false
+  v <- NN.rmsnorm_noscale kv dim=hd cast_float=true
   return k, v
 
 gemma4_kv_separate :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
@@ -63,7 +63,7 @@ gemma4_kv_separate xn kv_dim kv_heads hd = do
     NN.rmsnorm@k_norm dim=hd cast_float=true
   v <- NN.linear@v_proj xn dim=kv_dim bias=false |>
     reshape_heads heads=kv_heads |>
-    NN.rmsnorm@v_norm dim=hd cast_float=true with_scale=false
+    NN.rmsnorm_noscale dim=hd cast_float=true
   return k, v
 
 gemma4_moe_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
@@ -100,7 +100,7 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
   h1 <- rms@post_feedforward_layernorm_1 m
   topk_weights, topk_indices <- gemma4_router x top_k=TOPK_EXPERTS scalar_root_size=(1.0 / sqrt D) rms_eps=EPS
   xn2 <- rms@pre_feedforward_layernorm_2 x
-  h2 <- gemma4_moe_experts xn2 topk_weights topk_indices
+  h2 <- gemma4_moe_experts xn2 topk_weights topk_indices NUM_EXPERTS
   h2 <- rms@post_feedforward_layernorm_2 h2
   h <- h1 + h2
   h <- rms@post_feedforward_layernorm h

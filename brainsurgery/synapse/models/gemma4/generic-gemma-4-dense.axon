@@ -52,7 +52,7 @@ gemma4_kv_shared :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
 gemma4_kv_shared xn kv_dim kv_heads hd = do
   kv <- NN.linear@k_proj xn dim=kv_dim bias=false |> reshape_heads heads=kv_heads
   k <- NN.rmsnorm@k_norm kv dim=hd cast_float=true
-  v <- NN.rmsnorm@v_norm kv dim=hd cast_float=true with_scale=false
+  v <- NN.rmsnorm_noscale kv dim=hd cast_float=true
   return k, v
 
 gemma4_kv_separate :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
@@ -62,7 +62,7 @@ gemma4_kv_separate xn kv_dim kv_heads hd = do
     NN.rmsnorm@k_norm dim=hd cast_float=true
   v <- NN.linear@v_proj xn dim=kv_dim bias=false |>
     reshape_heads heads=kv_heads |>
-    NN.rmsnorm@v_norm dim=hd cast_float=true with_scale=false
+    NN.rmsnorm_noscale dim=hd cast_float=true
   return k, v
 
 gemma4_dense_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)

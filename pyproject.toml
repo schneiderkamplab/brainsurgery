@@ -19,20 +19,25 @@ classifiers = [
 ]
 
 dependencies = [
+    'accelerate',
     'lark',
+    'mltiming',
     'numpy',
     'omegaconf',
     'pyaml',
+    'pytest',
     'rich',
     'safetensors',
+    'sentencepiece',
     'torch',
     'tiktoken',
+    'transformers>=5.5.0',
     'tqdm',
     'typer'
 ]
 
 [project.optional-dependencies]
-dev = ["build", "mltiming", "mypy", "pre-commit", "pytest", "ruff", "transformers>=5.5.0", "twine"]
+dev = ["build", "mypy", "pre-commit", "ruff", "twine"]
 
 [project.urls]
 "Homepage" = "https://github.com/schneiderkamplab/brainsurgery"

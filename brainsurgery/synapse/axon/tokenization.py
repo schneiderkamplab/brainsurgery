@@ -8,6 +8,11 @@ import torch
 from transformers import AutoConfig, AutoTokenizer
 
 
+def _is_marian_autotokenizer_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return "MarianConfig" in msg and "AutoTokenizer" in msg
+
+
 def _looks_like_hf_repo_id(value: str | None) -> bool:
     if not isinstance(value, str):
         return False
@@ -31,7 +36,22 @@ def _from_pretrained(source: str, **kwargs: Any) -> Any:
             return AutoTokenizer.from_pretrained(source, tokenizer_type="mistral", **kwargs)
         except Exception:
             pass
-    return AutoTokenizer.from_pretrained(source, **kwargs)
+    try:
+        return AutoTokenizer.from_pretrained(source, **kwargs)
+    except Exception as exc:
+        # Some transformers builds do not map MarianConfig via AutoTokenizer.
+        # Fall back to explicit Marian tokenizer class.
+        if _is_marian_autotokenizer_error(exc):
+            try:
+                from transformers import MarianTokenizer
+
+                return MarianTokenizer.from_pretrained(source, **kwargs)
+            except ImportError as marian_exc:
+                raise RuntimeError(
+                    "Marian tokenizer load requires the 'sentencepiece' package. "
+                    "Install it (e.g. `pip install sentencepiece`) and retry."
+                ) from marian_exc
+        raise
 
 
 def load_tokenizer(

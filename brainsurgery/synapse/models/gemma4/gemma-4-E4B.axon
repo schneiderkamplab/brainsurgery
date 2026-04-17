@@ -59,7 +59,7 @@ gemma4_per_layer_input_at x i = Tensor.slice x dim=2 start=i end=(i + 1) |> Tens
 gemma4_kv :: Tensor[B,S,D] -> Int -> Int -> (Tensor, Tensor)
 gemma4_kv xn kv_dim hd = do
   k <- NN.linear@k_proj xn dim=kv_dim bias=false |> reshape_heads heads=KVH |> NN.rmsnorm@k_norm dim=hd cast_float=true
-  v <- NN.linear@v_proj xn dim=kv_dim bias=false |> reshape_heads heads=KVH |> NN.rmsnorm@v_norm dim=hd cast_float=true with_scale=false
+  v <- NN.linear@v_proj xn dim=kv_dim bias=false |> reshape_heads heads=KVH |> NN.rmsnorm_noscale dim=hd cast_float=true
   return k, v
 
 gemma4_apply_per_layer_input :: Tensor[B,S,D] -> Tensor -> Int -> Tensor[B,S,D]

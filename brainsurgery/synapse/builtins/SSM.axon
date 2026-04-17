@@ -42,9 +42,7 @@ causal_conv1d@path x ?activation="silu" ?weight_path="weight" ?bias_path="bias" 
 
 mamba_scan_step :: Tensor[B,D,N] -> Tensor[B,D] -> Tensor[B,D] -> Tensor[B,N] -> Tensor[B,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,D,N], Tensor[B,D])
 mamba_scan_step state u_t delta_t b_t c_t a d = do
-  delta_exp <- Math.exp delta_t
-  delta_sp_in <- delta_exp + 1.0
-  delta_sp <- Math.log delta_sp_in
+  delta_sp <- delta_t |> Math.exp |> Math.add 1.0 |> Math.log
   a_mul <- (Tensor.unsqueeze delta_sp dim=-1) * (Tensor.unsqueeze a dim=0)
   a_t <- Math.exp a_mul
   bu_t <- (Tensor.unsqueeze (delta_sp * u_t) dim=-1) * (Tensor.unsqueeze b_t dim=1)
@@ -84,11 +82,13 @@ mamba_scan u delta b c ?A="@A_log" ?D="@D" ?a_is_log=true = do
 mamba2_expand_groups :: Tensor[B,G,N] -> Int -> Int -> Tensor[B,H,N]
 mamba2_expand_groups x heads n_groups = do
   per_group <- heads / n_groups
-  g0 <- 0 / per_group
-  x0 <- Tensor.slice x dim=1 start=g0 end=(g0 + 1)
-  out <- x0
+  out <- Tensor.slice x dim=1 start=0 end=1
+  g <- 0
+  count <- 1
   for h <- [1..heads) do
-    g <- h / per_group
+    switch <- count >= per_group
+    g <- switch ? (g + 1) : g
+    count <- switch ? 1 : (count + 1)
     xh <- Tensor.slice x dim=1 start=g end=(g + 1)
     out <- Tensor.concat out xh dim=1
   return out
@@ -118,41 +118,31 @@ mamba2_scan u gate dt b c a_path d_path dt_bias_path norm_weight_path n_groups h
   s <- Tensor.size u 1
   b_last_dim <- Tensor.size b -1
   state_dim <- b_last_dim / n_groups
-
   u_t0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B, H, head_dim]
   b_tg0 <- Tensor.slice b dim=1 start=0 end=1 |> Tensor.reshape shape=[B, n_groups, state_dim]
   b_t0 <- mamba2_expand_groups b_tg0 H n_groups
   state <- ((Tensor.unsqueeze u_t0 dim=-1) * (Tensor.unsqueeze b_t0 dim=2)) * 0.0
-
-  dt_t0_raw <- Tensor.slice dt dim=1 start=0 end=1 |> Tensor.reshape shape=[B, H]
-  dt_t0_bias <- dt_t0_raw + (Tensor.unsqueeze dt_b dim=0)
-  dt_t0_exp <- Math.exp dt_t0_bias
-  dt_t0_sp <- dt_t0_exp + 1.0
-  dt_t0 <- Math.log dt_t0_sp
-  dt_t0 <- Math.clamp dt_t0 min=time_step_min max=time_step_max
+  dt_t0 <- Tensor.slice dt dim=1 start=0 end=1 |>
+    Tensor.reshape shape=[B, H] |> Math.add (Tensor.unsqueeze dt_b dim=0) |>
+    Math.exp |> Math.add 1.0 |> Math.log |> Math.clamp min=time_step_min max=time_step_max
   c_tg0 <- Tensor.slice c dim=1 start=0 end=1 |> Tensor.reshape shape=[B, n_groups, state_dim]
   c_t0 <- mamba2_expand_groups c_tg0 H n_groups
   state, y_t0 <- mamba2_scan_step state u_t0 dt_t0 b_t0 c_t0 a d
   y_all <- Tensor.reshape y_t0 shape=[B, 1, D]
-
   for t <- [1..s) do
     u_t <- Tensor.slice u dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, H, head_dim]
-    dt_t_raw <- Tensor.slice dt dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, H]
-    dt_t_bias <- dt_t_raw + (Tensor.unsqueeze dt_b dim=0)
-    dt_t_exp <- Math.exp dt_t_bias
-    dt_t_sp <- dt_t_exp + 1.0
-    dt_t <- Math.log dt_t_sp
-    dt_t <- Math.clamp dt_t min=time_step_min max=time_step_max
+    dt_t <- Tensor.slice dt dim=1 start=t end=(t + 1) |>
+      Tensor.reshape shape=[B, H] |> Math.add (Tensor.unsqueeze dt_b dim=0) |>
+      Math.exp |> Math.add 1.0 |> Math.log |> Math.clamp min=time_step_min max=time_step_max
     b_tg <- Tensor.slice b dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, n_groups, state_dim]
     c_tg <- Tensor.slice c dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, n_groups, state_dim]
     b_t <- mamba2_expand_groups b_tg H n_groups
     c_t <- mamba2_expand_groups c_tg H n_groups
     state, y_t <- mamba2_scan_step state u_t dt_t b_t c_t a d
     y_all <- Tensor.concat y_all (Tensor.reshape y_t shape=[B, 1, D]) dim=1
-
   gated <- y_all * (silu gate)
   group_dim <- D / n_groups
   gated_grouped <- Tensor.reshape gated shape=[B, S, n_groups, group_dim]
-  normed_grouped <- NN.rmsnorm@mamba2_scan_group_norm gated_grouped eps=1e-5 dim=group_dim with_scale=false cast_float=true
+  normed_grouped <- NN.rmsnorm_noscale gated_grouped eps=1e-5 dim=group_dim cast_float=true
   normed <- Tensor.reshape normed_grouped shape=[B, S, D]
   return normed * norm_w
