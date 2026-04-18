@@ -6,7 +6,7 @@ import Activations (silu)
 import Cache
 import MoE
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_base)
 import Math (mul, sqrt)
@@ -14,14 +14,14 @@ import Math (mul, sqrt)
 D    = Config.int "hidden_size" default=2048               -- hidden dimension
 V    = Config.int "vocab_size" default=50304               -- vocabulary size
 L    = Config.int "num_hidden_layers" default=16           -- number of decoder layers
-H    = Config.int "num_attention_heads" default=16         -- number of attention heads
+H    = Config.int "num_attention_heads" default=16         -- number of attention_masked heads
 HD   = D / H                                                -- per-head dimension
 E    = Config.int "num_experts" default=64                 -- number of experts
 EPT  = Config.int "num_experts_per_tok" default=8          -- experts selected per token (top-k)
 C    = Config.int "max_position_embeddings" default=4096   -- context window / max sequence length
 EPS  = 1e-05                                                -- RMSNorm epsilon
 THETA = Config.float "rope_theta" default=10000.0          -- rope theta
-ATTN_SCALE = 1.0 / sqrt HD                                  -- attention scale (1 / sqrt(HD))
+ATTN_SCALE = 1.0 / sqrt HD                                  -- attention_masked scale (1 / sqrt(HD))
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
@@ -42,7 +42,7 @@ olmoe_decoder_block x pos_ids attn_mask past_kv = do
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads
+    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads
     a <- NN.linear@o_proj a dim=D
     return a, new_kv
   x <- x + a

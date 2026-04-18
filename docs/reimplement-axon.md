@@ -1,5 +1,117 @@
 # Reimplement Axon Plan
 
+## Execution Plan First: Flat-Core Desugaring
+
+This section defines the concrete rollout plan before the rest of the agenda below.
+
+### Objective
+
+Move to a flat, desugared core Axon where:
+
+- function bodies are straight statement lists in `do ... return ...`
+- control flow is desugared to helper definitions
+- `select` (ternary) remains the only non-straight functional control concept (for lazy branch evaluation)
+- loops are represented via recursion after desugaring
+
+### Phase 1: Introduce explicit `for ... carry ... yield ...`
+
+Add the new loop surface first, with strict typing/arity checks.
+
+Example:
+
+```axon
+x, new_kv <- for@h i <- [0..L) carry (x, new_kv) yield (gpt2_loop_step@h i x attn_mask past_kv new_kv)
+```
+
+Rules:
+
+- loop LHS arity/types must match `carry` and `yield` arity/types
+- `yield` is the per-iteration next state
+- loop scope instantiation remains deterministic
+
+### Phase 2: Add path templating in loop scopes and paths
+
+Support template segments in scope/path strings using in-scope values (including loop vars).
+
+Scope behavior:
+
+- if template contains placeholders, instantiate placeholders each iteration
+- if no placeholder appears, keep existing behavior and append `.<loop_value>`
+
+Examples:
+
+```axon
+for@h i <- [0..L) ...
+for@layers.{i}.attn i <- [0..L) ...
+for@{base_scope}.block.{i} i <- [0..L) ...
+```
+
+Absolute-path strategy:
+
+- flatten to absolute paths where possible
+- for dynamic indices, use absolute templates (for example `@@h.{i}.attn.c_attn.weight`) and instantiate during lowering/codegen
+
+### Phase 3: Add explicit desugaring/flattening stage
+
+Insert a `Surface Axon -> Flat Core Axon` pass into the pipeline:
+
+1. parse/import-load
+2. syntax/AST validation
+3. **desugar/flatten (new)**
+4. typecheck on flat core
+5. lower on flat core
+
+Desugaring responsibilities:
+
+- ANF-style flattening into one statement per bind
+- helper extraction for loop/branch bodies
+- loop-to-recursion desugaring
+- call canonicalization (kwargs/defaults)
+- lexical path normalization to absolute/templated-absolute form
+
+### Flat-core style and examples
+
+#### Loop recursion form
+
+```axon
+loop i x new_kv = do
+  done <- (i >= L)
+  out <- done ? (x, new_kv) : (loop_else i x new_kv)
+  return out
+
+loop_else i x new_kv = do
+  x, new_kv <- step i x new_kv
+  i <- i + 1
+  out <- loop i x new_kv
+  return out
+```
+
+#### Ternary stays as `select`
+
+`select` remains the canonical lazy-branch form in core lowering; branch bodies can be helper calls:
+
+```axon
+out <- cond ? (then_helper args...) : (else_helper args...)
+```
+
+### Phase 4: Simplify later stages
+
+After flat-core desugaring is in place, simplify subsequent stages:
+
+- typecheck: remove sugar-specific cases, check only flat core constructs
+- lowering: structural translation only, minimal heuristics
+- path resolution: no ambient/root guessing for model code, lexical and explicit resolution
+
+### Phase 5: Continue with the remaining reimplement-Axon agenda
+
+Once phases 1-4 are stable, continue executing the numbered plan below:
+
+- primitive contracts/spec layer
+- formal type system and constraint-based checker
+- coercion policy
+- typed primitive schemas
+- further lowering cleanup
+
 ## 1. Primitive Contract / Spec Layer
 
 Define a machine-readable contract for every primitive:

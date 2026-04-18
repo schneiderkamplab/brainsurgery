@@ -6,7 +6,7 @@ import Activations (silu)
 import Cache
 import MoE
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_base)
 import Math (mul, sqrt)
@@ -15,7 +15,7 @@ import Math (mul, sqrt)
 D    = Config.int "hidden_size" default=4096                       -- residual hidden size
 V    = Config.int "vocab_size" default=100352                      -- tokenizer vocabulary size
 L    = Config.int "num_hidden_layers" default=32                   -- number of decoder layers
-H    = Config.int "num_attention_heads" default=32                 -- attention head count
+H    = Config.int "num_attention_heads" default=32                 -- attention_masked head count
 HD   = D / H                                                        -- per-head dimension
 E    = Config.int "num_experts" default=2                          -- routed experts
 EPT  = Config.int "num_experts_per_tok" default=2                  -- top-k experts per token
@@ -43,7 +43,7 @@ flexolmo_decoder_block x pos_ids attn_mask past_kv = do
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads
+    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads
     a <- NN.linear@o_proj a dim=D
     return a, new_kv
   a_norm <- rms@post_attention_layernorm a

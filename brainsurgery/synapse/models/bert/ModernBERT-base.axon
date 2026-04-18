@@ -5,7 +5,7 @@ import Activations
 import Activations (gelu)
 import Attention
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking
 import Masking (causal_mask, bidirectional_mask)
 import Positions (position_ids, rope_pair_base)
@@ -35,7 +35,7 @@ modernbert_layer x i pos_ids attn_mask = do
     theta <- full ? THETA_FULL : THETA_LOCAL
     q, k <- rope_pair_base q k pos_ids theta
     mask <- if full then bidirectional_mask q k padding_mask=attn_mask else bidirectional_mask q k window=LOCAL_WIN padding_mask=attn_mask
-    return attention q k v mask=mask causal=false eager=true |> merge_heads |> NN.linear@Wo dim=D bias=false
+    return attention_masked q k v mask=mask causal=false eager=true |> merge_heads |> NN.linear@Wo dim=D bias=false
   x <- x + a
   xn <- NN.layernorm@mlp_norm x eps=EPS bias=false
   m <- scope@mlp do

@@ -6,7 +6,7 @@ import Cache
 import Positions (position_ids, rope_pair_base)
 import MoE
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Activations (silu)
 import Math (mul)
@@ -55,7 +55,7 @@ granitemoe_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=ATTN_BIAS
+    a <- attention_masked q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=ATTN_BIAS
     return a, new_kv
   x <- x + (a * RESID_MUL)
   xn <- granitemoe_norm@post_attention_layernorm x

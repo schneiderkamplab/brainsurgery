@@ -6,7 +6,7 @@ import Activations (gelu_new)
 import Cache
 import Positions (position_ids)
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 
 T = 1024
@@ -25,7 +25,7 @@ gpt2_block x attn_mask past_kv = do
     v <- reshape_heads v_lin heads=H
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=T padding_mask=attn_mask
-    a <- attention q k v mask=mask |> merge_heads |> NN.linear@c_proj dim=D bias=true transpose=true
+    a <- attention_masked q k v mask=mask |> merge_heads |> NN.linear@c_proj dim=D bias=true transpose=true
     return a, new_kv
   x <- x + a
   x3 <- NN.layernorm@ln_2 x

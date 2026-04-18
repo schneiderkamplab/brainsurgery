@@ -7,9 +7,10 @@ import Activations (gelu_new)
 import Cache
 import Attention
 import Attention (mask_to_additive, merge_heads, split_qkv_heads)
-import Compat attention
+import Attention attention
 import Positions (linear_position_bias)
 import Masking
+import Math (sqrt)
 import Masking (causal_mask)
 
 D = 1536
@@ -35,7 +36,7 @@ bloom_block x attn_mask past_kv = do
     scores_ref <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
     causal_bias <- mask_to_additive scores_ref keep
     mask <- causal_bias + pos_bias
-    a <- attention q k v mask=mask |> merge_heads |> NN.linear@dense dim=D bias=true
+    a <- attention q k v keep=keep rel_bias=pos_bias scale=(1.0 / sqrt (D / H)) |> merge_heads |> NN.linear@dense dim=D bias=true
     return a, new_kv
   x <- attn_res + a
   xn <- NN.layernorm@post_attention_layernorm x eps=EPS

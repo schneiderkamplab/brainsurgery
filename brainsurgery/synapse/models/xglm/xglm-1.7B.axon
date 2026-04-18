@@ -5,7 +5,7 @@ import Activations
 import Activations (gelu, relu)
 import Cache
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids, sinusoidal_positions)
 
@@ -33,7 +33,7 @@ xglm_block x attn_mask past_kv = do
     v <- NN.linear@v_proj xn dim=D bias=true |> reshape_heads heads=H
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@out_proj dim=D bias=true
+    a <- attention_masked q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@out_proj dim=D bias=true
     return a, new_kv
   x <- x + a
   xn2 <- NN.layernorm@final_layer_norm x eps=EPS

@@ -5,7 +5,7 @@ import Activations (gelu_pytorch_tanh)
 import Cache
 import Cache
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_base)
 import Math (mul)
@@ -42,7 +42,7 @@ gemma3_block x i pos_ids attn_mask past_kv = do
     v <- Tensor.repeat v repeats=(H / KVH)
     window <- ((i + 1) % ROPE_PERIOD) == 0 ? WIN_LONG : WIN_LOCAL
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D
+    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   a <- NN.rmsnorm@post_attention_layernorm a cast_float=true unit_offset=true
   x <- x + a

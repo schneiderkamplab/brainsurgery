@@ -7,7 +7,7 @@ import Activations (gegelu)
 import Cache
 import Cache
 import Attention (merge_heads, split_qkv_grouped)
-import Compat attention
+import Attention attention
 import Masking (blocksparse_mask, causal_mask)
 import Positions (position_ids, rope_pair_base, rope_pair_longrope)
 
@@ -61,8 +61,14 @@ phi3small_block x i pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     dense <- (DENSE_EVERY > 0) ? (((i + 1) % DENSE_EVERY) == 0) : false
-    mask <- dense ? (causal_mask q k window=WINDOW_GLOBAL padding_mask=attn_mask) : (blocksparse_mask q k padding_mask=attn_mask block_size=BS_BLOCK_SIZE local_blocks=BS_LOCAL_BLOCKS vert_stride=BS_VERT_STRIDE homo_head=false)
-    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@dense dim=D bias=true
+    a <- dense
+      ? do
+        keep <- causal_mask q k window=WINDOW_GLOBAL padding_mask=attn_mask
+        return attention q k v keep=keep scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=D bias=true
+      : do
+        add_mask <- blocksparse_mask q k padding_mask=attn_mask block_size=BS_BLOCK_SIZE local_blocks=BS_LOCAL_BLOCKS vert_stride=BS_VERT_STRIDE homo_head=false
+        keep <- Tensor.eq add_mask 0.0
+        return attention q k v keep=keep rel_bias=add_mask scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=D bias=true
     return a, new_kv
   x <- x + a
   xn <- phi3small_norm@post_attention_layernorm x

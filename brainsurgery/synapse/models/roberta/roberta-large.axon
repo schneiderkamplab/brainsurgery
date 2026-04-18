@@ -4,7 +4,7 @@
 import Activations
 import Activations (gelu)
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids)
 
@@ -22,7 +22,7 @@ roberta_block x attn_mask = do
     q <- NN.linear@self.query x dim=D bias=true |> reshape_heads heads=H
     k <- NN.linear@self.key x dim=D bias=true |> reshape_heads heads=H
     v <- NN.linear@self.value x dim=D bias=true |> reshape_heads heads=H
-    return attention q k v mask=attn_mask padding_mask=true causal=false |> merge_heads |> NN.linear@output.dense dim=D bias=true
+    return attention_masked q k v mask=attn_mask padding_mask=true causal=false |> merge_heads |> NN.linear@output.dense dim=D bias=true
   x <- x + a
   x <- NN.layernorm@attention.output.LayerNorm x eps=EPS
   m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu

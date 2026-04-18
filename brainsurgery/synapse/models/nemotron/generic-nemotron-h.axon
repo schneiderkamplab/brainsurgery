@@ -8,7 +8,7 @@ import Activations (relu2)
 import SSM (causal_conv1d, mamba2_scan)
 import MoE
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Math (sqrt)
 
@@ -57,7 +57,7 @@ nemotron_h_attention x attn_mask = do
   k <- NN.linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
   v <- NN.linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
   mask <- causal_mask q k
-  return attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=MODEL_D bias=false
+  return attention_masked q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=MODEL_D bias=false
 
 nemotron_h_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_moe xn = do

@@ -4,7 +4,7 @@
 import Activations
 import Activations (gelu_new)
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids)
 
@@ -22,7 +22,7 @@ albert_block x attn_mask = do
     q <- NN.linear@query x dim=D bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.query.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.query.bias |> reshape_heads heads=H
     k <- NN.linear@key x dim=D bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.key.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.key.bias |> reshape_heads heads=H
     v <- NN.linear@value x dim=D bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.value.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.value.bias |> reshape_heads heads=H
-    return attention q k v mask=attn_mask padding_mask=true causal=false |> merge_heads |> NN.linear@dense dim=D bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.dense.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.dense.bias
+    return attention_masked q k v mask=attn_mask padding_mask=true causal=false |> merge_heads |> NN.linear@dense dim=D bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.dense.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.dense.bias
   x <- x + a
   x <- NN.layernorm@attention.LayerNorm x eps=EPS weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.LayerNorm.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.LayerNorm.bias
   m <- NN.linear@ffn x dim=FFN bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.ffn.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.ffn.bias |> gelu_new

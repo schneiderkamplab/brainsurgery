@@ -7,7 +7,7 @@ import Cache
 import Cache
 import MoE
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_yarn)
 import Math (mul)
@@ -58,7 +58,7 @@ deepseek_v2_attn x pos_ids attn_mask past_kv = do
     k_full <- Tensor.concat k_nope k_pe dim=-1
     k_all, v_all, new_kv <- Cache.update past_kv k_full v
     mask <- causal_mask q_full k_all window=C padding_mask=attn_mask
-    a <- attention q_full k_all v_all mask=mask scale=ATTN_SCALE eager=true |> merge_heads
+    a <- attention_masked q_full k_all v_all mask=mask scale=ATTN_SCALE eager=true |> merge_heads
     a <- NN.linear@o_proj a dim=D bias=false
     return a, new_kv
   return a, new_kv

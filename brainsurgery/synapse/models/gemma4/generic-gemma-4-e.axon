@@ -6,7 +6,7 @@ import Cache
 import Config
 import Params
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_proportional)
 import Math (mul, sqrt)
@@ -112,7 +112,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
-    a <- attention q k v mask=mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention_masked q k v mask=mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv, shared_k, shared_v
 
   a <- rms@post_attention_layernorm a

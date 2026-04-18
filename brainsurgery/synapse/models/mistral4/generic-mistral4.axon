@@ -8,14 +8,14 @@ import Cache
 import Cache
 import MoE
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_yarn)
 import Math (floor, log, mul, sqrt)
 
 CFG = (Config.has_key "text_config") ? "text_config" : ""
 ROPE_CFG = (CFG == "") ? "rope_parameters" : "text_config.rope_parameters"
-PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
+MODEL_ROOT = (Params.has_root "language_model.model") ? "language_model" : ""
 
 D = Config.int "hidden_size" root=CFG default=4096
 V = Config.int "vocab_size" root=CFG default=131072
@@ -88,7 +88,7 @@ mistral4_attn x pos_ids attn_mask past_kv = do
 
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads
+    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads
     a <- NN.linear@o_proj a dim=D bias=false
     return a, new_kv
   return a, new_kv
@@ -116,7 +116,7 @@ mistral4_block x pos_ids attn_mask past_kv = do
 mistral4 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 mistral4 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
-  x, new_kv <- scope@model root=PARAM_ROOT do
+  x, new_kv <- scope@model root=MODEL_ROOT do
     x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..L) do

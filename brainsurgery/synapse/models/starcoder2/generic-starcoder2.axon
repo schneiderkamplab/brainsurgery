@@ -6,7 +6,7 @@ import Params
 import Activations (gelu, gelu_pytorch_tanh)
 import Cache
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_base)
 
@@ -46,7 +46,7 @@ starcoder2_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=SW padding_mask=attn_mask
-    a <- attention q k v mask=mask eager=false |> merge_heads |> NN.linear@o_proj dim=D bias=true
+    a <- attention_masked q k v mask=mask eager=false |> merge_heads |> NN.linear@o_proj dim=D bias=true
     return a, new_kv
   x <- x + a
   xn2 <- starcoder2_ln@post_attention_layernorm x

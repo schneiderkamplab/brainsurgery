@@ -3,6 +3,10 @@ import Math (
   sqrt,
 )
 import Activations tanh
+import Masking (
+  bidirectional_mask,
+  causal_mask,
+)
 import Tensor (
   cast,
   chunk,
@@ -19,6 +23,7 @@ import Tensor (
 )
 export (attention, attention_gemma2, attention_with_sinks, mask_to_additive, merge_heads, reshape_heads)
 export (split_qkv_grouped, split_qkv_heads)
+export (attention_masked, attention_causal_scaled)
 
 
 mask_to_additive :: Tensor -> Tensor -> Tensor
@@ -66,7 +71,7 @@ split_qkv_grouped x ?heads=1 ?kv_heads=1 ?head_dim=null = do
 
 
 -- === ATTENTION ===
-attention_core :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor[1,H,Q,K] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,HD]
+attention_core :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,HD]
 attention_core q k v keep ?rel_bias=null ?scale=(1.0 / sqrt HD) ?sink_logits=null ?softcap=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
   scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
   scores <- scores * scale
@@ -87,23 +92,47 @@ attention_core q k v keep ?rel_bias=null ?scale=(1.0 / sqrt HD) ?sink_logits=nul
   return fp32_compute ? (Tensor.cast out dtype="float32") : out
 
 
-attention :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor[1,H,Q,K] -> ?Float -> Tensor[B,H,Q,HD]
+attention :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor -> ?Float -> Tensor[B,H,Q,HD]
 attention q k v keep ?rel_bias=null ?scale=(1.0 / sqrt HD) = do
   return attention_core q k v keep rel_bias scale
 
-attention_gemma2 :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Float -> ?Tensor[1,H,Q,K] -> ?Float -> Tensor[B,H,Q,HD]
+attention_gemma2 :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Float -> ?Tensor -> ?Float -> Tensor[B,H,Q,HD]
 attention_gemma2 q k v keep ?softcap=null ?rel_bias=null ?scale=(1.0 / sqrt HD) = do
   return attention_core q k v keep rel_bias scale null softcap false true
 
 
-attention_hf :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor[1,H,Q,K] -> ?Float -> Tensor[B,H,Q,HD]
+attention_hf :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor -> ?Float -> Tensor[B,H,Q,HD]
 attention_hf q k v keep ?rel_bias=null ?scale=(1.0 / sqrt HD) = do
   return attention_core q k v keep rel_bias scale null null true true
 
 
-attention_with_sinks :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> Tensor[H] -> ?Tensor[1,H,Q,K] -> ?Float -> Tensor[B,H,Q,HD]
+attention_with_sinks :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> Tensor[H] -> ?Tensor -> ?Float -> Tensor[B,H,Q,HD]
 attention_with_sinks q k v keep sink ?rel_bias=null ?scale=(1.0 / sqrt HD) = do
   sink_base <- reshape sink shape=[1, H, 1, 1]
   sink_ref <- slice q dim=-1 start=0 end=1
   sink_logits <- add (sink_ref * 0.0) sink_base
   return attention_core q k v keep rel_bias scale sink_logits
+
+
+-- DEPRECATED-SHAPE BRIDGE
+attention_masked :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> ?Tensor -> ?Bool -> ?Bool -> ?Float -> ?Bool -> ?Float -> ?Bool -> ?Tensor -> ?Path -> Tensor[B,H,Q,HD]
+attention_masked q k v ?mask=null ?padding_mask=false ?causal=false ?scale=null ?eager=false ?softcap=null ?top_left_mask=false ?sink=null ?sink_path=null = do
+  keep <- (mask == null)
+    ? (causal ? (causal_mask q k) : (bidirectional_mask q k))
+    : (
+      padding_mask
+        ? (causal ? (causal_mask q k padding_mask=mask) : (bidirectional_mask q k padding_mask=mask))
+        : mask
+    )
+  scale_eff <- (scale == null) ? (1.0 / sqrt HD) : scale
+  sink_logits <- (sink == null)
+    ? null
+    : do
+      sink_base <- reshape sink shape=[1, H, 1, 1]
+      sink_ref <- slice q dim=-1 start=0 end=1
+      return add (sink_ref * 0.0) sink_base
+  return attention_core q k v keep null scale_eff sink_logits softcap true false
+
+
+attention_causal_scaled :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Float -> ?Bool -> Tensor[B,H,Q,HD]
+attention_causal_scaled q k v scale ?eager=false = attention_masked q k v causal=true scale=scale eager=eager

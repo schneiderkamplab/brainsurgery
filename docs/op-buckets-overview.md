@@ -6,6 +6,7 @@ Type values: `primitive`, `derived`, `alias`, `wrapper` (non-alias wrapper), `na
 
 Rule update: direct primitive calls are now enforced as `_xyz` syntax and only from builtins (`*.axon` in builtin namespaces). Model code should call builtins wrappers/aliases/derived ops.
 Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor`) instead of wrapper symbols.
+Last refreshed: 2026-04-17 (live grep recount over `builtins/*.axon` and `models/**/*.axon`).
 
 ## Counting Methodology
 
@@ -28,10 +29,10 @@ Import policy update: `Prelude` now re-exports namespaces (`NN`, `Math`, `Tensor
 | Primitive op (`_xyz`) | Use in builtins | Use in models | Status |
 | --- | ---: | ---: | --- |
 | _attention | 2 | 0 | to be removed (still active via `Compat.attention`) |
-| _glm4_router | 1 | 0 | to be removed (still active via `MoE.glm4_router`) |
-| _nemotron_moe | 1 | 0 | to be removed (still active via `MoE.nemotron_moe`) |
+| _glm4_router | 0 | 0 | to be removed (inactive; candidate for deletion) |
+| _nemotron_moe | 0 | 0 | to be removed (inactive; candidate for deletion) |
 | _sigmoid_topk_router | 0 | 0 | to be removed |
-| _moe_grouped_ffn | 1 | 0 | to be removed (still active via `MoE.grouped_ffn`) |
+| _moe_grouped_ffn | 0 | 0 | to be removed (inactive; candidate for deletion) |
 | _disentangled_relative_bias | 0 | 0 | to be removed |
 | _gemma4_router | 0 | 0 | to be removed |
 | _gemma4_moe_experts | 0 | 0 | to be removed |
@@ -298,7 +299,7 @@ Notes:
 | _config_value | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _cos | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _cumsum | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _disentangled_relative_bias | primitive | to be removed | Replace with derived ops and remove primitive once migration is complete. | 1 | 0 | 0 |  |
+| _disentangled_relative_bias | primitive | to be removed | Replace with derived ops and remove primitive once migration is complete. | 0 | 0 | 0 |  |
 | _div | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 548 | Inflated: mapped from all `/` binary expressions, including non-tensor arithmetic. |
 | _dtype_value | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _embedding | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
@@ -313,7 +314,7 @@ Notes:
 | _gemma4_per_layer_input_at | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
 | _gemma4_per_layer_inputs | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
 | _gemma4_router | primitive | to be removed | Replaced by derived `MoE.gemma4_router`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
-| _glm4_router | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
+| _glm4_router | primitive | to be removed | Replaced by derived `MoE.glm4_router`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _ir_alias | primitive | internal | Internal compiler op; keep hidden. | 0 | 0 | 0 |  |
 | _ir_expr | primitive | internal | Internal compiler op; keep hidden. | 0 | 0 | 0 |  |
 | _l2norm | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
@@ -326,14 +327,14 @@ Notes:
 | _log | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _and | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 44 | Inflated: mapped from boolean `and` expressions. |
 | _matmul | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _moe_grouped_ffn | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _moe_grouped_swiglu_ffn | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
+| _moe_grouped_ffn | primitive | to be removed | Replaced by derived `MoE.grouped_ffn`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
+| _moe_grouped_swiglu_ffn | primitive | to be removed | Replaced by derived `MoE.grouped_swiglu_ffn_basic`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _moe_scatter_add | primitive | to be removed | Replaced by derived `MoE.scatter_add`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _moe_select | primitive | to be removed | Replaced by derived `MoE.select`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _mul | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 498 | Inflated: mapped from all `*` binary expressions in Axon ASTs. |
-| _nemotron_moe | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
+| _nemotron_moe | primitive | to be removed | Replaced by derived `MoE.nemotron_moe`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _params_param | primitive | active | Keep as-is. | 1 | 0 | 0 | Canonical parameter lookup primitive (`Params.param`). |
-| _param_scale | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
+| _param_scale | primitive | to be removed | Replaced by `Params.param_scale`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _params_has_root | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _permute | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _pow | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 | Used by expression `pow(...)` evaluators in runtime/codegen/materialization paths. |
@@ -343,7 +344,7 @@ Notes:
 | _scatter | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _select | primitive | active | Keep as-is (or groom incrementally if still coarse). | 0 | 0 | 0 |  |
 | _shape | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
-| _sigmoid_topk_router | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
+| _sigmoid_topk_router | primitive | to be removed | Replaced by derived `MoE.sigmoid_topk_router`; remove primitive after migration clean-up. | 0 | 0 | 0 |  |
 | _sin | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _slice | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |
 | _softmax | primitive | active | Keep as-is (or groom incrementally if still coarse). | 1 | 0 | 0 |  |

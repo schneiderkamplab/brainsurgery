@@ -4,11 +4,8 @@
 
 import Activations
 import Activations (silu)
-import Compat attention_causal_scaled
 import SSM causal_conv1d mamba_scan
-import Attention (reshape_heads, merge_heads)
-import Compat (attention)
-import Masking (causal_mask)
+import Attention (reshape_heads, merge_heads, attention_causal_scaled)
 import Math (mul)
 
 D = 2560

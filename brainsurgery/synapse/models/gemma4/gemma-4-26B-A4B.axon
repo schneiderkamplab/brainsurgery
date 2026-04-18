@@ -9,8 +9,7 @@ import MoE (gemma4_router, gemma4_moe_experts)
 import Params
 import Attention
 import Attention (reshape_heads, merge_heads)
-import Compat
-import Compat (attention)
+import Attention (attention_masked)
 import Masking
 import Masking (causal_mask)
 import Positions
@@ -73,7 +72,7 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / kv_heads)
     v <- Tensor.repeat v repeats=(H / kv_heads)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
-    a <- attention q k v mask=mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention_masked q k v mask=mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   a <- rms@post_attention_layernorm a
   x <- x + a

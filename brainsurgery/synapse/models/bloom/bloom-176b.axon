@@ -2,10 +2,10 @@
 {-# TASK "causal_lm" #-}
 
 import Params
+import Tensor
 import Activations (gelu_new)
 import Cache
-import Attention (mask_to_additive, merge_heads, split_qkv_heads)
-import Compat attention
+import Attention (attention, merge_heads, split_qkv_heads)
 import Positions (linear_position_bias)
 import Masking (causal_mask)
 
@@ -27,10 +27,11 @@ bloom_block x attn_mask past_kv = do
     qkv <- NN.linear@query_key_value xn dim=(3 * D) bias=true
     q, k, v <- split_qkv_heads qkv heads=H layout="interleaved"
     k, v, new_kv <- Cache.update past_kv k v
-    causal <- causal_mask q k window=MAX_CTX padding_mask=attn_mask
+    keep <- causal_mask q k window=MAX_CTX padding_mask=attn_mask
     pos_bias <- linear_position_bias attn_mask heads=H
-    mask <- causal + pos_bias
-    a <- attention q k v mask=mask |> merge_heads |> NN.linear@dense dim=D bias=true
+    head_dim <- Tensor.size q 3
+    scale <- 1.0 / sqrt head_dim
+    a <- attention q k v keep rel_bias=pos_bias scale=scale |> merge_heads |> NN.linear@dense dim=D bias=true
     return a, new_kv
   x <- attn_res + a
   xn <- NN.layernorm@post_attention_layernorm x eps=EPS

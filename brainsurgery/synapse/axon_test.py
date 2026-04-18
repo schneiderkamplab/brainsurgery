@@ -2016,7 +2016,10 @@ def _run_axon_test_single(
             "phi3small",
             "deepseek",
             "deepseek_v2",
+            "deepseek_v3",
+            "deepseekv3",
             "gemma4",
+            "mistral4",
             "mistral3",
             "llama4",
         }:
@@ -2038,6 +2041,18 @@ def _run_axon_test_single(
                     "HF strict dtype enabled; ignoring reference quantization config to preserve requested dtype"
                 )
                 reference_quant_config = None
+            if hf_strict_dtype and getattr(hf_config, "quantization_config", None) is not None:
+                print("HF strict dtype enabled; removing config.quantization_config")
+                try:
+                    delattr(hf_config, "quantization_config")
+                except Exception:
+                    pass
+            model_type = str(getattr(hf_config, "model_type", "")).strip().lower()
+            if model_type in {"deepseek_v3", "deepseek"}:
+                if not hasattr(hf_config, "num_experts") and hasattr(
+                    hf_config, "num_local_experts"
+                ):
+                    setattr(hf_config, "num_experts", int(getattr(hf_config, "num_local_experts")))
         exec_device_str = str(resolved_device)
         tokenizer_obj, input_ids_cpu, attention_mask_cpu = tokenize_prompts(
             prompts=prompts,
@@ -2133,6 +2148,24 @@ def _run_axon_test_single(
                 _patch_cache_api_compat()
             local_state_ref_cpu: dict[str, torch.Tensor] | None = None
             hf_device_map: dict[str, str] | None = None
+
+            def _mistral4_device_map_for_itt(
+                device_map: dict[str, str] | None,
+            ) -> dict[str, str] | None:
+                if device_map is None:
+                    return None
+                # Pipeline stage inference uses language_model.* paths from Axon specs.
+                # HF mistral4 text stack is registered under model.* / lm_head.
+                rewritten: dict[str, str] = {}
+                for key, value in device_map.items():
+                    if key.startswith("language_model.model."):
+                        rewritten[f"model.{key[len('language_model.model.') :]}"] = value
+                    elif key == "language_model.lm_head":
+                        rewritten["lm_head"] = value
+                    else:
+                        rewritten[key] = value
+                return rewritten
+
             hf_input_device = target_device
             if axon_backend == "pipeline" and resolved_model_task == "causal_lm":
                 local_state_ref_cpu = _load_state_dict(
@@ -2236,24 +2269,62 @@ def _run_axon_test_single(
                         .eval()
                     )
                 except Exception:
-                    if hf_config is not None and str(
-                        getattr(hf_config, "model_type", "")
-                    ).strip().lower() in {"gemma4", "mistral3", "llama4"}:
+                    model_type = (
+                        str(getattr(hf_config, "model_type", "")).strip().lower()
+                        if hf_config is not None
+                        else ""
+                    )
+                    if model_type in {"mistral4", "gemma4", "mistral3", "llama4"}:
                         _ensure_transformers_import_compat()
+                        mistral4_auto_map_target = Path(
+                            "models/mistralai/Mistral-Small-4-119B-2603"
+                        )
+                        use_mistral4_auto_map = (
+                            model_type == "mistral4"
+                            and resolved_hf_model_dir.as_posix().endswith(
+                                mistral4_auto_map_target.as_posix()
+                            )
+                        )
+                        multimodal_device_map: dict[str, str] | str | None
+                        if use_mistral4_auto_map:
+                            multimodal_device_map = "auto"
+                        else:
+                            multimodal_device_map = (
+                                _mistral4_device_map_for_itt(hf_device_map)
+                                if model_type == "mistral4"
+                                else hf_device_map
+                            )
+                        mistral4_key_mapping: dict[str, str] | None = None
+                        load_dtype = resolved_dtype
+                        if model_type == "mistral4":
+                            mistral4_key_mapping = {
+                                "language_model.model.": "model.",
+                                "language_model.lm_head": "lm_head",
+                            }
+                            # Mistral4 checkpoints with fp8 tensors materialize cleanly via bf16 load,
+                            # then can be promoted to fp32 when strict float32 is requested.
+                            if resolved_dtype == torch.float32:
+                                load_dtype = torch.bfloat16
                         hf_model = AutoModelForImageTextToText.from_pretrained(
                             str(resolved_hf_model_dir),
                             local_files_only=True,
-                            torch_dtype=resolved_dtype,
+                            torch_dtype=load_dtype,
                             config=hf_config,
                             trust_remote_code=effective_trust_remote_code,
-                            device_map=hf_device_map,
+                            device_map=multimodal_device_map,
+                            key_mapping=mistral4_key_mapping,
+                        )
+                        hf_base = (
+                            cast(Any, hf_model).eval()
+                            if multimodal_device_map is not None
+                            else cast(Any, hf_model)
+                            .to(device=target_device, dtype=load_dtype)
+                            .eval()
                         )
                         hf = (
-                            cast(Any, hf_model).eval()
-                            if hf_device_map is not None
-                            else cast(Any, hf_model)
-                            .to(device=target_device, dtype=resolved_dtype)
-                            .eval()
+                            cast(Any, hf_base).to(dtype=torch.float32).eval()
+                            if model_type == "mistral4" and resolved_dtype == torch.float32
+                            else hf_base
                         )
                     elif is_black_mamba_config_dir(resolved_hf_model_dir):
                         generated_state = _load_state_dict(

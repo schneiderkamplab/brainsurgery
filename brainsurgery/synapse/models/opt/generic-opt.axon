@@ -7,7 +7,7 @@ import Activations (relu)
 import Cache
 import Cache
 import Attention (reshape_heads, merge_heads)
-import Compat (attention)
+import Attention (attention_masked)
 import Masking (causal_mask)
 import Positions (position_ids)
 import Math (sqrt)
@@ -42,7 +42,7 @@ opt_block x attn_mask past_kv = do
     v <- NN.linear@v_proj xn dim=D bias=true |> reshape_heads heads=H
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask=mask scale=1.0 eager=true |> merge_heads |> NN.linear@out_proj dim=D bias=true
+    a <- attention_masked q k v mask=mask scale=1.0 eager=true |> merge_heads |> NN.linear@out_proj dim=D bias=true
     return a, new_kv
   x <- x + a
   x <- DO_PRE_LN ? x : (opt_ln@self_attn_layer_norm x)
