@@ -131,11 +131,11 @@ main scale q = do
 
 def test_typecheck_allows_generic_reshape_to_higher_rank(tmp_path: Path) -> None:
     source = """
-import Prelude
+import Tensor
 
 main :: Tensor[B,S] -> Tensor[B,1,S,1]
 main x = do
-  y <- reshape x shape=[B, 1, S, 1]
+  y <- Tensor.reshape x shape=[B, 1, S, 1]
   return y
 """
     modules = _parse_from_tmp_source(tmp_path, source)
@@ -147,12 +147,12 @@ def test_typecheck_allows_unsqueeze_via_prelude_exported_tensor_namespace(
     tmp_path: Path,
 ) -> None:
     source = """
-import Prelude
+import Tensor
 
 main :: Tensor[B,S] -> Tensor[B,1,S,1]
 main x = do
-  y <- unsqueeze x dim=1
-  z <- unsqueeze y dim=3
+  y <- Tensor.unsqueeze x dim=1
+  z <- Tensor.unsqueeze y dim=3
   return z
 """
     modules = _parse_from_tmp_source(tmp_path, source)
@@ -162,15 +162,15 @@ main x = do
 
 def test_typecheck_allows_variadic_split_on_4d_tensor(tmp_path: Path) -> None:
     source = """
-import Prelude
+import Tensor
 
 split_any :: Tensor[..S] -> List[Tensor[..S]]
-split_any x = split x dim=-1 sizes=[64, 64]
+split_any x = Tensor.split x dim=-1 sizes=[64, 64]
 
 main :: Tensor[B,H,T,HD] -> Tensor[B,H,T,HD]
 main x = do
   a, b <- split_any x
-  y <- concat a b dim=-1
+  y <- Tensor.concat a b dim=-1
   return y
 """
     modules = _parse_from_tmp_source(tmp_path, source)
@@ -209,11 +209,11 @@ main cache = past_length cache
 
 def test_lowering_infers_split_sizes_from_bind_arity(tmp_path: Path) -> None:
     source = """
-import Prelude
+import Tensor
 
 main :: Tensor[B,S,12] -> Tensor[B,S,12]
 main x = do
-  a, b, c <- split x
+  a, b, c <- Tensor.split x
   return a
 """
     modules = _parse_from_tmp_source(tmp_path, source)
@@ -234,11 +234,11 @@ main x = do
 
 def test_lowering_infers_chunk_parts_from_bind_arity(tmp_path: Path) -> None:
     source = """
-import Prelude
+import Tensor
 
 main :: Tensor[B,S,12] -> Tensor[B,S,12]
 main x = do
-  a, b, c <- chunk x
+  a, b, c <- Tensor.chunk x
   return a
 """
     modules = _parse_from_tmp_source(tmp_path, source)
@@ -259,11 +259,11 @@ main x = do
 
 def test_lowering_keeps_explicit_split_sizes_even_if_bind_arity_differs(tmp_path: Path) -> None:
     source = """
-import Prelude
+import Tensor
 
 main :: Tensor[B,S,12] -> Tensor[B,S,12]
 main x = do
-  a, b, c <- split x sizes=[6, 6]
+  a, b, c <- Tensor.split x sizes=[6, 6]
   return a
 """
     modules = _parse_from_tmp_source(tmp_path, source)
@@ -339,12 +339,13 @@ import Activations
 
 main :: Tensor[B,S,D] -> Tensor[B,S,D]
 main x = do
-  y <- Activations.swiglu x
+  y <- Activations.gegelu_limit x
   return y
 """
     modules = _parse_from_tmp_source(tmp_path, source)
     with pytest.raises(
-        ValueError, match=r"not exported by 'Activations'|not exported by \"Activations\""
+        ValueError,
+        match=r"unknown callee 'Activations\.gegelu_limit'|unknown callee \"Activations\.gegelu_limit\"",
     ):
         typecheck_axon_program(modules, main_module="main")
 

@@ -1,4 +1,8 @@
-export (has_root, param, param_scale)
+export (
+  has_root,
+  param,
+  param_scale,
+)
 
 has_root :: String -> Bool
 has_root root = _params_has_root root

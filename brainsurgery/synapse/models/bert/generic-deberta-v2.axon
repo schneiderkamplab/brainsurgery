@@ -1,13 +1,14 @@
 {-# CHECKPOINTS ["microsoft/deberta-v3-xsmall"] #-}
 {-# TASK "masked_lm" #-}
 
-import Config
 import Activations (gelu)
-import Params
-import Attention (attention, reshape_heads, merge_heads)
-import Masking (causal_mask, bidirectional_mask)
-import Positions (position_ids, relative_bias_disentangled)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (bidirectional_mask)
 import Math (mul)
+import Params (has_root)
+import Positions (position_ids, relative_bias_disentangled)
+
+
 
 D   = Config.int "hidden_size" default=1536
 E   = (Config.has_key "embedding_size") ? (Config.int "embedding_size" default=1536) : D
@@ -61,16 +62,16 @@ deberta_v2 input_ids attn_mask = do
   tok_type_ids <- Tensor.zeros_like input_ids
   tok <- NN.embedding@deberta.embeddings.word_embeddings input_ids dim=E
   pos <- Tensor.zeros_like tok
-  has_typ <- Params.has_root "deberta.embeddings.token_type_embeddings"
+  has_typ <- has_root "deberta.embeddings.token_type_embeddings"
   typ <- has_typ ? NN.embedding@deberta.embeddings.token_type_embeddings tok_type_ids dim=E : Tensor.zeros_like tok
   x <- tok + pos
   x <- x + typ
-  has_proj <- Params.has_root "deberta.embeddings.embed_proj"
+  has_proj <- has_root "deberta.embeddings.embed_proj"
   x <- has_proj ? NN.linear@deberta.embeddings.embed_proj x dim=D bias=false : x
   x <- NN.layernorm@deberta.embeddings.LayerNorm x eps=EPS
   for@deberta.encoder.layer i <- [0..L) do
     x <- deberta_block x attn_mask
-  modern_head <- Params.has_root "lm_predictions.lm_head"
-  legacy_head <- Params.has_root "cls.predictions"
+  modern_head <- has_root "lm_predictions.lm_head"
+  legacy_head <- has_root "cls.predictions"
   logits <- modern_head ? deberta_modern_head x : (legacy_head ? deberta_legacy_head x : deberta_modern_head x)
   return logits

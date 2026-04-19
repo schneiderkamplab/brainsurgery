@@ -1,12 +1,23 @@
-import Math
+import Math (clamp, exp, log)
 import Params (param)
-import Tensor
-
-export (gegelu, gelu, gelu_new, gelu_pytorch_tanh, relu, relu2, sigmoid, silu, swiglu, tanh, xielu)
+import Tensor (le, reshape, size, slice, where)
+export (
+  gegelu,
+  gelu,
+  gelu_new,
+  gelu_pytorch_tanh,
+  relu,
+  relu2,
+  sigmoid,
+  silu,
+  swiglu,
+  tanh,
+  xielu,
+)
 
 
 sigmoid :: Tensor -> Tensor
-sigmoid x = 1.0 / (1.0 + (Math.exp (0.0 - x)))
+sigmoid x = 1.0 / (1.0 + (exp (0.0 - x)))
 
 
 tanh :: Tensor -> Tensor
@@ -14,7 +25,7 @@ tanh x = (2.0 * (sigmoid (2.0 * x))) - 1.0
 
 
 relu :: Tensor -> Tensor
-relu x = Tensor.where (Tensor.le x 0.0) 0.0 x
+relu x = where (le x 0.0) 0.0 x
 
 
 relu2 :: Tensor -> Tensor
@@ -46,23 +57,23 @@ gelu x = gelu_new x
 
 gegelu :: Tensor -> ?Float -> Tensor
 gegelu x ?limit=null = do
-  d <- Tensor.size x -1
-  pair <- Tensor.reshape x shape=[-1, (d / 2), 2]
-  x_gelu <- Tensor.slice pair dim=-1 start=0 end=1 |> Tensor.reshape shape=[-1, (d / 2)]
-  x_linear <- Tensor.slice pair dim=-1 start=1 end=2 |> Tensor.reshape shape=[-1, (d / 2)]
-  x_gelu <- (limit == null) ? x_gelu : (Math.clamp x_gelu max=limit)
-  x_linear <- (limit == null) ? x_linear : (Math.clamp x_linear min=(0.0 - limit) max=limit)
+  d <- size x -1
+  pair <- reshape x shape=[-1, (d / 2), 2]
+  x_gelu <- slice pair dim=-1 start=0 end=1 |> reshape shape=[-1, (d / 2)]
+  x_linear <- slice pair dim=-1 start=1 end=2 |> reshape shape=[-1, (d / 2)]
+  x_gelu <- (limit == null) ? x_gelu : (clamp x_gelu max=limit)
+  x_linear <- (limit == null) ? x_linear : (clamp x_linear min=(0.0 - limit) max=limit)
   return x_gelu * (sigmoid (1.702 * x_gelu)) * (x_linear + 1.0)
 
 
 xielu_basic :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor -> Tensor
 xielu_basic x alpha_p_raw alpha_n_raw beta eps = do
-  alpha_p <- Math.log ((Math.exp alpha_p_raw) + 1.0)
-  alpha_n <- beta + (Math.log ((Math.exp alpha_n_raw) + 1.0))
+  alpha_p <- log ((exp alpha_p_raw) + 1.0)
+  alpha_n <- beta + (log ((exp alpha_n_raw) + 1.0))
   pos <- (alpha_p * x * x) + (beta * x)
-  x_cap <- Tensor.where (Tensor.le x eps) x eps
-  neg <- ((Math.exp x_cap - 1.0) - x) * alpha_n + (beta * x)
-  return Tensor.where (Tensor.le x 0.0) neg pos
+  x_cap <- where (le x eps) x eps
+  neg <- ((exp x_cap - 1.0) - x) * alpha_n + (beta * x)
+  return where (le x 0.0) neg pos
 
 
 xielu :: @Path -> Tensor -> ?Path -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor

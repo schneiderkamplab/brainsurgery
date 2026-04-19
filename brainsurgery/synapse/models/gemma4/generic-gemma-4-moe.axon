@@ -1,19 +1,17 @@
 {-# CHECKPOINTS ["google/gemma-4-26B-A4B", "google/gemma-4-26B-A4B-it"] #-}
 
 import Activations (gelu_pytorch_tanh, tanh)
-import Cache
-import Cache
-import Config
-import MoE (gemma4_router, gemma4_moe_experts)
-import Params
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_proportional)
 import Math (mul, sqrt)
+import MoE (scatter_add, select, softmax_topk_router)
+import Params (has_root, param_scale)
+import Positions (position_ids, rope_pair_proportional)
+
+
 
 CFG = (Config.has_key "text_config") ? "text_config" : ""
-PARAM_ROOT = (Params.has_root "model.language_model") ? "model" : ""
+PARAM_ROOT = (has_root "model.language_model") ? "model" : ""
 
 D = Config.int "hidden_size" root=CFG default=5376
 V = Config.int "vocab_size" root=CFG default=262144
@@ -48,6 +46,34 @@ NUM_EXPERTS = Config.int "num_experts" root=CFG default=128
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x cast_float=true
+
+gemma4_router :: Tensor -> Int -> ?Float -> ?Float -> (Tensor, IdxTensor)
+gemma4_router x top_k ?scalar_root_size=null ?rms_eps=null = do
+  scalar <- (scalar_root_size == null) ? 1.0 : scalar_root_size
+  eps <- (rms_eps == null) ? 1e-6 : rms_eps
+  topk_weights, topk_indices <- scope@router do
+    h <- NN.l2norm x eps=eps
+    h <- h * (Params.param path=@scale) * scalar
+    w, i <- softmax_topk_router@proj h top_k routed_scaling_factor=1.0 weight=@weight
+    per_expert_scale <- Params.param path=@per_expert_scale
+    b <- Tensor.size i 0
+    s <- Tensor.size i 1
+    e <- Tensor.size per_expert_scale 0
+    per_expert_scale <- Tensor.reshape per_expert_scale shape=[1, 1, e] |> Tensor.expand shape=[b, s, e]
+    w <- w * (Tensor.gather per_expert_scale i -1 |> Tensor.cast_like w)
+    return w, i
+  return topk_weights, topk_indices
+
+gemma4_moe_experts :: Tensor -> Tensor -> Tensor -> Int -> Tensor
+gemma4_moe_experts hidden topk_weights topk_indices num_experts = do
+  routed <- Tensor.zeros_like hidden
+  for e <- [0..num_experts) do
+    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
+    gate_up <- NN.linear@experts x_sel expert=e weight_path=@experts.gate_up_proj
+    gate, up <- Tensor.chunk gate_up parts=2
+    x_upd <- gate |> gelu_pytorch_tanh |> mul up |> NN.linear@experts expert=e weight_path=@experts.down_proj
+    routed <- scatter_add routed token_idx x_upd sel_scores
+  return routed
 
 gemma4_kv_shared :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
 gemma4_kv_shared xn kv_dim kv_heads hd = do
@@ -87,7 +113,7 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / kv_heads)
     v <- Tensor.repeat v repeats=(H / kv_heads)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
-    a <- attention_masked q k v mask=mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
 
   a <- rms@post_attention_layernorm a
@@ -105,7 +131,7 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
   h <- h1 + h2
   h <- rms@post_feedforward_layernorm h
   x <- x + h
-  x <- Params.param_scale x
+  x <- param_scale x
   return x, new_kv
 
 gemma4_moe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

@@ -1,10 +1,21 @@
 import Activations (gelu, relu, silu)
-import Math
-import NN
+import Math (add, clamp, exp, log)
+import NN rmsnorm_noscale
 import Params (param)
-import Tensor
-
-export (causal_conv1d, mamba_scan, mamba2_scan)
+import Tensor (
+  concat,
+  matmul,
+  reshape,
+  size,
+  slice,
+  transpose,
+  unsqueeze,
+)
+export (
+  causal_conv1d,
+  mamba2_scan,
+  mamba_scan,
+)
 
 
 activate :: Tensor[B,1,C] -> Any -> Tensor[B,1,C]
@@ -13,17 +24,17 @@ activate x activation = (activation == "relu") ? relu x : ((activation == "gelu"
 
 causal_conv1d_step :: Tensor[B,C,S] -> Tensor[C,1,K] -> Tensor[C] -> Int -> Any -> Tensor[B,1,C]
 causal_conv1d_step x_t w b t activation = do
-  k <- Tensor.size w -1
-  y_t <- b + ((Tensor.slice x_t dim=-1 start=t end=(t + 1) |> Tensor.reshape shape=[B, C]) * 0.0)
+  k <- size w -1
+  y_t <- b + ((slice x_t dim=-1 start=t end=(t + 1) |> reshape shape=[B, C]) * 0.0)
   for j <- [0..k) do
     idx <- t - (k - 1 - j)
     y_t <- (idx < 0)
       ? y_t
       : do
-        x_idx <- Tensor.slice x_t dim=-1 start=idx end=(idx + 1) |> Tensor.reshape shape=[B, C]
-        w_j <- Tensor.slice w dim=-1 start=j end=(j + 1) |> Tensor.reshape shape=[C]
+        x_idx <- slice x_t dim=-1 start=idx end=(idx + 1) |> reshape shape=[B, C]
+        w_j <- slice w dim=-1 start=j end=(j + 1) |> reshape shape=[C]
         return y_t + (x_idx * w_j)
-  return Tensor.unsqueeze y_t dim=1 |> activate activation
+  return unsqueeze y_t dim=1 |> activate activation
 
 
 causal_conv1d :: @Path -> Tensor[B,S,C] -> ?Any -> ?Path -> ?Path -> ?Path -> Tensor[B,S,C]
@@ -31,23 +42,23 @@ causal_conv1d@path x ?activation="silu" ?weight_path="weight" ?bias_path="bias" 
   prefix <- (prefix_path == null) ? path : prefix_path
   w <- param weight_path prefix_path=prefix
   b <- param bias_path prefix_path=prefix
-  x_t <- Tensor.transpose x dim1=1 dim2=2
-  s <- Tensor.size x 1
+  x_t <- transpose x dim1=1 dim2=2
+  s <- size x 1
   y_all <- causal_conv1d_step x_t w b 0 activation
   for t <- [1..s) do
     y_step <- causal_conv1d_step x_t w b t activation
-    y_all <- Tensor.concat y_all y_step dim=1
+    y_all <- concat y_all y_step dim=1
   return y_all
 
 
 mamba_scan_step :: Tensor[B,D,N] -> Tensor[B,D] -> Tensor[B,D] -> Tensor[B,N] -> Tensor[B,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,D,N], Tensor[B,D])
 mamba_scan_step state u_t delta_t b_t c_t a d = do
-  delta_sp <- delta_t |> Math.exp |> Math.add 1.0 |> Math.log
-  a_mul <- (Tensor.unsqueeze delta_sp dim=-1) * (Tensor.unsqueeze a dim=0)
-  a_t <- Math.exp a_mul
-  bu_t <- (Tensor.unsqueeze (delta_sp * u_t) dim=-1) * (Tensor.unsqueeze b_t dim=1)
+  delta_sp <- delta_t |> exp |> add 1.0 |> log
+  a_mul <- (unsqueeze delta_sp dim=-1) * (unsqueeze a dim=0)
+  a_t <- exp a_mul
+  bu_t <- (unsqueeze (delta_sp * u_t) dim=-1) * (unsqueeze b_t dim=1)
   state <- (a_t * state) + bu_t
-  y_t <- Tensor.matmul state (Tensor.unsqueeze c_t dim=-1) |> Tensor.reshape shape=[B, D]
+  y_t <- matmul state (unsqueeze c_t dim=-1) |> reshape shape=[B, D]
   y_t <- y_t + (u_t * d)
   return state, y_t
 
@@ -55,54 +66,54 @@ mamba_scan_step state u_t delta_t b_t c_t a d = do
 mamba_scan :: Tensor[B,S,DM] -> Tensor[B,S,DM] -> Tensor[B,S,N] -> Tensor[B,S,N] -> ?Path -> ?Path -> ?Bool -> Tensor[B,S,DM]
 mamba_scan u delta b c ?A="@A_log" ?D="@D" ?a_is_log=true = do
   a_raw <- param A
-  a_exp <- Math.exp a_raw
+  a_exp <- exp a_raw
   a <- a_is_log ? (0.0 - a_exp) : a_raw
   d <- param D
-  s <- Tensor.size u 1
-  u0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B, DM]
-  b0 <- Tensor.slice b dim=1 start=0 end=1 |> Tensor.reshape shape=[B, N]
-  state <- ((Tensor.unsqueeze u0 dim=-1) * (Tensor.unsqueeze b0 dim=1)) * 0.0
-  u_t0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B, DM]
-  delta_t0 <- Tensor.slice delta dim=1 start=0 end=1 |> Tensor.reshape shape=[B, DM]
-  b_t0 <- Tensor.slice b dim=1 start=0 end=1 |> Tensor.reshape shape=[B, N]
-  c_t0 <- Tensor.slice c dim=1 start=0 end=1 |> Tensor.reshape shape=[B, N]
+  s <- size u 1
+  u0 <- slice u dim=1 start=0 end=1 |> reshape shape=[B, DM]
+  b0 <- slice b dim=1 start=0 end=1 |> reshape shape=[B, N]
+  state <- ((unsqueeze u0 dim=-1) * (unsqueeze b0 dim=1)) * 0.0
+  u_t0 <- slice u dim=1 start=0 end=1 |> reshape shape=[B, DM]
+  delta_t0 <- slice delta dim=1 start=0 end=1 |> reshape shape=[B, DM]
+  b_t0 <- slice b dim=1 start=0 end=1 |> reshape shape=[B, N]
+  c_t0 <- slice c dim=1 start=0 end=1 |> reshape shape=[B, N]
   state, y_t0 <- mamba_scan_step state u_t0 delta_t0 b_t0 c_t0 a d
-  y_all <- Tensor.unsqueeze y_t0 dim=1
+  y_all <- unsqueeze y_t0 dim=1
   for t <- [1..s) do
-    u_t <- Tensor.slice u dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, DM]
-    delta_t <- Tensor.slice delta dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, DM]
-    b_t <- Tensor.slice b dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, N]
-    c_t <- Tensor.slice c dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, N]
+    u_t <- slice u dim=1 start=t end=(t + 1) |> reshape shape=[B, DM]
+    delta_t <- slice delta dim=1 start=t end=(t + 1) |> reshape shape=[B, DM]
+    b_t <- slice b dim=1 start=t end=(t + 1) |> reshape shape=[B, N]
+    c_t <- slice c dim=1 start=t end=(t + 1) |> reshape shape=[B, N]
     state, y_t <- mamba_scan_step state u_t delta_t b_t c_t a d
-    y_step <- Tensor.unsqueeze y_t dim=1
-    y_all <- Tensor.concat y_all y_step dim=1
+    y_step <- unsqueeze y_t dim=1
+    y_all <- concat y_all y_step dim=1
   return y_all
 
 
 mamba2_expand_groups :: Tensor[B,G,N] -> Int -> Int -> Tensor[B,H,N]
 mamba2_expand_groups x heads n_groups = do
   per_group <- heads / n_groups
-  out <- Tensor.slice x dim=1 start=0 end=1
+  out <- slice x dim=1 start=0 end=1
   g <- 0
   count <- 1
   for h <- [1..heads) do
     switch <- count >= per_group
     g <- switch ? (g + 1) : g
     count <- switch ? 1 : (count + 1)
-    xh <- Tensor.slice x dim=1 start=g end=(g + 1)
-    out <- Tensor.concat out xh dim=1
+    xh <- slice x dim=1 start=g end=(g + 1)
+    out <- concat out xh dim=1
   return out
 
 
 mamba2_scan_step :: Tensor[B,H,HD,N] -> Tensor[B,H,HD] -> Tensor[B,H] -> Tensor[B,H,N] -> Tensor[B,H,N] -> Tensor[H] -> Tensor[H] -> (Tensor[B,H,HD,N], Tensor[B,H,HD])
 mamba2_scan_step state u_t dt_t b_t c_t a d = do
-  a_mul <- (Tensor.unsqueeze (Tensor.unsqueeze dt_t dim=-1) dim=-1) * (Tensor.unsqueeze (Tensor.unsqueeze (Tensor.unsqueeze a dim=0) dim=-1) dim=-1)
-  d_a <- Math.exp a_mul
-  d_b <- (Tensor.unsqueeze (Tensor.unsqueeze dt_t dim=-1) dim=-1) * (Tensor.unsqueeze b_t dim=2)
-  d_bx <- d_b * (Tensor.unsqueeze u_t dim=-1)
+  a_mul <- (unsqueeze (unsqueeze dt_t dim=-1) dim=-1) * (unsqueeze (unsqueeze (unsqueeze a dim=0) dim=-1) dim=-1)
+  d_a <- exp a_mul
+  d_b <- (unsqueeze (unsqueeze dt_t dim=-1) dim=-1) * (unsqueeze b_t dim=2)
+  d_bx <- d_b * (unsqueeze u_t dim=-1)
   state <- (state * d_a) + d_bx
-  y_t <- Tensor.matmul state (Tensor.unsqueeze c_t dim=-1) |> Tensor.reshape shape=[B, H, HD]
-  d_h <- Tensor.unsqueeze (Tensor.unsqueeze d dim=0) dim=-1
+  y_t <- matmul state (unsqueeze c_t dim=-1) |> reshape shape=[B, H, HD]
+  d_h <- unsqueeze (unsqueeze d dim=0) dim=-1
   y_t <- y_t + (u_t * d_h)
   return state, y_t
 
@@ -110,39 +121,39 @@ mamba2_scan_step state u_t dt_t b_t c_t a d = do
 mamba2_scan :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S,H] -> Tensor[B,S,GN] -> Tensor[B,S,GN] -> Path -> Path -> Path -> Path -> Int -> Int -> ?Float -> ?Float -> Tensor[B,S,D]
 mamba2_scan u gate dt b c a_path d_path dt_bias_path norm_weight_path n_groups head_dim ?time_step_min=0.0 ?time_step_max=1e30 = do
   a_log <- param a_path
-  a_exp <- Math.exp a_log
+  a_exp <- exp a_log
   a <- 0.0 - a_exp
   d <- param d_path
   dt_b <- param dt_bias_path
   norm_w <- param norm_weight_path
-  s <- Tensor.size u 1
-  b_last_dim <- Tensor.size b -1
+  s <- size u 1
+  b_last_dim <- size b -1
   state_dim <- b_last_dim / n_groups
-  u_t0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B, H, head_dim]
-  b_tg0 <- Tensor.slice b dim=1 start=0 end=1 |> Tensor.reshape shape=[B, n_groups, state_dim]
+  u_t0 <- slice u dim=1 start=0 end=1 |> reshape shape=[B, H, head_dim]
+  b_tg0 <- slice b dim=1 start=0 end=1 |> reshape shape=[B, n_groups, state_dim]
   b_t0 <- mamba2_expand_groups b_tg0 H n_groups
-  state <- ((Tensor.unsqueeze u_t0 dim=-1) * (Tensor.unsqueeze b_t0 dim=2)) * 0.0
-  dt_t0 <- Tensor.slice dt dim=1 start=0 end=1 |>
-    Tensor.reshape shape=[B, H] |> Math.add (Tensor.unsqueeze dt_b dim=0) |>
-    Math.exp |> Math.add 1.0 |> Math.log |> Math.clamp min=time_step_min max=time_step_max
-  c_tg0 <- Tensor.slice c dim=1 start=0 end=1 |> Tensor.reshape shape=[B, n_groups, state_dim]
+  state <- ((unsqueeze u_t0 dim=-1) * (unsqueeze b_t0 dim=2)) * 0.0
+  dt_t0 <- slice dt dim=1 start=0 end=1 |>
+    reshape shape=[B, H] |> add (unsqueeze dt_b dim=0) |>
+    exp |> add 1.0 |> log |> clamp min=time_step_min max=time_step_max
+  c_tg0 <- slice c dim=1 start=0 end=1 |> reshape shape=[B, n_groups, state_dim]
   c_t0 <- mamba2_expand_groups c_tg0 H n_groups
   state, y_t0 <- mamba2_scan_step state u_t0 dt_t0 b_t0 c_t0 a d
-  y_all <- Tensor.reshape y_t0 shape=[B, 1, D]
+  y_all <- reshape y_t0 shape=[B, 1, D]
   for t <- [1..s) do
-    u_t <- Tensor.slice u dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, H, head_dim]
-    dt_t <- Tensor.slice dt dim=1 start=t end=(t + 1) |>
-      Tensor.reshape shape=[B, H] |> Math.add (Tensor.unsqueeze dt_b dim=0) |>
-      Math.exp |> Math.add 1.0 |> Math.log |> Math.clamp min=time_step_min max=time_step_max
-    b_tg <- Tensor.slice b dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, n_groups, state_dim]
-    c_tg <- Tensor.slice c dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, n_groups, state_dim]
+    u_t <- slice u dim=1 start=t end=(t + 1) |> reshape shape=[B, H, head_dim]
+    dt_t <- slice dt dim=1 start=t end=(t + 1) |>
+      reshape shape=[B, H] |> add (unsqueeze dt_b dim=0) |>
+      exp |> add 1.0 |> log |> clamp min=time_step_min max=time_step_max
+    b_tg <- slice b dim=1 start=t end=(t + 1) |> reshape shape=[B, n_groups, state_dim]
+    c_tg <- slice c dim=1 start=t end=(t + 1) |> reshape shape=[B, n_groups, state_dim]
     b_t <- mamba2_expand_groups b_tg H n_groups
     c_t <- mamba2_expand_groups c_tg H n_groups
     state, y_t <- mamba2_scan_step state u_t dt_t b_t c_t a d
-    y_all <- Tensor.concat y_all (Tensor.reshape y_t shape=[B, 1, D]) dim=1
+    y_all <- concat y_all (reshape y_t shape=[B, 1, D]) dim=1
   gated <- y_all * (silu gate)
   group_dim <- D / n_groups
-  gated_grouped <- Tensor.reshape gated shape=[B, S, n_groups, group_dim]
-  normed_grouped <- NN.rmsnorm_noscale gated_grouped eps=1e-5 dim=group_dim cast_float=true
-  normed <- Tensor.reshape normed_grouped shape=[B, S, D]
+  gated_grouped <- reshape gated shape=[B, S, n_groups, group_dim]
+  normed_grouped <- rmsnorm_noscale gated_grouped eps=1e-5 dim=group_dim cast_float=true
+  normed <- reshape normed_grouped shape=[B, S, D]
   return normed * norm_w

@@ -1,14 +1,13 @@
 {-# CHECKPOINTS ["google/gemma-2-9b", "google/gemma-2-9b-it"] #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (gelu_pytorch_tanh, tanh)
-import Cache
-import Cache
-import Attention (attention, attention_gemma2, reshape_heads, merge_heads)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D = 3584
 V = 256000
@@ -22,7 +21,6 @@ THETA = 10000.0
 C_LOCAL = 4096
 C_FULL = 8192
 ATTN_SCALE = 0.0625
-ATTN_LOGIT_SOFTCAP = 50.0
 LOGIT_SOFTCAP = 30.0
 EMB_SCALE = 59.86651818838306
 HAS_LM_HEAD = false
@@ -43,7 +41,7 @@ gemma2_block x i pos_ids attn_mask past_kv = do
     v <- Tensor.repeat v repeats=(H / KVH)
     window <- (i % 2) == 0 ? C_LOCAL : C_FULL
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- false ? (attention_gemma2 q k v mask softcap=ATTN_LOGIT_SOFTCAP scale=ATTN_SCALE) : (attention q k v mask scale=ATTN_SCALE)
+    a <- (attention q k v mask scale=ATTN_SCALE)
     a <- a |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   a <- rms@post_attention_layernorm a
@@ -67,7 +65,7 @@ gemma2 input_ids attn_mask past_kv use_cache = do
       x, new_i <- gemma2_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
     x <- rms@norm x
-    logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V weight_path=@@lm_head.weight) : (NN.linear@embed_tokens x dim=V)
+    logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V weight_path="@@lm_head.weight") : (NN.linear@embed_tokens x dim=V)
     logits <- logits / LOGIT_SOFTCAP
     logits <- tanh logits
     logits <- logits * LOGIT_SOFTCAP

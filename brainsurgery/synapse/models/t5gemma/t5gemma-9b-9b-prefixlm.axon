@@ -1,13 +1,13 @@
 {-# CHECKPOINTS ["google/t5gemma-9b-9b-prefixlm", "google/t5gemma-9b-9b-prefixlm-it"] #-}
 {-# TASK "seq2seq_lm" #-}
 
-import Activations
 import Activations (gelu_pytorch_tanh, sigmoid)
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
-import Masking (causal_mask, bidirectional_mask)
-import Positions (position_ids, rope_pair_base)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (bidirectional_mask, causal_mask)
 import Math (mul)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D_ENC = 3584
 D_DEC = 3584
@@ -53,7 +53,7 @@ t5gemma_encoder_block x i pos_ids attention_mask = do
     full_attn <- ((i + 1) % ROPE_PERIOD_ENC) == 0
     window <- full_attn ? WIN_FULL_ENC : WIN_SLIDE_ENC
     mask <- bidirectional_mask q k window=window padding_mask=attention_mask
-    return attention_masked q k v mask=mask causal=false scale=ATTN_SCALE_ENC |> merge_heads |> NN.linear@o_proj dim=D_ENC bias=false
+    return attention q k v mask scale=ATTN_SCALE_ENC |> merge_heads |> NN.linear@o_proj dim=D_ENC bias=false
   a <- NN.rmsnorm@post_self_attn_layernorm a eps=EPS_ENC cast_float=true unit_offset=true
   x <- x + a
   xn <- NN.rmsnorm@pre_feedforward_layernorm x eps=EPS_ENC cast_float=true unit_offset=true
@@ -77,7 +77,7 @@ t5gemma_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_atte
     full_attn <- ((i + 1) % ROPE_PERIOD_DEC) == 0
     window <- full_attn ? WIN_FULL_DEC : WIN_SLIDE_DEC
     mask <- causal_mask q k window=window padding_mask=decoder_attention_mask
-    return attention_masked q k v mask=mask causal=false scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
+    return attention q k v mask scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
   a <- NN.rmsnorm@post_self_attn_layernorm a eps=EPS_DEC cast_float=true unit_offset=true
   x <- x + a
   xn <- NN.rmsnorm@pre_cross_attn_layernorm x eps=EPS_DEC cast_float=true unit_offset=true
@@ -88,7 +88,7 @@ t5gemma_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_atte
     k <- Tensor.repeat k repeats=(H_DEC / KVH_DEC)
     v <- Tensor.repeat v repeats=(H_DEC / KVH_DEC)
     mask <- bidirectional_mask q k padding_mask=encoder_attention_mask
-    return attention_masked q k v mask=mask causal=false scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
+    return attention q k v mask scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
   a <- NN.rmsnorm@post_cross_attn_layernorm a eps=EPS_DEC cast_float=true unit_offset=true
   x <- x + a
   xn <- NN.rmsnorm@pre_feedforward_layernorm x eps=EPS_DEC cast_float=true unit_offset=true

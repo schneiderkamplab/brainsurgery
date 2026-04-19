@@ -1,16 +1,14 @@
 {-# CHECKPOINTS "allenai/OLMoE-1B-7B-0924" #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (silu)
-import Cache
-import Cache
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul)
+import MoE (scatter_add, select)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D = 2048
 L = 16
@@ -41,7 +39,7 @@ olmoe_decoder_block x pos_ids attn_mask past_kv = do
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads
     a <- NN.linear@o_proj a dim=D
     return a, new_kv
   x <- x + a
@@ -50,9 +48,9 @@ olmoe_decoder_block x pos_ids attn_mask past_kv = do
     topk_scores, topk_indices <- NN.linear@gate xn dim=E |> Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=EPT dim=-1
     m <- Tensor.zeros_like xn
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- select xn topk_scores topk_indices e
       x_upd <- expert_ffn x_sel
-      m <- MoE.scatter_add m token_idx x_upd sel_scores
+      m <- scatter_add m token_idx x_upd sel_scores
     return m
   return x + m, new_kv
 

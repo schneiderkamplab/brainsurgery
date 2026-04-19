@@ -1,15 +1,13 @@
 {-# CHECKPOINTS ["google/gemma-3-270m", "google/gemma-3-270m-it", "google/gemma-3-1b-pt", "google/gemma-3-1b-it", "google/gemma-3-4b-pt", "google/gemma-3-4b-it", "google/gemma-3-12b-pt", "google/gemma-3-12b-it", "google/gemma-3-27b-pt", "google/gemma-3-27b-it"] #-}
 
 import Activations (gelu_pytorch_tanh)
-import Cache
-import Cache
-import Config
-import Params
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul, sqrt)
+import Params (has_root)
+import Positions (position_ids, rope_pair_base)
+
+
 
 -- `CFG` selects where textual model settings live in config.json:
 -- - Gemma 3 text-only configs: root keys (CFG = "")
@@ -18,7 +16,7 @@ CFG = (Config.has_key "text_config") ? "text_config" : ""
 
 -- Parameter root for checkpoint key lookup.
 -- Some checkpoints namespace everything under `language_model.*`.
-PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
+PARAM_ROOT = (has_root "language_model") ? "language_model" : ""
 
 -- Gemma 3 uses either `_sliding_window_pattern` or `sliding_window_pattern`
 -- depending on checkpoint/config exporter version.
@@ -56,7 +54,7 @@ gemma3_block x i pos_ids attn_mask past_kv = do
     v <- Tensor.repeat v repeats=(H / KVH)
     window <- ((i + 1) % ROPE_PERIOD) == 0 ? WIN_LONG : WIN_LOCAL
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   a <- NN.rmsnorm@post_attention_layernorm a cast_float=true unit_offset=true
   x <- x + a

@@ -105,7 +105,7 @@ def test_build_pipeline_plan_evenly_splits_layers_for_visible_gpu_count(
 def test_build_pipeline_plan_uses_model_symbols_for_materialized_layer_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec = _load_spec("brainsurgery/synapse/models/gpt-oss/gpt-oss-20b.axon")
+    spec = _load_spec("brainsurgery/synapse/models/smollm/SmolLM-1.7B.axon")
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr("torch.cuda.device_count", lambda: 2)
     plan = build_pipeline_plan(spec, requested_device="cuda")

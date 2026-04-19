@@ -1,14 +1,14 @@
 {-# CHECKPOINTS ["google/gemma-2-2b", "google/gemma-2-2b-it", "google/gemma-2-9b", "google/gemma-2-9b-it", "google/gemma-2-27b", "google/gemma-2-27b-it"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (gelu_pytorch_tanh, tanh)
-import Cache
-import Positions (position_ids, rope_pair_base)
-import Math (sqrt, mul)
-import Attention (attention, attention_gemma2, reshape_heads, merge_heads)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
+import Math (mul, sqrt)
+import Params (has_root)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D = Config.int "hidden_size" default=2304
 V = Config.int "vocab_size" default=256000
@@ -28,7 +28,7 @@ ATTN_SCALE = 1.0 / sqrt (Config.float "query_pre_attn_scalar" default=256.0)
 ATTN_LOGIT_SOFTCAP = Config.float "attn_logit_softcapping" default=50.0
 LOGIT_SOFTCAP = Config.float "final_logit_softcapping" default=30.0
 EMB_SCALE = sqrt D
-HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD = has_root "lm_head"
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true unit_offset=true
@@ -46,7 +46,9 @@ gemma2_block x i pos_ids attn_mask past_kv = do
     v <- Tensor.repeat v repeats=(H / KVH)
     window <- (i % 2) == 0 ? C_LOCAL : C_FULL
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- ((Config.str "_attn_implementation" default="") == "eager") ? (attention_gemma2 q k v mask softcap=ATTN_LOGIT_SOFTCAP scale=ATTN_SCALE) : (attention q k v mask scale=ATTN_SCALE)
+    a <- ((Config.str "_attn_implementation" default="") == "eager")
+      ? (attention q k v mask softcap=ATTN_LOGIT_SOFTCAP scale=ATTN_SCALE zero_masked_after_softmax=false fp32_compute=true)
+      : (attention q k v mask scale=ATTN_SCALE)
     a <- a |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   a <- rms@post_attention_layernorm a

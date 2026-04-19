@@ -51,15 +51,31 @@ Absolute-path strategy:
 - flatten to absolute paths where possible
 - for dynamic indices, use absolute templates (for example `@@h.{i}.attn.c_attn.weight`) and instantiate during lowering/codegen
 
-### Phase 3: Add explicit desugaring/flattening stage
+### Phase 3: Resolve imports into a self-contained linked program
+
+Before flattening, build a closed linked program IR:
+
+1. parse source files
+2. resolve imports/exports across modules
+3. collect reachable definitions from selected main entrypoint
+4. apply canonical namespacing/renaming to avoid collisions
+5. keep this as linked in-memory IR (single-file emission optional)
+
+Goal:
+
+- desugaring and later stages run on a self-contained program with no unresolved imports
+
+### Phase 4: Add explicit desugaring/flattening stage
 
 Insert a `Surface Axon -> Flat Core Axon` pass into the pipeline:
 
 1. parse/import-load
 2. syntax/AST validation
-3. **desugar/flatten (new)**
-4. typecheck on flat core
-5. lower on flat core
+3. path templating normalization
+4. import/link resolution to closed program
+5. **desugar/flatten (new)**
+6. typecheck on flat core
+7. lower on flat core
 
 Desugaring responsibilities:
 
@@ -94,7 +110,7 @@ loop_else i x new_kv = do
 out <- cond ? (then_helper args...) : (else_helper args...)
 ```
 
-### Phase 4: Simplify later stages
+### Phase 5: Simplify later stages
 
 After flat-core desugaring is in place, simplify subsequent stages:
 
@@ -102,7 +118,7 @@ After flat-core desugaring is in place, simplify subsequent stages:
 - lowering: structural translation only, minimal heuristics
 - path resolution: no ambient/root guessing for model code, lexical and explicit resolution
 
-### Phase 5: Continue with the remaining reimplement-Axon agenda
+### Phase 6: Continue with the remaining reimplement-Axon agenda
 
 Once phases 1-4 are stable, continue executing the numbered plan below:
 

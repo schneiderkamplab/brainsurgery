@@ -1,11 +1,12 @@
 {-# CHECKPOINTS "google-t5/t5-3b" #-}
 {-# TASK "seq2seq_lm" #-}
 
-import Activations
 import Activations (relu)
-import Attention (attention, reshape_heads, merge_heads)
-import Masking (causal_mask, bidirectional_mask)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (bidirectional_mask, causal_mask)
 import Positions (relative_position_bias)
+
+
 
 D = 1024
 V = 32128

@@ -1,15 +1,13 @@
 {-# CHECKPOINTS "meta-llama/Meta-Llama-3-70B" #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (silu)
-import Cache
-import Cache
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_freq_scale)
 import Math (mul)
+import Positions (position_ids, rope_pair_freq_scale)
+
+
 
 D = 8192
 V = 128256
@@ -42,7 +40,7 @@ llama3_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask |> merge_heads |> NN.linear@o_proj dim=D
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x

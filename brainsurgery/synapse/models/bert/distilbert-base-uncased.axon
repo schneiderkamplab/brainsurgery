@@ -1,12 +1,12 @@
 {-# CHECKPOINTS "distilbert/distilbert-base-uncased" #-}
 {-# TASK "masked_lm" #-}
 
-import Activations
 import Activations (gelu)
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
-import Masking (causal_mask)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (bidirectional_mask)
 import Positions (position_ids)
+
+
 
 D = 768
 V = 30522
@@ -21,7 +21,8 @@ distil_block x attn_mask = do
     q <- NN.linear@q_lin x dim=D bias=true |> reshape_heads heads=H
     k <- NN.linear@k_lin x dim=D bias=true |> reshape_heads heads=H
     v <- NN.linear@v_lin x dim=D bias=true |> reshape_heads heads=H
-    return attention_masked q k v mask=attn_mask padding_mask=true causal=false |> merge_heads |> NN.linear@out_lin dim=D bias=true
+    keep <- bidirectional_mask q k padding_mask=attn_mask
+    return attention q k v keep |> merge_heads |> NN.linear@out_lin dim=D bias=true
   x <- x + a
   x <- NN.layernorm@sa_layer_norm x eps=EPS
   m <- NN.linear@ffn.lin1 x dim=FFN bias=true |> gelu

@@ -2,15 +2,14 @@
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
 
-import Config
-import Activations (sigmoid)
 import Activations (relu2)
-import SSM (causal_conv1d, mamba2_scan)
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Math (sqrt)
+import MoE (grouped_sigmoid_router, scatter_add, select)
+import SSM (causal_conv1d, mamba2_scan)
+
+
 
 MODEL_D = Config.int "hidden_size" default=2688
 V      = Config.int "vocab_size" default=131072
@@ -51,17 +50,34 @@ shared_ffn x = do
   up <- NN.linear@shared_experts.up_proj x dim=SFFN bias=false
   return up |> relu2 |> NN.linear@shared_experts.down_proj dim=MODEL_D bias=false
 
+shared_relu2_moe :: Tensor[B,S,D] -> Int -> Int -> Int -> Float -> Bool -> Tensor[B,S,D]
+shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob = do
+  topk_weights, topk_indices <- grouped_sigmoid_router@gate hidden top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor weight=@weight e_score_correction_bias=@gate.e_score_correction_bias
+  gate_w <- scope@gate do
+    return Params.param path=@weight
+  experts <- Tensor.size gate_w 0
+  routed <- Tensor.zeros_like hidden
+  for@experts e <- [0..experts) do
+    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
+    up <- NN.linear@up_proj x_sel dim=null bias=false
+    x_upd <- up |> relu2 |> NN.linear@down_proj dim=null bias=false
+    routed <- scatter_add routed token_idx x_upd sel_scores
+  shared <- scope@shared_experts do
+    up <- NN.linear@up_proj hidden dim=null bias=false
+    return up |> relu2 |> NN.linear@down_proj dim=null bias=false
+  return routed + shared
+
 nemotron_h_attention :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 nemotron_h_attention x attn_mask = do
   q <- NN.linear@q_proj x dim=(H * HD) bias=false |> reshape_heads heads=H
   k <- NN.linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
   v <- NN.linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
   mask <- causal_mask q k
-  return attention_masked q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=MODEL_D bias=false
+  return attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_D bias=false
 
 nemotron_h_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_moe xn = do
-  return MoE.shared_relu2_moe xn top_k=EPT n_group=N_GROUP topk_group=TOPK_GROUP routed_scaling_factor=ROUTE_SCALE norm_topk_prob=(NORM_TOPK_PROB != 0)
+  return shared_relu2_moe xn top_k=EPT n_group=N_GROUP topk_group=TOPK_GROUP routed_scaling_factor=ROUTE_SCALE norm_topk_prob=(NORM_TOPK_PROB != 0)
 
 nemotron_h_mamba :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_mamba xn = do

@@ -1,13 +1,11 @@
 {-# CHECKPOINTS ["EleutherAI/gpt-neox-20b", "EleutherAI/pythia-6.9b", "EleutherAI/pythia-12b"] #-}
 {-# TASK "causal_lm" #-}
-import Config
 import Activations (gelu, gelu_new)
-import Cache
-import Cache
-import Attention (merge_heads, split_qkv_heads)
-import Attention attention_masked
+import Attention (attention, merge_heads, split_qkv_heads)
 import Masking (causal_mask)
 import Positions (position_ids, rope_pair_base)
+
+
 
 D = Config.int "hidden_size" default=6144
 V = Config.int "vocab_size" default=50432
@@ -34,7 +32,7 @@ gpt_neox_block x pos_ids attn_mask past_kv = do
     q, k <- rope_pair_base q k pos_ids theta=THETA partial_rotary_factor=ROTARY_PCT
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask |> merge_heads |> NN.linear@dense dim=D bias=true
+    a <- attention q k v mask |> merge_heads |> NN.linear@dense dim=D bias=true
     return a, new_kv
   x_attn <- x + a
   xn2 <- neox_ln@post_attention_layernorm (PAR ? x : x_attn)

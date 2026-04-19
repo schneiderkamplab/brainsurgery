@@ -1,14 +1,13 @@
 {-# CHECKPOINTS ["bigcode/starcoder2-3b", "bigcode/starcoder2-7b", "bigcode/starcoder2-15b"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (gelu, gelu_pytorch_tanh)
-import Cache
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
+import Params (has_root)
 import Positions (position_ids, rope_pair_base)
+
+
 
 D = Config.int "hidden_size" default=4608
 V = Config.int "vocab_size" default=49152
@@ -25,8 +24,8 @@ SW = HAS_SLIDING_WINDOW ? (Config.int "sliding_window" default=4096) : C
 HAS_ROPE_THETA = Config.has_value "rope_theta"
 THETA = HAS_ROPE_THETA ? (Config.float "rope_theta" default=10000.0) : 10000.0
 ACT = Config.str "hidden_act" default="gelu_pytorch_tanh"
-HAS_LM_HEAD = Params.has_root "lm_head"
-HAS_LM_HEAD_BIAS = Params.has_root "lm_head.bias"
+HAS_LM_HEAD = has_root "lm_head"
+HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
 starcoder2_ln :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 starcoder2_ln@path x = NN.layernorm@path x eps=EPS
@@ -46,7 +45,7 @@ starcoder2_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=SW padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask eager=false |> merge_heads |> NN.linear@o_proj dim=D bias=true
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D bias=true
     return a, new_kv
   x <- x + a
   xn2 <- starcoder2_ln@post_attention_layernorm x

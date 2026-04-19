@@ -1,16 +1,14 @@
 {-# CHECKPOINTS ["facebook/opt-1.3b", "facebook/opt-6.7b", "facebook/opt-13b"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (relu)
-import Cache
-import Cache
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids)
 import Math (sqrt)
+import Params (has_root)
+import Positions (position_ids)
+
+
 
 D = Config.int "hidden_size" default=2048
 V = Config.int "vocab_size" default=50272
@@ -23,8 +21,8 @@ C = Config.int "max_position_embeddings" default=2048
 DO_PRE_LN = Config.bool "do_layer_norm_before" default=true
 ACT = Config.str "activation_function" default="relu"
 ATTN_SCALE = 1.0 / sqrt HD
-HAS_LM_HEAD = Params.has_root "lm_head"
-HAS_DECODER_ROOT = Params.has_root "decoder.embed_tokens"
+HAS_LM_HEAD = has_root "lm_head"
+HAS_DECODER_ROOT = has_root "decoder.embed_tokens"
 
 opt_ln :: @Path -> Tensor -> Tensor
 opt_ln@path x = NN.layernorm@path x eps=EPS
@@ -42,7 +40,7 @@ opt_block x attn_mask past_kv = do
     v <- NN.linear@v_proj xn dim=D bias=true |> reshape_heads heads=H
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=1.0 eager=true |> merge_heads |> NN.linear@out_proj dim=D bias=true
+    a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@out_proj dim=D bias=true
     return a, new_kv
   x <- x + a
   x <- DO_PRE_LN ? x : (opt_ln@self_attn_layer_norm x)

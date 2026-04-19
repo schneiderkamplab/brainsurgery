@@ -2,12 +2,12 @@
 {-# TASK "seq2seq_lm" #-}
 {-# TOKENIZER "Helsinki-NLP/opus-mt-en-de" #-}
 
-import Activations
 import Activations (silu)
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
-import Masking (causal_mask)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (bidirectional_mask, causal_mask)
 import Positions (position_ids)
+
+
 
 D = 512
 V = 58101
@@ -26,7 +26,8 @@ marian_encoder_layer x attention_mask = do
     q <- NN.linear@q_proj x dim=D bias=true |> reshape_heads heads=H_ENC
     k <- NN.linear@k_proj x dim=D bias=true |> reshape_heads heads=H_ENC
     v <- NN.linear@v_proj x dim=D bias=true |> reshape_heads heads=H_ENC
-    return attention_masked q k v mask=attention_mask padding_mask=true causal=false |> merge_heads |> NN.linear@out_proj dim=D bias=true
+    keep <- bidirectional_mask q k padding_mask=attention_mask
+    return attention q k v keep |> merge_heads |> NN.linear@out_proj dim=D bias=true
   x <- x + a
   x <- NN.layernorm@self_attn_layer_norm x eps=EPS
   h <- NN.linear@fc1 x dim=FFN_ENC bias=true |> silu
@@ -42,14 +43,15 @@ marian_decoder_layer x enc_hidden encoder_attention_mask decoder_attention_mask 
     k <- NN.linear@k_proj x dim=D bias=true |> reshape_heads heads=H_DEC
     v <- NN.linear@v_proj x dim=D bias=true |> reshape_heads heads=H_DEC
     mask <- causal_mask q k window=1048576 padding_mask=decoder_attention_mask
-    return attention_masked q k v mask=mask causal=false |> merge_heads |> NN.linear@out_proj dim=D bias=true
+    return attention q k v mask |> merge_heads |> NN.linear@out_proj dim=D bias=true
   x <- x + a
   x <- NN.layernorm@self_attn_layer_norm x eps=EPS
   a <- scope@encoder_attn do
     q <- NN.linear@q_proj x dim=D bias=true |> reshape_heads heads=H_DEC
     k <- NN.linear@k_proj enc_hidden dim=D bias=true |> reshape_heads heads=H_DEC
     v <- NN.linear@v_proj enc_hidden dim=D bias=true |> reshape_heads heads=H_DEC
-    return attention_masked q k v mask=encoder_attention_mask padding_mask=true causal=false |> merge_heads |> NN.linear@out_proj dim=D bias=true
+    keep <- bidirectional_mask q k padding_mask=encoder_attention_mask
+    return attention q k v keep |> merge_heads |> NN.linear@out_proj dim=D bias=true
   x <- x + a
   x <- NN.layernorm@encoder_attn_layer_norm x eps=EPS
   h <- NN.linear@fc1 x dim=FFN_DEC bias=true |> silu

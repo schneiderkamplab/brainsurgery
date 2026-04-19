@@ -1,17 +1,15 @@
 {-# CHECKPOINTS ["microsoft/Phi-3.5-MoE-instruct"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (silu)
-import Cache
-import Cache
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base, rope_pair_longrope)
 import Math (mul, sqrt)
+import MoE (scatter_add, select, sparsemixer_router)
+import Params (has_root)
+import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+
+
 
 D = Config.int "hidden_size" default=4096
 V = Config.int "vocab_size" default=32064
@@ -36,8 +34,8 @@ HAS_LONGROPE = Config.has_key "long_factor" root="rope_scaling"
 ROPE_ATTENTION_FACTOR = Config.float "long_mscale" root="rope_scaling" default=1.0
 WINDOW = Config.int "sliding_window" default=131072
 ROUTER_JITTER = Config.float "router_jitter_noise" default=0.01
-HAS_LM_HEAD = Params.has_root "lm_head"
-HAS_LM_HEAD_BIAS = Params.has_root "lm_head.bias"
+HAS_LM_HEAD = has_root "lm_head"
+HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
 ATTN_SCALE = 1.0 / sqrt HD
 
@@ -55,17 +53,17 @@ phimoe_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=WINDOW padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=true
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=true
     return a, new_kv
   x <- x + a
   xn <- NN.layernorm@post_attention_layernorm x eps=EPS bias=true
   m <- scope@block_sparse_moe do
-    topk_scores, topk_indices <- MoE.sparsemixer_router xn E ROUTER_JITTER
+    topk_scores, topk_indices <- sparsemixer_router xn E ROUTER_JITTER
     m <- xn * 0.0
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- select xn topk_scores topk_indices e
       x_upd <- NN.linear@w1 x_sel dim=FFN |> silu |> mul (NN.linear@w3 x_sel dim=FFN) |> NN.linear@w2 dim=D bias=false
-      m <- MoE.scatter_add m token_idx x_upd sel_scores
+      m <- scatter_add m token_idx x_upd sel_scores
     return m
   return x + m, new_kv
 

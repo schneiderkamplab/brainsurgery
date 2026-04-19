@@ -1,15 +1,13 @@
 {-# CHECKPOINTS "mistralai/Ministral-3-8B-Base-2512" #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (silu)
-import Cache
-import Cache
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_yarn)
 import Math (floor, log, mul)
+import Positions (position_ids, rope_pair_yarn)
+
+
 
 TEXT_PARAM_ROOT = "language_model"
 D = 4096
@@ -35,9 +33,9 @@ mistral3_norm@path x = NN.rmsnorm@path x eps=EPS
 mistral3_query_scale :: Tensor[B,S] -> Tensor[B,1,S,1]
 mistral3_query_scale pos_ids = do
   scaled <- pos_ids / ROPE_CONTEXT
-  bucket <- Math.floor scaled
+  bucket <- floor scaled
   shifted <- bucket + 1.0
-  logged <- Math.log shifted
+  logged <- log shifted
   beta_scaled <- logged * Q_SCALE_BETA
   gain <- beta_scaled + 1.0
   gain3 <- Tensor.unsqueeze gain dim=1
@@ -58,7 +56,7 @@ mistral3_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask |> merge_heads |> NN.linear@o_proj dim=D
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   x <- x + a
   xn <- mistral3_norm@post_attention_layernorm x

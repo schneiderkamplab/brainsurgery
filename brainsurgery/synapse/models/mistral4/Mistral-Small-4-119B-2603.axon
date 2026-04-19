@@ -1,19 +1,17 @@
 {-# CHECKPOINTS "mistralai/Mistral-Small-4-119B-2603" #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (silu)
-import Cache
-import Cache
-import MoE
-import Params
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_yarn)
 import Math (floor, log, mul)
+import MoE (grouped_swiglu_ffn_basic, softmax_topk_router)
+import Params (has_root)
+import Positions (position_ids, rope_pair_yarn)
 
-MODEL_ROOT = (Params.has_root "language_model.model") ? "language_model" : ""
+
+
+MODEL_ROOT = (has_root "language_model.model") ? "language_model" : ""
 D = 4096
 V = 131072
 L = 36
@@ -81,7 +79,7 @@ mistral4_attn x pos_ids attn_mask past_kv = do
     q <- q * q_scale
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads
     a <- NN.linear@o_proj a dim=D bias=false
     return a, new_kv
   return a, new_kv
@@ -92,8 +90,8 @@ mistral4_moe xn = do
     gate <- NN.linear@gate_proj xn dim=(EM * SE) bias=false
     up <- NN.linear@up_proj xn dim=(EM * SE) bias=false
     return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
-  topk_weights, topk_indices <- MoE.softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true routed_scaling_factor=ROUTE_SCALE
-  routed <- MoE.grouped_swiglu_ffn_basic xn topk_weights topk_indices E
+  topk_weights, topk_indices <- softmax_topk_router@gate xn top_k=EPT routed_scaling_factor=ROUTE_SCALE
+  routed <- grouped_swiglu_ffn_basic xn topk_weights topk_indices E
   return shared + routed
 
 mistral4_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)

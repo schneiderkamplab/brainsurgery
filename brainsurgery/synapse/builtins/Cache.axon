@@ -1,7 +1,12 @@
 import List
-import Prelude
 import Tensor
-export (append, index, init, past_length, update)
+export (
+  append,
+  index,
+  init,
+  past_length,
+  update,
+)
 
 type CacheLayer = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
 type Cache = List[CacheLayer]

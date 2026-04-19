@@ -1,21 +1,20 @@
 {-# CHECKPOINTS ["allenai/Flex-math-2x7B-1T", "allenai/Flex-news-2x7B-1T", "allenai/Flex-pes2o-2x7B-1T", "allenai/Flex-code-2x7B-1T", "allenai/Flex-creative-2x7B-1T", "allenai/Flex-reddit-2x7B-1T", "danish-foundation-models/dfm-moe-open-v0-8x7b-pt", "allenai/FlexOlmo-7x7B-1T"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
 import Activations (silu)
-import Cache
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul, sqrt)
+import MoE (scatter_add, select)
+import Positions (position_ids, rope_pair_base)
+
+
 
 -- FlexOlmo architecture constants.
 D    = Config.int "hidden_size" default=4096                       -- residual hidden size
 V    = Config.int "vocab_size" default=100352                      -- tokenizer vocabulary size
 L    = Config.int "num_hidden_layers" default=32                   -- number of decoder layers
-H    = Config.int "num_attention_heads" default=32                 -- attention_masked head count
+H    = Config.int "num_attention_heads" default=32                 -- attention head count
 HD   = D / H                                                        -- per-head dimension
 E    = Config.int "num_experts" default=2                          -- routed experts
 EPT  = Config.int "num_experts_per_tok" default=2                  -- top-k experts per token
@@ -43,7 +42,7 @@ flexolmo_decoder_block x pos_ids attn_mask past_kv = do
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads
     a <- NN.linear@o_proj a dim=D
     return a, new_kv
   a_norm <- rms@post_attention_layernorm a
@@ -53,9 +52,9 @@ flexolmo_decoder_block x pos_ids attn_mask past_kv = do
       Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=EPT dim=-1
     m <- x * 0.0
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select x topk_scores topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- select x topk_scores topk_indices e
       x_upd <- expert_ffn x_sel
-      m <- MoE.scatter_add m token_idx x_upd sel_scores
+      m <- scatter_add m token_idx x_upd sel_scores
     return m
   m_norm <- rms@post_feedforward_layernorm m
   return x + m_norm, new_kv

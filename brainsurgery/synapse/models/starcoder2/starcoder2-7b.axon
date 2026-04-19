@@ -1,15 +1,13 @@
 {-# CHECKPOINTS "bigcode/starcoder2-7b" #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (gelu, gelu_pytorch_tanh)
-import Cache
-import Cache
-import Params
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
+import Params (has_root)
 import Positions (position_ids, rope_pair_base)
+
+
 
 D = 4608
 V = 49152
@@ -23,7 +21,7 @@ SW = 4096
 THETA = 1000000.0
 ACT = "gelu_pytorch_tanh"
 HAS_LM_HEAD = false
-HAS_LM_HEAD_BIAS = Params.has_root "lm_head.bias"
+HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
 starcoder2_ln :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 starcoder2_ln@path x = NN.layernorm@path x eps=EPS
@@ -43,7 +41,7 @@ starcoder2_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=SW padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask eager=false |> merge_heads |> NN.linear@o_proj dim=D bias=true
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D bias=true
     return a, new_kv
   x <- x + a
   xn2 <- starcoder2_ln@post_attention_layernorm x

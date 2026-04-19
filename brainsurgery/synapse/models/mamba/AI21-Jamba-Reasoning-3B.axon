@@ -2,11 +2,13 @@
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
 
-import Activations
 import Activations (silu)
-import SSM causal_conv1d mamba_scan
-import Attention (reshape_heads, merge_heads, attention_causal_scaled)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (causal_mask)
 import Math (mul)
+import SSM (causal_conv1d, mamba_scan)
+
+
 
 D = 2560
 V = 65536
@@ -35,30 +37,30 @@ dense_ffn x = do
 attn_core :: Tensor[B,S,D] -> Tensor[B,S,D]
 attn_core x = do
   x_norm <- rms@input_layernorm x
-  q <- NN.linear@self_attn.q_proj x_norm dim=H * HD |> reshape_heads heads=H
-  k <- NN.linear@self_attn.k_proj x_norm dim=KVH * HD |> reshape_heads heads=KVH
-  k <- Tensor.repeat k repeats=H / KVH
-  v <- NN.linear@self_attn.v_proj x_norm dim=KVH * HD |> reshape_heads heads=KVH
-  v <- Tensor.repeat v repeats=H / KVH
-  a <- attention_causal_scaled q k v SCALE true |> merge_heads
+  q <- NN.linear@self_attn.q_proj x_norm dim=(H * HD) |> reshape_heads heads=H
+  k <- NN.linear@self_attn.k_proj x_norm dim=(KVH * HD) |> reshape_heads heads=KVH
+  k <- Tensor.repeat k repeats=(H / KVH)
+  v <- NN.linear@self_attn.v_proj x_norm dim=(KVH * HD) |> reshape_heads heads=KVH
+  v <- Tensor.repeat v repeats=(H / KVH)
+  keep <- causal_mask q k
+  a <- attention q k v keep scale=SCALE |> merge_heads
   a <- NN.linear@self_attn.o_proj a dim=D
   return x + a
 
 mamba_core :: Tensor[B,S,D] -> Tensor[B,S,D]
 mamba_core x = do
   x_norm <- rms@input_layernorm x
-  y <- do
-    in_proj <- NN.linear@mamba.in_proj x_norm dim=2 * I
-    u, gate <- Tensor.split in_proj sizes=[I, I]
-    u_conv <- causal_conv1d@mamba.conv1d u activation=silu
-    params <- NN.linear@mamba.x_proj u_conv dim=R + 2 * N
-    dt, b, c <- Tensor.split params sizes=[R, N, N]
-    dt <- NN.rmsnorm@mamba.dt_layernorm dt eps=EPS cast_float=true
-    b <- NN.rmsnorm@mamba.b_layernorm b eps=EPS cast_float=true
-    c <- NN.rmsnorm@mamba.c_layernorm c eps=EPS cast_float=true
-    delta <- NN.linear@mamba.dt_proj dt dim=I bias=true
-    y_scan <- mamba_scan u_conv delta b c A="mamba.A_log" D="mamba.D" a_is_log=true
-    return y_scan |> mul (silu gate) |> NN.linear@mamba.out_proj dim=D
+  in_proj <- NN.linear@mamba.in_proj x_norm dim=2 * I
+  u, gate <- Tensor.split in_proj sizes=[I, I]
+  u_conv <- causal_conv1d@mamba.conv1d u activation=silu
+  params <- NN.linear@mamba.x_proj u_conv dim=R + 2 * N
+  dt, b, c <- Tensor.split params sizes=[R, N, N]
+  dt <- NN.rmsnorm@mamba.dt_layernorm dt eps=EPS cast_float=true
+  b <- NN.rmsnorm@mamba.b_layernorm b eps=EPS cast_float=true
+  c <- NN.rmsnorm@mamba.c_layernorm c eps=EPS cast_float=true
+  delta <- NN.linear@mamba.dt_proj dt dim=I bias=true
+  y_scan <- mamba_scan u_conv delta b c A="mamba.A_log" D="mamba.D" a_is_log=true
+  y <- y_scan |> mul (silu gate) |> NN.linear@mamba.out_proj dim=D
   return x + y
 
 jamba_3b :: TokenIds[B,S] -> Tensor[B,S,V]

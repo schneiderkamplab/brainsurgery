@@ -1,16 +1,14 @@
 {-# CHECKPOINTS ["glm_4_5_air"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
 import Activations (silu)
-import Cache
-import Cache
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul)
+import MoE (grouped_sigmoid_router, scatter_add, select)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D    = Config.int "hidden_size" default=4096
 V    = Config.int "vocab_size" default=151552
@@ -65,7 +63,7 @@ glm4_moe_attn x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   return x + a, new_kv
 
@@ -84,12 +82,12 @@ glm4_moe_sparse_block x pos_ids attn_mask past_kv = do
   m <- scope@mlp do
     shared <- scope@shared_experts do
       return shared_expert_ffn xn
-    topk_weights, topk_indices <- MoE.grouped_sigmoid_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=true routed_scaling_factor=RSC
+    topk_weights, topk_indices <- grouped_sigmoid_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=true routed_scaling_factor=RSC
     routed <- Tensor.zeros_like xn
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_weights topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- select xn topk_weights topk_indices e
       x_upd <- routed_expert_ffn x_sel
-      routed <- MoE.scatter_add routed token_idx x_upd sel_scores
+      routed <- scatter_add routed token_idx x_upd sel_scores
     return shared + routed
   return x + m, new_kv
 

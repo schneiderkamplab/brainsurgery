@@ -1,14 +1,14 @@
 {-# CHECKPOINTS ["bigscience/bloom-560m", "bigscience/bloom-1b1", "bigscience/bloom-1b7", "bigscience/bloom-3b", "bigscience/bloom-7b1", "bigscience/bloom", "bigscience/bloomz-560m", "bigscience/bloomz-1b1", "bigscience/bloomz-1b7", "bigscience/bloomz-3b", "bigscience/bloomz-7b1"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
-import Tensor
 import Activations (gelu_new)
-import Cache
 import Attention (attention, merge_heads, split_qkv_heads)
-import Positions (linear_position_bias)
 import Masking (causal_mask)
+import Params (has_root)
+import Positions (linear_position_bias)
+import Tensor (size)
+
+
 
 D = Config.int "hidden_size" default=1024
 V = Config.int "vocab_size" default=250880
@@ -18,7 +18,7 @@ FFN = 4 * D
 EPS = Config.float "layer_norm_epsilon" default=1e-05
 MAX_CTX = Config.int "seq_length" default=2048
 POST_LN_RESID = Config.bool "apply_residual_connection_post_layernorm" default=false
-HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD = has_root "lm_head"
 
 bloom_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 bloom_block x attn_mask past_kv = do
@@ -30,7 +30,7 @@ bloom_block x attn_mask past_kv = do
     k, v, new_kv <- Cache.update past_kv k v
     keep <- causal_mask q k window=MAX_CTX padding_mask=attn_mask
     pos_bias <- linear_position_bias attn_mask heads=H
-    head_dim <- Tensor.size q 3
+    head_dim <- size q 3
     scale <- 1.0 / sqrt head_dim
     a <- attention q k v keep rel_bias=pos_bias scale=scale |> merge_heads |> NN.linear@dense dim=D bias=true
     return a, new_kv

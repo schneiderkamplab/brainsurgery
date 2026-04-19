@@ -1,5 +1,16 @@
 import Params (param)
-export (gegelu, gelu, gelu_new, gelu_pytorch_tanh, relu, relu2, sigmoid, silu, tanh, xielu)
+export (
+  gegelu,
+  gelu,
+  gelu_new,
+  gelu_pytorch_tanh,
+  relu,
+  relu2,
+  sigmoid,
+  silu,
+  tanh,
+  xielu,
+)
 
 gelu :: Tensor[B,T,D] -> Tensor[B,T,D]
 gelu = _activations_gelu

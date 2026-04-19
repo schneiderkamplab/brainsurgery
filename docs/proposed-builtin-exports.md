@@ -12,7 +12,7 @@ Derived from actual cross-file imports and namespaced calls in `brainsurgery/syn
 | List | append, index, init | 3 | 3 |
 | Masking | bidirectional_mask, causal_mask | 2 | 241 |
 | Math | PI, add, cos, exp, floor, log, mul, sin, sqrt | 9 | 4 |
-| MoE | grouped_ffn, grouped_swiglu_ffn_basic, grouped_swiglu_ffn_basic_granite, scatter_add, select, sparsemixer_router | 6 | 37 |
+| MoE | grouped_ffn, grouped_swiglu_ffn_basic, scatter_add, select, sparsemixer_router | 5 | 37 |
 | NN | embedding, layernorm, linear, rmsnorm | 4 | 1 |
 | Params | has_root, param, param_scale | 3 | 44 |
 | Positions | position_ids, relative_position_bias, rope_pair_base, rope_pair_freq_scale, rope_pair_hf_yarn, rope_pair_longrope, rope_pair_proportional, rope_pair_yarn | 8 | 2 |

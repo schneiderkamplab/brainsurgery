@@ -1,15 +1,14 @@
 {-# CHECKPOINTS ["deepseek-ai/DeepSeek-V3-Base", "deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-V3-0324"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
 import Activations (silu)
-import Cache
-import Cache
-import MoE
-import Attention (reshape_heads, merge_heads, attention)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_yarn)
 import Math (mul, sqrt)
+import MoE (grouped_sigmoid_router, scatter_add, select)
+import Positions (position_ids, rope_pair_yarn)
+
+
 
 D      = Config.int "hidden_size" default=7168
 V      = Config.int "vocab_size" default=129280
@@ -93,14 +92,14 @@ deepseek_v3_moe_block x pos_ids attn_mask past_kv = do
       gate <- NN.linear@gate_proj xn dim=(EM * SE) bias=false
       up <- NN.linear@up_proj xn dim=(EM * SE) bias=false
       return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
-    topk_scores, topk_indices <- MoE.grouped_sigmoid_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=(NTP == true) routed_scaling_factor=RSC
+    topk_scores, topk_indices <- grouped_sigmoid_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=(NTP == true) routed_scaling_factor=RSC
     routed <- Tensor.zeros_like xn
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- select xn topk_scores topk_indices e
       gate <- NN.linear@gate_proj x_sel dim=EM bias=false
       up <- NN.linear@up_proj x_sel dim=EM bias=false
       x_upd <- gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
-      routed <- MoE.scatter_add routed token_idx x_upd sel_scores
+      routed <- scatter_add routed token_idx x_upd sel_scores
     return shared + routed
   return x + m, new_kv
 

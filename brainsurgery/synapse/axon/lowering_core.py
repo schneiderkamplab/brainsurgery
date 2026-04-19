@@ -315,13 +315,9 @@ _PRIMITIVE_NAME_ALIASES: dict[str, str] = {
     "_list_init": "list_init",
     "_list_index": "list_index",
     "_list_append": "list_append",
-    "_moe_select": "moe_select",
-    "_moe_grouped_ffn": "moe_grouped_ffn",
-    "_moe_grouped_swiglu_ffn": "moe_grouped_swiglu_ffn",
 }
 _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Prelude",
-    "Compat",
     "SSM",
     "Activations",
     "Cache",
@@ -851,12 +847,6 @@ def _validate_normalized_kwargs(op_name: str, kwargs: dict[str, Any], args: list
 
 def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str]] | None:
     parse_callee = callee.replace("@@", "@", 1) if "@@" in callee else callee
-    parse_base = parse_callee.split("@", 1)[0]
-    if "." in parse_base:
-        namespace, member = parse_base.rsplit(".", 1)
-        imported_for_member = ctx.imported_member_namespaces.get(member, set())
-        if namespace in ctx.imported_namespaces and namespace not in imported_for_member:
-            raise ValueError(f"namespaced call {parse_base!r} not exported by {namespace!r}")
     if not ctx.block_signatures:
         return None
     if parse_callee in ctx.block_signatures:
@@ -880,8 +870,6 @@ def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str
             and namespace in imported_for_member
         ):
             return member, {}
-        if namespace in ctx.imported_namespaces and namespace not in imported_for_member:
-            raise ValueError(f"namespaced call {parse_callee!r} not exported by {namespace!r}")
     if "@" not in parse_callee and "." not in parse_callee and "::" not in parse_callee:
         imported_namespaces = ctx.imported_member_namespaces.get(parse_callee, set())
         if imported_namespaces:
@@ -912,8 +900,6 @@ def _resolve_block_call(callee: str, ctx: _LowerCtx) -> tuple[str, dict[str, str
             and namespace in imported_for_member
         ):
             base = member
-        elif namespace in ctx.imported_namespaces and namespace not in imported_for_member:
-            raise ValueError(f"namespaced call {callee!r} not exported by {namespace!r}")
     if base not in ctx.block_signatures and "." not in base:
         current_module = ctx.current_module if isinstance(ctx.current_module, str) else ""
         current_namespace = (
@@ -960,13 +946,9 @@ def _validate_namespaced_block_call(callee: str, ctx: _LowerCtx) -> None:
     if not ctx.block_signatures or callee not in ctx.block_signatures:
         return
     namespace = callee.split(".", 1)[0].strip()
-    member = callee.split(".", 1)[1].strip()
     if not namespace:
         return
     if namespace in ctx.imported_namespaces:
-        imported_for_member = ctx.imported_member_namespaces.get(member, set())
-        if imported_for_member and namespace not in imported_for_member:
-            raise ValueError(f"namespaced call {callee!r} not exported by {namespace!r}")
         return
     if isinstance(ctx.current_module, str) and ctx.current_module.startswith(f"{namespace}."):
         return
@@ -3026,8 +3008,6 @@ def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
         return names
     if op == "rmsnorm":
         return ["weight"]
-    if op == "param_scale":
-        return ["scale"]
     if op == "layernorm":
         names = ["weight_path" if _has_explicit_path_arg("weight_path") else "weight"]
         raw_bias = node_spec.get("bias", _raw_arg(4))
@@ -3037,10 +3017,6 @@ def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
         return names
     if op == "activations_xielu":
         return ["alpha_p", "alpha_n", "beta", "eps"]
-    if op == "glm4_router":
-        return ["weight", "e_score_correction_bias"]
-    if op == "sigmoid_topk_router":
-        return ["weight"]
     raise ValueError(f"unsupported param_base resolution for op {op!r}")
 
 

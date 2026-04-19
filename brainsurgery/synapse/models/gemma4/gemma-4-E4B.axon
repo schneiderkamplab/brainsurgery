@@ -1,19 +1,13 @@
 {-# CHECKPOINTS ["google/gemma-4-E4B", "google/gemma-4-E4B-it"] #-}
 
-import Activations
 import Activations (gelu_pytorch_tanh, tanh)
-import Cache
-import Config
-import Params
-import Attention
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
-import Masking
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions
-import Positions (position_ids, rope_pair_proportional)
-import Math
 import Math (mul, sqrt)
+import Params (param_scale)
+import Positions (position_ids, rope_pair_proportional)
+
+
 
 D = 2560
 L = 42
@@ -95,7 +89,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
-    a <- attention_masked q k v mask=mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv, shared_k, shared_v
   a <- rms@post_attention_layernorm a
   x <- x + a
@@ -107,7 +101,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
   m <- rms@post_feedforward_layernorm m
   x <- x + m
   x <- gemma4_apply_per_layer_input x per_layer_inputs i
-  x <- Params.param_scale x
+  x <- param_scale x
   shared_full_k <- ((shared_layer == false) and full) ? shared_k : shared_full_k
   shared_full_v <- ((shared_layer == false) and full) ? shared_v : shared_full_v
   shared_sliding_k <- ((shared_layer == false) and (full == false)) ? shared_k : shared_sliding_k

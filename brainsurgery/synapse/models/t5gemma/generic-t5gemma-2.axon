@@ -3,12 +3,12 @@
 {-# PADDING_SIDE "right" #-}
 
 import Activations (gelu_pytorch_tanh)
-import Config
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
-import Masking (causal_mask, bidirectional_mask)
-import Positions (position_ids, rope_pair_base)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (bidirectional_mask, causal_mask)
 import Math (mul, sqrt)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D = Config.int "hidden_size" root="decoder" default=640
 V = Config.int "vocab_size" default=262144
@@ -58,7 +58,7 @@ t5gemma2_encoder_block x i pos_ids attention_mask = do
     v <- Tensor.repeat v repeats=(H / KVH)
     window <- full_attn ? WIN_FULL_ENC : WIN_SLIDE_ENC
     mask <- bidirectional_mask q k window=window padding_mask=attention_mask
-    return attention_masked q k v mask=mask causal=false scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    return attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=false
   a <- NN.rmsnorm@post_self_attn_layernorm a eps=EPS cast_float=true unit_offset=true
   x <- x + a
 
@@ -97,7 +97,7 @@ t5gemma2_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_att
     cross_mask <- bidirectional_mask q k_cross padding_mask=encoder_attention_mask
     merged_mask <- Tensor.concat self_mask cross_mask dim=-1
 
-    return attention_masked q k_merged v_merged mask=merged_mask causal=false scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    return attention q k_merged v_merged merged_mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=false
   a <- NN.rmsnorm@post_self_attn_layernorm a eps=EPS cast_float=true unit_offset=true
   x <- x + a
 

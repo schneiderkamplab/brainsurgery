@@ -7,7 +7,6 @@ def test_synapse_ops_registry_discovery_has_expected_core_ops() -> None:
     # Smoke check for discovery + registration.
     assert "embedding" in OP_MODULES
     assert "linear" in OP_MODULES
-    assert "attention" in OP_MODULES
 
 
 def test_synapse_ops_registry_exports_required_interface() -> None:

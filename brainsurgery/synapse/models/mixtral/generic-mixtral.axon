@@ -1,16 +1,14 @@
 {-# CHECKPOINTS ["mistralai/Mixtral-8x7B-v0.1", "mistralai/Mixtral-8x7B-Instruct-v0.1", "mistralai/Mixtral-8x22B-v0.1", "mistralai/Mixtral-8x22B-Instruct-v0.1"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
 import Activations (silu)
-import Cache
-import Cache
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul)
+import MoE (scatter_add, select, softmax_topk_router)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D = Config.int "hidden_size" default=4096
 V = Config.int "vocab_size" default=32000
@@ -50,17 +48,17 @@ mixtral_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask |> merge_heads |> NN.linear@o_proj dim=D
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@block_sparse_moe do
-    topk_scores, topk_indices <- MoE.softmax_topk_router@gate xn top_k=EPT norm_topk_prob=true weight=@gate.weight
+    topk_scores, topk_indices <- softmax_topk_router@gate xn top_k=EPT weight=@gate.weight
     m <- xn * 0.0
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- select xn topk_scores topk_indices e
       x_upd <- mixtral_expert_ffn x_sel
-      m <- MoE.scatter_add m token_idx x_upd sel_scores
+      m <- scatter_add m token_idx x_upd sel_scores
     return m
   return x + m, new_kv
 

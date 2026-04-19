@@ -1,4 +1,17 @@
-export (PI, add, clamp, cos, div, exp, floor, log, mul, pow, sin, sqrt)
+export (
+  PI,
+  add,
+  clamp,
+  cos,
+  div,
+  exp,
+  floor,
+  log,
+  mul,
+  pow,
+  sin,
+  sqrt,
+)
 
 PI = 3.141592653589793
 

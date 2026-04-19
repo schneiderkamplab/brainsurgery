@@ -1,4 +1,8 @@
-export (append, index, init)
+export (
+  append,
+  index,
+  init,
+)
 
 init :: List[_T]
 init = _list_init

@@ -544,6 +544,13 @@ def _materialize_expr(
     state_keys: set[str],
     resolve_names: bool = True,
 ) -> AxonExpr:
+    def _bool_literal(node: AxonExpr) -> bool | None:
+        if isinstance(node, AxonExprBool):
+            return bool(node.value)
+        if isinstance(node, AxonExprParen):
+            return _bool_literal(node.inner)
+        return None
+
     evaluated = _try_eval_expr(
         expr,
         env=env,
@@ -564,53 +571,61 @@ def _materialize_expr(
         )
         return AxonExprParen(inner=inner)
     if isinstance(expr, AxonExprIf):
-        return AxonExprIf(
-            cond=_materialize_expr(
-                expr.cond,
-                env=env,
-                config=config,
-                state_keys=state_keys,
-                resolve_names=resolve_names,
-            ),
-            true_expr=_materialize_expr(
-                expr.true_expr,
-                env=env,
-                config=config,
-                state_keys=state_keys,
-                resolve_names=resolve_names,
-            ),
-            false_expr=_materialize_expr(
-                expr.false_expr,
-                env=env,
-                config=config,
-                state_keys=state_keys,
-                resolve_names=resolve_names,
-            ),
+        cond = _materialize_expr(
+            expr.cond,
+            env=env,
+            config=config,
+            state_keys=state_keys,
+            resolve_names=resolve_names,
         )
+        true_expr = _materialize_expr(
+            expr.true_expr,
+            env=env,
+            config=config,
+            state_keys=state_keys,
+            resolve_names=resolve_names,
+        )
+        false_expr = _materialize_expr(
+            expr.false_expr,
+            env=env,
+            config=config,
+            state_keys=state_keys,
+            resolve_names=resolve_names,
+        )
+        cond_val = _bool_literal(cond)
+        if cond_val is True:
+            return true_expr
+        if cond_val is False:
+            return false_expr
+        return AxonExprIf(cond=cond, true_expr=true_expr, false_expr=false_expr)
     if isinstance(expr, AxonExprTernary):
-        return AxonExprTernary(
-            cond=_materialize_expr(
-                expr.cond,
-                env=env,
-                config=config,
-                state_keys=state_keys,
-                resolve_names=resolve_names,
-            ),
-            true_expr=_materialize_expr(
-                expr.true_expr,
-                env=env,
-                config=config,
-                state_keys=state_keys,
-                resolve_names=resolve_names,
-            ),
-            false_expr=_materialize_expr(
-                expr.false_expr,
-                env=env,
-                config=config,
-                state_keys=state_keys,
-                resolve_names=resolve_names,
-            ),
+        cond = _materialize_expr(
+            expr.cond,
+            env=env,
+            config=config,
+            state_keys=state_keys,
+            resolve_names=resolve_names,
         )
+        true_expr = _materialize_expr(
+            expr.true_expr,
+            env=env,
+            config=config,
+            state_keys=state_keys,
+            resolve_names=resolve_names,
+        )
+        false_expr = _materialize_expr(
+            expr.false_expr,
+            env=env,
+            config=config,
+            state_keys=state_keys,
+            resolve_names=resolve_names,
+        )
+        cond_val = _bool_literal(cond)
+        if cond_val is True:
+            return true_expr
+        if cond_val is False:
+            return false_expr
+        return AxonExprTernary(cond=cond, true_expr=true_expr, false_expr=false_expr)
     if isinstance(expr, AxonExprBinary):
         return AxonExprBinary(
             op=expr.op,
@@ -819,7 +834,23 @@ def _materialize_statement(
 
 def _expr_uses_config_or_params(expr: AxonExpr) -> bool:
     if isinstance(expr, AxonExprCall):
+        callee_base = expr.callee.split("@", 1)[0]
         if expr.callee.startswith("Config.") or expr.callee.startswith("Params."):
+            return True
+        if callee_base in {
+            "int",
+            "float",
+            "bool",
+            "list",
+            "str",
+            "value",
+            "has",
+            "has_key",
+            "has_value",
+            "param",
+            "has_root",
+            "param_scale",
+        }:
             return True
         return any(_expr_uses_config_or_params(arg) for arg in expr.args) or any(
             _expr_uses_config_or_params(value)

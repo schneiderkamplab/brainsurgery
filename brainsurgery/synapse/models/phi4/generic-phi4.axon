@@ -1,18 +1,17 @@
 {-# CHECKPOINTS ["microsoft/Phi-4-mini-instruct", "microsoft/Phi-4-mini-reasoning"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (silu)
-import Cache
-import Positions (position_ids, rope_pair_base, rope_pair_longrope)
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Math (mul)
+import Params (has_root)
+import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+
+
 
 CFG = (Config.has_key "text_config") ? "text_config" : ""
-PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
+PARAM_ROOT = (has_root "language_model") ? "language_model" : ""
 
 D = Config.int "hidden_size" root=CFG default=3072
 V = Config.int "vocab_size" root=CFG default=200064
@@ -34,7 +33,7 @@ ROPE_SHORT_FACTOR = Config.list "short_factor" root="rope_scaling" default=[]
 HAS_LONGROPE = Config.has_key "long_factor" root="rope_scaling"
 ROPE_ATTENTION_FACTOR = (ROPE_MAX_CONTEXT > ROPE_ORIGINAL_CONTEXT) ? 1.1902380714238083 : 1.0
 WINDOW_LOCAL = Config.int "sliding_window" root=CFG default=262144
-HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD = has_root "lm_head"
 
 phi4_norm :: @Path -> Tensor -> Tensor
 phi4_norm@path x = NN.rmsnorm@path x eps=EPS
@@ -53,7 +52,7 @@ phi4_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=WINDOW_LOCAL padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   x <- x + a
   xn <- phi4_norm@post_attention_layernorm x

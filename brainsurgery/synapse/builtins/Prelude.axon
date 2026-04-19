@@ -1,3 +1,4 @@
 -- Prelude intentionally contains no wrappers.
-import NN, Math, Tensor
-export (NN, Math, Tensor)
+import Cache
+import Config
+export (Cache, Config)

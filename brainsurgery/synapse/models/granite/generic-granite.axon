@@ -1,15 +1,14 @@
 {-# CHECKPOINTS ["ibm-granite/granite-3.1-2b-base", "ibm-granite/granite-3.1-2b-instruct", "ibm-granite/granite-3.1-8b-base", "ibm-granite/granite-3.1-8b-instruct", "ibm-granite/granite-3.2-2b-instruct", "ibm-granite/granite-3.2-8b-instruct", "ibm-granite/granite-3.3-2b-base", "ibm-granite/granite-3.3-2b-instruct", "ibm-granite/granite-3.3-8b-base", "ibm-granite/granite-3.3-8b-instruct"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (silu)
-import Cache
-import Positions (position_ids, rope_pair_base)
-import Math (sqrt, mul)
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
+import Math (mul, sqrt)
+import Params (has_root)
+import Positions (position_ids, rope_pair_base)
+
+
 
 CFG = (Config.has_key "text_config") ? "text_config" : ""
 
@@ -30,7 +29,7 @@ EMBED_SCALE = Config.float "embedding_multiplier" root=CFG default=1.0
 RESIDUAL_SCALE = Config.float "residual_multiplier" root=CFG default=1.0
 ATTN_SCALE = Config.float "attention_multiplier" root=CFG default=(1.0 / sqrt HD)
 LOGITS_SCALE = Config.float "logits_scaling" root=CFG default=1.0
-HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD = has_root "lm_head"
 
 granite_norm :: @Path -> Tensor -> Tensor
 granite_norm@path x = NN.rmsnorm@path x eps=EPS
@@ -47,7 +46,7 @@ granite_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   x <- x + (a * RESIDUAL_SCALE)
   xn <- granite_norm@post_attention_layernorm x

@@ -1,18 +1,13 @@
 {-# CHECKPOINTS "falcon_rw_1b" #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Activations
 import Activations (gelu)
-import NN
-import Tensor
-import Attention
-import Attention (mask_to_additive, merge_heads, split_qkv_heads)
-import Cache
-import Attention attention
-import Positions (linear_position_bias)
-import Masking
+import Attention (attention, merge_heads, split_qkv_heads)
 import Masking (causal_mask)
+import NN (embedding, layernorm, linear)
+import Positions (linear_position_bias)
+
+
 
 D = 2048
 V = 50304
@@ -22,34 +17,31 @@ FFN = 8192
 C = 2048
 falcon_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 falcon_block x attn_mask past_kv = do
-  xn <- NN.layernorm@input_layernorm x dim=D
+  xn <- layernorm@input_layernorm x dim=D
   a, new_kv <- scope@self_attention do
-    qkv <- NN.linear@query_key_value xn dim=(3 * D) bias=true
+    qkv <- linear@query_key_value xn dim=(3 * D) bias=true
     q, k, v <- split_qkv_heads qkv heads=H layout="interleaved"
     k, v, new_kv <- Cache.update past_kv k v
     keep <- causal_mask q k window=C padding_mask=attn_mask
     pos_bias <- linear_position_bias attn_mask heads=H scale=0.125
-    scores_ref <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
-    causal_bias <- mask_to_additive scores_ref keep
-    mask <- causal_bias + pos_bias
     a <- attention q k v keep=keep rel_bias=pos_bias scale=0.125 |> merge_heads
-    a <- NN.linear@dense a dim=D bias=true
+    a <- linear@dense a dim=D bias=true
     return a, new_kv
   x <- x + a
-  x_mlp <- NN.layernorm@post_attention_layernorm x dim=D
+  x_mlp <- layernorm@post_attention_layernorm x dim=D
   m <- scope@mlp do
-    h <- NN.linear@dense_h_to_4h x_mlp dim=FFN bias=true
-    return gelu h |> NN.linear@dense_4h_to_h dim=D bias=true
+    h <- linear@dense_h_to_4h x_mlp dim=FFN bias=true
+    return gelu h |> linear@dense_4h_to_h dim=D bias=true
   x <- x + m
   return x, new_kv
 
 falcon :: TokenIds[B,S] -> Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 falcon input_ids attn_mask past_kv use_cache = do
-  x <- NN.embedding@transformer.word_embeddings input_ids dim=D
+  x <- embedding@transformer.word_embeddings input_ids dim=D
   new_kv <- use_cache ? Cache.init : null
   for@transformer.h i <- [0..L) do
     past_i <- Cache.index past_kv i
     x, new_i <- falcon_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i
-  logits <- NN.layernorm@transformer.ln_f x dim=D |> NN.linear@lm_head dim=V
+  logits <- layernorm@transformer.ln_f x dim=D |> linear@lm_head dim=V
   return logits, new_kv

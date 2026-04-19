@@ -2,10 +2,11 @@
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
 
-import Activations
 import Activations (silu)
-import SSM causal_conv1d mamba_scan
 import Math (mul)
+import SSM (causal_conv1d, mamba_scan)
+
+
 
 D = 2560
 I = 5120

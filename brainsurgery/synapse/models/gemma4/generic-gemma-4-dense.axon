@@ -1,18 +1,16 @@
 {-# CHECKPOINTS ["google/gemma-4-31B", "google/gemma-4-31B-it"] #-}
 
 import Activations (gelu_pytorch_tanh, tanh)
-import Cache
-import Cache
-import Config
-import Params
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_proportional)
 import Math (mul, sqrt)
+import Params (has_root, param_scale)
+import Positions (position_ids, rope_pair_proportional)
+
+
 
 CFG = (Config.has_key "text_config") ? "text_config" : ""
-PARAM_ROOT = (Params.has_root "model.language_model") ? "model" : ""
+PARAM_ROOT = (has_root "model.language_model") ? "model" : ""
 
 D = Config.int "hidden_size" root=CFG default=5376
 V = Config.int "vocab_size" root=CFG default=262144
@@ -86,7 +84,7 @@ gemma4_dense_block x i pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / kv_heads)
     v <- Tensor.repeat v repeats=(H / kv_heads)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
-    a <- attention_masked q k v mask=mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
 
   a <- rms@post_attention_layernorm a
@@ -98,7 +96,7 @@ gemma4_dense_block x i pos_ids attn_mask past_kv = do
     return gelu_pytorch_tanh g |> mul u |> NN.linear@down_proj dim=D bias=false
   m <- rms@post_feedforward_layernorm m
   x <- x + m
-  x <- Params.param_scale x
+  x <- param_scale x
   return x, new_kv
 
 gemma4_dense :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)

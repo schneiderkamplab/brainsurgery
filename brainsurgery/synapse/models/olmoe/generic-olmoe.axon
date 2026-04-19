@@ -1,27 +1,26 @@
 {-# CHECKPOINTS "allenai/OLMoE-1B-7B-0924" #-}
 {-# TASK "causal_lm" #-}
 
-import Config
 import Activations (silu)
-import Cache
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul, sqrt)
+import MoE (scatter_add, select)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D    = Config.int "hidden_size" default=2048               -- hidden dimension
 V    = Config.int "vocab_size" default=50304               -- vocabulary size
 L    = Config.int "num_hidden_layers" default=16           -- number of decoder layers
-H    = Config.int "num_attention_heads" default=16         -- number of attention_masked heads
+H    = Config.int "num_attention_heads" default=16         -- number of attention heads
 HD   = D / H                                                -- per-head dimension
 E    = Config.int "num_experts" default=64                 -- number of experts
 EPT  = Config.int "num_experts_per_tok" default=8          -- experts selected per token (top-k)
 C    = Config.int "max_position_embeddings" default=4096   -- context window / max sequence length
 EPS  = 1e-05                                                -- RMSNorm epsilon
 THETA = Config.float "rope_theta" default=10000.0          -- rope theta
-ATTN_SCALE = 1.0 / sqrt HD                                  -- attention_masked scale (1 / sqrt(HD))
+ATTN_SCALE = 1.0 / sqrt HD                                  -- attention scale (1 / sqrt(HD))
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
@@ -42,7 +41,7 @@ olmoe_decoder_block x pos_ids attn_mask past_kv = do
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads
     a <- NN.linear@o_proj a dim=D
     return a, new_kv
   x <- x + a
@@ -52,9 +51,9 @@ olmoe_decoder_block x pos_ids attn_mask past_kv = do
       Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=EPT dim=-1
     m <- Tensor.zeros_like xn
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- select xn topk_scores topk_indices e
       x_upd <- expert_ffn x_sel
-      m <- MoE.scatter_add m token_idx x_upd sel_scores
+      m <- scatter_add m token_idx x_upd sel_scores
     return m
   return x + m, new_kv
 

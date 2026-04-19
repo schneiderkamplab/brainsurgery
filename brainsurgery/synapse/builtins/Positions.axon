@@ -1,13 +1,6 @@
-import Math (
-  PI,
-  clamp,
-  exp,
-  floor,
-  log,
-  sin,
-  cos,
-  sqrt,
-  )
+import Math (PI, clamp, cos, exp, floor, log, sin, sqrt)
+import NN (embedding, layernorm, linear)
+import Params param
 import Tensor (
   and,
   arange,
@@ -32,8 +25,6 @@ import Tensor (
   where,
   zeros_like,
 )
-import NN
-import Params
 export (
   linear_position_bias,
   position_ids,
@@ -455,7 +446,7 @@ relative_position_bias@path q k ?num_buckets=32 ?max_distance=128 ?bidirectional
   row_ids <- arange q start=0 |> reshape shape=[-1, 1]
   col_ids <- arange k start=0 |> reshape shape=[1, -1]
   buckets <- col_ids - row_ids |> relative_position_buckets num_buckets max_distance bidirectional |> cast dtype="int64"
-  return NN.embedding@path buckets dim=H |> permute dims=[2, 0, 1] |> expand shape=[1, -1, -1, -1]
+  return embedding@path buckets dim=H |> permute dims=[2, 0, 1] |> expand shape=[1, -1, -1, -1]
 
 relative_bias_disentangled :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> ?Int -> ?Int -> ?Float -> Tensor[B,H,T,TK]
 relative_bias_disentangled@path q k ?position_buckets=256 ?max_relative_positions=512 ?rel_norm_eps=1e-7 = do
@@ -466,11 +457,11 @@ relative_bias_disentangled@path q k ?position_buckets=256 ?max_relative_position
   klen <- size k 2
   head_dim <- size q 3
   bh <- bsz * heads
-  rel <- Params.param path=@@deberta.encoder.rel_embeddings.weight |> slice 0 0 (att_span * 2)
-  rel <- NN.layernorm@path rel eps=rel_norm_eps dim=head_dim weight_path=@@deberta.encoder.LayerNorm.weight bias=true bias_path=@@deberta.encoder.LayerNorm.bias
+  rel <- param path=@@deberta.encoder.rel_embeddings.weight |> slice 0 0 (att_span * 2)
+  rel <- layernorm@path rel eps=rel_norm_eps dim=head_dim weight_path=@@deberta.encoder.LayerNorm.weight bias=true bias_path=@@deberta.encoder.LayerNorm.bias
   rel <- unsqueeze rel 0
-  q_proj <- NN.linear@path rel dim=null bias=true weight_path=@self.query_proj.weight bias_path=@self.query_proj.bias
-  k_proj <- NN.linear@path rel dim=null bias=true weight_path=@self.key_proj.weight bias_path=@self.key_proj.bias
+  q_proj <- linear@path rel dim=null bias=true weight_path=@self.query_proj.weight bias_path=@self.query_proj.bias
+  k_proj <- linear@path rel dim=null bias=true weight_path=@self.key_proj.weight bias_path=@self.key_proj.bias
   q_proj <- reshape q_proj shape=[1, (att_span * 2), heads, head_dim] |> permute dims=[0, 2, 1, 3] |> reshape shape=[heads, (att_span * 2), head_dim]
   k_proj <- reshape k_proj shape=[1, (att_span * 2), heads, head_dim] |> permute dims=[0, 2, 1, 3] |> reshape shape=[heads, (att_span * 2), head_dim]
   pos_query <- unsqueeze q_proj 0 |> expand shape=[bsz, heads, (att_span * 2), head_dim] |> reshape shape=[bh, (att_span * 2), head_dim]

@@ -194,12 +194,6 @@ def infer_output_types_for_node(
                 for out_name in output_vars:
                     inferred[out_name] = replaced
 
-    if op_name == "moe_scatter_add":
-        accum_type = in_types_by_slot.get("accum") or first_type
-        if isinstance(accum_type, str):
-            for out_name in output_vars:
-                inferred[out_name] = accum_type
-
     if op_name == "repeat":
         x_type = in_types_by_slot.get("x") or first_type
         repeats_val = node_spec.get("repeats")

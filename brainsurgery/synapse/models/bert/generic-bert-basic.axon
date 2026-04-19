@@ -1,17 +1,13 @@
 {-# CHECKPOINTS ["google-bert/bert-base-uncased"] #-}
 {-# TASK "masked_lm" #-}
 
-import Config
 import Activations (gelu)
-import Masking
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (bidirectional_mask)
-import Positions (position_ids)
-import Attention (
-  reshape_heads,
-  merge_heads,
-  attention,
-)
 import Math (sqrt)
+import Positions (position_ids)
+
+
 
 D   = Config.int "hidden_size" default=768
 V   = Config.int "vocab_size" default=30522

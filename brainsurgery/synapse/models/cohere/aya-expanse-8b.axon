@@ -1,15 +1,13 @@
 {-# CHECKPOINTS "CohereLabs/aya-expanse-8b" #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (silu)
-import Cache
-import Cache
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D = 4096
 V = 256000
@@ -40,7 +38,7 @@ cohere_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   m <- scope@mlp do
     g <- NN.linear@gate_proj xn dim=FFN bias=false

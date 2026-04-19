@@ -1,15 +1,14 @@
 {-# CHECKPOINTS ["ibm-research/PowerMoE-3b"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Cache
-import Positions (position_ids, rope_pair_base)
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
-import Masking (causal_mask)
 import Activations (silu)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (causal_mask)
 import Math (mul)
+import MoE (scatter_add, select)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D = Config.int "hidden_size" default=4096
 V = Config.int "vocab_size" default=32000
@@ -36,11 +35,11 @@ granitemoe_moe :: Tensor[B,S,D] -> Tensor[B,S,EPT] -> Tensor[B,S,EPT] -> Tensor[
 granitemoe_moe hidden topk_scores topk_indices = do
   routed <- hidden * 0.0
   for e <- [0..E) do
-    x_sel, token_idx, topk_pos, sel_scores <- MoE.select hidden topk_scores topk_indices e
+    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
     gate_up <- NN.linear@w1 x_sel dim=null bias=false transpose=false expert=e weight_path="input_linear.weight"
     gate, up <- Tensor.chunk gate_up parts=2
     x_upd <- gate |> silu |> mul up |> NN.linear@w2 dim=null bias=false transpose=false expert=e weight_path="output_linear.weight"
-    routed <- MoE.scatter_add routed token_idx x_upd sel_scores
+    routed <- scatter_add routed token_idx x_upd sel_scores
   return routed
 
 granitemoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
@@ -55,7 +54,7 @@ granitemoe_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=ATTN_BIAS
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=ATTN_BIAS
     return a, new_kv
   x <- x + (a * RESID_MUL)
   xn <- granitemoe_norm@post_attention_layernorm x

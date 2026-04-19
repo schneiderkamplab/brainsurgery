@@ -1,15 +1,14 @@
 {-# CHECKPOINTS ["google/gemma-2b", "google/gemma-2b-it", "google/gemma-7b", "google/gemma-7b-it"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (gelu)
-import Cache
-import Positions (position_ids, rope_pair_base)
-import Math (sqrt, mul)
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
+import Math (mul, sqrt)
+import Params (has_root)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D = Config.int "hidden_size" default=3072
 V = Config.int "vocab_size" default=256000
@@ -24,7 +23,7 @@ EPS = Config.float "rms_norm_eps" default=1e-06
 THETA = Config.float "rope_theta" default=10000.0
 C = Config.int "max_position_embeddings" default=8192
 EMB_SCALE = sqrt D
-HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD = has_root "lm_head"
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true unit_offset=true
@@ -41,7 +40,7 @@ gemma_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask |> merge_heads |> NN.linear@o_proj dim=D
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x

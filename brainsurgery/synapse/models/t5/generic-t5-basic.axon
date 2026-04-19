@@ -2,17 +2,12 @@
 {-# TASK "seq2seq_lm" #-}
 
 import Activations (relu)
-import Config
-import Masking (causal_mask, bidirectional_mask)
-import Positions (
-  relative_position_bias,
-)
-import Attention (
-  reshape_heads,
-  merge_heads,
-  attention,
-)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (bidirectional_mask, causal_mask)
 import Math (sqrt)
+import Positions (relative_position_bias)
+
+
 
 D = Config.int "d_model" default=512
 V = Config.int "vocab_size" default=32128

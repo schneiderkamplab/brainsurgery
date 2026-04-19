@@ -1,19 +1,17 @@
 {-# CHECKPOINTS ["HuggingFaceTB/SmolLM-135M", "HuggingFaceTB/SmolLM-135M-Instruct", "HuggingFaceTB/SmolLM-360M", "HuggingFaceTB/SmolLM-360M-Instruct", "HuggingFaceTB/SmolLM-1.7B", "HuggingFaceTB/SmolLM-1.7B-Instruct", "HuggingFaceTB/SmolLM2-135M", "HuggingFaceTB/SmolLM2-135M-Instruct", "HuggingFaceTB/SmolLM2-360M", "HuggingFaceTB/SmolLM2-360M-Instruct", "HuggingFaceTB/SmolLM2-1.7B", "HuggingFaceTB/SmolLM2-1.7B-Instruct"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (silu)
-import Cache
-import Cache
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul)
+import Params (has_root)
+import Positions (position_ids, rope_pair_base)
+
+
 
 CFG = (Config.has_key "text_config") ? "text_config" : ""
-PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
+PARAM_ROOT = (has_root "language_model") ? "language_model" : ""
 
 D = Config.int "hidden_size" root=CFG default=576
 V = Config.int "vocab_size" root=CFG default=49152
@@ -42,7 +40,7 @@ smollm_block x pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask |> merge_heads |> NN.linear@o_proj dim=D
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x

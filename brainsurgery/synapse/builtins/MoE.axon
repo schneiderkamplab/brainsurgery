@@ -1,19 +1,33 @@
-import Activations (silu, gelu_pytorch_tanh, sigmoid, relu2)
+import Activations (sigmoid, silu)
 import Math (clamp, log, mul)
-import Tensor
-import NN
-import Params
-
+import NN linear
+import Params param
+import Tensor (
+  cast,
+  cast_like,
+  chunk,
+  concat,
+  deinterleave_last2,
+  dtype_value,
+  eq,
+  expand,
+  gather,
+  index_add,
+  le,
+  reshape,
+  scatter,
+  size,
+  softmax,
+  topk,
+  transpose,
+  unsqueeze,
+  where,
+  where_indices,
+  zeros_like,
+)
 export (
-  gemma4_moe_experts,
-  gemma4_router,
   grouped_sigmoid_router,
-  glm4_router,
-  shared_relu2_moe,
-  nemotron_moe,
-  grouped_ffn,
   grouped_swiglu_ffn_basic,
-  grouped_swiglu_ffn_basic_granite,
   scatter_add,
   select,
   sigmoid_topk_router,
@@ -21,207 +35,118 @@ export (
   sparsemixer_router,
 )
 
-gemma4_router :: Tensor -> Int -> ?Float -> ?Float -> (Tensor, IdxTensor)
-gemma4_router x top_k ?scalar_root_size=null ?rms_eps=null = do
-  scalar <- (scalar_root_size == null) ? 1.0 : scalar_root_size
-  eps <- (rms_eps == null) ? 1e-6 : rms_eps
-  topk_weights, topk_indices <- scope@router do
-    h <- NN.l2norm x eps=eps
-    h <- h * (Params.param path=@scale) * scalar
-    w, i <- softmax_topk_router@proj h top_k norm_topk_prob=true routed_scaling_factor=1.0 weight=@weight
-    per_expert_scale <- Params.param path=@per_expert_scale
-    b <- Tensor.size i 0
-    s <- Tensor.size i 1
-    e <- Tensor.size per_expert_scale 0
-    per_expert_scale <- Tensor.reshape per_expert_scale shape=[1, 1, e] |> Tensor.expand shape=[b, s, e]
-    w <- w * (Tensor.gather per_expert_scale i -1 |> Tensor.cast_like w)
-    return w, i
-  return topk_weights, topk_indices
-
-gemma4_moe_experts :: Tensor -> Tensor -> Tensor -> Int -> Tensor
-gemma4_moe_experts hidden topk_weights topk_indices num_experts = do
-  routed <- zeros_like hidden
-  for e <- [0..num_experts) do
-    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
-    gate_up <- NN.linear@experts x_sel expert=e weight_path=@experts.gate_up_proj
-    gate, up <- Tensor.chunk gate_up parts=2
-    x_upd <- gate |> gelu_pytorch_tanh |> mul up |> NN.linear@experts expert=e weight_path=@experts.down_proj
-    routed <- scatter_add routed token_idx x_upd sel_scores
-  return routed
-
 grouped_sigmoid_router :: @Path -> Tensor[B,S,D] -> Int -> ?Int -> ?Int -> ?Bool -> ?Float -> ?Path -> ?Path -> (Tensor[B,S,TOPK], IdxTensor[B,S,TOPK])
 grouped_sigmoid_router@path x top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 ?weight=@weight ?e_score_correction_bias=@gate.e_score_correction_bias = do
-  x32 <- Tensor.cast x dtype="float32"
-  logits <- NN.linear@path x32 dim=null bias=false weight_path=weight
+  x32 <- cast x dtype="float32"
+  logits <- linear@path x32 dim=null bias=false weight_path=weight
   probs <- sigmoid logits
-  b <- Tensor.size probs 0
-  s <- Tensor.size probs 1
-  e <- Tensor.size probs 2
+  b <- size probs 0
+  s <- size probs 1
+  e <- size probs 2
   eps <- e / n_group
-  corr <- Params.param path=e_score_correction_bias |> Tensor.cast_like probs
-  corr <- Tensor.reshape corr shape=[1, 1, e] |> Tensor.expand shape=[b, s, e]
+  corr <- param path=e_score_correction_bias |> cast_like probs
+  corr <- reshape corr shape=[1, 1, e] |> expand shape=[b, s, e]
   scores <- probs + corr
 
   group_scores <- (eps == 1)
-    ? (Tensor.reshape scores shape=[b, s, n_group])
+    ? (reshape scores shape=[b, s, n_group])
     : (do
-      top2, _ <- Tensor.reshape scores shape=[b, s, n_group, eps] |> Tensor.topk 2 -1 true false
-      a, b2 <- Tensor.chunk top2 parts=2
-      a <- Tensor.reshape a shape=[b, s, n_group]
-      b2 <- Tensor.reshape b2 shape=[b, s, n_group]
+      top2, _ <- reshape scores shape=[b, s, n_group, eps] |> topk 2 -1 true false
+      a, b2 <- chunk top2 parts=2
+      a <- reshape a shape=[b, s, n_group]
+      b2 <- reshape b2 shape=[b, s, n_group]
       return a + b2
     )
-  _, group_idx <- Tensor.topk group_scores topk_group -1 true false
+  _, group_idx <- topk group_scores topk_group -1 true false
   one <- 1.0
-  group_keep <- Tensor.zeros_like group_scores |> Tensor.scatter group_idx one -1
-  score_mask <- Tensor.unsqueeze group_keep -1 |> Tensor.expand shape=[b, s, n_group, eps] |> Tensor.reshape shape=[b, s, e]
-  masked <- Tensor.where (Tensor.eq score_mask 1.0) scores (Tensor.zeros_like scores)
-  _, topk_indices <- Tensor.topk masked top_k -1 true false
-  topk_weights <- Tensor.gather probs topk_indices -1
+  group_keep <- zeros_like group_scores |> scatter group_idx one -1
+  score_mask <- unsqueeze group_keep -1 |> expand shape=[b, s, n_group, eps] |> reshape shape=[b, s, e]
+  masked <- where (eq score_mask 1.0) scores (zeros_like scores)
+  _, topk_indices <- topk masked top_k -1 true false
+  topk_weights <- gather probs topk_indices -1
   topk_weights <- norm_topk_prob
-    ? (topk_weights |> log |> Tensor.softmax dim=-1 dtype="float32")
+    ? (topk_weights |> log |> softmax dim=-1 dtype="float32")
     : topk_weights
-  topk_weights <- (topk_weights * routed_scaling_factor) |> Tensor.cast_like x
+  topk_weights <- (topk_weights * routed_scaling_factor) |> cast_like x
   return topk_weights, topk_indices
-
-shared_relu2_moe :: Tensor[B,S,D] -> Int -> Int -> Int -> Float -> Bool -> Tensor[B,S,D]
-shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob = do
-  topk_weights, topk_indices <- grouped_sigmoid_router@gate hidden top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor weight=@weight e_score_correction_bias=@gate.e_score_correction_bias
-  gate_w <- scope@gate do
-    return Params.param path=@weight
-  experts <- Tensor.size gate_w 0
-  routed <- Tensor.zeros_like hidden
-  for@experts e <- [0..experts) do
-    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
-    up <- NN.linear@up_proj x_sel dim=null bias=false
-    x_upd <- up |> relu2 |> NN.linear@down_proj dim=null bias=false
-    routed <- scatter_add routed token_idx x_upd sel_scores
-  shared <- scope@shared_experts do
-    up <- NN.linear@up_proj hidden dim=null bias=false
-    return up |> relu2 |> NN.linear@down_proj dim=null bias=false
-  return routed + shared
-
--- DEPRECATED
-glm4_router :: @Path -> Tensor -> Int -> ?Int -> ?Int -> ?Bool -> ?Float -> (Tensor, IdxTensor)
-glm4_router@path x top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 = grouped_sigmoid_router@path x top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor
-
--- DEPRECATED
-nemotron_moe :: Tensor[B,S,D] -> Int -> Int -> Int -> Float -> Bool -> Tensor[B,S,D]
-nemotron_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob = shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob
 
 select :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Int -> (Tensor[N,D], Tensor[N], Tensor[N], Tensor[N])
 select hidden topk_scores topk_indices expert = do
   bt <- B * T
-  hidden_flat <- Tensor.reshape hidden shape=[bt, D]
-  topk_scores_flat <- Tensor.reshape topk_scores shape=[bt, K]
-  topk_indices_flat <- Tensor.reshape topk_indices shape=[bt, K]
-  mask <- Tensor.eq topk_indices_flat expert
-  topk_pos, token_idx <- mask |> Tensor.transpose 0 1 |> Tensor.where_indices
-  n <- Tensor.size token_idx 0
-  token_idx_col <- Tensor.unsqueeze token_idx 1
-  token_idx_d <- Tensor.expand token_idx_col shape=[n, D]
-  token_idx_k <- Tensor.expand token_idx_col shape=[n, K]
-  selected_hidden <- Tensor.gather hidden_flat token_idx_d 0
-  selected_scores_all <- Tensor.gather topk_scores_flat token_idx_k 0
-  selected_scores <- Tensor.gather selected_scores_all (Tensor.unsqueeze topk_pos 1) 1 |> Tensor.reshape shape=[n]
+  hidden_flat <- reshape hidden shape=[bt, D]
+  topk_scores_flat <- reshape topk_scores shape=[bt, K]
+  topk_indices_flat <- reshape topk_indices shape=[bt, K]
+  mask <- eq topk_indices_flat expert
+  topk_pos, token_idx <- mask |> transpose 0 1 |> where_indices
+  n <- size token_idx 0
+  token_idx_col <- unsqueeze token_idx 1
+  token_idx_d <- expand token_idx_col shape=[n, D]
+  token_idx_k <- expand token_idx_col shape=[n, K]
+  selected_hidden <- gather hidden_flat token_idx_d 0
+  selected_scores_all <- gather topk_scores_flat token_idx_k 0
+  selected_scores <- gather selected_scores_all (unsqueeze topk_pos 1) 1 |> reshape shape=[n]
   return selected_hidden, token_idx, topk_pos, selected_scores
 
 scatter_add :: Tensor[B,T,D] -> Tensor[N] -> Tensor[N,D] -> Tensor[N] -> Tensor[B,T,D]
 scatter_add accum token_idx updates scores = do
   btd <- B * T
-  accum_flat <- Tensor.reshape accum shape=[btd, D]
-  weighted <- Tensor.unsqueeze scores 1 |> mul updates
-  accum_flat <- Tensor.index_add accum_flat token_idx weighted 0
-  return Tensor.reshape accum_flat shape=[B, T, D]
+  accum_flat <- reshape accum shape=[btd, D]
+  weighted <- unsqueeze scores 1 |> mul updates
+  accum_flat <- index_add accum_flat token_idx weighted 0
+  return reshape accum_flat shape=[B, T, D]
 
--- TODO: simplify if we decide to drop norm_topk_prob=false (currently no model call sites use it).
-softmax_topk_router :: @Path -> Tensor -> Int -> ?Bool -> ?Float -> ?Path -> (Tensor, IdxTensor)
-softmax_topk_router@path x top_k ?norm_topk_prob=true ?routed_scaling_factor=1.0 ?weight=@weight = do
-  x32 <- Tensor.cast x dtype="float32"
-  logits <- NN.linear@path x32 dim=null bias=false weight_path=weight
-  topk_weights, topk_indices <- norm_topk_prob
-    ? do
-      topk_logits, topk_indices <- Tensor.topk logits top_k -1 true false
-      topk_weights <- Tensor.softmax topk_logits -1 "float32"
-      return topk_weights, topk_indices
-    : do
-      probs <- Tensor.softmax logits -1 "float32"
-      topk_weights, topk_indices <- Tensor.topk probs top_k -1 true false
-      return topk_weights, topk_indices
-  topk_weights <- Tensor.cast_like topk_weights x
+softmax_topk_router :: @Path -> Tensor -> Int -> ?Float -> ?Path -> (Tensor, IdxTensor)
+softmax_topk_router@path x top_k ?routed_scaling_factor=1.0 ?weight=@weight = do
+  x32 <- cast x dtype="float32"
+  logits <- linear@path x32 dim=null bias=false weight_path=weight
+  topk_logits, topk_indices <- topk logits top_k -1 true false
+  topk_weights <- softmax topk_logits -1 "float32"
+  topk_weights <- cast_like topk_weights x
   return (topk_weights * routed_scaling_factor), topk_indices
 
--- DEPRECATED
 sigmoid_topk_router :: @Path -> Tensor -> Int -> ?Path -> (Tensor, IdxTensor)
 sigmoid_topk_router@path x top_k ?weight=@weight = do
-  x32 <- Tensor.cast x dtype="float32"
-  logits <- NN.linear@path x32 dim=null bias=false weight_path=weight
-  topk_logits, topk_indices <- Tensor.topk logits top_k -1 true false
-  topk_weights <- sigmoid topk_logits |> Tensor.cast_like x
+  x32 <- cast x dtype="float32"
+  logits <- linear@path x32 dim=null bias=false weight_path=weight
+  topk_logits, topk_indices <- topk logits top_k -1 true false
+  topk_weights <- sigmoid topk_logits |> cast_like x
   return topk_weights, topk_indices
-
-grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> ?Path -> ?Path -> ?Path -> ?Path -> ?Float -> ?Float -> ?Bool -> ?Bool -> ?Bool -> Tensor[B,T,D]
-grouped_ffn hidden topk_scores topk_indices ?gate_up_weight=@experts.gate_up_proj.weight ?gate_up_bias=@experts.gate_up_proj.bias ?out_weight=@experts.down_proj.weight ?out_bias=@experts.down_proj.bias ?alpha=1.702 ?limit=7.0 ?has_bias=true ?has_gate=true ?transpose=true = do
-  alpha <- (alpha == null) ? 1.702 : alpha
-  limit <- (limit == null) ? 7.0 : limit
-  has_bias <- (has_bias == null) ? true : has_bias
-  has_gate <- (has_gate == null) ? true : has_gate
-  transpose <- (transpose == null) ? true : transpose
-  routed <- hidden * 0.0
-  experts <- Params.param path=gate_up_weight |> Tensor.size 0
-  for e <- [0..experts) do
-    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
-    gate_up <- NN.linear@w1 x_sel dim=null bias=has_bias transpose=transpose expert=e weight_path=gate_up_weight bias_path=gate_up_bias
-    ff <- has_gate
-      ? (do
-        gate, up <- Tensor.deinterleave_last2 gate_up
-        gate <- clamp gate max=limit
-        up <- clamp up min=(0.0 - limit) max=limit
-        return (up + 1.0) * (gate * sigmoid (gate * alpha))
-      )
-      : (gate_up |> silu)
-    x_upd <- NN.linear@w2 ff dim=null bias=has_bias transpose=transpose expert=e weight_path=out_weight bias_path=out_bias
-    routed <- scatter_add routed token_idx x_upd sel_scores
-  return routed
 
 grouped_swiglu_ffn_basic :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Int -> ?Path -> ?Path -> ?Bool -> ?Bool -> Tensor[B,T,D]
 grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts ?gate_up_weight="experts.gate_up_proj" ?out_weight="experts.down_proj" ?transpose=false ?pre_scale_input=false = do
   routed <- hidden * 0.0
   for e <- [0..experts) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
-    sel_scale <- Tensor.unsqueeze sel_scores 1
+    sel_scale <- unsqueeze sel_scores 1
     x_in <- pre_scale_input ? (x_sel * sel_scale) : x_sel
-    gate_up <- NN.linear@w1 x_in dim=null bias=false transpose=transpose expert=e weight_path=gate_up_weight
-    gate, up <- Tensor.chunk gate_up parts=2
-    x_upd <- gate |> silu |> mul up |> NN.linear@w2 dim=null bias=false transpose=transpose expert=e weight_path=out_weight
+    gate_up <- linear@w1 x_in dim=null bias=false transpose=transpose expert=e weight_path=gate_up_weight
+    gate, up <- chunk gate_up parts=2
+    x_upd <- gate |> silu |> mul up |> linear@w2 dim=null bias=false transpose=transpose expert=e weight_path=out_weight
     out_scores <- pre_scale_input ? ((sel_scores * 0.0) + 1.0) : sel_scores
     routed <- scatter_add routed token_idx x_upd out_scores
   return routed
 
-grouped_swiglu_ffn_basic_granite :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Int -> ?Bool -> ?Bool -> Tensor[B,T,D]
-grouped_swiglu_ffn_basic_granite hidden topk_scores topk_indices experts ?transpose=false ?pre_scale_input=false = grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts gate_up_weight="input_linear.weight" out_weight="output_linear.weight" transpose=transpose pre_scale_input=pre_scale_input
-
 sparsemixer_router :: Tensor[B,S,D] -> Int -> ?Float -> (Tensor[B,S,2], IdxTensor[B,S,2])
 sparsemixer_router x experts ?jitter_eps=0.01 = do
-  logits <- NN.linear@gate x dim=experts bias=false
-  neg_inf <- Tensor.dtype_value logits "min"
-  max1, _ <- Tensor.topk logits 1 -1 true false
-  abs_logits <- Tensor.where (Tensor.le logits 0.0) (logits * -1.0) logits
-  factor1 <- Tensor.where (Tensor.le abs_logits max1) max1 abs_logits
+  logits <- linear@gate x dim=experts bias=false
+  neg_inf <- dtype_value logits "min"
+  max1, _ <- topk logits 1 -1 true false
+  abs_logits <- where (le logits 0.0) (logits * -1.0) logits
+  factor1 <- where (le abs_logits max1) max1 abs_logits
   ratio1 <- (max1 - logits) / factor1
-  keep1 <- Tensor.le ratio1 (2.0 * jitter_eps)
-  masked1 <- Tensor.where keep1 logits neg_inf
-  probs_1 <- Tensor.softmax masked1 -1 "float32"
-  _, top1_idx <- Tensor.topk masked1 1 -1 true false
-  top1_scores <- Tensor.gather probs_1 top1_idx -1
-  masked_scores <- Tensor.scatter logits top1_idx neg_inf -1
-  max2, top2_idx <- Tensor.topk masked_scores 1 -1 true false
-  factor2 <- Tensor.where (Tensor.le abs_logits max2) max2 abs_logits
+  keep1 <- le ratio1 (2.0 * jitter_eps)
+  masked1 <- where keep1 logits neg_inf
+  probs_1 <- softmax masked1 -1 "float32"
+  _, top1_idx <- topk masked1 1 -1 true false
+  top1_scores <- gather probs_1 top1_idx -1
+  masked_scores <- scatter logits top1_idx neg_inf -1
+  max2, top2_idx <- topk masked_scores 1 -1 true false
+  factor2 <- where (le abs_logits max2) max2 abs_logits
   ratio2 <- (max2 - logits) / factor2
-  keep2 <- Tensor.le ratio2 (2.0 * jitter_eps)
-  masked2 <- Tensor.where keep2 masked_scores neg_inf
-  probs_2 <- Tensor.softmax masked2 -1 "float32"
-  top2_scores <- Tensor.gather probs_2 top2_idx -1
-  topk_scores <- Tensor.concat top1_scores top2_scores dim=-1
-  topk_indices <- Tensor.concat top1_idx top2_idx dim=-1
+  keep2 <- le ratio2 (2.0 * jitter_eps)
+  masked2 <- where keep2 masked_scores neg_inf
+  probs_2 <- softmax masked2 -1 "float32"
+  top2_scores <- gather probs_2 top2_idx -1
+  topk_scores <- concat top1_scores top2_scores dim=-1
+  topk_indices <- concat top1_idx top2_idx dim=-1
   return topk_scores, topk_indices

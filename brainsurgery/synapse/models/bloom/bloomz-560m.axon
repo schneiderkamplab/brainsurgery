@@ -1,12 +1,13 @@
 {-# CHECKPOINTS "bigscience/bloomz-560m" #-}
 {-# TASK "causal_lm" #-}
 
-import Params
 import Activations (gelu_new)
-import Cache
 import Attention (attention, merge_heads, split_qkv_heads)
-import Positions (linear_position_bias)
 import Masking (causal_mask)
+import Params (has_root)
+import Positions (linear_position_bias)
+
+
 
 D = 1024
 V = 250880
@@ -16,7 +17,7 @@ FFN = 4096
 EPS = 1e-05
 MAX_CTX = 2048
 POST_LN_RESID = false
-HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD = has_root "lm_head"
 
 bloom_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 bloom_block x attn_mask past_kv = do

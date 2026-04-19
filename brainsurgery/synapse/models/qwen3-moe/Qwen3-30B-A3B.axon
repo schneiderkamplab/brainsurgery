@@ -1,16 +1,14 @@
 {-# CHECKPOINTS "Qwen/Qwen3-30B-A3B" #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (silu)
-import Cache
-import Cache
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_base)
 import Math (mul)
+import MoE (scatter_add, select, softmax_topk_router)
+import Positions (position_ids, rope_pair_base)
+
+
 
 D = 2048
 V = 151936
@@ -52,12 +50,12 @@ dense_ffn x = do
 
 sparse_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 sparse_ffn x = do
-  scores, indices <- MoE.softmax_topk_router@gate x top_k=MK norm_topk_prob=true
+  scores, indices <- softmax_topk_router@gate x top_k=MK
   out <- x * 0.0
   for@experts e <- [0..ME) do
-    x_sel, token_idx, topk_pos, sel_scores <- MoE.select x scores indices e
+    x_sel, token_idx, topk_pos, sel_scores <- select x scores indices e
     x_upd <- qwen3_moe_expert_ffn x_sel
-    out <- MoE.scatter_add out token_idx x_upd sel_scores
+    out <- scatter_add out token_idx x_upd sel_scores
   return out
 
 qwen3_moe_expert_ffn :: Tensor[N,D] -> Tensor[N,D]
@@ -78,7 +76,7 @@ qwen3_moe_block x pos_ids attn_mask past_kv layer_idx = do
     k <- Tensor.repeat k repeats=(H / KVH)
     v <- Tensor.repeat v repeats=(H / KVH)
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x

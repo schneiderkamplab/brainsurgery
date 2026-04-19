@@ -1,16 +1,14 @@
 {-# CHECKPOINTS ["LGAI-EXAONE/EXAONE-4.0-1.2B", "LGAI-EXAONE/EXAONE-4.0-32B"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (silu)
-import Cache
-import Cache
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_freq_scale)
 import Math (mul)
+import Params (has_root)
+import Positions (position_ids, rope_pair_freq_scale)
+
+
 
 D = Config.int "hidden_size" default=2048
 V = Config.int "vocab_size" default=102400
@@ -29,7 +27,7 @@ ROPE_CONTEXT = Config.int "rope_scaling.original_max_position_embeddings" defaul
 C = Config.int "max_position_embeddings" default=65536
 IS_32B = D == 5120
 HAS_LLLG = IS_32B
-HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD = has_root "lm_head"
 
 exaone4_rms :: @Path -> Tensor -> Tensor
 exaone4_rms@path x = NN.rmsnorm@path x eps=EPS
@@ -48,7 +46,7 @@ exaone4_block i x pos_ids attn_mask past_kv = do
     v <- Tensor.repeat v repeats=(H / KVH)
     window <- sliding ? 4096 : C
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask eager=true |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D bias=false
     return a, new_kv
   a <- exaone4_rms@post_attention_layernorm a
   x <- x + a

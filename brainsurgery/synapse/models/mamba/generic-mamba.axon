@@ -1,10 +1,11 @@
 {-# CHECKPOINTS ["state-spaces/mamba-2.8b-hf"] #-}
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
-import Config
 import Activations (silu)
-import SSM causal_conv1d mamba_scan
 import Math (mul)
+import SSM (causal_conv1d, mamba_scan)
+
+
 
 -- Mamba-2.8B architecture constants.
 D = Config.int "hidden_size" default=2560                          -- residual hidden size

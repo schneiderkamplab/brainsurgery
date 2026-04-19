@@ -1,12 +1,13 @@
 {-# CHECKPOINTS "google/mt5-xxl" #-}
 {-# TASK "seq2seq_lm" #-}
 
-import Activations
 import Activations (gelu_new)
-import Attention (attention, reshape_heads, merge_heads)
-import Masking (causal_mask, bidirectional_mask)
-import Positions (relative_position_bias)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (bidirectional_mask, causal_mask)
 import Math (mul)
+import Positions (relative_position_bias)
+
+
 
 D = 4096
 V = 250112

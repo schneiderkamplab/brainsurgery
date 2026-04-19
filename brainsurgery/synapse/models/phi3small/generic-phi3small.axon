@@ -1,18 +1,16 @@
 {-# CHECKPOINTS ["microsoft/Phi-3-small-8k-instruct", "microsoft/Phi-3-small-128k-instruct"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
 import Activations (gegelu)
-import Cache
-import Cache
-import Attention (merge_heads, split_qkv_grouped)
-import Attention attention
+import Attention (attention, merge_heads, split_qkv_grouped)
 import Masking (blocksparse_mask, causal_mask)
+import Params (has_root)
 import Positions (position_ids, rope_pair_base, rope_pair_longrope)
 
+
+
 CFG = (Config.has_key "text_config") ? "text_config" : ""
-PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
+PARAM_ROOT = (has_root "language_model") ? "language_model" : ""
 
 D = Config.int "hidden_size" root=CFG default=4096
 V = Config.int "vocab_size" root=CFG default=100352
@@ -45,7 +43,7 @@ BS_HOMO_HEAD = Config.bool "blocksparse_homo_head_pattern" root=CFG default=fals
 WINDOW_LOCAL = BS_LOCAL_BLOCKS * BS_BLOCK_SIZE
 WINDOW_GLOBAL = Config.int "max_position_embeddings" root=CFG default=8192
 DENSE_EVERY = Config.int "dense_attention_every_n_layers" root=CFG default=2
-HAS_LM_HEAD = Params.has_root "lm_head"
+HAS_LM_HEAD = has_root "lm_head"
 
 phi3small_norm :: @Path -> Tensor -> Tensor
 phi3small_norm@path x = NN.layernorm@path x eps=EPS

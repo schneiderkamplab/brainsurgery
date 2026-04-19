@@ -1,26 +1,40 @@
-
 import Math (floor)
-import Tensor
+import Tensor (
+  and,
+  arange,
+  cast,
+  dtype_value,
+  eq,
+  expand,
+  le,
+  reshape,
+  slice,
+  where,
+)
+export (
+  bidirectional_mask,
+  blocksparse_mask,
+  causal_mask,
+)
 
-export (bidirectional_mask, blocksparse_mask, causal_mask)
 
 -- === CAUSAL MASK ===
 causal_mask_keep :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Int -> Tensor[B,1,Q,K]
 causal_mask_keep q k ?window=null = do
-  row_ids <- Tensor.arange q start=0 end=Q |> Tensor.reshape shape=[Q, 1]
-  col_ids <- Tensor.arange k start=0 end=K |> Tensor.reshape shape=[1, K]
+  row_ids <- arange q start=0 end=Q |> reshape shape=[Q, 1]
+  col_ids <- arange k start=0 end=K |> reshape shape=[1, K]
   aligned <- row_ids + (K - Q)
-  upper <- Tensor.le col_ids aligned
-  keep_window <- (window == null) ? upper : (Tensor.and upper (Tensor.le (aligned - window + 1) col_ids))
-  keep <- Tensor.reshape keep_window shape=[1, 1, Q, K]
-  return Tensor.expand keep shape=[B, 1, Q, K]
+  upper <- le col_ids aligned
+  keep_window <- (window == null) ? upper : (and upper (le (aligned - window + 1) col_ids))
+  keep <- reshape keep_window shape=[1, 1, Q, K]
+  return expand keep shape=[B, 1, Q, K]
 
 
 causal_mask_masked :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,K] -> ?Int -> Tensor[B,1,Q,K]
 causal_mask_masked q k attn_mask ?window=null = do
   keep <- causal_mask_keep q k window=window
-  pad_keep <- Tensor.cast attn_mask dtype="bool" |> Tensor.reshape shape=[B, 1, 1, K]
-  return Tensor.and keep pad_keep
+  pad_keep <- cast attn_mask dtype="bool" |> reshape shape=[B, 1, 1, K]
+  return and keep pad_keep
 
 
 causal_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,K] -> ?Int -> ?Bool -> Tensor
@@ -33,23 +47,23 @@ causal_mask q k ?padding_mask=null ?window=null ?early_exit=false = if padding_m
 -- === BIDIRECTIONAL MASK ===
 bidirectional_mask_keep :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Int -> Tensor[B,1,Q,K]
 bidirectional_mask_keep q k ?window=null = do
-  row_ids <- Tensor.arange q start=0 end=Q |> Tensor.reshape shape=[Q, 1]
-  col_ids <- Tensor.arange k start=0 end=K |> Tensor.reshape shape=[1, K]
+  row_ids <- arange q start=0 end=Q |> reshape shape=[Q, 1]
+  col_ids <- arange k start=0 end=K |> reshape shape=[1, K]
   aligned <- row_ids + (K - Q)
   all_rows <- row_ids - row_ids
   all_cols <- col_ids - col_ids
-  keep <- (window == null) ? Tensor.eq all_rows all_cols : (Tensor.and (Tensor.le col_ids (aligned + window)) (Tensor.le (aligned - window) col_ids))
-  keep <- Tensor.reshape keep shape=[1, 1, Q, K]
-  return Tensor.expand keep shape=[B, 1, Q, K]
+  keep <- (window == null) ? eq all_rows all_cols : (and (le col_ids (aligned + window)) (le (aligned - window) col_ids))
+  keep <- reshape keep shape=[1, 1, Q, K]
+  return expand keep shape=[B, 1, Q, K]
 
 
 bidirectional_mask_masked :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,SM] -> ?Int -> Tensor[B,1,Q,K]
 bidirectional_mask_masked q k attn_mask ?window=null = do
   keep <- bidirectional_mask_keep q k window=window
-  pad_keep <- Tensor.slice attn_mask dim=-1 start=(SM - K) end=SM |>
-    Tensor.cast dtype="bool" |>
-    Tensor.reshape shape=[B, 1, 1, K]
-  return Tensor.and keep pad_keep
+  pad_keep <- slice attn_mask dim=-1 start=(SM - K) end=SM |>
+    cast dtype="bool" |>
+    reshape shape=[B, 1, 1, K]
+  return and keep pad_keep
 
 
 bidirectional_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,SM] -> ?Int -> Tensor[B,1,Q,K]
@@ -63,36 +77,36 @@ bidirectional_mask q k ?padding_mask=null ?window=null = if padding_mask == null
 blocksparse_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,K] -> ?Int -> ?Int -> ?Int -> ?Bool -> Tensor[B,H,Q,K]
 blocksparse_mask q k ?padding_mask=null ?block_size=64 ?local_blocks=16 ?vert_stride=8 ?homo_head=false = do
   shift <- ((K - Q) > 0) ? (K - Q) : 0
-  q_pos <- Tensor.arange q start=0 end=Q |> Tensor.reshape shape=[Q, 1]
+  q_pos <- arange q start=0 end=Q |> reshape shape=[Q, 1]
   q_pos <- q_pos + shift
-  k_pos <- Tensor.arange k start=0 end=K |> Tensor.reshape shape=[1, K]
+  k_pos <- arange k start=0 end=K |> reshape shape=[1, K]
   q_block <- floor (q_pos / block_size)
   k_block <- floor (k_pos / block_size)
-  causal_token <- Tensor.le k_pos q_pos
-  causal_block <- Tensor.le k_block q_block
-  local_block <- Tensor.le (q_block - (local_blocks - 1)) k_block
+  causal_token <- le k_pos q_pos
+  causal_block <- le k_block q_block
+  local_block <- le (q_block - (local_blocks - 1)) k_block
   keep <- homo_head
     ? do
-      strided <- Tensor.eq ((k_block + 1) % vert_stride) 0 |> Tensor.expand shape=[Q, K]
-      local_or <- Tensor.where local_block true strided
-      keep_homo <- Tensor.and causal_block local_or
-      return Tensor.reshape keep_homo shape=[1, 1, Q, K]
+      strided <- eq ((k_block + 1) % vert_stride) 0 |> expand shape=[Q, K]
+      local_or <- where local_block true strided
+      keep_homo <- and causal_block local_or
+      return reshape keep_homo shape=[1, 1, Q, K]
     : do
       head_step_raw <- floor (vert_stride / (((H > 0) ? H : 1)))
       head_step <- (head_step_raw > 0) ? head_step_raw : 1
-      head_idx <- Tensor.arange q start=0 end=H |> Tensor.reshape shape=[H, 1, 1]
-      k_block_h <- Tensor.reshape k_block shape=[1, 1, K]
-      strided <- Tensor.eq ((k_block_h + (head_idx * head_step) + 1) % vert_stride) 0 |> Tensor.expand shape=[H, Q, K]
-      local_h <- Tensor.reshape local_block shape=[1, Q, K] |> Tensor.expand shape=[H, Q, K]
-      causal_h <- Tensor.reshape causal_block shape=[1, Q, K] |> Tensor.expand shape=[H, Q, K]
-      local_or <- Tensor.where local_h true strided
-      keep_h <- Tensor.and causal_h local_or
-      return Tensor.reshape keep_h shape=[1, H, Q, K]
-  keep <- Tensor.and keep (Tensor.reshape causal_token shape=[1, 1, Q, K])
-  keep <- Tensor.expand keep shape=[B, H, Q, K]
+      head_idx <- arange q start=0 end=H |> reshape shape=[H, 1, 1]
+      k_block_h <- reshape k_block shape=[1, 1, K]
+      strided <- eq ((k_block_h + (head_idx * head_step) + 1) % vert_stride) 0 |> expand shape=[H, Q, K]
+      local_h <- reshape local_block shape=[1, Q, K] |> expand shape=[H, Q, K]
+      causal_h <- reshape causal_block shape=[1, Q, K] |> expand shape=[H, Q, K]
+      local_or <- where local_h true strided
+      keep_h <- and causal_h local_or
+      return reshape keep_h shape=[1, H, Q, K]
+  keep <- and keep (reshape causal_token shape=[1, 1, Q, K])
+  keep <- expand keep shape=[B, H, Q, K]
   keep <- (padding_mask == null)
     ? keep
     : do
-      pad_keep <- Tensor.cast padding_mask dtype="bool" |> Tensor.reshape shape=[B, 1, 1, K]
-      return Tensor.and keep pad_keep
-  return Tensor.where keep 0.0 (Tensor.dtype_value q "min")
+      pad_keep <- cast padding_mask dtype="bool" |> reshape shape=[B, 1, 1, K]
+      return and keep pad_keep
+  return where keep 0.0 (dtype_value q "min")

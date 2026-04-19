@@ -1,16 +1,14 @@
 {-# CHECKPOINTS ["facebook/xglm-564M", "facebook/xglm-1.7B", "facebook/xglm-2.9B", "facebook/xglm-4.5B", "facebook/xglm-7.5B"] #-}
 {-# TASK "causal_lm" #-}
 
-import Config
-import Params
-import Activations (gelu)
-import Activations (relu)
-import Cache
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Activations (gelu, relu)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, sinusoidal_positions)
 import Math (sqrt)
+import Params (has_root)
+import Positions (position_ids, sinusoidal_positions)
+
+
 
 D = Config.int "d_model" default=1024
 V = Config.int "vocab_size" default=256008
@@ -25,7 +23,7 @@ SCALE_EMB = Config.bool "scale_embedding" default=true
 EMB_SCALE = SCALE_EMB ? (sqrt D) : 1.0
 ATTN_SCALE = 1.0 / sqrt HD
 
-HAS_POS = Params.has_root "model.embed_positions.weight"
+HAS_POS = has_root "model.embed_positions.weight"
 
 xglm_act :: Tensor -> Tensor
 xglm_act x = (ACT == "relu") ? (relu x) : (gelu x)
@@ -39,7 +37,7 @@ xglm_block x attn_mask past_kv = do
     v <- NN.linear@v_proj xn dim=D bias=true |> reshape_heads heads=H
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE eager=true |> merge_heads |> NN.linear@out_proj dim=D bias=true
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@out_proj dim=D bias=true
     return a, new_kv
   x <- x + a
   xn2 <- NN.layernorm@final_layer_norm x eps=EPS

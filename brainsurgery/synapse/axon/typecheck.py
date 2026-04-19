@@ -88,7 +88,6 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, str] = {
 
 _BUILTIN_MODULE_NAMESPACES: set[str] = {
     "Prelude",
-    "Compat",
     "SSM",
     "Activations",
     "Cache",
@@ -1180,26 +1179,14 @@ def _primitive_fallback_type(
             "unsqueeze",
             "merge_heads",
             "repeat",
-            "attention",
             "causal_mask",
             "concat",
             "embedding",
             "linear",
-            "moe_grouped_ffn",
-            "moe_scatter_add",
         }:
             return tensor_default
         return None
 
-    if op_name == "moe_select" and arity == 4:
-        return TypeTuple(
-            items=(
-                tensor_default,
-                TypeNamed(name="IdxTensor"),
-                TypeNamed(name="IdxTensor"),
-                tensor_default,
-            )
-        )
     return None
 
 
@@ -1295,11 +1282,7 @@ def _primitive_output_type(
     def _is_generic_tensor_decl(tp: TypeExpr) -> bool:
         return isinstance(tp, TypeNamed) and tp.name in {"Tensor", "IdxTensor"}
 
-    generic_tensor_inference_ops = {
-        "repeat",
-        "merge_heads",
-        "moe_scatter_add",
-    }
+    generic_tensor_inference_ops = {"repeat", "merge_heads"}
 
     op_name = _canonical_primitive_name(callee)
     structural_ops = {"split", "list_append", "list_index"}
@@ -1933,6 +1916,8 @@ def _call_return_type(
     def _namespaced_member_is_visible(namespace: str, member: str) -> bool:
         current_module = module.name if isinstance(module.name, str) else ""
         if current_module.startswith(f"{namespace}."):
+            return True
+        if namespace in set(module.imports):
             return True
         if isinstance(module.imported_members, dict):
             members = module.imported_members.get(namespace)

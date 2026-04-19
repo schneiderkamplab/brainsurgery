@@ -1,16 +1,14 @@
 {-# CHECKPOINTS ["deepseek-ai/DeepSeek-V2-Lite", "deepseek-ai/DeepSeek-V2-Lite-Chat", "deepseek-ai/DeepSeek-Coder-V2-Lite-Base", "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"] #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (silu)
-import Cache
-import Cache
-import MoE
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_yarn)
 import Math (mul)
+import MoE (scatter_add, select)
+import Positions (position_ids, rope_pair_yarn)
+
+
 
 D = 2048
 V = 102400
@@ -58,7 +56,7 @@ deepseek_v2_attn x pos_ids attn_mask past_kv = do
     k_full <- Tensor.concat k_nope k_pe dim=-1
     k_all, v_all, new_kv <- Cache.update past_kv k_full v
     mask <- causal_mask q_full k_all window=C padding_mask=attn_mask
-    a <- attention_masked q_full k_all v_all mask=mask scale=ATTN_SCALE eager=true |> merge_heads
+    a <- attention q_full k_all v_all mask scale=ATTN_SCALE |> merge_heads
     a <- NN.linear@o_proj a dim=D bias=false
     return a, new_kv
   return a, new_kv
@@ -89,11 +87,11 @@ deepseek_v2_moe_block x pos_ids attn_mask past_kv = do
     topk_scores, topk_indices <- NN.linear@gate xn dim=E bias=false |> Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=EPT dim=-1 sorted=false
     routed <- Tensor.zeros_like xn
     for@experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select xn topk_scores topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- select xn topk_scores topk_indices e
       gate <- NN.linear@gate_proj x_sel dim=EM bias=false
       up <- NN.linear@up_proj x_sel dim=EM bias=false
       x_upd <- gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
-      routed <- MoE.scatter_add routed token_idx x_upd sel_scores
+      routed <- scatter_add routed token_idx x_upd sel_scores
     return shared + routed
   return x + m, new_kv
 

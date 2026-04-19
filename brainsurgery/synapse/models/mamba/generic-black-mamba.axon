@@ -2,12 +2,13 @@
 {-# TASK "causal_lm" #-}
 {-# TOKENIZER "EleutherAI/gpt-neox-20b" #-}
 {-# PADDING_SIDE "right" #-}
-import Config
-
 import Activations (silu)
-import SSM causal_conv1d mamba_scan
-import MoE
 import Math (mul)
+import MoE (scatter_add, select)
+import SSM (causal_conv1d, mamba_scan)
+
+
+
 
 -- BlackMamba architectural constants.
 D = Config.int "hidden_size" default=1472                          -- residual hidden size
@@ -39,9 +40,9 @@ moe_ffn x = do
   m <- Tensor.zeros_like x_norm
   x_upd <- scope@mixer do
     for@local_experts e <- [0..E) do
-      x_sel, token_idx, topk_pos, sel_scores <- MoE.select x_norm topk_scores topk_indices e
+      x_sel, token_idx, topk_pos, sel_scores <- select x_norm topk_scores topk_indices e
       x_expert <- expert_ffn x_sel
-      m <- MoE.scatter_add m token_idx x_expert sel_scores
+      m <- scatter_add m token_idx x_expert sel_scores
     return m
   return x + x_upd
 

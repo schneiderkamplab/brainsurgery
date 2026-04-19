@@ -1,14 +1,12 @@
 {-# CHECKPOINTS "microsoft/Phi-3-small-128k-instruct" #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (gegelu)
-import Cache
-import Cache
-import Attention (merge_heads, split_qkv_grouped)
-import Attention attention
+import Attention (attention, merge_heads, split_qkv_grouped)
 import Masking (blocksparse_mask, causal_mask)
 import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+
+
 
 PARAM_ROOT = ""
 D = 4096

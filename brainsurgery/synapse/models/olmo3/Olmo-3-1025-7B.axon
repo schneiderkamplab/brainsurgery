@@ -1,15 +1,13 @@
 {-# CHECKPOINTS ["allenai/Olmo-3-1025-7B", "allenai/Olmo-3-7B-Instruct", "allenai/Olmo-3-7B-Think"] #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (silu)
-import Cache
-import Cache
-import Attention (reshape_heads, merge_heads)
-import Attention (attention_masked)
+import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Positions (position_ids, rope_pair_yarn)
 import Math (mul)
+import Positions (position_ids, rope_pair_yarn)
+
+
 
 D = 4096
 V = 100278
@@ -41,7 +39,7 @@ olmo3_block x i pos_ids attn_mask past_kv = do
     v <- Tensor.repeat v repeats=(H / KVH)
     window <- ((i + 1) % FULL_ATTN_PERIOD) == 0 ? C : SW
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- attention_masked q k v mask=mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D
     return a, new_kv
   a <- NN.rmsnorm@post_attention_layernorm a eps=EPS cast_float=true
   x <- x + a
