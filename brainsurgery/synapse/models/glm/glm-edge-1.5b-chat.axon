@@ -1,55 +1,48 @@
 {-# CHECKPOINTS "zai-org/glm-edge-1.5b-chat" #-}
 {-# TASK "causal_lm" #-}
 
+import Activations
 import Activations (silu)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (causal_mask)
+import Math
 import Math (mul)
+import Params
+import Params (has_root)
+import Positions
 import Positions (position_ids, rope_pair_base)
 
+HAS_LM_HEAD = has_root "lm_head"
 
-
-D = 2048
-V = 59264
-L = 28
-H = 16
-KVH = 4
-QD = 2048
-KVD = 512
-FFN = 6144
-EPS = 1e-05
-THETA = 10000.0
-C = 8192
-PROPE = 1.0
-ATTN_BIAS = false
-
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = NN.rmsnorm@path x eps=EPS
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=1e-05
 
 glm_edge_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 glm_edge_attn x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- ATTN_BIAS ? (NN.linear@q_proj xn dim=QD bias=true) : (NN.linear@q_proj xn dim=QD bias=false)
-    q <- reshape_heads q heads=H
-    k <- ATTN_BIAS ? (NN.linear@k_proj xn dim=KVD bias=true) : (NN.linear@k_proj xn dim=KVD bias=false)
-    k <- reshape_heads k heads=KVH
-    v <- ATTN_BIAS ? (NN.linear@v_proj xn dim=KVD bias=true) : (NN.linear@v_proj xn dim=KVD bias=false)
-    v <- reshape_heads v heads=KVH
-    q, k <- rope_pair_base q k pos_ids theta=THETA partial_rotary_factor=PROPE interleaved=true
+    q <- (NN.linear@q_proj xn dim=2048 bias=false)
+    q <- reshape_heads q heads=16
+    k <- (NN.linear@k_proj xn dim=512 bias=false)
+    k <- reshape_heads k heads=4
+    v <- (NN.linear@v_proj xn dim=512 bias=false)
+    v <- reshape_heads v heads=4
+    q, k <- rope_pair_base q k pos_ids theta=10000.0 partial_rotary_factor=1.0 interleaved=true
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
-    mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    k <- Tensor.repeat k repeats=4
+    v <- Tensor.repeat v repeats=4
+    mask <- causal_mask q k window=8192 padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=2048 bias=false
     return a, new_kv
   return x + a, new_kv
 
 glm_edge_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 glm_edge_ffn x = do
-  gu <- NN.linear@gate_up_proj x dim=(2 * FFN) bias=false
-  g, u <- Tensor.split gu sizes=[FFN, FFN]
-  return g |> silu |> mul u |> NN.linear@down_proj dim=D bias=false
+  gu <- NN.linear@gate_up_proj x dim=12288 bias=false
+  g, u <- Tensor.split gu sizes=[6144, 6144]
+  return g |> silu |> mul u |> NN.linear@down_proj dim=2048 bias=false
 
 glm_edge_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 glm_edge_block x pos_ids attn_mask past_kv = do
@@ -65,14 +58,14 @@ glm_edge :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], 
 glm_edge input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=2048
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    for@layers i <- [0..28) do
       past_i <- Cache.index past_kv i
       x, new_i <- glm_edge_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
-  logits <- scope@model do
-    return NN.linear@embed_tokens x dim=V
+  logits <- HAS_LM_HEAD ? ((NN.linear@model.embed_tokens x dim=59264)) : (NN.linear@model.embed_tokens x dim=59264)
   return logits, new_kv

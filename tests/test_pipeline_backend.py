@@ -158,6 +158,45 @@ def test_build_pipeline_plan_uses_model_config_for_generic_layer_count(
     ]
 
 
+def test_build_pipeline_plan_uses_model_config_for_lowered_at_prefixed_config_int(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {
+                    "n_cfg": {
+                        "_op": "config_int",
+                        "_bind": "L",
+                        "_args": ["@num_hidden_layers", 30],
+                    }
+                },
+                {
+                    "n_for_0": {
+                        "_op": "for",
+                        "_scope": "model.layers",
+                        "_var": "i",
+                        "_from": 0,
+                        "_to": {"_expr": "name", "id": "L"},
+                        "_body": [],
+                    }
+                },
+            ],
+            "symbols": {},
+            "config": {"num_hidden_layers": 64},
+        },
+    }
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("torch.cuda.device_count", lambda: 2)
+    plan = build_pipeline_plan(spec, requested_device="cuda")
+    assert plan.total_layers == 64
+    assert [(stage.layer_start, stage.layer_stop) for stage in plan.stages] == [
+        (0, 32),
+        (32, 64),
+    ]
+
+
 def test_build_pipeline_plan_prefers_model_symbols_over_config_int_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -356,14 +395,23 @@ def test_build_pipeline_stage_specs_for_smollm_split_prefix_loop_and_suffix(
 
     assert "x" not in stage0["model"]["inputs"]
     assert stage0["model"]["outputs"] == {"x": "x", "new_kv": "new_kv"}
-    loop0 = next(iter(stage0["model"]["graph"][11].values()))
+    loop0 = next(
+        next(iter(node.values()))
+        for node in stage0["model"]["graph"]
+        if isinstance(next(iter(node.values())), dict)
+        and next(iter(node.values())).get("_op") == "for"
+    )
     assert loop0["_from"] == 0
     assert loop0["_to"] == 15
 
     assert "x" in stage1["model"]["inputs"]
     assert stage1["model"]["outputs"] == {"logits": "logits", "new_kv": "new_kv"}
-    assert len(stage1["model"]["graph"]) == 13
-    loop1 = next(iter(stage1["model"]["graph"][10].values()))
+    loop1 = next(
+        next(iter(node.values()))
+        for node in stage1["model"]["graph"]
+        if isinstance(next(iter(node.values())), dict)
+        and next(iter(node.values())).get("_op") == "for"
+    )
     assert loop1["_from"] == 15
     assert loop1["_to"] == 30
 

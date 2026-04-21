@@ -1,0 +1,4 @@
+interface:
+  display_name: "Benchmark Report"
+  short_description: "Render 3-table benchmark status from stream CSV logs"
+  default_prompt: "Use $report to generate a 3-table benchmark report from a log directory."

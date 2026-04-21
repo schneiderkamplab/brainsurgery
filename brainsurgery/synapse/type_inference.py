@@ -333,6 +333,8 @@ def infer_block_io_types_from_modules(
         if not isinstance(block_name, str) or not isinstance(block_spec, Mapping):
             continue
         module = modules_by_name.get(block_name)
+        if module is None and "__" in block_name:
+            module = modules_by_name.get(block_name.split("__", 1)[0])
         if module is None:
             continue
         block_inputs = block_spec.get("inputs", {})

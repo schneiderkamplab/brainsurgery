@@ -9,24 +9,24 @@ import Positions (position_ids, rope_pair_base)
 
 
 
-D    = Config.int "hidden_size" default=5120
-V    = Config.int "vocab_size" default=151936
-L    = Config.int "num_hidden_layers" default=40
-H    = Config.int "num_attention_heads" default=40
-KVH  = Config.int "num_key_value_heads" default=8
-HD   = Config.int "head_dim" default=128
+D    = Config.int@hidden_size default=5120
+V    = Config.int@vocab_size default=151936
+L    = Config.int@num_hidden_layers default=40
+H    = Config.int@num_attention_heads default=40
+KVH  = Config.int@num_key_value_heads default=8
+HD   = Config.int@head_dim default=128
 KVD  = KVH * HD
 QD   = H * HD
-FFN  = Config.int "intermediate_size" default=17408
-EPS  = Config.float "rms_norm_eps" default=1e-06
-THETA = Config.float "rope_theta" default=1000000.0
-C    = Config.int "max_position_embeddings" default=40960
-TIE  = Config.bool "tie_word_embeddings" default=false
+FFN  = Config.int@intermediate_size default=17408
+EPS  = Config.float@rms_norm_eps default=1e-06
+THETA = Config.float@rope_theta default=1000000.0
+C    = Config.int@max_position_embeddings default=40960
+TIE  = Config.bool@tie_word_embeddings default=false
 
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-head_rms :: @Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
+head_rms :: Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
 head_rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
 output_tied :: Tensor[B,S,D] -> Tensor[B,S,V]
@@ -66,10 +66,11 @@ qwen3 input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- qwen3_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
   logits <- TIE ? output_tied x : output_untied x

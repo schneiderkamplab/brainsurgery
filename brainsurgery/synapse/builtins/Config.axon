@@ -10,26 +10,26 @@ export (
   value,
 )
 
-has_key :: String -> ?String -> Bool
-has_key key ?root="" = _config_has key root
+has_key :: Path -> Bool
+has_key key = _config_has key
 
-has_value :: String -> ?String -> Bool
-has_value key ?root="" = (Config.value key root=root default=null) != null
+has_value :: Path -> Bool
+has_value key = (Config.value key default=null) != null
 
-int :: String -> ?String -> ?Int -> Int
-int key ?root="" ?default=null = _config_int key root default
+int :: Path -> ?Int -> Int
+int key ?default=null = _config_int key default
 
-float :: String -> ?String -> ?Float -> Float
-float key ?root="" ?default=null = _config_float key root default
+float :: Path -> ?Float -> Float
+float key ?default=null = _config_float key default
 
-str :: String -> ?String -> ?String -> String
-str key ?root="" ?default=null = _config_str key root default
+str :: Path -> ?String -> String
+str key ?default=null = _config_str key default
 
-bool :: String -> ?String -> ?Bool -> Bool
-bool key ?root="" ?default=null = _config_bool key root default
+bool :: Path -> ?Bool -> Bool
+bool key ?default=null = _config_bool key default
 
-list :: String -> ?String -> ?List[_T] -> List[_T]
-list key ?root="" ?default=List.init = _config_list key root default
+list :: Path -> ?List[_T] -> List[_T]
+list key ?default=List.init = _config_list key default
 
-value :: String -> ?String -> ?Any -> Any
-value key ?root="" ?default=null = _config_value key root default
+value :: Path -> ?Any -> Any
+value key ?default=null = _config_value key default

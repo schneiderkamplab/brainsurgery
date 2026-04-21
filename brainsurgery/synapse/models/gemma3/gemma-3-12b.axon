@@ -1,54 +1,47 @@
 {-# CHECKPOINTS ["google/gemma-3-12b-pt", "google/gemma-3-12b-it"] #-}
 
+import Activations
 import Activations (gelu_pytorch_tanh)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (causal_mask)
-import Math (mul)
+import Math
+import Math (mul, sqrt)
+import Params
+import Params (has_root)
+import Positions
 import Positions (position_ids, rope_pair_base)
 
-
-
-PARAM_ROOT = "language_model"
-D = 3840
-L = 48
-H = 16
-KVH = 8
-HD = 256
-FFN = 15360
-ROPE_PERIOD = 6
-THETA_BASE = 10000.0
-THETA_LONG = 1000000.0
-ROPE_LONG_SCALE = 8.0
-WIN_LOCAL = 1024
-WIN_LONG = 131072
-ATTN_SCALE = 0.0625
-EMB_SCALE = 61.96773353931867
+HAS_MODEL_LM_MODEL = has_root "model.language_model.model"
+HAS_LM_MODEL = has_root "language_model.model"
+PARAM_ROOT = HAS_MODEL_LM_MODEL ? "model.language_model" : (HAS_LM_MODEL ? "language_model" : "")
 
 gemma3_block :: Tensor -> Int -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
 gemma3_block x i pos_ids attn_mask past_kv = do
   xn <- NN.rmsnorm@input_layernorm x cast_float=true unit_offset=true
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=(H * HD) |> reshape_heads heads=H |> NN.rmsnorm@q_norm cast_float=true unit_offset=true
-    k <- NN.linear@k_proj xn dim=(KVH * HD) |> reshape_heads heads=KVH |> NN.rmsnorm@k_norm cast_float=true unit_offset=true
-    v <- NN.linear@v_proj xn dim=(KVH * HD) |> reshape_heads heads=KVH
-    long <- ((i + 1) % ROPE_PERIOD) == 0
-    theta <- long ? THETA_LONG : THETA_BASE
-    rope_scale <- long ? ROPE_LONG_SCALE : 1.0
+    q <- NN.linear@q_proj xn dim=4096 |> reshape_heads heads=16 |> NN.rmsnorm@q_norm cast_float=true unit_offset=true
+    k <- NN.linear@k_proj xn dim=2048 |> reshape_heads heads=8 |> NN.rmsnorm@k_norm cast_float=true unit_offset=true
+    v <- NN.linear@v_proj xn dim=2048 |> reshape_heads heads=8
+    long <- ((i + 1) % 6) == 0
+    theta <- long ? 1000000.0 : 10000.0
+    rope_scale <- long ? 8.0 : 1.0
     q, k <- rope_pair_base q k pos_ids theta scale_factor=rope_scale
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
-    window <- ((i + 1) % ROPE_PERIOD) == 0 ? WIN_LONG : WIN_LOCAL
+    k <- Tensor.repeat k repeats=2
+    v <- Tensor.repeat v repeats=2
+    window <- ((i + 1) % 6) == 0 ? 131072 : 1024
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D
+    a <- attention q k v mask scale=0.0625 |> merge_heads |> NN.linear@o_proj dim=3840
     return a, new_kv
   a <- NN.rmsnorm@post_attention_layernorm a cast_float=true unit_offset=true
   x <- x + a
   xn <- NN.rmsnorm@pre_feedforward_layernorm x cast_float=true unit_offset=true
   m <- scope@mlp do
-    g <- NN.linear@gate_proj xn dim=FFN
-    u <- NN.linear@up_proj xn dim=FFN
-    return gelu_pytorch_tanh g |> mul u |> NN.linear@down_proj dim=D
+    g <- NN.linear@gate_proj xn dim=15360
+    u <- NN.linear@up_proj xn dim=15360
+    return gelu_pytorch_tanh g |> mul u |> NN.linear@down_proj dim=3840
   m <- NN.rmsnorm@post_feedforward_layernorm m cast_float=true unit_offset=true
   return x + m, new_kv
 
@@ -56,12 +49,13 @@ gemma3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?C
 gemma3 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model root=PARAM_ROOT do
-    x <- NN.embedding@embed_tokens input_ids dim=D scale=EMB_SCALE
+    x <- NN.embedding@embed_tokens input_ids dim=3840 scale=61.96773353931867
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    for@layers i <- [0..48) do
       past_i <- Cache.index past_kv i
       x, new_i <- gemma3_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     logits <- NN.rmsnorm@norm x cast_float=true unit_offset=true |> NN.linear@embed_tokens
     return logits, new_kv
   return logits, new_kv

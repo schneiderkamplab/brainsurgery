@@ -79,6 +79,26 @@ def _find_bound_int(
     model_symbols: dict[str, Any] | None = None,
     model_config: dict[str, Any] | None = None,
 ) -> int | None:
+    def _normalize_config_key(raw_key: Any) -> str | None:
+        if not isinstance(raw_key, str):
+            return None
+        key = raw_key.strip()
+        if key.startswith("@"):
+            key = key[1:]
+        return key or None
+
+    def _config_int_key_default(node_spec: dict[str, Any]) -> tuple[str | None, int | None]:
+        raw = node_spec.get("_args")
+        if isinstance(raw, str):
+            return _normalize_config_key(raw), None
+        if isinstance(raw, (list, tuple)) and raw:
+            key = _normalize_config_key(raw[0])
+            default: int | None = None
+            if len(raw) > 1 and isinstance(raw[1], int):
+                default = raw[1]
+            return key, default
+        return None, None
+
     def _coerce_int(value: Any) -> int | None:
         if isinstance(value, int):
             return value
@@ -173,13 +193,16 @@ def _find_bound_int(
         *,
         root: Any = None,
     ) -> int | None:
+        normalized_key = _normalize_config_key(key)
+        if normalized_key is None:
+            return None
         base = _lookup_path(model_config, _resolve_config_root(root) or "")
         if not isinstance(base, dict):
             return None
-        direct = _coerce_int(base.get(key))
+        direct = _coerce_int(base.get(normalized_key))
         if direct is not None:
             return direct
-        dotted = _lookup_path(base, key)
+        dotted = _lookup_path(base, normalized_key)
         return _coerce_int(dotted)
 
     def _config_symbol_override(symbol_name: str) -> int | None:
@@ -273,9 +296,15 @@ def _find_bound_int(
                 return None
 
             if op == "config_int":
-                key = node.get("_args")
-                if isinstance(key, str):
-                    cfg_value = _lookup_config_int(model_config, key, root=node.get("root"))
+                key_raw = node.get("_args")
+                if isinstance(key_raw, str):
+                    cfg_value = _lookup_config_int(model_config, key_raw, root=node.get("root"))
+                    if cfg_value is not None:
+                        cache[bind_name] = cfg_value
+                        return cache[bind_name]
+                elif isinstance(key_raw, (list, tuple)) and key_raw:
+                    key0 = key_raw[0]
+                    cfg_value = _lookup_config_int(model_config, key0, root=node.get("root"))
                     if cfg_value is not None:
                         cache[bind_name] = cfg_value
                         return cache[bind_name]
@@ -283,11 +312,16 @@ def _find_bound_int(
                 if isinstance(default, int):
                     cache[bind_name] = default
                     return cache[bind_name]
+                if isinstance(key_raw, (list, tuple)) and len(key_raw) > 1:
+                    list_default = key_raw[1]
+                    if isinstance(list_default, int):
+                        cache[bind_name] = list_default
+                        return cache[bind_name]
                 return None
 
             if op == "config_has":
-                key = node.get("_args")
-                if not isinstance(key, str):
+                key = _normalize_config_key(node.get("_args"))
+                if key is None:
                     return None
                 root = _resolve_config_root(node.get("root"))
                 base = _lookup_path(model_config, root or "")
@@ -363,11 +397,13 @@ def _find_bound_int(
             continue
         if node_spec.get("_op") != "config_int":
             continue
-        key = node_spec.get("_args")
+        key, default = _config_int_key_default(node_spec)
         if isinstance(key, str):
             cfg_value = _lookup_config_int(model_config, key, root=node_spec.get("root"))
             if cfg_value is not None:
                 return cfg_value
+        if isinstance(default, int):
+            return default
     override = _config_symbol_override(name)
     if override is not None:
         return override
@@ -380,7 +416,9 @@ def _find_bound_int(
             continue
         if node_spec.get("_op") != "config_int":
             continue
-        default = node_spec.get("default")
+        _key, default = _config_int_key_default(node_spec)
+        if default is None:
+            default = node_spec.get("default")
         if isinstance(default, int):
             return default
     resolved_value = _resolve_bind_scalar(name, local_nodes=None, cache={}, visiting=set())

@@ -25,7 +25,9 @@ tanh x = (2.0 * (sigmoid (2.0 * x))) - 1.0
 
 
 relu :: Tensor -> Tensor
-relu x = where (le x 0.0) 0.0 x
+relu x = do
+  zero <- x * 0.0
+  return where (le x zero) zero x
 
 
 relu2 :: Tensor -> Tensor
@@ -71,16 +73,16 @@ xielu_basic x alpha_p_raw alpha_n_raw beta eps = do
   alpha_p <- log ((exp alpha_p_raw) + 1.0)
   alpha_n <- beta + (log ((exp alpha_n_raw) + 1.0))
   pos <- (alpha_p * x * x) + (beta * x)
+  zero <- x * 0.0
   x_cap <- where (le x eps) x eps
   neg <- ((exp x_cap - 1.0) - x) * alpha_n + (beta * x)
-  return where (le x 0.0) neg pos
+  return where (le x zero) neg pos
 
 
-xielu :: @Path -> Tensor -> ?Path -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor
-xielu@path x ?alpha_p_path=@alpha_p ?alpha_n_path=@alpha_n ?beta_path=@beta ?eps_path=@eps ?prefix_path=null = do
-  prefix <- (prefix_path == null) ? path : prefix_path
-  alpha_p <- param alpha_p_path prefix_path=prefix
-  alpha_n <- param alpha_n_path prefix_path=prefix
-  beta <- param beta_path prefix_path=prefix
-  eps <- param eps_path prefix_path=prefix
+xielu :: Path -> Tensor -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor
+xielu@path x ?alpha_p_path=null ?alpha_n_path=null ?beta_path=null ?eps_path=null = do
+  alpha_p <- (alpha_p_path == null) ? (param @'{path}.alpha_p') : (param alpha_p_path)
+  alpha_n <- (alpha_n_path == null) ? (param @'{path}.alpha_n') : (param alpha_n_path)
+  beta <- (beta_path == null) ? (param @'{path}.beta') : (param beta_path)
+  eps <- (eps_path == null) ? (param @'{path}.eps') : (param eps_path)
   return xielu_basic x alpha_p alpha_n beta eps

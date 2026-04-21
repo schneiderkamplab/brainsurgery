@@ -9,10 +9,12 @@ from brainsurgery.synapse.axon.types import (
     AxonExprDo,
     AxonExprInt,
     AxonExprList,
+    AxonExprPath,
     AxonExprString,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
+    AxonYield,
 )
 
 
@@ -40,6 +42,39 @@ lin x = do
     assert stmt.from_expr == AxonExprInt(value=1)
     assert stmt.to_expr == AxonExprInt(value=8)
     assert stmt.step_expr == AxonExprInt(value=2)
+
+
+def test_parse_for_bind_with_carry_and_yield() -> None:
+    source = """
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = do
+  y <- for@layers i <- [0..2) carry (x) do
+    x <- lin x
+    yield x
+  return y
+"""
+    rhs = _parse_rhs_do(source)
+    stmt = rhs.body[0]
+    assert isinstance(stmt, AxonRepeat)
+    assert stmt.targets == ("y",)
+    assert stmt.carry == ("x",)
+    assert isinstance(stmt.body[-1], AxonYield)
+    assert len(stmt.body[-1].values) == 1
+
+
+def test_parse_for_bind_short_form_without_carry_or_yield() -> None:
+    source = """
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = do
+  y <- for@layers i <- [0..2) do
+    y <- lin x
+  return y
+"""
+    rhs = _parse_rhs_do(source)
+    stmt = rhs.body[0]
+    assert isinstance(stmt, AxonRepeat)
+    assert stmt.targets == ("y",)
+    assert stmt.carry is None
 
 
 def test_parse_scope_bind_statement_without_at() -> None:
@@ -110,3 +145,22 @@ lin x = do
     assert stmt.targets == ("a", "b")
     assert isinstance(stmt.expr, AxonExprCall)
     assert stmt.expr.callee == "split"
+
+
+def test_parse_path_literal_single_quoted() -> None:
+    source = """
+lin :: Tensor[B,S,D] -> Tensor
+lin x = do
+  y <- Params.param @'model.layers.0.self_attn.q_proj.weight'
+  return y
+"""
+    rhs = _parse_rhs_do(source)
+    stmt = rhs.body[0]
+    assert isinstance(stmt, AxonBind)
+    assert isinstance(stmt.expr, AxonExprCall)
+    assert stmt.expr.callee == "Params.param"
+    assert len(stmt.expr.args) == 1
+    arg0 = stmt.expr.args[0]
+    assert isinstance(arg0, AxonExprPath)
+    assert arg0.absolute is False
+    assert arg0.parts == ("model", "layers", "0", "self_attn", "q_proj", "weight")

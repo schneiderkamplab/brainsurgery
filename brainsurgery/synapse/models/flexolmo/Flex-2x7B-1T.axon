@@ -21,7 +21,7 @@ EPS = 1e-06
 THETA = 500000.0
 ATTN_SCALE = 0.08838834764831843
 
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
 expert_ffn :: Tensor[N,D] -> Tensor[N,D]

@@ -8,11 +8,11 @@ import Positions (position_ids)
 
 
 
-T   = Config.int "n_positions" default=1024
-D   = Config.int "n_embd" default=768
-L   = Config.int "n_layer" default=12
-H   = Config.int "n_head" default=12
-V   = Config.int "vocab_size" default=52057
+T   = Config.int@n_positions default=1024
+D   = Config.int@n_embd default=768
+L   = Config.int@n_layer default=12
+H   = Config.int@n_head default=12
+V   = Config.int@vocab_size default=52057
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gpt2_block x attn_mask past_kv = do
@@ -38,9 +38,10 @@ gpt2 input_ids attn_mask past_kv use_cache = do
   pos <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=1 |> NN.embedding@wpe
   x <- tok + pos
   new_kv <- use_cache ? Cache.init : null
-  for@h i <- [0..L) do
+  x, new_kv <- for@h i <- [0..L) carry (x, new_kv) do
     past_i <- Cache.index past_kv i
     x, new_i <- gpt2_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i
+    yield x, new_kv
   logits <- NN.layernorm@ln_f x |> NN.linear@wte
   return logits, new_kv

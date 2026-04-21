@@ -12,30 +12,30 @@ import Positions (position_ids, rope_pair_hf_yarn)
 
 
 -- GPT-OSS-20B architecture and YaRN constants.
-D   = Config.int "hidden_size" default=2880                        -- residual hidden size
-V   = Config.int "vocab_size" default=201088                       -- tokenizer vocabulary size
-L   = Config.int "num_hidden_layers" default=24                    -- decoder depth
-H   = Config.int "num_attention_heads" default=64                  -- query head count
-KVH = Config.int "num_key_value_heads" default=8                   -- key/value head count
-HD  = Config.int "head_dim" default=64                             -- per-head hidden size
+D   = Config.int@hidden_size default=2880                        -- residual hidden size
+V   = Config.int@vocab_size default=201088                       -- tokenizer vocabulary size
+L   = Config.int@num_hidden_layers default=24                    -- decoder depth
+H   = Config.int@num_attention_heads default=64                  -- query head count
+KVH = Config.int@num_key_value_heads default=8                   -- key/value head count
+HD  = Config.int@head_dim default=64                             -- per-head hidden size
 QD  = H * HD                                                       -- query projection width
 KVD = KVH * HD                                                     -- key/value projection width
-E   = Config.int "num_local_experts" default=32                    -- total local experts
-EPT = Config.int "num_experts_per_tok" default=4                   -- routed experts per token
-C   = Config.int "max_position_embeddings" default=131072          -- max context length
-SW  = Config.int "sliding_window" default=128                      -- short-window attention size
-EPS = Config.float "rms_norm_eps" default=1e-05                    -- RMSNorm epsilon
-THETA = Config.float "rope_theta" default=150000.0                 -- base RoPE theta
-ROPE_SCALE = Config.float "factor" root="rope_scaling" default=32.0 -- YaRN scaling factor
-ROPE_LOW_FREQ = Config.float "beta_slow" root="rope_scaling" default=1.0 -- YaRN slow beta
-ROPE_HIGH_FREQ = Config.float "beta_fast" root="rope_scaling" default=32.0 -- YaRN fast beta
-ROPE_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=4096 -- YaRN train context
-ROPE_ATTN_FACTOR = Config.float "attention_factor" root="rope_scaling" default=1.3465735902799727 -- YaRN attention factor
+E   = Config.int@num_local_experts default=32                    -- total local experts
+EPT = Config.int@num_experts_per_tok default=4                   -- routed experts per token
+C   = Config.int@max_position_embeddings default=131072          -- max context length
+SW  = Config.int@sliding_window default=128                      -- short-window attention size
+EPS = Config.float@rms_norm_eps default=1e-05                    -- RMSNorm epsilon
+THETA = Config.float@rope_theta default=150000.0                 -- base RoPE theta
+ROPE_SCALE = Config.float @'rope_scaling.factor' default=32.0 -- YaRN scaling factor
+ROPE_LOW_FREQ = Config.float @'rope_scaling.beta_slow' default=1.0 -- YaRN slow beta
+ROPE_HIGH_FREQ = Config.float @'rope_scaling.beta_fast' default=32.0 -- YaRN fast beta
+ROPE_CONTEXT = Config.int @'rope_scaling.original_max_position_embeddings' default=4096 -- YaRN train context
+ROPE_ATTN_FACTOR = Config.float @'rope_scaling.attention_factor' default=1.3465735902799727 -- YaRN attention factor
 ATTN_SCALE = 1.0 / sqrt HD                                          -- qk scaling
-SWIGLU_LIMIT = Config.float "swiglu_limit" default=7.0             -- SwiGLU clamp threshold
-SWIGLU_ALPHA = Config.float "swiglu_alpha" default=1.702           -- SwiGLU slope
+SWIGLU_LIMIT = Config.float@swiglu_limit default=7.0             -- SwiGLU clamp threshold
+SWIGLU_ALPHA = Config.float@swiglu_alpha default=1.702           -- SwiGLU slope
 
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
 grouped_ffn_gated :: Tensor -> Float -> Float -> Tensor
@@ -54,12 +54,13 @@ grouped_ffn hidden topk_scores topk_indices ?gate_up_weight=@experts.gate_up_pro
   transpose <- (transpose == null) ? true : transpose
   routed <- hidden * 0.0
   experts <- param path=gate_up_weight |> Tensor.size 0
-  for e <- [0..experts) do
+  routed <- for e <- [0..experts) carry (routed) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
     gate_up <- NN.linear@w1 x_sel dim=null bias=has_bias transpose=transpose expert=e weight_path=gate_up_weight bias_path=gate_up_bias
     ff <- has_gate ? (grouped_ffn_gated gate_up alpha limit) : (gate_up |> silu)
     x_upd <- NN.linear@w2 ff dim=null bias=has_bias transpose=transpose expert=e weight_path=out_weight bias_path=out_bias
     routed <- scatter_add routed token_idx x_upd sel_scores
+    yield routed
   return routed
 
 gpt_oss_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
@@ -99,10 +100,11 @@ gpt_oss_20b input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- gpt_oss_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
 

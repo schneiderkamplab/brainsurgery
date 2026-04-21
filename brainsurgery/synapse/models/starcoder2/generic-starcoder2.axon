@@ -9,25 +9,25 @@ import Positions (position_ids, rope_pair_base)
 
 
 
-D = Config.int "hidden_size" default=4608
-V = Config.int "vocab_size" default=49152
-L = Config.int "num_hidden_layers" default=32
-H = Config.int "num_attention_heads" default=36
-KVH = Config.int "num_key_value_heads" default=4
+D = Config.int@hidden_size default=4608
+V = Config.int@vocab_size default=49152
+L = Config.int@num_hidden_layers default=32
+H = Config.int@num_attention_heads default=36
+KVH = Config.int@num_key_value_heads default=4
 HD = D / H
 KVD = KVH * HD
-FFN = Config.int "intermediate_size" default=18432
-EPS = Config.float "norm_epsilon" default=1e-05
-C = Config.int "max_position_embeddings" default=16384
-HAS_SLIDING_WINDOW = Config.has_value "sliding_window"
-SW = HAS_SLIDING_WINDOW ? (Config.int "sliding_window" default=4096) : C
-HAS_ROPE_THETA = Config.has_value "rope_theta"
-THETA = HAS_ROPE_THETA ? (Config.float "rope_theta" default=10000.0) : 10000.0
-ACT = Config.str "hidden_act" default="gelu_pytorch_tanh"
+FFN = Config.int@intermediate_size default=18432
+EPS = Config.float@norm_epsilon default=1e-05
+C = Config.int@max_position_embeddings default=16384
+HAS_SLIDING_WINDOW = Config.has_value@sliding_window
+SW = HAS_SLIDING_WINDOW ? (Config.int@sliding_window default=4096) : C
+HAS_ROPE_THETA = Config.has_value@rope_theta
+THETA = HAS_ROPE_THETA ? (Config.float@rope_theta default=10000.0) : 10000.0
+ACT = Config.str@hidden_act default="gelu_pytorch_tanh"
 HAS_LM_HEAD = has_root "lm_head"
 HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
-starcoder2_ln :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+starcoder2_ln :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 starcoder2_ln@path x = NN.layernorm@path x eps=EPS
 
 starcoder2_mlp_act :: Tensor[B,S,FFN] -> Tensor[B,S,FFN]
@@ -60,10 +60,11 @@ starcoder2 input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- starcoder2_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- starcoder2_ln@norm x
     return x, new_kv
   logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V bias=HAS_LM_HEAD_BIAS) : (NN.linear@model.embed_tokens x dim=V)

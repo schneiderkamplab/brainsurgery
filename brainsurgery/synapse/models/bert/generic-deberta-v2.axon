@@ -10,26 +10,26 @@ import Positions (position_ids, relative_bias_disentangled)
 
 
 
-D   = Config.int "hidden_size" default=1536
-E   = (Config.has_key "embedding_size") ? (Config.int "embedding_size" default=1536) : D
-V   = Config.int "vocab_size" default=128100
-L   = Config.int "num_hidden_layers" default=24
-H   = Config.int "num_attention_heads" default=24
-FFN = Config.int "intermediate_size" default=6144
-EPS = Config.float "layer_norm_eps" default=1e-07
-POS_BUCKETS = Config.int "position_buckets" default=256
-MAX_REL = Config.int "max_position_embeddings" default=512
-REL_Q_SCALE = Config.float "deberta_rel_q_scale" default=0.5773502691896257
-ATTN_SCALE = Config.float "deberta_attn_scale" default=0.125
+D   = Config.int@hidden_size default=1536
+E   = (Config.has_key@embedding_size) ? (Config.int@embedding_size default=1536) : D
+V   = Config.int@vocab_size default=128100
+L   = Config.int@num_hidden_layers default=24
+H   = Config.int@num_attention_heads default=24
+FFN = Config.int@intermediate_size default=6144
+EPS = Config.float@layer_norm_eps default=1e-07
+POS_BUCKETS = Config.int@position_buckets default=256
+MAX_REL = Config.int@max_position_embeddings default=512
+REL_Q_SCALE = Config.float@deberta_rel_q_scale default=0.5773502691896257
+ATTN_SCALE = Config.float@deberta_attn_scale default=0.125
 
-deberta_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+deberta_block :: Tensor -> ?Tensor -> Tensor
 deberta_block x attn_mask = do
   a <- scope@attention do
     q0 <- NN.linear@self.query_proj x dim=D bias=true |> reshape_heads heads=H
     k <- NN.linear@self.key_proj x dim=D bias=true |> reshape_heads heads=H
     v <- NN.linear@self.value_proj x dim=D bias=true |> reshape_heads heads=H
-    rel_bias <- relative_bias_disentangled@self q0 k position_buckets=POS_BUCKETS max_relative_positions=MAX_REL rel_norm_eps=EPS
-    q <- mul q0 REL_Q_SCALE
+    rel_bias <- relative_bias_disentangled@self q0 k position_buckets=POS_BUCKETS max_relative_positions=MAX_REL rel_norm_eps=EPS weight_path=@@deberta.encoder.rel_embeddings.weight ln_weight_path=@@deberta.encoder.LayerNorm.weight ln_bias_path=@@deberta.encoder.LayerNorm.bias
+    q <- q0 * REL_Q_SCALE
     keep <- bidirectional_mask q0 k padding_mask=attn_mask
     return attention q k v keep rel_bias=rel_bias scale=ATTN_SCALE |> merge_heads |> NN.linear@output.dense dim=D bias=true
   x <- x + a
@@ -40,7 +40,7 @@ deberta_block x attn_mask = do
   y <- NN.layernorm@output.LayerNorm y eps=EPS
   return y
 
-deberta_legacy_head :: Tensor[B,S,D] -> Tensor[B,S,V]
+deberta_legacy_head :: Tensor -> Tensor
 deberta_legacy_head x = do
   logits <- scope@cls.predictions do
     x <- NN.linear@transform.dense x dim=E bias=true |> gelu
@@ -48,7 +48,7 @@ deberta_legacy_head x = do
     return NN.linear@decoder x dim=V bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
   return logits
 
-deberta_modern_head :: Tensor[B,S,D] -> Tensor[B,S,V]
+deberta_modern_head :: Tensor -> Tensor
 deberta_modern_head x = do
   logits <- scope@lm_predictions.lm_head do
     x <- NN.linear@dense x dim=D bias=true |> gelu
@@ -59,7 +59,7 @@ deberta_modern_head x = do
 deberta_v2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 deberta_v2 input_ids attn_mask = do
   pos_ids <- position_ids input_ids
-  tok_type_ids <- Tensor.zeros_like input_ids
+  tok_type_ids <- input_ids - input_ids
   tok <- NN.embedding@deberta.embeddings.word_embeddings input_ids dim=E
   pos <- Tensor.zeros_like tok
   has_typ <- has_root "deberta.embeddings.token_type_embeddings"
@@ -69,8 +69,9 @@ deberta_v2 input_ids attn_mask = do
   has_proj <- has_root "deberta.embeddings.embed_proj"
   x <- has_proj ? NN.linear@deberta.embeddings.embed_proj x dim=D bias=false : x
   x <- NN.layernorm@deberta.embeddings.LayerNorm x eps=EPS
-  for@deberta.encoder.layer i <- [0..L) do
+  x <- for@deberta.encoder.layer i <- [0..L) carry (x) do
     x <- deberta_block x attn_mask
+    yield x
   modern_head <- has_root "lm_predictions.lm_head"
   legacy_head <- has_root "cls.predictions"
   logits <- modern_head ? deberta_modern_head x : (legacy_head ? deberta_legacy_head x : deberta_modern_head x)

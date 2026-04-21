@@ -10,16 +10,16 @@ import Positions (position_ids, sinusoidal_positions)
 
 
 
-D = Config.int "d_model" default=1024
-V = Config.int "vocab_size" default=256008
-L = Config.int "num_layers" default=24
-H = Config.int "attention_heads" default=16
+D = Config.int@d_model default=1024
+V = Config.int@vocab_size default=256008
+L = Config.int@num_layers default=24
+H = Config.int@attention_heads default=16
 HD = D / H
-FFN = Config.int "ffn_dim" default=4096
-EPS = Config.float "layer_norm_eps" default=1e-05
-C = Config.int "max_position_embeddings" default=2048
-ACT = Config.str "activation_function" default="gelu"
-SCALE_EMB = Config.bool "scale_embedding" default=true
+FFN = Config.int@ffn_dim default=4096
+EPS = Config.float@layer_norm_eps default=1e-05
+C = Config.int@max_position_embeddings default=2048
+ACT = Config.str@activation_function default="gelu"
+SCALE_EMB = Config.bool@scale_embedding default=true
 EMB_SCALE = SCALE_EMB ? (sqrt D) : 1.0
 ATTN_SCALE = 1.0 / sqrt HD
 
@@ -57,10 +57,11 @@ xglm input_ids attn_mask past_kv use_cache = do
       : (sinusoidal_positions x pos_ids_rope theta=10000.0 offset=0 padding_idx=null)
     x <- x + pos
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- xglm_block x attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- NN.layernorm@layer_norm x eps=EPS
     return x, new_kv
   logits <- NN.linear@lm_head x dim=V bias=false

@@ -105,14 +105,16 @@ sinusoidal_positions ref position_ids ?theta=10000.0 ?offset=2 ?padding_idx=null
 linear_position_bias :: Tensor[B,T] -> Int -> ?Float -> Tensor[B,H,1,T]
 linear_position_bias attn_mask heads ?scale=1.0 = do
   cp2 <- 1
-  for i <- [0..heads) do
+  cp2 <- for i <- [0..heads) carry (cp2) do
     cp2 <- (((cp2 * 2) <= heads) ? (cp2 * 2) : cp2)
+    yield cp2
   cp2_log2 <- 0
   cp2_tmp <- cp2
-  for i <- [0..heads) do
+  cp2_tmp, cp2_log2 <- for i <- [0..heads) carry (cp2_tmp, cp2_log2) do
     reduce <- cp2_tmp > 1
     cp2_tmp <- reduce ? (cp2_tmp / 2) : cp2_tmp
     cp2_log2 <- reduce ? (cp2_log2 + 1) : cp2_log2
+    yield cp2_tmp, cp2_log2
   ln2 <- log 2.0
   ratio <- (0.0 - 8.0) / cp2
   powers <- arange attn_mask start=1 end=(cp2 + 1)
@@ -303,7 +305,7 @@ rope_max_pos pos_ids = do
   return all_max
 
 
-rope_longrope_use_long :: Tensor[B,SM] -> Int -> Any
+rope_longrope_use_long :: Tensor[B,SM] -> Int -> Tensor
 rope_longrope_use_long pos_ids original_context = do
   max_pos <- rope_max_pos pos_ids
   return le original_context max_pos
@@ -325,13 +327,14 @@ rope_inv_freq_longrope q pos_ids theta original_context long_factor short_factor
 
 
 rope_attention_factor_longrope :: Tensor[B,SM] -> Int -> ?Float -> ?Float -> ?Float -> Any
-rope_attention_factor_longrope pos_ids original_context ?attention_factor=null ?long_mscale=null ?short_mscale=null = (attention_factor == null)
-  ? ((long_mscale == null)
-    ? ((short_mscale == null) ? 1.0 : short_mscale)
-    : ((short_mscale == null)
-      ? long_mscale
-      : (where (rope_longrope_use_long pos_ids original_context) long_mscale short_mscale)))
-  : attention_factor
+rope_attention_factor_longrope pos_ids original_context ?attention_factor=null ?long_mscale=null ?short_mscale=null = do
+  use_long <- rope_longrope_use_long pos_ids original_context
+  short_raw <- (short_mscale == null) ? 1.0 : short_mscale
+  long_raw <- (long_mscale == null) ? short_raw : long_mscale
+  short_val <- tensor_like short_raw pos_ids dtype="float32"
+  long_val <- tensor_like long_raw pos_ids dtype="float32"
+  base <- where use_long long_val short_val
+  return (attention_factor == null) ? base : (tensor_like attention_factor pos_ids dtype="float32")
 
 
 rope_pair_longrope :: Tensor[B,H,S,HD] -> Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Int -> Int -> Any -> Any -> ?Float -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,H,S,HD], Tensor[B,H,S,HD])
@@ -441,15 +444,15 @@ relative_position_buckets relative_position num_buckets max_distance bidirection
   return rel_base + where is_small rel_pos rel_pos_if_large
 
 
-relative_position_bias :: @Path -> Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Int -> ?Int -> ?Bool -> Tensor[1,H,Q,K]
+relative_position_bias :: Path -> Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Int -> ?Int -> ?Bool -> Tensor[1,H,Q,K]
 relative_position_bias@path q k ?num_buckets=32 ?max_distance=128 ?bidirectional=true = do
   row_ids <- arange q start=0 |> reshape shape=[-1, 1]
   col_ids <- arange k start=0 |> reshape shape=[1, -1]
   buckets <- col_ids - row_ids |> relative_position_buckets num_buckets max_distance bidirectional |> cast dtype="int64"
   return embedding@path buckets dim=H |> permute dims=[2, 0, 1] |> expand shape=[1, -1, -1, -1]
 
-relative_bias_disentangled :: @Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> ?Int -> ?Int -> ?Float -> Tensor[B,H,T,TK]
-relative_bias_disentangled@path q k ?position_buckets=256 ?max_relative_positions=512 ?rel_norm_eps=1e-7 = do
+relative_bias_disentangled :: Path -> Tensor[B,H,T,HD] -> Tensor[B,H,TK,HD] -> ?Int -> ?Int -> ?Float -> ?Path -> ?Path -> ?Path -> Tensor[B,H,T,TK]
+relative_bias_disentangled@path q k ?position_buckets=256 ?max_relative_positions=512 ?rel_norm_eps=1e-7 ?weight_path=@rel_embeddings.weight ?ln_weight_path=@LayerNorm.weight ?ln_bias_path=@LayerNorm.bias = do
   att_span <- (position_buckets > 0) ? position_buckets : max_relative_positions
   bsz <- size q 0
   heads <- size q 1
@@ -457,8 +460,8 @@ relative_bias_disentangled@path q k ?position_buckets=256 ?max_relative_position
   klen <- size k 2
   head_dim <- size q 3
   bh <- bsz * heads
-  rel <- param path=@@deberta.encoder.rel_embeddings.weight |> slice 0 0 (att_span * 2)
-  rel <- layernorm@path rel eps=rel_norm_eps dim=head_dim weight_path=@@deberta.encoder.LayerNorm.weight bias=true bias_path=@@deberta.encoder.LayerNorm.bias
+  rel <- param path=weight_path |> slice 0 0 (att_span * 2)
+  rel <- layernorm@path rel eps=rel_norm_eps dim=head_dim weight_path=ln_weight_path bias=true bias_path=ln_bias_path
   rel <- unsqueeze rel 0
   q_proj <- linear@path rel dim=null bias=true weight_path=@self.query_proj.weight bias_path=@self.query_proj.bias
   k_proj <- linear@path rel dim=null bias=true weight_path=@self.key_proj.weight bias_path=@self.key_proj.bias

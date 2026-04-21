@@ -10,27 +10,27 @@ import Positions (position_ids, rope_pair_base)
 
 
 
-D    = Config.int "hidden_size" default=4096
-V    = Config.int "vocab_size" default=151552
-L    = Config.int "num_hidden_layers" default=46
-H    = Config.int "num_attention_heads" default=96
-KVH  = Config.int "num_key_value_heads" default=8
-HD   = Config.int "head_dim" default=128
+D    = Config.int@hidden_size default=4096
+V    = Config.int@vocab_size default=151552
+L    = Config.int@num_hidden_layers default=46
+H    = Config.int@num_attention_heads default=96
+KVH  = Config.int@num_key_value_heads default=8
+HD   = Config.int@head_dim default=128
 QD   = H * HD
 KVD  = KVH * HD
-FFN  = Config.int "intermediate_size" default=10944
-E    = Config.int "n_routed_experts" default=128
-EPT  = Config.int "num_experts_per_tok" default=8
-EM   = Config.int "moe_intermediate_size" default=1408
-NG   = Config.int "n_group" default=1
-TKG  = Config.int "topk_group" default=1
-EPS  = Config.float "rms_norm_eps" default=1e-05
-THETA = Config.float "rope_theta" default=1000000.0
-C    = Config.int "max_position_embeddings" default=131072
-FIRST_DENSE = Config.int "first_k_dense_replace" default=1
-RSC  = Config.float "routed_scaling_factor" default=1.0
+FFN  = Config.int@intermediate_size default=10944
+E    = Config.int@n_routed_experts default=128
+EPT  = Config.int@num_experts_per_tok default=8
+EM   = Config.int@moe_intermediate_size default=1408
+NG   = Config.int@n_group default=1
+TKG  = Config.int@topk_group default=1
+EPS  = Config.float@rms_norm_eps default=1e-05
+THETA = Config.float@rope_theta default=1000000.0
+C    = Config.int@max_position_embeddings default=131072
+FIRST_DENSE = Config.int@first_k_dense_replace default=1
+RSC  = Config.float@routed_scaling_factor default=1.0
 
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
 routed_expert_ffn :: Tensor[N,D] -> Tensor[N,D]
@@ -84,10 +84,11 @@ glm4_moe_sparse_block x pos_ids attn_mask past_kv = do
       return shared_expert_ffn xn
     topk_weights, topk_indices <- grouped_sigmoid_router@gate xn top_k=EPT n_group=NG topk_group=TKG norm_topk_prob=true routed_scaling_factor=RSC
     routed <- Tensor.zeros_like xn
-    for@experts e <- [0..E) do
+    routed <- for@experts e <- [0..E) carry (routed) do
       x_sel, token_idx, topk_pos, sel_scores <- select xn topk_weights topk_indices e
       x_upd <- routed_expert_ffn x_sel
       routed <- scatter_add routed token_idx x_upd sel_scores
+      yield routed
     return shared + routed
   return x + m, new_kv
 
@@ -97,14 +98,16 @@ glm4_moe input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..FIRST_DENSE) do
+    x, new_kv <- for@layers i <- [0..FIRST_DENSE) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- glm4_moe_dense_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
-    for@layers i <- [FIRST_DENSE..L) do
+      yield x, new_kv
+    x, new_kv <- for@layers i <- [FIRST_DENSE..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- glm4_moe_sparse_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
   logits <- NN.linear@lm_head x dim=V bias=false

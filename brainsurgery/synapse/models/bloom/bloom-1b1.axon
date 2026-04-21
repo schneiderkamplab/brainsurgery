@@ -1,53 +1,53 @@
 {-# CHECKPOINTS ["bigscience/bloom-1b1", "bigscience/bloomz-1b1"] #-}
 {-# TASK "causal_lm" #-}
 
+import Activations
 import Activations (gelu_new)
+import Attention
 import Attention (attention, merge_heads, split_qkv_heads)
+import Masking
 import Masking (causal_mask)
-import Math (sqrt)
+import Params
+import Params (has_root)
+import Positions
 import Positions (linear_position_bias)
+import Tensor
+import Tensor (size)
 
-
-
-D = 1536
-V = 250880
-L = 24
-H = 16
-FFN = 6144
-EPS = 1e-05
-MAX_CTX = 2048
-POST_LN_RESID = false
-HAS_LM_HEAD = false
+HAS_LM_HEAD = has_root "lm_head"
 
 bloom_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 bloom_block x attn_mask past_kv = do
-  xn <- NN.layernorm@input_layernorm x eps=EPS
-  attn_res <- POST_LN_RESID ? xn : x
+  xn <- NN.layernorm@input_layernorm x eps=1e-05
+  attn_res <- x
   a, new_kv <- scope@self_attention do
-    qkv <- NN.linear@query_key_value xn dim=(3 * D) bias=true
-    q, k, v <- split_qkv_heads qkv heads=H layout="interleaved"
+    qkv <- NN.linear@query_key_value xn dim=4608 bias=true
+    q, k, v <- split_qkv_heads qkv heads=16 layout="interleaved"
     k, v, new_kv <- Cache.update past_kv k v
-    keep <- causal_mask q k window=MAX_CTX padding_mask=attn_mask
-    pos_bias <- linear_position_bias attn_mask heads=H
-    a <- attention q k v keep=keep rel_bias=pos_bias scale=(1.0 / sqrt (D / H)) |> merge_heads |> NN.linear@dense dim=D bias=true
+    keep <- causal_mask q k window=2048 padding_mask=attn_mask
+    pos_bias <- linear_position_bias attn_mask heads=16
+    head_dim <- size q 3
+    scale <- 1.0 / sqrt head_dim
+    a <- attention q k v keep rel_bias=pos_bias scale=scale |> merge_heads |> NN.linear@dense dim=1536 bias=true
     return a, new_kv
   x <- attn_res + a
-  xn <- NN.layernorm@post_attention_layernorm x eps=EPS
-  mlp_res <- POST_LN_RESID ? xn : x
+  xn <- NN.layernorm@post_attention_layernorm x eps=1e-05
+  mlp_res <- x
   m <- scope@mlp do
-    h <- NN.linear@dense_h_to_4h xn dim=FFN bias=true |> gelu_new
-    return NN.linear@dense_4h_to_h h dim=D bias=true
+    h <- NN.linear@dense_h_to_4h xn dim=6144 bias=true |> gelu_new
+    return NN.linear@dense_4h_to_h h dim=1536 bias=true
   return mlp_res + m, new_kv
 
 bloom :: TokenIds[B,S] -> Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 bloom input_ids attn_mask past_kv use_cache = do
-  tok <- NN.embedding@word_embeddings input_ids dim=D
-  x <- NN.layernorm@word_embeddings_layernorm tok eps=EPS
+  tok <- NN.embedding@word_embeddings input_ids dim=1536
+  x <- NN.layernorm@word_embeddings_layernorm tok eps=1e-05
   new_kv <- use_cache ? Cache.init : null
-  for@h i <- [0..L) do
+  for@h i <- [0..24) do
     past_i <- Cache.index past_kv i
     x, new_i <- bloom_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i
-  x <- NN.layernorm@ln_f x eps=EPS
-  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@word_embeddings x dim=V)
+    yield x, new_kv
+  x <- NN.layernorm@ln_f x eps=1e-05
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=250880) : (NN.linear@word_embeddings x dim=250880)
   return logits, new_kv

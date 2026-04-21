@@ -2018,6 +2018,7 @@ def _run_axon_test_single(
             "deepseek_v2",
             "deepseek_v3",
             "deepseekv3",
+            "gemma3",
             "gemma4",
             "mistral4",
             "mistral3",
@@ -2166,6 +2167,104 @@ def _run_axon_test_single(
                         rewritten[key] = value
                 return rewritten
 
+            def _normalize_hf_device_map_for_loading(
+                device_map: dict[str, str],
+                *,
+                hf_param_names: set[str] | None,
+                state_dict: dict[str, torch.Tensor],
+                first_device: str,
+                last_device: str,
+            ) -> dict[str, str]:
+                def _prefix_covers_name(prefix: str, name: str) -> bool:
+                    return name == prefix or name.startswith(prefix + ".")
+
+                def _candidate_hf_prefixes(prefix: str) -> tuple[str, ...]:
+                    out = [
+                        prefix,
+                        f"model.{prefix}",
+                        f"transformer.{prefix}",
+                        prefix.replace("language_model.model.", "language_model.", 1),
+                        f"model.{prefix.replace('language_model.model.', 'language_model.', 1)}",
+                        prefix.replace("language_model.", "model.language_model.", 1),
+                        prefix.replace("vision_tower.", "model.vision_tower.", 1),
+                        prefix.replace("multi_modal_projector.", "model.multi_modal_projector.", 1),
+                    ]
+                    dedup: list[str] = []
+                    seen: set[str] = set()
+                    for item in out:
+                        item = item.strip(".")
+                        if not item or item in seen:
+                            continue
+                        seen.add(item)
+                        dedup.append(item)
+                    return tuple(dedup)
+
+                def _match_prefix_to_hf_names(prefix: str, names: set[str]) -> str:
+                    if not names:
+                        return prefix
+                    candidates = _candidate_hf_prefixes(prefix)
+                    best = prefix
+                    best_score = -1
+                    for candidate in candidates:
+                        score = sum(1 for name in names if _prefix_covers_name(candidate, name))
+                        if score > best_score:
+                            best = candidate
+                            best_score = score
+                    return best
+
+                normalized: dict[str, str] = dict(device_map)
+                if not hf_param_names:
+                    rewritten: dict[str, str] = {}
+                    for key, value in normalized.items():
+                        mapped = key
+                        # Runtime stage usage uses stripped GPT/BLOOM prefixes for some specs.
+                        # Normalize these for HF loading when HF key introspection is unavailable.
+                        if (
+                            key.startswith("h.")
+                            or key == "ln_f"
+                            or key.startswith("word_embeddings")
+                        ):
+                            mapped = f"transformer.{key}"
+                        rewritten.setdefault(mapped, value)
+                    normalized = rewritten
+                else:
+                    rewritten = {}
+                    for key, value in normalized.items():
+                        mapped = _match_prefix_to_hf_names(key, hf_param_names)
+                        rewritten.setdefault(mapped, value)
+                    normalized = rewritten
+                # Some HF models keep RoPE buffers in a module without parameters.
+                normalized.setdefault("rotary_emb", first_device)
+                normalized.setdefault("model.rotary_emb", first_device)
+                normalized.setdefault("transformer.rotary_emb", first_device)
+                embed_device = next(
+                    (
+                        device
+                        for prefix, device in normalized.items()
+                        if prefix.endswith("embed_tokens")
+                        or prefix.endswith("word_embeddings")
+                        or prefix.endswith("wte")
+                    ),
+                    None,
+                )
+                if embed_device is not None:
+                    lm_head_device = (
+                        embed_device if "lm_head.weight" not in state_dict else last_device
+                    )
+                    normalized.setdefault("lm_head", lm_head_device)
+                    normalized.setdefault("language_model.lm_head", lm_head_device)
+                    normalized.setdefault("model.lm_head", lm_head_device)
+                if hf_param_names:
+                    uncovered: list[str] = []
+                    for name in hf_param_names:
+                        if any(_prefix_covers_name(prefix, name) for prefix in normalized):
+                            continue
+                        uncovered.append(name)
+                    for name in sorted(uncovered):
+                        root = name.rsplit(".", 1)[0] if "." in name else name
+                        normalized.setdefault(root, last_device)
+                return normalized
+
             hf_input_device = target_device
             if axon_backend == "pipeline" and resolved_model_task == "causal_lm":
                 local_state_ref_cpu = _load_state_dict(
@@ -2185,7 +2284,6 @@ def _run_axon_test_single(
                     input_ids=input_ids_cpu,
                     attention_mask=attention_mask_cpu,
                     requested_device=target_device_str,
-                    hf_param_names=hf_param_names,
                 )
                 print(
                     "HF device_map stages:",
@@ -2194,6 +2292,14 @@ def _run_axon_test_single(
                         for stage in hf_plan.stages
                     ),
                 )
+                if hf_plan.stages:
+                    hf_device_map = _normalize_hf_device_map_for_loading(
+                        hf_device_map,
+                        hf_param_names=hf_param_names,
+                        state_dict=local_state_ref_cpu,
+                        first_device=hf_plan.stages[0].device,
+                        last_device=hf_plan.stages[-1].device,
+                    )
                 if hf_plan.stages:
                     hf_input_device = torch.device(hf_plan.stages[0].device)
 

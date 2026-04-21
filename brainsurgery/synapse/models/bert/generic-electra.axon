@@ -8,13 +8,13 @@ import Positions (position_ids)
 
 
 
-E   = Config.int "embedding_size" default=128
-D   = Config.int "hidden_size" default=256
-V   = Config.int "vocab_size" default=30522
-L   = Config.int "num_hidden_layers" default=12
-H   = Config.int "num_attention_heads" default=4
-FFN = Config.int "intermediate_size" default=1024
-EPS = Config.float "layer_norm_eps" default=1e-12
+E   = Config.int@embedding_size default=128
+D   = Config.int@hidden_size default=256
+V   = Config.int@vocab_size default=30522
+L   = Config.int@num_hidden_layers default=12
+H   = Config.int@num_attention_heads default=4
+FFN = Config.int@intermediate_size default=1024
+EPS = Config.float@layer_norm_eps default=1e-12
 
 electra_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 electra_block x attn_mask = do
@@ -35,7 +35,7 @@ electra_block x attn_mask = do
 electra :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 electra input_ids attn_mask = do
   pos_ids <- position_ids input_ids
-  tok_type_ids <- Tensor.zeros_like input_ids
+  tok_type_ids <- input_ids - input_ids
   tok <- NN.embedding@electra.embeddings.word_embeddings input_ids dim=E
   pos <- NN.embedding@electra.embeddings.position_embeddings pos_ids dim=E
   typ <- NN.embedding@electra.embeddings.token_type_embeddings tok_type_ids dim=E
@@ -43,8 +43,9 @@ electra input_ids attn_mask = do
   x <- x + typ
   x <- NN.layernorm@electra.embeddings.LayerNorm x eps=EPS
   x <- (E == D) ? x : NN.linear@electra.embeddings_project x dim=D bias=true
-  for@electra.encoder.layer i <- [0..L) do
+  x <- for@electra.encoder.layer i <- [0..L) carry (x) do
     x <- electra_block x attn_mask
+    yield x
   x <- NN.linear@generator_predictions.dense x dim=E bias=true |> gelu
   x <- NN.layernorm@generator_predictions.LayerNorm x eps=EPS
   logits <- NN.linear@generator_lm_head x dim=V bias=true weight_path=@@electra.embeddings.word_embeddings.weight

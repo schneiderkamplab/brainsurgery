@@ -1,61 +1,53 @@
 {-# CHECKPOINTS ["HuggingFaceTB/SmolLM-135M", "HuggingFaceTB/SmolLM-135M-Instruct"] #-}
 {-# TASK "causal_lm" #-}
 
+import Activations
 import Activations (silu)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (causal_mask)
+import Math
 import Math (mul)
+import Positions
 import Positions (position_ids, rope_pair_base)
 
-
-
-PARAM_ROOT = ""
-D = 576
-V = 49152
-L = 30
-H = 9
-KVH = 3
-KVD = 192
-FFN = 1536
-EPS = 1e-05
-THETA = 10000.0
-C = 2048
-
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = NN.rmsnorm@path x eps=EPS
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=1e-05
 
 smollm_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 smollm_block x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=D |> reshape_heads heads=H
-    k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
-    v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
-    q, k <- rope_pair_base q k pos_ids THETA
+    q <- NN.linear@q_proj xn dim=576 |> reshape_heads heads=9
+    k <- NN.linear@k_proj xn dim=192 |> reshape_heads heads=3
+    v <- NN.linear@v_proj xn dim=192 |> reshape_heads heads=3
+    q, k <- rope_pair_base q k pos_ids 10000.0
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
-    mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D
+    k <- Tensor.repeat k repeats=3
+    v <- Tensor.repeat v repeats=3
+    mask <- causal_mask q k window=2048 padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=576
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
-    g <- NN.linear@gate_proj xn dim=FFN
-    u <- NN.linear@up_proj xn dim=FFN
-    return g |> silu |> mul u |> NN.linear@down_proj dim=D
+    g <- NN.linear@gate_proj xn dim=1536
+    u <- NN.linear@up_proj xn dim=1536
+    return g |> silu |> mul u |> NN.linear@down_proj dim=576
   return x + m, new_kv
 
 smollm :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 smollm input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
-  logits, new_kv <- scope@model root=PARAM_ROOT do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+  logits, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=576
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    for@layers i <- [0..30) do
       past_i <- Cache.index past_kv i
       x, new_i <- smollm_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
-    logits <- rms@norm x |> NN.linear@embed_tokens dim=V
+      yield x, new_kv
+    logits <- rms@norm x |> NN.linear@embed_tokens dim=49152
     return logits, new_kv
   return logits, new_kv

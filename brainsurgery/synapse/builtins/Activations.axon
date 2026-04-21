@@ -42,11 +42,10 @@ silu = _activations_silu
 swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
 swiglu = _activations_swiglu
 
-xielu :: @Path -> Tensor[B,T,D] -> ?Path -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor[B,T,D]
-xielu@path x ?alpha_p_path="alpha_p" ?alpha_n_path="alpha_n" ?beta_path="beta" ?eps_path="eps" ?prefix_path=null = do
-  prefix <- (prefix_path == null) ? path : prefix_path
-  alpha_p <- param alpha_p_path prefix_path=prefix
-  alpha_n <- param alpha_n_path prefix_path=prefix
-  beta <- param beta_path prefix_path=prefix
-  eps <- param eps_path prefix_path=prefix
+xielu :: Path -> Tensor[B,T,D] -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor[B,T,D]
+xielu@path x ?alpha_p_path=null ?alpha_n_path=null ?beta_path=null ?eps_path=null = do
+  alpha_p <- (alpha_p_path == null) ? (param @'{path}.alpha_p') : (param alpha_p_path)
+  alpha_n <- (alpha_n_path == null) ? (param @'{path}.alpha_n') : (param alpha_n_path)
+  beta <- (beta_path == null) ? (param @'{path}.beta') : (param beta_path)
+  eps <- (eps_path == null) ? (param @'{path}.eps') : (param eps_path)
   return _activations_xielu x alpha_p alpha_n beta eps

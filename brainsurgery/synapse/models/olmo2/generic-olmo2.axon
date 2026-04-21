@@ -9,20 +9,20 @@ import Positions (position_ids, rope_pair_base)
 
 
 
-D = Config.int "hidden_size" default=2048
-V = Config.int "vocab_size" default=100352
-L = Config.int "num_hidden_layers" default=16
-H = Config.int "num_attention_heads" default=16
-KVH = Config.int "num_key_value_heads" default=16
-HD = Config.int "head_dim" default=128
-FFN = Config.int "intermediate_size" default=8192
-C = Config.int "max_position_embeddings" default=4096
-EPS = Config.float "rms_norm_eps" default=1e-06
-THETA = Config.float "rope_theta" default=500000.0
-ROPE_SCALE = Config.float "rope_scaling.factor" default=1.0
+D = Config.int@hidden_size default=2048
+V = Config.int@vocab_size default=100352
+L = Config.int@num_hidden_layers default=16
+H = Config.int@num_attention_heads default=16
+KVH = Config.int@num_key_value_heads default=16
+HD = Config.int@head_dim default=128
+FFN = Config.int@intermediate_size default=8192
+C = Config.int@max_position_embeddings default=4096
+EPS = Config.float@rms_norm_eps default=1e-06
+THETA = Config.float@rope_theta default=500000.0
+ROPE_SCALE = Config.float @'rope_scaling.factor' default=1.0
 ATTN_SCALE = 1.0 / sqrt HD
 
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
 olmo2_block :: Tensor -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
@@ -53,10 +53,11 @@ olmo2 input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- olmo2_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
   logits <- NN.linear@lm_head x dim=V

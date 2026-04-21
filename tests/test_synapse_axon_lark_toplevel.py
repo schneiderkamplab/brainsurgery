@@ -10,7 +10,7 @@ from brainsurgery.synapse.axon.types import AxonExprTuple
 
 def test_parse_program_source_extracts_signature_type() -> None:
     source = """
-lin :: @Path -> Tensor[B,S,Din] -> Int -> Tensor[B,S,dim]
+lin :: Path -> Tensor[B,S,Din] -> Int -> Tensor[B,S,dim]
 lin@path x dim = linear@path x dim=dim bias=true transpose=true
 """
     parsed = parse_program_source(source)
@@ -19,11 +19,36 @@ lin@path x dim = linear@path x dim=dim bias=true transpose=true
     assert isinstance(signature, ParsedSignature)
     assert signature.module_decl == "lin"
     sig = signature.type_signature
-    assert len(sig.path_params) == 1
-    assert sig.path_params[0].name is None
-    assert render_type(sig.path_params[0].type_expr) == "Path"
-    assert tuple(render_type(arg) for arg in sig.arg_types) == ("Tensor[B,S,Din]", "Int")
+    assert len(sig.path_params) == 0
+    assert tuple(render_type(arg) for arg in sig.arg_types) == ("Path", "Tensor[B,S,Din]", "Int")
     assert render_type(sig.return_type) == "Tensor[B,S,dim]"
+
+
+def test_parse_program_source_accepts_plain_path_arg_for_path_bound_module() -> None:
+    source = """
+lin :: Path -> Tensor[B,S,Din] -> Int -> Tensor[B,S,dim]
+lin@path x dim = linear@path x dim=dim bias=true transpose=true
+"""
+    parsed = parse_program_source(source)
+    assert len(parsed.modules) == 1
+    signature = parsed.modules[0].signature
+    assert isinstance(signature, ParsedSignature)
+    sig = signature.type_signature
+    assert len(sig.path_params) == 0
+    assert tuple(render_type(arg) for arg in sig.arg_types) == (
+        "Path",
+        "Tensor[B,S,Din]",
+        "Int",
+    )
+
+
+def test_parse_program_source_rejects_at_path_in_signature() -> None:
+    source = """
+lin :: @Path -> Tensor[B,S,Din] -> Int -> Tensor[B,S,dim]
+lin@path x dim = linear@path x dim=dim bias=true transpose=true
+"""
+    with pytest.raises(ValueError, match="invalid Axon source syntax"):
+        parse_program_source(source)
 
 
 def test_parse_program_source_import_parenthesized_members() -> None:

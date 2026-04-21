@@ -15,46 +15,24 @@ import MoE (grouped_sigmoid_router, scatter_add, select)
 import SSM
 import SSM (causal_conv1d, mamba2_scan)
 
-MODEL_D = 2688
-V = 131072
-L = 52
-H = 32
-KVH = 2
-HD = 128
-ATTN_SCALE = 0.08838834764831843
-EPS = 1e-05
-M_H = 64
-M_HD = 64
-M_G = 8
-M_N = 128
-M_I = 4096
-M_CONV = 6144
-EPT = 6
-N_GROUP = 1
-TOPK_GROUP = 1
-NORM_TOPK_PROB = 1
-FFN = 1856
-SFFN = 3712
-ROUTE_SCALE = 2.5
-
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=1e-05 cast_float=true
 
 expert_ffn :: Tensor[N,D] -> Tensor[N,D]
 expert_ffn x = do
-  up <- NN.linear@up_proj x dim=FFN bias=false
-  return up |> relu2 |> NN.linear@down_proj dim=MODEL_D bias=false
+  up <- NN.linear@up_proj x dim=1856 bias=false
+  return up |> relu2 |> NN.linear@down_proj dim=2688 bias=false
 
 shared_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 shared_ffn x = do
-  up <- NN.linear@shared_experts.up_proj x dim=SFFN bias=false
-  return up |> relu2 |> NN.linear@shared_experts.down_proj dim=MODEL_D bias=false
+  up <- NN.linear@shared_experts.up_proj x dim=3712 bias=false
+  return up |> relu2 |> NN.linear@shared_experts.down_proj dim=2688 bias=false
 
 shared_relu2_moe :: Tensor[B,S,D] -> Int -> Int -> Int -> Float -> Bool -> Tensor[B,S,D]
 shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob = do
-  topk_weights, topk_indices <- grouped_sigmoid_router@gate hidden top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor weight="@weight" e_score_correction_bias="@gate.e_score_correction_bias"
+  topk_weights, topk_indices <- grouped_sigmoid_router@gate hidden top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor weight=@weight e_score_correction_bias=@gate.e_score_correction_bias
   gate_w <- scope@gate do
-    return Params.param path="@weight"
+    return Params.param path=@weight
   experts <- Tensor.size gate_w 0
   routed <- Tensor.zeros_like hidden
   for@experts e <- [0..experts) do
@@ -62,6 +40,7 @@ shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk
     up <- NN.linear@up_proj x_sel dim=null bias=false
     x_upd <- up |> relu2 |> NN.linear@down_proj dim=null bias=false
     routed <- scatter_add routed token_idx x_upd sel_scores
+    yield routed
   shared <- scope@shared_experts do
     up <- NN.linear@up_proj hidden dim=null bias=false
     return up |> relu2 |> NN.linear@down_proj dim=null bias=false
@@ -69,24 +48,24 @@ shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk
 
 nemotron_h_attention :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 nemotron_h_attention x attn_mask = do
-  q <- NN.linear@q_proj x dim=(H * HD) bias=false |> reshape_heads heads=H
-  k <- NN.linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
-  v <- NN.linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
+  q <- NN.linear@q_proj x dim=4096 bias=false |> reshape_heads heads=32
+  k <- NN.linear@k_proj x dim=256 bias=false |> reshape_heads heads=2 |> Tensor.repeat repeats=16
+  v <- NN.linear@v_proj x dim=256 bias=false |> reshape_heads heads=2 |> Tensor.repeat repeats=16
   mask <- causal_mask q k
-  return attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_D bias=false
+  return attention q k v mask scale=0.08838834764831843 |> merge_heads |> NN.linear@o_proj dim=2688 bias=false
 
 nemotron_h_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_moe xn = do
-  return shared_relu2_moe xn top_k=EPT n_group=N_GROUP topk_group=TOPK_GROUP routed_scaling_factor=ROUTE_SCALE norm_topk_prob=(NORM_TOPK_PROB != 0)
+  return shared_relu2_moe xn top_k=6 n_group=1 topk_group=1 routed_scaling_factor=2.5 norm_topk_prob=true
 
 nemotron_h_mamba :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_mamba xn = do
-  proj <- NN.linear@in_proj xn dim=(M_I + M_CONV + M_H) bias=false
-  gate, conv_in, dt <- Tensor.split proj sizes=[M_I, M_CONV, M_H]
-  conv_all <- causal_conv1d@conv1d conv_in activation=silu
-  u, b, c <- Tensor.split conv_all sizes=[M_I, M_G * M_N, M_G * M_N]
-  scan <- mamba2_scan u gate dt b c a_path="@A_log" d_path="@D" dt_bias_path="@dt_bias" norm_weight_path="@norm.weight" n_groups=M_G head_dim=M_HD time_step_min=0.0 time_step_max=1e+30
-  return NN.linear@out_proj scan dim=MODEL_D bias=false
+  proj <- NN.linear@in_proj xn dim=10304 bias=false
+  gate, conv_in, dt <- Tensor.split proj sizes=[4096, 6144, 64]
+  conv_all <- causal_conv1d@conv1d conv_in activation=silu weight_path=@conv1d.weight bias_path=@conv1d.bias
+  u, b, c <- Tensor.split conv_all sizes=[4096, 1024, 1024]
+  scan <- mamba2_scan u gate dt b c a_path=@A_log d_path=@D dt_bias_path=@dt_bias norm_weight_path=@norm.weight n_groups=8 head_dim=64 time_step_min=0.0 time_step_max=1e+30
+  return NN.linear@out_proj scan dim=2688 bias=false
 
 nemotron_h_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Int -> Tensor[B,S,D]
 nemotron_h_block x attn_mask i = do
@@ -97,8 +76,9 @@ nemotron_h_block x attn_mask i = do
 
 nemotron_h :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 nemotron_h input_ids attn_mask = do
-  x <- NN.embedding@backbone.embeddings input_ids dim=MODEL_D
-  for@backbone.layers i <- [0..L) do
+  x <- NN.embedding@backbone.embeddings input_ids dim=2688
+  for@backbone.layers i <- [0..52) do
     x <- nemotron_h_block x attn_mask i
+    yield x
   x <- rms@backbone.norm_f x
-  return NN.linear@lm_head x dim=V bias=false
+  return NN.linear@lm_head x dim=131072 bias=false

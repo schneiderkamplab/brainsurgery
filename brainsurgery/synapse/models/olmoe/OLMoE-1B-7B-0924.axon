@@ -1,27 +1,21 @@
 {-# CHECKPOINTS "allenai/OLMoE-1B-7B-0924" #-}
 {-# TASK "causal_lm" #-}
 
+import Activations
 import Activations (silu)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (causal_mask)
-import Math (mul)
+import Math
+import Math (mul, sqrt)
+import MoE
 import MoE (scatter_add, select)
+import Positions
 import Positions (position_ids, rope_pair_base)
 
-
-
-D = 2048
-L = 16
-H = 16
-E = 64
-EPT = 8
-C = 4096
-EPS = 1e-05
-THETA = 10000.0
-ATTN_SCALE = 0.08838834764831843
-
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = NN.rmsnorm@path x eps=EPS
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=1e-05
 
 expert_ffn :: Tensor[N,D] -> Tensor[N,D]
 expert_ffn x = do
@@ -33,24 +27,25 @@ olmoe_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLay
 olmoe_decoder_block x pos_ids attn_mask past_kv = do
   x_norm <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- x_norm |> NN.linear@q_proj dim=D |> rms@q_norm |> reshape_heads heads=H
-    k <- x_norm |> NN.linear@k_proj dim=D |> rms@k_norm |> reshape_heads heads=H
-    v <- x_norm |> NN.linear@v_proj dim=D |> reshape_heads heads=H
-    q, k <- rope_pair_base q k pos_ids THETA
+    q <- x_norm |> NN.linear@q_proj dim=2048 |> rms@q_norm |> reshape_heads heads=16
+    k <- x_norm |> NN.linear@k_proj dim=2048 |> rms@k_norm |> reshape_heads heads=16
+    v <- x_norm |> NN.linear@v_proj dim=2048 |> reshape_heads heads=16
+    q, k <- rope_pair_base q k pos_ids 10000.0
     k, v, new_kv <- Cache.update past_kv k v
-    mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads
-    a <- NN.linear@o_proj a dim=D
+    mask <- causal_mask q k window=4096 padding_mask=attn_mask
+    a <- attention q k v mask scale=0.08838834764831843 |> merge_heads
+    a <- NN.linear@o_proj a dim=2048
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
-    topk_scores, topk_indices <- NN.linear@gate xn dim=E |> Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=EPT dim=-1
+    topk_scores, topk_indices <- NN.linear@gate xn dim=64 |> Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=8 dim=-1
     m <- Tensor.zeros_like xn
-    for@experts e <- [0..E) do
+    for@experts e <- [0..64) do
       x_sel, token_idx, topk_pos, sel_scores <- select xn topk_scores topk_indices e
       x_upd <- expert_ffn x_sel
       m <- scatter_add m token_idx x_upd sel_scores
+      yield m
     return m
   return x + m, new_kv
 
@@ -58,12 +53,13 @@ olmoe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Ca
 olmoe input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=2048
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    for@layers i <- [0..16) do
       past_i <- Cache.index past_kv i
       x, new_i <- olmoe_decoder_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
   logits <- NN.linear@lm_head x

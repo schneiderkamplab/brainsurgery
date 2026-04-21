@@ -367,13 +367,55 @@ class _Emitter:
                 "        cfg = model.get('config') if isinstance(model, dict) else None",
                 "        return cfg if isinstance(cfg, dict) else {}",
                 "",
-                "    def _expr_config_lookup(self, key: str, *, root: str = '') -> tuple[bool, Any]:",
+                "    def _resolve_config_key_template(self, key: str, env: dict[str, Any], op_name: str = 'Config') -> str:",
+                "        if '{' not in key and '}' not in key:",
+                "            return key",
+                "        out: list[str] = []",
+                "        i = 0",
+                "        while i < len(key):",
+                "            ch = key[i]",
+                "            if ch == '}':",
+                "                raise ValueError(f\"{op_name} key template has unmatched '}}': {key!r}\")",
+                "            if ch != '{':",
+                "                out.append(ch)",
+                "                i += 1",
+                "                continue",
+                "            j = key.find('}', i + 1)",
+                "            if j < 0:",
+                "                raise ValueError(f\"{op_name} key template has unmatched '{{': {key!r}\")",
+                "            name = key[i + 1:j].strip()",
+                "            if not name:",
+                "                raise ValueError(f'{op_name} key template has empty placeholder: {key!r}')",
+                "            if name not in env:",
+                "                raise ValueError(f'{op_name} key template placeholder {name!r} is not defined')",
+                "            value = env[name]",
+                "            if not isinstance(value, (str, int, float, bool)):",
+                '                raise ValueError(f"{op_name} key template placeholder {name!r} must resolve to scalar, got {type(value).__name__}")',
+                "            out.append(str(value))",
+                "            i = j + 1",
+                "        resolved = ''.join(out)",
+                "        resolved = '.'.join(part for part in resolved.split('.') if part)",
+                "        if not resolved:",
+                "            raise ValueError(f'{op_name} key must resolve to non-empty string')",
+                "        return resolved",
+                "",
+                "    def _resolve_config_path_key(self, raw: Any, env: dict[str, Any], op_name: str = 'Config') -> str:",
+                "        if not isinstance(raw, str) or not raw:",
+                "            raise ValueError(f'{op_name} expression call expects one non-empty Path key')",
+                "        if raw.startswith('@@'):",
+                "            key = raw[2:]",
+                "        elif raw.startswith('@'):",
+                "            key = raw[1:]",
+                "        else:",
+                "            raise ValueError(f'{op_name} expression call expects Path key (expected @... or @@...)')",
+                "        if not key:",
+                "            raise ValueError(f'{op_name} expression call expects one non-empty Path key')",
+                '        if len(key) >= 2 and key[0] == "\'" and key[-1] == "\'":',
+                '            key = key[1:-1].replace("\\\\\'", "\'").replace("\\\\\\\\", "\\\\")',
+                "        return self._resolve_config_key_template(key, env, op_name)",
+                "",
+                "    def _expr_config_lookup(self, key: str) -> tuple[bool, Any]:",
                 "        value: Any = self._expr_config_root()",
-                "        if root:",
-                "            for part in root.split('.'):",
-                "                if not isinstance(value, dict) or part not in value:",
-                "                    return False, None",
-                "                value = value[part]",
                 "        for part in key.split('.'):",
                 "            if not isinstance(value, dict) or part not in value:",
                 "                return False, None",
@@ -391,7 +433,17 @@ class _Emitter:
                 "                return True",
                 "        return False",
                 "",
-                "    def _eval_expr_call(self, callee: str, args: list[Any], kwargs: dict[str, Any]) -> Any:",
+                "    def _eval_expr_call(self, callee: str, args: list[Any], kwargs: dict[str, Any], env: dict[str, Any], symbols: dict[str, Any]) -> Any:",
+                "        inline_path_callexprs = {'Config.value', 'Config.has_key', 'Config.has_value', 'Config.int', 'Config.float', 'Config.str', 'Config.bool', 'Config.list'}",
+                "        callee_base = callee.split('@', 1)[0] if '@' in callee else callee",
+                "        if '@' in callee and callee_base in inline_path_callexprs:",
+                "            suffix = callee[len(callee_base):]",
+                "            if not suffix or not suffix.startswith('@'):",
+                "                raise ValueError(f'Unsupported call expression: {callee!r}')",
+                "            if args:",
+                "                raise ValueError(f'{callee_base} expression call cannot mix inline @path and positional args')",
+                "            args = [suffix]",
+                "            callee = callee_base",
                 "        if callee in {'sqrt', 'Prelude.sqrt', 'Math.sqrt', 'log', 'Prelude.log', 'Math.log', 'exp', 'Prelude.exp', 'Math.exp', 'sin', 'Prelude.sin', 'Math.sin', 'cos', 'Prelude.cos', 'Math.cos'}:",
                 "            fn_name = callee.split('.', 1)[-1]",
                 "            if kwargs:",
@@ -450,12 +502,12 @@ class _Emitter:
                 "                raise ValueError('max expression call expects numeric arguments')",
                 "            return max(args)",
                 "        if callee in {'Config.has_key', 'Config.has_value', 'Config.int', 'Config.float', 'Config.str', 'Config.bool', 'Config.list', 'Config.value'}:",
-                "            if len(args) != 1 or not isinstance(args[0], str) or not args[0]:",
-                "                raise ValueError(f'{callee} expression call expects one non-empty string key')",
-                "            key = args[0]",
-                "            root_raw = kwargs.get('root', '')",
-                "            root = root_raw if isinstance(root_raw, str) else ''",
-                "            found, value = self._expr_config_lookup(key, root=root)",
+                "            if len(args) != 1:",
+                "                raise ValueError(f'{callee} expression call expects one non-empty Path key')",
+                "            if 'root' in kwargs:",
+                "                raise ValueError(f'{callee} expression call does not support root kwarg')",
+                "            key = self._resolve_config_path_key(args[0], {**symbols, **env}, callee)",
+                "            found, value = self._expr_config_lookup(key)",
                 "            if callee == 'Config.has_key':",
                 "                if 'default' in kwargs:",
                 "                    raise ValueError('Config.has_key expression call does not support default kwarg')",
@@ -466,8 +518,7 @@ class _Emitter:
                 "                return bool(found) and value is not None",
                 "            if not found:",
                 "                if 'default' not in kwargs:",
-                "                    full_key = f'{root}.{key}' if root else key",
-                "                    raise KeyError(f'{callee} expression call missing required config key: {full_key}')",
+                "                    raise KeyError(f'{callee} expression call missing required config key: {key}')",
                 "                value = kwargs['default']",
                 "            if callee == 'Config.int':",
                 "                if isinstance(value, bool):",
@@ -901,15 +952,67 @@ class _Emitter:
                 body = node_spec.get("_body")
                 if not isinstance(body, list):
                     raise ValueError("for requires list _body")
+                raw_carry = node_spec.get("_carry")
+                carry_names: list[str] = []
+                if raw_carry is not None:
+                    if not isinstance(raw_carry, list) or not all(
+                        isinstance(name, str) for name in raw_carry
+                    ):
+                        raise ValueError("for _carry must be a list of string names")
+                    carry_names = [name for name in raw_carry if name]
+                    for carry_name in carry_names:
+                        if carry_name not in env:
+                            raise ValueError(f"for carry name not found in scope: {carry_name}")
+                yield_expr = node_spec.get("_yield")
+                raw_bind = node_spec.get("_bind")
+                bind_names: list[str] = []
+                if raw_bind is not None:
+                    if not isinstance(raw_bind, list) or not all(
+                        isinstance(name, str) for name in raw_bind
+                    ):
+                        raise ValueError("for _bind must be a list of string names")
+                    bind_names = [name for name in raw_bind if name]
                 lines.extend(
                     self._compile_graph(
                         graph=body, env=env, scope_var=child_scope, indent=inner_indent + "    "
                     )
                 )
+                if carry_names:
+                    if yield_expr is None:
+                        yield_values = [self._read_env_var(env, name) for name in carry_names]
+                    elif isinstance(yield_expr, list):
+                        yield_values = [self._expr_code(expr, env) for expr in yield_expr]
+                    else:
+                        yield_values = [self._expr_code(yield_expr, env)]
+                    if len(yield_values) != len(carry_names):
+                        raise ValueError(
+                            f"for yield arity mismatch: expected {len(carry_names)}, got {len(yield_values)}"
+                        )
+                    yielded_tuple = self._fresh("yielded")
+                    lines.append(
+                        f"{inner_indent}    {yielded_tuple} = ({', '.join(yield_values)},)"
+                    )
+                    for idx, carry_name in enumerate(carry_names):
+                        carry_var = self._assign_out_var(env, carry_name)
+                        lines.append(f"{inner_indent}    {carry_var} = {yielded_tuple}[{idx}]")
+                if bind_names:
+                    if not carry_names:
+                        raise ValueError("for _bind requires _carry")
+                    if len(bind_names) != len(carry_names):
+                        raise ValueError(
+                            f"for bind arity mismatch: expected {len(bind_names)}, got {len(carry_names)}"
+                        )
                 if saved is None:
                     env.pop(var_name, None)
                 else:
                     env[var_name] = saved
+                if bind_names:
+                    for bind_name, carry_name in zip(bind_names, carry_names, strict=True):
+                        if bind_name == "_":
+                            continue
+                        carry_var = self._read_env_var(env, carry_name)
+                        bind_var = self._assign_out_var(env, bind_name)
+                        lines.append(f"{inner_indent}{bind_var} = {carry_var}")
                 continue
 
             if op == "call":
@@ -958,6 +1061,7 @@ class _Emitter:
             for out_name in self._node_output_names(node_spec):
                 _out_var = env.get(out_name)
                 if isinstance(_out_var, str):
+                    lines.append(f"{inner_indent}env[{out_name!r}] = {_out_var}")
                     trace_extra = ""
                     if op == "linear":
                         weight_expr = self._infer_param_expr(
@@ -1338,6 +1442,8 @@ class _Emitter:
             kind = expr.get("_expr")
             if kind == "name":
                 ident = expr.get("id")
+                if ident is None:
+                    ident = expr.get("value")
                 if isinstance(ident, str):
                     if ident in env:
                         return env[ident]
@@ -1383,6 +1489,11 @@ class _Emitter:
                 if isinstance(value, str):
                     return repr(value)
                 raise ValueError(f"Invalid string expression payload: {expr!r}")
+            if kind == "path":
+                value = expr.get("value")
+                if isinstance(value, str):
+                    return repr(value)
+                raise ValueError(f"Invalid path expression payload: {expr!r}")
             if kind == "call":
                 callee = expr.get("callee")
                 args_raw = expr.get("args", [])
@@ -1398,7 +1509,7 @@ class _Emitter:
                     f"{key!r}: {self._expr_code(value, env)}" for key, value in kwargs_raw.items()
                 ]
                 kwargs_code = ", ".join(kwargs_parts)
-                return f"self._eval_expr_call({callee!r}, [{args_code}], {{{kwargs_code}}})"
+                return f"self._eval_expr_call({callee!r}, [{args_code}], {{{kwargs_code}}}, env, self._symbols)"
             return repr(expr)
         if isinstance(expr, str):
             token = expr.strip()

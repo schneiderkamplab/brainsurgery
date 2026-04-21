@@ -26,6 +26,7 @@ from .axon.types import (
     AxonExprName,
     AxonExprNull,
     AxonExprParen,
+    AxonExprPath,
     AxonExprPipe,
     AxonExprString,
     AxonExprTernary,
@@ -35,6 +36,7 @@ from .axon.types import (
     AxonReturn,
     AxonScopeBind,
     AxonStatement,
+    AxonYield,
 )
 
 _NOT_EVALUABLE = object()
@@ -80,13 +82,59 @@ def _checkpoint_pragma(parsed: ParsedProgramSource) -> list[str]:
     return []
 
 
-def _expr_config_lookup(config: dict[str, object], key: str, *, root: str = "") -> tuple[bool, Any]:
+def _resolve_config_key_template(key: str, env: dict[str, object], op_name: str) -> str:
+    if "{" not in key and "}" not in key:
+        return key
+    out: list[str] = []
+    i = 0
+    while i < len(key):
+        ch = key[i]
+        if ch == "}":
+            raise ValueError(f"{op_name} key template has unmatched '}}': {key!r}")
+        if ch != "{":
+            out.append(ch)
+            i += 1
+            continue
+        j = key.find("}", i + 1)
+        if j < 0:
+            raise ValueError(f"{op_name} key template has unmatched '{{': {key!r}")
+        name = key[i + 1 : j].strip()
+        if not name:
+            raise ValueError(f"{op_name} key template has empty placeholder: {key!r}")
+        if name not in env:
+            raise ValueError(f"{op_name} key template placeholder {name!r} is not defined")
+        value = env[name]
+        if not isinstance(value, (str, int, float, bool)):
+            raise ValueError(
+                f"{op_name} key template placeholder {name!r} must resolve to scalar, got {type(value).__name__}"
+            )
+        out.append(str(value))
+        i = j + 1
+    resolved = "".join(out)
+    resolved = ".".join(part for part in resolved.split(".") if part)
+    if not resolved:
+        raise ValueError(f"{op_name} key must resolve to non-empty string")
+    return resolved
+
+
+def _resolve_config_path_key(raw: object, env: dict[str, object], op_name: str) -> str:
+    if not isinstance(raw, str) or not raw:
+        raise ValueError(f"{op_name} expects one non-empty Path key")
+    if raw.startswith("@@"):
+        key = raw[2:]
+    elif raw.startswith("@"):
+        key = raw[1:]
+    else:
+        raise ValueError(f"{op_name} expects Path key (expected @... or @@...)")
+    if not key:
+        raise ValueError(f"{op_name} expects one non-empty Path key")
+    if len(key) >= 2 and key[0] == "'" and key[-1] == "'":
+        key = key[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+    return _resolve_config_key_template(key, env, op_name)
+
+
+def _expr_config_lookup(config: dict[str, object], key: str) -> tuple[bool, Any]:
     value: Any = config
-    if root:
-        for part in root.split("."):
-            if not isinstance(value, dict) or part not in value:
-                return False, None
-            value = value[part]
     for part in key.split("."):
         if not isinstance(value, dict) or part not in value:
             return False, None
@@ -169,6 +217,23 @@ def _as_number(value: object) -> _Number:
 
 
 def _expr_from_scalar(value: object) -> AxonExpr:
+    def _parse_path_token(raw: str) -> AxonExprPath | None:
+        token = raw.strip()
+        if not token.startswith("@"):
+            return None
+        absolute = token.startswith("@@")
+        body = token[2:] if absolute else token[1:]
+        if not body:
+            return None
+        if len(body) >= 2 and body[0] == "'" and body[-1] == "'":
+            quoted = body[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+            parts = tuple(part for part in quoted.split(".") if part)
+        else:
+            parts = tuple(part for part in body.split(".") if part)
+        if not parts:
+            return None
+        return AxonExprPath(absolute=absolute, parts=parts)
+
     if value is None:
         return AxonExprNull()
     if isinstance(value, bool):
@@ -178,6 +243,9 @@ def _expr_from_scalar(value: object) -> AxonExpr:
     if isinstance(value, float):
         return AxonExprFloat(value=value)
     if isinstance(value, str):
+        parsed_path = _parse_path_token(value)
+        if parsed_path is not None:
+            return parsed_path
         return AxonExprString(value=value)
     if isinstance(value, list):
         return AxonExprList(items=tuple(_expr_from_scalar(item) for item in value))
@@ -195,11 +263,11 @@ def _eval_expr(
     resolve_names: bool = True,
 ) -> object:
     if isinstance(expr, AxonExprName):
+        if expr.name in env:
+            return env[expr.name]
         if not resolve_names:
             raise ValueError(f"name resolution disabled: {expr.name}")
-        if expr.name not in env:
-            raise ValueError(f"unknown runtime name: {expr.name}")
-        return env[expr.name]
+        raise ValueError(f"unknown runtime name: {expr.name}")
     if isinstance(expr, AxonExprInt):
         return expr.value
     if isinstance(expr, AxonExprFloat):
@@ -210,6 +278,8 @@ def _eval_expr(
         return None
     if isinstance(expr, AxonExprString):
         return expr.value
+    if isinstance(expr, AxonExprPath):
+        return expr.to_source()
     if isinstance(expr, AxonExprList):
         return [
             _eval_expr(
@@ -289,7 +359,12 @@ def _eval_expr(
         if op == "/":
             if not _is_number(left) or not _is_number(right):
                 raise ValueError("binary '/' expects numeric operands")
-            return _as_number(left) / _as_number(right)
+            left_number = _as_number(left)
+            right_number = _as_number(right)
+            if isinstance(left_number, int) and isinstance(right_number, int):
+                if right_number != 0 and left_number % right_number == 0:
+                    return left_number // right_number
+            return left_number / right_number
         if op == "%":
             if not _is_number(left) or not _is_number(right):
                 raise ValueError("binary '%' expects numeric operands")
@@ -320,7 +395,16 @@ def _eval_expr(
             return bool(left) or bool(right)
         raise ValueError(f"unsupported binary operator {op!r}")
     if isinstance(expr, AxonExprCall):
-        callee = expr.callee.strip()
+        raw_callee = expr.callee.strip()
+        is_absolute_path = "@@" in raw_callee
+        parse_callee = raw_callee.replace("@@", "@", 1) if is_absolute_path else raw_callee
+        callee_parts = parse_callee.split("@")
+        callee = callee_parts[0]
+        callee_paths = callee_parts[1:]
+        if callee == "has_root":
+            callee = "Params.has_root"
+        elif callee == "root":
+            callee = "Params.root"
 
         def _eval_kwarg_value(value: AxonKwargValue) -> object:
             if isinstance(value, AxonExpr):
@@ -344,6 +428,22 @@ def _eval_expr(
             for arg in expr.args
         ]
         kwargs = {key: _eval_kwarg_value(value) for key, value in expr.kwargs.items()}
+
+        def _path_token_from_suffix(token: str, *, absolute: bool) -> str:
+            raw = token.strip()
+            if not raw:
+                raise ValueError("empty @path suffix is not allowed")
+            return ("@@" if absolute else "@") + raw
+
+        if callee.startswith("Config.") and callee_paths:
+            if args:
+                raise ValueError(
+                    f"{callee} does not allow both positional key and @path suffix key"
+                )
+            if len(callee_paths) != 1:
+                raise ValueError(f"{callee} expects exactly one @path suffix key")
+            args = [_path_token_from_suffix(callee_paths[0], absolute=is_absolute_path)]
+
         if callee in {
             "sqrt",
             "Prelude.sqrt",
@@ -395,25 +495,15 @@ def _eval_expr(
         if callee == "Config.value":
             if kwargs:
                 raise ValueError("Config.value does not support kwargs")
-            if len(args) < 1 or len(args) > 3 or not isinstance(args[0], str) or not args[0]:
-                raise ValueError(
-                    "Config.value expects positional arguments: key [, root [, default]]"
-                )
-            key = args[0]
-            if len(args) >= 2:
-                root_raw = args[1]
-                if not isinstance(root_raw, str):
-                    raise ValueError("Config.value root argument must be string")
-                root_str = root_raw
-            else:
-                root_str = ""
-            has_default = len(args) >= 3
-            default_value = args[2] if has_default else None
-            found, value = _expr_config_lookup(config, key, root=root_str)
+            if len(args) < 1 or len(args) > 2:
+                raise ValueError("Config.value expects positional arguments: key [, default]")
+            key = _resolve_config_path_key(args[0], env, "Config.value")
+            has_default = len(args) >= 2
+            default_value = args[1] if has_default else None
+            found, value = _expr_config_lookup(config, key)
             if not found:
                 if not has_default:
-                    full_key = f"{root_str}.{key}" if root_str else key
-                    raise KeyError(f"missing required config key: {full_key}")
+                    raise KeyError(f"missing required config key: {key}")
                 value = default_value
             return value
         if callee in {
@@ -425,12 +515,12 @@ def _eval_expr(
             "Config.bool",
             "Config.list",
         }:
-            if len(args) != 1 or not isinstance(args[0], str) or not args[0]:
-                raise ValueError(f"{callee} expects one non-empty string key")
-            key = args[0]
-            root = kwargs.get("root", "")
-            root_str = root if isinstance(root, str) else ""
-            found, value = _expr_config_lookup(config, key, root=root_str)
+            if len(args) != 1:
+                raise ValueError(f"{callee} expects one non-empty Path key")
+            if "root" in kwargs:
+                raise ValueError(f"{callee} does not support root")
+            key = _resolve_config_path_key(args[0], env, callee)
+            found, value = _expr_config_lookup(config, key)
             if callee == "Config.has_key":
                 if "default" in kwargs:
                     raise ValueError("Config.has_key does not support default")
@@ -441,8 +531,7 @@ def _eval_expr(
                 return bool(found) and value is not None
             if not found:
                 if "default" not in kwargs:
-                    full_key = f"{root_str}.{key}" if root_str else key
-                    raise KeyError(f"missing required config key: {full_key}")
+                    raise KeyError(f"missing required config key: {key}")
                 value = kwargs["default"]
             if callee == "Config.int":
                 if isinstance(value, bool):
@@ -776,6 +865,19 @@ def _materialize_statement(
                 for value in stmt.values
             )
         )
+    if isinstance(stmt, AxonYield):
+        return AxonYield(
+            values=tuple(
+                _materialize_expr(
+                    value,
+                    env=env,
+                    config=config,
+                    state_keys=state_keys,
+                    resolve_names=resolve_names,
+                )
+                for value in stmt.values
+            )
+        )
     if isinstance(stmt, AxonRepeat):
         return AxonRepeat(
             name=stmt.name,
@@ -809,9 +911,16 @@ def _materialize_statement(
             ),
         )
     if isinstance(stmt, AxonScopeBind):
+        prefix = stmt.prefix
+        has_template = ("{" in prefix) or ("}" in prefix)
+        if has_template:
+            prefix_has_at = prefix.startswith("@")
+            key = prefix[1:] if prefix_has_at else prefix
+            resolved = _resolve_config_key_template(key, env, "scope")
+            prefix = f"@{resolved}" if prefix_has_at else resolved
         return AxonScopeBind(
             targets=stmt.targets,
-            prefix=stmt.prefix,
+            prefix=prefix,
             kwargs={
                 key: _materialize_kwarg_value(
                     value,
@@ -909,6 +1018,21 @@ def _collect_expr_names(expr: AxonExpr, *, out: set[str]) -> None:
     if isinstance(expr, AxonExprName):
         out.add(expr.name)
         return
+    if isinstance(expr, AxonExprPath):
+        for part in expr.parts:
+            start = 0
+            while True:
+                open_idx = part.find("{", start)
+                if open_idx < 0:
+                    break
+                close_idx = part.find("}", open_idx + 1)
+                if close_idx < 0:
+                    break
+                name = part[open_idx + 1 : close_idx].strip()
+                if name:
+                    out.add(name)
+                start = close_idx + 1
+        return
     if isinstance(expr, AxonExprCall):
         for arg in expr.args:
             _collect_expr_names(arg, out=out)
@@ -970,6 +1094,19 @@ def _collect_statement_names(stmt: AxonStatement, *, out: set[str]) -> None:
             _collect_statement_names(item, out=out)
         return
     if isinstance(stmt, AxonScopeBind):
+        prefix = stmt.prefix
+        start = 0
+        while True:
+            open_idx = prefix.find("{", start)
+            if open_idx < 0:
+                break
+            close_idx = prefix.find("}", open_idx + 1)
+            if close_idx < 0:
+                break
+            name = prefix[open_idx + 1 : close_idx].strip()
+            if name:
+                out.add(name)
+            start = close_idx + 1
         for kwarg_value in stmt.kwargs.values():
             if isinstance(kwarg_value, AxonExpr):
                 _collect_expr_names(kwarg_value, out=out)
@@ -1051,6 +1188,8 @@ def _expr_text(expr: AxonExpr) -> str:
         return "null"
     if isinstance(expr, AxonExprString):
         return json.dumps(expr.value)
+    if isinstance(expr, AxonExprPath):
+        return expr.to_source()
     if isinstance(expr, AxonExprList):
         return "[" + ", ".join(_expr_text(item) for item in expr.items) + "]"
     if isinstance(expr, AxonExprTuple):
@@ -1072,7 +1211,20 @@ def _expr_text(expr: AxonExpr) -> str:
     if isinstance(expr, AxonExprIf):
         return f"if {_expr_text(expr.cond)} then {_expr_text(expr.true_expr)} else {_expr_text(expr.false_expr)}"
     if isinstance(expr, AxonExprTernary):
-        return f"{_expr_text(expr.cond)} ? {_expr_text(expr.true_expr)} : {_expr_text(expr.false_expr)}"
+        cond_text = _expr_text(expr.cond)
+        true_text = _expr_text(expr.true_expr)
+        false_text = _expr_text(expr.false_expr)
+        if "\n" not in true_text and "\n" not in false_text:
+            return f"{cond_text} ? {true_text} : {false_text}"
+
+        def _paren(text: str) -> str:
+            parts = text.splitlines() or [text]
+            if len(parts) == 1:
+                return f"({parts[0]})"
+            indented = "\n".join("  " + line for line in parts[1:])
+            return f"({parts[0]}\n{indented}\n)"
+
+        return f"{cond_text} ? {_paren(true_text)} : {_paren(false_text)}"
     if isinstance(expr, AxonExprBinary):
         return f"{_expr_text(expr.left)} {expr.op} {_expr_text(expr.right)}"
     if isinstance(expr, AxonExprLambda):
@@ -1102,10 +1254,17 @@ def _render_statements(statements: tuple[AxonStatement, ...], *, indent: str) ->
     for stmt in statements:
         if isinstance(stmt, AxonBind):
             lhs = ", ".join(stmt.targets)
-            lines.append(f"{indent}{lhs} <- {_expr_text(stmt.expr)}")
+            expr_text = _expr_text(stmt.expr)
+            expr_lines = expr_text.splitlines() or [expr_text]
+            lines.append(f"{indent}{lhs} <- {expr_lines[0]}")
+            for tail in expr_lines[1:]:
+                lines.append(f"{indent}{tail}")
             continue
         if isinstance(stmt, AxonReturn):
             lines.append(f"{indent}return {', '.join(_expr_text(value) for value in stmt.values)}")
+            continue
+        if isinstance(stmt, AxonYield):
+            lines.append(f"{indent}yield {', '.join(_expr_text(value) for value in stmt.values)}")
             continue
         if isinstance(stmt, AxonRepeat):
             name = f"@{stmt.name}" if stmt.name else ""
@@ -1143,7 +1302,13 @@ def _render_signature(signature: ParsedSignature) -> str:
 def _is_simple_default_expr(expr: AxonExpr) -> bool:
     return isinstance(
         expr,
-        AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString | AxonExprName,
+        AxonExprInt
+        | AxonExprFloat
+        | AxonExprBool
+        | AxonExprNull
+        | AxonExprString
+        | AxonExprPath
+        | AxonExprName,
     )
 
 

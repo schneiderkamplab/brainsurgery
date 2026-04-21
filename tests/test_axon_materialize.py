@@ -109,9 +109,9 @@ def test_generic_materialize_works_for_non_gemma3_with_config_and_params(tmp_pat
                 "import Config",
                 "import Params",
                 "",
-                'CFG = (Config.has_key "text_config") ? "text_config" : ""',
+                'CFG = Config.has_key@text_config ? "text_config" : ""',
                 'ROOT = Params.root "language_model" default=""',
-                'D = Config.int "hidden_size" root=CFG default=16',
+                "D = Config.int @'{CFG}.hidden_size' default=16",
                 "",
                 "toy :: TokenIds[B,S] -> Tensor[B,S,D]",
                 "toy input_ids = do",
@@ -146,9 +146,8 @@ def test_generic_materialize_works_for_non_gemma3_with_config_and_params(tmp_pat
     assert 'CHECKPOINTS ["org/toy-pt", "org/toy-it"]' in rendered
     assert "Config." not in rendered
     assert "Params." not in rendered
-    assert 'ROOT = "language_model"' in rendered
-    assert "D = 32" in rendered
-    assert "scope@model root=ROOT" in rendered
+    assert 'root="language_model"' in rendered
+    assert "dim=32" in rendered
 
 
 def test_materialize_groups_identical_instruct_variant_by_body(tmp_path: Path) -> None:
@@ -162,7 +161,7 @@ def test_materialize_groups_identical_instruct_variant_by_body(tmp_path: Path) -
                 "",
                 "import Config",
                 "",
-                'D = Config.int "hidden_size" default=16',
+                "D = Config.int@hidden_size default=16",
                 "",
                 "toy :: TokenIds[B,S] -> Tensor[B,S,D]",
                 "toy input_ids = do",
@@ -192,3 +191,90 @@ def test_materialize_groups_identical_instruct_variant_by_body(tmp_path: Path) -
     rendered = (axon_dir / "toy.axon").read_text(encoding="utf-8")
     assert 'CHECKPOINTS ["org/toy", "org/toy-Instruct"]' in rendered
     assert not (axon_dir / "toy-Instruct.axon").exists()
+
+
+def test_materialize_resolves_config_calls_inside_module_body_using_constant_env(
+    tmp_path: Path,
+) -> None:
+    axon_dir = tmp_path / "modelsrc"
+    axon_dir.mkdir(parents=True)
+    axon_path = axon_dir / "toy.axon"
+    axon_path.write_text(
+        "\n".join(
+            [
+                '{-# CHECKPOINTS ["org/toy"] #-}',
+                "",
+                "import Config",
+                "",
+                'CFG = Config.has_key@text_config ? "text_config" : ""',
+                "",
+                "toy :: Tensor[B,S,D] -> Tensor[B,S,D]",
+                "toy x = do",
+                "  eps <- Config.float @'{CFG}.rms_norm_eps' default=1e-05",
+                "  y <- rmsnorm@norm x eps=eps",
+                "  return y",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    model_root = tmp_path / "weights" / "org" / "toy"
+    model_root.mkdir(parents=True)
+    (model_root / "config.json").write_text(
+        json.dumps({"text_config": {"rms_norm_eps": 2.5e-5}}),
+        encoding="utf-8",
+    )
+    import torch
+    from safetensors.torch import save_file
+
+    save_file({"norm.weight": torch.zeros([16])}, str(model_root / "model.safetensors"))
+
+    written = run_axon_materialize(axon_path=axon_path, models_root=tmp_path / "weights")
+    assert written == [axon_dir / "toy.axon"]
+    rendered = (axon_dir / "toy.axon").read_text(encoding="utf-8")
+    assert "Config." not in rendered
+    assert "eps <- 2.5e-05" in rendered or "eps <- 2.5e-5" in rendered
+
+
+def test_materialize_instantiates_scope_prefix_templates_from_env(tmp_path: Path) -> None:
+    axon_dir = tmp_path / "modelsrc"
+    axon_dir.mkdir(parents=True)
+    axon_path = axon_dir / "toy.axon"
+    axon_path.write_text(
+        "\n".join(
+            [
+                '{-# CHECKPOINTS ["org/toy"] #-}',
+                "",
+                "import Params (has_root)",
+                "",
+                'PARAM_ROOT = (has_root "language_model") ? "language_model" : ""',
+                "",
+                "toy :: TokenIds[B,S] -> Tensor[B,S,D]",
+                "toy input_ids = do",
+                "  x <- scope@'{PARAM_ROOT}.model' do",
+                "    return embedding@embed_tokens input_ids dim=16",
+                "  return x",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    model_root = tmp_path / "weights" / "org" / "toy"
+    model_root.mkdir(parents=True)
+    (model_root / "config.json").write_text("{}", encoding="utf-8")
+    import torch
+    from safetensors.torch import save_file
+
+    save_file(
+        {"language_model.model.embed_tokens.weight": torch.zeros([128, 16])},
+        str(model_root / "model.safetensors"),
+    )
+
+    written = run_axon_materialize(axon_path=axon_path, models_root=tmp_path / "weights")
+    assert written == [axon_dir / "toy.axon"]
+
+    rendered = (axon_dir / "toy.axon").read_text(encoding="utf-8")
+    assert "PARAM_ROOT" not in rendered
+    assert "scope@language_model.model do" in rendered

@@ -10,28 +10,28 @@ import Positions (position_ids, rope_pair_base)
 
 
 
-D    = Config.int "hidden_size" default=2048
-V    = Config.int "vocab_size" default=151936
-L    = Config.int "num_hidden_layers" default=48
-H    = Config.int "num_attention_heads" default=32
-KVH  = Config.int "num_key_value_heads" default=4
-HD   = Config.int "head_dim" default=128
+D    = Config.int@hidden_size default=2048
+V    = Config.int@vocab_size default=151936
+L    = Config.int@num_hidden_layers default=48
+H    = Config.int@num_attention_heads default=32
+KVH  = Config.int@num_key_value_heads default=4
+HD   = Config.int@head_dim default=128
 KVD  = KVH * HD
 QD   = H * HD
-FFN  = Config.int "intermediate_size" default=6144
-ME   = Config.int "num_experts" default=128
-MK   = Config.int "num_experts_per_tok" default=8
-MFFN = Config.int "moe_intermediate_size" default=768
-SPARSE_STEP = Config.int "decoder_sparse_step" default=1
-EPS  = Config.float "rms_norm_eps" default=1e-06
-THETA = Config.float "rope_theta" default=1000000.0
-C    = Config.int "max_position_embeddings" default=40960
-TIE  = Config.bool "tie_word_embeddings" default=false
+FFN  = Config.int@intermediate_size default=6144
+ME   = Config.int@num_experts default=128
+MK   = Config.int@num_experts_per_tok default=8
+MFFN = Config.int@moe_intermediate_size default=768
+SPARSE_STEP = Config.int@decoder_sparse_step default=1
+EPS  = Config.float@rms_norm_eps default=1e-06
+THETA = Config.float@rope_theta default=1000000.0
+C    = Config.int@max_position_embeddings default=40960
+TIE  = Config.bool@tie_word_embeddings default=false
 
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-head_rms :: @Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
+head_rms :: Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
 head_rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
 output_tied :: Tensor[B,S,D] -> Tensor[B,S,V]
@@ -53,10 +53,11 @@ sparse_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 sparse_ffn x = do
   scores, indices <- softmax_topk_router@gate x top_k=MK
   out <- x * 0.0
-  for@experts e <- [0..ME) do
+  out <- for@experts e <- [0..ME) carry (out) do
     x_sel, token_idx, topk_pos, sel_scores <- select x scores indices e
     x_upd <- qwen3_moe_expert_ffn x_sel
     out <- scatter_add out token_idx x_upd sel_scores
+    yield out
   return out
 
 qwen3_moe_expert_ffn :: Tensor[N,D] -> Tensor[N,D]
@@ -91,10 +92,11 @@ qwen3_moe input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- qwen3_moe_block x pos_ids attn_mask past_i i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
   logits <- TIE ? output_tied x : output_untied x

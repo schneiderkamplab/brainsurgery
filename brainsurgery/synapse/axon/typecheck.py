@@ -49,6 +49,7 @@ from .types import (
     AxonExprName,
     AxonExprNull,
     AxonExprParen,
+    AxonExprPath,
     AxonExprPipe,
     AxonExprString,
     AxonExprTernary,
@@ -59,6 +60,7 @@ from .types import (
     AxonReturn,
     AxonScopeBind,
     AxonStatement,
+    AxonYield,
 )
 
 _TYPE_EXPR_CLASSES = (
@@ -87,7 +89,6 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, str] = {
 }
 
 _BUILTIN_MODULE_NAMESPACES: set[str] = {
-    "Prelude",
     "SSM",
     "Activations",
     "Cache",
@@ -745,14 +746,10 @@ def _types_compatible(
     def _is_path_type(tp: TypeExpr) -> bool:
         return isinstance(tp, TypeNamed) and tp.name == "Path"
 
-    # Path-typed parameters accept explicit string/path values only.
+    # Path-typed parameters accept Path values only.
     if _is_path_type(expected):
-        if isinstance(actual, TypeString):
-            return True
         if _is_path_type(actual):
             return True
-    if _is_path_type(actual) and isinstance(expected, TypeString):
-        return True
 
     if isinstance(expected, TypeAny):
         return True
@@ -1042,15 +1039,13 @@ def _kwarg_matches_kind(value: Any, expected: str) -> bool:
     if expected == "path":
         if isinstance(expr_type, TypeNamed) and expr_type.name == "Path":
             return True
-        if isinstance(expr_type, TypeString):
-            return True
-        return isinstance(raw, str)
+        return False
     if expected == "path_or_null":
         if isinstance(expr_type, TypeNamed) and expr_type.name == "Path":
             return True
-        if isinstance(expr_type, (TypeString, TypeNull)):
+        if isinstance(expr_type, TypeNull):
             return True
-        return isinstance(raw, str) or raw is None
+        return raw is None
     if expected == "str_or_bool_or_null":
         if isinstance(expr_type, (TypeString, TypeBool, TypeNull)):
             return True
@@ -1424,6 +1419,8 @@ def _primitive_output_type(
                 kwarg_scalars[key] = None
             elif isinstance(lit, TypeString):
                 kwarg_scalars[key] = value.value if isinstance(value, AxonExprString) else None
+            elif isinstance(lit, TypeNamed) and lit.name == "Path":
+                kwarg_scalars[key] = value.to_source() if isinstance(value, AxonExprPath) else None
             else:
                 inferred_type = _infer_expr_type(
                     value,
@@ -1443,6 +1440,8 @@ def _primitive_output_type(
                     kwarg_scalars[key] = False
                 elif isinstance(inferred_type, TypeString):
                     kwarg_scalars[key] = ""
+                elif isinstance(inferred_type, TypeNamed) and inferred_type.name == "Path":
+                    kwarg_scalars[key] = "@path"
                 elif isinstance(inferred_type, TypeList):
                     kwarg_scalars[key] = _list_type_placeholder(inferred_type.item)
                 else:
@@ -1535,6 +1534,8 @@ def _infer_literal_expr_type(expr: AxonExpr) -> TypeExpr | None:
         return TypeNull()
     if isinstance(expr, AxonExprString):
         return TypeString()
+    if isinstance(expr, AxonExprPath):
+        return TypeNamed(name="Path")
     return None
 
 
@@ -1574,6 +1575,8 @@ def _expr_scalar_value(
         return None
     if isinstance(expr, AxonExprString):
         return expr.value
+    if isinstance(expr, AxonExprPath):
+        return expr.to_source()
     if isinstance(expr, AxonExprName):
         return expr.name
     if isinstance(expr, AxonExprParen):
@@ -1713,6 +1716,23 @@ def _arity_kwarg_value(value: Any) -> Any:
 
 
 def _kwarg_value_to_expr(value: AxonKwargValue) -> AxonExpr:
+    def _parse_path_token(raw: str) -> AxonExprPath | None:
+        token = raw.strip()
+        if not token.startswith("@"):
+            return None
+        absolute = token.startswith("@@")
+        body = token[2:] if absolute else token[1:]
+        if not body:
+            return None
+        if len(body) >= 2 and body[0] == "'" and body[-1] == "'":
+            quoted = body[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+            parts = tuple(part for part in quoted.split(".") if part)
+        else:
+            parts = tuple(part for part in body.split(".") if part)
+        if not parts:
+            return None
+        return AxonExprPath(absolute=absolute, parts=parts)
+
     if isinstance(value, AxonExpr):
         return value
     if isinstance(value, bool):
@@ -1724,6 +1744,9 @@ def _kwarg_value_to_expr(value: AxonKwargValue) -> AxonExpr:
     if value is None:
         return AxonExprNull()
     if isinstance(value, str):
+        parsed_path = _parse_path_token(value)
+        if parsed_path is not None:
+            return parsed_path
         return AxonExprString(value=value)
     if isinstance(value, list):
         return AxonExprList(items=tuple(_kwarg_value_to_expr(item) for item in value))
@@ -1737,7 +1760,7 @@ def _substitute_expr(expr: AxonExpr, var_name: str, replacement: AxonExpr) -> Ax
         return expr
     if isinstance(
         expr,
-        AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString,
+        AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString | AxonExprPath,
     ):
         return expr
     if isinstance(expr, AxonExprTuple):
@@ -1816,7 +1839,12 @@ def _expr_name_refs(expr: AxonExpr) -> set[str]:
             continue
         if isinstance(
             node,
-            AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString,
+            AxonExprInt
+            | AxonExprFloat
+            | AxonExprBool
+            | AxonExprNull
+            | AxonExprString
+            | AxonExprPath,
         ):
             continue
         if isinstance(node, AxonExprParen):
@@ -1879,6 +1907,13 @@ def _call_return_type(
         alias_parts = name.split("@")
         alias_base_name = alias_parts[0]
         alias_path_parts = alias_parts[1:]
+        # Keep regular module-call resolution when a signature exists.
+        if (
+            alias_base_name in signatures
+            or name in signatures
+            or ("." in alias_base_name and alias_base_name.rsplit(".", 1)[1] in signatures)
+        ):
+            return name
         alias = primitive_aliases.get(alias_base_name)
         if alias is None:
             return name
@@ -1908,9 +1943,6 @@ def _call_return_type(
             qualified_base = f"{explicit_namespaces[0]}.{base_name}"
             return "@".join([qualified_base, *path_suffix]) if path_suffix else qualified_base
 
-        prelude_qualified = f"Prelude.{base_name}"
-        if prelude_qualified in signatures:
-            return "@".join([prelude_qualified, *path_suffix]) if path_suffix else prelude_qualified
         return name
 
     def _namespaced_member_is_visible(namespace: str, member: str) -> bool:
@@ -1926,6 +1958,14 @@ def _call_return_type(
         return False
 
     def _has_call_signature(name: str) -> bool:
+        def _path_param_capacity(sig: ModuleSignature) -> int:
+            count = 0
+            for param_type in sig.params:
+                root = param_type.inner if isinstance(param_type, TypeOptional) else param_type
+                if isinstance(root, TypeNamed) and root.name == "Path":
+                    count += 1
+            return count
+
         if signatures.get(name) is not None:
             return True
         if "@" in name:
@@ -1933,14 +1973,82 @@ def _call_return_type(
             base = parts[0]
             path_parts = parts[1:]
             base_sig = signatures.get(base)
-            if base_sig is not None and base_sig.path_param_count == len(path_parts):
-                return True
+            if base_sig is not None and len(path_parts) >= base_sig.path_param_count:
+                extras = len(path_parts) - base_sig.path_param_count
+                if extras <= _path_param_capacity(base_sig):
+                    return True
             if "." in base:
                 member_base = base.rsplit(".", 1)[1]
                 member_sig = signatures.get(member_base)
-                if member_sig is not None and member_sig.path_param_count == len(path_parts):
-                    return True
+                if member_sig is not None and len(path_parts) >= member_sig.path_param_count:
+                    extras = len(path_parts) - member_sig.path_param_count
+                    if extras <= _path_param_capacity(member_sig):
+                        return True
         return False
+
+    def _path_expr_from_suffix_token(
+        token: str,
+        *,
+        is_absolute: bool,
+        path_param_names: set[str],
+    ) -> AxonExpr:
+        raw = token.strip()
+        if not raw:
+            raise _error(module, path, "empty @path suffix is not allowed")
+        if raw in path_param_names:
+            return AxonExprName(name=raw)
+        parts = tuple(part for part in raw.split(".") if part)
+        if not parts:
+            raise _error(module, path, f"invalid @path suffix {token!r}")
+        return AxonExprPath(absolute=is_absolute, parts=parts)
+
+    def _apply_extra_path_suffix_kwargs(
+        *,
+        call_sig: ModuleSignature,
+        call_base: str,
+        callee_paths: list[str],
+        args_for_call: tuple[AxonExpr, ...],
+        kwargs_for_call: dict[str, AxonKwargValue],
+    ) -> dict[str, AxonKwargValue]:
+        if len(callee_paths) <= call_sig.path_param_count:
+            return kwargs_for_call
+        extra_paths = callee_paths[call_sig.path_param_count :]
+        bound_names = set(kwargs_for_call.keys())
+        for idx, arg_expr in enumerate(args_for_call):
+            del arg_expr
+            if idx >= len(call_sig.param_names):
+                break
+            bound_names.add(call_sig.param_names[idx])
+        available_path_params: list[str] = []
+        for name, param_type in zip(call_sig.param_names, call_sig.params, strict=True):
+            root = param_type.inner if isinstance(param_type, TypeOptional) else param_type
+            if isinstance(root, TypeNamed) and root.name == "Path" and name not in bound_names:
+                available_path_params.append(name)
+        if len(extra_paths) > len(available_path_params):
+            raise _error(
+                module,
+                path,
+                f"call {call_base!r} provides {len(extra_paths)} extra @path suffixes but only "
+                f"{len(available_path_params)} unbound Path arguments are available",
+            )
+        out_kwargs = dict(kwargs_for_call)
+        is_absolute_path = "@@" in raw_callee
+        module_path_param_names: set[str] = set(module.path_params)
+        if not module_path_param_names and isinstance(module.path_param, str):
+            module_path_param_names.add(module.path_param)
+        for path_token, param_name in zip(extra_paths, available_path_params, strict=True):
+            if param_name in out_kwargs:
+                raise _error(
+                    module,
+                    path,
+                    f"call {call_base!r} received multiple values for argument {param_name!r}",
+                )
+            out_kwargs[param_name] = _path_expr_from_suffix_token(
+                path_token,
+                is_absolute=is_absolute_path,
+                path_param_names=module_path_param_names,
+            )
+        return out_kwargs
 
     raw_resolved_name = _resolve_unqualified_import_member(raw_callee)
     raw_call_resolves_to_block = _has_call_signature(raw_resolved_name)
@@ -1976,14 +2084,16 @@ def _call_return_type(
         callee = implicit_activation
     _check_obsolete_call_syntax(callee)
     call_sig = signatures.get(callee)
+    callee_paths_for_binding: list[str] = []
     if call_sig is None and "@" in callee:
         callee_parts = callee.split("@")
         callee_base = callee_parts[0]
         callee_paths = callee_parts[1:]
         base_sig = signatures.get(callee_base)
-        if base_sig is not None and base_sig.path_param_count == len(callee_paths):
+        if base_sig is not None and len(callee_paths) >= base_sig.path_param_count:
             call_sig = base_sig
             callee = callee_base
+            callee_paths_for_binding = list(callee_paths)
     if call_sig is None:
         callee_parts = callee.split("@")
         callee_base = callee_parts[0]
@@ -2000,10 +2110,18 @@ def _call_return_type(
                 )
             if member_visible:
                 member_sig = signatures.get(member_base)
-                if member_sig is not None and member_sig.path_param_count == len(callee_paths):
+                if member_sig is not None and len(callee_paths) >= member_sig.path_param_count:
                     call_sig = member_sig
                     callee = member_base
+                    callee_paths_for_binding = list(callee_paths)
     if call_sig is not None:
+        kwargs = _apply_extra_path_suffix_kwargs(
+            call_sig=call_sig,
+            call_base=callee,
+            callee_paths=callee_paths_for_binding,
+            args_for_call=args,
+            kwargs_for_call=kwargs,
+        )
         if len(args) > len(call_sig.params):
             raise _error(
                 module,
@@ -2371,6 +2489,43 @@ def _infer_expr_type(
     rigid_symbols: set[str],
     expected_arity: int | None = None,
 ) -> TypeExpr:
+    def _is_path_type(tp: TypeExpr) -> bool:
+        root = tp.inner if isinstance(tp, TypeOptional) else tp
+        return isinstance(root, TypeNamed) and root.name == "Path"
+
+    def _resolve_pipe_stage_signature(callee: str) -> ModuleSignature | None:
+        base = callee.split("@", 1)[0]
+        return (
+            signatures.get(callee)
+            or signatures.get(base)
+            or (signatures.get(base.rsplit(".", 1)[1]) if "." in base else None)
+        )
+
+    def _insert_piped_args(
+        *,
+        callee: str,
+        stage_args: list[AxonExpr],
+        stage_kwargs: dict[str, AxonKwargValue],
+        piped_args: tuple[AxonExpr, ...],
+    ) -> list[AxonExpr]:
+        sig = _resolve_pipe_stage_signature(callee)
+        if sig is None:
+            return [*piped_args, *stage_args]
+        param_index_by_name = {name: idx for idx, name in enumerate(sig.param_names)}
+        bound_by_kwargs: set[int] = set()
+        for kw_name in stage_kwargs:
+            kw_idx = param_index_by_name.get(kw_name)
+            if kw_idx is not None:
+                bound_by_kwargs.add(kw_idx)
+        insert_at = 0
+        for idx, param_type in enumerate(sig.params):
+            if idx in bound_by_kwargs:
+                continue
+            if not _is_path_type(param_type):
+                insert_at = idx
+                break
+        return [*stage_args[:insert_at], *piped_args, *stage_args[insert_at:]]
+
     literal = _infer_literal_expr_type(expr)
     if literal is not None:
         return literal
@@ -2521,9 +2676,16 @@ def _infer_expr_type(
                             break
                     if same_prefix:
                         stage_args = stage_args[len(pipe_names) :]
+                piped_args = tuple(AxonExprName(name=name) for name in pipe_names)
+                rewritten_args = _insert_piped_args(
+                    callee=stage.callee,
+                    stage_args=stage_args,
+                    stage_kwargs=stage.kwargs,
+                    piped_args=piped_args,
+                )
                 stage_expr = AxonExprCall(
                     callee=stage.callee,
-                    args=tuple([*(AxonExprName(name=name) for name in pipe_names), *stage_args]),
+                    args=tuple(rewritten_args),
                     kwargs=stage.kwargs,
                 )
                 current = _infer_expr_type(
@@ -2538,9 +2700,16 @@ def _infer_expr_type(
                 )
                 continue
             if isinstance(stage, AxonExprName):
+                piped_args = tuple(AxonExprName(name=name) for name in pipe_names)
+                rewritten_args = _insert_piped_args(
+                    callee=stage.name,
+                    stage_args=[],
+                    stage_kwargs={},
+                    piped_args=piped_args,
+                )
                 stage_expr = AxonExprCall(
                     callee=stage.name,
-                    args=tuple(AxonExprName(name=name) for name in pipe_names),
+                    args=tuple(rewritten_args),
                     kwargs={},
                 )
                 current = _infer_expr_type(
@@ -2794,6 +2963,7 @@ def _collect_return_types(
     path: tuple[int, ...],
     dim_symbols: dict[str, DimToken],
     rigid_symbols: set[str],
+    in_loop: bool = False,
 ) -> list[tuple[TypeExpr, ...]]:
     out: list[tuple[TypeExpr, ...]] = []
     for idx, stmt in enumerate(statements):
@@ -2859,6 +3029,23 @@ def _collect_return_types(
             )
             out.append(ret_types)
             continue
+        if isinstance(stmt, AxonYield):
+            if in_loop:
+                yield_types = tuple(
+                    _infer_expr_type(
+                        value,
+                        env=env,
+                        signatures=signatures,
+                        primitive_aliases=primitive_aliases,
+                        module=module,
+                        path=(*stmt_path, i),
+                        dim_symbols=dim_symbols,
+                        rigid_symbols=rigid_symbols,
+                    )
+                    for i, value in enumerate(stmt.values)
+                )
+                out.append(yield_types)
+            continue
         if isinstance(stmt, AxonRepeat):
             nested_env = dict(env)
             nested_env[stmt.var] = TypeInt()
@@ -2872,6 +3059,7 @@ def _collect_return_types(
                     path=stmt_path,
                     dim_symbols=dim_symbols,
                     rigid_symbols=rigid_symbols,
+                    in_loop=True,
                 )
             )
             for name, tp in nested_env.items():
@@ -2889,6 +3077,7 @@ def _collect_return_types(
                 path=stmt_path,
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
+                in_loop=in_loop,
             )
             out.extend(scope_returns)
             if scope_returns:
@@ -2912,6 +3101,7 @@ def _typecheck_statements(
     path: tuple[int, ...],
     dim_symbols: dict[str, DimToken],
     rigid_symbols: set[str],
+    in_loop: bool = False,
 ) -> None:
     for idx, stmt in enumerate(statements):
         stmt_path = (*path, idx)
@@ -3015,6 +3205,11 @@ def _typecheck_statements(
                             f"return type mismatch at index {ret_idx}: expected {render_type(expected)}, got {render_type(actual)}",
                         )
             continue
+        if isinstance(stmt, AxonYield):
+            if not in_loop:
+                raise _error(module, stmt_path, "yield is only valid inside for-loop bodies")
+            # Yield typing is validated by the surrounding for-loop branch.
+            continue
         if isinstance(stmt, AxonRepeat):
             to_type = _infer_expr_type(
                 stmt.to_expr,
@@ -3064,6 +3259,16 @@ def _typecheck_statements(
                 )
             nested_env = dict(env)
             nested_env[stmt.var] = TypeInt()
+            carry_names: tuple[str, ...] = ()
+            if stmt.carry is not None:
+                carry_names = stmt.carry
+            elif stmt.targets is not None:
+                carry_names = stmt.targets
+            carry_types: list[TypeExpr] = []
+            for name in carry_names:
+                if name not in env:
+                    raise _error(module, stmt_path, f"for-loop carry name {name!r} is not in scope")
+                carry_types.append(env[name])
             _typecheck_statements(
                 stmt.body,
                 env=nested_env,
@@ -3074,9 +3279,81 @@ def _typecheck_statements(
                 path=stmt_path,
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
+                in_loop=True,
             )
+            explicit_yield: AxonYield | None = None
+            for child in stmt.body:
+                if isinstance(child, AxonYield):
+                    explicit_yield = child
+                    break
+            yielded_types: list[TypeExpr] = []
+            if explicit_yield is not None:
+                yielded_types = [
+                    _infer_expr_type(
+                        value,
+                        env=nested_env,
+                        signatures=signatures,
+                        primitive_aliases=primitive_aliases,
+                        module=module,
+                        path=stmt_path,
+                        dim_symbols=dim_symbols,
+                        rigid_symbols=rigid_symbols,
+                    )
+                    for value in explicit_yield.values
+                ]
+            elif carry_names:
+                yielded_types = [nested_env[name] for name in carry_names]
+            if carry_names:
+                if len(yielded_types) != len(carry_names):
+                    raise _error(
+                        module,
+                        stmt_path,
+                        f"for-loop yield arity mismatch: expected {len(carry_names)}, got {len(yielded_types)}",
+                    )
+                unified_types: list[TypeExpr] = []
+                for idx, (expected, actual) in enumerate(
+                    zip(carry_types, yielded_types, strict=True)
+                ):
+                    if _types_compatible(
+                        actual,
+                        expected,
+                        dim_subst={},
+                        dim_symbols=dim_symbols,
+                        rigid_symbols=rigid_symbols,
+                    ):
+                        unified_types.append(expected)
+                        continue
+                    if _types_compatible(
+                        expected,
+                        actual,
+                        dim_subst={},
+                        dim_symbols=dim_symbols,
+                        rigid_symbols=rigid_symbols,
+                    ):
+                        unified_types.append(actual)
+                        continue
+                    raise _error(
+                        module,
+                        stmt_path,
+                        f"for-loop yield type mismatch at index {idx}: expected {render_type(expected)}, got {render_type(actual)}",
+                    )
+                for name, tp in zip(carry_names, unified_types, strict=True):
+                    env[name] = tp
+                yielded_types = unified_types
+            if stmt.targets is not None:
+                if not yielded_types:
+                    raise _error(module, stmt_path, "for-loop with targets requires yielded values")
+                if len(stmt.targets) != len(yielded_types):
+                    raise _error(
+                        module,
+                        stmt_path,
+                        f"for-loop targets arity mismatch: expected {len(stmt.targets)}, got {len(yielded_types)}",
+                    )
+                for name, tp in zip(stmt.targets, yielded_types, strict=True):
+                    if name != "_":
+                        env[name] = tp
             for name, tp in nested_env.items():
-                if name != stmt.var:
+                if name != stmt.var and name not in set(carry_names):
                     env[name] = tp
             continue
         if isinstance(stmt, AxonScopeBind):
@@ -3091,6 +3368,7 @@ def _typecheck_statements(
                 path=stmt_path,
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
+                in_loop=in_loop,
             )
             return_types = _collect_return_types(
                 stmt.body,
@@ -3101,6 +3379,7 @@ def _typecheck_statements(
                 path=stmt_path,
                 dim_symbols=dim_symbols,
                 rigid_symbols=rigid_symbols,
+                in_loop=in_loop,
             )
             if not return_types:
                 raise _error(module, stmt_path, "scope bind body has no typed return path")
@@ -3213,6 +3492,7 @@ def typecheck_axon_program(
             path=(),
             dim_symbols=dim_symbols,
             rigid_symbols=rigid_symbols,
+            in_loop=False,
         )
 
     return signatures

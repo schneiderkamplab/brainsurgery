@@ -1,56 +1,49 @@
 {-# CHECKPOINTS "answerdotai/ModernBERT-base" #-}
 {-# TASK "masked_lm" #-}
 
+import Activations
 import Activations (gelu)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (bidirectional_mask)
+import Math
 import Math (mul)
+import Positions
 import Positions (position_ids, rope_pair_base)
-
-
-
-D = 768
-V = 50368
-L = 22
-H = 12
-FFN = 1152
-EPS = 1e-05
-FULL_EVERY = 3
-LOCAL_WIN = 64
-THETA_FULL = 160000.0
-THETA_LOCAL = 10000.0
 
 modernbert_layer :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> Tensor[B,S,D]
 modernbert_layer x i pos_ids attn_mask = do
-  xn <- (i == 0) ? x : NN.layernorm@attn_norm x eps=EPS bias=false
+  xn <- (i == 0) ? x : NN.layernorm@attn_norm x eps=1e-05 bias=false
   a <- scope@attn do
-    qkv <- NN.linear@Wqkv xn dim=3 * D bias=false
+    qkv <- NN.linear@Wqkv xn dim=2304 bias=false
     q, k, v <- Tensor.chunk qkv parts=3
-    q <- reshape_heads q heads=H
-    k <- reshape_heads k heads=H
-    v <- reshape_heads v heads=H
-    full <- (FULL_EVERY <= 0) or ((i % FULL_EVERY) == 0)
-    theta <- full ? THETA_FULL : THETA_LOCAL
+    q <- reshape_heads q heads=12
+    k <- reshape_heads k heads=12
+    v <- reshape_heads v heads=12
+    full <- false or ((i % 3) == 0)
+    theta <- full ? 160000.0 : 10000.0
     q, k <- rope_pair_base q k pos_ids theta
-    mask <- if full then bidirectional_mask q k padding_mask=attn_mask else bidirectional_mask q k window=LOCAL_WIN padding_mask=attn_mask
-    return attention q k v mask |> merge_heads |> NN.linear@Wo dim=D bias=false
+    mask <- if full then bidirectional_mask q k padding_mask=attn_mask else bidirectional_mask q k window=64 padding_mask=attn_mask
+    return attention q k v mask |> merge_heads |> NN.linear@Wo dim=768 bias=false
   x <- x + a
-  xn <- NN.layernorm@mlp_norm x eps=EPS bias=false
+  xn <- NN.layernorm@mlp_norm x eps=1e-05 bias=false
   m <- scope@mlp do
-    wi <- NN.linear@Wi xn dim=2 * FFN bias=false
+    wi <- NN.linear@Wi xn dim=2304 bias=false
     u, g <- Tensor.chunk wi parts=2
-    return gelu u |> mul g |> NN.linear@Wo dim=D bias=false
+    return gelu u |> mul g |> NN.linear@Wo dim=768 bias=false
   return x + m
 
 modernbert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 modernbert input_ids attn_mask = do
   pos_ids <- position_ids input_ids attn_mask
-  x <- NN.embedding@model.embeddings.tok_embeddings input_ids dim=D
-  x <- NN.layernorm@model.embeddings.norm x eps=EPS bias=false
-  for@model.layers i <- [0..L) do
+  x <- NN.embedding@model.embeddings.tok_embeddings input_ids dim=768
+  x <- NN.layernorm@model.embeddings.norm x eps=1e-05 bias=false
+  for@model.layers i <- [0..22) do
     x <- modernbert_layer x i pos_ids attn_mask
-  x <- NN.layernorm@model.final_norm x eps=EPS bias=false
-  x <- NN.linear@head.dense x dim=D bias=false |> gelu
-  x <- NN.layernorm@head.norm x eps=EPS bias=false
-  logits <- NN.linear@decoder x dim=V bias=true weight_path="@@model.embeddings.tok_embeddings.weight"
+    yield x
+  x <- NN.layernorm@model.final_norm x eps=1e-05 bias=false
+  x <- NN.linear@head.dense x dim=768 bias=false |> gelu
+  x <- NN.layernorm@head.norm x eps=1e-05 bias=false
+  logits <- NN.linear@decoder x dim=50368 bias=true weight_path=@@model.embeddings.tok_embeddings.weight
   return logits

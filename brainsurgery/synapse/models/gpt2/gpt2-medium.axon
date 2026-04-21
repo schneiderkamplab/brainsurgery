@@ -1,40 +1,45 @@
 {-# CHECKPOINTS "openai-community/gpt2-medium" #-}
 {-# TASK "causal_lm" #-}
 
+import Activations
 import Activations (gelu_new)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (causal_mask)
+import Math
+import Math (sqrt)
+import Positions
 import Positions (position_ids)
 
-
-
-T = 1024
-D = 1024
-L = 24
-H = 16
-
-gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
-gpt2_block x attn_mask = do
+gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gpt2_block x attn_mask past_kv = do
   x1 <- NN.layernorm@ln_1 x
-  a <- scope@attn do
-    q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
-    q <- reshape_heads q_lin heads=H
-    k <- reshape_heads k_lin heads=H
-    v <- reshape_heads v_lin heads=H
-    mask <- causal_mask q k window=T padding_mask=attn_mask
-    return attention q k v mask |> merge_heads |> NN.linear@c_proj dim=D bias=true transpose=true
+  a, new_kv <- scope@attn do
+    q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@c_attn x1 dim=3072 bias=true transpose=true) parts=3
+    q <- reshape_heads q_lin heads=16
+    k <- reshape_heads k_lin heads=16
+    v <- reshape_heads v_lin heads=16
+    k, v, new_kv <- Cache.update past_kv k v
+    mask <- causal_mask q k attn_mask
+    a <- attention q k v mask scale=0.125 |> merge_heads |> NN.linear@c_proj dim=1024 bias=true transpose=true
+    return a, new_kv
   x <- x + a
   x3 <- NN.layernorm@ln_2 x
   m <- scope@mlp do
-    return NN.linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=D bias=true transpose=true
-  return x + m
+    return NN.linear@c_fc x3 dim=4096 bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=1024 bias=true transpose=true
+  return x + m, new_kv
 
-gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
-gpt2 input_ids attn_mask = do
-  tok <- NN.embedding@wte input_ids dim=D
-  pos <- position_ids input_ids attn_mask=attn_mask pad_fill=1 |> NN.embedding@wpe
+gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gpt2 input_ids attn_mask past_kv use_cache = do
+  tok <- NN.embedding@wte input_ids dim=1024
+  pos <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=1 |> NN.embedding@wpe
   x <- tok + pos
-  for@h i <- [0..L) do
-    x <- gpt2_block x attn_mask
+  new_kv <- use_cache ? Cache.init : null
+  for@h i <- [0..24) do
+    past_i <- Cache.index past_kv i
+    x, new_i <- gpt2_block x attn_mask past_i
+    new_kv <- Cache.append new_kv new_i
+    yield x, new_kv
   logits <- NN.layernorm@ln_f x |> NN.linear@wte
-  return logits
+  return logits, new_kv

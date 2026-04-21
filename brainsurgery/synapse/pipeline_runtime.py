@@ -30,81 +30,6 @@ def _hf_device_map_prefix_for_key(key: str) -> str | None:
     return key.rsplit(".", 1)[0]
 
 
-def _prefix_covers_name(prefix: str, name: str) -> bool:
-    return name == prefix or name.startswith(prefix + ".")
-
-
-def _candidate_hf_prefixes(prefix: str) -> tuple[str, ...]:
-    out = [
-        prefix,
-        f"model.{prefix}",
-        f"transformer.{prefix}",
-        prefix.replace("language_model.model.", "language_model.", 1),
-        f"model.{prefix.replace('language_model.model.', 'language_model.', 1)}",
-        prefix.replace("language_model.", "model.language_model.", 1),
-        prefix.replace("vision_tower.", "model.vision_tower.", 1),
-        prefix.replace("multi_modal_projector.", "model.multi_modal_projector.", 1),
-    ]
-    dedup: list[str] = []
-    seen: set[str] = set()
-    for item in out:
-        item = item.strip(".")
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        dedup.append(item)
-    return tuple(dedup)
-
-
-def _match_prefix_to_hf_names(prefix: str, hf_param_names: set[str]) -> str:
-    if not hf_param_names:
-        # Fallback for GPT/BLOOM-style unprefixed runtime keys when HF parameter
-        # introspection is unavailable (empty set).
-        if prefix.startswith("h.") or prefix == "ln_f" or prefix.startswith("word_embeddings"):
-            return f"transformer.{prefix}"
-        return prefix
-    candidates = _candidate_hf_prefixes(prefix)
-    best = prefix
-    best_score = -1
-    for candidate in candidates:
-        score = sum(1 for name in hf_param_names if _prefix_covers_name(candidate, name))
-        if score > best_score:
-            best = candidate
-            best_score = score
-    return best
-
-
-def _add_coverage_roots_for_unmapped_params(
-    device_map: dict[str, str],
-    hf_param_names: set[str],
-    *,
-    default_device: str,
-) -> None:
-    if not hf_param_names:
-        return
-
-    def _is_covered(name: str) -> bool:
-        for prefix in device_map:
-            if _prefix_covers_name(prefix, name):
-                return True
-        return False
-
-    uncovered = [name for name in hf_param_names if not _is_covered(name)]
-    if not uncovered:
-        return
-    roots: set[str] = set()
-    for name in uncovered:
-        # Add a precise module root instead of broad family roots like
-        # "model.language_model", which can cause parent hooks to run on a
-        # different device than child-layer parameters.
-        if "." in name:
-            roots.add(name.rsplit(".", 1)[0])
-        else:
-            roots.add(name)
-    for root in sorted(roots):
-        device_map.setdefault(root, default_device)
-
-
 def _move_value_to_device(value: Any, device: str) -> Any:
     if isinstance(value, torch.Tensor):
         return value.to(device)
@@ -467,7 +392,6 @@ def build_hf_device_map_from_pipeline_usage(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor | None = None,
     requested_device: str | torch.device = "cuda",
-    hf_param_names: set[str] | None = None,
 ) -> tuple[PipelinePlan, dict[str, str]]:
     plan = build_pipeline_stage_specs(spec, requested_device=requested_device)[0]
     cpu_stages = tuple(
@@ -530,8 +454,6 @@ def build_hf_device_map_from_pipeline_usage(
             prefix = _hf_device_map_prefix_for_key(key)
             if prefix is None:
                 continue
-            if hf_param_names is not None:
-                prefix = _match_prefix_to_hf_names(prefix, hf_param_names)
             existing = device_map.get(prefix)
             if existing is None:
                 device_map[prefix] = stage.device
@@ -544,36 +466,7 @@ def build_hf_device_map_from_pipeline_usage(
         prefix = _hf_device_map_prefix_for_key(key)
         if prefix is None:
             continue
-        if hf_param_names is not None:
-            prefix = _match_prefix_to_hf_names(prefix, hf_param_names)
         device_map.setdefault(prefix, last_device)
-    embed_device = next(
-        (
-            device
-            for prefix, device in device_map.items()
-            if prefix.endswith("embed_tokens")
-            or prefix.endswith("word_embeddings")
-            or prefix.endswith("wte")
-        ),
-        None,
-    )
-    first_device = plan.stages[0].device
-    # Some HF models keep RoPE buffers in a module without parameters.
-    # Ensure these modules are explicitly placed with the first stage.
-    device_map.setdefault("rotary_emb", first_device)
-    device_map.setdefault("model.rotary_emb", first_device)
-    device_map.setdefault("transformer.rotary_emb", first_device)
-    if embed_device is not None:
-        lm_head_device = embed_device if "lm_head.weight" not in state_dict else last_device
-        device_map.setdefault("lm_head", lm_head_device)
-        device_map.setdefault("language_model.lm_head", lm_head_device)
-        device_map.setdefault("model.lm_head", lm_head_device)
-    if hf_param_names is not None:
-        _add_coverage_roots_for_unmapped_params(
-            device_map,
-            hf_param_names,
-            default_device=last_device,
-        )
     return plan, device_map
 
 

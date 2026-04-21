@@ -63,3 +63,27 @@ def test_ast_validation_rejects_unknown_main_module() -> None:
     )
     with pytest.raises(ValueError, match="unknown main module"):
         validate_axon_program((module,), main_module="missing")
+
+
+def test_ast_validation_rejects_yield_outside_for() -> None:
+    source = """
+tiny :: Tensor -> Tensor
+tiny x = do
+  yield x
+  return x
+"""
+    with pytest.raises(ValueError, match="yield is only valid inside for-loop bodies"):
+        parse_axon_program(source)
+
+
+def test_ast_validation_rejects_non_terminal_yield_in_for_body() -> None:
+    source = """
+tiny :: Tensor -> Tensor
+tiny x = do
+  y <- for i <- [0..2) carry (x) do
+    yield x
+    x <- x
+  return y
+"""
+    with pytest.raises(ValueError, match="yield must be the final statement in a for-loop body"):
+        parse_axon_program(source)

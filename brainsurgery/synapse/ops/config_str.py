@@ -11,7 +11,7 @@ from ._config_common import (
 )
 
 OP_NAME = "config_str"
-LOWERING_ARITY = (1, 3)
+LOWERING_ARITY = (1, 2)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {}
@@ -90,7 +90,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("String", "String", "String"),
+    "args": ("Path", "String"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": ("String",),
 }

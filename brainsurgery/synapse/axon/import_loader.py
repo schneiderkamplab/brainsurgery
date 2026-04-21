@@ -27,6 +27,7 @@ from .types import (
     AxonReturn,
     AxonScopeBind,
     AxonStatement,
+    AxonYield,
 )
 
 
@@ -226,8 +227,13 @@ def _apply_namespace(
                         from_expr=_rewrite_expr(stmt.from_expr),
                         step_expr=_rewrite_expr(stmt.step_expr),
                         body=_rewrite_statements(stmt.body),
+                        targets=stmt.targets,
+                        carry=stmt.carry,
                     )
                 )
+                continue
+            if isinstance(stmt, AxonYield):
+                rewritten.append(AxonYield(values=tuple(_rewrite_expr(v) for v in stmt.values)))
                 continue
             if isinstance(stmt, AxonScopeBind):
                 rewritten.append(
@@ -327,7 +333,6 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
     ordered_files: list[_LoadedSyntaxFile] = []
 
     builtins_dir = (Path(__file__).resolve().parents[1] / "builtins").resolve()
-    prelude_file = (builtins_dir / "Prelude.axon").resolve()
     builtin_files = tuple(sorted(path for path in builtins_dir.glob("*.axon") if path.is_file()))
     search_paths = _axon_search_paths()
 
@@ -352,15 +357,11 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
         seen_paths.add(resolved)
         visiting.pop()
 
-    if prelude_file.exists() and prelude_file != root:
-        _load_file_syntax(prelude_file, namespace="Prelude")
-    # For model/user Axon roots, implicitly load all non-Prelude builtins under
+    # For model/user Axon roots, implicitly load all builtins under
     # their own namespaces (Math, Activations, Tensor, Positions, ...). This
     # enables namespaced calls like `Math.exp` without explicit import lines.
     if builtins_dir not in root.parents:
         for builtin_file in builtin_files:
-            if builtin_file == prelude_file:
-                continue
             _load_file_syntax(builtin_file, namespace=builtin_file.stem)
     _load_file_syntax(root)
 
@@ -371,10 +372,6 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
     loaded_by_namespace: dict[str, _LoadedSyntaxFile] = {
         loaded.namespace: loaded for loaded in ordered_files if loaded.namespace is not None
     }
-    prelude_exports: tuple[str, ...] = ()
-    prelude_loaded = loaded_by_namespace.get("Prelude")
-    if prelude_loaded is not None:
-        prelude_exports = tuple(prelude_loaded.parsed_source.exports)
     for loaded in ordered_files:
         effective_imported_members: dict[str, tuple[str, ...]] = dict(
             loaded.parsed_source.imported_members
@@ -387,25 +384,6 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
             if dep is None or not dep.parsed_source.exports:
                 continue
             effective_imported_members[namespace] = dep.parsed_source.exports
-        # For model/user roots (outside builtins), implicitly expose Prelude
-        # re-exported namespaces and their members so namespaced calls like
-        # `NN.embedding` work without explicit `import NN`.
-        if builtins_dir not in loaded.path.parents and prelude_exports:
-            if "Prelude" not in effective_imported_members:
-                effective_imported_members["Prelude"] = prelude_exports
-            if "Prelude" not in loaded.parsed_source.imports:
-                effective_extra_imports.append("Prelude")
-            for namespace in prelude_exports:
-                dep = loaded_by_namespace.get(namespace)
-                if dep is None:
-                    continue
-                if namespace not in loaded.parsed_source.imports:
-                    effective_extra_imports.append(namespace)
-                if namespace in effective_imported_members:
-                    continue
-                if dep.parsed_source.exports:
-                    effective_imported_members[namespace] = dep.parsed_source.exports
-
         imported_constants: dict[str, AxonExpr] = {}
         imported_constant_imports: list[str] = []
         for namespace, members in effective_imported_members.items():

@@ -9,43 +9,43 @@ import Positions (position_ids, rope_pair_base, rope_pair_longrope)
 
 
 
-CFG = (Config.has_key "text_config") ? "text_config" : ""
+CFG = (Config.has_key@text_config) ? "text_config" : ""
 PARAM_ROOT = (has_root "language_model") ? "language_model" : ""
 
-D = Config.int "hidden_size" root=CFG default=4096
-V = Config.int "vocab_size" root=CFG default=100352
-L = Config.int "num_hidden_layers" root=CFG default=32
-H = Config.int "num_attention_heads" root=CFG default=32
-KVH = Config.int "num_key_value_heads" root=CFG default=8
-HD = (Config.has_key "head_dim" root=CFG) ? (Config.int "head_dim" root=CFG default=128) : 128
+D = Config.int @'{CFG}.hidden_size' default=4096
+V = Config.int @'{CFG}.vocab_size' default=100352
+L = Config.int @'{CFG}.num_hidden_layers' default=32
+H = Config.int @'{CFG}.num_attention_heads' default=32
+KVH = Config.int @'{CFG}.num_key_value_heads' default=8
+HD = (Config.has_key @'{CFG}.head_dim') ? (Config.int @'{CFG}.head_dim' default=128) : 128
 QD = H * HD
 KVD = KVH * HD
-FFN = Config.int "ff_intermediate_size" root=CFG default=14336
-EPS = Config.float "layer_norm_epsilon" root=CFG default=1e-05
-THETA = Config.float "rope_embedding_base" root=CFG default=1000000.0
-ROPE_MODE = Config.str "type" root="rope_scaling" default=(Config.str "rope_type" root="rope_scaling" default="default")
-ROPE_ORIGINAL_CONTEXT = Config.int "original_max_position_embeddings" root="rope_scaling" default=(Config.int "original_max_position_embeddings" root=CFG default=8192)
-ROPE_MAX_CONTEXT = Config.int "max_position_embeddings" root=CFG default=8192
-ROPE_LONG_FACTOR = Config.list "long_factor" root="rope_scaling" default=[]
-ROPE_SHORT_FACTOR = Config.list "short_factor" root="rope_scaling" default=[]
-ROPE_LONG_MSCALE = Config.float "long_mscale" root="rope_scaling" default=-1.0
-ROPE_SHORT_MSCALE = Config.float "short_mscale" root="rope_scaling" default=-1.0
-HAS_LONGROPE = Config.has_key "long_factor" root="rope_scaling"
-GEGELU_LIMIT = Config.float "gegelu_limit" root=CFG default=20.0
-MUP_ATTN_MULT = Config.float "mup_attn_multiplier" root=CFG default=1.0
-MUP_EMBED_MULT = Config.float "mup_embedding_multiplier" root=CFG default=10.0
-MUP_WIDTH_MULT = Config.float "mup_width_multiplier" root=CFG default=8.0
+FFN = Config.int @'{CFG}.ff_intermediate_size' default=14336
+EPS = Config.float @'{CFG}.layer_norm_epsilon' default=1e-05
+THETA = Config.float @'{CFG}.rope_embedding_base' default=1000000.0
+ROPE_MODE = Config.str @'rope_scaling.type' default=(Config.str @'rope_scaling.rope_type' default="default")
+ROPE_ORIGINAL_CONTEXT = Config.int @'rope_scaling.original_max_position_embeddings' default=(Config.int @'{CFG}.original_max_position_embeddings' default=8192)
+ROPE_MAX_CONTEXT = Config.int @'{CFG}.max_position_embeddings' default=8192
+ROPE_LONG_FACTOR = Config.list @'rope_scaling.long_factor' default=[]
+ROPE_SHORT_FACTOR = Config.list @'rope_scaling.short_factor' default=[]
+ROPE_LONG_MSCALE = Config.float @'rope_scaling.long_mscale' default=-1.0
+ROPE_SHORT_MSCALE = Config.float @'rope_scaling.short_mscale' default=-1.0
+HAS_LONGROPE = Config.has_key @'rope_scaling.long_factor'
+GEGELU_LIMIT = Config.float @'{CFG}.gegelu_limit' default=20.0
+MUP_ATTN_MULT = Config.float @'{CFG}.mup_attn_multiplier' default=1.0
+MUP_EMBED_MULT = Config.float @'{CFG}.mup_embedding_multiplier' default=10.0
+MUP_WIDTH_MULT = Config.float @'{CFG}.mup_width_multiplier' default=8.0
 ATTN_SCALE = MUP_ATTN_MULT / HD
-BS_LOCAL_BLOCKS = Config.int "blocksparse_num_local_blocks" root=CFG default=16
-BS_BLOCK_SIZE = Config.int "blocksparse_block_size" root=CFG default=64
-BS_VERT_STRIDE = Config.int "blocksparse_vert_stride" root=CFG default=8
-BS_HOMO_HEAD = Config.bool "blocksparse_homo_head_pattern" root=CFG default=false
+BS_LOCAL_BLOCKS = Config.int @'{CFG}.blocksparse_num_local_blocks' default=16
+BS_BLOCK_SIZE = Config.int @'{CFG}.blocksparse_block_size' default=64
+BS_VERT_STRIDE = Config.int @'{CFG}.blocksparse_vert_stride' default=8
+BS_HOMO_HEAD = Config.bool @'{CFG}.blocksparse_homo_head_pattern' default=false
 WINDOW_LOCAL = BS_LOCAL_BLOCKS * BS_BLOCK_SIZE
-WINDOW_GLOBAL = Config.int "max_position_embeddings" root=CFG default=8192
-DENSE_EVERY = Config.int "dense_attention_every_n_layers" root=CFG default=2
+WINDOW_GLOBAL = Config.int @'{CFG}.max_position_embeddings' default=8192
+DENSE_EVERY = Config.int @'{CFG}.dense_attention_every_n_layers' default=2
 HAS_LM_HEAD = has_root "lm_head"
 
-phi3small_norm :: @Path -> Tensor -> Tensor
+phi3small_norm :: Path -> Tensor -> Tensor
 phi3small_norm@path x = NN.layernorm@path x eps=EPS
 
 phi3small_block :: Tensor -> Int -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
@@ -78,14 +78,15 @@ phi3small_block x i pos_ids attn_mask past_kv = do
 phi3small :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 phi3small input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
-  x, new_kv <- scope@model root=PARAM_ROOT do
+  x, new_kv <- scope@'{PARAM_ROOT}.model' do
     x <- NN.embedding@embed_tokens input_ids dim=D
     x <- (MUP_EMBED_MULT > 0.0) ? (x * MUP_EMBED_MULT) : x
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- phi3small_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- phi3small_norm@final_layernorm x
     return x, new_kv
   logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@model.embed_tokens x dim=V)

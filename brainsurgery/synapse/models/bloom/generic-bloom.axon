@@ -10,14 +10,14 @@ import Tensor (size)
 
 
 
-D = Config.int "hidden_size" default=1024
-V = Config.int "vocab_size" default=250880
-L = Config.int "n_layer" default=24
-H = Config.int "n_head" default=16
+D = Config.int@hidden_size default=1024
+V = Config.int@vocab_size default=250880
+L = Config.int@n_layer default=24
+H = Config.int@n_head default=16
 FFN = 4 * D
-EPS = Config.float "layer_norm_epsilon" default=1e-05
-MAX_CTX = Config.int "seq_length" default=2048
-POST_LN_RESID = Config.bool "apply_residual_connection_post_layernorm" default=false
+EPS = Config.float@layer_norm_epsilon default=1e-05
+MAX_CTX = Config.int@seq_length default=2048
+POST_LN_RESID = Config.bool@apply_residual_connection_post_layernorm default=false
 HAS_LM_HEAD = has_root "lm_head"
 
 bloom_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
@@ -47,10 +47,11 @@ bloom input_ids attn_mask past_kv use_cache = do
   tok <- NN.embedding@word_embeddings input_ids dim=D
   x <- NN.layernorm@word_embeddings_layernorm tok eps=EPS
   new_kv <- use_cache ? Cache.init : null
-  for@h i <- [0..L) do
+  x, new_kv <- for@h i <- [0..L) carry (x, new_kv) do
     past_i <- Cache.index past_kv i
     x, new_i <- bloom_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i
+    yield x, new_kv
   x <- NN.layernorm@ln_f x eps=EPS
   logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@word_embeddings x dim=V)
   return logits, new_kv

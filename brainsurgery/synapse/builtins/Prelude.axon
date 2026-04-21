@@ -1,4 +1,0 @@
--- Prelude intentionally contains no wrappers.
-import Cache
-import Config
-export (Cache, Config)

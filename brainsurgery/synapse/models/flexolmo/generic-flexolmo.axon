@@ -11,20 +11,20 @@ import Positions (position_ids, rope_pair_base)
 
 
 -- FlexOlmo architecture constants.
-D    = Config.int "hidden_size" default=4096                       -- residual hidden size
-V    = Config.int "vocab_size" default=100352                      -- tokenizer vocabulary size
-L    = Config.int "num_hidden_layers" default=32                   -- number of decoder layers
-H    = Config.int "num_attention_heads" default=32                 -- attention head count
+D    = Config.int@hidden_size default=4096                       -- residual hidden size
+V    = Config.int@vocab_size default=100352                      -- tokenizer vocabulary size
+L    = Config.int@num_hidden_layers default=32                   -- number of decoder layers
+H    = Config.int@num_attention_heads default=32                 -- attention head count
 HD   = D / H                                                        -- per-head dimension
-E    = Config.int "num_experts" default=2                          -- routed experts
-EPT  = Config.int "num_experts_per_tok" default=2                  -- top-k experts per token
-C    = Config.int "max_position_embeddings" default=4096           -- causal window
-FFN  = Config.int "intermediate_size" default=11008                -- expert FFN width
-EPS  = Config.float "rms_norm_eps" default=1e-06                   -- RMSNorm epsilon
-THETA = Config.float "rope_theta" default=500000.0                 -- RoPE theta
+E    = Config.int@num_experts default=2                          -- routed experts
+EPT  = Config.int@num_experts_per_tok default=2                  -- top-k experts per token
+C    = Config.int@max_position_embeddings default=4096           -- causal window
+FFN  = Config.int@intermediate_size default=11008                -- expert FFN width
+EPS  = Config.float@rms_norm_eps default=1e-06                   -- RMSNorm epsilon
+THETA = Config.float@rope_theta default=500000.0                 -- RoPE theta
 ATTN_SCALE = 1.0 / sqrt HD                                         -- qk scaling
 
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
 expert_ffn :: Tensor[N,D] -> Tensor[N,D]
@@ -51,10 +51,11 @@ flexolmo_decoder_block x pos_ids attn_mask past_kv = do
     topk_scores, topk_indices <- NN.linear@gate x dim=E |>
       Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=EPT dim=-1
     m <- x * 0.0
-    for@experts e <- [0..E) do
+    m <- for@experts e <- [0..E) carry (m) do
       x_sel, token_idx, topk_pos, sel_scores <- select x topk_scores topk_indices e
       x_upd <- expert_ffn x_sel
       m <- scatter_add m token_idx x_upd sel_scores
+      yield m
     return m
   m_norm <- rms@post_feedforward_layernorm m
   return x + m_norm, new_kv
@@ -65,10 +66,11 @@ flexolmo input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- flexolmo_decoder_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
   logits <- NN.linear@lm_head x

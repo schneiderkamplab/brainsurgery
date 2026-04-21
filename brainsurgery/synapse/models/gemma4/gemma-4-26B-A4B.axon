@@ -15,28 +15,7 @@ import Params (has_root, param_scale)
 import Positions
 import Positions (position_ids, rope_pair_proportional)
 
-D = 2816
-L = 30
-H = 16
-KVH = 8
-GKVH = 2
-HD = 256
-GHD = 512
-FFN = 2112
-WIN_LOCAL = 1024
-WIN_FULL = 262144
-EPS = 1e-06
-THETA_LOCAL = 10000.0
-THETA_FULL = 1000000.0
-ROPE_SCALE_FULL = 1.0
-ROTARY_PARTIAL_FULL = 0.25
-ROPE_PERIOD = 6
-ATTN_K_EQ_V = true
-LOGIT_SOFTCAP = 30.0
-TOPK_EXPERTS = 8
-NUM_EXPERTS = 128
-
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x cast_float=true
 
 gemma4_router :: Tensor -> Int -> ?Float -> ?Float -> (Tensor, IdxTensor)
@@ -45,9 +24,9 @@ gemma4_router x top_k ?scalar_root_size=null ?rms_eps=null = do
   eps <- (rms_eps == null) ? 1e-06 : rms_eps
   topk_weights, topk_indices <- scope@router do
     h <- NN.l2norm x eps=eps
-    h <- h * (Params.param path="@scale") * scalar
-    w, i <- softmax_topk_router@proj h top_k routed_scaling_factor=1.0 weight="@weight"
-    per_expert_scale <- Params.param path="@per_expert_scale"
+    h <- h * (Params.param path=@scale) * scalar
+    w, i <- softmax_topk_router@proj h top_k routed_scaling_factor=1.0 weight=@weight
+    per_expert_scale <- Params.param path=@per_expert_scale
     b <- Tensor.size i 0
     s <- Tensor.size i 1
     e <- Tensor.size per_expert_scale 0
@@ -61,10 +40,11 @@ gemma4_moe_experts hidden topk_weights topk_indices num_experts = do
   routed <- Tensor.zeros_like hidden
   for e <- [0..num_experts) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
-    gate_up <- NN.linear@experts x_sel expert=e weight_path="@experts.gate_up_proj"
+    gate_up <- NN.linear@experts x_sel expert=e weight_path=@experts.gate_up_proj
     gate, up <- Tensor.chunk gate_up parts=2
-    x_upd <- gate |> gelu_pytorch_tanh |> mul up |> NN.linear@experts expert=e weight_path="@experts.down_proj"
+    x_upd <- gate |> gelu_pytorch_tanh |> mul up |> NN.linear@experts expert=e weight_path=@experts.down_proj
     routed <- scatter_add routed token_idx x_upd sel_scores
+    yield routed
   return routed
 
 gemma4_kv_shared :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
@@ -82,35 +62,36 @@ gemma4_kv_separate xn kv_dim kv_heads hd = do
 
 gemma4_moe_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gemma4_moe_block x i pos_ids attn_mask past_kv = do
-  full <- ((i + 1) % ROPE_PERIOD) == 0
-  kv_heads <- (full and ATTN_K_EQ_V) ? GKVH : KVH
-  hd <- full ? GHD : HD
-  q_dim <- H * hd
+  full <- ((i + 1) % 6) == 0
+  use_global_kv <- full and true
+  kv_heads <- use_global_kv ? 2 : 8
+  hd <- full ? 512 : 256
+  q_dim <- 16 * hd
   kv_dim <- kv_heads * hd
-  theta <- full ? THETA_FULL : THETA_LOCAL
-  window <- full ? WIN_FULL : WIN_LOCAL
+  theta <- full ? 1000000.0 : 10000.0
+  window <- full ? 262144 : 1024
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=q_dim bias=false |> reshape_heads heads=H |> NN.rmsnorm@q_norm dim=hd cast_float=true
-    k, v <- if (full and ATTN_K_EQ_V) then gemma4_kv_shared xn kv_dim kv_heads hd else gemma4_kv_separate xn kv_dim kv_heads hd
-    q, k <- rope_pair_proportional q k pos_ids theta=theta scale_factor=(full ? ROPE_SCALE_FULL : 1.0) partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0)
+    q <- NN.linear@q_proj xn dim=q_dim bias=false |> reshape_heads heads=16 |> NN.rmsnorm@q_norm dim=hd cast_float=true
+    k, v <- if use_global_kv then gemma4_kv_shared xn kv_dim kv_heads hd else gemma4_kv_separate xn kv_dim kv_heads hd
+    q, k <- rope_pair_proportional q k pos_ids theta=theta scale_factor=(full ? 1.0 : 1.0) partial_rotary_factor=(full ? 0.25 : 1.0)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / kv_heads)
-    v <- Tensor.repeat v repeats=(H / kv_heads)
+    k <- Tensor.repeat k repeats=(16 / kv_heads)
+    v <- Tensor.repeat v repeats=(16 / kv_heads)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
-    a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=2816 bias=false
     return a, new_kv
   a <- rms@post_attention_layernorm a
   x <- x + a
   xn <- rms@pre_feedforward_layernorm x
   m <- scope@mlp do
-    g <- NN.linear@gate_proj xn dim=FFN bias=false
-    u <- NN.linear@up_proj xn dim=FFN bias=false
-    return gelu_pytorch_tanh g |> mul u |> NN.linear@down_proj dim=D bias=false
+    g <- NN.linear@gate_proj xn dim=2112 bias=false
+    u <- NN.linear@up_proj xn dim=2112 bias=false
+    return gelu_pytorch_tanh g |> mul u |> NN.linear@down_proj dim=2816 bias=false
   h1 <- rms@post_feedforward_layernorm_1 m
-  topk_weights, topk_indices <- gemma4_router x top_k=TOPK_EXPERTS scalar_root_size=(1.0 / sqrt D) rms_eps=EPS
+  topk_weights, topk_indices <- gemma4_router x top_k=8 scalar_root_size=0.018844459036110227 rms_eps=1e-06
   xn2 <- rms@pre_feedforward_layernorm_2 x
-  h2 <- gemma4_moe_experts xn2 topk_weights topk_indices NUM_EXPERTS
+  h2 <- gemma4_moe_experts xn2 topk_weights topk_indices 128
   h2 <- rms@post_feedforward_layernorm_2 h2
   h <- h1 + h2
   h <- rms@post_feedforward_layernorm h
@@ -121,16 +102,17 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
 gemma4_moe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gemma4_moe input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
-  logits, new_kv <- scope@language_model root="model" do
-    x <- NN.embedding@embed_tokens input_ids dim=D scale=(sqrt D)
+  logits, new_kv <- scope@model.language_model do
+    x <- NN.embedding@embed_tokens input_ids dim=2816 scale=53.0659966456864
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    for@layers i <- [0..30) do
       past_i <- Cache.index past_kv i
       x, new_i <- gemma4_moe_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     logits <- rms@norm x |> NN.linear@embed_tokens
-    logits <- logits / LOGIT_SOFTCAP
+    logits <- logits / 30.0
     logits <- tanh logits
-    logits <- logits * LOGIT_SOFTCAP
+    logits <- logits * 30.0
     return logits, new_kv
   return logits, new_kv

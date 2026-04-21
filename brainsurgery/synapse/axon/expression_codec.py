@@ -15,6 +15,7 @@ from .types import (
     AxonExprName,
     AxonExprNull,
     AxonExprParen,
+    AxonExprPath,
     AxonExprString,
     AxonExprTernary,
     AxonExprTuple,
@@ -34,6 +35,8 @@ def axon_expr_to_runtime_value(expr: AxonExpr) -> Any:
         return None
     if isinstance(expr, AxonExprString):
         return {"_expr": "string", "value": expr.value}
+    if isinstance(expr, AxonExprPath):
+        return {"_expr": "path", "value": expr.to_source()}
     if isinstance(expr, AxonExprList):
         return [axon_expr_to_runtime_value(item) for item in expr.items]
     if isinstance(expr, AxonExprTuple):

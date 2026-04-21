@@ -178,6 +178,54 @@ main x = do
     assert "main" in signatures
 
 
+def test_typecheck_allows_extra_path_suffix_binding_for_path_params(tmp_path: Path) -> None:
+    source = """
+my_linear :: Path -> Tensor[B,S,D] -> ?Path -> ?Path -> Tensor[B,S,D]
+my_linear@path x ?weight_path=@weight ?bias_path=@bias = do
+  return x
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- my_linear@q_proj@weight@bias x
+  return y
+"""
+    modules = _parse_from_tmp_source(tmp_path, source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
+
+
+def test_typecheck_rejects_too_many_extra_path_suffixes(tmp_path: Path) -> None:
+    source = """
+my_linear :: Path -> Tensor[B,S,D] -> ?Path -> Tensor[B,S,D]
+my_linear@path x ?weight_path=@weight = do
+  return x
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- my_linear@q_proj@weight@bias x
+  return y
+"""
+    modules = _parse_from_tmp_source(tmp_path, source)
+    with pytest.raises(ValueError, match="extra @path suffixes"):
+        typecheck_axon_program(modules, main_module="main")
+
+
+def test_typecheck_allows_plain_path_signature_for_path_bound_module(tmp_path: Path) -> None:
+    source = """
+my_linear :: Path -> Tensor[B,S,D] -> ?Path -> ?Path -> Tensor[B,S,D]
+my_linear@path x ?weight_path=@weight ?bias_path=@bias = do
+  return x
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- my_linear@q_proj@weight@bias x
+  return y
+"""
+    modules = _parse_from_tmp_source(tmp_path, source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
+
+
 def test_typecheck_and_lowering_allow_value_level_dim_symbol_from_alias(tmp_path: Path) -> None:
     source = """
 type CacheLayer = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
@@ -280,6 +328,30 @@ main x = do
     assert split_calls[0].get("sizes") == [6, 6]
 
 
+def test_lowering_emits_for_carry_yield_and_bind_metadata(tmp_path: Path) -> None:
+    source = """
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- for@layers i <- [0..2) carry (x) do
+    x <- x
+    yield x
+  return y
+"""
+    modules = _parse_from_tmp_source(tmp_path, source)
+    spec = lower_axon_program_to_synapse_spec(modules, main_module="main")
+    loops = [
+        node
+        for item in spec["model"]["graph"]
+        for node in item.values()
+        if isinstance(node, dict) and node.get("_op") == "for"
+    ]
+    assert len(loops) == 1
+    loop = loops[0]
+    assert loop.get("_carry") == ["x"]
+    assert loop.get("_yield") == [{"_expr": "name", "id": "x"}]
+    assert loop.get("_bind") == ["y"]
+
+
 def test_import_uses_exported_namespace_symbols_from_dependency(tmp_path: Path) -> None:
     helper_path = tmp_path / "Helper.axon"
     helper_path.write_text(
@@ -321,7 +393,7 @@ main x = do
 
 def test_prelude_exports_core_namespaces_without_explicit_imports(tmp_path: Path) -> None:
     source = """
-main :: @Path -> Tensor[B,S,D] -> Tensor[B,1,S,D]
+main :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,D]
 main@path x = do
   y <- NN.rmsnorm@path x
   z <- Tensor.unsqueeze y 1
@@ -356,7 +428,7 @@ import Config
 
 main :: Tensor[B,S,D] -> Tensor[B,S,D]
 main x = do
-  d <- Config.int "hidden_size" default=768
+  d <- Config.int@hidden_size default=768
   return x
 """
     modules = _parse_from_tmp_source(tmp_path, source)

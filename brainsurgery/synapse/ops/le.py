@@ -138,7 +138,7 @@ def compile(
 LOWERING_TYPE_SIGNATURE = {
     "args": ("Any", "Any"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
-    "returns": "dynamic",
+    "returns": "Tensor",
 }
 
 __all__ = [

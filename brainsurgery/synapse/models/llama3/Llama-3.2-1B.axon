@@ -1,66 +1,58 @@
 {-# CHECKPOINTS ["meta-llama/Llama-3.2-1B", "meta-llama/Llama-3.2-1B-Instruct"] #-}
 {-# TASK "causal_lm" #-}
 
+import Activations
 import Activations (silu)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (causal_mask)
-import Math (mul)
+import Math
+import Math (mul, sqrt)
+import Params
+import Params (has_root)
+import Positions
 import Positions (position_ids, rope_pair_freq_scale)
 
+HAS_LM_HEAD = has_root "lm_head"
 
-
-D = 2048
-V = 128256
-L = 16
-H = 32
-KVH = 8
-KVD = 512
-FFN = 8192
-EPS = 1e-05
-THETA = 500000.0
-C = 131072
-ROPE_SCALE = 32.0
-ROPE_LOW_FREQ = 1.0
-ROPE_HIGH_FREQ = 4.0
-ROPE_CONTEXT = 8192
-HAS_LM_HEAD = false
-
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = NN.rmsnorm@path x eps=EPS
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=1e-05
 
 llama3_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 llama3_block x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=D |> reshape_heads heads=H
-    k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
-    v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
-    q, k <- rope_pair_freq_scale q k pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT
+    q <- NN.linear@q_proj xn dim=2048 |> reshape_heads heads=32
+    k <- NN.linear@k_proj xn dim=512 |> reshape_heads heads=8
+    v <- NN.linear@v_proj xn dim=512 |> reshape_heads heads=8
+    q, k <- rope_pair_freq_scale q k pos_ids 500000.0 32.0 1.0 4.0 8192
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
-    mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D
+    k <- Tensor.repeat k repeats=4
+    v <- Tensor.repeat v repeats=4
+    keep <- causal_mask q k attn_mask
+    a <- attention q k v keep scale=0.125 |> merge_heads |> NN.linear@o_proj dim=2048
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
-    g <- NN.linear@gate_proj xn dim=FFN
-    u <- NN.linear@up_proj xn dim=FFN
-    return g |> silu |> mul u |> NN.linear@down_proj dim=D
+    g <- NN.linear@gate_proj xn dim=8192
+    u <- NN.linear@up_proj xn dim=8192
+    return g |> silu |> mul u |> NN.linear@down_proj dim=2048
   return x + m, new_kv
 
 llama3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 llama3 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=1
   logits, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=2048
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    for@layers i <- [0..16) do
       past_i <- Cache.index past_kv i
       x, new_i <- llama3_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
-    logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V weight_path=@@lm_head.weight) : (NN.linear@embed_tokens x dim=V)
+    logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=128256 weight_path=@@lm_head.weight) : (NN.linear@embed_tokens x dim=128256)
     return logits, new_kv
   return logits, new_kv

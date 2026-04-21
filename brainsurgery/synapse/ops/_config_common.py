@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 
@@ -41,8 +42,62 @@ def _resolve_key(
     raw_key = args[0]
     key = _resolve_scalar_ref(raw_key, env, symbols)
     if not isinstance(key, str) or not key:
+        raise ValueError(f"{op_name} key must resolve to non-empty Path")
+    if key.startswith("@@"):
+        path_key = key[2:]
+    elif key.startswith("@"):
+        path_key = key[1:]
+    else:
+        raise ValueError(f"{op_name} key must be a Path literal/reference (expected @... or @@...)")
+    if not path_key:
+        raise ValueError(f"{op_name} key must resolve to non-empty Path")
+    if len(path_key) >= 2 and path_key[0] == "'" and path_key[-1] == "'":
+        path_key = path_key[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+    return _resolve_key_template(op_name=op_name, key=path_key, env=env, symbols=symbols)
+
+
+def _resolve_key_template(
+    *,
+    op_name: str,
+    key: str,
+    env: dict[str, Any],
+    symbols: Mapping[str, int | float | bool],
+) -> str:
+    if "{" not in key and "}" not in key:
+        return key
+    out: list[str] = []
+    i = 0
+    while i < len(key):
+        ch = key[i]
+        if ch == "}":
+            raise ValueError(f"{op_name} key template has unmatched '}}': {key!r}")
+        if ch != "{":
+            out.append(ch)
+            i += 1
+            continue
+        j = key.find("}", i + 1)
+        if j < 0:
+            raise ValueError(f"{op_name} key template has unmatched '{{': {key!r}")
+        name = key[i + 1 : j].strip()
+        if not name:
+            raise ValueError(f"{op_name} key template has empty placeholder: {key!r}")
+        if name in env:
+            value = env[name]
+        elif name in symbols:
+            value = symbols[name]
+        else:
+            raise ValueError(f"{op_name} key template placeholder {name!r} is not defined")
+        if not isinstance(value, (str, int, float, bool)):
+            raise ValueError(
+                f"{op_name} key template placeholder {name!r} must resolve to scalar, got {type(value).__name__}"
+            )
+        out.append(str(value))
+        i = j + 1
+    resolved = "".join(out)
+    resolved = ".".join(part for part in resolved.split(".") if part)
+    if not resolved:
         raise ValueError(f"{op_name} key must resolve to non-empty string")
-    return key
+    return resolved
 
 
 def _resolve_default(
@@ -53,33 +108,12 @@ def _resolve_default(
     symbols: Mapping[str, int | float | bool],
 ) -> tuple[bool, Any]:
     args = _raw_args(node_spec)
-    if len(args) < 3:
+    if len(args) < 2:
         return False, None
-    raw_default = _resolve_scalar_ref(args[2], env, symbols)
+    raw_default = _resolve_scalar_ref(args[1], env, symbols)
     if isinstance(raw_default, dict) and "_expr" in raw_default:
         return True, model._eval_expr(raw_default, env, symbols)
     return True, raw_default
-
-
-def _resolve_root(
-    *,
-    model: Any,
-    node_spec: dict[str, Any],
-    env: dict[str, Any],
-    symbols: Mapping[str, int | float | bool],
-) -> str:
-    args = _raw_args(node_spec)
-    if len(args) < 2:
-        return ""
-    raw_root = args[1]
-    root = _resolve_scalar_ref(raw_root, env, symbols)
-    if isinstance(root, dict) and "_expr" in root:
-        root = model._eval_expr(root, env, symbols)
-    if root is None:
-        return ""
-    if not isinstance(root, str):
-        raise ValueError("config root must resolve to string")
-    return root
 
 
 def _config_root(spec: dict[str, Any]) -> dict[str, Any]:
@@ -146,20 +180,9 @@ def _resolve_config_value(
 ) -> tuple[str, bool, Any]:
     key = _resolve_key(op_name=op_name, node_spec=node_spec, env=env, symbols=symbols)
     config = _config_root(model.spec)
-    root = _resolve_root(model=model, node_spec=node_spec, env=env, symbols=symbols)
-    full_key = f"{root}.{key}" if root else key
-    if root:
-        root_found, root_value = _config_lookup(config, root)
-        if not root_found:
-            found, value = False, None
-        elif isinstance(root_value, dict):
-            found, value = _config_lookup(root_value, key)
-        else:
-            found, value = False, None
-    else:
-        found, value = _config_lookup(config, key)
+    found, value = _config_lookup(config, key)
     if found:
-        return full_key, found, value
+        return key, found, value
     has_default, default_value = _resolve_default(
         model=model,
         node_spec=node_spec,
@@ -167,8 +190,8 @@ def _resolve_config_value(
         symbols=symbols,
     )
     if has_default:
-        return full_key, True, default_value
-    raise KeyError(f"{op_name} missing required config key: {full_key}")
+        return key, True, default_value
+    raise KeyError(f"{op_name} missing required config key: {key}")
 
 
 def _compile_value_expr(*, emitter: Any, value: Any, env: dict[str, str]) -> str:
@@ -185,53 +208,88 @@ def _compile_lookup_lines(
 ) -> tuple[list[str], str, str, str]:
     lines: list[str] = []
     root_var = emitter._fresh("cfg_root")
-    lookup_root_var = emitter._fresh("cfg_lookup_root")
+    key_raw_var = emitter._fresh("cfg_key_raw")
+    template_env_var = emitter._fresh("cfg_template_env")
     key_var = emitter._fresh("cfg_key")
-    full_key_var = emitter._fresh("cfg_full_key")
     found_var = emitter._fresh("cfg_found")
     value_var = emitter._fresh("cfg_value")
     part_var = emitter._fresh("cfg_part")
-    root_part_var = emitter._fresh("cfg_root_part")
     args = _raw_args(node_spec)
     if not args:
         raise ValueError(f"{op_name} requires key positional arg")
     key_expr = _compile_value_expr(emitter=emitter, value=args[0], env=env)
-    root_expr = _compile_value_expr(
-        emitter=emitter, value=args[1] if len(args) >= 2 else "", env=env
-    )
 
     spec = getattr(emitter, "spec", {})
     model = spec.get("model", {}) if isinstance(spec, dict) else {}
     model_config = model.get("config") if isinstance(model, dict) else None
     config_literal = model_config if isinstance(model_config, dict) else {}
+    symbols = getattr(emitter, "symbols", {})
+
+    raw_template = args[0]
+    template_text: str | None = None
+    if isinstance(raw_template, str):
+        template_text = raw_template
+    elif isinstance(raw_template, dict):
+        kind = raw_template.get("_expr")
+        if kind in {"path", "string"} and isinstance(raw_template.get("value"), str):
+            template_text = raw_template["value"]
+    if isinstance(template_text, str):
+        if template_text.startswith("@@"):
+            template_text = template_text[2:]
+        elif template_text.startswith("@"):
+            template_text = template_text[1:]
+        if len(template_text) >= 2 and template_text[0] == "'" and template_text[-1] == "'":
+            template_text = template_text[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+    needed_names: set[str] = set()
+    if isinstance(template_text, str):
+        needed_names = {
+            name.strip() for name in re.findall(r"\{([^{}]+)\}", template_text) if name.strip()
+        }
+
+    template_bindings = ", ".join(
+        f"{name!r}: {py_name}" for name, py_name in env.items() if name in needed_names
+    )
+    symbol_bindings = ""
+    if isinstance(symbols, dict) and symbols:
+        symbol_bindings = ", ".join(
+            f"{name!r}: {value!r}" for name, value in symbols.items() if name in needed_names
+        )
 
     lines.append(f"{indent}{root_var} = {repr(config_literal)}")
     lines.append(f"{indent}if not isinstance({root_var}, dict):")
     lines.append(f"{indent}    {root_var} = {{}}")
-    lines.append(f"{indent}{lookup_root_var} = {root_expr}")
-    lines.append(f"{indent}if {lookup_root_var} is None:")
-    lines.append(f"{indent}    {lookup_root_var} = ''")
-    lines.append(f"{indent}elif not isinstance({lookup_root_var}, str):")
-    lines.append(f"{indent}    raise ValueError('config root must resolve to string')")
-    lines.append(f"{indent}{key_var} = {key_expr}")
-    lines.append(f"{indent}if not isinstance({key_var}, str) or not {key_var}:")
+    lines.append(f"{indent}{key_raw_var} = {key_expr}")
+    lines.append(f"{indent}if not isinstance({key_raw_var}, str) or not {key_raw_var}:")
     lines.append(
-        f"{indent}    raise ValueError({op_name!r} + ' key must resolve to non-empty string')"
+        f"{indent}    raise ValueError({op_name!r} + ' key must resolve to non-empty Path')"
+    )
+    lines.append(f"{indent}if {key_raw_var}.startswith('@@'):")
+    lines.append(f"{indent}    {key_raw_var} = {key_raw_var}[2:]")
+    lines.append(f"{indent}elif {key_raw_var}.startswith('@'):")
+    lines.append(f"{indent}    {key_raw_var} = {key_raw_var}[1:]")
+    lines.append(f"{indent}else:")
+    lines.append(
+        f"{indent}    raise ValueError({op_name!r} + ' key must be a Path literal/reference (expected @... or @@...)')"
     )
     lines.append(
-        f"{indent}{full_key_var} = ({lookup_root_var} + '.' + {key_var}) if {lookup_root_var} else {key_var}"
+        f'{indent}if len({key_raw_var}) >= 2 and {key_raw_var}[0] == "\'" and {key_raw_var}[-1] == "\'":'
+    )
+    lines.append(
+        f'{indent}    {key_raw_var} = {key_raw_var}[1:-1].replace("\\\\\'", "\'").replace("\\\\\\\\", "\\\\")'
+    )
+    if template_bindings and symbol_bindings:
+        lines.append(f"{indent}{template_env_var} = {{{template_bindings}, {symbol_bindings}}}")
+    elif template_bindings:
+        lines.append(f"{indent}{template_env_var} = {{{template_bindings}}}")
+    elif symbol_bindings:
+        lines.append(f"{indent}{template_env_var} = {{{symbol_bindings}}}")
+    else:
+        lines.append(f"{indent}{template_env_var} = {{}}")
+    lines.append(
+        f"{indent}{key_var} = self._resolve_config_key_template({key_raw_var}, {template_env_var}, {op_name!r})"
     )
     lines.append(f"{indent}{found_var} = True")
     lines.append(f"{indent}{value_var} = {root_var}")
-    lines.append(f"{indent}if {lookup_root_var}:")
-    lines.append(f"{indent}    for {root_part_var} in {lookup_root_var}.split('.'):")
-    lines.append(
-        f"{indent}        if isinstance({value_var}, dict) and {root_part_var} in {value_var}:"
-    )
-    lines.append(f"{indent}            {value_var} = {value_var}[{root_part_var}]")
-    lines.append(f"{indent}        else:")
-    lines.append(f"{indent}            {found_var} = False")
-    lines.append(f"{indent}            break")
     lines.append(f"{indent}if {found_var}:")
     lines.append(f"{indent}    for {part_var} in {key_var}.split('.'):")
     lines.append(f"{indent}        if isinstance({value_var}, dict) and {part_var} in {value_var}:")
@@ -239,7 +297,7 @@ def _compile_lookup_lines(
     lines.append(f"{indent}        else:")
     lines.append(f"{indent}            {found_var} = False")
     lines.append(f"{indent}            break")
-    return lines, full_key_var, found_var, value_var
+    return lines, key_var, found_var, value_var
 
 
 def _compile_default_lines(
@@ -255,8 +313,8 @@ def _compile_default_lines(
 ) -> list[str]:
     lines: list[str] = []
     args = _raw_args(node_spec)
-    if len(args) >= 3:
-        default_expr = _compile_value_expr(emitter=emitter, value=args[2], env=env)
+    if len(args) >= 2:
+        default_expr = _compile_value_expr(emitter=emitter, value=args[1], env=env)
         lines.append(f"{indent}if not {found_var}:")
         lines.append(f"{indent}    {value_var} = {default_expr}")
         return lines
@@ -306,7 +364,7 @@ __all__ = [
     "_resolve_config_value",
     "_resolve_default",
     "_resolve_key",
-    "_resolve_root",
+    "_resolve_key_template",
     "_resolve_scalar_ref",
     "_unsupported_compile",
     "_unsupported_interpret",

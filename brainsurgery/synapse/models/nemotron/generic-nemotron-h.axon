@@ -11,33 +11,33 @@ import SSM (causal_conv1d, mamba2_scan)
 
 
 
-MODEL_D = Config.int "hidden_size" default=2688
-V      = Config.int "vocab_size" default=131072
-L      = Config.int "num_hidden_layers" default=52
-H      = Config.int "num_attention_heads" default=32
-KVH    = Config.int "num_key_value_heads" default=2
-HD     = Config.int "head_dim" default=128
+MODEL_D = Config.int@hidden_size default=2688
+V      = Config.int@vocab_size default=131072
+L      = Config.int@num_hidden_layers default=52
+H      = Config.int@num_attention_heads default=32
+KVH    = Config.int@num_key_value_heads default=2
+HD     = Config.int@head_dim default=128
 ATTN_SCALE = 1.0 / sqrt HD
-C      = Config.int "max_position_embeddings" default=262144
-EPS    = Config.float "layer_norm_epsilon" default=1e-5
+C      = Config.int@max_position_embeddings default=262144
+EPS    = Config.float@layer_norm_epsilon default=1e-5
 
-M_H    = Config.int "mamba_num_heads" default=64
-M_HD   = Config.int "mamba_head_dim" default=64
-M_G    = Config.int "n_groups" default=8
-M_N    = Config.int "ssm_state_size" default=128
+M_H    = Config.int@mamba_num_heads default=64
+M_HD   = Config.int@mamba_head_dim default=64
+M_G    = Config.int@n_groups default=8
+M_N    = Config.int@ssm_state_size default=128
 M_I    = M_H * M_HD
 M_CONV = M_I + 2 * M_G * M_N
 
-E      = Config.int "n_routed_experts" default=128
-EPT    = Config.int "num_experts_per_tok" default=6
-N_GROUP = Config.int "n_group" default=1
-TOPK_GROUP = Config.int "topk_group" default=1
+E      = Config.int@n_routed_experts default=128
+EPT    = Config.int@num_experts_per_tok default=6
+N_GROUP = Config.int@n_group default=1
+TOPK_GROUP = Config.int@topk_group default=1
 NORM_TOPK_PROB = 1
-FFN    = Config.int "moe_intermediate_size" default=1856
-SFFN   = Config.int "moe_shared_expert_intermediate_size" default=3712
-ROUTE_SCALE = Config.float "routed_scaling_factor" default=2.5
+FFN    = Config.int@moe_intermediate_size default=1856
+SFFN   = Config.int@moe_shared_expert_intermediate_size default=3712
+ROUTE_SCALE = Config.float@routed_scaling_factor default=2.5
 
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
 expert_ffn :: Tensor[N,D] -> Tensor[N,D]
@@ -57,11 +57,12 @@ shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk
     return Params.param path=@weight
   experts <- Tensor.size gate_w 0
   routed <- Tensor.zeros_like hidden
-  for@experts e <- [0..experts) do
+  routed <- for@experts e <- [0..experts) carry (routed) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
     up <- NN.linear@up_proj x_sel dim=null bias=false
     x_upd <- up |> relu2 |> NN.linear@down_proj dim=null bias=false
     routed <- scatter_add routed token_idx x_upd sel_scores
+    yield routed
   shared <- scope@shared_experts do
     up <- NN.linear@up_proj hidden dim=null bias=false
     return up |> relu2 |> NN.linear@down_proj dim=null bias=false
@@ -83,7 +84,7 @@ nemotron_h_mamba :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_mamba xn = do
   proj <- NN.linear@in_proj xn dim=(M_I + M_CONV + M_H) bias=false
   gate, conv_in, dt <- Tensor.split proj sizes=[M_I, M_CONV, M_H]
-  conv_all <- causal_conv1d@conv1d conv_in activation=silu
+  conv_all <- causal_conv1d@conv1d conv_in activation=silu weight_path=@conv1d.weight bias_path=@conv1d.bias
   u, b, c <- Tensor.split conv_all sizes=[M_I, M_G * M_N, M_G * M_N]
   scan <- mamba2_scan u gate dt b c a_path=@A_log d_path=@D dt_bias_path=@dt_bias norm_weight_path=@norm.weight n_groups=M_G head_dim=M_HD time_step_min=0.0 time_step_max=1e30
   return NN.linear@out_proj scan dim=MODEL_D bias=false
@@ -98,7 +99,8 @@ nemotron_h_block x attn_mask i = do
 nemotron_h :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 nemotron_h input_ids attn_mask = do
   x <- NN.embedding@backbone.embeddings input_ids dim=MODEL_D
-  for@backbone.layers i <- [0..L) do
+  x <- for@backbone.layers i <- [0..L) carry (x) do
     x <- nemotron_h_block x attn_mask i
+    yield x
   x <- rms@backbone.norm_f x
   return NN.linear@lm_head x dim=V bias=false

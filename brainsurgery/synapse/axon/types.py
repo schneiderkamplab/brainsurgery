@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
@@ -44,6 +45,21 @@ class AxonExprNull:
 @dataclass(frozen=True)
 class AxonExprString:
     value: str
+
+
+@dataclass(frozen=True)
+class AxonExprPath:
+    absolute: bool
+    parts: tuple[str, ...]
+
+    def to_source(self) -> str:
+        head = "@@" if self.absolute else "@"
+        dotted = ".".join(self.parts)
+        simple_part = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)$")
+        if all(simple_part.match(part) for part in self.parts):
+            return head + dotted
+        escaped = dotted.replace("\\", "\\\\").replace("'", "\\'")
+        return f"{head}'{escaped}'"
 
 
 @dataclass(frozen=True)
@@ -121,6 +137,7 @@ AxonExpr = (
     | AxonExprBool
     | AxonExprNull
     | AxonExprString
+    | AxonExprPath
     | AxonExprList
     | AxonExprTuple
     | AxonExprCall
@@ -158,6 +175,13 @@ class AxonRepeat:
     from_expr: AxonExpr
     step_expr: AxonExpr
     body: tuple["AxonStatement", ...]
+    targets: tuple[str, ...] | None = None
+    carry: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class AxonYield:
+    values: tuple[AxonExpr, ...]
 
 
 @dataclass(frozen=True)
@@ -168,7 +192,7 @@ class AxonScopeBind:
     kwargs: dict[str, "AxonKwargValue"] = field(default_factory=dict)
 
 
-AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonScopeBind
+AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonYield | AxonScopeBind
 
 
 @dataclass(frozen=True)
@@ -198,6 +222,7 @@ __all__ = [
     "AxonExprBool",
     "AxonExprNull",
     "AxonExprString",
+    "AxonExprPath",
     "AxonExprList",
     "AxonScalarValue",
     "AxonListScalarValue",
@@ -215,6 +240,7 @@ __all__ = [
     "AxonBind",
     "AxonReturn",
     "AxonRepeat",
+    "AxonYield",
     "AxonScopeBind",
     "AxonStatement",
     "AxonModule",

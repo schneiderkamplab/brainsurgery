@@ -39,6 +39,7 @@ from .types import (
     AxonExprName,
     AxonExprNull,
     AxonExprParen,
+    AxonExprPath,
     AxonExprPipe,
     AxonExprString,
     AxonExprTernary,
@@ -48,6 +49,7 @@ from .types import (
     AxonReturn,
     AxonScopeBind,
     AxonStatement,
+    AxonYield,
 )
 
 
@@ -240,11 +242,7 @@ top_item: module_decl
 
 module_decl: signature _NL definition
 signature: mod_decl TYPE_SEP signature_type
-signature_type: signature_segment (LAMBDA_ARROW signature_segment)*
-?signature_segment: path_type_annotation
-    | type_expr
-path_type_annotation: "@" NAME ":" type_expr -> path_type_named
-    | "@" type_expr -> path_type_implicit
+signature_type: type_expr (LAMBDA_ARROW type_expr)*
 
 ?type_expr: type_optional
 ?type_optional: "?" type_optional -> type_optional
@@ -292,19 +290,26 @@ constant: NAME "=" expr
 type_alias_decl: TYPE_KW NAME "=" type_expr
 
 ?statement: for_statement
+    | for_bind_statement
     | scope_bind_statement
     | return_statement
+    | yield_statement
     | bind_statement
 
-for_statement: FOR for_scope? NAME BIND_ARROW range_expr for_step? DO suite
+for_statement: FOR for_scope? NAME BIND_ARROW range_expr for_step? for_carry? DO suite
+for_bind_statement: target_list BIND_ARROW FOR for_scope? NAME BIND_ARROW range_expr for_step? for_carry? DO suite
 for_scope: "@" scoped_name
 for_step: STEP "=" expr
+for_carry: CARRY LPAR target_list RPAR
 
 scope_bind_statement: target_list BIND_ARROW SCOPE_KW scope_ref scope_bind_kwarg* DO suite
 scope_bind_kwarg: NAME "=" kwarg_value
 scope_ref: "@"? scoped_name
-scoped_name: NAME ("." NAME)*
+    | "@"? STRING -> scope_ref_string
+scoped_name: scoped_part ("." scoped_part)*
+scoped_part: NAME | TEMPLATE_NAME
 return_statement: RETURN expr_list
+yield_statement: YIELD expr_list
 bind_statement: target_list BIND_ARROW expr
 
 target_list: NAME ("," NAME)*
@@ -314,7 +319,7 @@ suite: inline_suite block_suite? -> suite_inline_maybe_block
     | block_suite -> suite_block
 
 inline_suite: inline_statement (";" inline_statement)* ";"?
-inline_statement: return_statement | bind_statement
+inline_statement: return_statement | yield_statement | bind_statement
 
 block_suite: INDENT _NL* statement_line (_NL+ statement_line)* _NL* DEDENT
 statement_line: statement (";" statement)* ";"?
@@ -361,7 +366,7 @@ do_expr: DO suite
 bare_arg: kwarg_bare | arg_expr
 kwarg_bare: NAME "=" kwarg_value
 
-kwarg_value: path_lit | arg_expr
+kwarg_value: arg_expr
 path_lit: PATH_LIT
 
 ?arg_expr: do_expr
@@ -370,7 +375,6 @@ path_lit: PATH_LIT
     | arg_or "?" arg_ws? arg_expr arg_ws? ":" arg_ws? arg_expr -> ternary
     | arg_or INDENT "?" arg_ws? arg_expr arg_ws? ":" arg_ws? arg_expr DEDENT -> ternary
 ?def_param_simple: literal
-    | path_lit
     | name_ref
 ?arg_if: "if" arg_ws? arg_expr arg_ws? "then" arg_ws? arg_expr arg_ws? "else" arg_ws? arg_expr -> if_expr
     | "if" arg_ws? arg_expr arg_ws? "then" INDENT arg_expr DEDENT arg_ws? "else" INDENT arg_expr DEDENT -> if_expr
@@ -413,16 +417,18 @@ callable: NAME
     | TRUE -> lit_true
     | FALSE -> lit_false
     | NULL -> lit_null
+    | path_lit
     | STRING -> lit_string
 
 arg_ws: (_NL | INDENT | DEDENT)*
 nl_gap: (_NL | INDENT | DEDENT)+
 
 NAME: /[A-Za-z_](?:[A-Za-z0-9_:@]|\.(?!\.))*(?=[ \t\r\n]|$|[),;?:|+\-*\/%<>=\[\]]|\.\.)/
+TEMPLATE_NAME: /\{[A-Za-z_][A-Za-z0-9_]*\}/
 INT: /-?[0-9]+/
 FLOAT: /-?(?:[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?|[0-9]+(?:[eE][+-]?[0-9]+))/
 STRING: /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/
-PATH_LIT: /@@?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+))*/
+PATH_LIT: /@@?'(?:[^'\\]|\\.)*'|@@?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+))*/
 
 CMP_OP: "==" | "!=" | "<=" | ">=" | "<" | ">"
 ADD_OP: "+" | "-"
@@ -441,6 +447,8 @@ STEP.3: "step"
 DO.3: "do"
 SCOPE_KW.3: "scope"
 RETURN.3: "return"
+CARRY.3: "carry"
+YIELD.3: "yield"
 TRUE.3: "true"
 FALSE.3: "false"
 NULL.3: "null"
@@ -485,6 +493,7 @@ class _ProgramTransformer(Transformer[Token, object]):
                 AxonExprBool,
                 AxonExprNull,
                 AxonExprString,
+                AxonExprPath,
                 AxonExprList,
                 AxonExprTuple,
                 AxonExprCall,
@@ -510,6 +519,8 @@ class _ProgramTransformer(Transformer[Token, object]):
         expr = cls._as_expr(value)
         if isinstance(expr, AxonExprString):
             return expr.value
+        if isinstance(expr, AxonExprPath):
+            return expr.to_source()
         if isinstance(expr, AxonExprInt):
             return expr.value
         if isinstance(expr, AxonExprFloat):
@@ -607,7 +618,7 @@ class _ProgramTransformer(Transformer[Token, object]):
 
     @staticmethod
     def _is_stmt(value: object) -> bool:
-        return isinstance(value, AxonBind | AxonReturn | AxonRepeat | AxonScopeBind)
+        return isinstance(value, AxonBind | AxonReturn | AxonRepeat | AxonYield | AxonScopeBind)
 
     @classmethod
     def _as_stmt(cls, value: object) -> AxonStatement:
@@ -759,12 +770,6 @@ class _ProgramTransformer(Transformer[Token, object]):
             raise ValueError("module name cannot be empty")
         return ".".join(parts)
 
-    def scoped_name(self, children: list[object]) -> str:
-        parts = [str(child) for child in children if isinstance(child, Token)]
-        if not parts:
-            raise ValueError("scope name cannot be empty")
-        return ".".join(parts)
-
     def type_name(self, children: list[object]) -> str:
         token = children[0]
         assert isinstance(token, Token)
@@ -842,48 +847,19 @@ class _ProgramTransformer(Transformer[Token, object]):
                 dims.append(child)
         return TypeTensor(base=base, dims=tuple(dims))
 
-    def path_type_named(self, children: list[object]) -> ParsedPathTypeParam:
-        if len(children) != 2:
-            raise ValueError("invalid named path type annotation")
-        name = cast(Token, children[0])
-        type_expr = self._as_type(children[1])
-        return ParsedPathTypeParam(name=str(name), type_expr=type_expr)
-
-    def path_type_implicit(self, children: list[object]) -> ParsedPathTypeParam:
-        if len(children) != 1:
-            raise ValueError("invalid implicit path type annotation")
-        type_expr = self._as_type(children[0])
-        return ParsedPathTypeParam(name=None, type_expr=type_expr)
-
     def signature_type(self, children: list[object]) -> ParsedFunctionType:
-        segments: list[ParsedPathTypeParam | TypeExpr] = []
+        segments: list[TypeExpr] = []
         for child in children:
-            if isinstance(child, ParsedPathTypeParam):
-                segments.append(child)
-                continue
             if self._is_type(child):
                 segments.append(self._as_type(child))
         if not segments:
             raise ValueError("empty signature type")
-        if isinstance(segments[-1], ParsedPathTypeParam):
-            raise ValueError("signature return type cannot be a path annotation")
-        path_params: list[ParsedPathTypeParam] = []
-        args_and_return: list[TypeExpr] = []
-        in_args = False
-        for segment in segments:
-            if isinstance(segment, ParsedPathTypeParam):
-                if in_args:
-                    raise ValueError("path annotations must precede value arguments in signature")
-                path_params.append(segment)
-                continue
-            in_args = True
-            args_and_return.append(segment)
-        if not args_and_return:
+        if not segments:
             raise ValueError("signature requires a return type")
         return ParsedFunctionType(
-            path_params=tuple(path_params),
-            arg_types=tuple(args_and_return[:-1]),
-            return_type=args_and_return[-1],
+            path_params=(),
+            arg_types=tuple(segments[:-1]),
+            return_type=segments[-1],
         )
 
     def signature(self, children: list[object]) -> ParsedSignature:
@@ -1070,6 +1046,17 @@ class _ProgramTransformer(Transformer[Token, object]):
         )
         return AxonReturn(values=values)
 
+    def yield_statement(self, children: list[object]) -> AxonYield:
+        values = next(
+            (
+                cast(tuple[AxonExpr, ...], child)
+                for child in children
+                if isinstance(child, tuple) and all(self._is_expr(item) for item in child)
+            ),
+            (),
+        )
+        return AxonYield(values=values)
+
     def bind_statement(self, children: list[object]) -> AxonBind:
         targets = cast(tuple[str, ...], children[0])
         expr = next((self._as_expr(child) for child in children[1:] if self._is_expr(child)), None)
@@ -1077,13 +1064,48 @@ class _ProgramTransformer(Transformer[Token, object]):
             raise ValueError("binding expression is required")
         return AxonBind(targets=targets, expr=expr)
 
+    def for_carry(self, children: list[object]) -> tuple[str, ...]:
+        for child in children:
+            if isinstance(child, tuple) and all(isinstance(item, str) for item in child):
+                return cast(tuple[str, ...], child)
+        return ()
+
     def for_scope(self, children: list[object]) -> str:
         return cast(str, children[0])
+
+    def scoped_part(self, children: list[object]) -> str:
+        token = children[0]
+        if isinstance(token, Token):
+            return str(token)
+        return str(token)
+
+    def scoped_name(self, children: list[object]) -> str:
+        parts = [str(child) for child in children if isinstance(child, str | Token)]
+        if not parts:
+            raise ValueError("scoped name cannot be empty")
+        return ".".join(parts)
 
     def scope_ref(self, children: list[object]) -> str:
         if not children:
             raise ValueError("scope reference cannot be empty")
         scoped = cast(str, children[-1])
+        if len(children) > 1:
+            return f"@{scoped}"
+        return scoped
+
+    def scope_ref_string(self, children: list[object]) -> str:
+        if not children:
+            raise ValueError("scope reference cannot be empty")
+        raw = children[-1]
+        if not isinstance(raw, Token):
+            raise ValueError("scope reference string token is required")
+        text = str(raw)
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            scoped = text[1:-1]
+        else:
+            scoped = text
+        if not isinstance(scoped, str) or not scoped:
+            raise ValueError("scope reference string cannot be empty")
         if len(children) > 1:
             return f"@{scoped}"
         return scoped
@@ -1115,12 +1137,15 @@ class _ProgramTransformer(Transformer[Token, object]):
         end = str(end_token)
         return (start, start_expr, end_expr, end)
 
-    def for_statement(self, children: list[object]) -> AxonRepeat:
+    def _build_for_statement(
+        self, children: list[object], *, targets: tuple[str, ...] | None = None
+    ) -> AxonRepeat:
         scope_name: str | None = None
         var: str | None = None
         range_value: tuple[str, AxonExpr, AxonExpr, str] | None = None
         step_expr: AxonExpr = AxonExprInt(value=1)
         body: tuple[AxonStatement, ...] = ()
+        carry: tuple[str, ...] | None = None
 
         for child in children:
             if isinstance(child, Token):
@@ -1144,6 +1169,9 @@ class _ProgramTransformer(Transformer[Token, object]):
                 ):
                     range_value = cast(tuple[str, AxonExpr, AxonExpr, str], child)
                     continue
+                if all(isinstance(item, str) for item in child):
+                    carry = cast(tuple[str, ...], child)
+                    continue
                 if all(self._is_stmt(item) for item in child):
                     body = cast(tuple[AxonStatement, ...], child)
                     continue
@@ -1163,7 +1191,16 @@ class _ProgramTransformer(Transformer[Token, object]):
             from_expr=from_expr,
             step_expr=step_expr,
             body=body,
+            targets=targets,
+            carry=carry,
         )
+
+    def for_statement(self, children: list[object]) -> AxonRepeat:
+        return self._build_for_statement(children)
+
+    def for_bind_statement(self, children: list[object]) -> AxonRepeat:
+        targets = cast(tuple[str, ...], children[0])
+        return self._build_for_statement(children[1:], targets=targets)
 
     def scope_bind_statement(self, children: list[object]) -> AxonScopeBind:
         targets = cast(tuple[str, ...], children[0])
@@ -1247,7 +1284,19 @@ class _ProgramTransformer(Transformer[Token, object]):
     def path_lit(self, children: list[object]) -> AxonExpr:
         token = children[0]
         assert isinstance(token, Token)
-        return AxonExprString(value=str(token))
+        raw = str(token).strip()
+        absolute = raw.startswith("@@")
+        body = raw[2:] if absolute else raw[1:]
+        if not body:
+            raise ValueError("path literal cannot be empty")
+        if len(body) >= 2 and body[0] == "'" and body[-1] == "'":
+            quoted = body[1:-1].replace("\\'", "'").replace("\\\\", "\\")
+            parts = tuple(part for part in quoted.split(".") if part)
+        else:
+            parts = tuple(part for part in body.split(".") if part)
+        if not parts:
+            raise ValueError("path literal cannot be empty")
+        return AxonExprPath(absolute=absolute, parts=parts)
 
     def tuple_expr(self, children: list[object]) -> AxonExpr:
         items = tuple(self._as_expr(child) for child in children if self._is_expr(child))

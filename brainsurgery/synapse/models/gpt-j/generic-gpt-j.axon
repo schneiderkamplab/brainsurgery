@@ -9,17 +9,17 @@ import Positions (position_ids, rope_pair_base)
 
 
 
-D = Config.int "n_embd" default=4096
-V = Config.int "vocab_size" default=50400
-L = Config.int "n_layer" default=28
-H = Config.int "n_head" default=16
+D = Config.int@n_embd default=4096
+V = Config.int@vocab_size default=50400
+L = Config.int@n_layer default=28
+H = Config.int@n_head default=16
 HD = D / H
 FFN = 4 * D
-EPS = Config.float "layer_norm_epsilon" default=1e-05
-C = Config.int "n_positions" default=2048
-ROTARY_DIM = Config.int "rotary_dim" default=64
+EPS = Config.float@layer_norm_epsilon default=1e-05
+C = Config.int@n_positions default=2048
+ROTARY_DIM = Config.int@rotary_dim default=64
 ROTARY_FACTOR = ROTARY_DIM / HD
-THETA = Config.float "rotary_emb_base" default=10000.0
+THETA = Config.float@rotary_emb_base default=10000.0
 HAS_LM_HEAD = has_root "lm_head"
 HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
@@ -46,10 +46,11 @@ gpt_j input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@transformer do
     x <- NN.embedding@wte input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    for@h i <- [0..L) do
+    x, new_kv <- for@h i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- gptj_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- NN.layernorm@ln_f x eps=EPS
     return x, new_kv
   logits <- HAS_LM_HEAD

@@ -1,40 +1,34 @@
 {-# CHECKPOINTS "EleutherAI/gpt-j-6b" #-}
 {-# TASK "causal_lm" #-}
 
+import Activations
 import Activations (gelu_new)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (causal_mask)
+import Params
 import Params (has_root)
+import Positions
 import Positions (position_ids, rope_pair_base)
 
-
-
-D = 4096
-V = 50400
-L = 28
-H = 16
-FFN = 16384
-EPS = 1e-05
-C = 2048
-ROTARY_FACTOR = 0.25
-THETA = 10000.0
-HAS_LM_HEAD = true
+HAS_LM_HEAD = has_root "lm_head"
 HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
 gptj_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gptj_block x pos_ids attn_mask past_kv = do
-  xn <- NN.layernorm@ln_1 x eps=EPS
+  xn <- NN.layernorm@ln_1 x eps=1e-05
   a, new_kv <- scope@attn do
-    q <- NN.linear@q_proj xn dim=D bias=false |> reshape_heads heads=H
-    k <- NN.linear@k_proj xn dim=D bias=false |> reshape_heads heads=H
-    v <- NN.linear@v_proj xn dim=D bias=false |> reshape_heads heads=H
-    q, k <- rope_pair_base q k pos_ids theta=THETA partial_rotary_factor=ROTARY_FACTOR interleaved=true
+    q <- NN.linear@q_proj xn dim=4096 bias=false |> reshape_heads heads=16
+    k <- NN.linear@k_proj xn dim=4096 bias=false |> reshape_heads heads=16
+    v <- NN.linear@v_proj xn dim=4096 bias=false |> reshape_heads heads=16
+    q, k <- rope_pair_base q k pos_ids theta=10000.0 partial_rotary_factor=0.25 interleaved=true
     k, v, new_kv <- Cache.update past_kv k v
-    mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@out_proj dim=D bias=false
+    mask <- causal_mask q k window=2048 padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@out_proj dim=4096 bias=false
     return a, new_kv
   m <- scope@mlp do
-    return NN.linear@fc_in xn dim=FFN bias=true |> gelu_new |> NN.linear@fc_out dim=D bias=true
+    return NN.linear@fc_in xn dim=16384 bias=true |> gelu_new |> NN.linear@fc_out dim=4096 bias=true
   x <- x + a + m
   return x, new_kv
 
@@ -42,13 +36,14 @@ gpt_j :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Ca
 gpt_j input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@transformer do
-    x <- NN.embedding@wte input_ids dim=D
+    x <- NN.embedding@wte input_ids dim=4096
     new_kv <- use_cache ? Cache.init : null
-    for@h i <- [0..L) do
+    for@h i <- [0..28) do
       past_i <- Cache.index past_kv i
       x, new_i <- gptj_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
-    x <- NN.layernorm@ln_f x eps=EPS
+      yield x, new_kv
+    x <- NN.layernorm@ln_f x eps=1e-05
     return x, new_kv
-  logits <- HAS_LM_HEAD ? NN.linear@lm_head x dim=V bias=HAS_LM_HEAD_BIAS : NN.linear@transformer.wte x dim=V bias=false
+  logits <- HAS_LM_HEAD ? NN.linear@lm_head x dim=50400 bias=HAS_LM_HEAD_BIAS : NN.linear@transformer.wte x dim=50400 bias=false
   return logits, new_kv

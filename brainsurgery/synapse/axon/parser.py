@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
 from typing import Callable, TypeGuard
@@ -9,6 +10,7 @@ from .ast_validation import validate_axon_program
 from .grammar import (
     ParsedDefinition,
     ParsedModuleSource,
+    ParsedPathTypeParam,
     ParsedProgramSource,
     ParsedSignature,
     parse_program_source,
@@ -41,6 +43,7 @@ from .types import (
     AxonExprName,
     AxonExprNull,
     AxonExprParen,
+    AxonExprPath,
     AxonExprPipe,
     AxonExprString,
     AxonExprTernary,
@@ -119,10 +122,16 @@ def _collect_type_dim_names_recursive(type_expr: TypeExpr) -> set[str]:
 def _collect_expr_names(expr: AxonExpr) -> set[str]:
     names: set[str] = set()
     stack: list[AxonExpr] = [expr]
+    path_placeholder_re = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
     while stack:
         current = stack.pop()
         if isinstance(current, AxonExprName):
             names.add(current.name)
+            continue
+        if isinstance(current, AxonExprPath):
+            for part in current.parts:
+                for match in path_placeholder_re.finditer(part):
+                    names.add(match.group(1))
             continue
         if isinstance(current, AxonExprParen):
             stack.append(current.inner)
@@ -192,6 +201,18 @@ def _collect_statement_symbol_names(statements: tuple[AxonStatement, ...]) -> se
     out: set[str] = set()
     for expr in _collect_statement_exprs(statements):
         out.update(_collect_expr_names(expr))
+    path_placeholder_re = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+    stack: list[tuple[AxonStatement, ...]] = [statements]
+    while stack:
+        current = stack.pop()
+        for stmt in current:
+            if isinstance(stmt, AxonRepeat):
+                stack.append(stmt.body)
+                continue
+            if isinstance(stmt, AxonScopeBind):
+                for match in path_placeholder_re.finditer(stmt.prefix):
+                    out.add(match.group(1))
+                stack.append(stmt.body)
     return out
 
 
@@ -244,7 +265,7 @@ def _is_direct_symbol_default_call(expr: AxonExpr) -> bool:
     root = expr.inner if isinstance(expr, AxonExprParen) else expr
     if not isinstance(root, AxonExprCall):
         return False
-    callee = root.callee.strip()
+    callee = root.callee.strip().split("@", 1)[0]
     return callee in {
         "Config.int",
         "Config.float",
@@ -269,40 +290,21 @@ def _select_module_symbol_defaults(
     params: tuple[AxonParam, ...],
     return_type_expr: TypeExpr | None,
 ) -> dict[str, object]:
-    return_dim_refs = (
-        _collect_type_dim_names_recursive(return_type_expr)
-        if return_type_expr is not None
-        else set()
+    del (
+        module_name,
+        constants,
+        global_expr_refs,
+        annotation_symbols,
+        params,
+        return_type_expr,
     )
-    param_dim_refs: set[str] = set()
-    for param in params:
-        if param.type_expr is not None:
-            param_dim_refs.update(_collect_type_dim_names_recursive(param.type_expr))
-
-    direct_config_symbols = {
-        name for name, expr in constants.items() if _is_direct_symbol_default_call(expr)
-    }
-    legacy_drop_symbols: set[str] = set()
-    if module_name.startswith("gemma"):
-        legacy_drop_symbols.add("HD")
 
     out: dict[str, object] = {}
-    annotation_names = set(annotation_symbols.keys())
     for name, value in resolved_defaults.items():
-        if name in legacy_drop_symbols:
+        if name in runtime_constant_names:
+            # Runtime-bound constants must not be shadowed by static defaults in
+            # module symbols; doing so can override model config-derived values.
             continue
-        if name not in runtime_constant_names:
-            out[name] = value
-            continue
-        if name in direct_config_symbols:
-            include_direct = (
-                name in global_expr_refs
-                or (name in return_dim_refs and name not in annotation_names)
-                or (name in param_dim_refs and name not in annotation_names)
-                or (name == "HD" and module_name.startswith("glm"))
-            )
-            if not include_direct:
-                continue
         out[name] = value
     return out
 
@@ -334,6 +336,8 @@ def _eval_const_expr(
         return None
     if isinstance(expr, AxonExprString):
         return expr.value
+    if isinstance(expr, AxonExprPath):
+        return expr.to_source()
     if isinstance(expr, AxonExprList):
         return [_eval_const_expr(item, resolve_name=resolve_name) for item in expr.items]
     if isinstance(expr, AxonExprTuple):
@@ -397,25 +401,27 @@ def _eval_const_expr(
         raise ValueError(f"unsupported binary operator {op!r} in constant expression")
     if isinstance(expr, AxonExprCall):
         callee = expr.callee.strip()
+        callee_base = callee.split("@", 1)[0]
+        callee_base = callee.split("@", 1)[0]
         if expr.kwargs:
             raise ValueError("constant call expressions do not support kwargs")
         arg_values = [_eval_const_expr(arg, resolve_name=resolve_name) for arg in expr.args]
-        if callee in {"sqrt", "Prelude.sqrt"}:
+        if callee_base in {"sqrt", "Prelude.sqrt"}:
             if len(arg_values) != 1:
                 raise ValueError("sqrt constant call expects exactly one positional argument")
             numeric = _ensure_const_number(arg_values[0], context="sqrt")
             if numeric < 0:
                 raise ValueError("sqrt constant call argument must be non-negative")
             return math.sqrt(float(numeric))
-        if callee in {"abs", "Prelude.abs"}:
+        if callee_base in {"abs", "Prelude.abs"}:
             if len(arg_values) != 1:
                 raise ValueError("abs constant call expects exactly one positional argument")
             return abs(_ensure_const_number(arg_values[0], context="abs"))
-        if callee in {"min", "Prelude.min"}:
+        if callee_base in {"min", "Prelude.min"}:
             if len(arg_values) < 1:
                 raise ValueError("min constant call expects at least one positional argument")
             return min(_ensure_const_number(value, context="min") for value in arg_values)
-        if callee in {"max", "Prelude.max"}:
+        if callee_base in {"max", "Prelude.max"}:
             if len(arg_values) < 1:
                 raise ValueError("max constant call expects at least one positional argument")
             return max(_ensure_const_number(value, context="max") for value in arg_values)
@@ -474,6 +480,8 @@ def _eval_symbol_default_expr(
         return None
     if isinstance(expr, AxonExprString):
         return expr.value
+    if isinstance(expr, AxonExprPath):
+        return expr.to_source()
     if isinstance(expr, AxonExprList):
         return [_eval_symbol_default_expr(item, resolve_name=resolve_name) for item in expr.items]
     if isinstance(expr, AxonExprTuple):
@@ -546,6 +554,7 @@ def _eval_symbol_default_expr(
         raise ValueError(f"unsupported binary operator {op!r} in symbol-default expression")
     if isinstance(expr, AxonExprCall):
         callee = expr.callee.strip()
+        callee_base = callee.split("@", 1)[0]
 
         def _eval_kwarg_value(value: object) -> object:
             if isinstance(value, AxonExpr):
@@ -556,47 +565,47 @@ def _eval_symbol_default_expr(
             _eval_symbol_default_expr(arg, resolve_name=resolve_name) for arg in expr.args
         ]
         kw_values = {key: _eval_kwarg_value(value) for key, value in expr.kwargs.items()}
-        if callee in {"sqrt", "Prelude.sqrt"}:
+        if callee_base in {"sqrt", "Prelude.sqrt"}:
             if len(arg_values) != 1:
                 raise ValueError("sqrt symbol-default call expects exactly one positional argument")
             numeric = _ensure_const_number(arg_values[0], context="sqrt")
             if numeric < 0:
                 raise ValueError("sqrt symbol-default call argument must be non-negative")
             return math.sqrt(float(numeric))
-        if callee in {"abs", "Prelude.abs"}:
+        if callee_base in {"abs", "Prelude.abs"}:
             if len(arg_values) != 1:
                 raise ValueError("abs symbol-default call expects exactly one positional argument")
             return abs(_ensure_const_number(arg_values[0], context="abs"))
-        if callee in {"min", "Prelude.min"}:
+        if callee_base in {"min", "Prelude.min"}:
             if len(arg_values) < 1:
                 raise ValueError("min symbol-default call expects at least one positional argument")
             return min(_ensure_const_number(value, context="min") for value in arg_values)
-        if callee in {"max", "Prelude.max"}:
+        if callee_base in {"max", "Prelude.max"}:
             if len(arg_values) < 1:
                 raise ValueError("max symbol-default call expects at least one positional argument")
             return max(_ensure_const_number(value, context="max") for value in arg_values)
-        if callee == "Config.int":
+        if callee_base == "Config.int":
             default = kw_values.get("default")
             if default is None:
                 return None
             if isinstance(default, bool) or not isinstance(default, int | float):
                 raise ValueError("Config.int symbol-default call expects numeric default")
             return int(default)
-        if callee == "Config.float":
+        if callee_base == "Config.float":
             default = kw_values.get("default")
             if default is None:
                 return None
             if isinstance(default, bool) or not isinstance(default, int | float):
                 raise ValueError("Config.float symbol-default call expects numeric default")
             return float(default)
-        if callee == "Config.str":
+        if callee_base == "Config.str":
             default = kw_values.get("default")
             if default is None:
                 return ""
             if not isinstance(default, str):
                 raise ValueError("Config.str symbol-default call expects string default")
             return default
-        if callee == "Config.bool":
+        if callee_base == "Config.bool":
             default = kw_values.get("default")
             if default is None:
                 return False
@@ -609,7 +618,7 @@ def _eval_symbol_default_expr(
                 if raw == "false":
                     return False
             raise ValueError("Config.bool symbol-default call expects bool default")
-        if callee == "Config.list":
+        if callee_base == "Config.list":
             default = kw_values.get("default")
             if default is None:
                 return []
@@ -618,9 +627,9 @@ def _eval_symbol_default_expr(
             if isinstance(default, tuple):
                 return list(default)
             raise ValueError("Config.list symbol-default call expects list default")
-        if callee in {"Config.has_key", "Config.has_value", "Params.has_root"}:
-            raise ValueError(f"{callee} cannot be resolved as a static symbol default")
-        if callee == "Params.root":
+        if callee_base in {"Config.has_key", "Config.has_value", "Params.has_root"}:
+            raise ValueError(f"{callee_base} cannot be resolved as a static symbol default")
+        if callee_base == "Params.root":
             default = kw_values.get("default")
             if default is None:
                 return ""
@@ -766,21 +775,34 @@ def _parse_haskell_header(
 
     sig_type = signature.type_signature
     sig_path_params = sig_type.path_params
+    if not sig_path_params and path_params:
+        arg_types_raw = list(sig_type.arg_types)
+        if len(arg_types_raw) < len(path_params):
+            raise ValueError("signature must provide one Path argument per module path parameter")
+        inferred_path_params: list[ParsedPathTypeParam] = []
+        for idx, path_name in enumerate(path_params):
+            path_type = arg_types_raw[idx]
+            if not isinstance(path_type, TypeNamed) or path_type.name != "Path":
+                raise ValueError(
+                    "path-bound module parameters require leading Path arguments in signature"
+                )
+            inferred_path_params.append(ParsedPathTypeParam(name=path_name, type_expr=path_type))
+        sig_path_params = tuple(inferred_path_params)
+        arg_types = arg_types_raw[len(path_params) :]
+    else:
+        arg_types = list(sig_type.arg_types)
     if len(sig_path_params) != len(path_params):
         raise ValueError("path signature annotation count must match module path parameter count")
     for idx, path_sig in enumerate(sig_path_params):
         path_type = path_sig.type_expr
         if not isinstance(path_type, TypeNamed) or path_type.name != "Path":
-            raise ValueError(
-                f"path signature type must be Path, got {render_type(path_type)!r}. Use '@Path'."
-            )
+            raise ValueError(f"path signature type must be Path, got {render_type(path_type)!r}.")
         expected_name = path_params[idx]
         if isinstance(path_sig.name, str) and path_sig.name and path_sig.name != expected_name:
             raise ValueError(
                 "path signature parameter does not match module path parameter:"
                 f" {path_sig.name!r} != {expected_name!r}"
             )
-    arg_types = list(sig_type.arg_types)
     return_type = sig_type.return_type
     opt_flags = [isinstance(arg_type, TypeOptional) for arg_type in arg_types]
 

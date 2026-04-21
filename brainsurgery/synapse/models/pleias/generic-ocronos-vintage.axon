@@ -8,11 +8,11 @@ import Positions (position_ids)
 
 
 
-T = Config.int "n_positions" default=1024
-D = Config.int "n_embd" default=768
-L = Config.int "n_layer" default=12
-H = Config.int "n_head" default=12
-V = Config.int "vocab_size" default=50257
+T = Config.int@n_positions default=1024
+D = Config.int@n_embd default=768
+L = Config.int@n_layer default=12
+H = Config.int@n_head default=12
+V = Config.int@vocab_size default=50257
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 gpt2_block x attn_mask = do
@@ -36,8 +36,9 @@ gpt2 input_ids attn_mask = do
     tok <- NN.embedding@wte input_ids dim=D
     pos <- position_ids input_ids attn_mask=attn_mask pad_fill=1 |> NN.embedding@wpe
     x <- tok + pos
-    for@h i <- [0..L) do
+    x <- for@h i <- [0..L) carry (x) do
       x <- gpt2_block x attn_mask
+      yield x
     logits <- NN.layernorm@ln_f x |> NN.linear@wte
     return logits
   return logits

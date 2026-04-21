@@ -7,12 +7,11 @@ from ._config_common import (
     _config_lookup,
     _config_root,
     _resolve_key,
-    _resolve_root,
     _uses_node_path,
 )
 
 OP_NAME = "config_has"
-LOWERING_ARITY = (1, 2)
+LOWERING_ARITY = (1, 1)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {}
@@ -43,15 +42,7 @@ def interpret(
     out_name = model._require_name(node_spec.get("_bind"), field="config_has._bind")
     key = _resolve_key(op_name=OP_NAME, node_spec=node_spec, env=env, symbols=symbols)
     config = _config_root(model.spec)
-    root = _resolve_root(model=model, node_spec=node_spec, env=env, symbols=symbols)
-    if root:
-        root_found, root_value = _config_lookup(config, root)
-        if root_found and isinstance(root_value, dict):
-            found, _ = _config_lookup(root_value, key)
-        else:
-            found = False
-    else:
-        found, _ = _config_lookup(config, key)
+    found, _ = _config_lookup(config, key)
     env[out_name] = bool(found)
 
 
@@ -79,7 +70,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("String", "String"),
+    "args": ("Path",),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": ("Bool",),
 }

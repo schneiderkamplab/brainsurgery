@@ -4,7 +4,7 @@ import Activations (gelu_pytorch_tanh)
 import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Math (mul, sqrt)
-import Params (has_root)
+import Params has_root
 import Positions (position_ids, rope_pair_base)
 
 
@@ -12,31 +12,32 @@ import Positions (position_ids, rope_pair_base)
 -- `CFG` selects where textual model settings live in config.json:
 -- - Gemma 3 text-only configs: root keys (CFG = "")
 -- - Gemma 3 multimodal-ish layouts: under `text_config` (CFG = "text_config")
-CFG = (Config.has_key "text_config") ? "text_config" : ""
+CFG = (Config.has_key@text_config) ? "text_config" : ""
 
 -- Parameter root for checkpoint key lookup.
 -- Some checkpoints namespace everything under `language_model.*`.
-PARAM_ROOT = (has_root "language_model") ? "language_model" : ""
-
 -- Gemma 3 uses either `_sliding_window_pattern` or `sliding_window_pattern`
 -- depending on checkpoint/config exporter version.
-ROPE_PERIOD_KEY = (Config.has_key "_sliding_window_pattern" root=CFG) ? "_sliding_window_pattern" : "sliding_window_pattern"
+ROPE_PERIOD_KEY = (Config.has_key @'{CFG}._sliding_window_pattern') ? "_sliding_window_pattern" : "sliding_window_pattern"
 
-D = Config.int "hidden_size" root=CFG default=640
-V = Config.int "vocab_size" root=CFG default=262208
-L = Config.int "num_hidden_layers" root=CFG default=18
-H = Config.int "num_attention_heads" root=CFG default=8
-KVH = Config.int "num_key_value_heads" root=CFG default=4
-HD = Config.int "head_dim" root=CFG default=256
-FFN = Config.int "intermediate_size" root=CFG default=2048
-ROPE_PERIOD = Config.int ROPE_PERIOD_KEY root=CFG default=6
-THETA_BASE = Config.float "rope_local_base_freq" root=CFG default=10000.0
-THETA_LONG = Config.float "rope_theta" root=CFG default=1000000.0
-ROPE_LONG_SCALE = Config.float "rope_scaling.factor" root=CFG default=1.0
-WIN_LOCAL = Config.int "sliding_window" root=CFG default=512
-WIN_LONG = Config.int "max_position_embeddings" root=CFG default=131072
-ATTN_SCALE = 1.0 / sqrt (Config.float "query_pre_attn_scalar" root=CFG default=256.0)
+D = Config.int @'{CFG}.hidden_size' default=640
+V = Config.int @'{CFG}.vocab_size' default=262208
+L = Config.int @'{CFG}.num_hidden_layers' default=18
+H = Config.int @'{CFG}.num_attention_heads' default=8
+KVH = Config.int @'{CFG}.num_key_value_heads' default=4
+HD = Config.int @'{CFG}.head_dim' default=256
+FFN = Config.int @'{CFG}.intermediate_size' default=2048
+ROPE_PERIOD = Config.int @'{CFG}.{ROPE_PERIOD_KEY}' default=6
+THETA_BASE = Config.float @'{CFG}.rope_local_base_freq' default=10000.0
+THETA_LONG = Config.float @'{CFG}.rope_theta' default=1000000.0
+ROPE_LONG_SCALE = Config.float @'{CFG}.rope_scaling.factor' default=1.0
+WIN_LOCAL = Config.int @'{CFG}.sliding_window' default=512
+WIN_LONG = Config.int @'{CFG}.max_position_embeddings' default=131072
+ATTN_SCALE = 1.0 / sqrt (Config.float @'{CFG}.query_pre_attn_scalar' default=256.0)
 EMB_SCALE = sqrt D
+HAS_MODEL_LM_MODEL = has_root "model.language_model.model"
+HAS_LM_MODEL = has_root "language_model.model"
+PARAM_ROOT = HAS_MODEL_LM_MODEL ? "model.language_model" : (HAS_LM_MODEL ? "language_model" : "")
 
 gemma3_block :: Tensor -> Int -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
 gemma3_block x i pos_ids attn_mask past_kv = do
@@ -72,10 +73,11 @@ gemma3 input_ids attn_mask past_kv use_cache = do
   logits, new_kv <- scope@model root=PARAM_ROOT do
     x <- NN.embedding@embed_tokens input_ids dim=D scale=EMB_SCALE
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- gemma3_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     logits <- NN.rmsnorm@norm x cast_float=true unit_offset=true |> NN.linear@embed_tokens
     return logits, new_kv
   return logits, new_kv

@@ -35,7 +35,7 @@ export (
   sparsemixer_router,
 )
 
-grouped_sigmoid_router :: @Path -> Tensor[B,S,D] -> Int -> ?Int -> ?Int -> ?Bool -> ?Float -> ?Path -> ?Path -> (Tensor[B,S,TOPK], IdxTensor[B,S,TOPK])
+grouped_sigmoid_router :: Path -> Tensor[B,S,D] -> Int -> ?Int -> ?Int -> ?Bool -> ?Float -> ?Path -> ?Path -> (Tensor[B,S,TOPK], IdxTensor[B,S,TOPK])
 grouped_sigmoid_router@path x top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 ?weight=@weight ?e_score_correction_bias=@gate.e_score_correction_bias = do
   x32 <- cast x dtype="float32"
   logits <- linear@path x32 dim=null bias=false weight_path=weight
@@ -87,15 +87,18 @@ select hidden topk_scores topk_indices expert = do
   selected_scores <- gather selected_scores_all (unsqueeze topk_pos 1) 1 |> reshape shape=[n]
   return selected_hidden, token_idx, topk_pos, selected_scores
 
-scatter_add :: Tensor[B,T,D] -> Tensor[N] -> Tensor[N,D] -> Tensor[N] -> Tensor[B,T,D]
+scatter_add :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor
 scatter_add accum token_idx updates scores = do
-  btd <- B * T
-  accum_flat <- reshape accum shape=[btd, D]
+  b <- size accum 0
+  t <- size accum 1
+  d <- size accum 2
+  btd <- b * t
+  accum_flat <- reshape accum shape=[btd, d]
   weighted <- unsqueeze scores 1 |> mul updates
   accum_flat <- index_add accum_flat token_idx weighted 0
-  return reshape accum_flat shape=[B, T, D]
+  return reshape accum_flat shape=[b, t, d]
 
-softmax_topk_router :: @Path -> Tensor -> Int -> ?Float -> ?Path -> (Tensor, IdxTensor)
+softmax_topk_router :: Path -> Tensor -> Int -> ?Float -> ?Path -> (Tensor, IdxTensor)
 softmax_topk_router@path x top_k ?routed_scaling_factor=1.0 ?weight=@weight = do
   x32 <- cast x dtype="float32"
   logits <- linear@path x32 dim=null bias=false weight_path=weight
@@ -104,7 +107,7 @@ softmax_topk_router@path x top_k ?routed_scaling_factor=1.0 ?weight=@weight = do
   topk_weights <- cast_like topk_weights x
   return (topk_weights * routed_scaling_factor), topk_indices
 
-sigmoid_topk_router :: @Path -> Tensor -> Int -> ?Path -> (Tensor, IdxTensor)
+sigmoid_topk_router :: Path -> Tensor -> Int -> ?Path -> (Tensor, IdxTensor)
 sigmoid_topk_router@path x top_k ?weight=@weight = do
   x32 <- cast x dtype="float32"
   logits <- linear@path x32 dim=null bias=false weight_path=weight
@@ -113,9 +116,9 @@ sigmoid_topk_router@path x top_k ?weight=@weight = do
   return topk_weights, topk_indices
 
 grouped_swiglu_ffn_basic :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Int -> ?Path -> ?Path -> ?Bool -> ?Bool -> Tensor[B,T,D]
-grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts ?gate_up_weight="experts.gate_up_proj" ?out_weight="experts.down_proj" ?transpose=false ?pre_scale_input=false = do
+grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts ?gate_up_weight=@experts.gate_up_proj ?out_weight=@experts.down_proj ?transpose=false ?pre_scale_input=false = do
   routed <- hidden * 0.0
-  for e <- [0..experts) do
+  routed <- for e <- [0..experts) carry (routed) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
     sel_scale <- unsqueeze sel_scores 1
     x_in <- pre_scale_input ? (x_sel * sel_scale) : x_sel
@@ -124,6 +127,7 @@ grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts ?gate_up_weight
     x_upd <- gate |> silu |> mul up |> linear@w2 dim=null bias=false transpose=transpose expert=e weight_path=out_weight
     out_scores <- pre_scale_input ? ((sel_scores * 0.0) + 1.0) : sel_scores
     routed <- scatter_add routed token_idx x_upd out_scores
+    yield routed
   return routed
 
 sparsemixer_router :: Tensor[B,S,D] -> Int -> ?Float -> (Tensor[B,S,2], IdxTensor[B,S,2])

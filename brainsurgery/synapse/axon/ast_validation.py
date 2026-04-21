@@ -19,6 +19,7 @@ from .types import (
     AxonExprName,
     AxonExprNull,
     AxonExprParen,
+    AxonExprPath,
     AxonExprPipe,
     AxonExprString,
     AxonExprTernary,
@@ -28,6 +29,7 @@ from .types import (
     AxonReturn,
     AxonScopeBind,
     AxonStatement,
+    AxonYield,
 )
 
 
@@ -97,7 +99,10 @@ def _has_duplicate_non_discard(names: tuple[str, ...]) -> bool:
 def _expr_non_empty(expr: AxonExpr) -> bool:
     if isinstance(expr, AxonExprName):
         return bool(expr.name.strip())
-    if isinstance(expr, AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString):
+    if isinstance(
+        expr,
+        AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString | AxonExprPath,
+    ):
         return True
     if isinstance(expr, AxonExprList):
         return True
@@ -131,6 +136,13 @@ def _validate_expr(expr: AxonExpr, module: AxonModule, path: tuple[int, ...]) ->
     if isinstance(expr, AxonExprString):
         if not isinstance(expr.value, str):
             raise _error(module, path, "string literal must be a string")
+        return
+    if isinstance(expr, AxonExprPath):
+        if not expr.parts:
+            raise _error(module, path, "path literal cannot be empty")
+        for part in expr.parts:
+            if not isinstance(part, str) or not part.strip():
+                raise _error(module, path, "path literal segments must be non-empty strings")
         return
     if isinstance(expr, AxonExprList):
         for i, item in enumerate(expr.items):
@@ -222,7 +234,9 @@ def _validate_expr(expr: AxonExpr, module: AxonModule, path: tuple[int, ...]) ->
         return
 
 
-def _validate_statement(stmt: AxonStatement, module: AxonModule, path: tuple[int, ...]) -> None:
+def _validate_statement(
+    stmt: AxonStatement, module: AxonModule, path: tuple[int, ...], *, in_loop: bool = False
+) -> None:
     if isinstance(stmt, AxonBind):
         if not stmt.targets:
             raise _error(module, path, "binding must contain at least one target")
@@ -244,7 +258,42 @@ def _validate_statement(stmt: AxonStatement, module: AxonModule, path: tuple[int
                 raise _error(module, path, "return values must be non-empty")
         return
 
+    if isinstance(stmt, AxonYield):
+        if not in_loop:
+            raise _error(module, path, "yield is only valid inside for-loop bodies")
+        if not stmt.values:
+            raise _error(module, path, "yield must contain at least one value")
+        for i, value in enumerate(stmt.values):
+            _validate_expr(value, module, (*path, i))
+            if not _expr_non_empty(value):
+                raise _error(module, path, "yield values must be non-empty")
+        return
+
     if isinstance(stmt, AxonRepeat):
+        if stmt.targets is not None:
+            if not stmt.targets:
+                raise _error(module, path, "for-loop targets must not be empty")
+            if _has_duplicate_non_discard(stmt.targets):
+                raise _error(module, path, "for-loop targets contain duplicates")
+            for name in stmt.targets:
+                _validate_name(name, module=module, path=path, field="for-loop target")
+        if stmt.carry is not None:
+            if not stmt.carry:
+                raise _error(module, path, "for-loop carry must not be empty when provided")
+            if _has_duplicate_non_discard(stmt.carry):
+                raise _error(module, path, "for-loop carry contains duplicates")
+            for name in stmt.carry:
+                _validate_name(name, module=module, path=path, field="for-loop carry target")
+        if (
+            stmt.targets is not None
+            and stmt.carry is not None
+            and len(stmt.targets) != len(stmt.carry)
+        ):
+            raise _error(
+                module,
+                path,
+                "for-loop targets and carry must have matching arity when both are present",
+            )
         _validate_name(stmt.var, module=module, path=path, field="loop variable")
         _validate_expr(stmt.to_expr, module, (*path, 0))
         _validate_expr(stmt.from_expr, module, (*path, 1))
@@ -257,8 +306,15 @@ def _validate_statement(stmt: AxonStatement, module: AxonModule, path: tuple[int
             raise _error(module, path, "for-loop step cannot be empty")
         if not stmt.body:
             raise _error(module, path, "for-loop body cannot be empty")
+        yield_positions = [
+            idx for idx, child in enumerate(stmt.body) if isinstance(child, AxonYield)
+        ]
+        if len(yield_positions) > 1:
+            raise _error(module, path, "for-loop body supports at most one yield statement")
+        if yield_positions and yield_positions[0] != len(stmt.body) - 1:
+            raise _error(module, path, "yield must be the final statement in a for-loop body")
         for i, child in enumerate(stmt.body):
-            _validate_statement(child, module, (*path, i))
+            _validate_statement(child, module, (*path, i), in_loop=True)
         return
 
     if isinstance(stmt, AxonScopeBind):
@@ -292,7 +348,7 @@ def _validate_statement(stmt: AxonStatement, module: AxonModule, path: tuple[int
         if not stmt.body:
             raise _error(module, path, "scope bind body cannot be empty")
         for i, child in enumerate(stmt.body):
-            _validate_statement(child, module, (*path, i))
+            _validate_statement(child, module, (*path, i), in_loop=in_loop)
         if not _has_compatible_return(stmt.body, len(stmt.targets)):
             raise _error(
                 module,

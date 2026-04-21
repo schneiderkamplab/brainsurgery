@@ -51,6 +51,146 @@ Absolute-path strategy:
 - flatten to absolute paths where possible
 - for dynamic indices, use absolute templates (for example `@@h.{i}.attn.c_attn.weight`) and instantiate during lowering/codegen
 
+#### Proposed Implementation Plan (Phase 2)
+
+1. Define syntax + AST representation.
+- Introduce a dedicated parsed form for templated segments (do not keep raw strings as the semantic form).
+- Allow placeholders only in path-like positions (`scope@...`, `@...`, `@@...`) and reject elsewhere.
+- Do not keep legacy string-based path representation.
+- Parse all paths into structured path AST/IR nodes (templated and non-templated).
+- Treat string paths as invalid syntax (hard error, no compatibility shim).
+- Use this as the basis to remove ad-hoc root/prefix mechanisms (`root=...`, `prefix_path=...`, similar path-concatenation conventions) in favor of explicit templated path construction.
+
+2. Add a path-template normalization pass (surface-only).
+- Normalize all path-like literals into one canonical internal form:
+  - static path segments
+  - placeholder segments bound to in-scope symbols
+- Reject unresolved placeholders early with precise source spans.
+- Reject unsupported placeholder value types (must be statically representable as path segments).
+
+3. Add loop-aware instantiation semantics.
+- For `for@...` with templates:
+  - instantiate placeholders from the current loop environment.
+- For `for@...` without templates:
+  - preserve current auto-append behavior (`.<loop_value>`).
+- Make this behavior explicit in one helper used by both typecheck and lowering (single source of truth).
+
+4. Add typed path IR (first slice).
+- Introduce a minimal `PathExpr` IR for resolved paths:
+  - `PathLiteral(parts=[...])`
+  - `PathTemplate(parts=[literal|placeholder])`
+- Keep string emission only at backend boundary; internal passes consume `PathExpr`.
+
+5. Lowering integration with deterministic materialization.
+- During lowering, materialize concrete paths when all placeholders are known constants.
+- If placeholders remain symbolic at lowering time, emit canonical runtime template form and defer expansion to runtime/codegen in one place only.
+- Remove ad-hoc string concatenation for scopes/paths from individual ops.
+
+6. Tests and acceptance gates.
+- Parser tests:
+  - valid templates, invalid placeholders, and illegal contexts.
+- Typecheck tests:
+  - unresolved placeholder rejection and loop-scope symbol visibility.
+- Lowering tests:
+  - concrete instantiation parity with existing behavior.
+  - mixed static/dynamic template segments.
+- Regression tests on representative models:
+  - one dense decoder (GPT-like), one encoder model, one MoE model.
+
+7. Rollout + cleanup.
+- Land behind a temporary feature flag for one PR cycle.
+- Run full parity sweep and compare:
+  - compile success rate
+  - fidelity flags
+  - runtime regression budget
+- Remove flag and legacy path-string branches after parity holds.
+
+8. Path-typed op audit.
+- Audit all existing primitive and wrapper ops for parameters that eventually resolve to tensor/state-dict paths.
+- Require those parameters to be structured path type in signatures and IR (not `String`/`Any` placeholders).
+- Add validation that rejects non-path-typed values at parse/typecheck boundaries.
+- Track migration status per op and block new path-like kwargs that are not path-typed.
+
+#### Phase 2 Deliverables
+
+- Canonical template syntax + parser support
+- `PathExpr` core representation (initial version)
+- Shared template-instantiation helper
+- Replacement of path/scope string heuristics in lowering hot paths
+- Test suite covering parser/typecheck/lowering + model smoke cases
+
+#### Phase 2 Exit Criteria
+
+- No unresolved template/path ambiguity reaches lowering.
+- No model parity regression attributable to scope/path resolution.
+- No duplicate path-resolution logic remains across typecheck/lowering/runtime.
+
+### Phase 2.2b: Overloaded Type Signatures (Exact-Match)
+
+Add support for multiple type signatures per definition name, with strict overload resolution.
+
+Example:
+
+```axon
+mul :: Tensor[..S] -> Float -> Tensor[..S]
+mul :: Float -> Tensor[..S] -> Tensor[..S]
+mul :: Float -> Float -> Float
+mul = _mul
+```
+
+Rules:
+
+- No coercive matching in overload resolution.
+- Ambiguous matches are hard errors.
+- No legacy fallback to "first signature wins" unless exactly one candidate matches.
+
+#### Proposed Implementation Plan (Phase 2.2b)
+
+1. Parser + AST support for repeated signatures.
+- Permit multiple `name :: ...` signatures for the same definition name in one module.
+- Store signature groups in source order for deterministic diagnostics.
+
+2. Signature table refactor in typecheck.
+- Change `name -> ModuleSignature` to `name -> list[ModuleSignature]`.
+- Keep path-parameter metadata per overload.
+
+3. Overload candidate filtering.
+- Filter by:
+  - path-arg arity from `abc@p1@p2` sugar
+  - positional/kwarg arity and required/defaulted arguments
+  - kwarg names
+- Reject invalid calls before type unification.
+
+4. Exact-match type unification per candidate.
+- Reuse existing unification logic (including symbolic dims/rest dims).
+- Candidate matches only if all args and returns typecheck without coercion.
+
+5. Ambiguity handling.
+- `0` matches: existing "no matching signature" style error.
+- `>1` matches: explicit ambiguous-overload error listing candidate signatures and conflicting argument positions.
+
+6. Kwarg/default/path semantics integration.
+- Apply `abc@p1@p2` sugar generically to first unbound `Path`-typed positional arguments per candidate.
+- Resolve kwargs/defaults against each candidate before matching.
+- Do not add alias-specific special casing.
+
+7. Tests.
+- Positive:
+  - scalar/scalar and tensor/scalar overloads for the same symbol.
+  - path-sugar binding with multiple path-typed parameters.
+  - symbolic-dim overloads with one unique match.
+- Negative:
+  - ambiguous candidates.
+  - missing/extra kwargs with overload sets.
+  - path-suffix count mismatch.
+
+#### Phase 2.2b Exit Criteria
+
+- Overload selection is deterministic and exact-match only.
+- Ambiguous calls fail with actionable diagnostics.
+- Existing non-overloaded modules preserve behavior.
+- No lowering/runtime changes needed beyond consuming resolved overload identity.
+
 ### Phase 3: Resolve imports into a self-contained linked program
 
 Before flattening, build a closed linked program IR:

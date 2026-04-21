@@ -1,70 +1,61 @@
 {-# CHECKPOINTS "ibm-granite/granite-3.3-2b-instruct" #-}
 {-# TASK "causal_lm" #-}
 
+import Activations
 import Activations (silu)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (causal_mask)
-import Math (mul)
+import Math
+import Math (mul, sqrt)
+import Params
+import Params (has_root)
+import Positions
 import Positions (position_ids, rope_pair_base)
 
+HAS_LM_HEAD = has_root "lm_head"
 
-
-D = 2048
-V = 49159
-L = 40
-H = 32
-KVH = 8
-QD = 2048
-KVD = 512
-FFN = 8192
-EPS = 1e-05
-THETA = 10000000.0
-C = 131072
-EMBED_SCALE = 12.0
-RESIDUAL_SCALE = 0.22
-ATTN_SCALE = 0.015625
-LOGITS_SCALE = 8.0
-HAS_LM_HEAD = false
-
-granite_norm :: @Path -> Tensor -> Tensor
-granite_norm@path x = NN.rmsnorm@path x eps=EPS
+granite_norm :: Path -> Tensor -> Tensor
+granite_norm@path x = NN.rmsnorm@path x eps=1e-05
 
 granite_block :: Tensor -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
 granite_block x pos_ids attn_mask past_kv = do
   xn <- granite_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H
-    k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
-    v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
-    q, k <- rope_pair_base q k pos_ids THETA
+    q <- NN.linear@q_proj xn dim=2048 bias=false |> reshape_heads heads=32
+    k <- NN.linear@k_proj xn dim=512 bias=false |> reshape_heads heads=8
+    v <- NN.linear@v_proj xn dim=512 bias=false |> reshape_heads heads=8
+    q, k <- rope_pair_base q k pos_ids 10000000.0
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
-    mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    k <- Tensor.repeat k repeats=4
+    v <- Tensor.repeat v repeats=4
+    mask <- causal_mask q k window=131072 padding_mask=attn_mask
+    a <- attention q k v mask scale=0.015625 |> merge_heads |> NN.linear@o_proj dim=2048 bias=false
     return a, new_kv
-  x <- x + (a * RESIDUAL_SCALE)
+  x <- x + (a * 0.22)
   xn <- granite_norm@post_attention_layernorm x
   m <- scope@mlp do
-    g <- NN.linear@gate_proj xn dim=FFN bias=false
-    u <- NN.linear@up_proj xn dim=FFN bias=false
-    return g |> silu |> mul u |> NN.linear@down_proj dim=D bias=false
-  x <- x + (m * RESIDUAL_SCALE)
+    g <- NN.linear@gate_proj xn dim=8192 bias=false
+    u <- NN.linear@up_proj xn dim=8192 bias=false
+    return g |> silu |> mul u |> NN.linear@down_proj dim=2048 bias=false
+  x <- x + (m * 0.22)
   return x, new_kv
 
 granite :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 granite input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
-    x <- x * EMBED_SCALE
+    x <- NN.embedding@embed_tokens input_ids dim=2048
+    x <- x * 12.0
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    for@layers i <- [0..40) do
       past_i <- Cache.index past_kv i
       x, new_i <- granite_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- granite_norm@norm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@model.embed_tokens x dim=V)
-  logits <- logits / LOGITS_SCALE
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=49159) : (NN.linear@model.embed_tokens x dim=49159)
+  logits <- logits / 8.0
   return logits, new_kv

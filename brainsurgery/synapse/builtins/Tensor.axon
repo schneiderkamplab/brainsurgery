@@ -59,19 +59,17 @@ size x dim = shape x |> index dim
 expand :: Tensor -> ?List[Dim] -> Tensor
 expand x ?shape=null = _expand x shape
 
-arange :: Tensor -> ?Int -> ?Int -> IdxTensor
+arange :: Tensor -> ?Int -> ?Any -> IdxTensor
 arange x ?start=0 ?end=null = _arange x start end
 
 arange_step :: Tensor -> ?Int -> ?Int -> ?Int -> IdxTensor
 arange_step x ?start=0 ?end=null ?stride=1 = do
   ref <- arange x
-  ref_shape <- shape ref
-  ref_end <- ref_shape |> index 0
+  ref_end <- size ref 0
   end_value <- ((end == null) ? ref_end : end)
   fwd <- (stride > 0)
   base <- (fwd ? (arange x start=start end=end_value) : (arange x start=end_value end=start))
-  base_shape <- shape base
-  base_len <- base_shape |> index 0
+  base_len <- size base 0
   stride_abs <- (fwd ? stride : (0 - stride))
   count <- floor ((base_len + stride_abs - 1) / stride_abs)
   idx <- arange base start=0 end=count
@@ -102,10 +100,10 @@ concat x y ?dim=-1 = _concat x y dim=dim
 matmul :: Tensor -> Tensor -> Tensor
 matmul = _matmul
 
-eq :: Tensor -> Tensor -> Tensor
+eq :: Any -> Any -> Tensor
 eq = _eq
 
-le :: Tensor -> Tensor -> Tensor
+le :: Any -> Any -> Tensor
 le = _le
 
 and :: Tensor -> Tensor -> Tensor
@@ -157,8 +155,8 @@ scatter x index src ?dim=-1 = _scatter x index src dim
 index_add :: Tensor -> IdxTensor -> Tensor -> ?Int -> Tensor
 index_add x index src ?dim=0 = _index_add x index src dim
 
-zeros_like :: Tensor[B,T,D] -> Tensor[B,T,D]
+zeros_like :: Tensor[..S] -> Tensor[..S]
 zeros_like = _zeros_like
 
-min_like :: Tensor[B,T,D] -> Tensor[B,T,D]
+min_like :: Tensor[..S] -> Tensor[..S]
 min_like x = fill (empty_like x) (dtype_value x "min")

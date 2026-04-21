@@ -1,100 +1,89 @@
 {-# CHECKPOINTS "Qwen/Qwen3-30B-A3B" #-}
 {-# TASK "causal_lm" #-}
 
+import Activations
 import Activations (silu)
+import Attention
 import Attention (attention, merge_heads, reshape_heads)
+import Masking
 import Masking (causal_mask)
+import Math
 import Math (mul)
+import MoE
 import MoE (scatter_add, select, softmax_topk_router)
+import Positions
 import Positions (position_ids, rope_pair_base)
 
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=1e-06 cast_float=true
 
-
-D = 2048
-V = 151936
-L = 48
-H = 32
-KVH = 4
-KVD = 512
-QD = 4096
-FFN = 6144
-ME = 128
-MK = 8
-MFFN = 768
-SPARSE_STEP = 1
-EPS = 1e-06
-THETA = 1000000.0
-C = 40960
-TIE = false
-
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
-
-head_rms :: @Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
-head_rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+head_rms :: Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
+head_rms@path x = NN.rmsnorm@path x eps=1e-06 cast_float=true
 
 output_tied :: Tensor[B,S,D] -> Tensor[B,S,V]
 output_tied x = do
   logits <- scope@model do
-    return NN.linear@embed_tokens x dim=V
+    return NN.linear@embed_tokens x dim=151936
   return logits
 
 output_untied :: Tensor[B,S,D] -> Tensor[B,S,V]
-output_untied x = NN.linear@lm_head x dim=V
+output_untied x = NN.linear@lm_head x dim=151936
 
 dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 dense_ffn x = do
-  g <- NN.linear@gate_proj x dim=FFN
-  u <- NN.linear@up_proj x dim=FFN
-  return g |> silu |> mul u |> NN.linear@down_proj dim=D
+  g <- NN.linear@gate_proj x dim=6144
+  u <- NN.linear@up_proj x dim=6144
+  return g |> silu |> mul u |> NN.linear@down_proj dim=2048
 
 sparse_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 sparse_ffn x = do
-  scores, indices <- softmax_topk_router@gate x top_k=MK
+  scores, indices <- softmax_topk_router@gate x top_k=8
   out <- x * 0.0
-  for@experts e <- [0..ME) do
+  for@experts e <- [0..128) do
     x_sel, token_idx, topk_pos, sel_scores <- select x scores indices e
     x_upd <- qwen3_moe_expert_ffn x_sel
     out <- scatter_add out token_idx x_upd sel_scores
+    yield out
   return out
 
 qwen3_moe_expert_ffn :: Tensor[N,D] -> Tensor[N,D]
 qwen3_moe_expert_ffn x = do
-  g <- NN.linear@gate_proj x dim=MFFN
-  u <- NN.linear@up_proj x dim=MFFN
-  return g |> silu |> mul u |> NN.linear@down_proj dim=D bias=false
+  g <- NN.linear@gate_proj x dim=768
+  u <- NN.linear@up_proj x dim=768
+  return g |> silu |> mul u |> NN.linear@down_proj dim=2048 bias=false
 
 qwen3_moe_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> Int -> (Tensor[B,S,D], ?CacheLayer)
 qwen3_moe_block x pos_ids attn_mask past_kv layer_idx = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H |> head_rms@q_norm
-    k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> head_rms@k_norm
-    v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
-    q, k <- rope_pair_base q k pos_ids THETA
+    q <- NN.linear@q_proj xn dim=4096 bias=false |> reshape_heads heads=32 |> head_rms@q_norm
+    k <- NN.linear@k_proj xn dim=512 bias=false |> reshape_heads heads=4 |> head_rms@k_norm
+    v <- NN.linear@v_proj xn dim=512 bias=false |> reshape_heads heads=4
+    q, k <- rope_pair_base q k pos_ids 1000000.0
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
-    mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    k <- Tensor.repeat k repeats=8
+    v <- Tensor.repeat v repeats=8
+    mask <- causal_mask q k window=40960 padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=2048 bias=false
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
-    return (((layer_idx + 1) % SPARSE_STEP) == 0) ? sparse_ffn xn : dense_ffn xn
+    return (((layer_idx + 1) % 1) == 0) ? sparse_ffn xn : dense_ffn xn
   return x + m, new_kv
 
 qwen3_moe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 qwen3_moe input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=2048
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    for@layers i <- [0..48) do
       past_i <- Cache.index past_kv i
       x, new_i <- qwen3_moe_block x pos_ids attn_mask past_i i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
-  logits <- TIE ? output_tied x : output_untied x
+  logits <- output_untied x
   return logits, new_kv

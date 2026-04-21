@@ -9,21 +9,21 @@ import Positions (position_ids, rope_pair_base)
 
 
 
-D    = Config.int "hidden_size" default=896
-V    = Config.int "vocab_size" default=151936
-L    = Config.int "num_hidden_layers" default=24
-H    = Config.int "num_attention_heads" default=14
-KVH  = Config.int "num_key_value_heads" default=2
-HAS_HEAD_DIM = Config.has_value "head_dim"
-HD   = HAS_HEAD_DIM ? (Config.int "head_dim" default=64) : (D / H)
+D    = Config.int@hidden_size default=896
+V    = Config.int@vocab_size default=151936
+L    = Config.int@num_hidden_layers default=24
+H    = Config.int@num_attention_heads default=14
+KVH  = Config.int@num_key_value_heads default=2
+HAS_HEAD_DIM = Config.has_value@head_dim
+HD   = HAS_HEAD_DIM ? (Config.int@head_dim default=64) : (D / H)
 KVD  = KVH * HD
-FFN  = Config.int "intermediate_size" default=4864
-EPS  = Config.float "rms_norm_eps" default=1e-06
-THETA = Config.float "rope_theta" default=1000000.0
-C    = Config.int "max_position_embeddings" default=32768
-TIE  = Config.bool "tie_word_embeddings" default=false
+FFN  = Config.int@intermediate_size default=4864
+EPS  = Config.float@rms_norm_eps default=1e-06
+THETA = Config.float@rope_theta default=1000000.0
+C    = Config.int@max_position_embeddings default=32768
+TIE  = Config.bool@tie_word_embeddings default=false
 
-rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
 output_tied :: Tensor[B,S,D] -> Tensor[B,S,V]
@@ -63,10 +63,11 @@ qwen2 input_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=D
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..L) do
+    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- qwen2_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm x
     return x, new_kv
   logits <- TIE ? output_tied x : output_untied x

@@ -1,5 +1,5 @@
 import Activations (gelu, relu, silu)
-import Math (add, clamp, exp, log)
+import Math (clamp, exp, log)
 import NN rmsnorm_noscale
 import Params (param)
 import Tensor (
@@ -26,7 +26,7 @@ causal_conv1d_step :: Tensor[B,C,S] -> Tensor[C,1,K] -> Tensor[C] -> Int -> Any 
 causal_conv1d_step x_t w b t activation = do
   k <- size w -1
   y_t <- b + ((slice x_t dim=-1 start=t end=(t + 1) |> reshape shape=[B, C]) * 0.0)
-  for j <- [0..k) do
+  y_t <- for j <- [0..k) carry (y_t) do
     idx <- t - (k - 1 - j)
     y_t <- (idx < 0)
       ? y_t
@@ -34,26 +34,28 @@ causal_conv1d_step x_t w b t activation = do
         x_idx <- slice x_t dim=-1 start=idx end=(idx + 1) |> reshape shape=[B, C]
         w_j <- slice w dim=-1 start=j end=(j + 1) |> reshape shape=[C]
         return y_t + (x_idx * w_j)
+    yield y_t
   return unsqueeze y_t dim=1 |> activate activation
 
 
-causal_conv1d :: @Path -> Tensor[B,S,C] -> ?Any -> ?Path -> ?Path -> ?Path -> Tensor[B,S,C]
-causal_conv1d@path x ?activation="silu" ?weight_path="weight" ?bias_path="bias" ?prefix_path=null = do
-  prefix <- (prefix_path == null) ? path : prefix_path
-  w <- param weight_path prefix_path=prefix
-  b <- param bias_path prefix_path=prefix
+causal_conv1d :: Path -> Tensor[B,S,C] -> ?Any -> ?Path -> ?Path -> Tensor[B,S,C]
+causal_conv1d@path x ?activation="silu" ?weight_path=null ?bias_path=null = do
+  w <- (weight_path == null) ? (param @weight) : (param weight_path)
+  b <- (bias_path == null) ? (param @bias) : (param bias_path)
   x_t <- transpose x dim1=1 dim2=2
   s <- size x 1
   y_all <- causal_conv1d_step x_t w b 0 activation
-  for t <- [1..s) do
+  y_all <- for t <- [1..s) carry (y_all) do
     y_step <- causal_conv1d_step x_t w b t activation
     y_all <- concat y_all y_step dim=1
+    yield y_all
   return y_all
 
 
 mamba_scan_step :: Tensor[B,D,N] -> Tensor[B,D] -> Tensor[B,D] -> Tensor[B,N] -> Tensor[B,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,D,N], Tensor[B,D])
 mamba_scan_step state u_t delta_t b_t c_t a d = do
-  delta_sp <- delta_t |> exp |> add 1.0 |> log
+  delta_sp <- delta_t |> exp
+  delta_sp <- log (delta_sp + 1.0)
   a_mul <- (unsqueeze delta_sp dim=-1) * (unsqueeze a dim=0)
   a_t <- exp a_mul
   bu_t <- (unsqueeze (delta_sp * u_t) dim=-1) * (unsqueeze b_t dim=1)
@@ -64,7 +66,7 @@ mamba_scan_step state u_t delta_t b_t c_t a d = do
 
 
 mamba_scan :: Tensor[B,S,DM] -> Tensor[B,S,DM] -> Tensor[B,S,N] -> Tensor[B,S,N] -> ?Path -> ?Path -> ?Bool -> Tensor[B,S,DM]
-mamba_scan u delta b c ?A="@A_log" ?D="@D" ?a_is_log=true = do
+mamba_scan u delta b c ?A=@A_log ?D=@D ?a_is_log=true = do
   a_raw <- param A
   a_exp <- exp a_raw
   a <- a_is_log ? (0.0 - a_exp) : a_raw
@@ -79,7 +81,7 @@ mamba_scan u delta b c ?A="@A_log" ?D="@D" ?a_is_log=true = do
   c_t0 <- slice c dim=1 start=0 end=1 |> reshape shape=[B, N]
   state, y_t0 <- mamba_scan_step state u_t0 delta_t0 b_t0 c_t0 a d
   y_all <- unsqueeze y_t0 dim=1
-  for t <- [1..s) do
+  state, y_all <- for t <- [1..s) carry (state, y_all) do
     u_t <- slice u dim=1 start=t end=(t + 1) |> reshape shape=[B, DM]
     delta_t <- slice delta dim=1 start=t end=(t + 1) |> reshape shape=[B, DM]
     b_t <- slice b dim=1 start=t end=(t + 1) |> reshape shape=[B, N]
@@ -87,6 +89,7 @@ mamba_scan u delta b c ?A="@A_log" ?D="@D" ?a_is_log=true = do
     state, y_t <- mamba_scan_step state u_t delta_t b_t c_t a d
     y_step <- unsqueeze y_t dim=1
     y_all <- concat y_all y_step dim=1
+    yield state, y_all
   return y_all
 
 
@@ -96,12 +99,13 @@ mamba2_expand_groups x heads n_groups = do
   out <- slice x dim=1 start=0 end=1
   g <- 0
   count <- 1
-  for h <- [1..heads) do
+  g, count, out <- for h <- [1..heads) carry (g, count, out) do
     switch <- count >= per_group
     g <- switch ? (g + 1) : g
     count <- switch ? 1 : (count + 1)
     xh <- slice x dim=1 start=g end=(g + 1)
     out <- concat out xh dim=1
+    yield g, count, out
   return out
 
 
@@ -133,24 +137,27 @@ mamba2_scan u gate dt b c a_path d_path dt_bias_path norm_weight_path n_groups h
   b_tg0 <- slice b dim=1 start=0 end=1 |> reshape shape=[B, n_groups, state_dim]
   b_t0 <- mamba2_expand_groups b_tg0 H n_groups
   state <- ((unsqueeze u_t0 dim=-1) * (unsqueeze b_t0 dim=2)) * 0.0
-  dt_t0 <- slice dt dim=1 start=0 end=1 |>
-    reshape shape=[B, H] |> add (unsqueeze dt_b dim=0) |>
-    exp |> add 1.0 |> log |> clamp min=time_step_min max=time_step_max
+  dt_t0 <- slice dt dim=1 start=0 end=1 |> reshape shape=[B, H]
+  dt_t0 <- dt_t0 + (unsqueeze dt_b dim=0)
+  dt_t0 <- exp dt_t0
+  dt_t0 <- log (dt_t0 + 1.0) |> clamp min=time_step_min max=time_step_max
   c_tg0 <- slice c dim=1 start=0 end=1 |> reshape shape=[B, n_groups, state_dim]
   c_t0 <- mamba2_expand_groups c_tg0 H n_groups
   state, y_t0 <- mamba2_scan_step state u_t0 dt_t0 b_t0 c_t0 a d
   y_all <- reshape y_t0 shape=[B, 1, D]
-  for t <- [1..s) do
+  state, y_all <- for t <- [1..s) carry (state, y_all) do
     u_t <- slice u dim=1 start=t end=(t + 1) |> reshape shape=[B, H, head_dim]
-    dt_t <- slice dt dim=1 start=t end=(t + 1) |>
-      reshape shape=[B, H] |> add (unsqueeze dt_b dim=0) |>
-      exp |> add 1.0 |> log |> clamp min=time_step_min max=time_step_max
+    dt_t <- slice dt dim=1 start=t end=(t + 1) |> reshape shape=[B, H]
+    dt_t <- dt_t + (unsqueeze dt_b dim=0)
+    dt_t <- exp dt_t
+    dt_t <- log (dt_t + 1.0) |> clamp min=time_step_min max=time_step_max
     b_tg <- slice b dim=1 start=t end=(t + 1) |> reshape shape=[B, n_groups, state_dim]
     c_tg <- slice c dim=1 start=t end=(t + 1) |> reshape shape=[B, n_groups, state_dim]
     b_t <- mamba2_expand_groups b_tg H n_groups
     c_t <- mamba2_expand_groups c_tg H n_groups
     state, y_t <- mamba2_scan_step state u_t dt_t b_t c_t a d
     y_all <- concat y_all (reshape y_t shape=[B, 1, D]) dim=1
+    yield state, y_all
   gated <- y_all * (silu gate)
   group_dim <- D / n_groups
   gated_grouped <- reshape gated shape=[B, S, n_groups, group_dim]
