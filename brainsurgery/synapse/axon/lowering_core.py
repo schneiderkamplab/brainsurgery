@@ -15,6 +15,7 @@ from ..ops import (
 )
 from ..type_inference import annotate_spec_with_block_io_types, infer_block_io_types_from_modules
 from .expression_codec import axon_expr_to_runtime_value as _expr_to_runtime_value
+from .path_expr import parse_path_token, path_expr_to_runtime_value
 from .type_system import (
     TypeExpr,
     TypeList,
@@ -543,9 +544,13 @@ def _is_kind(value: Any, kind: str) -> bool:
     if kind == "str":
         return isinstance(value, str) or is_expr_payload
     if kind == "path":
-        return isinstance(value, str)
+        return isinstance(value, str) or (isinstance(value, dict) and value.get("_expr") == "path")
     if kind == "path_or_null":
-        return isinstance(value, str) or value is None
+        return (
+            isinstance(value, str)
+            or (isinstance(value, dict) and value.get("_expr") == "path")
+            or value is None
+        )
     if kind == "str_or_bool_or_null":
         return isinstance(value, (str, bool)) or value is None or is_expr_payload
     if kind == "dim":
@@ -3304,7 +3309,9 @@ def _resolve_paths_at_lowering_time(
                 if isinstance(ident, str) and ident in mapping:
                     replacement = mapping[ident]
                     if isinstance(replacement, str) and replacement.startswith("@"):
-                        return {"_expr": "path", "value": replacement}
+                        return path_expr_to_runtime_value(
+                            parse_path_token(replacement, op_name="inline path")
+                        )
                     return replacement
             return {k: _substitute_names(v, mapping) for k, v in value.items()}
         return value

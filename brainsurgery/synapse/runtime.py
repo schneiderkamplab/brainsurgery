@@ -10,6 +10,12 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from ..core import StateDictLike
+from .axon.path_expr import (
+    path_expr_to_runtime_value,
+    resolve_path_expr_to_key,
+    resolve_static_path_expr_to_key,
+    runtime_value_to_path_expr,
+)
 from .axon.type_system import TypeTensor, parse_type_expr
 from .mxfp4 import materialize_mxfp4_aliases
 from .ops import get_op_module
@@ -756,20 +762,15 @@ class SynapseProgramModel(nn.Module):
                 roots = composed
             return roots
 
-        def _explicit_candidates(raw_path: str) -> list[str]:
-            if raw_path.startswith("@@"):
-                absolute = raw_path[2:]
-                if not absolute:
-                    return []
-                return [absolute]
-            if raw_path.startswith("@"):
-                raw_path = raw_path[1:]
-                if not raw_path:
-                    return []
+        def _explicit_candidates(raw_path: Any) -> list[str]:
+            expr = runtime_value_to_path_expr(raw_path, op_name=f"{param_name} path")
+            key = resolve_static_path_expr_to_key(expr, op_name=f"{param_name} path")
+            if expr.absolute:
+                return [key] if key else []
             roots = _current_roots()
             scope_prefix = _effective_scope()
-            scoped = self._join(scope_prefix, raw_path)
-            scoped = scoped if scoped else raw_path
+            scoped = self._join(scope_prefix, key)
+            scoped = scoped if scoped else key
             scoped_candidates: list[str] = []
             for candidate in [_join_root(root, scoped) for root in roots]:
                 if candidate not in scoped_candidates:
@@ -777,7 +778,7 @@ class SynapseProgramModel(nn.Module):
             return scoped_candidates
 
         def _pick_explicit_candidate(raw: Any) -> str | None:
-            if isinstance(raw, str):
+            if isinstance(raw, (str, dict)):
                 candidates = _explicit_candidates(raw)
                 for candidate in candidates:
                     if candidate in self._state:
@@ -786,7 +787,7 @@ class SynapseProgramModel(nn.Module):
             if isinstance(raw, list | tuple):
                 list_candidates: list[str] = []
                 for item in raw:
-                    if not isinstance(item, str):
+                    if not isinstance(item, (str, dict)):
                         continue
                     list_candidates.extend(_explicit_candidates(item))
                 if not list_candidates:
@@ -813,9 +814,9 @@ class SynapseProgramModel(nn.Module):
             return _pick_scoped_candidate(scoped_param)
         # Explicit per-node path override wins over _params.
         explicit_params = node_spec.get("_params")
-        if param_name in node_spec and isinstance(node_spec[param_name], str):
+        if param_name in node_spec and isinstance(node_spec[param_name], (str, dict)):
             candidate = node_spec[param_name]
-            if candidate != param_name:
+            if not (isinstance(candidate, str) and candidate == param_name):
                 explicit = _pick_explicit_candidate(candidate)
                 if isinstance(explicit, str):
                     return explicit
@@ -1041,10 +1042,12 @@ class SynapseProgramModel(nn.Module):
                     raise ValueError(f"Invalid string expression payload: {expr!r}")
                 return value
             if kind == "path":
-                value = expr.get("value")
-                if not isinstance(value, str):
-                    raise ValueError(f"Invalid path expression payload: {expr!r}")
-                return value
+                try:
+                    return path_expr_to_runtime_value(
+                        runtime_value_to_path_expr(expr, op_name="path expression")
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"Invalid path expression payload: {expr!r}") from exc
             if kind == "call":
                 callee = expr.get("callee")
                 args_raw = expr.get("args", [])
@@ -1079,58 +1082,10 @@ class SynapseProgramModel(nn.Module):
                 return cfg
         return {}
 
-    def _resolve_config_key_template(
-        self, key: str, env: Mapping[str, Any], op_name: str = "Config"
-    ) -> str:
-        if "{" not in key and "}" not in key:
-            return key
-        out: list[str] = []
-        i = 0
-        while i < len(key):
-            ch = key[i]
-            if ch == "}":
-                raise ValueError(f"{op_name} key template has unmatched '}}': {key!r}")
-            if ch != "{":
-                out.append(ch)
-                i += 1
-                continue
-            j = key.find("}", i + 1)
-            if j < 0:
-                raise ValueError(f"{op_name} key template has unmatched '{{': {key!r}")
-            name = key[i + 1 : j].strip()
-            if not name:
-                raise ValueError(f"{op_name} key template has empty placeholder: {key!r}")
-            if name not in env:
-                raise ValueError(f"{op_name} key template placeholder {name!r} is not defined")
-            value = env[name]
-            if not isinstance(value, (str, int, float, bool)):
-                raise ValueError(
-                    f"{op_name} key template placeholder {name!r} must resolve to scalar, got {type(value).__name__}"
-                )
-            out.append(str(value))
-            i = j + 1
-        resolved = "".join(out)
-        resolved = ".".join(part for part in resolved.split(".") if part)
-        if not resolved:
-            raise ValueError(f"{op_name} key must resolve to non-empty string")
-        return resolved
-
     def _resolve_config_path_key(
         self, raw: Any, env: Mapping[str, Any], op_name: str = "Config"
     ) -> str:
-        if not isinstance(raw, str) or not raw:
-            raise ValueError(f"{op_name} expression call expects one non-empty Path key")
-        if raw.startswith("@@"):
-            key = raw[2:]
-        elif raw.startswith("@"):
-            key = raw[1:]
-        else:
-            raise ValueError(f"{op_name} expression call expects Path key (expected @... or @@...)")
-        if not key:
-            raise ValueError(f"{op_name} expression call expects one non-empty Path key")
-        if len(key) >= 2 and key[0] == "'" and key[-1] == "'":
-            key = key[1:-1].replace("\\'", "'").replace("\\\\", "\\")
-        return self._resolve_config_key_template(key, env, op_name)
+        return resolve_path_expr_to_key(raw, env, op_name=op_name)
 
     def _expr_config_lookup(self, key: str) -> tuple[bool, Any]:
         value: Any = self._expr_config_root()
@@ -1369,21 +1324,11 @@ class SynapseProgramModel(nn.Module):
             return ""
         return node_path.rsplit(".", 1)[0]
 
-    def _resolve_state_path(self, *, node_path: str, raw_path: str) -> str:
-        if not isinstance(raw_path, str):
-            raise ValueError(f"state path must resolve to string, got {raw_path!r}")
-        token = raw_path.strip()
-        if not token:
-            raise ValueError("state path cannot be empty")
-        if token.startswith("@@"):
-            absolute = token[2:]
-            if not absolute:
-                raise ValueError("absolute state path cannot be empty")
-            return absolute
-        if token.startswith("@"):
-            token = token[1:]
-            if not token:
-                raise ValueError("state path cannot be empty")
+    def _resolve_state_path(self, *, node_path: str, raw_path: Any) -> str:
+        expr = runtime_value_to_path_expr(raw_path, op_name="state path")
+        token = resolve_static_path_expr_to_key(expr, op_name="state path")
+        if expr.absolute:
+            return token
         scope = self._scope_of(node_path)
         scope_parts = scope.split(".") if scope else []
         synthetic_prefixes = ("n_for_", "n_if_", "n_else_", "n_call_", "n_op_")

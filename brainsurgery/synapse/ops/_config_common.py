@@ -3,6 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
+from ..axon.path_expr import (
+    path_expr_template_text,
+    resolve_path_expr_to_key,
+    runtime_value_to_path_expr,
+)
+
 
 def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
     raw = node_spec.get("_args")
@@ -41,19 +47,7 @@ def _resolve_key(
         raise ValueError(f"{op_name} requires key positional arg")
     raw_key = args[0]
     key = _resolve_scalar_ref(raw_key, env, symbols)
-    if not isinstance(key, str) or not key:
-        raise ValueError(f"{op_name} key must resolve to non-empty Path")
-    if key.startswith("@@"):
-        path_key = key[2:]
-    elif key.startswith("@"):
-        path_key = key[1:]
-    else:
-        raise ValueError(f"{op_name} key must be a Path literal/reference (expected @... or @@...)")
-    if not path_key:
-        raise ValueError(f"{op_name} key must resolve to non-empty Path")
-    if len(path_key) >= 2 and path_key[0] == "'" and path_key[-1] == "'":
-        path_key = path_key[1:-1].replace("\\'", "'").replace("\\\\", "\\")
-    return _resolve_key_template(op_name=op_name, key=path_key, env=env, symbols=symbols)
+    return resolve_path_expr_to_key(key, {**symbols, **env}, op_name=op_name)
 
 
 def _resolve_key_template(
@@ -228,18 +222,17 @@ def _compile_lookup_lines(
     raw_template = args[0]
     template_text: str | None = None
     if isinstance(raw_template, str):
-        template_text = raw_template
+        template_text = path_expr_template_text(
+            runtime_value_to_path_expr(raw_template, op_name=op_name)
+        )
     elif isinstance(raw_template, dict):
         kind = raw_template.get("_expr")
-        if kind in {"path", "string"} and isinstance(raw_template.get("value"), str):
+        if kind == "path":
+            template_text = path_expr_template_text(
+                runtime_value_to_path_expr(raw_template, op_name=op_name)
+            )
+        elif kind == "string" and isinstance(raw_template.get("value"), str):
             template_text = raw_template["value"]
-    if isinstance(template_text, str):
-        if template_text.startswith("@@"):
-            template_text = template_text[2:]
-        elif template_text.startswith("@"):
-            template_text = template_text[1:]
-        if len(template_text) >= 2 and template_text[0] == "'" and template_text[-1] == "'":
-            template_text = template_text[1:-1].replace("\\'", "'").replace("\\\\", "\\")
     needed_names: set[str] = set()
     if isinstance(template_text, str):
         needed_names = {
@@ -259,24 +252,6 @@ def _compile_lookup_lines(
     lines.append(f"{indent}if not isinstance({root_var}, dict):")
     lines.append(f"{indent}    {root_var} = {{}}")
     lines.append(f"{indent}{key_raw_var} = {key_expr}")
-    lines.append(f"{indent}if not isinstance({key_raw_var}, str) or not {key_raw_var}:")
-    lines.append(
-        f"{indent}    raise ValueError({op_name!r} + ' key must resolve to non-empty Path')"
-    )
-    lines.append(f"{indent}if {key_raw_var}.startswith('@@'):")
-    lines.append(f"{indent}    {key_raw_var} = {key_raw_var}[2:]")
-    lines.append(f"{indent}elif {key_raw_var}.startswith('@'):")
-    lines.append(f"{indent}    {key_raw_var} = {key_raw_var}[1:]")
-    lines.append(f"{indent}else:")
-    lines.append(
-        f"{indent}    raise ValueError({op_name!r} + ' key must be a Path literal/reference (expected @... or @@...)')"
-    )
-    lines.append(
-        f'{indent}if len({key_raw_var}) >= 2 and {key_raw_var}[0] == "\'" and {key_raw_var}[-1] == "\'":'
-    )
-    lines.append(
-        f'{indent}    {key_raw_var} = {key_raw_var}[1:-1].replace("\\\\\'", "\'").replace("\\\\\\\\", "\\\\")'
-    )
     if template_bindings and symbol_bindings:
         lines.append(f"{indent}{template_env_var} = {{{template_bindings}, {symbol_bindings}}}")
     elif template_bindings:
@@ -286,7 +261,7 @@ def _compile_lookup_lines(
     else:
         lines.append(f"{indent}{template_env_var} = {{}}")
     lines.append(
-        f"{indent}{key_var} = self._resolve_config_key_template({key_raw_var}, {template_env_var}, {op_name!r})"
+        f"{indent}{key_var} = self._resolve_config_path_key({key_raw_var}, {template_env_var}, {op_name!r})"
     )
     lines.append(f"{indent}{found_var} = True")
     lines.append(f"{indent}{value_var} = {root_var}")

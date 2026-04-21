@@ -125,72 +125,6 @@ Absolute-path strategy:
 - No model parity regression attributable to scope/path resolution.
 - No duplicate path-resolution logic remains across typecheck/lowering/runtime.
 
-### Phase 2.2b: Overloaded Type Signatures (Exact-Match)
-
-Add support for multiple type signatures per definition name, with strict overload resolution.
-
-Example:
-
-```axon
-mul :: Tensor[..S] -> Float -> Tensor[..S]
-mul :: Float -> Tensor[..S] -> Tensor[..S]
-mul :: Float -> Float -> Float
-mul = _mul
-```
-
-Rules:
-
-- No coercive matching in overload resolution.
-- Ambiguous matches are hard errors.
-- No legacy fallback to "first signature wins" unless exactly one candidate matches.
-
-#### Proposed Implementation Plan (Phase 2.2b)
-
-1. Parser + AST support for repeated signatures.
-- Permit multiple `name :: ...` signatures for the same definition name in one module.
-- Store signature groups in source order for deterministic diagnostics.
-
-2. Signature table refactor in typecheck.
-- Change `name -> ModuleSignature` to `name -> list[ModuleSignature]`.
-- Keep path-parameter metadata per overload.
-
-3. Overload candidate filtering.
-- Filter by:
-  - path-arg arity from `abc@p1@p2` sugar
-  - positional/kwarg arity and required/defaulted arguments
-  - kwarg names
-- Reject invalid calls before type unification.
-
-4. Exact-match type unification per candidate.
-- Reuse existing unification logic (including symbolic dims/rest dims).
-- Candidate matches only if all args and returns typecheck without coercion.
-
-5. Ambiguity handling.
-- `0` matches: existing "no matching signature" style error.
-- `>1` matches: explicit ambiguous-overload error listing candidate signatures and conflicting argument positions.
-
-6. Kwarg/default/path semantics integration.
-- Apply `abc@p1@p2` sugar generically to first unbound `Path`-typed positional arguments per candidate.
-- Resolve kwargs/defaults against each candidate before matching.
-- Do not add alias-specific special casing.
-
-7. Tests.
-- Positive:
-  - scalar/scalar and tensor/scalar overloads for the same symbol.
-  - path-sugar binding with multiple path-typed parameters.
-  - symbolic-dim overloads with one unique match.
-- Negative:
-  - ambiguous candidates.
-  - missing/extra kwargs with overload sets.
-  - path-suffix count mismatch.
-
-#### Phase 2.2b Exit Criteria
-
-- Overload selection is deterministic and exact-match only.
-- Ambiguous calls fail with actionable diagnostics.
-- Existing non-overloaded modules preserve behavior.
-- No lowering/runtime changes needed beyond consuming resolved overload identity.
-
 ### Phase 3: Resolve imports into a self-contained linked program
 
 Before flattening, build a closed linked program IR:
@@ -412,3 +346,79 @@ Responsibilities:
 Goal:
 
 - predictable lowering with minimal ad-hoc logic and minimal behavior drift risk
+
+## 9. Deferred: Overloaded Type Signatures (Only If Still Needed)
+
+This is intentionally last.
+
+Comments:
+
+- do not start this before the type-system revamp above is designed and stable
+- this might be better solved by typeclasses, constrained generics, or another overloading mechanism
+- if the later formal type system makes this unnecessary, drop it
+
+Potential target:
+
+- allow multiple type signatures per definition name with strict exact-match resolution
+
+Example:
+
+```axon
+mul :: Tensor[..S] -> Float -> Tensor[..S]
+mul :: Float -> Tensor[..S] -> Tensor[..S]
+mul :: Float -> Float -> Float
+mul = _mul
+```
+
+Rules, if we still do this:
+
+- no coercive matching in overload resolution
+- ambiguous matches are hard errors
+- no legacy fallback to "first signature wins" unless exactly one candidate matches
+
+Possible implementation sketch:
+
+1. Parser + AST support for repeated signatures.
+- Permit multiple `name :: ...` signatures for the same definition name in one module.
+- Store signature groups in source order for deterministic diagnostics.
+
+2. Signature table refactor in typecheck.
+- Change `name -> ModuleSignature` to `name -> list[ModuleSignature]`.
+- Keep path-parameter metadata per overload.
+
+3. Overload candidate filtering.
+- Filter by:
+  - path-arg arity from `abc@p1@p2` sugar
+  - positional/kwarg arity and required/defaulted arguments
+  - kwarg names
+- Reject invalid calls before type unification.
+
+4. Exact-match type unification per candidate.
+- Reuse existing unification logic (including symbolic dims/rest dims).
+- Candidate matches only if all args and returns typecheck without coercion.
+
+5. Ambiguity handling.
+- `0` matches: existing "no matching signature" style error.
+- `>1` matches: explicit ambiguous-overload error listing candidate signatures and conflicting argument positions.
+
+6. Kwarg/default/path semantics integration.
+- Apply `abc@p1@p2` sugar generically to first unbound `Path`-typed positional arguments per candidate.
+- Resolve kwargs/defaults against each candidate before matching.
+- Do not add alias-specific special casing.
+
+7. Tests.
+- Positive:
+  - scalar/scalar and tensor/scalar overloads for the same symbol
+  - path-sugar binding with multiple path-typed parameters
+  - symbolic-dim overloads with one unique match
+- Negative:
+  - ambiguous candidates
+  - missing/extra kwargs with overload sets
+  - path-suffix count mismatch
+
+Exit criteria, if still needed:
+
+- overload selection is deterministic and exact-match only
+- ambiguous calls fail with actionable diagnostics
+- existing non-overloaded modules preserve behavior
+- no lowering/runtime changes needed beyond consuming resolved overload identity

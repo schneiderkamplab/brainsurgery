@@ -7,6 +7,7 @@ from lark import Lark, Token, Transformer
 from lark.exceptions import LarkError, VisitError
 from lark.indenter import DedentError, Indenter
 
+from .path_expr import parse_path_token
 from .type_system import (
     DimExprBinary,
     DimToken,
@@ -1284,19 +1285,7 @@ class _ProgramTransformer(Transformer[Token, object]):
     def path_lit(self, children: list[object]) -> AxonExpr:
         token = children[0]
         assert isinstance(token, Token)
-        raw = str(token).strip()
-        absolute = raw.startswith("@@")
-        body = raw[2:] if absolute else raw[1:]
-        if not body:
-            raise ValueError("path literal cannot be empty")
-        if len(body) >= 2 and body[0] == "'" and body[-1] == "'":
-            quoted = body[1:-1].replace("\\'", "'").replace("\\\\", "\\")
-            parts = tuple(part for part in quoted.split(".") if part)
-        else:
-            parts = tuple(part for part in body.split(".") if part)
-        if not parts:
-            raise ValueError("path literal cannot be empty")
-        return AxonExprPath(absolute=absolute, parts=parts)
+        return parse_path_token(str(token), op_name="path literal")
 
     def tuple_expr(self, children: list[object]) -> AxonExpr:
         items = tuple(self._as_expr(child) for child in children if self._is_expr(child))

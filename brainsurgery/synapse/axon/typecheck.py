@@ -9,6 +9,7 @@ from ..ops import (
     get_op_lowering_type_signature,
 )
 from ..type_inference import infer_output_types_for_node
+from .path_expr import parse_path_token
 from .type_system import (
     TYPING_RULES,
     DimExprBinary,
@@ -1716,23 +1717,6 @@ def _arity_kwarg_value(value: Any) -> Any:
 
 
 def _kwarg_value_to_expr(value: AxonKwargValue) -> AxonExpr:
-    def _parse_path_token(raw: str) -> AxonExprPath | None:
-        token = raw.strip()
-        if not token.startswith("@"):
-            return None
-        absolute = token.startswith("@@")
-        body = token[2:] if absolute else token[1:]
-        if not body:
-            return None
-        if len(body) >= 2 and body[0] == "'" and body[-1] == "'":
-            quoted = body[1:-1].replace("\\'", "'").replace("\\\\", "\\")
-            parts = tuple(part for part in quoted.split(".") if part)
-        else:
-            parts = tuple(part for part in body.split(".") if part)
-        if not parts:
-            return None
-        return AxonExprPath(absolute=absolute, parts=parts)
-
     if isinstance(value, AxonExpr):
         return value
     if isinstance(value, bool):
@@ -1744,9 +1728,9 @@ def _kwarg_value_to_expr(value: AxonKwargValue) -> AxonExpr:
     if value is None:
         return AxonExprNull()
     if isinstance(value, str):
-        parsed_path = _parse_path_token(value)
-        if parsed_path is not None:
-            return parsed_path
+        stripped = value.strip()
+        if stripped.startswith("@"):
+            return parse_path_token(stripped, op_name="module call path")
         return AxonExprString(value=value)
     if isinstance(value, list):
         return AxonExprList(items=tuple(_kwarg_value_to_expr(item) for item in value))

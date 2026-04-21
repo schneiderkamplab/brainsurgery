@@ -42,3 +42,31 @@ def test_codegen_resolves_single_quoted_templated_config_path() -> None:
     )
 
     assert key == "text_config.hidden_size"
+
+
+def test_runtime_resolves_structured_templated_config_path() -> None:
+    model = SynapseProgramModel.from_spec(_minimal_spec(), state_dict={})
+
+    key = model._resolve_config_path_key(  # noqa: SLF001 - regression for runtime helper
+        {"_expr": "path", "absolute": False, "parts": ["{CFG}", "hidden_size"]},
+        {"CFG": "text_config"},
+        "Config",
+    )
+
+    assert key == "text_config.hidden_size"
+
+
+def test_codegen_resolves_structured_templated_config_path() -> None:
+    source = emit_model_code_from_synapse_spec(_minimal_spec(), class_name="Generated")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - test-controlled generated source
+    model_cls = namespace["Generated"]
+    model = model_cls.from_state_dict({})  # type: ignore[attr-defined]
+
+    key = model._resolve_config_path_key(  # noqa: SLF001 - regression for generated helper
+        {"_expr": "path", "absolute": False, "parts": ["{CFG}", "hidden_size"]},
+        {"CFG": "text_config"},
+        "Config",
+    )
+
+    assert key == "text_config.hidden_size"

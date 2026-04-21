@@ -9,6 +9,7 @@ import safetensors
 import torch
 
 from .axon.grammar import ParsedDefParam, ParsedProgramSource, ParsedSignature, parse_program_source
+from .axon.path_expr import parse_path_token, resolve_path_expr_to_key
 from .axon.type_system import render_type
 from .axon.types import (
     AxonBind,
@@ -82,55 +83,8 @@ def _checkpoint_pragma(parsed: ParsedProgramSource) -> list[str]:
     return []
 
 
-def _resolve_config_key_template(key: str, env: dict[str, object], op_name: str) -> str:
-    if "{" not in key and "}" not in key:
-        return key
-    out: list[str] = []
-    i = 0
-    while i < len(key):
-        ch = key[i]
-        if ch == "}":
-            raise ValueError(f"{op_name} key template has unmatched '}}': {key!r}")
-        if ch != "{":
-            out.append(ch)
-            i += 1
-            continue
-        j = key.find("}", i + 1)
-        if j < 0:
-            raise ValueError(f"{op_name} key template has unmatched '{{': {key!r}")
-        name = key[i + 1 : j].strip()
-        if not name:
-            raise ValueError(f"{op_name} key template has empty placeholder: {key!r}")
-        if name not in env:
-            raise ValueError(f"{op_name} key template placeholder {name!r} is not defined")
-        value = env[name]
-        if not isinstance(value, (str, int, float, bool)):
-            raise ValueError(
-                f"{op_name} key template placeholder {name!r} must resolve to scalar, got {type(value).__name__}"
-            )
-        out.append(str(value))
-        i = j + 1
-    resolved = "".join(out)
-    resolved = ".".join(part for part in resolved.split(".") if part)
-    if not resolved:
-        raise ValueError(f"{op_name} key must resolve to non-empty string")
-    return resolved
-
-
 def _resolve_config_path_key(raw: object, env: dict[str, object], op_name: str) -> str:
-    if not isinstance(raw, str) or not raw:
-        raise ValueError(f"{op_name} expects one non-empty Path key")
-    if raw.startswith("@@"):
-        key = raw[2:]
-    elif raw.startswith("@"):
-        key = raw[1:]
-    else:
-        raise ValueError(f"{op_name} expects Path key (expected @... or @@...)")
-    if not key:
-        raise ValueError(f"{op_name} expects one non-empty Path key")
-    if len(key) >= 2 and key[0] == "'" and key[-1] == "'":
-        key = key[1:-1].replace("\\'", "'").replace("\\\\", "\\")
-    return _resolve_config_key_template(key, env, op_name)
+    return resolve_path_expr_to_key(raw, env, op_name=op_name)
 
 
 def _expr_config_lookup(config: dict[str, object], key: str) -> tuple[bool, Any]:
@@ -217,23 +171,6 @@ def _as_number(value: object) -> _Number:
 
 
 def _expr_from_scalar(value: object) -> AxonExpr:
-    def _parse_path_token(raw: str) -> AxonExprPath | None:
-        token = raw.strip()
-        if not token.startswith("@"):
-            return None
-        absolute = token.startswith("@@")
-        body = token[2:] if absolute else token[1:]
-        if not body:
-            return None
-        if len(body) >= 2 and body[0] == "'" and body[-1] == "'":
-            quoted = body[1:-1].replace("\\'", "'").replace("\\\\", "\\")
-            parts = tuple(part for part in quoted.split(".") if part)
-        else:
-            parts = tuple(part for part in body.split(".") if part)
-        if not parts:
-            return None
-        return AxonExprPath(absolute=absolute, parts=parts)
-
     if value is None:
         return AxonExprNull()
     if isinstance(value, bool):
@@ -243,9 +180,9 @@ def _expr_from_scalar(value: object) -> AxonExpr:
     if isinstance(value, float):
         return AxonExprFloat(value=value)
     if isinstance(value, str):
-        parsed_path = _parse_path_token(value)
-        if parsed_path is not None:
-            return parsed_path
+        stripped = value.strip()
+        if stripped.startswith("@"):
+            return parse_path_token(stripped, op_name="materialization path")
         return AxonExprString(value=value)
     if isinstance(value, list):
         return AxonExprList(items=tuple(_expr_from_scalar(item) for item in value))
@@ -914,10 +851,9 @@ def _materialize_statement(
         prefix = stmt.prefix
         has_template = ("{" in prefix) or ("}" in prefix)
         if has_template:
-            prefix_has_at = prefix.startswith("@")
-            key = prefix[1:] if prefix_has_at else prefix
-            resolved = _resolve_config_key_template(key, env, "scope")
-            prefix = f"@{resolved}" if prefix_has_at else resolved
+            prefixed = prefix if prefix.startswith("@") else f"@{prefix}"
+            resolved = resolve_path_expr_to_key(prefixed, env, op_name="scope")
+            prefix = f"@{resolved}" if prefix.startswith("@") else resolved
         return AxonScopeBind(
             targets=stmt.targets,
             prefix=prefix,

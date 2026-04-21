@@ -48,7 +48,7 @@ gemma3_block x i pos_ids attn_mask past_kv = do
 gemma3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gemma3 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
-  logits, new_kv <- scope@model root=PARAM_ROOT do
+  logits, new_kv <- scope@'{PARAM_ROOT}.model' do
     x <- NN.embedding@embed_tokens input_ids dim=640 scale=25.298221281347036
     new_kv <- use_cache ? Cache.init : null
     for@layers i <- [0..18) do

@@ -42,10 +42,6 @@ def interpret(
     del scope
     raw = node_spec.get("_args")
     path_value = model._eval_expr(raw, env, symbols)
-    if not isinstance(path_value, str):
-        raise ValueError(
-            f"params_param path must resolve to string, got {type(path_value).__name__}"
-        )
     path_spec = dict(node_spec)
     path_spec["value"] = path_value
     resolved = model._infer_param_path(path_spec, node_path=node_path, param_name="value")
@@ -74,10 +70,6 @@ def compile(
     out_name = str(node_spec.get("_bind"))
     out_var = emitter._assign_out_var(env, out_name)
     lines.append(f"{indent}{path_var} = {path_expr}")
-    lines.append(f"{indent}if not isinstance({path_var}, str):")
-    lines.append(
-        f"{indent}    raise ValueError('params_param path must resolve to string, got ' + type({path_var}).__name__)"
-    )
     lines.append(f"{indent}{path_spec_var} = {{'_op': 'params_param', 'value': {path_var}}}")
     if "_scope" in node_spec:
         lines.append(f"{indent}{path_spec_var}['_scope'] = {node_spec.get('_scope')!r}")

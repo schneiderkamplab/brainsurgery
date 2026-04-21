@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .grammar import parse_expression_source
+from .path_expr import path_expr_to_runtime_value
 from .types import (
     AxonExpr,
     AxonExprBinary,
@@ -36,7 +37,7 @@ def axon_expr_to_runtime_value(expr: AxonExpr) -> Any:
     if isinstance(expr, AxonExprString):
         return {"_expr": "string", "value": expr.value}
     if isinstance(expr, AxonExprPath):
-        return {"_expr": "path", "value": expr.to_source()}
+        return path_expr_to_runtime_value(expr)
     if isinstance(expr, AxonExprList):
         return [axon_expr_to_runtime_value(item) for item in expr.items]
     if isinstance(expr, AxonExprTuple):

@@ -30,7 +30,7 @@ def _arg_or_default(args: list[Any], index: int, default: Any) -> Any:
     return value
 
 
-def _path_override(args: list[Any], index: int) -> str | None:
+def _path_override(args: list[Any], index: int) -> Any | None:
     if index >= len(args):
         return None
     value = args[index]
@@ -41,7 +41,7 @@ def _path_override(args: list[Any], index: int) -> str | None:
         if stripped.lower() == "null":
             return None
         return stripped
-    return None
+    return value
 
 
 def _is_default_path_token(token: str, *, kind: str) -> bool:
@@ -53,8 +53,34 @@ def _is_default_path_token(token: str, *, kind: str) -> bool:
     return False
 
 
+def _is_default_path_expr(value: Any, *, kind: str) -> bool:
+    if isinstance(value, str):
+        return _is_default_path_token(value, kind=kind)
+    if not isinstance(value, dict):
+        return False
+    if value.get("_expr") != "path":
+        return False
+    if bool(value.get("absolute")):
+        return False
+    parts = value.get("parts")
+    if isinstance(parts, tuple):
+        parts = list(parts)
+    if not isinstance(parts, list) or len(parts) != 1:
+        return False
+    leaf = parts[0]
+    if not isinstance(leaf, str):
+        return False
+    if kind == "weight":
+        return leaf == "weight"
+    if kind == "bias":
+        return leaf == "bias"
+    return False
+
+
 def _has_explicit_path(path_spec: dict[str, Any], key: str) -> bool:
     value = path_spec.get(key)
+    if isinstance(value, dict):
+        return True
     if not isinstance(value, str):
         return False
     stripped = value.strip()
@@ -146,31 +172,23 @@ def interpret(
     path_spec = dict(node_spec)
     weight_param = "weight_path" if _has_explicit_path(path_spec, "weight_path") else "weight"
     if weight_override is not None:
-        if weight_override.isidentifier():
+        override_value: Any = weight_override
+        if isinstance(weight_override, str) and weight_override.isidentifier():
             resolved = env.get(weight_override)
-            if isinstance(resolved, str):
-                if not _is_default_path_token(resolved, kind="weight"):
-                    path_spec["weight_path"] = resolved
-                    weight_param = "weight_path"
-            else:
-                path_spec["weight_path"] = weight_override
-                weight_param = "weight_path"
-        else:
-            path_spec["weight_path"] = weight_override
+            if resolved is not None:
+                override_value = resolved
+        if not _is_default_path_expr(override_value, kind="weight"):
+            path_spec["weight_path"] = override_value
             weight_param = "weight_path"
     bias_param = "bias_path" if _has_explicit_path(path_spec, "bias_path") else "bias"
     if bias_override is not None:
-        if bias_override.isidentifier():
+        bias_override_value: Any = bias_override
+        if isinstance(bias_override, str) and bias_override.isidentifier():
             resolved = env.get(bias_override)
-            if isinstance(resolved, str):
-                if not _is_default_path_token(resolved, kind="bias"):
-                    path_spec["bias_path"] = resolved
-                    bias_param = "bias_path"
-            else:
-                path_spec["bias_path"] = bias_override
-                bias_param = "bias_path"
-        else:
-            path_spec["bias_path"] = bias_override
+            if resolved is not None:
+                bias_override_value = resolved
+        if not _is_default_path_expr(bias_override_value, kind="bias"):
+            path_spec["bias_path"] = bias_override_value
             bias_param = "bias_path"
 
     linear_weight_path = model._infer_param_path(
@@ -273,7 +291,11 @@ def compile(
     weight_param_expr: str | None = None
     weight_override_name: str | None = None
     if weight_override is not None:
-        if weight_override.isidentifier() and weight_override in env:
+        if (
+            isinstance(weight_override, str)
+            and weight_override.isidentifier()
+            and weight_override in env
+        ):
             weight_override_name = weight_override
         else:
             path_spec["weight_path"] = weight_override
@@ -282,7 +304,7 @@ def compile(
     bias_param_expr: str | None = None
     bias_override_name: str | None = None
     if bias_override is not None:
-        if bias_override.isidentifier() and bias_override in env:
+        if isinstance(bias_override, str) and bias_override.isidentifier() and bias_override in env:
             bias_override_name = bias_override
         else:
             path_spec["bias_path"] = bias_override
@@ -343,8 +365,12 @@ def compile(
         raw_weight_override = emitter._fresh("raw_weight_override")
         lines.append(f"{indent}{raw_weight_override} = {read(weight_override_name)}")
         lines.append(
-            f"{indent}if isinstance({raw_weight_override}, str) and "
-            f"{raw_weight_override}.strip() not in ('@weight', 'weight'):"
+            f"{indent}if not ("
+            f"(isinstance({raw_weight_override}, str) and {raw_weight_override}.strip() in ('@weight', 'weight')) "
+            f"or "
+            f"(isinstance({raw_weight_override}, dict) and {raw_weight_override}.get('_expr') == 'path' "
+            f"and not bool({raw_weight_override}.get('absolute')) and {raw_weight_override}.get('parts') == ['weight'])"
+            f"):"
         )
         lines.append(
             f"{indent}    {resolved_weight_var} = emitter._param(self._resolve_state_path("
@@ -354,8 +380,12 @@ def compile(
         raw_bias_override = emitter._fresh("raw_bias_override")
         lines.append(f"{indent}{raw_bias_override} = {read(bias_override_name)}")
         lines.append(
-            f"{indent}if isinstance({raw_bias_override}, str) and "
-            f"{raw_bias_override}.strip() not in ('@bias', 'bias'):"
+            f"{indent}if not ("
+            f"(isinstance({raw_bias_override}, str) and {raw_bias_override}.strip() in ('@bias', 'bias')) "
+            f"or "
+            f"(isinstance({raw_bias_override}, dict) and {raw_bias_override}.get('_expr') == 'path' "
+            f"and not bool({raw_bias_override}.get('absolute')) and {raw_bias_override}.get('parts') == ['bias'])"
+            f"):"
         )
         lines.append(
             f"{indent}    {resolved_bias_var} = self._state_tensor_from_path("
