@@ -6,20 +6,24 @@ import Attention (attention, merge_heads, split_qkv_grouped)
 import Masking (blocksparse_mask, causal_mask)
 import Params (has_root)
 import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+import Cache
+import Config
+import NN
+import Tensor
 
 
 
 CFG = (Config.has_key@text_config) ? "text_config" : ""
 PARAM_ROOT = (has_root "language_model") ? "language_model" : ""
 
-D = Config.int @'{CFG}.hidden_size' default=4096
-V = Config.int @'{CFG}.vocab_size' default=100352
-L = Config.int @'{CFG}.num_hidden_layers' default=32
-H = Config.int @'{CFG}.num_attention_heads' default=32
+MODEL_DIM = Config.int @'{CFG}.hidden_size' default=4096
+VOCAB_SIZE = Config.int @'{CFG}.vocab_size' default=100352
+NUM_LAYERS = Config.int @'{CFG}.num_hidden_layers' default=32
+NUM_HEADS = Config.int @'{CFG}.num_attention_heads' default=32
 KVH = Config.int @'{CFG}.num_key_value_heads' default=8
-HD = (Config.has_key @'{CFG}.head_dim') ? (Config.int @'{CFG}.head_dim' default=128) : 128
-QD = H * HD
-KVD = KVH * HD
+MODEL_HEAD_DIM = (Config.has_key @'{CFG}.head_dim') ? (Config.int @'{CFG}.head_dim' default=128) : 128
+QD = NUM_HEADS * MODEL_HEAD_DIM
+KVD = KVH * MODEL_HEAD_DIM
 FFN = Config.int @'{CFG}.ff_intermediate_size' default=14336
 EPS = Config.float @'{CFG}.layer_norm_epsilon' default=1e-05
 THETA = Config.float @'{CFG}.rope_embedding_base' default=1000000.0
@@ -35,7 +39,7 @@ GEGELU_LIMIT = Config.float @'{CFG}.gegelu_limit' default=20.0
 MUP_ATTN_MULT = Config.float @'{CFG}.mup_attn_multiplier' default=1.0
 MUP_EMBED_MULT = Config.float @'{CFG}.mup_embedding_multiplier' default=10.0
 MUP_WIDTH_MULT = Config.float @'{CFG}.mup_width_multiplier' default=8.0
-ATTN_SCALE = MUP_ATTN_MULT / HD
+ATTN_SCALE = MUP_ATTN_MULT / MODEL_HEAD_DIM
 BS_LOCAL_BLOCKS = Config.int @'{CFG}.blocksparse_num_local_blocks' default=16
 BS_BLOCK_SIZE = Config.int @'{CFG}.blocksparse_block_size' default=64
 BS_VERT_STRIDE = Config.int @'{CFG}.blocksparse_vert_stride' default=8
@@ -53,42 +57,42 @@ phi3small_block x i pos_ids attn_mask past_kv = do
   xn <- phi3small_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
     qkv <- NN.linear@query_key_value xn dim=(QD + KVD + KVD) bias=true
-    q, k, v <- split_qkv_grouped qkv heads=H kv_heads=KVH
+    q, k, v <- split_qkv_grouped qkv heads=NUM_HEADS kv_heads=KVH
     q, k <- HAS_LONGROPE ? (rope_pair_longrope q k pos_ids THETA ROPE_ORIGINAL_CONTEXT ROPE_MAX_CONTEXT ROPE_LONG_FACTOR ROPE_SHORT_FACTOR long_mscale=ROPE_LONG_MSCALE short_mscale=ROPE_SHORT_MSCALE) : (rope_pair_base q k pos_ids theta=THETA)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
     dense <- (DENSE_EVERY > 0) ? (((i + 1) % DENSE_EVERY) == 0) : false
     a <- dense
       ? do
         keep <- causal_mask q k window=WINDOW_GLOBAL padding_mask=attn_mask
-        return attention q k v keep=keep scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=D bias=true
+        return attention q k v keep=keep scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
       : do
         add_mask <- blocksparse_mask q k padding_mask=attn_mask block_size=BS_BLOCK_SIZE local_blocks=BS_LOCAL_BLOCKS vert_stride=BS_VERT_STRIDE homo_head=false
         keep <- Tensor.eq add_mask 0.0
-        return attention q k v keep=keep rel_bias=add_mask scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=D bias=true
+        return attention q k v keep=keep rel_bias=add_mask scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
     return a, new_kv
   x <- x + a
   xn <- phi3small_norm@post_attention_layernorm x
   m <- scope@mlp do
     u <- NN.linear@up_proj xn dim=(2 * FFN) bias=true
-    return u |> gegelu limit=GEGELU_LIMIT |> NN.linear@down_proj dim=D bias=true
+    return u |> gegelu limit=GEGELU_LIMIT |> NN.linear@down_proj dim=MODEL_DIM bias=true
   return x + m, new_kv
 
 phi3small :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 phi3small input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@'{PARAM_ROOT}.model' do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     x <- (MUP_EMBED_MULT > 0.0) ? (x * MUP_EMBED_MULT) : x
     new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- phi3small_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- phi3small_norm@final_layernorm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@model.embed_tokens x dim=V)
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
   logits <- (MUP_WIDTH_MULT > 0.0) ? (logits / MUP_WIDTH_MULT) : logits
   return logits, new_kv

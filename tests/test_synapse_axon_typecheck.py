@@ -93,6 +93,8 @@ main x = do
 
 def test_typecheck_allows_log_on_int_input_via_numeric_promotion(tmp_path: Path) -> None:
     source = """
+import Math
+
 main :: Tensor[B,S,D] -> Tensor[B,S,D]
 main x = do
   d <- 640
@@ -106,6 +108,8 @@ main x = do
 
 def test_typecheck_allows_floor_on_int_input_via_numeric_promotion(tmp_path: Path) -> None:
     source = """
+import Math
+
 main :: Tensor[B,S,D] -> Tensor[B,S,D]
 main x = do
   d <- 640
@@ -391,14 +395,30 @@ main x = do
     assert "main" in signatures
 
 
-def test_prelude_exports_core_namespaces_without_explicit_imports(tmp_path: Path) -> None:
+def test_typecheck_requires_explicit_imports_for_qualified_namespaces(tmp_path: Path) -> None:
     source = """
+import Math
+import NN
+import Tensor
+
 main :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,D]
 main@path x = do
   y <- NN.rmsnorm@path x
   z <- Tensor.unsqueeze y 1
   w <- Math.exp z
   return w
+"""
+    modules = _parse_from_tmp_source(tmp_path, source)
+    signatures = typecheck_axon_program(modules, main_module="main")
+    assert "main" in signatures
+
+
+def test_typecheck_allows_qualified_pipe_stage(tmp_path: Path) -> None:
+    source = """
+import Math
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = x |> Math.exp
 """
     modules = _parse_from_tmp_source(tmp_path, source)
     signatures = typecheck_axon_program(modules, main_module="main")

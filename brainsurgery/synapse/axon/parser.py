@@ -1018,6 +1018,67 @@ def build_axon_modules_from_parsed_source(
     return out
 
 
+def build_surface_axon_modules_from_parsed_source(
+    parsed_source: ParsedProgramSource,
+    *,
+    validate: bool = True,
+    extra_imports: tuple[str, ...] | None = None,
+    extra_imported_members: dict[str, tuple[str, ...]] | None = None,
+) -> tuple[AxonModule, ...]:
+    top_imports = parsed_source.imports
+    if extra_imports:
+        top_imports = tuple(dict.fromkeys([*top_imports, *extra_imports]))
+    top_imported_members: dict[str, tuple[str, ...]] = dict(parsed_source.imported_members)
+    if extra_imported_members:
+        for namespace, members in extra_imported_members.items():
+            prev_members = top_imported_members.get(namespace, ())
+            top_imported_members[namespace] = tuple(dict.fromkeys([*prev_members, *members]))
+
+    modules_list: list[AxonModule] = []
+    for module_source in parsed_source.modules:
+        (
+            module_name,
+            module_path_param,
+            module_path_params,
+            params,
+            returns,
+            rhs_expr,
+            _annotation_symbols,
+            return_type_expr,
+            return_shape,
+        ) = _parse_haskell_header(
+            signature=module_source.signature, definition=module_source.definition
+        )
+
+        if isinstance(rhs_expr, AxonExprDo) and not rhs_expr.inline:
+            statements = rhs_expr.body
+        else:
+            statements = (AxonReturn(values=(rhs_expr,)),)
+
+        modules_list.append(
+            AxonModule(
+                name=module_name,
+                path_param=module_path_param,
+                path_params=module_path_params,
+                params=params,
+                returns=returns,
+                statements=statements,
+                imports=top_imports,
+                imported_members=top_imported_members or None,
+                exports=parsed_source.exports,
+                symbols=None,
+                pragmas=None,
+                type_aliases=parsed_source.type_aliases or None,
+                return_type_expr=return_type_expr,
+                return_shape=return_shape,
+            )
+        )
+    out = tuple(modules_list)
+    if validate:
+        validate_axon_program(out)
+    return out
+
+
 def parse_axon_module(source: str) -> AxonModule:
     parsed_source = parse_program_source(source)
     validate_parsed_program_source(parsed_source)
@@ -1041,6 +1102,7 @@ def parse_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
 
 __all__ = [
     "build_axon_modules_from_parsed_source",
+    "build_surface_axon_modules_from_parsed_source",
     "parse_axon_module",
     "parse_axon_program",
     "parse_axon_program_from_path",

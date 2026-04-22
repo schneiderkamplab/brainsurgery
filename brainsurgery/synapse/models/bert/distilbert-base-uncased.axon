@@ -9,6 +9,7 @@ import Masking
 import Masking (bidirectional_mask)
 import Positions
 import Positions (position_ids)
+import NN
 
 distil_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 distil_block x attn_mask = do

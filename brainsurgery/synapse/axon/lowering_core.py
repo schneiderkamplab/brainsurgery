@@ -1071,14 +1071,7 @@ def _validate_namespaced_block_call(callee: str, ctx: _LowerCtx) -> None:
         return
     if not ctx.block_signatures or callee not in ctx.block_signatures:
         return
-    namespace = callee.split(".", 1)[0].strip()
-    if not namespace:
-        return
-    if namespace in ctx.imported_namespaces:
-        return
-    if isinstance(ctx.current_module, str) and ctx.current_module.startswith(f"{namespace}."):
-        return
-    raise ValueError(f"namespaced call {callee!r} requires `import {namespace}` in the Axon source")
+    return
 
 
 def _rewrite_prelude_alias_callee(callee: str, kwargs: dict[str, Any], ctx: _LowerCtx) -> str:
@@ -1964,6 +1957,14 @@ def _lower_simple_call(
 def _lower_alias_or_const(
     expr: AxonExpr, out: str | list[str], ctx: _LowerCtx, *, guard: str | None = None
 ) -> list[dict[str, Any]]:
+    if isinstance(expr, AxonExprName):
+        resolved = _resolve_block_call(expr.name, ctx)
+        if resolved is not None and ctx.block_signatures is not None:
+            block_name, _ = resolved
+            input_names, _ = ctx.block_signatures.get(block_name, ([], []))
+            if len(input_names) == 0:
+                return _lower_simple_call(expr.name, (), {}, out, ctx, guard=guard)
+
     node_name = f"n_{ctx.fresh('op')}"
     node: dict[str, Any]
     if isinstance(expr, AxonExprName):

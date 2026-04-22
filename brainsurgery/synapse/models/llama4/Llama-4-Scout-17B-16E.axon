@@ -8,11 +8,14 @@ import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
 import Math
-import Math (floor, log, mul, sqrt)
+import Math (floor, log, mul)
 import MoE
 import MoE (grouped_swiglu_ffn_basic, sigmoid_topk_router)
 import Positions
-import Positions (position_ids, rope_pair_base, rope_pair_freq_scale)
+import Positions (position_ids, rope_pair_freq_scale)
+import Cache
+import NN
+import Tensor
 
 llama4_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 llama4_norm@path x = NN.rmsnorm@path x eps=1e-05

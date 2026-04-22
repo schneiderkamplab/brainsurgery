@@ -3,17 +3,18 @@
 {-# PADDING_SIDE "right" #-}
 
 import Activations
-import Activations (relu2)
+import Activations (relu2, silu)
 import Attention
 import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
-import Math
-import Math (sqrt)
 import MoE
 import MoE (grouped_sigmoid_router, scatter_add, select)
 import SSM
 import SSM (causal_conv1d, mamba2_scan)
+import NN
+import Params
+import Tensor
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-05 cast_float=true

@@ -2,23 +2,27 @@
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
 
-import Activations (relu2)
+import Activations (relu2, silu)
 import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Math (sqrt)
 import MoE (grouped_sigmoid_router, scatter_add, select)
 import SSM (causal_conv1d, mamba2_scan)
+import Config
+import NN
+import Params
+import Tensor
 
 
 
 MODEL_D = Config.int@hidden_size default=2688
-V      = Config.int@vocab_size default=131072
-L      = Config.int@num_hidden_layers default=52
-H      = Config.int@num_attention_heads default=32
+VOCAB_SIZE      = Config.int@vocab_size default=131072
+NUM_LAYERS      = Config.int@num_hidden_layers default=52
+NUM_HEADS      = Config.int@num_attention_heads default=32
 KVH    = Config.int@num_key_value_heads default=2
-HD     = Config.int@head_dim default=128
-ATTN_SCALE = 1.0 / sqrt HD
-C      = Config.int@max_position_embeddings default=262144
+MODEL_HEAD_DIM     = Config.int@head_dim default=128
+ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
+MAX_POSITIONS      = Config.int@max_position_embeddings default=262144
 EPS    = Config.float@layer_norm_epsilon default=1e-5
 
 M_H    = Config.int@mamba_num_heads default=64
@@ -70,9 +74,9 @@ shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk
 
 nemotron_h_attention :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 nemotron_h_attention x attn_mask = do
-  q <- NN.linear@q_proj x dim=(H * HD) bias=false |> reshape_heads heads=H
-  k <- NN.linear@k_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
-  v <- NN.linear@v_proj x dim=(KVH * HD) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(H / KVH)
+  q <- NN.linear@q_proj x dim=(NUM_HEADS * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@k_proj x dim=(KVH * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(NUM_HEADS / KVH)
+  v <- NN.linear@v_proj x dim=(KVH * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=KVH |> Tensor.repeat repeats=(NUM_HEADS / KVH)
   mask <- causal_mask q k
   return attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_D bias=false
 
@@ -99,8 +103,8 @@ nemotron_h_block x attn_mask i = do
 nemotron_h :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 nemotron_h input_ids attn_mask = do
   x <- NN.embedding@backbone.embeddings input_ids dim=MODEL_D
-  x <- for@backbone.layers i <- [0..L) carry (x) do
+  x <- for@backbone.layers i <- [0..NUM_LAYERS) carry (x) do
     x <- nemotron_h_block x attn_mask i
     yield x
   x <- rms@backbone.norm_f x
-  return NN.linear@lm_head x dim=V bias=false
+  return NN.linear@lm_head x dim=VOCAB_SIZE bias=false

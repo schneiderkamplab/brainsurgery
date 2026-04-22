@@ -8,13 +8,16 @@ import Activations (sigmoid, silu)
 import Masking
 import Masking (causal_mask)
 import Math
-import Math (clamp, sqrt)
+import Math (clamp)
 import MoE
 import MoE (scatter_add, select)
 import Params
 import Params (param)
 import Positions
 import Positions (position_ids, rope_pair_hf_yarn)
+import Cache
+import NN
+import Tensor
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-05 cast_float=true

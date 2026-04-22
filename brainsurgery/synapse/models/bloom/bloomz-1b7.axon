@@ -7,12 +7,16 @@ import Attention
 import Attention (attention, merge_heads, split_qkv_heads)
 import Masking
 import Masking (causal_mask)
+import Math
+import Math (sqrt)
 import Params
 import Params (has_root)
 import Positions
 import Positions (linear_position_bias)
 import Tensor
 import Tensor (size)
+import Cache
+import NN
 
 HAS_LM_HEAD = has_root "lm_head"
 

@@ -7,15 +7,19 @@ import Masking (causal_mask)
 import Math (floor, log, mul, sqrt)
 import MoE (grouped_swiglu_ffn_basic, softmax_topk_router)
 import Positions (position_ids, rope_pair_yarn)
+import Cache
+import Config
+import NN
+import Tensor
 
 
 
 CFG = (Config.has_key@text_config) ? "text_config" : ""
 ROPE_CFG = (CFG == "") ? "rope_parameters" : "text_config.rope_parameters"
-D = Config.int @'{CFG}.hidden_size' default=4096
-V = Config.int @'{CFG}.vocab_size' default=131072
-L = Config.int @'{CFG}.num_hidden_layers' default=36
-H = Config.int @'{CFG}.num_attention_heads' default=32
+MODEL_DIM = Config.int @'{CFG}.hidden_size' default=4096
+VOCAB_SIZE = Config.int @'{CFG}.vocab_size' default=131072
+NUM_LAYERS = Config.int @'{CFG}.num_hidden_layers' default=36
+NUM_HEADS = Config.int @'{CFG}.num_attention_heads' default=32
 QKNOPE = Config.int @'{CFG}.qk_nope_head_dim' default=64
 QKROPE = Config.int @'{CFG}.qk_rope_head_dim' default=64
 QKHD = QKNOPE + QKROPE
@@ -64,16 +68,16 @@ mistral4_attn x pos_ids attn_mask past_kv = do
   a, new_kv <- scope@self_attn do
     q_low <- NN.linear@q_a_proj x dim=QLR bias=false
     q_low <- mistral4_q_norm@q_a_layernorm q_low
-    q <- NN.linear@q_b_proj q_low dim=(H * QKHD) bias=false |> reshape_heads heads=H
+    q <- NN.linear@q_b_proj q_low dim=(NUM_HEADS * QKHD) bias=false |> reshape_heads heads=NUM_HEADS
     q_pass, q_rot <- Tensor.split q sizes=[QKNOPE, QKROPE]
 
     kv_comp <- NN.linear@kv_a_proj_with_mqa x dim=(KVR + QKROPE) bias=false
     kv_latent, k_rot_base <- Tensor.split kv_comp sizes=[KVR, QKROPE]
     kv_latent <- mistral4_kv_norm@kv_a_layernorm kv_latent
-    kv <- NN.linear@kv_b_proj kv_latent dim=(H * (QKNOPE + VHD)) bias=false |> reshape_heads heads=H
+    kv <- NN.linear@kv_b_proj kv_latent dim=(NUM_HEADS * (QKNOPE + VHD)) bias=false |> reshape_heads heads=NUM_HEADS
     k_pass, v <- Tensor.split kv sizes=[QKNOPE, VHD]
 
-    k_rot <- reshape_heads k_rot_base heads=1 |> Tensor.repeat repeats=H
+    k_rot <- reshape_heads k_rot_base heads=1 |> Tensor.repeat repeats=NUM_HEADS
     q_rot, k_rot <- rope_pair_yarn q_rot k_rot pos_ids THETA ROPE_FACTOR ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM interleaved=true
     q <- Tensor.concat q_pass q_rot dim=-1
     k <- Tensor.concat k_pass k_rot dim=-1
@@ -84,7 +88,7 @@ mistral4_attn x pos_ids attn_mask past_kv = do
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k padding_mask=attn_mask
     a <- attention q k v mask scale=ATTN_SCALE |> merge_heads
-    a <- NN.linear@o_proj a dim=D bias=false
+    a <- NN.linear@o_proj a dim=MODEL_DIM bias=false
     return a, new_kv
   return a, new_kv
 
@@ -93,7 +97,7 @@ mistral4_moe xn = do
   shared <- scope@shared_experts do
     gate <- NN.linear@gate_proj xn dim=(EM * SE) bias=false
     up <- NN.linear@up_proj xn dim=(EM * SE) bias=false
-    return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
+    return gate |> silu |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
   topk_weights, topk_indices <- softmax_topk_router@gate xn top_k=EPT routed_scaling_factor=ROUTE_SCALE
   routed <- grouped_swiglu_ffn_basic xn topk_weights topk_indices E
   return shared + routed
@@ -112,9 +116,9 @@ mistral4 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], 
 mistral4 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@language_model.model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- mistral4_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
@@ -122,6 +126,6 @@ mistral4 input_ids attn_mask past_kv use_cache = do
     x <- mistral4_norm@norm x
     return x, new_kv
   logits <- scope@language_model do
-    logits <- NN.linear@lm_head x dim=V bias=false
+    logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
     return logits
   return logits, new_kv

@@ -6,20 +6,24 @@ import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Math (mul)
 import Positions (position_ids, rope_pair_base)
+import Cache
+import Config
+import NN
+import Tensor
 
 
 
-D = Config.int@hidden_size default=4096
-V = Config.int@vocab_size default=64256
-L = Config.int@num_hidden_layers default=32
-H = Config.int@num_attention_heads default=32
+MODEL_DIM = Config.int@hidden_size default=4096
+VOCAB_SIZE = Config.int@vocab_size default=64256
+NUM_LAYERS = Config.int@num_hidden_layers default=32
+NUM_HEADS = Config.int@num_attention_heads default=32
 KVH = Config.int@num_key_value_heads default=32
-HD = Config.int@head_dim default=128
-KVD = KVH * HD
+MODEL_HEAD_DIM = Config.int@head_dim default=128
+KVD = KVH * MODEL_HEAD_DIM
 FFN = Config.int@intermediate_size default=11008
 EPS = Config.float@rms_norm_eps default=1e-05
 THETA = Config.float@rope_theta default=100000.0
-C = Config.int@max_position_embeddings default=16384
+MAX_POSITIONS = Config.int@max_position_embeddings default=16384
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
@@ -28,36 +32,36 @@ comma_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (T
 comma_block x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=D |> reshape_heads heads=H
+    q <- NN.linear@q_proj xn dim=MODEL_DIM |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
     v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
-    mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=D
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
     g <- NN.linear@gate_proj xn dim=FFN
     u <- NN.linear@up_proj xn dim=FFN
-    return g |> silu |> mul u |> NN.linear@down_proj dim=D
+    return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
   return x + m, new_kv
 
 comma :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 comma input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- comma_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- rms@norm x
     return x, new_kv
-  logits <- NN.linear@lm_head x dim=V
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE
   return logits, new_kv

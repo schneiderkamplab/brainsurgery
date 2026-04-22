@@ -8,9 +8,12 @@ import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
 import Math
-import Math (mul, sqrt)
+import Math (mul)
 import Positions
 import Positions (position_ids, rope_pair_yarn)
+import Cache
+import NN
+import Tensor
 
 olmo3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 olmo3_block x i pos_ids attn_mask past_kv = do

@@ -12,6 +12,9 @@ import Math
 import Math (mul)
 import Positions
 import Positions (position_ids, rope_pair_base)
+import Cache
+import NN
+import Tensor
 
 magistral_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 magistral_norm@path x = NN.rmsnorm@path x eps=1e-05

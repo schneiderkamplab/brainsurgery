@@ -7,10 +7,9 @@ import Attention
 import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (bidirectional_mask, causal_mask)
-import Math
-import Math (sqrt)
 import Positions
 import Positions (relative_position_bias)
+import NN
 
 t5_encoder_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 t5_encoder_block x attention_mask = do

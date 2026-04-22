@@ -10,7 +10,10 @@ import Masking (causal_mask)
 import Math
 import Math (mul)
 import Positions
-import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+import Positions (position_ids, rope_pair_base)
+import Cache
+import NN
+import Tensor
 
 phi3minimedium_norm :: Path -> Tensor -> Tensor
 phi3minimedium_norm@path x = NN.rmsnorm@path x eps=1e-05

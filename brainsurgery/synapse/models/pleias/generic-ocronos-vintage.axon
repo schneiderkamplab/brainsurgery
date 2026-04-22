@@ -5,38 +5,41 @@ import Activations (gelu_new)
 import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Positions (position_ids)
+import Config
+import NN
+import Tensor
 
 
 
-T = Config.int@n_positions default=1024
-D = Config.int@n_embd default=768
-L = Config.int@n_layer default=12
-H = Config.int@n_head default=12
-V = Config.int@vocab_size default=50257
+CONTEXT_SIZE = Config.int@n_positions default=1024
+MODEL_DIM = Config.int@n_embd default=768
+NUM_LAYERS = Config.int@n_layer default=12
+NUM_HEADS = Config.int@n_head default=12
+VOCAB_SIZE = Config.int@vocab_size default=50257
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 gpt2_block x attn_mask = do
   x1 <- NN.layernorm@ln_1 x
   a <- scope@attn do
-    q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
-    q <- reshape_heads q_lin heads=H
-    k <- reshape_heads k_lin heads=H
-    v <- reshape_heads v_lin heads=H
-    mask <- causal_mask q k window=T padding_mask=attn_mask
-    return attention q k v mask |> merge_heads |> NN.linear@c_proj dim=D bias=true transpose=true
+    q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@c_attn x1 dim=(3 * MODEL_DIM) bias=true transpose=true) parts=3
+    q <- reshape_heads q_lin heads=NUM_HEADS
+    k <- reshape_heads k_lin heads=NUM_HEADS
+    v <- reshape_heads v_lin heads=NUM_HEADS
+    mask <- causal_mask q k window=CONTEXT_SIZE padding_mask=attn_mask
+    return attention q k v mask |> merge_heads |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
   x <- x + a
   x3 <- NN.layernorm@ln_2 x
   m <- scope@mlp do
-    return NN.linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=D bias=true transpose=true
+    return NN.linear@c_fc x3 dim=(4 * MODEL_DIM) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
   return x + m
 
 gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 gpt2 input_ids attn_mask = do
   logits <- scope@transformer do
-    tok <- NN.embedding@wte input_ids dim=D
+    tok <- NN.embedding@wte input_ids dim=MODEL_DIM
     pos <- position_ids input_ids attn_mask=attn_mask pad_fill=1 |> NN.embedding@wpe
     x <- tok + pos
-    x <- for@h i <- [0..L) carry (x) do
+    x <- for@h i <- [0..NUM_LAYERS) carry (x) do
       x <- gpt2_block x attn_mask
       yield x
     logits <- NN.layernorm@ln_f x |> NN.linear@wte

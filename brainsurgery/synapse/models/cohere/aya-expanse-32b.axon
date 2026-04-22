@@ -13,6 +13,9 @@ import Params
 import Params (has_root)
 import Positions
 import Positions (position_ids, rope_pair_base)
+import Cache
+import NN
+import Tensor
 
 HAS_LM_HEAD = has_root "lm_head"
 

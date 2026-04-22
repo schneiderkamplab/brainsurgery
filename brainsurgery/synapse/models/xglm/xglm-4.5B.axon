@@ -2,17 +2,17 @@
 {-# TASK "causal_lm" #-}
 
 import Activations
-import Activations (gelu, relu)
+import Activations (relu)
 import Attention
 import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
-import Math
-import Math (sqrt)
 import Params
 import Params (has_root)
 import Positions
 import Positions (position_ids, sinusoidal_positions)
+import Cache
+import NN
 
 HAS_POS = has_root "model.embed_positions.weight"
 

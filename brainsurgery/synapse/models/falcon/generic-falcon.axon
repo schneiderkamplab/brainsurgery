@@ -6,47 +6,49 @@ import Attention (attention, merge_heads, split_qkv_heads)
 import Masking (causal_mask)
 import NN (embedding, layernorm, linear)
 import Positions (linear_position_bias)
+import Cache
+import Config
 
 
 
-D   = Config.int@hidden_size default=2048
-V   = Config.int@vocab_size default=50304
-L   = Config.int@num_hidden_layers default=24
-H   = Config.int@num_attention_heads default=32
+MODEL_DIM   = Config.int@hidden_size default=2048
+VOCAB_SIZE   = Config.int@vocab_size default=50304
+NUM_LAYERS   = Config.int@num_hidden_layers default=24
+NUM_HEADS   = Config.int@num_attention_heads default=32
 HAS_N_INNER = Config.has_value@n_inner
 FFN_INT = Config.int@n_inner default=0
-FFN = HAS_N_INNER ? ((FFN_INT == 0) ? (4 * D) : FFN_INT) : (4 * D)
-C   = Config.int@max_position_embeddings default=2048
+FFN = HAS_N_INNER ? ((FFN_INT == 0) ? (4 * MODEL_DIM) : FFN_INT) : (4 * MODEL_DIM)
+MAX_POSITIONS   = Config.int@max_position_embeddings default=2048
 falcon_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 falcon_block x attn_mask past_kv = do
-  xn <- layernorm@input_layernorm x dim=D
+  xn <- layernorm@input_layernorm x dim=MODEL_DIM
 
   a, new_kv <- scope@self_attention do
-    qkv <- linear@query_key_value xn dim=(3 * D) bias=true
-    q, k, v <- split_qkv_heads qkv heads=H layout="interleaved"
+    qkv <- linear@query_key_value xn dim=(3 * MODEL_DIM) bias=true
+    q, k, v <- split_qkv_heads qkv heads=NUM_HEADS layout="interleaved"
     k, v, new_kv <- Cache.update past_kv k v
-    keep <- causal_mask q k window=C padding_mask=attn_mask
-    pos_bias <- linear_position_bias attn_mask heads=H scale=0.125
+    keep <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    pos_bias <- linear_position_bias attn_mask heads=NUM_HEADS scale=0.125
     a <- attention q k v keep=keep rel_bias=pos_bias scale=0.125 |> merge_heads
-    a <- linear@dense a dim=D bias=true
+    a <- linear@dense a dim=MODEL_DIM bias=true
     return a, new_kv
 
   x <- x + a
-  x_mlp <- layernorm@post_attention_layernorm x dim=D
+  x_mlp <- layernorm@post_attention_layernorm x dim=MODEL_DIM
   m <- scope@mlp do
     h <- linear@dense_h_to_4h x_mlp dim=FFN bias=true
-    return gelu h |> linear@dense_4h_to_h dim=D bias=true
+    return gelu h |> linear@dense_4h_to_h dim=MODEL_DIM bias=true
   x <- x + m
   return x, new_kv
 
 falcon :: TokenIds[B,S] -> Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 falcon input_ids attn_mask past_kv use_cache = do
-  x <- embedding@transformer.word_embeddings input_ids dim=D
+  x <- embedding@transformer.word_embeddings input_ids dim=MODEL_DIM
   new_kv <- use_cache ? Cache.init : null
-  x, new_kv <- for@transformer.h i <- [0..L) carry (x, new_kv) do
+  x, new_kv <- for@transformer.h i <- [0..NUM_LAYERS) carry (x, new_kv) do
     past_i <- Cache.index past_kv i
     x, new_i <- falcon_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i
     yield x, new_kv
-  logits <- layernorm@transformer.ln_f x dim=D |> linear@lm_head dim=V
+  logits <- layernorm@transformer.ln_f x dim=MODEL_DIM |> linear@lm_head dim=VOCAB_SIZE
   return logits, new_kv

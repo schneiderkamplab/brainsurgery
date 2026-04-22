@@ -11,6 +11,7 @@ import NN
 import NN (embedding, layernorm, linear)
 import Positions
 import Positions (linear_position_bias)
+import Cache
 
 falcon_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 falcon_block x attn_mask past_kv = do

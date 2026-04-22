@@ -14,6 +14,10 @@ TARGET_PACKAGES = (
     "web",
 )
 
+INTENTIONAL_UNUSED_PRIVATE_SYMBOLS = {
+    "brainsurgery.cli.synapse:_resolve_axon_to_text",
+}
+
 
 def _package_exports(package: str) -> set[str]:
     init_path = PACKAGE_ROOT / package / "__init__.py"
@@ -133,7 +137,10 @@ def test_symbol_visibility_contract_for_core_io_engine() -> None:
                     module, set()
                 ) or symbol in module_decorated_defs.get(module, set())
                 if not importers and not locally_used:
-                    dead_symbol_violations.append(f"{module}:{symbol}")
+                    violation = f"{module}:{symbol}"
+                    if violation in INTENTIONAL_UNUSED_PRIVATE_SYMBOLS:
+                        continue
+                    dead_symbol_violations.append(violation)
 
     assert not export_violations, (
         "Exported symbols must not start with underscore. Violations: "

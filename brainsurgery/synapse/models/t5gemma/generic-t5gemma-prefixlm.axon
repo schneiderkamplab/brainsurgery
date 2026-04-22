@@ -6,12 +6,15 @@ import Attention (attention, merge_heads, reshape_heads)
 import Masking (bidirectional_mask, causal_mask)
 import Math (mul, sqrt)
 import Positions (position_ids, rope_pair_base)
+import Config
+import NN
+import Tensor
 
 
 
 D_ENC = Config.int @'encoder.hidden_size' default=512
 D_DEC = Config.int @'decoder.hidden_size' default=512
-V = Config.int @'decoder.vocab_size' default=256000
+VOCAB_SIZE = Config.int @'decoder.vocab_size' default=256000
 L_ENC = Config.int @'encoder.num_hidden_layers' default=8
 L_DEC = Config.int @'decoder.num_hidden_layers' default=8
 H_ENC = Config.int @'encoder.num_attention_heads' default=8
@@ -120,7 +123,7 @@ t5gemma input_ids attention_mask decoder_input_ids decoder_attention_mask = do
     yield dec_hidden
   dec_hidden <- NN.rmsnorm@model.decoder.norm dec_hidden eps=EPS_DEC cast_float=true unit_offset=true
 
-  logits <- NN.linear@model.decoder.embed_tokens dec_hidden dim=V bias=false
+  logits <- NN.linear@model.decoder.embed_tokens dec_hidden dim=VOCAB_SIZE bias=false
   logits <- logits / LOGIT_SOFTCAP
   logits <- logits * 2.0 |> sigmoid
   logits <- (logits * 2.0) - 1.0

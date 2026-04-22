@@ -7,10 +7,11 @@ import Attention
 import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
-import Math
-import Math (sqrt)
 import Positions
 import Positions (position_ids)
+import Cache
+import NN
+import Tensor
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gpt2_block x attn_mask past_kv = do

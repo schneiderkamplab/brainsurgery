@@ -139,6 +139,32 @@ Goal:
 
 - desugaring and later stages run on a self-contained program with no unresolved imports
 
+Resolver contract:
+
+- AST to AST only:
+  - no lowering/materialization/runtime/codegen dependencies
+  - resolved output must remain valid Axon surface syntax
+- no constant propagation or symbol folding in Phase 3:
+  - imported constants are linked as explicit top-level definitions
+  - resolver only rewrites references and prunes unreachable definitions
+- canonicalization rules:
+  - imported modules keep qualified canonical names (for example `Foo.bar`)
+  - imported constants are renamed to collision-free flat identifiers (for example `__Foo__BAR`)
+  - root-file definitions keep their source names unless a collision requires deterministic renaming
+- closure validation:
+  - hard error on unresolved names
+  - hard error on unresolved imports/exports
+  - hard error on duplicate canonical names after resolution
+  - hard error on ambiguous imported-member resolution
+  - hard error if resolved modules still carry import state
+- diagnostics:
+  - warning on unused qualified imports
+  - warning on unused unqualified imported symbols
+  - warning on unused root definitions dropped by reachability pruning
+- CLI:
+  - `brainsurgery synapse axon-resolve in.axon out.axon`
+  - `--strict` upgrades resolver warnings to failure
+
 ### Phase 4: Add explicit desugaring/flattening stage
 
 Insert a `Surface Axon -> Flat Core Axon` pass into the pipeline:

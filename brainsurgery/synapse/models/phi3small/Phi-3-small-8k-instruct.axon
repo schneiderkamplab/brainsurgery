@@ -8,7 +8,10 @@ import Attention (attention, merge_heads, split_qkv_grouped)
 import Masking
 import Masking (blocksparse_mask, causal_mask)
 import Positions
-import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+import Positions (position_ids, rope_pair_base)
+import Cache
+import NN
+import Tensor
 
 phi3small_norm :: Path -> Tensor -> Tensor
 phi3small_norm@path x = NN.layernorm@path x eps=1e-05

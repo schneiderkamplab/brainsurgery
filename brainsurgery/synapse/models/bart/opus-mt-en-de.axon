@@ -8,10 +8,9 @@ import Attention
 import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (bidirectional_mask, causal_mask)
-import Math
-import Math (sqrt)
 import Positions
 import Positions (position_ids)
+import NN
 
 marian_encoder_layer :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 marian_encoder_layer x attention_mask = do

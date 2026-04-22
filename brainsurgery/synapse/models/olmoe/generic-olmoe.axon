@@ -7,20 +7,24 @@ import Masking (causal_mask)
 import Math (mul, sqrt)
 import MoE (scatter_add, select)
 import Positions (position_ids, rope_pair_base)
+import Cache
+import Config
+import NN
+import Tensor
 
 
 
-D    = Config.int@hidden_size default=2048               -- hidden dimension
-V    = Config.int@vocab_size default=50304               -- vocabulary size
-L    = Config.int@num_hidden_layers default=16           -- number of decoder layers
-H    = Config.int@num_attention_heads default=16         -- number of attention heads
-HD   = D / H                                                -- per-head dimension
+MODEL_DIM    = Config.int@hidden_size default=2048               -- hidden dimension
+VOCAB_SIZE    = Config.int@vocab_size default=50304               -- vocabulary size
+NUM_LAYERS    = Config.int@num_hidden_layers default=16           -- number of decoder layers
+NUM_HEADS    = Config.int@num_attention_heads default=16         -- number of attention heads
+MODEL_HEAD_DIM   = MODEL_DIM / NUM_HEADS                                                -- per-head dimension
 E    = Config.int@num_experts default=64                 -- number of experts
 EPT  = Config.int@num_experts_per_tok default=8          -- experts selected per token (top-k)
-C    = Config.int@max_position_embeddings default=4096   -- context window / max sequence length
+MAX_POSITIONS    = Config.int@max_position_embeddings default=4096   -- context window / max sequence length
 EPS  = 1e-05                                                -- RMSNorm epsilon
 THETA = Config.float@rope_theta default=10000.0          -- rope theta
-ATTN_SCALE = 1.0 / sqrt HD                                  -- attention scale (1 / sqrt(HD))
+ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM                                  -- attention scale (1 / sqrt(MODEL_HEAD_DIM))
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
@@ -35,14 +39,14 @@ olmoe_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLay
 olmoe_decoder_block x pos_ids attn_mask past_kv = do
   x_norm <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- x_norm |> NN.linear@q_proj dim=D |> rms@q_norm |> reshape_heads heads=H
-    k <- x_norm |> NN.linear@k_proj dim=D |> rms@k_norm |> reshape_heads heads=H
-    v <- x_norm |> NN.linear@v_proj dim=D |> reshape_heads heads=H
+    q <- x_norm |> NN.linear@q_proj dim=MODEL_DIM |> rms@q_norm |> reshape_heads heads=NUM_HEADS
+    k <- x_norm |> NN.linear@k_proj dim=MODEL_DIM |> rms@k_norm |> reshape_heads heads=NUM_HEADS
+    v <- x_norm |> NN.linear@v_proj dim=MODEL_DIM |> reshape_heads heads=NUM_HEADS
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
-    mask <- causal_mask q k window=C padding_mask=attn_mask
+    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
     a <- attention q k v mask scale=ATTN_SCALE |> merge_heads
-    a <- NN.linear@o_proj a dim=D
+    a <- NN.linear@o_proj a dim=MODEL_DIM
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
@@ -62,9 +66,9 @@ olmoe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Ca
 olmoe input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- olmoe_decoder_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i

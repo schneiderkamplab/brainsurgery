@@ -6,42 +6,46 @@ import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Math (sqrt)
 import Positions (position_ids)
+import Cache
+import Config
+import NN
+import Tensor
 
 
 
-T   = Config.int@n_positions default=1024
-D   = Config.int@n_embd default=768
-L   = Config.int@n_layer default=12
-H   = Config.int@n_head default=12
-V   = Config.int@vocab_size default=50257
+CONTEXT_SIZE   = Config.int@n_positions default=1024
+MODEL_DIM   = Config.int@n_embd default=768
+NUM_LAYERS   = Config.int@n_layer default=12
+NUM_HEADS   = Config.int@n_head default=12
+VOCAB_SIZE   = Config.int@vocab_size default=50257
 PAD_FILL = 1
-ATTN_SCALE = 1.0 / sqrt (D / H)
+ATTN_SCALE = 1.0 / sqrt (MODEL_DIM / NUM_HEADS)
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gpt2_block x attn_mask past_kv = do
   x1 <- NN.layernorm@ln_1 x
   a, new_kv <- scope@attn do
-    q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@c_attn x1 dim=(3 * D) bias=true transpose=true) parts=3
-    q <- reshape_heads q_lin heads=H
-    k <- reshape_heads k_lin heads=H
-    v <- reshape_heads v_lin heads=H
+    q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@c_attn x1 dim=(3 * MODEL_DIM) bias=true transpose=true) parts=3
+    q <- reshape_heads q_lin heads=NUM_HEADS
+    k <- reshape_heads k_lin heads=NUM_HEADS
+    v <- reshape_heads v_lin heads=NUM_HEADS
     k, v, new_kv <- Cache.update past_kv k v
     mask <- causal_mask q k attn_mask
-    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@c_proj dim=D bias=true transpose=true
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
     return a, new_kv
   x <- x + a
   x3 <- NN.layernorm@ln_2 x
   m <- scope@mlp do
-    return NN.linear@c_fc x3 dim=(4 * D) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=D bias=true transpose=true
+    return NN.linear@c_fc x3 dim=(4 * MODEL_DIM) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
   return x + m, new_kv
 
 gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
 gpt2 input_ids attn_mask past_kv use_cache = do
-  tok <- NN.embedding@wte input_ids dim=D
+  tok <- NN.embedding@wte input_ids dim=MODEL_DIM
   pos <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=PAD_FILL |> NN.embedding@wpe
   x <- tok + pos
   new_kv <- use_cache ? Cache.init : null
-  x, new_kv <- for@h i <- [0..L) carry (x, new_kv) do
+  x, new_kv <- for@h i <- [0..NUM_LAYERS) carry (x, new_kv) do
     past_i <- Cache.index past_kv i
     x, new_i <- gpt2_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i

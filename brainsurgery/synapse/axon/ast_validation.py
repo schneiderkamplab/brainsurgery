@@ -71,6 +71,13 @@ def _is_identifier(value: str) -> bool:
     return all(ch.isalnum() or ch == "_" for ch in value[1:])
 
 
+def _is_qualified_identifier(value: str) -> bool:
+    if not value:
+        return False
+    parts = value.split(".")
+    return all(_is_identifier(part) for part in parts)
+
+
 def _expected_return_arity(return_type_expr: TypeExpr | None) -> int | None:
     if return_type_expr is None:
         return None
@@ -85,9 +92,17 @@ def _expected_return_arity(return_type_expr: TypeExpr | None) -> int | None:
 def _validate_name(name: str, *, module: AxonModule, path: tuple[int, ...], field: str) -> None:
     if name == "_":
         return
-    if not _is_identifier(name):
+    validator = _is_qualified_identifier if field == "expression name" else _is_identifier
+    if not validator(name):
         raise _error(
-            module, path, f"invalid {field} name {name!r}; expected [A-Za-z_][A-Za-z0-9_]*"
+            module,
+            path,
+            (
+                f"invalid {field} name {name!r}; expected [A-Za-z_][A-Za-z0-9_]*"
+                if field != "expression name"
+                else "invalid expression name name "
+                f"{name!r}; expected [A-Za-z_][A-Za-z0-9_]* or dotted qualified form"
+            ),
         )
 
 

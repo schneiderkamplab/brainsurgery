@@ -8,6 +8,8 @@ from .lowering import (
 )
 from .parser import parse_axon_module, parse_axon_program, parse_axon_program_from_path
 from .render import synapse_spec_to_axon_module_text
+from .render_linked import render_resolved_axon_program, resolve_axon_program_to_source
+from .resolver import ResolvedAxonProgram, ResolveDiagnostic, resolve_axon_program_from_path
 from .tokenization import (
     candidate_tokenizer_dirs,
     load_tokenizer,
@@ -39,6 +41,11 @@ __all__ = [
     "parse_axon_module",
     "parse_axon_program",
     "parse_axon_program_from_path",
+    "resolve_axon_program_to_source",
+    "render_resolved_axon_program",
+    "resolve_axon_program_from_path",
+    "ResolvedAxonProgram",
+    "ResolveDiagnostic",
     "validate_axon_program",
     "typecheck_axon_module",
     "typecheck_axon_program",

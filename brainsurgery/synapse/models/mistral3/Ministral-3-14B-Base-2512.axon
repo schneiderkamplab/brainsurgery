@@ -11,6 +11,9 @@ import Math
 import Math (floor, log, mul)
 import Positions
 import Positions (position_ids, rope_pair_yarn)
+import Cache
+import NN
+import Tensor
 
 mistral3_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 mistral3_norm@path x = NN.rmsnorm@path x eps=1e-05

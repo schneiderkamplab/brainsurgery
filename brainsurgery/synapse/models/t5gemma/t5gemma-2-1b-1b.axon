@@ -9,9 +9,11 @@ import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (bidirectional_mask, causal_mask)
 import Math
-import Math (mul, sqrt)
+import Math (mul)
 import Positions
 import Positions (position_ids, rope_pair_base)
+import NN
+import Tensor
 
 t5gemma2_encoder_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> Tensor[B,S,D]
 t5gemma2_encoder_block x i pos_ids attention_mask = do

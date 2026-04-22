@@ -5,7 +5,7 @@ import pytest
 from brainsurgery.synapse.axon.grammar import ParsedSignature, parse_program_source
 from brainsurgery.synapse.axon.parser import parse_axon_program
 from brainsurgery.synapse.axon.type_system import TypeTuple, render_type
-from brainsurgery.synapse.axon.types import AxonExprTuple
+from brainsurgery.synapse.axon.types import AxonExprName, AxonExprPipe, AxonExprTuple
 
 
 def test_parse_program_source_extracts_signature_type() -> None:
@@ -231,3 +231,17 @@ pair x = (x, x,)
     rhs = parsed.modules[0].definition.rhs
     assert isinstance(rhs, AxonExprTuple)
     assert len(rhs.items) == 2
+
+
+def test_parse_program_source_allows_qualified_pipe_stage() -> None:
+    source = """
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = x |> Math.exp
+"""
+    parsed = parse_program_source(source)
+    rhs = parsed.modules[0].definition.rhs
+    assert isinstance(rhs, AxonExprPipe)
+    assert len(rhs.stages) == 1
+    stage = rhs.stages[0]
+    assert isinstance(stage, AxonExprName)
+    assert stage.name == "Math.exp"

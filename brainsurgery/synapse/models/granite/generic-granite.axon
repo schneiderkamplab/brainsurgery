@@ -7,27 +7,31 @@ import Masking (causal_mask)
 import Math (mul, sqrt)
 import Params (has_root)
 import Positions (position_ids, rope_pair_base)
+import Cache
+import Config
+import NN
+import Tensor
 
 
 
 CFG = (Config.has_key@text_config) ? "text_config" : ""
 
-D = Config.int @'{CFG}.hidden_size' default=2048
-V = Config.int @'{CFG}.vocab_size' default=49152
-L = Config.int @'{CFG}.num_hidden_layers' default=40
-H = Config.int @'{CFG}.num_attention_heads' default=32
+MODEL_DIM = Config.int @'{CFG}.hidden_size' default=2048
+VOCAB_SIZE = Config.int @'{CFG}.vocab_size' default=49152
+NUM_LAYERS = Config.int @'{CFG}.num_hidden_layers' default=40
+NUM_HEADS = Config.int @'{CFG}.num_attention_heads' default=32
 KVH = Config.int @'{CFG}.num_key_value_heads' default=8
 HAS_HEAD_DIM = Config.has_value @'{CFG}.head_dim'
-HD = HAS_HEAD_DIM ? (Config.int @'{CFG}.head_dim' default=64) : (D / H)
-QD = H * HD
-KVD = KVH * HD
+MODEL_HEAD_DIM = HAS_HEAD_DIM ? (Config.int @'{CFG}.head_dim' default=64) : (MODEL_DIM / NUM_HEADS)
+QD = NUM_HEADS * MODEL_HEAD_DIM
+KVD = KVH * MODEL_HEAD_DIM
 FFN = Config.int @'{CFG}.intermediate_size' default=8192
 EPS = Config.float @'{CFG}.rms_norm_eps' default=1e-05
 THETA = Config.float @'{CFG}.rope_theta' default=10000.0
-C = Config.int @'{CFG}.max_position_embeddings' default=4096
+MAX_POSITIONS = Config.int @'{CFG}.max_position_embeddings' default=4096
 EMBED_SCALE = Config.float @'{CFG}.embedding_multiplier' default=1.0
 RESIDUAL_SCALE = Config.float @'{CFG}.residual_multiplier' default=1.0
-ATTN_SCALE = Config.float @'{CFG}.attention_multiplier' default=(1.0 / sqrt HD)
+ATTN_SCALE = Config.float @'{CFG}.attention_multiplier' default=(1.0 / sqrt MODEL_HEAD_DIM)
 LOGITS_SCALE = Config.float @'{CFG}.logits_scaling' default=1.0
 HAS_LM_HEAD = has_root "lm_head"
 
@@ -38,22 +42,22 @@ granite_block :: Tensor -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?Cach
 granite_block x pos_ids attn_mask past_kv = do
   xn <- granite_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=H
+    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
-    mask <- causal_mask q k window=C padding_mask=attn_mask
-    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
     return a, new_kv
   x <- x + (a * RESIDUAL_SCALE)
   xn <- granite_norm@post_attention_layernorm x
   m <- scope@mlp do
     g <- NN.linear@gate_proj xn dim=FFN bias=false
     u <- NN.linear@up_proj xn dim=FFN bias=false
-    return g |> silu |> mul u |> NN.linear@down_proj dim=D bias=false
+    return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM bias=false
   x <- x + (m * RESIDUAL_SCALE)
   return x, new_kv
 
@@ -61,16 +65,16 @@ granite :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?
 granite input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     x <- x * EMBED_SCALE
     new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- granite_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- granite_norm@norm x
     return x, new_kv
-  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=V) : (NN.linear@model.embed_tokens x dim=V)
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
   logits <- logits / LOGITS_SCALE
   return logits, new_kv

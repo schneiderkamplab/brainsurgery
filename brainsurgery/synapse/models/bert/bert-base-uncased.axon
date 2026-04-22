@@ -9,6 +9,7 @@ import Masking
 import Masking (bidirectional_mask)
 import Positions
 import Positions (position_ids)
+import NN
 
 bert_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 bert_block x attn_mask = do

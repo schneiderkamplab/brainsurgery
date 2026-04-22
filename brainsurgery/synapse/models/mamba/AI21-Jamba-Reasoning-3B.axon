@@ -9,9 +9,11 @@ import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
 import Math
-import Math (mul, sqrt)
+import Math (mul)
 import SSM
 import SSM (causal_conv1d, mamba_scan)
+import NN
+import Tensor
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-06 cast_float=true

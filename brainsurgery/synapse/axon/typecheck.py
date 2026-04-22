@@ -2477,6 +2477,16 @@ def _infer_expr_type(
         root = tp.inner if isinstance(tp, TypeOptional) else tp
         return isinstance(root, TypeNamed) and root.name == "Path"
 
+    def _resolve_zero_arg_name_signature(name: str) -> ModuleSignature | None:
+        sig = signatures.get(name)
+        if sig is None:
+            return None
+        if sig.path_param_count != 0:
+            return None
+        if len(sig.params) != 0:
+            return None
+        return sig
+
     def _resolve_pipe_stage_signature(callee: str) -> ModuleSignature | None:
         base = callee.split("@", 1)[0]
         return (
@@ -2516,8 +2526,28 @@ def _infer_expr_type(
     if isinstance(expr, AxonExprName):
         if expr.name in env:
             return env[expr.name]
+        if "." in expr.name and isinstance(module.imported_members, dict):
+            namespace, _, member = expr.name.partition(".")
+            imported = module.imported_members.get(namespace)
+            if isinstance(imported, tuple) and member in imported and member in env:
+                return env[member]
         if expr.name in dim_symbols:
             return TypeInt()
+        zero_arg_sig = _resolve_zero_arg_name_signature(expr.name)
+        if zero_arg_sig is not None:
+            return _call_return_type(
+                callee=expr.name,
+                args=(),
+                kwargs={},
+                env=env,
+                signatures=signatures,
+                primitive_aliases=primitive_aliases,
+                module=module,
+                path=path,
+                dim_symbols=dim_symbols,
+                rigid_symbols=rigid_symbols,
+                expected_arity=expected_arity,
+            )
         return TypeAny()
     if isinstance(expr, AxonExprList):
         if not expr.items:

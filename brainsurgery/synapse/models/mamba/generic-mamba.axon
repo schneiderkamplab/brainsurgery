@@ -4,16 +4,19 @@
 import Activations (silu)
 import Math (mul)
 import SSM (causal_conv1d, mamba_scan)
+import Config
+import NN
+import Tensor
 
 
 
 -- Mamba-2.8B architecture constants.
-D = Config.int@hidden_size default=2560                          -- residual hidden size
+MODEL_DIM = Config.int@hidden_size default=2560                          -- residual hidden size
 I = Config.int@intermediate_size default=5120                    -- mixer inner width
 N = Config.int@state_size default=16                             -- state-space width
 R = Config.int@time_step_rank default=160                        -- delta rank
-L = Config.int@n_layer default=64                                -- mixer block count
-V = Config.int@vocab_size default=50280                          -- tokenizer vocabulary size
+NUM_LAYERS = Config.int@n_layer default=64                                -- mixer block count
+VOCAB_SIZE = Config.int@vocab_size default=50280                          -- tokenizer vocabulary size
 EPS = Config.float@layer_norm_epsilon default=1e-5               -- RMSNorm epsilon
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
@@ -27,8 +30,8 @@ mamba_mixer x = do
   params <- NN.linear@x_proj u_conv dim=R + 2*N
   dt, b, c <- Tensor.split params sizes=[R, N, N]
   delta <- NN.linear@dt_proj dt dim=I bias=true
-  y_scan <- mamba_scan u_conv delta b c A=@A_log D=@D a_is_log=true
-  return y_scan |> mul (silu gate) |> NN.linear@out_proj dim=D
+  y_scan <- mamba_scan u_conv delta b c A=@A_log MODEL_DIM=@MODEL_DIM a_is_log=true
+  return y_scan |> mul (silu gate) |> NN.linear@out_proj dim=MODEL_DIM
 
 mamba_block :: Tensor[B,S,D] -> Tensor[B,S,D]
 mamba_block x = do
@@ -40,10 +43,10 @@ mamba_block x = do
 mamba_2_8b :: TokenIds[B,S] -> Tensor[B,S,V]
 mamba_2_8b input_ids = do
   logits <- scope@backbone do
-    x <- NN.embedding@embeddings input_ids dim=D
-    x <- for@layers i <- [0..L) carry (x) do
+    x <- NN.embedding@embeddings input_ids dim=MODEL_DIM
+    x <- for@layers i <- [0..NUM_LAYERS) carry (x) do
       x <- mamba_block x
       yield x
     x <- rms@norm_f x
-    return NN.linear@embeddings x dim=V
+    return NN.linear@embeddings x dim=VOCAB_SIZE
   return logits

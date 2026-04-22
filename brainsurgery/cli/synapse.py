@@ -46,6 +46,24 @@ def _render_synapse_to_axon_text(spec: dict[str, Any], *, module_name: str) -> s
     return render_fn(spec, module_name=module_name)
 
 
+def _resolve_axon_to_text(axon_path: Path, *, strict: bool = False) -> str:
+    module = _synapse_module()
+    resolve_fn = getattr(module, "resolve_axon_program_to_source")
+    return resolve_fn(axon_path, strict=strict)
+
+
+def _resolve_axon_program(axon_path: Path, *, strict: bool = False) -> Any:
+    module = _synapse_module()
+    resolve_fn = getattr(module, "resolve_axon_program_from_path")
+    return resolve_fn(axon_path, strict=strict)
+
+
+def _render_resolved_axon_program(program: Any) -> str:
+    module = _synapse_module()
+    render_fn = getattr(module, "render_resolved_axon_program")
+    return render_fn(program)
+
+
 def _build_pipeline_plan_for_axon(
     axon_path: Path, *, device: str = "cuda", main_module: str | None = None
 ) -> Any:
@@ -208,6 +226,52 @@ def synapse_to_axon(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
     typer.echo(f"Wrote Axon source to {output_path}")
+
+
+@app.command("axon-resolve")
+def axon_resolve(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    output_path: Path = typer.Argument(
+        ...,
+        help="Destination Axon file with imports resolved away.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite output file if it already exists.",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Fail when the resolver emits warnings.",
+    ),
+) -> None:
+    """Resolve imports into one Axon file without import statements."""
+    _ensure_overwrite_allowed(output_path, force=force)
+    if output_path.suffix != ".axon":
+        raise typer.BadParameter("Output path must end with .axon")
+
+    try:
+        program = _resolve_axon_program(axon_path, strict=strict)
+        text = _render_resolved_axon_program(program)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+    for diagnostic in program.diagnostics:
+        level = diagnostic.level.upper()
+        prefix = f"{diagnostic.file_path}: " if diagnostic.file_path is not None else ""
+        typer.echo(f"{level}: {prefix}{diagnostic.message}", err=True)
+    typer.echo(f"Wrote resolved Axon source to {output_path}")
 
 
 @app.command("axon-test")

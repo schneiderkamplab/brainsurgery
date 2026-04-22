@@ -13,6 +13,9 @@ import MoE
 import MoE (grouped_sigmoid_router, scatter_add, select)
 import Positions
 import Positions (position_ids, rope_pair_base)
+import Cache
+import NN
+import Tensor
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-05

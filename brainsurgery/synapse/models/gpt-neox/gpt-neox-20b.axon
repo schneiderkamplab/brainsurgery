@@ -2,13 +2,15 @@
 {-# TASK "causal_lm" #-}
 
 import Activations
-import Activations (gelu, gelu_new)
+import Activations (gelu_new)
 import Attention
 import Attention (attention, merge_heads, split_qkv_heads)
 import Masking
 import Masking (causal_mask)
 import Positions
 import Positions (position_ids, rope_pair_base)
+import Cache
+import NN
 
 neox_ln :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 neox_ln@path x = NN.layernorm@path x eps=1e-05

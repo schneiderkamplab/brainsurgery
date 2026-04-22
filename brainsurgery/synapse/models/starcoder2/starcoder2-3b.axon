@@ -2,7 +2,7 @@
 {-# TASK "causal_lm" #-}
 
 import Activations
-import Activations (gelu, gelu_pytorch_tanh)
+import Activations (gelu_pytorch_tanh)
 import Attention
 import Attention (attention, merge_heads, reshape_heads)
 import Masking
@@ -11,6 +11,9 @@ import Params
 import Params (has_root)
 import Positions
 import Positions (position_ids, rope_pair_base)
+import Cache
+import NN
+import Tensor
 
 HAS_LM_HEAD = has_root "lm_head"
 HAS_LM_HEAD_BIAS = has_root "lm_head.bias"

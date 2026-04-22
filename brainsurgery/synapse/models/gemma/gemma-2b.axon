@@ -8,11 +8,14 @@ import Attention (attention, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
 import Math
-import Math (mul, sqrt)
+import Math (mul)
 import Params
 import Params (has_root)
 import Positions
 import Positions (position_ids, rope_pair_base)
+import Cache
+import NN
+import Tensor
 
 HAS_LM_HEAD = has_root "lm_head"
 

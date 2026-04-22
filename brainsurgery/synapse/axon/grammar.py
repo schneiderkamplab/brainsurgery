@@ -1247,7 +1247,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         token = children[0]
         assert isinstance(token, Token)
         text = str(token)
-        if "@" in text or "." in text or "::" in text or text in _ZERO_ARG_CALLS:
+        if "@" in text or "::" in text or text in _ZERO_ARG_CALLS:
             return AxonExprCall(callee=text, args=(), kwargs={})
         return AxonExprName(name=text)
 

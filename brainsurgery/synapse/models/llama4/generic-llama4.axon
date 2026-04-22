@@ -7,25 +7,29 @@ import Masking (causal_mask)
 import Math (floor, log, mul, sqrt)
 import MoE (grouped_swiglu_ffn_basic, sigmoid_topk_router)
 import Positions (position_ids, rope_pair_base, rope_pair_freq_scale)
+import Cache
+import Config
+import NN
+import Tensor
 
 
 
 CFG = "text_config"
 
-D = Config.int @'{CFG}.hidden_size' default=5120
-V = Config.int @'{CFG}.vocab_size' default=202048
-L = Config.int @'{CFG}.num_hidden_layers' default=48
-H = Config.int @'{CFG}.num_attention_heads' default=40
+MODEL_DIM = Config.int @'{CFG}.hidden_size' default=5120
+VOCAB_SIZE = Config.int @'{CFG}.vocab_size' default=202048
+NUM_LAYERS = Config.int @'{CFG}.num_hidden_layers' default=48
+NUM_HEADS = Config.int @'{CFG}.num_attention_heads' default=40
 KVH = Config.int @'{CFG}.num_key_value_heads' default=8
-HD = Config.int @'{CFG}.head_dim' default=128
-KVD = KVH * HD
+MODEL_HEAD_DIM = Config.int @'{CFG}.head_dim' default=128
+KVD = KVH * MODEL_HEAD_DIM
 FFN = Config.int @'{CFG}.intermediate_size' default=8192
 FFN_SHARED = Config.int @'{CFG}.intermediate_size_mlp' default=16384
 E = Config.int @'{CFG}.num_local_experts' default=16
 EPT = Config.int @'{CFG}.num_experts_per_tok' default=1
 EPS = Config.float @'{CFG}.rms_norm_eps' default=1e-05
 THETA = Config.float @'{CFG}.rope_theta' default=500000.0
-C = Config.int @'{CFG}.max_position_embeddings' default=262144
+MAX_POSITIONS = Config.int @'{CFG}.max_position_embeddings' default=262144
 ROPE_SCALE = Config.float @'{CFG}.rope_scaling.factor' default=16.0
 ROPE_LOW_FREQ = Config.float @'{CFG}.rope_scaling.low_freq_factor' default=1.0
 ROPE_HIGH_FREQ = Config.float @'{CFG}.rope_scaling.high_freq_factor' default=1.0
@@ -37,7 +41,7 @@ USE_QK_NORM = Config.bool @'{CFG}.use_qk_norm' default=true
 USE_TEMP_TUNING = Config.bool @'{CFG}.attn_temperature_tuning' default=true
 FLOOR_SCALE = Config.float @'{CFG}.floor_scale' default=8192.0
 ATTN_TEMP_SCALE = Config.float @'{CFG}.attn_scale' default=0.1
-ATTN_SCALE = 1.0 / sqrt HD
+ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
 llama4_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 llama4_norm@path x = NN.rmsnorm@path x eps=EPS
@@ -58,7 +62,7 @@ llama4_moe x = do
   shared <- scope@shared_expert do
     gate <- NN.linear@gate_proj x dim=FFN_SHARED bias=false
     up <- NN.linear@up_proj x dim=FFN_SHARED bias=false
-    return gate |> silu |> mul up |> NN.linear@down_proj dim=D bias=false
+    return gate |> silu |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
   topk_weights, topk_indices <- sigmoid_topk_router@router x top_k=EPT
   routed <- grouped_swiglu_ffn_basic x topk_weights topk_indices E transpose=true pre_scale_input=true
   return shared + routed
@@ -68,7 +72,7 @@ llama4_block x i pos_ids attn_mask past_kv = do
   use_rope <- ((i + 1) % NO_ROPE_INTERVAL) != 0
   xn <- llama4_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=D bias=false |> reshape_heads heads=H
+    q <- NN.linear@q_proj xn dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
     q, k <- use_rope ? (HAS_LLAMA3_FREQ_SPLIT ? (rope_pair_freq_scale q k pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT interleaved=true) : (rope_pair_base q k pos_ids theta=THETA scale_factor=ROPE_SCALE interleaved=true)) : (q, k)
@@ -76,10 +80,10 @@ llama4_block x i pos_ids attn_mask past_kv = do
     k <- (USE_QK_NORM and use_rope) ? (NN.l2norm k eps=EPS) : k
     q <- ((USE_TEMP_TUNING and (use_rope == false)) ? (q * (llama4_temp_scale pos_ids)) : q)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=(H / KVH)
-    v <- Tensor.repeat v repeats=(H / KVH)
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
     mask <- use_rope ? (causal_mask q k window=ATTN_CHUNK padding_mask=attn_mask) : (causal_mask q k padding_mask=attn_mask)
-    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=D bias=false
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
     return a, new_kv
   x <- x + a
   xn <- llama4_norm@post_attention_layernorm x
@@ -91,14 +95,14 @@ llama4 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?C
 llama4 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@language_model.model do
-    x <- NN.embedding@embed_tokens input_ids dim=D
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..L) carry (x, new_kv) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- llama4_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- llama4_norm@norm x
     return x, new_kv
-  logits <- NN.linear@language_model.lm_head x dim=V bias=false
+  logits <- NN.linear@language_model.lm_head x dim=VOCAB_SIZE bias=false
   return logits, new_kv

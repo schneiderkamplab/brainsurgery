@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +37,12 @@ class _LoadedSyntaxFile:
     path: Path
     namespace: str | None
     parsed_source: ParsedProgramSource
+
+
+@dataclass(frozen=True)
+class _ImportUsage:
+    qualified_namespaces: frozenset[str]
+    unqualified_symbols: frozenset[str]
 
 
 def _collect_expr_names(expr: AxonExpr) -> set[str]:
@@ -140,6 +147,258 @@ def _collect_constant_closure(
     for name in ordered_seeds:
         _visit(name)
     return closure
+
+
+def _track_import_usage_expr(
+    expr: AxonExpr,
+    *,
+    bound_names: set[str],
+    qualified_namespaces: set[str],
+    unqualified_symbols: set[str],
+) -> None:
+    if isinstance(expr, AxonExprName):
+        if "." in expr.name:
+            namespace, _ = expr.name.rsplit(".", 1)
+            qualified_namespaces.add(namespace)
+        elif expr.name not in bound_names:
+            unqualified_symbols.add(expr.name)
+        return
+    if isinstance(expr, AxonExprParen):
+        _track_import_usage_expr(
+            expr.inner,
+            bound_names=bound_names,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        return
+    if isinstance(expr, AxonExprList):
+        for item in expr.items:
+            _track_import_usage_expr(
+                item,
+                bound_names=bound_names,
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+        return
+    if isinstance(expr, AxonExprTuple):
+        for item in expr.items:
+            _track_import_usage_expr(
+                item,
+                bound_names=bound_names,
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+        return
+    if isinstance(expr, AxonExprPipe):
+        _track_import_usage_expr(
+            expr.value,
+            bound_names=bound_names,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        for stage in expr.stages:
+            _track_import_usage_expr(
+                stage,
+                bound_names=bound_names,
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+        return
+    if isinstance(expr, AxonExprBind):
+        _track_import_usage_expr(
+            expr.value,
+            bound_names=bound_names,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        nested_bound = set(bound_names)
+        nested_bound.add(expr.var)
+        _track_import_usage_expr(
+            expr.body,
+            bound_names=nested_bound,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        return
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        _track_import_usage_expr(
+            expr.cond,
+            bound_names=bound_names,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        _track_import_usage_expr(
+            expr.true_expr,
+            bound_names=bound_names,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        _track_import_usage_expr(
+            expr.false_expr,
+            bound_names=bound_names,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        return
+    if isinstance(expr, AxonExprBinary):
+        _track_import_usage_expr(
+            expr.left,
+            bound_names=bound_names,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        _track_import_usage_expr(
+            expr.right,
+            bound_names=bound_names,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        return
+    if isinstance(expr, AxonExprCall):
+        base = expr.callee.split("@", 1)[0]
+        if "." in base:
+            namespace, _ = base.rsplit(".", 1)
+            qualified_namespaces.add(namespace)
+        elif base not in bound_names:
+            unqualified_symbols.add(base)
+        for arg in expr.args:
+            _track_import_usage_expr(
+                arg,
+                bound_names=bound_names,
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+        for kwarg in expr.kwargs.values():
+            if isinstance(kwarg, AxonExpr):
+                _track_import_usage_expr(
+                    kwarg,
+                    bound_names=bound_names,
+                    qualified_namespaces=qualified_namespaces,
+                    unqualified_symbols=unqualified_symbols,
+                )
+        return
+    if isinstance(expr, AxonExprLambda):
+        nested_bound = set(bound_names)
+        nested_bound.add(expr.var)
+        _track_import_usage_expr(
+            expr.body,
+            bound_names=nested_bound,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+        return
+    if isinstance(expr, AxonExprDo):
+        _track_import_usage_statements(
+            expr.body,
+            bound_names=set(bound_names),
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+
+
+def _track_import_usage_statements(
+    statements: tuple[AxonStatement, ...],
+    *,
+    bound_names: set[str],
+    qualified_namespaces: set[str],
+    unqualified_symbols: set[str],
+) -> None:
+    local_bound = set(bound_names)
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            _track_import_usage_expr(
+                stmt.expr,
+                bound_names=local_bound,
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+            for target in stmt.targets:
+                if target != "_":
+                    local_bound.add(target)
+            continue
+        if isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                _track_import_usage_expr(
+                    value,
+                    bound_names=local_bound,
+                    qualified_namespaces=qualified_namespaces,
+                    unqualified_symbols=unqualified_symbols,
+                )
+            continue
+        if isinstance(stmt, AxonRepeat):
+            _track_import_usage_expr(
+                stmt.from_expr,
+                bound_names=local_bound,
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+            _track_import_usage_expr(
+                stmt.to_expr,
+                bound_names=local_bound,
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+            _track_import_usage_expr(
+                stmt.step_expr,
+                bound_names=local_bound,
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+            loop_bound = set(local_bound)
+            loop_bound.add(stmt.var)
+            if stmt.carry:
+                for name in stmt.carry:
+                    if name != "_":
+                        loop_bound.add(name)
+            _track_import_usage_statements(
+                stmt.body,
+                bound_names=loop_bound,
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+            if stmt.targets:
+                for target in stmt.targets:
+                    if target != "_":
+                        local_bound.add(target)
+            continue
+        if isinstance(stmt, AxonScopeBind):
+            for kwarg in stmt.kwargs.values():
+                if isinstance(kwarg, AxonExpr):
+                    _track_import_usage_expr(
+                        kwarg,
+                        bound_names=local_bound,
+                        qualified_namespaces=qualified_namespaces,
+                        unqualified_symbols=unqualified_symbols,
+                    )
+            _track_import_usage_statements(
+                stmt.body,
+                bound_names=set(local_bound),
+                qualified_namespaces=qualified_namespaces,
+                unqualified_symbols=unqualified_symbols,
+            )
+            for target in stmt.targets:
+                if target != "_":
+                    local_bound.add(target)
+
+
+def _collect_import_usage(modules: tuple[AxonModule, ...]) -> _ImportUsage:
+    qualified_namespaces: set[str] = set()
+    unqualified_symbols: set[str] = set()
+    for module in modules:
+        bound_names = {param.name for param in module.params}
+        bound_names.update(name for name in module.path_params if isinstance(name, str))
+        if isinstance(module.path_param, str):
+            bound_names.add(module.path_param)
+        _track_import_usage_statements(
+            module.statements,
+            bound_names=bound_names,
+            qualified_namespaces=qualified_namespaces,
+            unqualified_symbols=unqualified_symbols,
+        )
+    return _ImportUsage(
+        qualified_namespaces=frozenset(qualified_namespaces),
+        unqualified_symbols=frozenset(unqualified_symbols),
+    )
 
 
 def _apply_namespace(
@@ -277,6 +536,451 @@ def _apply_namespace(
     return tuple(namespaced)
 
 
+def _warn_unused_imports(
+    *,
+    file_path: Path,
+    parsed_source: ParsedProgramSource,
+    usage: _ImportUsage,
+    enabled: bool = True,
+) -> None:
+    if not enabled:
+        return
+    imported_members = parsed_source.imported_members
+    for namespace in parsed_source.imports:
+        members = imported_members.get(namespace)
+        if members:
+            for member in members:
+                if member not in usage.unqualified_symbols:
+                    warnings.warn(
+                        f"{file_path}: unused unqualified import {namespace}.{member}",
+                        stacklevel=2,
+                    )
+            continue
+        if namespace not in usage.qualified_namespaces:
+            warnings.warn(
+                f"{file_path}: unused qualified import {namespace}",
+                stacklevel=2,
+            )
+
+
+def _rewrite_imported_member_refs(
+    modules: tuple[AxonModule, ...],
+    *,
+    imported_members: dict[str, tuple[str, ...]] | None,
+) -> tuple[AxonModule, ...]:
+    if not imported_members:
+        return modules
+    providers: dict[str, tuple[str, ...]] = {}
+    for namespace, members in imported_members.items():
+        for member in members:
+            prev = providers.get(member, ())
+            if namespace not in prev:
+                providers[member] = (*prev, namespace)
+
+    def _qualify_member(member: str, module_name: str) -> str:
+        namespaces = providers.get(member, ())
+        if not namespaces:
+            return member
+        if len(namespaces) > 1:
+            choices = ", ".join(sorted(namespaces))
+            raise ValueError(
+                f"Axon import resolution failed in module {module_name!r}: ambiguous imported member "
+                f"{member!r}; found in namespaces: {choices}"
+            )
+        return f"{namespaces[0]}.{member}"
+
+    def _rewrite_expr(expr: AxonExpr, *, bound_names: set[str], module_name: str) -> AxonExpr:
+        if isinstance(expr, AxonExprName):
+            if "." in expr.name or expr.name in bound_names:
+                return expr
+            qualified = _qualify_member(expr.name, module_name)
+            if qualified == expr.name:
+                return expr
+            return AxonExprName(name=qualified)
+        if isinstance(expr, AxonExprCall):
+            base, sep, suffix = expr.callee.partition("@")
+            if "." not in base and base not in bound_names:
+                qualified = _qualify_member(base, module_name)
+                callee = f"{qualified}{sep}{suffix}" if sep else qualified
+            else:
+                callee = expr.callee
+            return AxonExprCall(
+                callee=callee,
+                args=tuple(
+                    _rewrite_expr(arg, bound_names=bound_names, module_name=module_name)
+                    for arg in expr.args
+                ),
+                kwargs={
+                    key: (
+                        _rewrite_expr(value, bound_names=bound_names, module_name=module_name)
+                        if isinstance(value, AxonExpr)
+                        else value
+                    )
+                    for key, value in expr.kwargs.items()
+                },
+            )
+        if isinstance(expr, AxonExprPipe):
+            return AxonExprPipe(
+                value=_rewrite_expr(expr.value, bound_names=bound_names, module_name=module_name),
+                stages=tuple(
+                    _rewrite_expr(stage, bound_names=bound_names, module_name=module_name)
+                    for stage in expr.stages
+                ),
+            )
+        if isinstance(expr, AxonExprBind):
+            value = _rewrite_expr(expr.value, bound_names=bound_names, module_name=module_name)
+            nested_bound = set(bound_names)
+            nested_bound.add(expr.var)
+            body = _rewrite_expr(expr.body, bound_names=nested_bound, module_name=module_name)
+            return AxonExprBind(value=value, var=expr.var, body=body)
+        if isinstance(expr, AxonExprIf):
+            return AxonExprIf(
+                cond=_rewrite_expr(expr.cond, bound_names=bound_names, module_name=module_name),
+                true_expr=_rewrite_expr(
+                    expr.true_expr, bound_names=bound_names, module_name=module_name
+                ),
+                false_expr=_rewrite_expr(
+                    expr.false_expr, bound_names=bound_names, module_name=module_name
+                ),
+            )
+        if isinstance(expr, AxonExprTernary):
+            return AxonExprTernary(
+                cond=_rewrite_expr(expr.cond, bound_names=bound_names, module_name=module_name),
+                true_expr=_rewrite_expr(
+                    expr.true_expr, bound_names=bound_names, module_name=module_name
+                ),
+                false_expr=_rewrite_expr(
+                    expr.false_expr, bound_names=bound_names, module_name=module_name
+                ),
+            )
+        if isinstance(expr, AxonExprBinary):
+            return AxonExprBinary(
+                op=expr.op,
+                left=_rewrite_expr(expr.left, bound_names=bound_names, module_name=module_name),
+                right=_rewrite_expr(expr.right, bound_names=bound_names, module_name=module_name),
+            )
+        if isinstance(expr, AxonExprLambda):
+            nested_bound = set(bound_names)
+            nested_bound.add(expr.var)
+            return AxonExprLambda(
+                var=expr.var,
+                body=_rewrite_expr(expr.body, bound_names=nested_bound, module_name=module_name),
+            )
+        if isinstance(expr, AxonExprParen):
+            return AxonExprParen(
+                inner=_rewrite_expr(expr.inner, bound_names=bound_names, module_name=module_name)
+            )
+        if isinstance(expr, AxonExprList):
+            return AxonExprList(
+                items=tuple(
+                    _rewrite_expr(item, bound_names=bound_names, module_name=module_name)
+                    for item in expr.items
+                )
+            )
+        if isinstance(expr, AxonExprTuple):
+            return AxonExprTuple(
+                items=tuple(
+                    _rewrite_expr(item, bound_names=bound_names, module_name=module_name)
+                    for item in expr.items
+                )
+            )
+        if isinstance(expr, AxonExprDo):
+            return AxonExprDo(
+                body=_rewrite_statements(
+                    expr.body, bound_names=set(bound_names), module_name=module_name
+                ),
+                inline=expr.inline,
+            )
+        return expr
+
+    def _rewrite_statements(
+        statements: tuple[AxonStatement, ...],
+        *,
+        bound_names: set[str],
+        module_name: str,
+    ) -> tuple[AxonStatement, ...]:
+        rewritten: list[AxonStatement] = []
+        local_bound = set(bound_names)
+        for stmt in statements:
+            if isinstance(stmt, AxonBind):
+                rewritten.append(
+                    AxonBind(
+                        targets=stmt.targets,
+                        expr=_rewrite_expr(
+                            stmt.expr,
+                            bound_names=local_bound,
+                            module_name=module_name,
+                        ),
+                    )
+                )
+                for target in stmt.targets:
+                    if target != "_":
+                        local_bound.add(target)
+                continue
+            if isinstance(stmt, AxonReturn):
+                rewritten.append(
+                    AxonReturn(
+                        values=tuple(
+                            _rewrite_expr(value, bound_names=local_bound, module_name=module_name)
+                            for value in stmt.values
+                        )
+                    )
+                )
+                continue
+            if isinstance(stmt, AxonYield):
+                rewritten.append(
+                    AxonYield(
+                        values=tuple(
+                            _rewrite_expr(value, bound_names=local_bound, module_name=module_name)
+                            for value in stmt.values
+                        )
+                    )
+                )
+                continue
+            if isinstance(stmt, AxonRepeat):
+                loop_bound = set(local_bound)
+                loop_bound.add(stmt.var)
+                if stmt.carry:
+                    for name in stmt.carry:
+                        if name != "_":
+                            loop_bound.add(name)
+                rewritten.append(
+                    AxonRepeat(
+                        name=stmt.name,
+                        var=stmt.var,
+                        to_expr=_rewrite_expr(
+                            stmt.to_expr, bound_names=local_bound, module_name=module_name
+                        ),
+                        from_expr=_rewrite_expr(
+                            stmt.from_expr, bound_names=local_bound, module_name=module_name
+                        ),
+                        step_expr=_rewrite_expr(
+                            stmt.step_expr, bound_names=local_bound, module_name=module_name
+                        ),
+                        body=_rewrite_statements(
+                            stmt.body,
+                            bound_names=loop_bound,
+                            module_name=module_name,
+                        ),
+                        targets=stmt.targets,
+                        carry=stmt.carry,
+                    )
+                )
+                if stmt.targets:
+                    for target in stmt.targets:
+                        if target != "_":
+                            local_bound.add(target)
+                continue
+            if isinstance(stmt, AxonScopeBind):
+                rewritten.append(
+                    AxonScopeBind(
+                        targets=stmt.targets,
+                        prefix=stmt.prefix,
+                        body=_rewrite_statements(
+                            stmt.body,
+                            bound_names=set(local_bound),
+                            module_name=module_name,
+                        ),
+                        kwargs={
+                            key: (
+                                _rewrite_expr(
+                                    value, bound_names=local_bound, module_name=module_name
+                                )
+                                if isinstance(value, AxonExpr)
+                                else value
+                            )
+                            for key, value in stmt.kwargs.items()
+                        },
+                    )
+                )
+                for target in stmt.targets:
+                    if target != "_":
+                        local_bound.add(target)
+                continue
+            rewritten.append(stmt)
+        return tuple(rewritten)
+
+    out: list[AxonModule] = []
+    for module in modules:
+        bound_names = {param.name for param in module.params}
+        bound_names.update(name for name in module.path_params if isinstance(name, str))
+        if isinstance(module.path_param, str):
+            bound_names.add(module.path_param)
+        out.append(
+            AxonModule(
+                name=module.name,
+                path_param=module.path_param,
+                path_params=module.path_params,
+                params=module.params,
+                returns=module.returns,
+                statements=_rewrite_statements(
+                    module.statements,
+                    bound_names=bound_names,
+                    module_name=module.name,
+                ),
+                imports=module.imports,
+                imported_members=module.imported_members,
+                exports=module.exports,
+                symbols=module.symbols,
+                pragmas=module.pragmas,
+                type_aliases=module.type_aliases,
+                return_type_expr=module.return_type_expr,
+                return_shape=module.return_shape,
+            )
+        )
+    return tuple(out)
+
+
+def _collect_called_modules(modules: tuple[AxonModule, ...]) -> dict[str, set[str]]:
+    module_names = {module.name for module in modules}
+    calls: dict[str, set[str]] = {}
+
+    for module in modules:
+        imported_targets: dict[str, tuple[str, ...]] = {}
+        if module.imported_members:
+            for namespace, members in module.imported_members.items():
+                for member in members:
+                    qualified = f"{namespace}.{member}"
+                    if qualified not in module_names:
+                        continue
+                    prev = imported_targets.get(member, ())
+                    if qualified not in prev:
+                        imported_targets[member] = (*prev, qualified)
+
+        def _add_candidates(name: str, *, bound_names: set[str], acc: set[str]) -> None:
+            if name in bound_names:
+                return
+            if name in module_names:
+                acc.add(name)
+            if "." not in name:
+                for qualified in imported_targets.get(name, ()):
+                    acc.add(qualified)
+
+        def _track_expr(
+            expr: AxonExpr,
+            *,
+            bound_names: set[str],
+            acc: set[str],
+        ) -> None:
+            if isinstance(expr, AxonExprName):
+                _add_candidates(expr.name, bound_names=bound_names, acc=acc)
+                return
+            if isinstance(expr, AxonExprCall):
+                base = expr.callee.split("@", 1)[0]
+                _add_candidates(base, bound_names=bound_names, acc=acc)
+                for arg in expr.args:
+                    _track_expr(arg, bound_names=bound_names, acc=acc)
+                for kwarg in expr.kwargs.values():
+                    if isinstance(kwarg, AxonExpr):
+                        _track_expr(kwarg, bound_names=bound_names, acc=acc)
+                return
+            if isinstance(expr, AxonExprParen):
+                _track_expr(expr.inner, bound_names=bound_names, acc=acc)
+                return
+            if isinstance(expr, AxonExprList | AxonExprTuple):
+                for item in expr.items:
+                    _track_expr(item, bound_names=bound_names, acc=acc)
+                return
+            if isinstance(expr, AxonExprPipe):
+                _track_expr(expr.value, bound_names=bound_names, acc=acc)
+                for stage in expr.stages:
+                    _track_expr(stage, bound_names=bound_names, acc=acc)
+                return
+            if isinstance(expr, AxonExprBind):
+                _track_expr(expr.value, bound_names=bound_names, acc=acc)
+                nested_bound = set(bound_names)
+                nested_bound.add(expr.var)
+                _track_expr(expr.body, bound_names=nested_bound, acc=acc)
+                return
+            if isinstance(expr, AxonExprIf | AxonExprTernary):
+                _track_expr(expr.cond, bound_names=bound_names, acc=acc)
+                _track_expr(expr.true_expr, bound_names=bound_names, acc=acc)
+                _track_expr(expr.false_expr, bound_names=bound_names, acc=acc)
+                return
+            if isinstance(expr, AxonExprBinary):
+                _track_expr(expr.left, bound_names=bound_names, acc=acc)
+                _track_expr(expr.right, bound_names=bound_names, acc=acc)
+                return
+            if isinstance(expr, AxonExprLambda):
+                nested_bound = set(bound_names)
+                nested_bound.add(expr.var)
+                _track_expr(expr.body, bound_names=nested_bound, acc=acc)
+                return
+            if isinstance(expr, AxonExprDo):
+                _track_statements(expr.body, bound_names=set(bound_names), acc=acc)
+
+        def _track_statements(
+            statements: tuple[AxonStatement, ...],
+            *,
+            bound_names: set[str],
+            acc: set[str],
+        ) -> None:
+            local_bound = set(bound_names)
+            for stmt in statements:
+                if isinstance(stmt, AxonBind):
+                    _track_expr(stmt.expr, bound_names=local_bound, acc=acc)
+                    for target in stmt.targets:
+                        if target != "_":
+                            local_bound.add(target)
+                    continue
+                if isinstance(stmt, AxonReturn | AxonYield):
+                    for value in stmt.values:
+                        _track_expr(value, bound_names=local_bound, acc=acc)
+                    continue
+                if isinstance(stmt, AxonRepeat):
+                    _track_expr(stmt.from_expr, bound_names=local_bound, acc=acc)
+                    _track_expr(stmt.to_expr, bound_names=local_bound, acc=acc)
+                    _track_expr(stmt.step_expr, bound_names=local_bound, acc=acc)
+                    loop_bound = set(local_bound)
+                    loop_bound.add(stmt.var)
+                    if stmt.carry:
+                        for name in stmt.carry:
+                            if name != "_":
+                                loop_bound.add(name)
+                    _track_statements(stmt.body, bound_names=loop_bound, acc=acc)
+                    if stmt.targets:
+                        for target in stmt.targets:
+                            if target != "_":
+                                local_bound.add(target)
+                    continue
+                if isinstance(stmt, AxonScopeBind):
+                    for kwarg in stmt.kwargs.values():
+                        if isinstance(kwarg, AxonExpr):
+                            _track_expr(kwarg, bound_names=local_bound, acc=acc)
+                    _track_statements(stmt.body, bound_names=set(local_bound), acc=acc)
+                    for target in stmt.targets:
+                        if target != "_":
+                            local_bound.add(target)
+
+        bound_names = {param.name for param in module.params}
+        bound_names.update(name for name in module.path_params if isinstance(name, str))
+        if isinstance(module.path_param, str):
+            bound_names.add(module.path_param)
+        acc: set[str] = set()
+        _track_statements(module.statements, bound_names=bound_names, acc=acc)
+        calls[module.name] = acc
+    return calls
+
+
+def _prune_to_reachable_modules(
+    modules: tuple[AxonModule, ...],
+    *,
+    root_module_names: tuple[str, ...],
+) -> tuple[AxonModule, ...]:
+    calls = _collect_called_modules(modules)
+    reachable: set[str] = set()
+    stack = [name for name in root_module_names if name in calls]
+    while stack:
+        name = stack.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        for dep in calls.get(name, ()):
+            if dep not in reachable:
+                stack.append(dep)
+    return tuple(module for module in modules if module.name in reachable)
+
+
 def _axon_search_paths() -> tuple[Path, ...]:
     raw = os.environ.get("AXON_PATH", "")
     if not raw:
@@ -333,7 +1037,6 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
     ordered_files: list[_LoadedSyntaxFile] = []
 
     builtins_dir = (Path(__file__).resolve().parents[1] / "builtins").resolve()
-    builtin_files = tuple(sorted(path for path in builtins_dir.glob("*.axon") if path.is_file()))
     search_paths = _axon_search_paths()
 
     def _load_file_syntax(file_path: Path, *, namespace: str | None = None) -> None:
@@ -357,12 +1060,6 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
         seen_paths.add(resolved)
         visiting.pop()
 
-    # For model/user Axon roots, implicitly load all builtins under
-    # their own namespaces (Math, Activations, Tensor, Positions, ...). This
-    # enables namespaced calls like `Math.exp` without explicit import lines.
-    if builtins_dir not in root.parents:
-        for builtin_file in builtin_files:
-            _load_file_syntax(builtin_file, namespace=builtin_file.stem)
     _load_file_syntax(root)
 
     # Local import avoids a parser<->import_loader import cycle at module import time.
@@ -372,6 +1069,7 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
     loaded_by_namespace: dict[str, _LoadedSyntaxFile] = {
         loaded.namespace: loaded for loaded in ordered_files if loaded.namespace is not None
     }
+    root_module_names: tuple[str, ...] = ()
     for loaded in ordered_files:
         effective_imported_members: dict[str, tuple[str, ...]] = dict(
             loaded.parsed_source.imported_members
@@ -413,9 +1111,25 @@ def load_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
             if effective_imported_members
             else None,
         )
-        ordered_modules.extend(_apply_namespace(modules, loaded.namespace))
+        usage = _collect_import_usage(modules)
+        _warn_unused_imports(
+            file_path=loaded.path,
+            parsed_source=loaded.parsed_source,
+            usage=usage,
+            enabled=builtins_dir not in loaded.path.parents,
+        )
+        linked_modules = _rewrite_imported_member_refs(
+            modules,
+            imported_members=effective_imported_members if effective_imported_members else None,
+        )
+        namespaced_modules = _apply_namespace(linked_modules, loaded.namespace)
+        if loaded.path == root and loaded.namespace is None:
+            root_module_names = tuple(module.name for module in namespaced_modules)
+        ordered_modules.extend(namespaced_modules)
 
     out = tuple(ordered_modules)
+    if root_module_names:
+        out = _prune_to_reachable_modules(out, root_module_names=root_module_names)
     validate_axon_program(out)
     return out
 
