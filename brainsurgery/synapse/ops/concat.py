@@ -4,6 +4,8 @@ from typing import Any
 
 import torch
 
+from ..axon.ast import AxonExprAscribe, AxonExprInt, AxonExprParen
+
 OP_NAME = "concat"
 LOWERING_ARITY = (2, 2)
 LOWERING_ALLOWED_KWARGS: set[str] = {"dim"}
@@ -90,6 +92,46 @@ LOWERING_TYPE_SIGNATURE = {
     "returns": "dynamic",
 }
 
+
+def type_rule(
+    *,
+    arg_types: tuple[Any, ...],
+    kwarg_types: dict[str, Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    helpers: Any,
+) -> Any | None:
+    del kwarg_types, args
+    if len(arg_types) != 2:
+        return None
+    left_dims = helpers.type_dims(arg_types[0])
+    right_dims = helpers.type_dims(arg_types[1])
+    if left_dims is None or right_dims is None:
+        return None
+    if len(left_dims) != len(right_dims):
+        return None
+    raw_dim = kwargs.get("dim", -1)
+    while isinstance(raw_dim, AxonExprAscribe | AxonExprParen):
+        raw_dim = raw_dim.expr if isinstance(raw_dim, AxonExprAscribe) else raw_dim.inner
+    if isinstance(raw_dim, AxonExprInt):
+        raw_dim = raw_dim.value
+    if isinstance(raw_dim, bool) or not isinstance(raw_dim, int):
+        return None
+    rank = len(left_dims)
+    dim = raw_dim if raw_dim >= 0 else rank + raw_dim
+    if dim < 0 or dim >= rank:
+        return None
+    out_dims: list[Any] = []
+    for idx, (left_dim, right_dim) in enumerate(zip(left_dims, right_dims, strict=True)):
+        if idx == dim:
+            out_dims.append(left_dim + right_dim)
+            continue
+        if left_dim != right_dim:
+            return None
+        out_dims.append(left_dim)
+    return helpers.type_tensor(dims=tuple(out_dims))
+
+
 __all__ = [
     "OP_NAME",
     "LOWERING_ARITY",
@@ -102,4 +144,5 @@ __all__ = [
     "compile",
     "uses_node_path",
     "LOWERING_TYPE_SIGNATURE",
+    "type_rule",
 ]

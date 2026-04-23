@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .types import AxonExprPath
+from .nodes import AxonExprPath
 
 
 def parse_path_token(raw: str, *, op_name: str = "path") -> AxonExprPath:
@@ -59,6 +59,18 @@ def path_expr_template_text(expr: AxonExprPath) -> str:
     return ".".join(expr.parts)
 
 
+def join_path_expr(base: AxonExprPath, child: AxonExprPath) -> AxonExprPath:
+    if child.absolute:
+        return child
+    return AxonExprPath(absolute=base.absolute, parts=(*base.parts, *child.parts))
+
+
+def absolutize_path_expr(expr: AxonExprPath, *, prefix: tuple[str, ...] = ()) -> AxonExprPath:
+    if expr.absolute:
+        return expr
+    return AxonExprPath(absolute=True, parts=(*prefix, *expr.parts))
+
+
 def _resolve_template_text(text: str, env: Mapping[str, Any], op_name: str) -> str:
     if "{" not in text and "}" not in text:
         return text
@@ -112,6 +124,8 @@ def resolve_static_path_expr_to_key(raw: object, *, op_name: str = "Path") -> st
 
 
 __all__ = [
+    "absolutize_path_expr",
+    "join_path_expr",
     "parse_path_token",
     "path_expr_template_text",
     "path_expr_to_runtime_value",

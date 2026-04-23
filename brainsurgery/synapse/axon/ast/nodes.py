@@ -4,7 +4,14 @@ import re
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
-from .type_system import DimToken, TypeExpr
+from .types import Constraint, DimToken, TypeAliasDef, TypeExpr
+
+
+@dataclass(frozen=True, kw_only=True)
+class AxonExprTyping:
+    inferred_type: TypeExpr | None = None
+    inferred_arity: int | None = None
+    inferred_dims: tuple[DimToken, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -17,38 +24,38 @@ class AxonParam:
 
 
 @dataclass(frozen=True)
-class AxonExprName:
+class AxonExprName(AxonExprTyping):
     name: str
 
 
 @dataclass(frozen=True)
-class AxonExprInt:
+class AxonExprInt(AxonExprTyping):
     value: int
 
 
 @dataclass(frozen=True)
-class AxonExprFloat:
+class AxonExprFloat(AxonExprTyping):
     value: float
     lexeme: str | None = None
 
 
 @dataclass(frozen=True)
-class AxonExprBool:
+class AxonExprBool(AxonExprTyping):
     value: bool
 
 
 @dataclass(frozen=True)
-class AxonExprNull:
+class AxonExprNull(AxonExprTyping):
     pass
 
 
 @dataclass(frozen=True)
-class AxonExprString:
+class AxonExprString(AxonExprTyping):
     value: str
 
 
 @dataclass(frozen=True)
-class AxonExprPath:
+class AxonExprPath(AxonExprTyping):
     absolute: bool
     parts: tuple[str, ...]
 
@@ -63,69 +70,75 @@ class AxonExprPath:
 
 
 @dataclass(frozen=True)
-class AxonExprList:
+class AxonExprList(AxonExprTyping):
     items: tuple["AxonExpr", ...]
 
 
 @dataclass(frozen=True)
-class AxonExprTuple:
+class AxonExprTuple(AxonExprTyping):
     items: tuple["AxonExpr", ...]
 
 
 @dataclass(frozen=True)
-class AxonExprCall:
+class AxonExprCall(AxonExprTyping):
     callee: str
     args: tuple["AxonExpr", ...]
     kwargs: dict[str, "AxonKwargValue"]
 
 
 @dataclass(frozen=True)
-class AxonExprPipe:
+class AxonExprPipe(AxonExprTyping):
     value: "AxonExpr"
     stages: tuple["AxonExpr", ...]
 
 
 @dataclass(frozen=True)
-class AxonExprBind:
+class AxonExprBind(AxonExprTyping):
     value: "AxonExpr"
     var: str
     body: "AxonExpr"
 
 
 @dataclass(frozen=True)
-class AxonExprIf:
+class AxonExprIf(AxonExprTyping):
     cond: "AxonExpr"
     true_expr: "AxonExpr"
     false_expr: "AxonExpr"
 
 
 @dataclass(frozen=True)
-class AxonExprTernary:
+class AxonExprTernary(AxonExprTyping):
     cond: "AxonExpr"
     true_expr: "AxonExpr"
     false_expr: "AxonExpr"
 
 
 @dataclass(frozen=True)
-class AxonExprBinary:
+class AxonExprBinary(AxonExprTyping):
     op: str
     left: "AxonExpr"
     right: "AxonExpr"
 
 
 @dataclass(frozen=True)
-class AxonExprLambda:
+class AxonExprLambda(AxonExprTyping):
     var: str
     body: "AxonExpr"
 
 
 @dataclass(frozen=True)
-class AxonExprParen:
+class AxonExprParen(AxonExprTyping):
     inner: "AxonExpr"
 
 
 @dataclass(frozen=True)
-class AxonExprDo:
+class AxonExprAscribe(AxonExprTyping):
+    expr: "AxonExpr"
+    type_expr: TypeExpr
+
+
+@dataclass(frozen=True)
+class AxonExprDo(AxonExprTyping):
     body: tuple["AxonStatement", ...]
     inline: bool = False
 
@@ -148,6 +161,7 @@ AxonExpr = (
     | AxonExprBinary
     | AxonExprLambda
     | AxonExprParen
+    | AxonExprAscribe
     | AxonExprDo
 )
 
@@ -185,14 +199,21 @@ class AxonYield:
 
 
 @dataclass(frozen=True)
+class AxonCond:
+    cond: AxonExpr
+    true_body: tuple["AxonStatement", ...]
+    false_body: tuple["AxonStatement", ...]
+
+
+@dataclass(frozen=True)
 class AxonScopeBind:
     targets: tuple[str, ...]
-    prefix: str
+    prefix: AxonExprPath
     body: tuple["AxonStatement", ...]
     kwargs: dict[str, "AxonKwargValue"] = field(default_factory=dict)
 
 
-AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonYield | AxonScopeBind
+AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonYield | AxonCond | AxonScopeBind
 
 
 @dataclass(frozen=True)
@@ -202,20 +223,23 @@ class AxonModule:
     params: tuple[AxonParam, ...]
     returns: tuple[str, ...]
     statements: tuple[AxonStatement, ...]
+    body_expr: AxonExpr | None = None
     path_params: tuple[str, ...] = ()
     imports: tuple[str, ...] = ()
     imported_members: dict[str, tuple[str, ...]] | None = None
     exports: tuple[str, ...] = ()
     symbols: dict[str, object] | None = None
     pragmas: dict[str, object] | None = None
-    type_aliases: dict[str, TypeExpr] | None = None
+    type_aliases: dict[str, TypeAliasDef] | None = None
     return_type_expr: TypeExpr | None = None
     return_shape: tuple[DimToken, ...] | None = None
+    constraints: tuple[Constraint, ...] | None = None
 
 
 __all__ = [
     "AxonParam",
     "AxonExpr",
+    "AxonExprTyping",
     "AxonExprName",
     "AxonExprInt",
     "AxonExprFloat",
@@ -236,11 +260,13 @@ __all__ = [
     "AxonExprBinary",
     "AxonExprLambda",
     "AxonExprParen",
+    "AxonExprAscribe",
     "AxonExprDo",
     "AxonBind",
     "AxonReturn",
     "AxonRepeat",
     "AxonYield",
+    "AxonCond",
     "AxonScopeBind",
     "AxonStatement",
     "AxonModule",

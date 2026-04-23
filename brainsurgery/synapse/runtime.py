@@ -10,30 +10,47 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from ..core import StateDictLike
-from .axon.path_expr import (
+from .axon.ast import TypeTensor, parse_type_expr
+from .axon.ast.path import (
     path_expr_to_runtime_value,
     resolve_path_expr_to_key,
-    resolve_static_path_expr_to_key,
     runtime_value_to_path_expr,
 )
-from .axon.type_system import TypeTensor, parse_type_expr
 from .mxfp4 import materialize_mxfp4_aliases
 from .ops import get_op_module
 from .spec_normalize import normalize_synapse_spec_expressions
 
-SymbolScalar = int | float | bool | str
-SymbolValue = SymbolScalar | list[SymbolScalar] | tuple[SymbolScalar, ...]
+SymbolValue = Any
 
 
 def _is_int_token(token: str) -> bool:
     return bool(token) and (token.isdigit() or (token[0] in {"+", "-"} and token[1:].isdigit()))
 
 
+def _parse_scalar_token(token: str) -> Any:
+    value = token.strip()
+    lower = value.lower()
+    if lower == "null":
+        return None
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if value and (value.isdigit() or (value[0] in {"+", "-"} and value[1:].isdigit())):
+        return int(value)
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
 def _is_symbol_value(value: Any) -> bool:
     if isinstance(value, (int, float, bool, str)):
         return True
+    if isinstance(value, dict):
+        return True
     if isinstance(value, list | tuple):
-        return all(isinstance(item, (int, float, bool, str)) for item in value)
+        return all(_is_symbol_value(item) for item in value)
     return False
 
 
@@ -53,7 +70,6 @@ class SynapseProgramModel(nn.Module):
         self.spec: dict[str, Any] = self._resolve_spec(spec)
         self._state: Mapping[str, torch.Tensor] = {}
         self._runtime_state_dict = runtime_state_dict
-        self._param_roots_stack: list[list[str]] = []
         if state_dict is not None:
             self.load_state_dict_tensors(state_dict)
 
@@ -408,17 +424,6 @@ class SynapseProgramModel(nn.Module):
                 raise ValueError(f"Missing required input: {input_name}")
         return env
 
-    def _for_values(self, *, from_value: int, to_value: int, step_value: int) -> range:
-        if not isinstance(from_value, int):
-            raise ValueError(f"for _from must resolve to int, got {from_value!r}")
-        if not isinstance(to_value, int):
-            raise ValueError(f"for _to must resolve to int, got {to_value!r}")
-        if not isinstance(step_value, int):
-            raise ValueError(f"for _step must resolve to int, got {step_value!r}")
-        if step_value == 0:
-            raise ValueError("for _step must be non-zero")
-        return range(from_value, to_value, step_value)
-
     def _run_graph(
         self,
         graph: list[Any],
@@ -437,71 +442,7 @@ class SynapseProgramModel(nn.Module):
 
             op = node_spec.get("_op")
             if op == "for":
-                scope_name = node_spec.get("_scope")
-                if not isinstance(scope_name, str):
-                    raise ValueError("for requires string '_scope'")
-                to_value = self._eval_expr(node_spec.get("_to"), env, symbols)
-                from_value = self._eval_expr(node_spec.get("_from", 0), env, symbols)
-                step_value = self._eval_expr(node_spec.get("_step", 1), env, symbols)
-                var_name = node_spec.get("_var")
-                if not isinstance(var_name, str):
-                    raise ValueError("for requires string '_var'")
-                body = node_spec.get("_body")
-                if not isinstance(body, list):
-                    raise ValueError("for requires list '_body'")
-                raw_carry = node_spec.get("_carry")
-                carry_names: list[str] = []
-                if raw_carry is not None:
-                    if not isinstance(raw_carry, list) or not all(
-                        isinstance(name, str) for name in raw_carry
-                    ):
-                        raise ValueError("for _carry must be a list of string names")
-                    carry_names = [name for name in raw_carry if name]
-                    for carry_name in carry_names:
-                        if carry_name not in env:
-                            raise ValueError(f"for carry name not found in scope: {carry_name}")
-                yield_expr = node_spec.get("_yield")
-                raw_bind = node_spec.get("_bind")
-                bind_names: list[str] = []
-                if raw_bind is not None:
-                    if not isinstance(raw_bind, list) or not all(
-                        isinstance(name, str) for name in raw_bind
-                    ):
-                        raise ValueError("for _bind must be a list of string names")
-                    bind_names = [name for name in raw_bind if name]
-                for iter_value in self._for_values(
-                    from_value=from_value, to_value=to_value, step_value=step_value
-                ):
-                    env[var_name] = iter_value
-                    iter_segment = "" if not scope_name else f"{scope_name}.{iter_value}"
-                    for_scope = self._join(scope, iter_segment)
-                    self._run_graph(body, env, scope=for_scope, symbols=symbols, blocks=blocks)
-                    if carry_names:
-                        if yield_expr is None:
-                            yielded_values = [env[name] for name in carry_names]
-                        elif isinstance(yield_expr, list):
-                            yielded_values = [
-                                self._eval_expr(expr, env, symbols) for expr in yield_expr
-                            ]
-                        else:
-                            yielded_values = [self._eval_expr(yield_expr, env, symbols)]
-                        if len(yielded_values) != len(carry_names):
-                            raise ValueError(
-                                f"for yield arity mismatch: expected {len(carry_names)}, got {len(yielded_values)}"
-                            )
-                        for carry_name, value in zip(carry_names, yielded_values, strict=True):
-                            env[carry_name] = value
-                if bind_names:
-                    if not carry_names:
-                        raise ValueError("for _bind requires _carry")
-                    if len(bind_names) != len(carry_names):
-                        raise ValueError(
-                            f"for bind arity mismatch: expected {len(bind_names)}, got {len(carry_names)}"
-                        )
-                    for bind_name, carry_name in zip(bind_names, carry_names, strict=True):
-                        if bind_name != "_":
-                            env[bind_name] = env[carry_name]
-                env.pop(var_name, None)
+                raise ValueError("runtime no longer supports for-nodes; flatten/lower first")
                 continue
 
             if op == "call":
@@ -530,14 +471,6 @@ class SynapseProgramModel(nn.Module):
             if isinstance(param_base, str) and isinstance(env.get(param_base), str):
                 exec_node_spec = dict(node_spec)
                 exec_node_spec[param_base] = env[param_base]
-            param_root_value = node_spec.get("_param_root")
-            if isinstance(param_root_value, dict):
-                if exec_node_spec is node_spec:
-                    exec_node_spec = dict(node_spec)
-                resolved_param_root = self._eval_expr(param_root_value, env, symbols)
-                exec_node_spec["_param_root"] = (
-                    resolved_param_root if isinstance(resolved_param_root, str) else ""
-                )
             self._execute_op(
                 op, exec_node_spec, env, node_path=node_path, scope=scope, symbols=symbols
             )
@@ -596,27 +529,6 @@ class SynapseProgramModel(nn.Module):
         block_graph = block_spec.get("graph")
         if not isinstance(block_graph, list):
             raise ValueError("block spec must include list graph")
-        call_scope = scope
-        raw_scope = node_spec.get("_scope")
-        if isinstance(raw_scope, str) and raw_scope:
-            call_scope = self._join(scope, raw_scope)
-        raw_param_root = node_spec.get("_param_root")
-        pushed_roots: list[str] | None = None
-        if isinstance(raw_param_root, dict):
-            resolved_root = self._eval_expr(raw_param_root, env, symbols)
-            if isinstance(resolved_root, str):
-                pushed_roots = [resolved_root]
-                self._param_roots_stack.append(pushed_roots)
-        elif isinstance(raw_param_root, str):
-            pushed_roots = [raw_param_root]
-            self._param_roots_stack.append(pushed_roots)
-        elif (
-            isinstance(raw_param_root, list)
-            and bool(raw_param_root)
-            and all(isinstance(item, str) for item in raw_param_root)
-        ):
-            pushed_roots = list(raw_param_root)
-            self._param_roots_stack.append(pushed_roots)
         # Keep shape/type symbol inference local to the block call so that
         # helper signatures (e.g. Tensor[B,S,D]) do not leak/lock caller symbols.
         block_symbols = dict(symbols)
@@ -626,13 +538,7 @@ class SynapseProgramModel(nn.Module):
             symbols=block_symbols,
         )
         self._validate_input_shapes(block_env, block_inputs, block_symbols)
-        try:
-            self._run_graph(
-                block_graph, block_env, scope=call_scope, symbols=block_symbols, blocks=blocks
-            )
-        finally:
-            if pushed_roots is not None:
-                self._param_roots_stack.pop()
+        self._run_graph(block_graph, block_env, scope=scope, symbols=block_symbols, blocks=blocks)
 
         block_outputs = block_spec.get("outputs", {})
         if not isinstance(block_outputs, dict):
@@ -733,49 +639,27 @@ class SynapseProgramModel(nn.Module):
         )
 
     def _infer_param_path(
-        self, node_spec: dict[str, Any], *, node_path: str, param_name: str
+        self,
+        node_spec: dict[str, Any],
+        *,
+        node_path: str,
+        param_name: str,
+        env: Mapping[str, Any],
     ) -> str:
         def _effective_scope() -> str:
             abs_path = node_spec.get("_abs_path")
-            if isinstance(abs_path, str) and abs_path:
-                return abs_path
-            ambient_scope = self._scope_of(node_path)
-            explicit_scope = node_spec.get("_scope")
-            if isinstance(explicit_scope, str) and explicit_scope:
-                return self._join(ambient_scope, explicit_scope)
-            return ambient_scope
-
-        def _join_root(root: str, scoped: str) -> str:
-            if not root:
-                return scoped
-            if not scoped:
-                return root
-            return self._join(root, scoped)
-
-        def _current_roots() -> list[str]:
-            roots = list(self._param_roots_stack[-1]) if self._param_roots_stack else [""]
-            direct_root = node_spec.get("_param_root")
-            if isinstance(direct_root, str):
-                composed: list[str] = []
-                for root in roots:
-                    composed.append(_join_root(root, direct_root))
-                roots = composed
-            return roots
+            if isinstance(abs_path, (str, dict)) and abs_path:
+                return resolve_path_expr_to_key(abs_path, env, op_name="_abs_path")
+            return self._scope_of(node_path)
 
         def _explicit_candidates(raw_path: Any) -> list[str]:
             expr = runtime_value_to_path_expr(raw_path, op_name=f"{param_name} path")
-            key = resolve_static_path_expr_to_key(expr, op_name=f"{param_name} path")
+            key = resolve_path_expr_to_key(expr, env, op_name=f"{param_name} path")
             if expr.absolute:
                 return [key] if key else []
-            roots = _current_roots()
             scope_prefix = _effective_scope()
             scoped = self._join(scope_prefix, key)
-            scoped = scoped if scoped else key
-            scoped_candidates: list[str] = []
-            for candidate in [_join_root(root, scoped) for root in roots]:
-                if candidate not in scoped_candidates:
-                    scoped_candidates.append(candidate)
-            return scoped_candidates
+            return [scoped if scoped else key]
 
         def _pick_explicit_candidate(raw: Any) -> str | None:
             if isinstance(raw, (str, dict)):
@@ -798,20 +682,15 @@ class SynapseProgramModel(nn.Module):
                 return list_candidates[0]
             return None
 
-        def _pick_scoped_candidate(scoped: str) -> str:
-            candidates = [_join_root(root, scoped) for root in _current_roots()]
-            for candidate in candidates:
-                if candidate in self._state:
-                    return candidate
-            return candidates[0]
-
         param_base = node_spec.get("param_base")
         if isinstance(param_base, str):
             base_resolved = node_spec.get(param_base)
             base = base_resolved if isinstance(base_resolved, str) else param_base
             scoped_base = self._join(_effective_scope(), base)
             scoped_param = f"{scoped_base}.{param_name}" if scoped_base else param_name
-            return _pick_scoped_candidate(scoped_param)
+            if scoped_param in self._state:
+                return scoped_param
+            return scoped_param
         # Explicit per-node path override wins over _params.
         explicit_params = node_spec.get("_params")
         if param_name in node_spec and isinstance(node_spec[param_name], (str, dict)):
@@ -827,7 +706,9 @@ class SynapseProgramModel(nn.Module):
                 return explicit
         scope_fallback = self._join(_effective_scope(), param_name)
         fallback = scope_fallback if scope_fallback else param_name
-        return _pick_scoped_candidate(fallback)
+        if fallback in self._state:
+            return fallback
+        return fallback
 
     def _resolve_output_ref(self, ref: Any, env: dict[str, Any]) -> Any:
         if isinstance(ref, str):
@@ -994,7 +875,7 @@ class SynapseProgramModel(nn.Module):
                 if ident in env:
                     return env[ident]
                 if ident in symbols:
-                    return symbols[ident]
+                    return self._eval_expr(symbols[ident], env, symbols)
                 raise ValueError(f"Unknown symbol in expression: {ident}")
             if kind == "tuple":
                 items = expr.get("items")
@@ -1070,8 +951,8 @@ class SynapseProgramModel(nn.Module):
             if token in env:
                 return env[token]
             if token in symbols:
-                return symbols[token]
-            return token
+                return self._eval_expr(symbols[token], env, symbols)
+            return _parse_scalar_token(token)
         return expr
 
     def _expr_config_root(self) -> dict[str, Any]:
@@ -1119,6 +1000,7 @@ class SynapseProgramModel(nn.Module):
             "Config.has_key",
             "Config.has_value",
             "Config.int",
+            "Config.dim",
             "Config.float",
             "Config.str",
             "Config.bool",
@@ -1226,6 +1108,7 @@ class SynapseProgramModel(nn.Module):
             "Config.has_key",
             "Config.has_value",
             "Config.int",
+            "Config.dim",
             "Config.float",
             "Config.str",
             "Config.bool",
@@ -1253,16 +1136,16 @@ class SynapseProgramModel(nn.Module):
                 if "default" not in kwargs:
                     raise KeyError(f"{callee} expression call missing required config key: {key}")
                 value = kwargs["default"]
-            if callee == "Config.int":
+            if callee in {"Config.int", "Config.dim"}:
                 if isinstance(value, bool):
-                    raise ValueError("Config.int expression call expected int")
+                    raise ValueError(f"{callee} expression call expected int")
                 if isinstance(value, int):
                     return int(value)
                 if isinstance(value, str):
                     raw = value.strip()
                     if raw and (raw.isdigit() or (raw[0] in {"+", "-"} and raw[1:].isdigit())):
                         return int(raw)
-                raise ValueError("Config.int expression call expected int")
+                raise ValueError(f"{callee} expression call expected int")
             if callee == "Config.float":
                 if isinstance(value, bool):
                     raise ValueError("Config.float expression call expected float")
@@ -1324,9 +1207,11 @@ class SynapseProgramModel(nn.Module):
             return ""
         return node_path.rsplit(".", 1)[0]
 
-    def _resolve_state_path(self, *, node_path: str, raw_path: Any) -> str:
+    def _resolve_state_path(
+        self, *, node_path: str, raw_path: Any, env: Mapping[str, Any] | None = None
+    ) -> str:
         expr = runtime_value_to_path_expr(raw_path, op_name="state path")
-        token = resolve_static_path_expr_to_key(expr, op_name="state path")
+        token = resolve_path_expr_to_key(expr, env or {}, op_name="state path")
         if expr.absolute:
             return token
         scope = self._scope_of(node_path)
@@ -1347,28 +1232,9 @@ class SynapseProgramModel(nn.Module):
             break
         normalized_scope = ".".join(scope_parts)
         scoped = self._join_scope(normalized_scope, token)
-        roots = (
-            list(self._param_roots_stack[-1])
-            if self._param_roots_stack
-            and isinstance(self._param_roots_stack[-1], list)
-            and self._param_roots_stack[-1]
-            else [""]
-        )
-
-        def _join_root(root: str, value: str) -> str:
-            if not root:
-                return value
-            if not value:
-                return root
-            if value == root or value.startswith(f"{root}."):
-                return value
-            return self._join_scope(root, value)
-
-        candidates = [_join_root(root, scoped) for root in roots]
-        for candidate in candidates:
-            if candidate in self._state:
-                return candidate
-        return candidates[0]
+        if scoped in self._state:
+            return scoped
+        return scoped
 
     def _state_tensor_from_resolved_path(self, path: str, *, field: str) -> torch.Tensor:
         resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
@@ -1384,10 +1250,11 @@ class SynapseProgramModel(nn.Module):
         self,
         *,
         node_path: str,
-        raw_path: str,
+        raw_path: Any,
         field: str,
+        env: Mapping[str, Any] | None = None,
     ) -> torch.Tensor:
-        path = self._resolve_state_path(node_path=node_path, raw_path=raw_path)
+        path = self._resolve_state_path(node_path=node_path, raw_path=raw_path, env=env)
         return self._state_tensor_from_resolved_path(path, field=field)
 
     def _state_key_alternatives(self, key: str, *, limit: int = 8) -> list[str]:

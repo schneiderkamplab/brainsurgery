@@ -158,12 +158,32 @@ Resolver contract:
   - hard error on ambiguous imported-member resolution
   - hard error if resolved modules still carry import state
 - diagnostics:
+  - any resolver-produced warnings are emitted by `validate.closed`, not by resolve core
   - warning on unused qualified imports
   - warning on unused unqualified imported symbols
-  - warning on unused root definitions dropped by reachability pruning
+  - warning on unused definitions dropped by reachability pruning, with the warning attached to the file that defined them
 - CLI:
   - `brainsurgery synapse axon-resolve in.axon out.axon`
-  - `--strict` upgrades resolver warnings to failure
+  - `--strict` upgrades validation warnings to failure in the workflow layer
+
+Resolver name-resolution semantics:
+
+- lexical binding wins:
+  - function parameters
+  - path parameters
+  - variables introduced by `do`/`for`/lambda/bind
+  - symbolic dimension names introduced by type signatures
+- type-signature dimension binders shadow top-level names with the same spelling
+- imported modules keep their own local symbolic binders after resolution; linking must not capture root-model constants into imported helper modules
+- unqualified imports resolve only through the imported member set actually brought into scope
+- qualified references (`Foo.bar`) resolve only through imported/exported module members
+- re-exports are flattened during resolution; unresolved or ambiguous exported members are hard errors
+- the resolved program must be closed:
+  - no unresolved names
+  - no unresolved imports
+  - no duplicate canonical names
+  - no leftover import state on resolved modules
+- `axon-resolve --strict` fails on any `validate.closed` warning, including unused imports and unused pruned definitions
 
 ### Phase 4: Add explicit desugaring/flattening stage
 

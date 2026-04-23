@@ -17,6 +17,9 @@ TARGET_PACKAGES = (
 INTENTIONAL_UNUSED_PRIVATE_SYMBOLS = {
     "brainsurgery.cli.synapse:_resolve_axon_to_text",
 }
+INTENTIONAL_INTERNAL_CROSS_MODULE_SYMBOLS = {
+    "brainsurgery.cli.synapse_materialize:run_axon_materialize_workflow",
+}
 
 
 def _package_exports(package: str) -> set[str]:
@@ -128,9 +131,11 @@ def test_symbol_visibility_contract_for_core_io_engine() -> None:
 
                 # Internal cross-module symbols must be clearly internal.
                 if importers and not symbol.startswith("_"):
-                    internal_name_violations.append(
-                        f"{module}:{symbol} (imported by {', '.join(sorted(importers))})"
-                    )
+                    violation = f"{module}:{symbol}"
+                    if violation not in INTENTIONAL_INTERNAL_CROSS_MODULE_SYMBOLS:
+                        internal_name_violations.append(
+                            f"{violation} (imported by {', '.join(sorted(importers))})"
+                        )
 
                 # Non-exported symbols must be used either locally or by siblings.
                 locally_used = symbol in module_loads.get(

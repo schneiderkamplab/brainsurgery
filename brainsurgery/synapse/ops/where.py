@@ -147,6 +147,32 @@ LOWERING_TYPE_SIGNATURE = {
     "returns": "dynamic",
 }
 
+
+def type_rule(
+    *,
+    arg_types: tuple[Any, ...],
+    kwarg_types: dict[str, Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    helpers: Any,
+) -> Any | None:
+    del kwarg_types, args, kwargs
+    dims: tuple[Any, ...] | None = None
+    for arg_type in arg_types:
+        arg_dims = helpers.type_dims(arg_type)
+        if arg_dims is None:
+            continue
+        if dims is None:
+            dims = arg_dims
+            continue
+        dims = broadcast_shape(dims, arg_dims)
+        if dims is None:
+            return None
+    if dims is None:
+        return None
+    return helpers.type_tensor(dims=dims)
+
+
 __all__ = [
     "LOWERING_ARITY",
     "LOWERING_ALLOWED_KWARGS",
@@ -159,4 +185,5 @@ __all__ = [
     "compile",
     "uses_node_path",
     "LOWERING_TYPE_SIGNATURE",
+    "type_rule",
 ]

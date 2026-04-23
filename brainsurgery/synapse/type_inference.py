@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .axon.type_system import (
+from .axon.ast import (
     TypeAny,
     TypeBool,
     TypeFloat,

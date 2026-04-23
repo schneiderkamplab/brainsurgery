@@ -1,5 +1,6 @@
 import List index
 import Math (floor)
+type TokenIds[B,S] = Tensor[B,S]
 export (
   and,
   arange,
@@ -38,7 +39,7 @@ export (
 split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..S]]
 split x ?dim=-1 ?sizes=null = _split x dim sizes
 
-chunk :: Tensor[..S] -> ?Int -> ?Int -> List[Tensor[..S]]
+chunk :: Tensor[..S] -> ?Int -> ?Dim -> List[Tensor[..S]]
 chunk x ?dim=-1 ?parts=null = _chunk x dim parts
 
 permute :: Tensor -> ?Any -> Tensor
@@ -47,13 +48,13 @@ permute x ?dims=null = _permute x dims
 transpose :: Tensor -> ?Int -> ?Int -> Tensor
 transpose x ?dim1=1 ?dim2=2 = _transpose x dim1 dim2
 
-reshape :: Any -> ?Any -> Tensor
+reshape :: Any -> ?List[Dim] -> Tensor
 reshape x ?shape=null = _reshape x shape
 
-shape :: Tensor -> List[Int]
+shape :: Tensor -> List[Dim]
 shape x = _shape x
 
-size :: Tensor -> Int -> Int
+size :: Tensor -> Int -> Dim
 size x dim = shape x |> index dim
 
 expand :: Tensor -> ?List[Dim] -> Tensor
@@ -91,7 +92,7 @@ cumsum x ?dim=-1 = _cumsum x dim
 unsqueeze :: Tensor -> ?Int -> Tensor
 unsqueeze x ?dim=0 = _unsqueeze x dim
 
-repeat :: Tensor[B,KVH,T,HD] -> ?Int -> ?Int -> Tensor[B,H,T,HD]
+repeat :: Tensor[B,KVH,T,HD] -> ?Dim -> ?Int -> Tensor[B,H,T,HD]
 repeat x ?repeats=2 ?dim=1 = _repeat x repeats dim
 
 concat :: Tensor -> Tensor -> ?Int -> Tensor
@@ -134,16 +135,16 @@ slice x dim start end = _slice x dim start end
 softmax :: Tensor -> ?Int -> ?String -> Tensor
 softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype
 
-topk :: Tensor -> Int -> ?Int -> ?Bool -> ?Bool -> (Tensor, IdxTensor)
+topk :: Tensor -> Dim -> ?Int -> ?Bool -> ?Bool -> (Tensor, IdxTensor)
 topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted
 
 dtype_value :: Tensor -> String -> Float
 dtype_value x kind = _dtype_value x kind
 
-empty_like :: Tensor -> ?String -> Tensor
+empty_like :: Tensor[..S] -> ?String -> Tensor[..S]
 empty_like x ?dtype=null = _empty_like x dtype
 
-fill :: Tensor -> Any -> ?String -> Tensor
+fill :: Tensor[..S] -> Any -> ?String -> Tensor[..S]
 fill x value ?dtype=null = _fill x value dtype
 
 gather :: Tensor -> IdxTensor -> ?Int -> Tensor

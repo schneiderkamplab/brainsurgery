@@ -166,6 +166,16 @@ def get_op_lowering_validator(op_name: str) -> Any | None:
     return None
 
 
+def get_op_type_rule(op_name: str) -> Any | None:
+    module = get_op_module(op_name)
+    if module is None:
+        return None
+    rule = getattr(module, "type_rule", None)
+    if callable(rule):
+        return rule
+    return None
+
+
 __all__ = [
     "OP_MODULES",
     "get_op_module",
@@ -175,4 +185,5 @@ __all__ = [
     "get_op_lowering_infer_metadata",
     "get_op_lowering_known_output_arity",
     "get_op_lowering_validator",
+    "get_op_type_rule",
 ]

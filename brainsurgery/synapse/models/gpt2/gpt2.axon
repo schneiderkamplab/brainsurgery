@@ -1,13 +1,9 @@
 {-# CHECKPOINTS "openai-community/gpt2" #-}
 {-# TASK "causal_lm" #-}
 
-import Activations
 import Activations (gelu_new)
-import Attention
 import Attention (attention, merge_heads, reshape_heads)
-import Masking
 import Masking (causal_mask)
-import Positions
 import Positions (position_ids)
 import NN
 import Tensor
@@ -33,7 +29,7 @@ gpt2 input_ids attn_mask = do
   tok <- NN.embedding@wte input_ids dim=768
   pos <- position_ids input_ids attn_mask=attn_mask pad_fill=1 |> NN.embedding@wpe
   x <- tok + pos
-  for@h i <- [0..12) do
+  x <- for@h i <- [0..12) carry (x) do
     x <- gpt2_block x attn_mask
     yield x
   logits <- NN.layernorm@ln_f x |> NN.linear@wte

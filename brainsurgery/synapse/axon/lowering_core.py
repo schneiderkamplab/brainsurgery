@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import copy
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,21 +12,10 @@ from ..ops import (
     get_op_lowering_validator,
 )
 from ..type_inference import annotate_spec_with_block_io_types, infer_block_io_types_from_modules
-from .expression_codec import axon_expr_to_runtime_value as _expr_to_runtime_value
-from .path_expr import parse_path_token, path_expr_to_runtime_value
-from .type_system import (
-    TypeExpr,
-    TypeList,
-    TypeNamed,
-    TypeOptional,
-    TypeTensor,
-    TypeTuple,
-    dim_token_names,
-)
-from .typecheck import ModuleSignature, typecheck_axon_program
-from .types import (
+from .ast import (
     AxonBind,
     AxonExpr,
+    AxonExprAscribe,
     AxonExprBinary,
     AxonExprBind,
     AxonExprBool,
@@ -47,6 +34,7 @@ from .types import (
     AxonExprString,
     AxonExprTernary,
     AxonExprTuple,
+    AxonFile,
     AxonKwargValue,
     AxonModule,
     AxonRepeat,
@@ -54,7 +42,24 @@ from .types import (
     AxonScopeBind,
     AxonStatement,
     AxonYield,
+    TypeExpr,
+    TypeList,
+    TypeNamed,
+    TypeOptional,
+    TypeTensor,
+    TypeTuple,
+    dim_token_names,
+    render_type,
 )
+from .expression_codec import axon_expr_to_runtime_value as _expr_to_runtime_value
+from .flatten import flatten_closed_axon_file
+from .optimize import optimize_flat_typed_axon_file
+from .resolve import resolve_axon_program_from_path
+from .signatures import ModuleSignature, _build_module_signatures_for_closed_program
+from .typecheck import typecheck_flat_axon_file
+from .validate.closed import validate_closed_axon_file
+from .validate.flat import validate_flat_axon_file
+from .validate.typed import validate_typed_axon_file
 
 
 def _is_identifier(token: str) -> bool:
@@ -118,6 +123,10 @@ def _parse_scalar_token(token: str) -> Any:
 
 _NO_CONST = object()
 
+_CANONICAL_PATH_ARG_PRIMITIVES = frozenset(
+    {"_embedding", "_linear", "_layernorm", "_rmsnorm", "_activations_xielu"}
+)
+
 
 def _is_static_literal(value: Any) -> bool:
     if isinstance(value, (bool, int, float, str)) or value is None:
@@ -127,6 +136,92 @@ def _is_static_literal(value: Any) -> bool:
     if isinstance(value, tuple):
         return all(_is_static_literal(item) for item in value)
     return False
+
+
+def _surface_modules_from_file(ast: AxonFile) -> tuple[AxonModule, ...]:
+    modules: list[AxonModule] = []
+    for module in ast.modules:
+        if isinstance(module.body_expr, AxonExprDo) and not module.body_expr.inline:
+            statements = module.body_expr.body
+        elif isinstance(module.body_expr, AxonExpr):
+            statements = (AxonReturn(values=(module.body_expr,)),)
+        else:
+            statements = module.statements
+        modules.append(
+            AxonModule(
+                name=module.name,
+                path_param=module.path_param,
+                path_params=module.path_params,
+                params=module.params,
+                returns=module.returns,
+                statements=statements,
+                body_expr=None,
+                imports=ast.imports,
+                imported_members=dict(ast.imported_members) or None,
+                exports=ast.exports,
+                symbols=module.symbols,
+                pragmas=module.pragmas,
+                type_aliases=dict(ast.type_aliases) or module.type_aliases,
+                return_type_expr=module.return_type_expr,
+                return_shape=module.return_shape,
+                constraints=module.constraints,
+            )
+        )
+    return tuple(modules)
+
+
+def _wrap_modules_as_file(modules: tuple[AxonModule, ...]) -> AxonFile:
+    return AxonFile(
+        modules=modules,
+        imports=(),
+        imported_members={},
+        exports=(),
+        pragmas={},
+        constants={},
+        type_aliases={},
+    )
+
+
+def _lower_program_symbol_values(program: AxonFile) -> dict[str, Any]:
+    lowered: dict[str, Any] = {}
+    for key, value in program.constants.items():
+        if isinstance(key, str) and isinstance(value, AxonExpr):
+            lowered[key] = _expr_to_runtime_value(value)
+    return lowered
+
+
+def _prepare_program_for_lowering(
+    modules: AxonFile | tuple[AxonModule, ...],
+    *,
+    main_module: str | None,
+) -> AxonFile:
+    program = modules if isinstance(modules, AxonFile) else _wrap_modules_as_file(modules)
+    try:
+        validate_typed_axon_file(program, main_module=main_module)
+        return optimize_flat_typed_axon_file(program, main_module=main_module)
+    except Exception:
+        pass
+    try:
+        validate_flat_axon_file(program, main_module=main_module)
+        typed = typecheck_flat_axon_file(program, main_module=main_module)
+        return optimize_flat_typed_axon_file(typed, main_module=main_module)
+    except Exception:
+        pass
+    try:
+        validate_closed_axon_file(program, main_module=main_module)
+        flat = flatten_closed_axon_file(program, main_module=main_module)
+        typed = typecheck_flat_axon_file(flat, main_module=main_module)
+        return optimize_flat_typed_axon_file(typed, main_module=main_module)
+    except Exception:
+        pass
+    if program.origin_path is None:
+        raise ValueError(
+            "lowering requires a closed Axon program or an AxonFile with origin_path for resolve"
+        )
+    resolved = resolve_axon_program_from_path(program.origin_path).ast
+    flat = flatten_closed_axon_file(resolved, main_module=main_module)
+    typed = typecheck_flat_axon_file(flat, main_module=main_module)
+    return optimize_flat_typed_axon_file(typed, main_module=main_module)
 
 
 def _const_fold_expr(expr: AxonExpr, ctx: "_LowerCtx") -> Any:
@@ -322,7 +417,6 @@ _IMPLICIT_ACTIVATION_ALIASES: dict[str, tuple[str, int]] = {
     "swiglu": ("_activations_swiglu", 0),
 }
 _PRIMITIVE_NAME_ALIASES: dict[str, str] = {
-    "_repeat": "repeat",
     "_list_init": "list_init",
     "_list_index": "list_index",
     "_list_append": "list_append",
@@ -364,116 +458,6 @@ def _to_synapse_op(
     for key, value in kwargs.items():
         default_op[key] = value
     return default_op
-
-
-def _join_dot(left: str, right: str) -> str:
-    if not left:
-        return right
-    if not right:
-        return left
-    return f"{left}.{right}"
-
-
-def _normalize_root_token(value: Any) -> str:
-    if not isinstance(value, str):
-        raise ValueError("scope root values must resolve to strings")
-    token = value.strip()
-    if token.startswith(".") or token.endswith(".") or ".." in token:
-        raise ValueError(f"invalid scope root path {value!r}")
-    return token
-
-
-def _scope_root_values_from_kwarg(raw: AxonKwargValue, ctx: "_LowerCtx") -> tuple[str, ...] | None:
-    def _resolve_atom(value: Any) -> Any:
-        if isinstance(value, AxonExprString):
-            return value.value
-        if isinstance(value, AxonExprPath):
-            return _path_expr_to_source(value)
-        if isinstance(value, AxonExprName):
-            if value.name in ctx.symbol_values:
-                return ctx.symbol_values[value.name]
-            if value.name in ctx.symbol_names:
-                raise ValueError(
-                    f"scope root symbol {value.name!r} is not a concrete constant value"
-                )
-            return None
-        if isinstance(value, AxonExprList):
-            items = [_resolve_atom(item) for item in value.items]
-            return None if any(item is None for item in items) else items
-        if isinstance(value, AxonExprTuple):
-            tuple_items = tuple(_resolve_atom(item) for item in value.items)
-            return None if any(item is None for item in tuple_items) else tuple_items
-        if isinstance(value, AxonExprParen):
-            return _resolve_atom(value.inner)
-        if isinstance(value, AxonExpr):
-            return None
-        return value
-
-    resolved = _resolve_atom(raw)
-    if resolved is None:
-        return None
-    values: list[str] = []
-    if isinstance(resolved, str):
-        values.append(_normalize_root_token(resolved))
-    elif isinstance(resolved, list | tuple):
-        for item in resolved:
-            values.append(_normalize_root_token(item))
-    else:
-        raise ValueError("scope root must resolve to string or list/tuple of strings")
-    dedup: list[str] = []
-    seen: set[str] = set()
-    for item in values:
-        if item in seen:
-            continue
-        seen.add(item)
-        dedup.append(item)
-    return tuple(dedup if dedup else [""])
-
-
-def _scope_root_expr_from_kwarg(raw: AxonKwargValue) -> Any:
-    if isinstance(raw, AxonExpr):
-        expr_value = _expr_to_runtime_value(raw)
-        if isinstance(expr_value, (str, dict)):
-            return expr_value
-        raise ValueError("dynamic scope root expression must resolve to string")
-    if isinstance(raw, str):
-        return raw
-    raise ValueError("scope root must be string or expression resolving to string")
-
-
-_SCOPE_TEMPLATE_RE = re.compile(r"^\{([A-Za-z_][A-Za-z0-9_]*)\}(?:\.(.*))?$")
-
-
-def _scope_root_from_prefix_template(
-    prefix: str,
-) -> tuple[str, Any | None]:
-    token = prefix.strip()
-    match = _SCOPE_TEMPLATE_RE.match(token)
-    if match is None:
-        return prefix, None
-    root_name = match.group(1)
-    rest = match.group(2) or ""
-    return rest, {"_expr": "name", "id": root_name}
-
-
-def _current_param_roots(ctx: "_LowerCtx") -> tuple[str, ...]:
-    if not ctx.param_root_stack:
-        return ("",)
-    combined: list[str] = [""]
-    for frame in ctx.param_root_stack:
-        next_values: list[str] = []
-        for base in combined:
-            for suffix in frame:
-                next_values.append(_join_dot(base, suffix))
-        combined = next_values if next_values else combined
-    dedup: list[str] = []
-    seen: set[str] = set()
-    for item in combined:
-        if item in seen:
-            continue
-        seen.add(item)
-        dedup.append(item)
-    return tuple(dedup if dedup else [""])
 
 
 def _canonical_op_name(callee: str) -> str:
@@ -632,10 +616,6 @@ class _LowerCtx:
     tensor_last_dim: dict[str, Any] = field(default_factory=dict)
     tensor_heads: dict[str, Any] = field(default_factory=dict)
     tensor_shape: dict[str, tuple[Any, ...]] = field(default_factory=dict)
-    scope_stack: list[str] = field(default_factory=list)
-    loop_scope_cover_prefixes: list[str] = field(default_factory=list)
-    param_root_stack: list[tuple[str, ...]] = field(default_factory=list)
-    dynamic_param_root_stack: list[Any] = field(default_factory=list)
     path_param_names: set[str] = field(default_factory=set)
     imported_namespaces: set[str] = field(default_factory=set)
     imported_member_namespaces: dict[str, set[str]] = field(default_factory=dict)
@@ -647,6 +627,7 @@ class _LowerCtx:
     dim_symbol_names: set[str] = field(default_factory=set)
     symbol_values: dict[str, Any] = field(default_factory=dict)
     runtime_bound_symbol_names: set[str] = field(default_factory=set)
+    enforce_source_primitive_syntax: bool = False
 
     def fresh(self, base: str = "t") -> str:
         self.counter += 1
@@ -657,92 +638,6 @@ def _with_guard(nodes: list[dict[str, Any]], guard: str | None) -> list[dict[str
     if guard is not None:
         raise ValueError("internal lowering error: guard-based lowering is no longer supported")
     return nodes
-
-
-def _param_root_payload(ctx: _LowerCtx) -> Any | None:
-    dynamic_root_expr = _current_dynamic_param_root(ctx)
-    if dynamic_root_expr is not None:
-        return dynamic_root_expr
-    root_candidates = _current_param_roots(ctx)
-    if root_candidates != ("",):
-        return root_candidates[0] if len(root_candidates) == 1 else list(root_candidates)
-    return None
-
-
-def _with_scope(
-    nodes: list[dict[str, Any]], scope: str | None, *, param_root: Any | None = None
-) -> list[dict[str, Any]]:
-    if not isinstance(scope, str) or not scope:
-        scope = None
-
-    def _annotate_node_spec(node_spec: dict[str, Any]) -> dict[str, Any]:
-        spec = dict(node_spec)
-        op = spec.get("_op")
-        if (
-            isinstance(op, str)
-            and scope is not None
-            and "_scope" not in spec
-            and "_abs_path" not in spec
-        ):
-            spec["_scope"] = scope
-        if (
-            isinstance(op, str)
-            and param_root is not None
-            and "_param_root" not in spec
-            and "_abs_path" not in spec
-        ):
-            spec["_param_root"] = copy.deepcopy(param_root)
-        nested = spec.get("graph")
-        if isinstance(nested, list):
-            spec["graph"] = _annotate_items(nested)
-        body = spec.get("_body")
-        if isinstance(body, list):
-            spec["_body"] = _annotate_items(body)
-        then_branch = spec.get("_then")
-        if isinstance(then_branch, list):
-            spec["_then"] = _annotate_items(then_branch)
-        else_branch = spec.get("_else")
-        if isinstance(else_branch, list):
-            spec["_else"] = _annotate_items(else_branch)
-        return spec
-
-    def _annotate_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        out_items: list[dict[str, Any]] = []
-        for item in items:
-            if not isinstance(item, dict) or len(item) != 1:
-                out_items.append(item)
-                continue
-            name, node_spec = next(iter(item.items()))
-            if not isinstance(node_spec, dict):
-                out_items.append(item)
-                continue
-            out_items.append({name: _annotate_node_spec(node_spec)})
-        return out_items
-
-    return _annotate_items(nodes)
-
-
-def _current_dynamic_param_root(ctx: _LowerCtx) -> Any | None:
-    if not ctx.dynamic_param_root_stack:
-        return None
-    for item in reversed(ctx.dynamic_param_root_stack):
-        if item is not None:
-            return item
-    return None
-
-
-def _normalize_call_scope_for_runtime(ctx: _LowerCtx, call_scope: str) -> str:
-    if not call_scope:
-        return ""
-    cover_prefixes = [p for p in ctx.loop_scope_cover_prefixes if isinstance(p, str) and p]
-    if not cover_prefixes:
-        return call_scope
-    longest = max(cover_prefixes, key=len)
-    if call_scope == longest:
-        return ""
-    if call_scope.startswith(f"{longest}."):
-        return call_scope[len(longest) + 1 :]
-    return call_scope
 
 
 def _op_name_from_callee(callee: str) -> str:
@@ -907,6 +802,48 @@ def _path_expr_from_suffix_token(token: str, *, is_absolute: bool, ctx: "_LowerC
     return AxonExprPath(absolute=is_absolute, parts=parts)
 
 
+def _strip_atomic_expr_wrappers(expr: AxonExpr) -> AxonExpr:
+    current = expr
+    while isinstance(current, AxonExprParen | AxonExprAscribe):
+        if isinstance(current, AxonExprParen):
+            current = current.inner
+        else:
+            current = current.expr
+    return current
+
+
+def _split_canonical_primitive_path_arg(
+    callee: str, args: tuple[AxonExpr, ...]
+) -> tuple[AxonExpr | None, tuple[AxonExpr, ...]]:
+    if callee not in _CANONICAL_PATH_ARG_PRIMITIVES or not args:
+        return None, args
+    path_expr = _strip_atomic_expr_wrappers(args[0])
+    if isinstance(path_expr, AxonExprPath | AxonExprName):
+        return path_expr, args[1:]
+    return None, args
+
+
+def _bind_canonical_primitive_path(
+    *,
+    node_spec: dict[str, Any],
+    path_expr: AxonExpr,
+    ctx: _LowerCtx,
+) -> None:
+    raw = _strip_atomic_expr_wrappers(path_expr)
+    if isinstance(raw, AxonExprPath):
+        token = _path_expr_to_source(raw)
+        if not token.startswith("@@"):
+            raise ValueError(
+                "typed flat lowering requires canonical primitive Path arguments to be absolute"
+            )
+        _normalize_bound_params_on_node(node_spec, base_path=token)
+        return
+    if isinstance(raw, AxonExprName):
+        node_spec["param_base"] = raw.name
+        return
+    raise ValueError("canonical primitive Path argument must be an atomic Path expression")
+
+
 def _apply_extra_path_suffix_bindings(
     callee: str,
     args: tuple[AxonExpr, ...],
@@ -946,7 +883,9 @@ def _apply_extra_path_suffix_bindings(
     available_path_params = [
         name
         for name, param_type in zip(call_sig.param_names, call_sig.params, strict=True)
-        if _is_path_type_expr(param_type) and name not in bound_param_names
+        if param_type is not None
+        and _is_path_type_expr(param_type)
+        and name not in bound_param_names
     ]
     if len(extra_paths) > len(available_path_params):
         raise ValueError(
@@ -1447,9 +1386,11 @@ def _lower_simple_call(
     *,
     guard: str | None = None,
     enforce_source_primitive_syntax: bool = True,
+    call_expr: AxonExprCall | None = None,
 ) -> list[dict[str, Any]]:
     callee = callee.strip()
     raw_callee = callee
+    canonical_path_arg, args = _split_canonical_primitive_path_arg(callee, args)
     _validate_namespaced_block_call(callee, ctx)
     # Generic sugar first: abc@p1@p2 binds to unbound Path-typed arguments.
     callee, kwargs_expr = _apply_extra_path_suffix_bindings(callee, args, kwargs_expr, ctx)
@@ -1462,6 +1403,9 @@ def _lower_simple_call(
         get_op_lowering_signature(op_name_raw) is not None
         or get_op_lowering_type_signature(op_name_raw) is not None
         or get_op_lowering_known_output_arity(op_name_raw) is not None
+    )
+    enforce_source_primitive_syntax = (
+        enforce_source_primitive_syntax and ctx.enforce_source_primitive_syntax
     )
     if (
         enforce_source_primitive_syntax
@@ -1488,6 +1432,8 @@ def _lower_simple_call(
         raise ValueError(
             "_linear only accepts positional arguments; use Prelude.linear for keyword/default syntax"
         )
+    if raw_base == "_repeat":
+        raise ValueError("_repeat must be flattened away before lowering")
     if raw_base == "_layernorm" and kwargs_expr:
         raise ValueError(
             "_layernorm only accepts positional arguments; use Prelude.layernorm for keyword/default syntax"
@@ -1528,9 +1474,6 @@ def _lower_simple_call(
     pre_graph: list[dict[str, Any]] = []
     kwargs = _render_kwargs_for_call(kwargs_expr)
     effective_when = guard
-    effective_scope = _normalize_call_scope_for_runtime(
-        ctx, ".".join(part for part in ctx.scope_stack if part)
-    )
 
     resolved_args: list[str] = []
     runtime_args: list[Any] = []
@@ -1835,29 +1778,19 @@ def _lower_simple_call(
             node_spec["_args"] = (
                 positional_args[0] if len(positional_args) == 1 else positional_args
             )
-        call_scope = _normalize_call_scope_for_runtime(
-            ctx, ".".join(part for part in ctx.scope_stack if part)
-        )
-        if path_bindings:
-            # Relative @path block calls still need the runtime lexical scope so bound
-            # relative parameter paths resolve under the current scope. Absolute @@path
-            # calls already carry their full path and must not be scope-prefixed again.
-            node_spec["_scope"] = None if is_absolute_path else call_scope
-        elif call_scope:
-            node_spec["_scope"] = call_scope
-        else:
-            # Preserve explicit "no extra call scope" intent so _with_scope does not
-            # re-inject lexical scope for this node.
-            node_spec["_scope"] = None
-        root_candidates = _current_param_roots(ctx)
-        dynamic_root_expr = _current_dynamic_param_root(ctx)
-        if dynamic_root_expr is not None:
-            node_spec["_param_root"] = dynamic_root_expr
-        elif root_candidates != ("",):
-            node_spec["_param_root"] = (
-                root_candidates[0] if len(root_candidates) == 1 else list(root_candidates)
-            )
         node_spec["_bind"] = out_values[0] if len(out_values) == 1 else out_values
+        if call_expr is not None and call_expr.inferred_type is not None:
+            if len(out_values) == 1:
+                node_spec["_out_types"] = {str(out_values[0]): render_type(call_expr.inferred_type)}
+            elif isinstance(call_expr.inferred_type, TypeTuple) and len(
+                call_expr.inferred_type.items
+            ) == len(out_values):
+                node_spec["_out_types"] = {
+                    str(bind_name): render_type(item_type)
+                    for bind_name, item_type in zip(
+                        out_values, call_expr.inferred_type.items, strict=True
+                    )
+                }
         for key, value in extra_kwargs.items():
             node_spec[key] = value
         nodes = _with_guard([{node_name: node_spec}], effective_when)
@@ -1870,10 +1803,12 @@ def _lower_simple_call(
         )
         return [
             *pre_graph,
-            *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx)),
+            *nodes,
         ]
 
     node_spec = _to_synapse_op(callee, args_text, kwargs, out)
+    if canonical_path_arg is not None:
+        _bind_canonical_primitive_path(node_spec=node_spec, path_expr=canonical_path_arg, ctx=ctx)
     if "@" in callee:
         op_name, param_path = callee.split("@", 1)
         if param_path in ctx.path_param_names:
@@ -1886,7 +1821,7 @@ def _lower_simple_call(
             )
             return [
                 *pre_graph,
-                *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx)),
+                *nodes,
             ]
         concrete_node = _to_synapse_op(op_name, args_text, kwargs, out)
         try:
@@ -1897,7 +1832,6 @@ def _lower_simple_call(
             if not param_path.strip():
                 raise ValueError(f"invalid @ path in Axon call: {callee!r}")
             node_name = f"n_{ctx.fresh('op')}"
-            dynamic_root_expr = _current_dynamic_param_root(ctx)
             params: dict[str, str | list[str]] = {}
             for param_name in bound_params:
                 explicit_name = concrete_node.get(param_name)
@@ -1920,21 +1854,13 @@ def _lower_simple_call(
                 else:
                     params[param_name] = suffix
             concrete_node["_params"] = params
-            if dynamic_root_expr is not None:
-                concrete_node["_param_root"] = dynamic_root_expr
-            else:
-                root_candidates = _current_param_roots(ctx)
-                if root_candidates != ("",):
-                    concrete_node["_param_root"] = (
-                        root_candidates[0] if len(root_candidates) == 1 else list(root_candidates)
-                    )
             nodes = _with_guard([{node_name: concrete_node}], effective_when)
             _record_last_dim_for_call(
                 callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx
             )
             return [
                 *pre_graph,
-                *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx)),
+                *nodes,
             ]
         segments = [part.strip() for part in param_path.split(".") if part.strip()]
         if not segments:
@@ -1946,12 +1872,12 @@ def _lower_simple_call(
         _record_last_dim_for_call(callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx)
         return [
             *pre_graph,
-            *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx)),
+            *nodes,
         ]
     node_name = f"n_{ctx.fresh('op')}"
     nodes = _with_guard([{node_name: node_spec}], effective_when)
     _record_last_dim_for_call(callee=callee, args=args_text, kwargs=kwargs, out=out, ctx=ctx)
-    return [*pre_graph, *_with_scope(nodes, effective_scope, param_root=_param_root_payload(ctx))]
+    return [*pre_graph, *nodes]
 
 
 def _lower_alias_or_const(
@@ -1998,14 +1924,7 @@ def _lower_alias_or_const(
         }
     else:
         node = {"_op": "_ir_expr", "value": _expr_to_runtime_value(expr), "_bind": out}
-    effective_scope = _normalize_call_scope_for_runtime(
-        ctx, ".".join(part for part in ctx.scope_stack if part)
-    )
-    return _with_scope(
-        _with_guard([{node_name: node}], guard),
-        effective_scope,
-        param_root=_param_root_payload(ctx),
-    )
+    return _with_guard([{node_name: node}], guard)
 
 
 def _bind_names(out: str | list[str]) -> list[str]:
@@ -2215,7 +2134,16 @@ def _lower_expr(
         return do_graph
 
     if isinstance(expr, AxonExprIf | AxonExprTernary):
-        out_names = _bind_names(out)
+        tuple_result_out: str | None = None
+        if (
+            not isinstance(out, list)
+            and isinstance(expr.inferred_arity, int)
+            and expr.inferred_arity > 1
+        ):
+            tuple_result_out = out
+            out_names = [ctx.fresh(f"sel_{idx}") for idx in range(expr.inferred_arity)]
+        else:
+            out_names = _bind_names(out)
         cond_graph, cond_value = _lower_select_cond(expr.cond, ctx=ctx)
 
         then_binds = [
@@ -2241,21 +2169,20 @@ def _lower_expr(
             "_then_bind": _bind_field(then_binds),
             "_else_bind": _bind_field(else_binds),
         }
-        effective_scope = _normalize_call_scope_for_runtime(
-            ctx, ".".join(part for part in ctx.scope_stack if part)
-        )
-        if effective_scope:
-            node_spec["_scope"] = effective_scope
-        return [
+        select_graph = [
             *cond_graph,
-            *(
-                _with_scope(
-                    [{node_name: node_spec}],
-                    effective_scope,
-                    param_root=_param_root_payload(ctx),
-                )
-            ),
+            {node_name: node_spec},
         ]
+        if tuple_result_out is not None:
+            select_graph.extend(
+                _lower_expr(
+                    AxonExprTuple(items=tuple(AxonExprName(name=name) for name in out_names)),
+                    tuple_result_out,
+                    ctx,
+                    guard=guard,
+                )
+            )
+        return select_graph
 
     if isinstance(expr, AxonExprPipe):
         pipe_graph: list[dict[str, Any]] = []
@@ -2289,7 +2216,7 @@ def _lower_expr(
             for idx, param_type in enumerate(sig.params):
                 if idx in bound_by_kwargs:
                     continue
-                if not _is_path_type_expr(param_type):
+                if param_type is None or not _is_path_type_expr(param_type):
                     insert_at = idx
                     break
             return [*stage_args[:insert_at], *piped_args, *stage_args[insert_at:]]
@@ -2338,14 +2265,22 @@ def _lower_expr(
             call_args = tuple(rewritten_args)
             pipe_graph.extend(
                 _lower_simple_call(
-                    stage_callee, call_args, stage_kwargs, next_out, ctx, guard=guard
+                    stage_callee,
+                    call_args,
+                    stage_kwargs,
+                    next_out,
+                    ctx,
+                    guard=guard,
+                    call_expr=stage if isinstance(stage, AxonExprCall) else None,
                 )
             )
             pipe_ref = next_out
         return pipe_graph
 
     if isinstance(expr, AxonExprCall):
-        return _lower_simple_call(expr.callee, expr.args, expr.kwargs, out, ctx, guard=guard)
+        return _lower_simple_call(
+            expr.callee, expr.args, expr.kwargs, out, ctx, guard=guard, call_expr=expr
+        )
 
     if isinstance(expr, AxonExprBinary) and expr.op in {"+", "*"}:
         if not (_expr_is_tensorish(expr.left, ctx) or _expr_is_tensorish(expr.right, ctx)):
@@ -2531,7 +2466,8 @@ def _type_dim_names(tp: TypeExpr) -> set[str]:
 def _signature_dim_names(signature: ModuleSignature) -> set[str]:
     names: set[str] = set()
     for param in signature.params:
-        names.update(_type_dim_names(param))
+        if param is not None:
+            names.update(_type_dim_names(param))
     for ret in signature.returns:
         names.update(_type_dim_names(ret))
     return names
@@ -2799,7 +2735,10 @@ def _new_lower_ctx(
 
 
 def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
-    typed_signatures = typecheck_axon_program((module,), main_module=module.name)
+    validate_typed_axon_file(_wrap_modules_as_file((module,)), main_module=module.name)
+    typed_signatures = _build_module_signatures_for_closed_program(
+        (module,), main_module=module.name
+    )
     inputs = _module_inputs(module)
     graph: list[dict[str, Any]] = []
     outputs: dict[str, str] = {}
@@ -2872,117 +2811,13 @@ def _lower_statements(
 ) -> None:
     for stmt in statements:
         if isinstance(stmt, AxonRepeat):
-            body_graph: list[dict[str, Any]] = []
-            explicit_yield: AxonYield | None = None
-            loop_body_statements = stmt.body
-            if loop_body_statements and isinstance(loop_body_statements[-1], AxonYield):
-                explicit_yield = loop_body_statements[-1]
-                loop_body_statements = loop_body_statements[:-1]
-            carry_names: tuple[str, ...] = ()
-            if stmt.carry is not None:
-                carry_names = stmt.carry
-            elif stmt.targets is not None:
-                carry_names = stmt.targets
-            base_loop_scope = stmt.name if isinstance(stmt.name, str) and stmt.name else ""
-            loop_cover_prefix = ".".join(part for part in ctx.scope_stack if part)
-            full_loop_scope = _join_dot(loop_cover_prefix, base_loop_scope)
-            ctx.loop_scope_cover_prefixes.append(full_loop_scope)
-            if base_loop_scope:
-                ctx.scope_stack.append(base_loop_scope)
-            try:
-                _lower_statements(
-                    statements=loop_body_statements,
-                    graph=body_graph,
-                    outputs={},
-                    returns=(),
-                    ctx=ctx,
-                    guard=guard,
-                )
-            finally:
-                if base_loop_scope:
-                    ctx.scope_stack.pop()
-                ctx.loop_scope_cover_prefixes.pop()
-            node_name = f"n_{ctx.fresh('for')}"
-            base_loop_scope = stmt.name if isinstance(stmt.name, str) and stmt.name else ""
-            loop_scope = ""
-            if base_loop_scope:
-                loop_scope = base_loop_scope
-                if ctx.scope_stack:
-                    scope_prefix = ".".join(part for part in ctx.scope_stack if part)
-                    if scope_prefix:
-                        loop_scope = f"{scope_prefix}.{base_loop_scope}"
-            repeat_item: dict[str, Any] = {
-                node_name: {
-                    "_op": "for",
-                    "_scope": loop_scope,
-                    "_var": stmt.var,
-                    "_to": _expr_to_runtime_value(stmt.to_expr),
-                    "_body": body_graph,
-                }
-            }
-            from_expr = _expr_to_runtime_value(stmt.from_expr)
-            step_expr = _expr_to_runtime_value(stmt.step_expr)
-            if from_expr != 0:
-                repeat_item[node_name]["_from"] = from_expr
-            if step_expr != 1:
-                repeat_item[node_name]["_step"] = step_expr
-            if carry_names:
-                repeat_item[node_name]["_carry"] = list(carry_names)
-            if explicit_yield is not None:
-                repeat_item[node_name]["_yield"] = [
-                    _expr_to_runtime_value(value) for value in explicit_yield.values
-                ]
-            if stmt.targets is not None:
-                repeat_item[node_name]["_bind"] = list(stmt.targets)
-            graph.append(repeat_item)
+            raise ValueError("lowering requires flat Axon; for/repeat must be flattened first")
             continue
         if isinstance(stmt, AxonYield):
             raise ValueError("yield statement must only appear as final statement in for-loop body")
 
         if isinstance(stmt, AxonScopeBind):
-            scope_prefix = stmt.prefix
-            root_values: tuple[str, ...] = ("",)
-            dynamic_root_expr: Any | None = None
-            if "root" in stmt.kwargs:
-                resolved_root_values = _scope_root_values_from_kwarg(stmt.kwargs["root"], ctx)
-                if resolved_root_values is None:
-                    dynamic_root_expr = _scope_root_expr_from_kwarg(stmt.kwargs["root"])
-                else:
-                    root_values = resolved_root_values
-            else:
-                scope_prefix, template_root_expr = _scope_root_from_prefix_template(scope_prefix)
-                if template_root_expr is not None:
-                    dynamic_root_expr = template_root_expr
-            pushed_scope = bool(scope_prefix)
-            if pushed_scope:
-                ctx.scope_stack.append(scope_prefix)
-            ctx.param_root_stack.append(root_values)
-            ctx.dynamic_param_root_stack.append(dynamic_root_expr)
-            scoped_outputs: dict[str, str] = {}
-            try:
-                _lower_statements(
-                    statements=stmt.body,
-                    graph=graph,
-                    outputs=scoped_outputs,
-                    returns=(),
-                    ctx=ctx,
-                    guard=guard,
-                )
-            finally:
-                ctx.dynamic_param_root_stack.pop()
-                ctx.param_root_stack.pop()
-                if pushed_scope:
-                    ctx.scope_stack.pop()
-            for idx, target in enumerate(stmt.targets):
-                output_name = f"out_{idx}"
-                if output_name not in scoped_outputs:
-                    raise ValueError(
-                        f"scope bind for {stmt.prefix!r} must return value {idx} via `return`"
-                    )
-                source_name = scoped_outputs[output_name]
-                if target == source_name:
-                    continue
-                graph.extend(_lower_expr(AxonExprName(name=source_name), target, ctx, guard=guard))
+            raise ValueError("lowering requires flat Axon; scope blocks must be flattened first")
             continue
 
         if isinstance(stmt, AxonBind):
@@ -3167,10 +3002,6 @@ def _normalize_bound_params_on_node(
     node_spec.pop("param_base", None)
 
 
-def _sanitize_path_suffix(value: str) -> str:
-    return _sanitize_token(value, default="path")
-
-
 def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
     def _raw_arg(index: int) -> Any:
         raw_args = node_spec.get("_args")
@@ -3235,497 +3066,6 @@ def _path_bound_param_names(node_spec: dict[str, Any]) -> list[str]:
     raise ValueError(f"unsupported param_base resolution for op {op!r}")
 
 
-def _resolve_paths_at_lowering_time(
-    model: dict[str, Any],
-    block_path_params: dict[str, tuple[str, ...]],
-    block_default_inputs: dict[str, dict[str, AxonExpr]] | None = None,
-) -> None:
-    blocks_raw = model.get("blocks")
-    if not isinstance(blocks_raw, dict) or not blocks_raw:
-        return
-
-    base_blocks: dict[str, dict[str, Any]] = {
-        name: copy.deepcopy(spec) for name, spec in blocks_raw.items() if isinstance(spec, dict)
-    }
-    all_blocks: dict[str, dict[str, Any]] = dict(base_blocks)
-    path_params_by_block: dict[str, tuple[str, ...]] = {
-        name: tuple(p for p in block_path_params.get(name, ()) if isinstance(p, str) and p)
-        for name in base_blocks
-    }
-    specialization_cache: dict[tuple[str, tuple[tuple[str, str], ...]], str] = {}
-
-    def _resolve_default_path_expr(
-        expr: AxonExpr | None,
-        *,
-        bindings: dict[str, str],
-    ) -> str | None:
-        if expr is None:
-            return None
-        if isinstance(expr, AxonExprParen):
-            return _resolve_default_path_expr(expr.inner, bindings=bindings)
-        if isinstance(expr, AxonExprName):
-            return bindings.get(expr.name)
-        if not isinstance(expr, AxonExprString | AxonExprPath):
-            return None
-        raw = (
-            expr.value if isinstance(expr, AxonExprString) else _path_expr_to_source(expr)
-        ).strip()
-        if not raw:
-            return None
-        if raw.startswith("@@"):
-            return raw[2:]
-        if raw.startswith("@"):
-            suffix = raw[1:]
-            if not suffix:
-                return None
-            base = bindings.get("path")
-            if base is None and len(bindings) == 1:
-                only = next(iter(bindings.values()))
-                if isinstance(only, str) and only:
-                    base = only
-            if not isinstance(base, str) or not base:
-                return None
-            return f"{base}.{suffix}"
-        head, sep, tail = raw.partition(".")
-        mapped_head = bindings.get(head)
-        if isinstance(mapped_head, str) and mapped_head.strip():
-            return f"{mapped_head.strip()}{sep}{tail}" if sep else mapped_head.strip()
-        return raw if "." in raw else bindings.get(raw)
-
-    def _to_list(value: Any) -> list[Any]:
-        if isinstance(value, list):
-            return list(value)
-        if value is None:
-            return []
-        return [value]
-
-    def _substitute_names(value: Any, mapping: dict[str, Any]) -> Any:
-        if isinstance(value, str):
-            return mapping.get(value, value)
-        if isinstance(value, list):
-            return [_substitute_names(item, mapping) for item in value]
-        if isinstance(value, dict):
-            if value.get("_expr") == "name":
-                ident = value.get("id")
-                if isinstance(ident, str) and ident in mapping:
-                    replacement = mapping[ident]
-                    if isinstance(replacement, str) and replacement.startswith("@"):
-                        return path_expr_to_runtime_value(
-                            parse_path_token(replacement, op_name="inline path")
-                        )
-                    return replacement
-            return {k: _substitute_names(v, mapping) for k, v in value.items()}
-        return value
-
-    def _map_call_inputs_to_values(
-        *, call_spec: dict[str, Any], block_spec: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        inputs = block_spec.get("inputs")
-        if not isinstance(inputs, dict):
-            return None
-        ordered_inputs = list(inputs.keys())
-        positional = _to_list(call_spec.get("_args"))
-        kwargs = {
-            key: value
-            for key, value in call_spec.items()
-            if isinstance(key, str) and not key.startswith("_")
-        }
-        env: dict[str, Any] = {}
-        for idx, name in enumerate(ordered_inputs):
-            if idx < len(positional):
-                env[name] = positional[idx]
-                continue
-            if name in kwargs:
-                env[name] = kwargs[name]
-                continue
-            return None
-        return env
-
-    def _bind_map_for_inline(*, template_bind: Any, call_bind: Any) -> dict[str, Any] | None:
-        template = _to_list(template_bind)
-        target = _to_list(call_bind)
-        if len(template) != len(target):
-            return None
-        return {
-            str(src): dst
-            for src, dst in zip(template, target, strict=False)
-            if isinstance(src, str)
-        }
-
-    def _inline_simple_call_if_possible(
-        *,
-        call_spec: dict[str, Any],
-        target: str,
-        concrete_paths: dict[str, str],
-        inherited_path_bindings: dict[str, str] | None = None,
-    ) -> dict[str, Any] | None:
-        block_spec = base_blocks.get(target)
-        if not isinstance(block_spec, dict):
-            return None
-        graph = block_spec.get("graph")
-        if not isinstance(graph, list) or len(graph) != 1:
-            return None
-        node_item = graph[0]
-        if not isinstance(node_item, dict) or len(node_item) != 1:
-            return None
-        _, template_spec = next(iter(node_item.items()))
-        if not isinstance(template_spec, dict):
-            return None
-        template_op = template_spec.get("_op")
-        if not isinstance(template_op, str) or template_op in {"call", "for"}:
-            return None
-
-        input_values = _map_call_inputs_to_values(call_spec=call_spec, block_spec=block_spec)
-        if input_values is None:
-            return None
-        effective_path_bindings: dict[str, str] = {}
-        if isinstance(inherited_path_bindings, dict):
-            effective_path_bindings.update(inherited_path_bindings)
-        effective_path_bindings.update(concrete_paths)
-        input_values.update(effective_path_bindings)
-
-        bind_map = _bind_map_for_inline(
-            template_bind=template_spec.get("_bind"),
-            call_bind=call_spec.get("_bind"),
-        )
-        if bind_map is None:
-            return None
-        input_values.update(bind_map)
-
-        inlined = copy.deepcopy(template_spec)
-        inlined = _substitute_names(inlined, input_values)
-        caller_scope = call_spec.get("_scope")
-        if isinstance(caller_scope, str) and caller_scope and "_scope" not in inlined:
-            inlined["_scope"] = caller_scope
-        caller_param_root = call_spec.get("_param_root")
-        if (
-            caller_param_root is not None
-            and "_param_root" not in inlined
-            and "_abs_path" not in inlined
-        ):
-            inlined["_param_root"] = copy.deepcopy(caller_param_root)
-
-        param_base = inlined.get("param_base")
-        if isinstance(param_base, str):
-            resolved_base = effective_path_bindings.get(param_base, param_base)
-            _normalize_bound_params_on_node(
-                inlined,
-                base_path=resolved_base,
-                inherited_path_bindings=effective_path_bindings,
-            )
-
-        return inlined
-
-    def _call_has_path_like_inputs(
-        *, call_spec: dict[str, Any], block_spec: dict[str, Any]
-    ) -> bool:
-        mapped = _map_call_inputs_to_values(call_spec=call_spec, block_spec=block_spec)
-        if not isinstance(mapped, dict):
-            return False
-        for value in mapped.values():
-            token = _as_concrete_path(value)
-            if not isinstance(token, str):
-                continue
-            if token.startswith("@@") or token.startswith("@") or "." in token:
-                return True
-        return False
-
-    def ensure_specialized_block(block_name: str, path_bindings: dict[str, str]) -> str:
-        propagated_bindings = dict(path_bindings)
-        if isinstance(block_default_inputs, dict):
-            defaults = block_default_inputs.get(block_name, {})
-            if isinstance(defaults, dict):
-                # Propagate concrete path defaults (for example:
-                # `scale_path=@weight` in Prelude.rmsnorm specialized via `@path`).
-                for input_name, default_expr in defaults.items():
-                    if input_name in propagated_bindings:
-                        continue
-                    if not isinstance(default_expr, AxonExpr):
-                        continue
-                    resolved = _resolve_default_path_expr(
-                        default_expr, bindings=propagated_bindings
-                    )
-                    if isinstance(resolved, str) and resolved:
-                        propagated_bindings[input_name] = resolved
-
-        cache_key = (block_name, tuple(sorted(propagated_bindings.items())))
-        cached = specialization_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        base_spec = base_blocks.get(block_name)
-        if base_spec is None:
-            return block_name
-        specialized = copy.deepcopy(base_spec)
-        inputs = specialized.get("inputs")
-        if isinstance(inputs, dict):
-            for path_name in path_bindings:
-                inputs.pop(path_name, None)
-        parts = [block_name]
-        for key in sorted(propagated_bindings):
-            parts.append(f"{key}_{_sanitize_path_suffix(propagated_bindings[key])}")
-        base_name = "__".join(parts)
-        candidate = base_name
-        idx = 2
-        while candidate in all_blocks:
-            candidate = f"{base_name}_{idx}"
-            idx += 1
-        rewrite_graph(
-            specialized.get("graph"),
-            inherited_path_bindings=propagated_bindings,
-        )
-        _rewrite_bound_path_tokens_in_graph(
-            specialized.get("graph"),
-            bindings=propagated_bindings,
-        )
-        all_blocks[candidate] = specialized
-        path_params_by_block[candidate] = ()
-        specialization_cache[cache_key] = candidate
-        return candidate
-
-    def _rewrite_bound_path_tokens_in_graph(graph: Any, *, bindings: dict[str, str]) -> None:
-        if not isinstance(graph, list) or not bindings:
-            return
-
-        def _rewrite_bound_exprs(value: Any) -> Any:
-            if isinstance(value, list):
-                return [_rewrite_bound_exprs(item) for item in value]
-            if isinstance(value, dict):
-                expr_kind = value.get("_expr")
-                if expr_kind == "name":
-                    ident = value.get("id")
-                    if isinstance(ident, str):
-                        concrete = bindings.get(ident)
-                        if isinstance(concrete, str) and concrete:
-                            return {"_expr": "string", "value": concrete}
-                return {k: _rewrite_bound_exprs(v) for k, v in value.items()}
-            return value
-
-        def _rewrite_token(value: str) -> str:
-            token = value.strip()
-            for name, concrete in bindings.items():
-                if not isinstance(name, str) or not isinstance(concrete, str):
-                    continue
-                if token == name:
-                    return concrete
-                prefix = f"{name}."
-                if token.startswith(prefix):
-                    return f"{concrete}.{token[len(prefix) :]}"
-            return token
-
-        for item in graph:
-            if not isinstance(item, dict) or len(item) != 1:
-                continue
-            _, node_spec = next(iter(item.items()))
-            if not isinstance(node_spec, dict):
-                continue
-            rewritten_node = _rewrite_bound_exprs(node_spec)
-            if isinstance(rewritten_node, dict):
-                node_spec.clear()
-                node_spec.update(rewritten_node)
-            params = node_spec.get("_params")
-            if isinstance(params, dict):
-                rewritten: dict[str, Any] = {}
-                changed = False
-                for key, value in params.items():
-                    if isinstance(value, str):
-                        new_value = _rewrite_token(value)
-                        rewritten[key] = new_value
-                        changed = changed or (new_value != value)
-                    else:
-                        rewritten[key] = value
-                if changed:
-                    node_spec["_params"] = rewritten
-            nested = node_spec.get("graph")
-            if isinstance(nested, list):
-                _rewrite_bound_path_tokens_in_graph(nested, bindings=bindings)
-            body = node_spec.get("_body")
-            if isinstance(body, list):
-                _rewrite_bound_path_tokens_in_graph(body, bindings=bindings)
-            then_branch = node_spec.get("_then")
-            if isinstance(then_branch, list):
-                _rewrite_bound_path_tokens_in_graph(then_branch, bindings=bindings)
-            else_branch = node_spec.get("_else")
-            if isinstance(else_branch, list):
-                _rewrite_bound_path_tokens_in_graph(else_branch, bindings=bindings)
-
-    def rewrite_graph(graph: Any, *, inherited_path_bindings: dict[str, str]) -> None:
-        if not isinstance(graph, list):
-            return
-        for item in graph:
-            if not isinstance(item, dict) or len(item) != 1:
-                continue
-            _, node_spec = next(iter(item.items()))
-            if not isinstance(node_spec, dict):
-                continue
-
-            if inherited_path_bindings:
-                for path_name, concrete_path in inherited_path_bindings.items():
-                    if path_name not in node_spec:
-                        continue
-                    raw_value = node_spec.get(path_name)
-                    token = _as_concrete_path(raw_value)
-                    if token == path_name:
-                        node_spec[path_name] = concrete_path
-                if node_spec.get("_op") == "_ir_alias":
-                    alias_src = node_spec.get("_args")
-                    if isinstance(alias_src, str):
-                        concrete_alias = inherited_path_bindings.get(alias_src)
-                        if isinstance(concrete_alias, str) and concrete_alias:
-                            node_spec.pop("_args", None)
-                            node_spec["_op"] = "_ir_expr"
-                            node_spec["value"] = {"_expr": "string", "value": concrete_alias}
-
-            param_base = node_spec.get("param_base")
-            if isinstance(param_base, str) and param_base in inherited_path_bindings:
-                base_path = inherited_path_bindings[param_base]
-                _normalize_bound_params_on_node(
-                    node_spec,
-                    base_path=base_path,
-                    inherited_path_bindings=inherited_path_bindings,
-                )
-
-            if node_spec.get("_op") == "call":
-                target = node_spec.get("_target")
-                if isinstance(target, str):
-                    required_path_params = path_params_by_block.get(target, ())
-                    concrete: dict[str, str] = {}
-                    if required_path_params:
-                        for path_name in required_path_params:
-                            concrete_value = _as_concrete_path(node_spec.get(path_name))
-                            if concrete_value is None:
-                                concrete = {}
-                                break
-                            if concrete_value in required_path_params:
-                                forwarded = inherited_path_bindings.get(concrete_value)
-                                if forwarded is None:
-                                    concrete = {}
-                                    break
-                                concrete_value = forwarded
-                            elif (
-                                "." not in concrete_value
-                                and not concrete_value.startswith("@@")
-                                and inherited_path_bindings
-                            ):
-                                parent_base = inherited_path_bindings.get("path")
-                                if parent_base is None and len(inherited_path_bindings) == 1:
-                                    parent_base = next(iter(inherited_path_bindings.values()))
-                                if (
-                                    isinstance(parent_base, str)
-                                    and parent_base
-                                    and ("." in parent_base or parent_base.startswith("@@"))
-                                ):
-                                    concrete_value = f"{parent_base}.{concrete_value}"
-                            concrete[path_name] = concrete_value
-                    call_block = base_blocks.get(target)
-                    should_try_inline = False
-                    if not concrete and isinstance(call_block, dict):
-                        # Preserve concrete Path-typed call arguments (for example
-                        # `scale=@layer_scalar`) by substituting them into the inlined op.
-                        should_try_inline = _call_has_path_like_inputs(
-                            call_spec=node_spec,
-                            block_spec=call_block,
-                        )
-                    if should_try_inline:
-                        inlined = _inline_simple_call_if_possible(
-                            call_spec=node_spec,
-                            target=target,
-                            concrete_paths=concrete,
-                            inherited_path_bindings=inherited_path_bindings,
-                        )
-                        if inlined is not None:
-                            node_spec.clear()
-                            node_spec.update(inlined)
-                            target = None
-                            required_path_params = ()
-                            continue
-                    if concrete and required_path_params:
-                        specialized_name = ensure_specialized_block(target, concrete)
-                        node_spec["_target"] = specialized_name
-                        for path_name in required_path_params:
-                            node_spec.pop(path_name, None)
-
-            nested = node_spec.get("graph")
-            if isinstance(nested, list):
-                rewrite_graph(nested, inherited_path_bindings=inherited_path_bindings)
-            body = node_spec.get("_body")
-            if isinstance(body, list):
-                rewrite_graph(body, inherited_path_bindings=inherited_path_bindings)
-            then_branch = node_spec.get("_then")
-            if isinstance(then_branch, list):
-                rewrite_graph(then_branch, inherited_path_bindings=inherited_path_bindings)
-            else_branch = node_spec.get("_else")
-            if isinstance(else_branch, list):
-                rewrite_graph(else_branch, inherited_path_bindings=inherited_path_bindings)
-
-    rewrite_graph(model.get("graph"), inherited_path_bindings={})
-    for block_spec in list(all_blocks.values()):
-        rewrite_graph(block_spec.get("graph"), inherited_path_bindings={})
-
-    reachable: set[str] = set()
-
-    def collect_called_blocks(graph: Any) -> list[str]:
-        called: list[str] = []
-        if not isinstance(graph, list):
-            return called
-        for item in graph:
-            if not isinstance(item, dict) or len(item) != 1:
-                continue
-            _, node_spec = next(iter(item.items()))
-            if not isinstance(node_spec, dict):
-                continue
-            if node_spec.get("_op") == "call" and isinstance(node_spec.get("_target"), str):
-                called.append(node_spec["_target"])
-            nested = node_spec.get("graph")
-            if isinstance(nested, list):
-                called.extend(collect_called_blocks(nested))
-            body = node_spec.get("_body")
-            if isinstance(body, list):
-                called.extend(collect_called_blocks(body))
-            then_branch = node_spec.get("_then")
-            if isinstance(then_branch, list):
-                called.extend(collect_called_blocks(then_branch))
-            else_branch = node_spec.get("_else")
-            if isinstance(else_branch, list):
-                called.extend(collect_called_blocks(else_branch))
-        return called
-
-    worklist = collect_called_blocks(model.get("graph"))
-    while worklist:
-        target = worklist.pop()
-        if target in reachable:
-            continue
-        if target not in all_blocks:
-            continue
-        block_spec = all_blocks[target]
-        reachable.add(target)
-        worklist.extend(collect_called_blocks(block_spec.get("graph")))
-
-    def _assert_no_unresolved_param_base(graph: Any, *, block_name: str) -> None:
-        if not isinstance(graph, list):
-            return
-        for item in graph:
-            if not isinstance(item, dict) or len(item) != 1:
-                continue
-            _, node_spec = next(iter(item.items()))
-            if not isinstance(node_spec, dict):
-                continue
-            if "param_base" in node_spec:
-                raise ValueError(f"unresolved param_base in reachable block {block_name!r}")
-            for key in ("graph", "_body", "_then", "_else"):
-                nested = node_spec.get(key)
-                if isinstance(nested, list):
-                    _assert_no_unresolved_param_base(nested, block_name=block_name)
-
-    for block_name in sorted(reachable):
-        block_spec = all_blocks[block_name]
-        _assert_no_unresolved_param_base(block_spec.get("graph"), block_name=block_name)
-
-    if reachable:
-        model["blocks"] = {name: all_blocks[name] for name in all_blocks if name in reachable}
-    else:
-        model.pop("blocks", None)
-
-
 def _canonical_type_source_block_name(block_name: str) -> str:
     if "__" in block_name:
         return block_name.split("__", 1)[0]
@@ -3761,9 +3101,13 @@ def _finalize_block_io_types_for_model(
 
 
 def lower_axon_program_to_synapse_spec(
-    modules: tuple[AxonModule, ...], *, main_module: str | None = None
+    modules: AxonFile | tuple[AxonModule, ...], *, main_module: str | None = None
 ) -> dict[str, Any]:
-    typed_signatures = typecheck_axon_program(modules, main_module=main_module)
+    program = _prepare_program_for_lowering(modules, main_module=main_module)
+    validate_typed_axon_file(program, main_module=main_module)
+    program_symbol_values = _lower_program_symbol_values(program)
+    modules = program.modules
+    typed_signatures = _build_module_signatures_for_closed_program(modules, main_module=main_module)
     if not modules:
         raise ValueError("Axon program must contain at least one module")
 
@@ -3851,6 +3195,8 @@ def lower_axon_program_to_synapse_spec(
     _ensure_outputs_from_returns(main_outputs, main_returns)
     model: dict[str, Any] = {"inputs": main_inputs, "graph": main_graph, "outputs": main_outputs}
     combined_symbols: dict[str, Any] = {}
+    for key, value in program_symbol_values.items():
+        combined_symbols[key] = value
     for module in modules:
         if not isinstance(module.symbols, dict):
             continue
@@ -3908,11 +3254,6 @@ def lower_axon_program_to_synapse_spec(
     if blocks:
         spec["model"]["blocks"] = blocks
 
-    _resolve_paths_at_lowering_time(
-        spec["model"],
-        block_path_params,
-        block_default_inputs=block_default_inputs,
-    )
     inferred_block_io_types = infer_block_io_types_from_modules(
         spec=spec,
         modules=modules,

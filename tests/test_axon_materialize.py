@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from brainsurgery.synapse.axon_materialize import run_axon_materialize
+from brainsurgery.cli.synapse_materialize import run_axon_materialize_workflow
+from brainsurgery.synapse import (
+    ast_equal,
+    load_materialize_context,
+    materialize_axon_file,
+    parse_axon_program_from_path,
+    render_axon_file,
+)
 
 
 def test_gemma3_materialize_reads_checkpoint_pragma_and_groups_variants(tmp_path: Path) -> None:
@@ -82,16 +89,18 @@ def test_gemma3_materialize_reads_checkpoint_pragma_and_groups_variants(tmp_path
             str(d / "model.safetensors"),
         )
 
-    written = run_axon_materialize(axon_path=axon_path, models_root=tmp_path / "models")
+    written = run_axon_materialize_workflow(axon_path=axon_path, models_root=tmp_path / "models")
 
     assert written == [axon_dir / "gemma-3-270m.axon", axon_dir / "gemma-3-1b.axon"]
     rendered_270m = (axon_dir / "gemma-3-270m.axon").read_text(encoding="utf-8")
     rendered_1b = (axon_dir / "gemma-3-1b.axon").read_text(encoding="utf-8")
-    assert 'CHECKPOINTS ["google/gemma-3-270m", "google/gemma-3-270m-it"]' in rendered_270m
-    assert 'CHECKPOINTS ["google/gemma-3-1b-pt", "google/gemma-3-1b-it"]' in rendered_1b
-    assert "Config." not in rendered_270m
+    assert '{-# CHECKPOINTS ["google/gemma-3-270m", "google/gemma-3-270m-it"] #-}' in rendered_270m
+    assert '{-# CHECKPOINTS ["google/gemma-3-1b-pt", "google/gemma-3-1b-it"] #-}' in rendered_1b
+    assert "Config.int" not in rendered_270m
+    assert "Config.float" not in rendered_270m
+    assert "Config.int" not in rendered_1b
+    assert "Config.float" not in rendered_1b
     assert "Params." not in rendered_270m
-    assert "Config." not in rendered_1b
     assert "Params." not in rendered_1b
     assert not (axon_dir / "gemma-3-270m-it.axon").exists()
     assert not (axon_dir / "gemma-3-1b-it.axon").exists()
@@ -139,15 +148,18 @@ def test_generic_materialize_works_for_non_gemma3_with_config_and_params(tmp_pat
             str(d / "model.safetensors"),
         )
 
-    written = run_axon_materialize(axon_path=axon_path, models_root=tmp_path / "weights")
+    written = run_axon_materialize_workflow(axon_path=axon_path, models_root=tmp_path / "weights")
 
     assert written == [axon_dir / "toy.axon"]
     rendered = (axon_dir / "toy.axon").read_text(encoding="utf-8")
-    assert 'CHECKPOINTS ["org/toy-pt", "org/toy-it"]' in rendered
-    assert "Config." not in rendered
-    assert "Params." not in rendered
-    assert 'root="language_model"' in rendered
-    assert "dim=32" in rendered
+    assert '{-# CHECKPOINTS ["org/toy-pt", "org/toy-it"] #-}' in rendered
+    assert "import Config" in rendered
+    assert "import Params" in rendered
+    assert 'CFG = true ? "text_config" : ""' in rendered
+    assert 'ROOT = Params.root "language_model" default=""' in rendered
+    assert "D = 32" in rendered
+    assert "root=ROOT" in rendered
+    assert "dim=D" in rendered
 
 
 def test_materialize_groups_identical_instruct_variant_by_body(tmp_path: Path) -> None:
@@ -185,11 +197,13 @@ def test_materialize_groups_identical_instruct_variant_by_body(tmp_path: Path) -
 
         save_file({"embed_tokens.weight": torch.zeros([128, 32])}, str(d / "model.safetensors"))
 
-    written = run_axon_materialize(axon_path=axon_path, models_root=tmp_path / "weights")
+    written = run_axon_materialize_workflow(axon_path=axon_path, models_root=tmp_path / "weights")
 
     assert written == [axon_dir / "toy.axon"]
     rendered = (axon_dir / "toy.axon").read_text(encoding="utf-8")
-    assert 'CHECKPOINTS ["org/toy", "org/toy-Instruct"]' in rendered
+    assert '{-# CHECKPOINTS ["org/toy", "org/toy-Instruct"] #-}' in rendered
+    assert "import Config" in rendered
+    assert "D = 32" in rendered
     assert not (axon_dir / "toy-Instruct.axon").exists()
 
 
@@ -230,10 +244,11 @@ def test_materialize_resolves_config_calls_inside_module_body_using_constant_env
 
     save_file({"norm.weight": torch.zeros([16])}, str(model_root / "model.safetensors"))
 
-    written = run_axon_materialize(axon_path=axon_path, models_root=tmp_path / "weights")
+    written = run_axon_materialize_workflow(axon_path=axon_path, models_root=tmp_path / "weights")
     assert written == [axon_dir / "toy.axon"]
     rendered = (axon_dir / "toy.axon").read_text(encoding="utf-8")
-    assert "Config." not in rendered
+    assert "import Config" in rendered
+    assert "Config.float" not in rendered
     assert "eps <- 2.5e-05" in rendered or "eps <- 2.5e-5" in rendered
 
 
@@ -272,9 +287,68 @@ def test_materialize_instantiates_scope_prefix_templates_from_env(tmp_path: Path
         str(model_root / "model.safetensors"),
     )
 
-    written = run_axon_materialize(axon_path=axon_path, models_root=tmp_path / "weights")
+    written = run_axon_materialize_workflow(axon_path=axon_path, models_root=tmp_path / "weights")
     assert written == [axon_dir / "toy.axon"]
 
     rendered = (axon_dir / "toy.axon").read_text(encoding="utf-8")
-    assert "PARAM_ROOT" not in rendered
-    assert "scope@language_model.model do" in rendered
+    assert 'PARAM_ROOT = (has_root "language_model") ? "language_model" : ""' in rendered
+    assert "scope@'{PARAM_ROOT}.model' do" in rendered
+
+
+def test_materialize_workflow_written_file_roundtrips_to_expected_ast(tmp_path: Path) -> None:
+    axon_dir = tmp_path / "modelsrc"
+    axon_dir.mkdir(parents=True)
+    axon_path = axon_dir / "toy.axon"
+    axon_path.write_text(
+        "\n".join(
+            [
+                '{-# CHECKPOINTS ["org/toy"] #-}',
+                "",
+                "import Config",
+                "",
+                "D = Config.int@hidden_size default=16",
+                "",
+                "toy :: Tensor[B,S,D] -> Tensor[B,S,D]",
+                "toy x = do",
+                "  y <- linear@proj x dim=D",
+                "  return y",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    model_root = tmp_path / "weights" / "org" / "toy"
+    model_root.mkdir(parents=True)
+    (model_root / "config.json").write_text(json.dumps({"hidden_size": 24}), encoding="utf-8")
+    import torch
+    from safetensors.torch import save_file
+
+    save_file({"proj.weight": torch.zeros([24, 24])}, str(model_root / "model.safetensors"))
+
+    written = run_axon_materialize_workflow(axon_path=axon_path, models_root=tmp_path / "weights")
+    assert written == [axon_dir / "toy.axon"]
+
+    original = parse_axon_program_from_path(axon_path)
+    context = load_materialize_context(checkpoint="org/toy", models_root=tmp_path / "weights")
+    expected = materialize_axon_file(original, context=context)
+    expected_path = written[0].with_suffix(".expected.axon")
+    expected_path.unlink(missing_ok=True)
+    expected_path.write_text(
+        render_axon_file(
+            expected.__class__(
+                modules=expected.modules,
+                imports=expected.imports,
+                imported_members=dict(expected.imported_members),
+                exports=expected.exports,
+                pragmas={"checkpoints": "org/toy"},
+                constants=dict(expected.constants),
+                type_aliases=dict(expected.type_aliases),
+                origin_path=expected.origin_path,
+            )
+        ),
+        encoding="utf-8",
+    )
+    expected = parse_axon_program_from_path(expected_path)
+    reparsed = parse_axon_program_from_path(written[0])
+    assert ast_equal(reparsed, expected)

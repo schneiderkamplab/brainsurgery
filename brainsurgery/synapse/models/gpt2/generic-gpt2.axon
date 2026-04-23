@@ -11,11 +11,11 @@ import Tensor
 
 
 
-CONTEXT_SIZE   = Config.int@n_positions default=1024
-MODEL_DIM   = Config.int@n_embd default=768
-NUM_LAYERS   = Config.int@n_layer default=12
-NUM_HEADS   = Config.int@n_head default=12
-VOCAB_SIZE   = Config.int@vocab_size default=52057
+CONTEXT_SIZE   = Config.dim@n_positions default=1024
+MODEL_DIM   = Config.dim@n_embd default=768
+NUM_LAYERS   = Config.dim@n_layer default=12
+NUM_HEADS   = Config.dim@n_head default=12
+VOCAB_SIZE   = Config.dim@vocab_size default=52057
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 gpt2_block x attn_mask = do

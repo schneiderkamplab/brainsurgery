@@ -2,6 +2,7 @@ export (
   append,
   index,
   init,
+  length,
 )
 
 init :: List[_T]
@@ -12,3 +13,6 @@ index = _list_index
 
 append :: List[_T] -> _T -> List[_T]
 append = _list_append
+
+length :: List[_T] -> Dim
+length = _list_length

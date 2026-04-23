@@ -9,6 +9,8 @@ import typer
 from omegaconf import OmegaConf
 from typer.models import OptionInfo
 
+from .synapse_materialize import run_axon_materialize_workflow
+
 app = typer.Typer(help="Synapse tooling.")
 
 
@@ -60,8 +62,8 @@ def _resolve_axon_program(axon_path: Path, *, strict: bool = False) -> Any:
 
 def _render_resolved_axon_program(program: Any) -> str:
     module = _synapse_module()
-    render_fn = getattr(module, "render_resolved_axon_program")
-    return render_fn(program)
+    render_fn = getattr(module, "render_axon_file")
+    return render_fn(program.ast)
 
 
 def _build_pipeline_plan_for_axon(
@@ -1197,10 +1199,8 @@ def axon_materialize(
     ),
 ) -> None:
     """Materialize checkpoint-specific Axon files with config values baked in."""
-    module = _synapse_module()
-    run_fn = getattr(module, "run_axon_materialize")
     try:
-        written = run_fn(
+        written = run_axon_materialize_workflow(
             axon_path=axon_path,
             checkpoints=checkpoint or None,
             models_root=models_root,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterator, cast
 
@@ -7,26 +8,11 @@ from lark import Lark, Token, Transformer
 from lark.exceptions import LarkError, VisitError
 from lark.indenter import DedentError, Indenter
 
-from .path_expr import parse_path_token
-from .type_system import (
-    DimExprBinary,
-    DimToken,
-    TypeAny,
-    TypeBool,
-    TypeExpr,
-    TypeFloat,
-    TypeInt,
-    TypeList,
-    TypeNamed,
-    TypeNull,
-    TypeOptional,
-    TypeString,
-    TypeTensor,
-    TypeTuple,
-)
-from .types import (
+from ..ast.nodes import (
     AxonBind,
+    AxonCond,
     AxonExpr,
+    AxonExprAscribe,
     AxonExprBinary,
     AxonExprBind,
     AxonExprBool,
@@ -52,55 +38,52 @@ from .types import (
     AxonStatement,
     AxonYield,
 )
+from ..ast.path import parse_path_token
+from ..ast.types import (
+    DimExprBinary,
+    DimToken,
+    TypeAliasDef,
+    TypeAny,
+    TypeBool,
+    TypeDim,
+    TypeExpr,
+    TypeFloat,
+    TypeInt,
+    TypeList,
+    TypeNamed,
+    TypeNull,
+    TypeOptional,
+    TypePath,
+    TypeString,
+    TypeTensor,
+    TypeTuple,
+    TypeVar,
+)
+from ._cst import (
+    CstDefinition,
+    CstDefParam,
+    CstFunctionType,
+    CstModuleSource,
+    CstPathTypeParam,
+    CstProgramSource,
+    CstSignature,
+)
 
-
-@dataclass(frozen=True)
-class ParsedSignature:
-    module_decl: str
-    type_signature: ParsedFunctionType
-
-
-@dataclass(frozen=True)
-class ParsedPathTypeParam:
-    name: str | None
-    type_expr: TypeExpr
-
-
-@dataclass(frozen=True)
-class ParsedFunctionType:
-    path_params: tuple[ParsedPathTypeParam, ...]
-    arg_types: tuple[TypeExpr, ...]
-    return_type: TypeExpr
-
-
-@dataclass(frozen=True)
-class ParsedDefParam:
-    name: str
-    default_expr: AxonExpr | None = None
-
-
-@dataclass(frozen=True)
-class ParsedDefinition:
-    module_decl: str
-    args: tuple[ParsedDefParam, ...]
-    rhs: AxonExpr
-
-
-@dataclass(frozen=True)
-class ParsedModuleSource:
-    signature: ParsedSignature
-    definition: ParsedDefinition
-
-
-@dataclass(frozen=True)
-class ParsedProgramSource:
-    modules: tuple[ParsedModuleSource, ...]
-    imports: tuple[str, ...]
-    imported_members: dict[str, tuple[str, ...]]
-    exports: tuple[str, ...]
-    pragmas: dict[str, object]
-    constants: dict[str, AxonExpr]
-    type_aliases: dict[str, TypeExpr]
+_TYPE_EXPR_CLASSES = (
+    TypeAny,
+    TypeBool,
+    TypeDim,
+    TypeFloat,
+    TypeInt,
+    TypeList,
+    TypeNamed,
+    TypeNull,
+    TypeOptional,
+    TypePath,
+    TypeString,
+    TypeTensor,
+    TypeTuple,
+)
 
 
 @dataclass(frozen=True)
@@ -288,24 +271,30 @@ pragma: "{-#" NAME pragma_value "#-}"
     | list_expr
     | literal
 constant: NAME "=" expr
-type_alias_decl: TYPE_KW NAME "=" type_expr
+type_alias_decl: TYPE_KW NAME type_alias_params? "=" type_expr
+type_alias_params: LSQB NAME ("," NAME)* RSQB
 
 ?statement: for_statement
     | for_bind_statement
+    | if_statement
     | scope_bind_statement
     | return_statement
     | yield_statement
     | bind_statement
 
 for_statement: FOR for_scope? NAME BIND_ARROW range_expr for_step? for_carry? DO suite
+    | FOR for_scope? NAME BIND_ARROW range_expr for_step? for_carry? bind_expr -> for_statement_expr
 for_bind_statement: target_list BIND_ARROW FOR for_scope? NAME BIND_ARROW range_expr for_step? for_carry? DO suite
+    | target_list BIND_ARROW FOR for_scope? NAME BIND_ARROW range_expr for_step? for_carry? bind_expr -> for_bind_statement_expr
 for_scope: "@" scoped_name
 for_step: STEP "=" expr
 for_carry: CARRY LPAR target_list RPAR
 
 scope_bind_statement: target_list BIND_ARROW SCOPE_KW scope_ref scope_bind_kwarg* DO suite
+if_statement: "if" expr "then" DO suite _NL* "else" DO suite
 scope_bind_kwarg: NAME "=" kwarg_value
-scope_ref: "@"? scoped_name
+scope_ref: path_lit -> scope_ref_path
+    | "@"? scoped_name
     | "@"? STRING -> scope_ref_string
 scoped_name: scoped_part ("." scoped_part)*
 scoped_part: NAME | TEMPLATE_NAME
@@ -329,7 +318,9 @@ range_expr: range_start expr RANGE_DOTS expr range_end
 range_start: LSQB | LPAR
 range_end: RSQB | RPAR
 
-?expr: do_expr | bind_expr
+?expr: expr_no_ascribe TYPE_SEP type_expr -> expr_ascribe
+    | expr_no_ascribe
+?expr_no_ascribe: do_expr | bind_expr
 do_expr: DO suite
 
 ?bind_expr: pipe_expr
@@ -370,7 +361,9 @@ kwarg_bare: NAME "=" kwarg_value
 kwarg_value: arg_expr
 path_lit: PATH_LIT
 
-?arg_expr: do_expr
+?arg_expr: arg_expr_no_ascribe TYPE_SEP type_expr -> expr_ascribe
+    | arg_expr_no_ascribe
+?arg_expr_no_ascribe: do_expr
     | arg_ternary
 ?arg_ternary: arg_if
     | arg_or "?" arg_ws? arg_expr arg_ws? ":" arg_ws? arg_expr -> ternary
@@ -505,6 +498,7 @@ class _ProgramTransformer(Transformer[Token, object]):
                 AxonExprBinary,
                 AxonExprLambda,
                 AxonExprParen,
+                AxonExprAscribe,
                 AxonExprDo,
             ),
         )
@@ -619,7 +613,10 @@ class _ProgramTransformer(Transformer[Token, object]):
 
     @staticmethod
     def _is_stmt(value: object) -> bool:
-        return isinstance(value, AxonBind | AxonReturn | AxonRepeat | AxonYield | AxonScopeBind)
+        return isinstance(
+            value,
+            AxonBind | AxonReturn | AxonRepeat | AxonYield | AxonCond | AxonScopeBind,
+        )
 
     @classmethod
     def _as_stmt(cls, value: object) -> AxonStatement:
@@ -638,6 +635,9 @@ class _ProgramTransformer(Transformer[Token, object]):
                 TypeBool,
                 TypeNull,
                 TypeString,
+                TypePath,
+                TypeDim,
+                TypeVar,
                 TypeNamed,
                 TypeOptional,
                 TypeTensor,
@@ -652,16 +652,16 @@ class _ProgramTransformer(Transformer[Token, object]):
             raise ValueError("expected type expression node")
         return cast(TypeExpr, value)
 
-    def program(self, children: list[object]) -> ParsedProgramSource:
-        modules: list[ParsedModuleSource] = []
+    def program(self, children: list[object]) -> CstProgramSource:
+        modules: list[CstModuleSource] = []
         imports: list[str] = []
         imported_members: dict[str, tuple[str, ...]] = {}
         exports: list[str] = []
         pragmas: dict[str, object] = {}
         constants: dict[str, AxonExpr] = {}
-        type_aliases: dict[str, TypeExpr] = {}
+        type_aliases: dict[str, TypeAliasDef] = {}
         for child in children:
-            if isinstance(child, ParsedModuleSource):
+            if isinstance(child, CstModuleSource):
                 modules.append(child)
                 continue
             if isinstance(child, tuple) and len(child) == 2 and child[0] == "import":
@@ -722,9 +722,8 @@ class _ProgramTransformer(Transformer[Token, object]):
                 continue
             if isinstance(child, tuple) and len(child) == 3 and child[0] == "type_alias":
                 name = cast(str, child[1])
-                type_value = cast(TypeExpr, child[2])
-                type_aliases[name] = type_value
-        return ParsedProgramSource(
+                type_aliases[name] = cast(TypeAliasDef, child[2])
+        return CstProgramSource(
             modules=tuple(modules),
             imports=tuple(dict.fromkeys(imports)),
             imported_members=imported_members,
@@ -737,17 +736,17 @@ class _ProgramTransformer(Transformer[Token, object]):
     def top_item(self, children: list[object]) -> object:
         return children[0]
 
-    def module_decl(self, children: list[object]) -> ParsedModuleSource:
-        signature: ParsedSignature | None = None
-        definition: ParsedDefinition | None = None
+    def module_decl(self, children: list[object]) -> CstModuleSource:
+        signature: CstSignature | None = None
+        definition: CstDefinition | None = None
         for child in children:
-            if isinstance(child, ParsedSignature):
+            if isinstance(child, CstSignature):
                 signature = child
-            elif isinstance(child, ParsedDefinition):
+            elif isinstance(child, CstDefinition):
                 definition = child
         if signature is None or definition is None:
             raise ValueError("invalid module declaration syntax")
-        return ParsedModuleSource(
+        return CstModuleSource(
             signature=signature,
             definition=definition,
         )
@@ -790,6 +789,12 @@ class _ProgramTransformer(Transformer[Token, object]):
             return TypeNull()
         if raw in {"Str", "String"}:
             return TypeString()
+        if raw == "Path":
+            return TypePath()
+        if raw == "Dim":
+            return TypeDim()
+        if re.fullmatch(r"_T[0-9]+", raw):
+            return TypeVar(name=raw)
         return TypeNamed(name=raw)
 
     def type_optional(self, children: list[object]) -> TypeExpr:
@@ -823,9 +828,12 @@ class _ProgramTransformer(Transformer[Token, object]):
         return f"..{name}"
 
     def type_dim_paren(self, children: list[object]) -> DimToken:
-        token = children[0]
-        assert isinstance(token, int | str | DimExprBinary)
-        return token
+        inner = next(
+            (child for child in children if isinstance(child, int | str | DimExprBinary)), None
+        )
+        if inner is None:
+            raise ValueError("invalid parenthesized tensor dimension expression")
+        return inner
 
     def type_dim_binary(self, children: list[object]) -> DimToken:
         left = children[0]
@@ -846,9 +854,16 @@ class _ProgramTransformer(Transformer[Token, object]):
                 continue
             if isinstance(child, int | str | DimExprBinary):
                 dims.append(child)
-        return TypeTensor(base=base, dims=tuple(dims))
+        if base in {"Tensor", "IdxTensor"}:
+            return TypeTensor(base=base, dims=tuple(dims))
+        return TypeNamed(name=base, args=tuple(dims))
 
-    def signature_type(self, children: list[object]) -> ParsedFunctionType:
+    def type_alias_params(self, children: list[object]) -> tuple[str, ...]:
+        return tuple(
+            str(child) for child in children if isinstance(child, Token) and child.type == "NAME"
+        )
+
+    def signature_type(self, children: list[object]) -> CstFunctionType:
         segments: list[TypeExpr] = []
         for child in children:
             if self._is_type(child):
@@ -857,50 +872,50 @@ class _ProgramTransformer(Transformer[Token, object]):
             raise ValueError("empty signature type")
         if not segments:
             raise ValueError("signature requires a return type")
-        return ParsedFunctionType(
+        return CstFunctionType(
             path_params=(),
             arg_types=tuple(segments[:-1]),
             return_type=segments[-1],
         )
 
-    def signature(self, children: list[object]) -> ParsedSignature:
+    def signature(self, children: list[object]) -> CstSignature:
         mod = cast(str, children[0])
         signature_type = next(
-            (child for child in children[1:] if isinstance(child, ParsedFunctionType)),
+            (child for child in children[1:] if isinstance(child, CstFunctionType)),
             None,
         )
-        if not isinstance(signature_type, ParsedFunctionType):
+        if not isinstance(signature_type, CstFunctionType):
             raise ValueError("signature type expression is required")
-        return ParsedSignature(module_decl=mod, type_signature=signature_type)
+        return CstSignature(module_decl=mod, type_signature=signature_type)
 
-    def definition(self, children: list[object]) -> ParsedDefinition:
+    def definition(self, children: list[object]) -> CstDefinition:
         mod = cast(str, children[0])
-        args: list[ParsedDefParam] = []
+        args: list[CstDefParam] = []
         rhs: AxonExpr | None = None
         for child in children[1:]:
-            if isinstance(child, ParsedDefParam):
+            if isinstance(child, CstDefParam):
                 args.append(child)
                 continue
             if self._is_expr(child):
                 rhs = self._as_expr(child)
         if rhs is None:
             raise ValueError("definition rhs expression is required")
-        return ParsedDefinition(module_decl=mod, args=tuple(args), rhs=rhs)
+        return CstDefinition(module_decl=mod, args=tuple(args), rhs=rhs)
 
-    def def_param_positional(self, children: list[object]) -> ParsedDefParam:
+    def def_param_positional(self, children: list[object]) -> CstDefParam:
         if len(children) != 1:
             raise ValueError("invalid positional definition parameter")
         token = cast(Token, children[0])
-        return ParsedDefParam(name=str(token), default_expr=None)
+        return CstDefParam(name=str(token), default_expr=None)
 
-    def def_param_default(self, children: list[object]) -> ParsedDefParam:
+    def def_param_default(self, children: list[object]) -> CstDefParam:
         if len(children) != 2:
             raise ValueError("invalid defaulted definition parameter")
         token = cast(Token, children[0])
         default_expr = self._as_expr(children[1])
-        return ParsedDefParam(name=str(token), default_expr=default_expr)
+        return CstDefParam(name=str(token), default_expr=default_expr)
 
-    def def_param_default_paren(self, children: list[object]) -> ParsedDefParam:
+    def def_param_default_paren(self, children: list[object]) -> CstDefParam:
         token = next(
             (child for child in children if isinstance(child, Token) and child.type == "NAME"),
             None,
@@ -910,7 +925,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         )
         if not isinstance(token, Token) or default_expr is None:
             raise ValueError("invalid parenthesized defaulted definition parameter")
-        return ParsedDefParam(name=str(token), default_expr=default_expr)
+        return CstDefParam(name=str(token), default_expr=default_expr)
 
     def import_members_paren(self, children: list[object]) -> tuple[str, ...]:
         return tuple(
@@ -973,10 +988,18 @@ class _ProgramTransformer(Transformer[Token, object]):
         value = self._as_expr(children[1])
         return ("constant", name, value)
 
-    def type_alias_decl(self, children: list[object]) -> tuple[str, str, TypeExpr]:
+    def type_alias_decl(self, children: list[object]) -> tuple[str, str, TypeAliasDef]:
         name_token = next(
             (child for child in children if isinstance(child, Token) and child.type == "NAME"),
             None,
+        )
+        params = next(
+            (
+                cast(tuple[str, ...], child)
+                for child in children
+                if isinstance(child, tuple) and all(isinstance(item, str) for item in child)
+            ),
+            (),
         )
         alias_type = next(
             (self._as_type(child) for child in children if self._is_type(child)), None
@@ -984,7 +1007,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         if not isinstance(name_token, Token) or alias_type is None:
             raise ValueError("invalid type alias syntax")
         name = str(name_token)
-        return ("type_alias", name, alias_type)
+        return ("type_alias", name, TypeAliasDef(params=params, value=alias_type))
 
     def target_list(self, children: list[object]) -> tuple[str, ...]:
         out = [str(child) for child in children if isinstance(child, Token)]
@@ -1086,15 +1109,24 @@ class _ProgramTransformer(Transformer[Token, object]):
             raise ValueError("scoped name cannot be empty")
         return ".".join(parts)
 
-    def scope_ref(self, children: list[object]) -> str:
+    def scope_ref(self, children: list[object]) -> AxonExprPath:
         if not children:
             raise ValueError("scope reference cannot be empty")
         scoped = cast(str, children[-1])
-        if len(children) > 1:
-            return f"@{scoped}"
-        return scoped
+        parts = tuple(part for part in scoped.split(".") if part)
+        if not parts:
+            raise ValueError("scope reference cannot be empty")
+        return AxonExprPath(absolute=False, parts=parts)
 
-    def scope_ref_string(self, children: list[object]) -> str:
+    def scope_ref_path(self, children: list[object]) -> AxonExprPath:
+        if not children:
+            raise ValueError("scope reference cannot be empty")
+        path = children[-1]
+        if not isinstance(path, AxonExprPath):
+            raise ValueError("scope reference path is required")
+        return path
+
+    def scope_ref_string(self, children: list[object]) -> AxonExprPath:
         if not children:
             raise ValueError("scope reference cannot be empty")
         raw = children[-1]
@@ -1107,9 +1139,7 @@ class _ProgramTransformer(Transformer[Token, object]):
             scoped = text
         if not isinstance(scoped, str) or not scoped:
             raise ValueError("scope reference string cannot be empty")
-        if len(children) > 1:
-            return f"@{scoped}"
-        return scoped
+        return AxonExprPath(absolute=False, parts=tuple(part for part in scoped.split(".") if part))
 
     def for_step(self, children: list[object]) -> AxonExpr:
         for child in reversed(children):
@@ -1147,6 +1177,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         step_expr: AxonExpr = AxonExprInt(value=1)
         body: tuple[AxonStatement, ...] = ()
         carry: tuple[str, ...] | None = None
+        inline_expr: AxonExpr | None = None
 
         for child in children:
             if isinstance(child, Token):
@@ -1161,6 +1192,14 @@ class _ProgramTransformer(Transformer[Token, object]):
                 body = child.body
                 continue
             if isinstance(child, tuple):
+                if (
+                    len(child) == 2
+                    and isinstance(child[0], str)
+                    and child[0] == "loop_inline_expr"
+                    and self._is_expr(child[1])
+                ):
+                    inline_expr = self._as_expr(child[1])
+                    continue
                 if (
                     len(child) == 4
                     and isinstance(child[0], str)
@@ -1185,6 +1224,23 @@ class _ProgramTransformer(Transformer[Token, object]):
 
         from_expr = start_expr if start_delim == "[" else _plus_one(start_expr)
         to_expr = _plus_one(end_expr) if end_delim == "]" else end_expr
+        if inline_expr is not None:
+            if body:
+                raise ValueError("inline for-expression cannot be combined with suite body")
+            if isinstance(inline_expr, AxonExprDo):
+                if not inline_expr.body:
+                    raise ValueError("inline loop do-expression body cannot be empty")
+                has_yield = any(isinstance(stmt, AxonYield) for stmt in inline_expr.body)
+                has_return = any(isinstance(stmt, AxonReturn) for stmt in inline_expr.body)
+                if has_return:
+                    raise ValueError("inline loop do-expression must not contain return")
+                if not has_yield:
+                    raise ValueError("inline loop do-expression must contain yield")
+                body = inline_expr.body
+            elif isinstance(inline_expr, AxonExprTuple):
+                body = (AxonYield(values=tuple(inline_expr.items)),)
+            else:
+                body = (AxonYield(values=(inline_expr,)),)
         return AxonRepeat(
             name=scope_name,
             var=var,
@@ -1199,19 +1255,35 @@ class _ProgramTransformer(Transformer[Token, object]):
     def for_statement(self, children: list[object]) -> AxonRepeat:
         return self._build_for_statement(children)
 
+    def for_statement_expr(self, children: list[object]) -> AxonRepeat:
+        if not children:
+            raise ValueError("invalid inline for-statement syntax")
+        inline_expr = self._as_expr(children[-1])
+        return self._build_for_statement([*children[:-1], ("loop_inline_expr", inline_expr)])
+
     def for_bind_statement(self, children: list[object]) -> AxonRepeat:
         targets = cast(tuple[str, ...], children[0])
         return self._build_for_statement(children[1:], targets=targets)
 
+    def for_bind_statement_expr(self, children: list[object]) -> AxonRepeat:
+        targets = cast(tuple[str, ...], children[0])
+        if len(children) < 2:
+            raise ValueError("invalid inline for-bind statement syntax")
+        inline_expr = self._as_expr(children[-1])
+        return self._build_for_statement(
+            [*children[1:-1], ("loop_inline_expr", inline_expr)],
+            targets=targets,
+        )
+
     def scope_bind_statement(self, children: list[object]) -> AxonScopeBind:
         targets = cast(tuple[str, ...], children[0])
-        prefix: str | None = None
+        prefix: AxonExprPath | None = None
         kwargs: dict[str, AxonKwargValue] = {}
         body: tuple[AxonStatement, ...] = ()
         for child in children[1:]:
             if isinstance(child, Token):
                 continue
-            if isinstance(child, str) and prefix is None:
+            if isinstance(child, AxonExprPath) and prefix is None:
                 prefix = child
                 continue
             if isinstance(child, tuple) and len(child) == 2 and isinstance(child[0], str):
@@ -1225,6 +1297,13 @@ class _ProgramTransformer(Transformer[Token, object]):
         if prefix is None:
             raise ValueError("scope bind prefix is required")
         return AxonScopeBind(targets=targets, prefix=prefix, body=body, kwargs=kwargs)
+
+    def if_statement(self, children: list[object]) -> AxonCond:
+        cond = next((self._as_expr(child) for child in children if self._is_expr(child)), None)
+        suites = [child for child in children if isinstance(child, _SuiteBody)]
+        if cond is None or len(suites) != 2:
+            raise ValueError("if statement requires condition and two suites")
+        return AxonCond(cond=cond, true_body=suites[0].body, false_body=suites[1].body)
 
     def scope_bind_kwarg(self, children: list[object]) -> tuple[str, AxonKwargValue]:
         return self.kwarg_item(children)
@@ -1296,6 +1375,15 @@ class _ProgramTransformer(Transformer[Token, object]):
         if inner is None:
             raise ValueError("parenthesized expression requires an inner expression")
         return AxonExprParen(inner=inner)
+
+    def expr_ascribe(self, children: list[object]) -> AxonExpr:
+        expr = next((self._as_expr(child) for child in children if self._is_expr(child)), None)
+        type_expr = next(
+            (child for child in children if isinstance(child, _TYPE_EXPR_CLASSES)), None
+        )
+        if expr is None or type_expr is None:
+            raise ValueError("typed ascription requires expression and type")
+        return AxonExprAscribe(expr=expr, type_expr=type_expr)
 
     def bare_call(self, children: list[object]) -> AxonExpr:
         callee_token = children[0]
@@ -1407,7 +1495,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         return AxonExprTuple(items=tuple(exprs))
 
 
-def parse_program_source(source: str) -> ParsedProgramSource:
+def parse_surface_program_source(source: str) -> CstProgramSource:
     try:
         tree = _PARSER.parse(source, start="program")
     except LarkError as exc:
@@ -1418,7 +1506,7 @@ def parse_program_source(source: str) -> ParsedProgramSource:
         if isinstance(exc.orig_exc, ValueError):
             raise exc.orig_exc
         raise
-    if not isinstance(transformed, ParsedProgramSource):
+    if not isinstance(transformed, CstProgramSource):
         raise ValueError("invalid Axon source syntax")
     return transformed
 
@@ -1440,12 +1528,12 @@ def parse_expression_source(source: str) -> AxonExpr:
 
 
 __all__ = [
-    "ParsedDefinition",
-    "ParsedFunctionType",
-    "ParsedModuleSource",
-    "ParsedPathTypeParam",
-    "ParsedProgramSource",
-    "ParsedSignature",
+    "CstDefinition",
+    "CstFunctionType",
+    "CstModuleSource",
+    "CstPathTypeParam",
+    "CstProgramSource",
+    "CstSignature",
     "parse_expression_source",
-    "parse_program_source",
+    "parse_surface_program_source",
 ]

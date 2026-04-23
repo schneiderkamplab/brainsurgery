@@ -6,7 +6,7 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
-from .axon.type_system import TypeList, TypeOptional, TypeTensor, TypeTuple, parse_type_expr
+from .axon.ast import TypeList, TypeOptional, TypeTensor, TypeTuple, parse_type_expr
 from .ops import get_op_module
 from .spec_normalize import normalize_synapse_spec_expressions
 
@@ -48,8 +48,10 @@ def emit_model_code_from_synapse_spec(
     def _is_codegen_symbol_value(value: Any) -> bool:
         if isinstance(value, (int, float, bool, str)):
             return True
+        if isinstance(value, dict):
+            return True
         if isinstance(value, (list, tuple)):
-            return all(isinstance(item, (int, float, bool, str)) for item in value)
+            return all(_is_codegen_symbol_value(item) for item in value)
         return False
 
     symbols = {k: v for k, v in symbols_raw.items() if _is_codegen_symbol_value(v)}
@@ -70,29 +72,34 @@ class _Emitter:
         self._counter = 0
         self._active_env: dict[str, str] = {}
         self._active_shape_aliases: dict[str, str] = {}
-        self._active_scope_var: str | None = None
+        self._active_shape_alias_penalties: dict[str, int] = {}
         self._node_hoists: dict[tuple[str, str], str] = {}
 
-    def _shape_symbol_aliases(
+    def _shape_symbol_alias_candidates(
         self, *, env: dict[str, str], input_types: dict[str, Any]
-    ) -> dict[str, str]:
-        aliases: dict[str, str] = {}
+    ) -> dict[str, tuple[int, str]]:
+        aliases: dict[str, tuple[int, str]] = {}
 
-        def _collect_aliases(type_expr: Any, src_expr: str) -> None:
+        def _record(dim: str, penalty: int, expr: str) -> None:
+            current = aliases.get(dim)
+            if current is None or penalty < current[0]:
+                aliases[dim] = (penalty, expr)
+
+        def _collect_aliases(type_expr: Any, src_expr: str, *, penalty: int = 0) -> None:
             if isinstance(type_expr, TypeOptional):
-                _collect_aliases(type_expr.inner, src_expr)
+                _collect_aliases(type_expr.inner, src_expr, penalty=penalty + 4)
                 return
             if isinstance(type_expr, TypeTensor):
                 for axis, dim in enumerate(type_expr.dims):
-                    if isinstance(dim, str) and dim not in env and dim not in aliases:
-                        aliases[dim] = f"int({src_expr}.shape[{axis}])"
+                    if isinstance(dim, str) and dim not in env:
+                        _record(dim, penalty, f"int({src_expr}.shape[{axis}])")
                 return
             if isinstance(type_expr, TypeList):
-                _collect_aliases(type_expr.item, f"{src_expr}[0]")
+                _collect_aliases(type_expr.item, f"{src_expr}[0]", penalty=penalty + 3)
                 return
             if isinstance(type_expr, TypeTuple):
                 for idx, item in enumerate(type_expr.items):
-                    _collect_aliases(item, f"{src_expr}[{idx}]")
+                    _collect_aliases(item, f"{src_expr}[{idx}]", penalty=penalty + 2)
                 return
 
         for input_name, type_expr in input_types.items():
@@ -106,6 +113,26 @@ class _Emitter:
             _collect_aliases(parsed, src)
         return aliases
 
+    def _shape_symbol_aliases(
+        self, *, env: dict[str, str], input_types: dict[str, Any]
+    ) -> dict[str, str]:
+        return {
+            dim: expr
+            for dim, (_, expr) in self._shape_symbol_alias_candidates(
+                env=env, input_types=input_types
+            ).items()
+        }
+
+    def _shape_symbol_alias_penalties(
+        self, *, env: dict[str, str], input_types: dict[str, Any]
+    ) -> dict[str, int]:
+        return {
+            dim: penalty
+            for dim, (penalty, _) in self._shape_symbol_alias_candidates(
+                env=env, input_types=input_types
+            ).items()
+        }
+
     def render(self) -> str:
         lines: list[str] = []
         lines.extend(
@@ -114,7 +141,7 @@ class _Emitter:
                 "",
                 "from typing import Any",
                 "",
-                "from brainsurgery.synapse.axon.path_expr import (",
+                "from brainsurgery.synapse.axon.ast.path import (",
                 "    resolve_path_expr_to_key,",
                 "    resolve_static_path_expr_to_key,",
                 "    runtime_value_to_path_expr,",
@@ -136,7 +163,6 @@ class _Emitter:
                 "        super().__init__()",
                 "        self._state: dict[str, torch.Tensor] = {}",
                 "        self._runtime_state_dict = runtime_state_dict",
-                "        self._param_roots_stack: list[list[str]] = []",
                 f"        self._symbols: dict[str, Any] = {repr(self.symbols)}",
                 "        self._trace_enabled = False",
                 "        self.trace_ops: list[dict[str, Any]] = []",
@@ -169,9 +195,9 @@ class _Emitter:
                 "            return ''",
                 "        return node_path.rsplit('.', 1)[0]",
                 "",
-                "    def _resolve_state_path(self, *, node_path: str, raw_path: Any) -> str:",
+                "    def _resolve_state_path(self, *, node_path: str, raw_path: Any, env: dict[str, Any] | None = None) -> str:",
                 "        expr = runtime_value_to_path_expr(raw_path, op_name='state path')",
-                "        token = resolve_static_path_expr_to_key(expr, op_name='state path')",
+                "        token = resolve_path_expr_to_key(expr, env or {}, op_name='state path')",
                 "        if expr.absolute:",
                 "            return token",
                 "        scope = self._scope_of(node_path)",
@@ -188,22 +214,9 @@ class _Emitter:
                 "            break",
                 "        normalized_scope = '.'.join(scope_parts)",
                 "        scoped = self._join_scope(normalized_scope, token)",
-                "        roots = list(self._param_roots_stack[-1]) if self._param_roots_stack and isinstance(self._param_roots_stack[-1], list) and self._param_roots_stack[-1] else ['']",
-                "",
-                "        def _join_root(root: str, value: str) -> str:",
-                "            if not root:",
-                "                return value",
-                "            if not value:",
-                "                return root",
-                "            if value == root or value.startswith(root + '.'):",
-                "                return value",
-                "            return self._join_scope(root, value)",
-                "",
-                "        candidates = [_join_root(root, scoped) for root in roots]",
-                "        for candidate in candidates:",
-                "            if candidate in self._state:",
-                "                return candidate",
-                "        return candidates[0]",
+                "        if scoped in self._state:",
+                "            return scoped",
+                "        return scoped",
                 "",
                 "    def _state_tensor_from_resolved_path(self, path: str, *, field: str) -> torch.Tensor:",
                 "        resolved = path[2:] if isinstance(path, str) and path.startswith('@@') else path",
@@ -213,8 +226,8 @@ class _Emitter:
                 "            raise ValueError(f'{field} tensor not found at path: {resolved}. Alternatives: {alt_text}')",
                 "        return self._state[resolved]",
                 "",
-                "    def _state_tensor_from_path(self, *, node_path: str, raw_path: Any, field: str) -> torch.Tensor:",
-                "        path = self._resolve_state_path(node_path=node_path, raw_path=raw_path)",
+                "    def _state_tensor_from_path(self, *, node_path: str, raw_path: Any, field: str, env: dict[str, Any] | None = None) -> torch.Tensor:",
+                "        path = self._resolve_state_path(node_path=node_path, raw_path=raw_path, env=env)",
                 "        return self._state_tensor_from_resolved_path(path, field=field)",
                 "",
                 "    def _state_key_alternatives(self, key: str, *, limit: int = 8) -> list[str]:",
@@ -265,16 +278,7 @@ class _Emitter:
                 "                    return out",
                 "        return out",
                 "",
-                "    def _node_scope(self, ambient_scope: str, explicit_scope: str | None = None, abs_path: str | None = None) -> str:",
-                "        if isinstance(abs_path, str) and abs_path:",
-                "            return abs_path",
-                "        if not isinstance(ambient_scope, str):",
-                "            ambient_scope = ''",
-                "        if isinstance(explicit_scope, str) and explicit_scope:",
-                "            return self._join_scope(ambient_scope, explicit_scope)",
-                "        return ambient_scope",
-                "",
-                "    def _pick_param_path(self, scope: str, candidates: list[Any], extra_root: str | None = None) -> str:",
+                "    def _pick_param_path(self, scope: str, candidates: list[Any], env: dict[str, Any]) -> str:",
                 "        scoped: list[str] = []",
                 "        for candidate in candidates:",
                 "            if not isinstance(candidate, (str, dict)):",
@@ -282,14 +286,13 @@ class _Emitter:
                 "            if isinstance(candidate, str) and candidate and not candidate.startswith('@'):",
                 "                candidate = '@' + candidate",
                 "            expr = runtime_value_to_path_expr(candidate, op_name='parameter path')",
-                "            key = resolve_static_path_expr_to_key(expr, op_name='parameter path')",
+                "            key = resolve_path_expr_to_key(expr, env, op_name='parameter path')",
                 "            if expr.absolute:",
                 "                if key:",
                 "                    scoped.append(key)",
                 "                continue",
                 "            base = self._join_scope(scope, key)",
-                "            for root in self._current_param_roots(extra_root=extra_root):",
-                "                scoped.append(self._join_scope(root, base))",
+                "            scoped.append(base)",
                 "        if not scoped:",
                 "            raise ValueError('parameter candidate list is empty')",
                 "        for candidate in scoped:",
@@ -297,66 +300,37 @@ class _Emitter:
                 "                return candidate",
                 "        return scoped[0]",
                 "",
-                "    def _current_param_roots(self, extra_root: str | None = None) -> list[str]:",
-                "        if self._param_roots_stack:",
-                "            roots = self._param_roots_stack[-1]",
-                "            if isinstance(roots, list) and roots:",
-                "                base_roots = roots",
-                "            else:",
-                "                base_roots = ['']",
-                "        else:",
-                "            base_roots = ['']",
-                "        if isinstance(extra_root, str):",
-                "            composed: list[str] = []",
-                "            for root in base_roots:",
-                "                if not root:",
-                "                    composed.append(extra_root)",
-                "                elif not extra_root:",
-                "                    composed.append(root)",
-                "                else:",
-                "                    composed.append(self._join_scope(root, extra_root))",
-                "            return composed",
-                "        return base_roots",
-                "",
-                "    def _pick_param_from_single(self, scope: str, candidate: Any, extra_root: str | None = None) -> str:",
+                "    def _pick_param_from_single(self, scope: str, candidate: Any, env: dict[str, Any]) -> str:",
                 "        if isinstance(candidate, str) and candidate and not candidate.startswith('@'):",
                 "            candidate = '@' + candidate",
                 "        expr = runtime_value_to_path_expr(candidate, op_name='parameter path')",
-                "        key = resolve_static_path_expr_to_key(expr, op_name='parameter path')",
+                "        key = resolve_path_expr_to_key(expr, env, op_name='parameter path')",
                 "        if expr.absolute:",
                 "            return key",
-                "        resolved: list[str] = []",
                 "        base = self._join_scope(scope, key)",
-                "        for root in self._current_param_roots(extra_root=extra_root):",
-                "            resolved.append(self._join_scope(root, base))",
-                "        for item in resolved:",
-                "            if item in self._state:",
-                "                return item",
-                "        return resolved[0]",
+                "        if base in self._state:",
+                "            return base",
+                "        return base",
                 "",
-                "    def _infer_param_path(self, node_spec: dict[str, Any], *, node_path: str, param_name: str) -> str:",
+                "    def _infer_param_path(self, node_spec: dict[str, Any], *, node_path: str, param_name: str, env: dict[str, Any]) -> str:",
                 "        abs_path = node_spec.get('_abs_path')",
-                "        if isinstance(abs_path, str) and abs_path:",
-                "            scope = abs_path",
+                "        if isinstance(abs_path, (str, dict)) and abs_path:",
+                "            scope = resolve_path_expr_to_key(abs_path, env, op_name='_abs_path')",
                 "        else:",
-                "            ambient_scope = self._scope_of(node_path)",
-                "            explicit_scope = node_spec.get('_scope')",
-                "            scope = self._node_scope(ambient_scope, explicit_scope if isinstance(explicit_scope, str) else None, None)",
-                "        direct_root = node_spec.get('_param_root')",
-                "        extra_root = direct_root if isinstance(direct_root, str) else None",
+                "            scope = self._scope_of(node_path)",
                 "        explicit_params = node_spec.get('_params')",
                 "        candidate = node_spec.get(param_name)",
                 "        if isinstance(candidate, (str, dict)):",
                 "            if not (isinstance(candidate, str) and candidate == param_name):",
                 "                if not isinstance(candidate, str) or candidate.startswith('@') or '.' in candidate:",
-                "                    return self._pick_param_from_single(scope, candidate, extra_root=extra_root)",
+                "                    return self._pick_param_from_single(scope, candidate, env)",
                 "        if isinstance(explicit_params, dict):",
                 "            explicit = explicit_params.get(param_name)",
                 "            if isinstance(explicit, (str, dict)):",
-                "                return self._pick_param_from_single(scope, explicit, extra_root=extra_root)",
+                "                return self._pick_param_from_single(scope, explicit, env)",
                 "            if isinstance(explicit, list) and all(isinstance(item, (str, dict)) for item in explicit):",
-                "                return self._pick_param_path(scope, explicit, extra_root=extra_root)",
-                "        return self._pick_param_from_single(scope, param_name, extra_root=extra_root)",
+                "                return self._pick_param_path(scope, explicit, env)",
+                "        return self._pick_param_from_single(scope, param_name, env)",
                 "",
                 "    def _expr_config_root(self) -> dict[str, Any]:",
                 f"        model = {repr(self.model)}",
@@ -386,7 +360,7 @@ class _Emitter:
                 "        return False",
                 "",
                 "    def _eval_expr_call(self, callee: str, args: list[Any], kwargs: dict[str, Any], env: dict[str, Any], symbols: dict[str, Any]) -> Any:",
-                "        inline_path_callexprs = {'Config.value', 'Config.has_key', 'Config.has_value', 'Config.int', 'Config.float', 'Config.str', 'Config.bool', 'Config.list'}",
+                "        inline_path_callexprs = {'Config.value', 'Config.has_key', 'Config.has_value', 'Config.int', 'Config.dim', 'Config.float', 'Config.str', 'Config.bool', 'Config.list'}",
                 "        callee_base = callee.split('@', 1)[0] if '@' in callee else callee",
                 "        if '@' in callee and callee_base in inline_path_callexprs:",
                 "            suffix = callee[len(callee_base):]",
@@ -453,7 +427,7 @@ class _Emitter:
                 "            if any(isinstance(arg, bool) or not isinstance(arg, (int, float)) for arg in args):",
                 "                raise ValueError('max expression call expects numeric arguments')",
                 "            return max(args)",
-                "        if callee in {'Config.has_key', 'Config.has_value', 'Config.int', 'Config.float', 'Config.str', 'Config.bool', 'Config.list', 'Config.value'}:",
+                "        if callee in {'Config.has_key', 'Config.has_value', 'Config.int', 'Config.dim', 'Config.float', 'Config.str', 'Config.bool', 'Config.list', 'Config.value'}:",
                 "            if len(args) != 1:",
                 "                raise ValueError(f'{callee} expression call expects one non-empty Path key')",
                 "            if 'root' in kwargs:",
@@ -472,16 +446,16 @@ class _Emitter:
                 "                if 'default' not in kwargs:",
                 "                    raise KeyError(f'{callee} expression call missing required config key: {key}')",
                 "                value = kwargs['default']",
-                "            if callee == 'Config.int':",
+                "            if callee in {'Config.int', 'Config.dim'}:",
                 "                if isinstance(value, bool):",
-                "                    raise ValueError('Config.int expression call expected int')",
+                "                    raise ValueError(f'{callee} expression call expected int')",
                 "                if isinstance(value, int):",
                 "                    return int(value)",
                 "                if isinstance(value, str):",
                 "                    raw = value.strip()",
                 "                    if raw and (raw.isdigit() or (raw[0] in ('+', '-') and raw[1:].isdigit())):",
                 "                        return int(raw)",
-                "                raise ValueError('Config.int expression call expected int')",
+                "                raise ValueError(f'{callee} expression call expected int')",
                 "            if callee == 'Config.float':",
                 "                if isinstance(value, bool):",
                 "                    raise ValueError('Config.float expression call expected float')",
@@ -642,6 +616,11 @@ class _Emitter:
             if isinstance(input_types, dict)
             else {}
         )
+        shape_alias_penalties = (
+            self._shape_symbol_alias_penalties(env=env, input_types=input_types)
+            if isinstance(input_types, dict)
+            else {}
+        )
 
         sig = ", ".join(["self", *arg_names, "scope: str"])
         lines = [f"    def _block_{self._py_name(block_name)}({sig}) -> tuple[Any, ...]:"]
@@ -651,11 +630,14 @@ class _Emitter:
             lines.append(f"        env[{syn_name!r}] = {py_name}")
 
         prev_shape_aliases = self._active_shape_aliases
+        prev_shape_alias_penalties = self._active_shape_alias_penalties
         self._active_shape_aliases = shape_aliases
+        self._active_shape_alias_penalties = shape_alias_penalties
         try:
             body = self._compile_graph(graph=graph, env=env, scope_var="scope", indent="        ")
         finally:
             self._active_shape_aliases = prev_shape_aliases
+            self._active_shape_alias_penalties = prev_shape_alias_penalties
         lines.extend(body)
 
         return_values: list[str] = []
@@ -707,15 +689,23 @@ class _Emitter:
             if isinstance(main_input_types, dict)
             else {}
         )
+        shape_alias_penalties = (
+            self._shape_symbol_alias_penalties(env=env, input_types=main_input_types)
+            if isinstance(main_input_types, dict)
+            else {}
+        )
 
         prev_shape_aliases = self._active_shape_aliases
+        prev_shape_alias_penalties = self._active_shape_alias_penalties
         self._active_shape_aliases = shape_aliases
+        self._active_shape_alias_penalties = shape_alias_penalties
         try:
             lines.extend(
                 self._compile_graph(graph=graph, env=env, scope_var="scope", indent="        ")
             )
         finally:
             self._active_shape_aliases = prev_shape_aliases
+            self._active_shape_alias_penalties = prev_shape_alias_penalties
 
         lines.append("        outputs: dict[str, Any] = {}")
         for out_name, ref in outputs.items():
@@ -873,98 +863,7 @@ class _Emitter:
 
             op = node_spec.get("_op")
             if op == "for":
-                scope_name = node_spec.get("_scope")
-                if not isinstance(scope_name, str):
-                    raise ValueError("for requires string _scope")
-                var_name = node_spec.get("_var")
-                if not isinstance(var_name, str):
-                    raise ValueError("for requires string _var")
-                to_code = self._expr_code(node_spec.get("_to"), env)
-                from_code = self._expr_code(node_spec.get("_from", 0), env)
-                step_code = self._expr_code(node_spec.get("_step", 1), env)
-                saved = env.get(var_name)
-                iter_value = self._fresh(self._py_name(var_name))
-                to_var = self._fresh("to")
-                from_var = self._fresh("from")
-                step_var = self._fresh("step")
-                lines.append(f"{inner_indent}{to_var} = int({to_code})")
-                lines.append(f"{inner_indent}{from_var} = int({from_code})")
-                lines.append(f"{inner_indent}{step_var} = int({step_code})")
-                lines.append(
-                    f"{inner_indent}for {iter_value} in self._for_values(from_value={from_var}, to_value={to_var}, step_value={step_var}):"
-                )
-                env[var_name] = iter_value
-                child_scope = self._fresh("scope")
-                lines.append(
-                    f"{inner_indent}    {child_scope}_seg = '' if not {scope_name!r} else f'{scope_name}.{{{iter_value}}}'"
-                )
-                lines.append(
-                    f"{inner_indent}    {child_scope} = self._join_scope({scope_var}, {child_scope}_seg)"
-                )
-                body = node_spec.get("_body")
-                if not isinstance(body, list):
-                    raise ValueError("for requires list _body")
-                raw_carry = node_spec.get("_carry")
-                carry_names: list[str] = []
-                if raw_carry is not None:
-                    if not isinstance(raw_carry, list) or not all(
-                        isinstance(name, str) for name in raw_carry
-                    ):
-                        raise ValueError("for _carry must be a list of string names")
-                    carry_names = [name for name in raw_carry if name]
-                    for carry_name in carry_names:
-                        if carry_name not in env:
-                            raise ValueError(f"for carry name not found in scope: {carry_name}")
-                yield_expr = node_spec.get("_yield")
-                raw_bind = node_spec.get("_bind")
-                bind_names: list[str] = []
-                if raw_bind is not None:
-                    if not isinstance(raw_bind, list) or not all(
-                        isinstance(name, str) for name in raw_bind
-                    ):
-                        raise ValueError("for _bind must be a list of string names")
-                    bind_names = [name for name in raw_bind if name]
-                lines.extend(
-                    self._compile_graph(
-                        graph=body, env=env, scope_var=child_scope, indent=inner_indent + "    "
-                    )
-                )
-                if carry_names:
-                    if yield_expr is None:
-                        yield_values = [self._read_env_var(env, name) for name in carry_names]
-                    elif isinstance(yield_expr, list):
-                        yield_values = [self._expr_code(expr, env) for expr in yield_expr]
-                    else:
-                        yield_values = [self._expr_code(yield_expr, env)]
-                    if len(yield_values) != len(carry_names):
-                        raise ValueError(
-                            f"for yield arity mismatch: expected {len(carry_names)}, got {len(yield_values)}"
-                        )
-                    yielded_tuple = self._fresh("yielded")
-                    lines.append(
-                        f"{inner_indent}    {yielded_tuple} = ({', '.join(yield_values)},)"
-                    )
-                    for idx, carry_name in enumerate(carry_names):
-                        carry_var = self._assign_out_var(env, carry_name)
-                        lines.append(f"{inner_indent}    {carry_var} = {yielded_tuple}[{idx}]")
-                if bind_names:
-                    if not carry_names:
-                        raise ValueError("for _bind requires _carry")
-                    if len(bind_names) != len(carry_names):
-                        raise ValueError(
-                            f"for bind arity mismatch: expected {len(bind_names)}, got {len(carry_names)}"
-                        )
-                if saved is None:
-                    env.pop(var_name, None)
-                else:
-                    env[var_name] = saved
-                if bind_names:
-                    for bind_name, carry_name in zip(bind_names, carry_names, strict=True):
-                        if bind_name == "_":
-                            continue
-                        carry_var = self._read_env_var(env, carry_name)
-                        bind_var = self._assign_out_var(env, bind_name)
-                        lines.append(f"{inner_indent}{bind_var} = {carry_var}")
+                raise ValueError("codegen no longer supports for-nodes; flatten/lower first")
                 continue
 
             if op == "call":
@@ -1105,18 +1004,8 @@ class _Emitter:
             var = self._fresh(self._py_name(block_out_name))
             tmp_vars.append(var)
 
-        call_scope_var = scope_var
-        raw_scope = node_spec.get("_scope")
-        if isinstance(raw_scope, str) and raw_scope:
-            scoped_var = self._fresh("scope")
-            lines = [
-                f"{indent}{scoped_var} = self._join_scope({scope_var}, {raw_scope!r})",
-            ]
-            call_scope_var = scoped_var
-        else:
-            lines = []
-
-        call_args = ", ".join([*arg_codes, f"scope={call_scope_var}"])
+        lines: list[str] = []
+        call_args = ", ".join([*arg_codes, f"scope={scope_var}"])
         if len(tmp_vars) == 1:
             call_line = (
                 f"{indent}{tmp_vars[0]} = self._block_{self._py_name(block_name)}({call_args})"
@@ -1124,38 +1013,7 @@ class _Emitter:
         else:
             call_line = f"{indent}{', '.join(tmp_vars)} = self._block_{self._py_name(block_name)}({call_args})"
 
-        raw_param_root = node_spec.get("_param_root")
-        push_roots = False
-        pushed_literal: list[str] | None = None
-        pushed_expr_var: str | None = None
-        if raw_param_root is not None and not isinstance(raw_param_root, (str, list)):
-            pushed_expr_var = self._fresh("param_root")
-            root_expr_code = self._expr_code(raw_param_root, env)
-            lines.append(f"{indent}{pushed_expr_var} = {root_expr_code}")
-            lines.append(f"{indent}if not isinstance({pushed_expr_var}, str):")
-            lines.append(f"{indent}    {pushed_expr_var} = ''")
-            push_roots = True
-        elif isinstance(raw_param_root, str):
-            push_roots = True
-            pushed_literal = [raw_param_root]
-        elif (
-            isinstance(raw_param_root, list)
-            and bool(raw_param_root)
-            and all(isinstance(item, str) for item in raw_param_root)
-        ):
-            push_roots = True
-            pushed_literal = list(raw_param_root)
-        if push_roots:
-            if pushed_expr_var is not None:
-                lines.append(f"{indent}self._param_roots_stack.append([{pushed_expr_var}])")
-            else:
-                lines.append(f"{indent}self._param_roots_stack.append({pushed_literal!r})")
-            lines.append(f"{indent}try:")
-            lines.append(f"{indent}    {call_line[len(indent) :]}")
-            lines.append(f"{indent}finally:")
-            lines.append(f"{indent}    self._param_roots_stack.pop()")
-        else:
-            lines.append(call_line)
+        lines.append(call_line)
         for dst_name, tmp in zip(binds, tmp_vars, strict=True):
             existing = env.get(dst_name)
             dst_var = (
@@ -1163,6 +1021,31 @@ class _Emitter:
             )
             lines.append(f"{indent}{dst_var} = {tmp}")
             env[dst_name] = dst_var
+        block_types = self.block_io_types.get(block_name, {})
+        output_types = block_types.get("outputs", {}) if isinstance(block_types, dict) else {}
+        exact_output_types = node_spec.get("_out_types")
+        if isinstance(exact_output_types, dict):
+            bound_output_types = {
+                str(dst_name): exact_output_types[dst_name]
+                for dst_name in binds
+                if isinstance(dst_name, str) and isinstance(exact_output_types.get(dst_name), str)
+            }
+        elif isinstance(output_types, dict):
+            bound_output_types = {
+                str(dst_name): output_types[block_out_name]
+                for dst_name, block_out_name in zip(binds, output_names, strict=True)
+                if isinstance(dst_name, str) and isinstance(output_types.get(block_out_name), str)
+            }
+        else:
+            bound_output_types = {}
+        if bound_output_types:
+            for dim_name, (penalty, expr) in self._shape_symbol_alias_candidates(
+                env=env, input_types=bound_output_types
+            ).items():
+                current_penalty = self._active_shape_alias_penalties.get(dim_name)
+                if current_penalty is None or penalty < current_penalty:
+                    self._active_shape_aliases[dim_name] = expr
+                    self._active_shape_alias_penalties[dim_name] = penalty
         return lines
 
     def _compile_op(
@@ -1180,10 +1063,9 @@ class _Emitter:
             raise NotImplementedError(f"Unsupported op in codegen compiler: {op}")
         prev_env = self._active_env
         prev_shape_aliases = self._active_shape_aliases
-        prev_scope_var = self._active_scope_var
+        prev_shape_alias_penalties = self._active_shape_alias_penalties
         prev_hoists = self._node_hoists
         self._active_env = env
-        self._active_scope_var = scope_var
         self._node_hoists = {}
         try:
             return op_module.compile(
@@ -1197,7 +1079,7 @@ class _Emitter:
         finally:
             self._active_env = prev_env
             self._active_shape_aliases = prev_shape_aliases
-            self._active_scope_var = prev_scope_var
+            self._active_shape_alias_penalties = prev_shape_alias_penalties
             self._node_hoists = prev_hoists
 
     def _assign_out_var(self, env: dict[str, str], out_name: str) -> str:
@@ -1218,27 +1100,10 @@ class _Emitter:
         scope_var: str | None = None,
     ) -> str:
         expr_env = self._active_env if env is None else env
-        ambient_scope_expr = (
-            scope_var
-            if isinstance(scope_var, str)
-            else self._active_scope_var
-            if isinstance(self._active_scope_var, str)
-            else node_path_var
-        )
-        extra_root_expr: str | None = None
-        if "_param_root" in node_spec:
-            raw_root = node_spec["_param_root"]
-            if isinstance(raw_root, str):
-                extra_root_expr = repr(raw_root)
-            else:
-                extra_root_expr = self._expr_code(raw_root, expr_env)
-        extra_root_code = extra_root_expr if extra_root_expr is not None else "None"
-        explicit_scope = node_spec.get("_scope")
-        explicit_scope_code = repr(explicit_scope) if isinstance(explicit_scope, str) else "None"
+        env_expr = "locals()"
         abs_path = node_spec.get("_abs_path")
-        abs_path_code = repr(abs_path) if isinstance(abs_path, str) else "None"
         scope_expr = (
-            f"self._node_scope({ambient_scope_expr}, {explicit_scope_code}, {abs_path_code})"
+            repr(abs_path) if isinstance(abs_path, str) else f"self._scope_of({node_path_var})"
         )
         param_base = node_spec.get("param_base")
         if isinstance(param_base, str):
@@ -1246,49 +1111,34 @@ class _Emitter:
                 base_expr = expr_env[param_base]
                 return (
                     "self._pick_param_from_single("
-                    f"{scope_expr}, self._join_scope({base_expr}, {param_name!r}), "
-                    f"extra_root={extra_root_code})"
+                    f"{scope_expr}, self._join_scope({base_expr}, {param_name!r}), {env_expr})"
                 )
             if isinstance(node_spec.get(param_base), str):
                 base_expr = repr(node_spec[param_base])
                 return (
                     "self._pick_param_from_single("
-                    f"{scope_expr}, self._join_scope({base_expr}, {param_name!r}), "
-                    f"extra_root={extra_root_code})"
+                    f"{scope_expr}, self._join_scope({base_expr}, {param_name!r}), {env_expr})"
                 )
             base_expr = repr(param_base)
             return (
                 "self._pick_param_from_single("
-                f"{scope_expr}, self._join_scope({base_expr}, {param_name!r}), "
-                f"extra_root={extra_root_code})"
+                f"{scope_expr}, self._join_scope({base_expr}, {param_name!r}), {env_expr})"
             )
         explicit_params = node_spec.get("_params")
         if isinstance(node_spec.get(param_name), str):
             candidate = node_spec[param_name]
             if candidate != param_name and (candidate.startswith("@") or "." in candidate):
-                return (
-                    "self._pick_param_from_single("
-                    f"{scope_expr}, {candidate!r}, extra_root={extra_root_code})"
-                )
+                return f"self._pick_param_from_single({scope_expr}, {candidate!r}, {env_expr})"
         # Next precedence level: lowered path bindings from _params.
         if isinstance(explicit_params, dict):
             explicit = explicit_params.get(param_name)
             if isinstance(explicit, str):
-                expr = (
-                    "self._pick_param_from_single("
-                    f"{scope_expr}, {explicit!r}, extra_root={extra_root_code})"
-                )
+                expr = f"self._pick_param_from_single({scope_expr}, {explicit!r}, {env_expr})"
                 return expr
             if isinstance(explicit, list) and all(isinstance(item, str) for item in explicit):
-                expr = (
-                    "self._pick_param_path("
-                    f"{scope_expr}, {explicit!r}, extra_root={extra_root_code})"
-                )
+                expr = f"self._pick_param_path({scope_expr}, {explicit!r}, {env_expr})"
                 return expr
-        fallback_expr = (
-            "self._pick_param_from_single("
-            f"{node_path_var}, {param_name!r}, extra_root={extra_root_code})"
-        )
+        fallback_expr = f"self._pick_param_from_single({scope_expr}, {param_name!r}, {env_expr})"
         return fallback_expr
 
     def _hoist_expr(self, *, kind: str, key: str, expr: str, lines: list[str], indent: str) -> str:
@@ -1372,6 +1222,23 @@ class _Emitter:
             raise ValueError(f"Unknown input var {name!r}")
         return env[name]
 
+    def _scalar_token_code(self, token: str) -> str | None:
+        value = token.strip()
+        lower = value.lower()
+        if lower == "null":
+            return "None"
+        if lower == "true":
+            return "True"
+        if lower == "false":
+            return "False"
+        if value and (value.isdigit() or (value[0] in {"+", "-"} and value[1:].isdigit())):
+            return repr(int(value))
+        try:
+            parsed = float(value)
+        except ValueError:
+            return None
+        return repr(parsed)
+
     def _expr_code(self, expr: Any, env: dict[str, str]) -> str:
         if expr is None:
             return "None"
@@ -1402,7 +1269,7 @@ class _Emitter:
                     if ident in self._active_shape_aliases:
                         return self._active_shape_aliases[ident]
                     if ident in self.symbols:
-                        return repr(self.symbols[ident])
+                        return self._expr_code(self.symbols[ident], env)
                     raise ValueError(f"Unknown symbol in expression: {ident}")
             if kind == "tuple":
                 items_raw = expr.get("items")
@@ -1472,8 +1339,13 @@ class _Emitter:
             token = expr.strip()
             if token in env:
                 return env[token]
+            if token in self._active_shape_aliases:
+                return self._active_shape_aliases[token]
             if token in self.symbols:
-                return repr(self.symbols[token])
+                return self._expr_code(self.symbols[token], env)
+            scalar_code = self._scalar_token_code(token)
+            if scalar_code is not None:
+                return scalar_code
             return repr(token)
         return repr(expr)
 
@@ -1498,7 +1370,7 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
     if not isinstance(ops, dict):
         raise ValueError("op map must contain mapping key 'ops'")
 
-    known_control_ops = {"for", "call"}
+    known_control_ops = {"call"}
 
     def _walk_graph(graph: list[Any]) -> None:
         for item in graph:
@@ -1535,12 +1407,6 @@ def _validate_spec_ops(spec: dict[str, Any], op_map: dict[str, Any]) -> None:
                 if not isinstance(else_graph, list):
                     raise ValueError("node '_else' must be a list")
                 _walk_graph(else_graph)
-
-            if op == "for":
-                body = node_spec.get("_body")
-                if not isinstance(body, list):
-                    raise ValueError("for node requires list '_body'")
-                _walk_graph(body)
 
     model = spec.get("model")
     if not isinstance(model, dict):

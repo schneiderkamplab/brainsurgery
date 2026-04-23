@@ -1066,13 +1066,16 @@ def run_axon_benchmark(
     for resolved_axon_file in _expand_axon_inputs(axon_files):
         if _matches_any_selector(resolved_axon_file, exclude_filter):
             continue
-        checkpoints = _declared_checkpoints_from_axon(
-            axon_file=resolved_axon_file,
-            main_module=main_module,
-        )
-        for checkpoint_id in checkpoints:
-            if checkpoint_filter and checkpoint_id not in checkpoint_filter:
-                continue
+        declared_checkpoints: tuple[str, ...] | None = None
+        if checkpoint_filter:
+            checkpoints_to_run = tuple(sorted(checkpoint_filter))
+        else:
+            declared_checkpoints = _declared_checkpoints_from_axon(
+                axon_file=resolved_axon_file,
+                main_module=main_module,
+            )
+            checkpoints_to_run = declared_checkpoints
+        for checkpoint_id in checkpoints_to_run:
             pairs.append(
                 _BenchmarkPair(
                     axon_file=resolved_axon_file,
@@ -1083,7 +1086,7 @@ def run_axon_benchmark(
     if not pairs:
         if checkpoint_filter:
             requested = ", ".join(sorted(checkpoint_filter))
-            raise ValueError(f"No declared checkpoints matched: {requested}")
+            raise ValueError(f"No benchmark pairs found for explicit checkpoints: {requested}")
         raise ValueError("No benchmark pairs found")
     pairs, skipped_by_param_count = _apply_billions_params_filter(
         pairs,

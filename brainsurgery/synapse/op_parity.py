@@ -325,7 +325,7 @@ class _TracingSynapseProgramModel(SynapseProgramModel):
         if op == "linear":
             try:
                 maybe_path = self._infer_param_path(
-                    node_spec, node_path=node_path, param_name="weight"
+                    node_spec, node_path=node_path, param_name="weight", env=env
                 )
                 if isinstance(maybe_path, str):
                     weight_path = maybe_path

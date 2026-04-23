@@ -356,10 +356,37 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any",),
+    "args": ("Path", "Tensor[..S]", "?Float", "?Dim", "?Path", "?Bool", "?Path"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
-    "returns": "dynamic",
+    "returns": ("Tensor[..S]",),
 }
+
+
+def type_rule(
+    *,
+    arg_types: tuple[Any, ...],
+    kwarg_types: dict[str, Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    helpers: Any,
+) -> Any | None:
+    del kwarg_types, kwargs
+    if len(arg_types) < 2:
+        return None
+    input_dims = helpers.type_dims(arg_types[1])
+    if input_dims is None:
+        return None
+    dim_expr = args[3] if len(args) >= 4 else None
+    dim_token = helpers.expr_to_dim_token(dim_expr)
+    if dim_token is not None and input_dims:
+        last = input_dims[-1]
+        if last != dim_token:
+            if not (isinstance(last, str) and isinstance(dim_token, str)):
+                raise ValueError(
+                    f"Axon typecheck failed: _layernorm dim {dim_token!r} mismatches input last dim {last!r}"
+                )
+    return helpers.type_tensor(dims=input_dims)
+
 
 __all__ = [
     "LOWERING_ARITY",
@@ -373,4 +400,5 @@ __all__ = [
     "compile",
     "uses_node_path",
     "LOWERING_TYPE_SIGNATURE",
+    "type_rule",
 ]

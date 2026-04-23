@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from .type_system import TypeExpr, TypeOptional, TypeTuple
-from .types import (
+from ..ast.nodes import (
     AxonBind,
+    AxonCond,
     AxonExpr,
+    AxonExprAscribe,
     AxonExprBinary,
     AxonExprBind,
     AxonExprBool,
@@ -31,6 +32,7 @@ from .types import (
     AxonStatement,
     AxonYield,
 )
+from ..ast.types import TypeExpr, TypeOptional, TypeTuple
 
 
 def _stmt_path(path: tuple[int, ...]) -> str:
@@ -48,6 +50,8 @@ def _error(module: AxonModule, path: tuple[int, ...], message: str) -> ValueErro
 def _iter_nested(stmt: AxonStatement) -> Iterable[AxonStatement]:
     if isinstance(stmt, AxonRepeat):
         return stmt.body
+    if isinstance(stmt, AxonCond):
+        return (*stmt.true_body, *stmt.false_body)
     if isinstance(stmt, AxonScopeBind):
         return stmt.body
     return ()
@@ -135,6 +139,8 @@ def _expr_non_empty(expr: AxonExpr) -> bool:
         return _expr_non_empty(expr.left) and _expr_non_empty(expr.right)
     if isinstance(expr, AxonExprLambda):
         return bool(expr.var.strip())
+    if isinstance(expr, AxonExprAscribe):
+        return _expr_non_empty(expr.expr)
     if isinstance(expr, AxonExprParen):
         return _expr_non_empty(expr.inner)
     if isinstance(expr, AxonExprDo):
@@ -234,6 +240,9 @@ def _validate_expr(expr: AxonExpr, module: AxonModule, path: tuple[int, ...]) ->
         _validate_name(expr.var, module=module, path=path, field="lambda variable")
         _validate_expr(expr.body, module, (*path, 0))
         return
+    if isinstance(expr, AxonExprAscribe):
+        _validate_expr(expr.expr, module, (*path, 0))
+        return
     if isinstance(expr, AxonExprParen):
         _validate_expr(expr.inner, module, (*path, 0))
         return
@@ -265,6 +274,8 @@ def _validate_statement(
         return
 
     if isinstance(stmt, AxonReturn):
+        if in_loop:
+            raise _error(module, path, "return is not valid inside for-loop bodies; use yield")
         if not stmt.values:
             raise _error(module, path, "return must contain at least one value")
         for i, value in enumerate(stmt.values):
@@ -282,6 +293,18 @@ def _validate_statement(
             _validate_expr(value, module, (*path, i))
             if not _expr_non_empty(value):
                 raise _error(module, path, "yield values must be non-empty")
+        return
+
+    if isinstance(stmt, AxonCond):
+        _validate_expr(stmt.cond, module, (*path, 0))
+        if not stmt.true_body:
+            raise _error(module, path, "if statement then-body cannot be empty")
+        if not stmt.false_body:
+            raise _error(module, path, "if statement else-body cannot be empty")
+        for i, child in enumerate(stmt.true_body):
+            _validate_statement(child, module, (*path, 1, i), in_loop=in_loop)
+        for i, child in enumerate(stmt.false_body):
+            _validate_statement(child, module, (*path, 2, i), in_loop=in_loop)
         return
 
     if isinstance(stmt, AxonRepeat):
@@ -339,7 +362,7 @@ def _validate_statement(
             raise _error(module, path, "scope bind contains duplicate targets")
         for name in stmt.targets:
             _validate_name(name, module=module, path=path, field="scope bind target")
-        if not stmt.prefix.strip():
+        if not stmt.prefix.parts:
             raise _error(module, path, "scope bind prefix cannot be empty")
         unsupported = sorted(set(stmt.kwargs) - {"root"})
         if unsupported:
@@ -393,6 +416,21 @@ def _validate_module(module: AxonModule) -> None:
                 f"Axon AST validation failed in module '{module.name}': path parameter(s) conflict with value parameter(s): {names}"
             )
     expected_arity = _expected_return_arity(module.return_type_expr)
+    if isinstance(module.body_expr, AxonExpr):
+        _validate_expr(module.body_expr, module, (0,))
+        if isinstance(module.body_expr, AxonExprDo) and expected_arity is not None:
+            for i, stmt in enumerate(module.body_expr.body):
+                if isinstance(stmt, AxonReturn):
+                    actual = len(stmt.values)
+                    if actual != expected_arity:
+                        if expected_arity > 1 and actual == 1:
+                            continue
+                        raise _error(
+                            module,
+                            (0, i),
+                            f"return arity mismatch: signature implies {expected_arity} value(s), got {actual}",
+                        )
+        return
     if not _has_compatible_return(module.statements, 0):
         raise ValueError(
             f"Axon AST validation failed in module '{module.name}': module body must contain at least one return statement"
@@ -418,7 +456,9 @@ def validate_axon_program(
     modules: tuple[AxonModule, ...], *, main_module: str | None = None
 ) -> None:
     if not modules:
-        raise ValueError("Axon AST validation failed: program must contain at least one module")
+        if main_module is None:
+            return
+        raise ValueError(f"Axon AST validation failed: unknown main module {main_module!r}")
     names = [module.name for module in modules]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:

@@ -8,27 +8,27 @@ export (
   update,
 )
 
-type CacheLayer = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
-type Cache = List[CacheLayer]
+type CacheLayer[B,H,T,DH] = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
+type Cache[B,H,T,DH] = List[CacheLayer[B,H,T,DH]]
 
-update :: ?CacheLayer -> Tensor[B,H,T,DH] -> Tensor[B,H,T,DH] -> (Tensor[B,H,T,DH], Tensor[B,H,T,DH], ?CacheLayer)
+update :: ?CacheLayer[B,H,P,DH] -> Tensor[B,H,S,DH] -> Tensor[B,H,S,DH] -> (Tensor[B,H,K,DH], Tensor[B,H,K,DH], ?CacheLayer[B,H,K,DH])
 update past k v = (past == null)
   ? do
     return k, v, (k, v)
   : do
     k_past, v_past <- past
-    k_all <- Tensor.concat k_past k dim=-2
-    v_all <- Tensor.concat v_past v dim=-2
+    k_all <- _concat k_past k dim=-2
+    v_all <- _concat v_past v dim=-2
     return k_all, v_all, (k_all, v_all)
 
-init :: Cache
+init :: Cache[B,H,T,DH]
 init = List.init
 
-index :: ?Cache -> Int -> ?CacheLayer
+index :: ?Cache[B,H,T,DH] -> Int -> ?CacheLayer[B,H,T,DH]
 index values i = (values == null) ? null : List.index values i
 
-append :: ?Cache -> ?CacheLayer -> ?Cache
+append :: ?Cache[B,H,T,DH] -> ?CacheLayer[B,H,T,DH] -> ?Cache[B,H,T,DH]
 append values value = (values == null) ? null : ((value == null) ? values : List.append values value)
 
-past_length :: ?Cache -> Int
-past_length cache = (cache == null) ? 0 : do k, _ <- List.index cache 0; return Tensor.size k -2
+past_length :: ?Cache[B,H,T,DH] -> Dim
+past_length cache = (cache == null) ? 0 : T

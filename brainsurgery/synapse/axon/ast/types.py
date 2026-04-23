@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TypeAlias
 
@@ -44,8 +45,24 @@ class TypeString:
 
 
 @dataclass(frozen=True)
+class TypePath:
+    pass
+
+
+@dataclass(frozen=True)
+class TypeDim:
+    pass
+
+
+@dataclass(frozen=True)
+class TypeVar:
+    name: str
+
+
+@dataclass(frozen=True)
 class TypeNamed:
     name: str
+    args: tuple["DimToken", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,6 +96,24 @@ class TypeTuple:
     items: tuple["TypeExpr", ...]
 
 
+@dataclass(frozen=True)
+class TypeAliasDef:
+    params: tuple[str, ...]
+    value: "TypeExpr"
+
+
+ConstraintAtom: TypeAlias = int | str | bool | None | DimExprBinary
+ConstraintOperand: TypeAlias = ConstraintAtom | tuple[ConstraintAtom, ...]
+
+
+@dataclass(frozen=True)
+class Constraint:
+    relation: str
+    left: ConstraintOperand
+    right: ConstraintOperand | None = None
+    guards: tuple["Constraint", ...] = ()
+
+
 TypeExpr: TypeAlias = (
     TypeAny
     | TypeInt
@@ -86,6 +121,9 @@ TypeExpr: TypeAlias = (
     | TypeBool
     | TypeNull
     | TypeString
+    | TypePath
+    | TypeDim
+    | TypeVar
     | TypeNamed
     | TypeOptional
     | TypeTensor
@@ -349,7 +387,7 @@ def _is_name_start(ch: str) -> bool:
 
 
 def _is_name_char(ch: str) -> bool:
-    return ch.isalnum() or ch == "_"
+    return ch.isalnum() or ch in "_."
 
 
 class _TypeExprParser:
@@ -469,7 +507,9 @@ class _TypeExprParser:
             else:
                 dims = self._parse_dim_list()
             self._expect("]")
-            return TypeTensor(base=name, dims=dims)
+            if name in {"Tensor", "IdxTensor"}:
+                return TypeTensor(base=name, dims=dims)
+            return TypeNamed(name=name, args=dims)
 
         if name == "Int":
             return TypeInt()
@@ -481,10 +521,14 @@ class _TypeExprParser:
             return TypeNull()
         if name in {"Str", "String"}:
             return TypeString()
+        if name == "Path":
+            return TypePath()
+        if name == "Dim":
+            return TypeDim()
+        if re.fullmatch(r"_T[0-9]+", name):
+            return TypeVar(name=name)
         if name == "Any":
             return TypeAny()
-        if name in {"Tensor", "IdxTensor"}:
-            return TypeNamed(name=name)
         return TypeNamed(name=name)
 
 
@@ -515,7 +559,16 @@ def render_type(tp: TypeExpr) -> str:
         return "Null"
     if isinstance(tp, TypeString):
         return "String"
+    if isinstance(tp, TypePath):
+        return "Path"
+    if isinstance(tp, TypeDim):
+        return "Dim"
+    if isinstance(tp, TypeVar):
+        return tp.name
     if isinstance(tp, TypeNamed):
+        if tp.args:
+            dims = ",".join(render_dim_token(dim) for dim in tp.args)
+            return f"{tp.name}[{dims}]"
         return tp.name
     if isinstance(tp, TypeOptional):
         return f"?{render_type(tp.inner)}"
@@ -540,11 +593,18 @@ __all__ = [
     "TypeBool",
     "TypeNull",
     "TypeString",
+    "TypePath",
+    "TypeDim",
+    "TypeVar",
     "TypeNamed",
     "TypeOptional",
     "TypeTensor",
     "TypeList",
     "TypeTuple",
+    "TypeAliasDef",
+    "ConstraintAtom",
+    "ConstraintOperand",
+    "Constraint",
     "TypeExpr",
     "TypingRule",
     "TYPING_RULES",

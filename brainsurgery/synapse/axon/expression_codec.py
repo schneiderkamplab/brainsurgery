@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .grammar import parse_expression_source
-from .path_expr import path_expr_to_runtime_value
-from .types import (
+from .ast.nodes import (
     AxonExpr,
     AxonExprBinary,
     AxonExprBool,
@@ -21,6 +19,8 @@ from .types import (
     AxonExprTernary,
     AxonExprTuple,
 )
+from .ast.path import path_expr_to_runtime_value
+from .parse import parse_expression_source
 
 
 def axon_expr_to_runtime_value(expr: AxonExpr) -> Any:

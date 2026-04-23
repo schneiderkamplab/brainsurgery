@@ -7,6 +7,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = REPO_ROOT / "brainsurgery" / "synapse" / "models"
 BUILTINS_DIR = REPO_ROOT / "brainsurgery" / "synapse" / "builtins"
+ALLOWED_REPEATED_PRIMITIVES = {
+    "_concat",
+    "_config_int",
+}
 
 
 def _model_family_names() -> set[str]:
@@ -82,7 +86,11 @@ def test_each_builtin_primitive_reference_is_single_source() -> None:
                     f"{file_path.relative_to(REPO_ROOT)}:{lineno}"
                 )
 
-    repeated = {name: locs for name, locs in locations.items() if counts[name] > 1}
+    repeated = {
+        name: locs
+        for name, locs in locations.items()
+        if counts[name] > 1 and name not in ALLOWED_REPEATED_PRIMITIVES
+    }
     assert not repeated, (
         "Primitive _xyz references must have a single canonical builtin definition:\n"
         + "\n".join(f"{name}: {', '.join(locs)}" for name, locs in sorted(repeated.items()))

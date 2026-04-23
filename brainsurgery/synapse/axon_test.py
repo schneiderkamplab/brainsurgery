@@ -1800,12 +1800,15 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _select_main_axon_module(modules: Sequence[Any], *, main_module: str | None) -> Any:
-    if not modules:
+def _select_main_axon_module(modules: Sequence[Any] | Any, *, main_module: str | None) -> Any:
+    raw_modules = getattr(modules, "modules", modules)
+    if not isinstance(raw_modules, Sequence):
+        raise TypeError("expected AxonFile or sequence of modules")
+    if not raw_modules:
         raise ValueError("Axon program contains no modules")
     if main_module is None:
-        return modules[-1]
-    for module in modules:
+        return raw_modules[-1]
+    for module in raw_modules:
         if getattr(module, "name", None) == main_module:
             return module
     raise ValueError(f"Main Axon module not found: {main_module}")
@@ -1816,9 +1819,11 @@ def _declared_checkpoints_from_axon(
     axon_file: Path,
     main_module: str | None,
 ) -> tuple[str, ...]:
-    modules = parse_axon_program_from_path(axon_file)
-    module = _select_main_axon_module(modules, main_module=main_module)
+    parsed = parse_axon_program_from_path(axon_file)
+    module = _select_main_axon_module(parsed, main_module=main_module)
     raw = (getattr(module, "pragmas", None) or {}).get("checkpoints")
+    if raw is None:
+        raw = (getattr(parsed, "pragmas", None) or {}).get("checkpoints")
     if raw is None:
         raise ValueError(
             f"No CHECKPOINTS pragma declared in {axon_file}"

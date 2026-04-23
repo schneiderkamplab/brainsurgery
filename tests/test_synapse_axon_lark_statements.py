@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from brainsurgery.synapse.axon.grammar import parse_program_source
-from brainsurgery.synapse.axon.types import (
+from brainsurgery.synapse.axon.ast import (
     AxonBind,
     AxonExprCall,
     AxonExprDo,
@@ -16,12 +15,13 @@ from brainsurgery.synapse.axon.types import (
     AxonScopeBind,
     AxonYield,
 )
+from brainsurgery.synapse.axon.parse import parse_axon_program
 
 
 def _parse_rhs_do(source: str) -> AxonExprDo:
-    parsed = parse_program_source(source)
+    parsed = parse_axon_program(source)
     assert len(parsed.modules) == 1
-    rhs = parsed.modules[0].definition.rhs
+    rhs = parsed.modules[0].body_expr
     assert isinstance(rhs, AxonExprDo)
     return rhs
 
@@ -30,7 +30,7 @@ def test_parse_for_statement_with_step() -> None:
     source = """
 lin :: Tensor[B,S,D] -> Tensor[B,S,D]
 lin x = do
-  for@layers i <- [1..8) step=2 do return i
+  for@layers i <- [1..8) step=2 i
   return x
 """
     rhs = _parse_rhs_do(source)
@@ -88,7 +88,7 @@ lin x = do
     stmt = rhs.body[0]
     assert isinstance(stmt, AxonScopeBind)
     assert stmt.targets == ("y", "z")
-    assert stmt.prefix == "model.layers"
+    assert stmt.prefix == AxonExprPath(absolute=False, parts=("model", "layers"))
 
 
 def test_parse_scope_bind_statement_with_root_kwarg() -> None:
@@ -101,7 +101,7 @@ lin x = do
     rhs = _parse_rhs_do(source)
     stmt = rhs.body[0]
     assert isinstance(stmt, AxonScopeBind)
-    assert stmt.prefix == "model.layers"
+    assert stmt.prefix == AxonExprPath(absolute=False, parts=("model", "layers"))
     root = stmt.kwargs.get("root")
     assert isinstance(root, AxonExprList)
     assert root.items == (
@@ -118,12 +118,12 @@ lin x = do
     return x
 """
     with pytest.raises(ValueError, match="invalid Axon source syntax"):
-        parse_program_source(source)
+        parse_axon_program(source)
 
 
 def test_parse_return_statement() -> None:
     source = """
-lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin :: Tensor[B,S,D] -> (Tensor[B,S,D], Tensor[B,S,D])
 lin x = do return x, x
 """
     rhs = _parse_rhs_do(source)

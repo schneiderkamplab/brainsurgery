@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
-from ..axon.path_expr import (
+from ..axon.ast.path import (
     path_expr_template_text,
     resolve_path_expr_to_key,
     runtime_value_to_path_expr,

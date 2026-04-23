@@ -1,0 +1,4000 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Any, Mapping
+
+from ...ops import get_op_lowering_type_signature, get_op_type_rule
+from ..ast import (
+    AxonBind,
+    AxonCond,
+    AxonExpr,
+    AxonExprAscribe,
+    AxonExprBinary,
+    AxonExprBind,
+    AxonExprBool,
+    AxonExprCall,
+    AxonExprDo,
+    AxonExprFloat,
+    AxonExprIf,
+    AxonExprInt,
+    AxonExprLambda,
+    AxonExprList,
+    AxonExprName,
+    AxonExprNull,
+    AxonExprParen,
+    AxonExprPath,
+    AxonExprPipe,
+    AxonExprString,
+    AxonExprTernary,
+    AxonExprTuple,
+    AxonFile,
+    AxonKwargValue,
+    AxonModule,
+    AxonParam,
+    AxonRepeat,
+    AxonReturn,
+    AxonScopeBind,
+    AxonStatement,
+    AxonYield,
+    Constraint,
+    ConstraintAtom,
+    ConstraintOperand,
+    DimExprBinary,
+    DimToken,
+    TypeAliasDef,
+    TypeAny,
+    TypeBool,
+    TypeDim,
+    TypeExpr,
+    TypeFloat,
+    TypeInt,
+    TypeList,
+    TypeNamed,
+    TypeNull,
+    TypeOptional,
+    TypePath,
+    TypeString,
+    TypeTensor,
+    TypeTuple,
+    TypeVar,
+    dim_token_names,
+    parse_type_expr,
+)
+from ..validate import validate_flat_axon_file
+
+_COMPARE_OPS = {"==", "!=", "<", "<=", ">", ">="}
+_BOOL_OPS = {"and", "or"}
+_ARITH_OPS = {"+", "-", "*", "/"}
+
+
+@dataclass
+class _TcCtx:
+    modules_by_name: dict[str, AxonModule]
+    type_aliases: dict[str, TypeAliasDef]
+    substitutions: dict[str, TypeExpr]
+    dim_substitutions: dict[str, DimToken | tuple[DimToken, ...]]
+    fresh_counter: int = 0
+
+    def fresh_type_var(self, prefix: str = "__tc") -> TypeVar:
+        self.fresh_counter += 1
+        return TypeVar(name=f"{prefix}{self.fresh_counter}")
+
+    def child(self, *, share_constraints: bool = False) -> _TcCtx:
+        return _TcCtx(
+            modules_by_name=self.modules_by_name,
+            type_aliases=self.type_aliases,
+            substitutions=self.substitutions if share_constraints else {},
+            dim_substitutions=self.dim_substitutions if share_constraints else {},
+            fresh_counter=self.fresh_counter,
+        )
+
+
+@dataclass(frozen=True)
+class _RecursiveInterfaces:
+    signatures: dict[str, tuple[list[TypeExpr], list[TypeExpr]]]
+    members: frozenset[str]
+
+
+def _is_generic_named_type(tp: TypeExpr, *, type_aliases: dict[str, TypeAliasDef]) -> bool:
+    return isinstance(tp, TypeNamed) and tp.name not in type_aliases and "." not in tp.name
+
+
+def _apply_subst(tp: TypeExpr, ctx: _TcCtx) -> TypeExpr:
+    def _apply_dim_token(dim: DimToken) -> tuple[DimToken, ...]:
+        if isinstance(dim, str):
+            mapped = ctx.dim_substitutions.get(dim)
+            if mapped is None:
+                return (dim,)
+            if isinstance(mapped, tuple):
+                return tuple(_flatten_dim_tokens(mapped))
+            return _apply_dim_token(mapped)
+        if isinstance(dim, int):
+            return (dim,)
+        left = _apply_dim_token(dim.left)
+        right = _apply_dim_token(dim.right)
+        if len(left) == 1 and len(right) == 1:
+            return (DimExprBinary(op=dim.op, left=left[0], right=right[0]),)
+        return (dim,)
+
+    def _flatten_dim_tokens(dims: tuple[DimToken, ...]) -> tuple[DimToken, ...]:
+        out: list[DimToken] = []
+        for item in dims:
+            out.extend(_apply_dim_token(item))
+        return tuple(out)
+
+    if isinstance(tp, TypeVar):
+        current: TypeExpr = tp
+        seen: set[str] = set()
+        while (
+            isinstance(current, TypeVar)
+            and current.name in ctx.substitutions
+            and current.name not in seen
+        ):
+            seen.add(current.name)
+            next_tp = ctx.substitutions[current.name]
+            if next_tp == current:
+                break
+            current = next_tp
+        if current != tp:
+            return _apply_subst(current, ctx)
+        return current
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(inner=_apply_subst(tp.inner, ctx))
+    if isinstance(tp, TypeList):
+        return TypeList(item=_apply_subst(tp.item, ctx))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(items=tuple(_apply_subst(item, ctx) for item in tp.items))
+    if isinstance(tp, TypeTensor):
+        return TypeTensor(base=tp.base, dims=_flatten_dim_tokens(tp.dims))
+    if isinstance(tp, TypeNamed):
+        return TypeNamed(name=tp.name, args=_flatten_dim_tokens(tp.args))
+    return tp
+
+
+def _expand_alias(tp: TypeExpr, ctx: _TcCtx) -> TypeExpr:
+    tp = _apply_subst(tp, ctx)
+    if isinstance(tp, TypeNamed) and tp.name == "Tensor" and not tp.args:
+        return TypeTensor(base="Tensor", dims=())
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(inner=_expand_alias(tp.inner, ctx))
+    if isinstance(tp, TypeList):
+        return TypeList(item=_expand_alias(tp.item, ctx))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(items=tuple(_expand_alias(item, ctx) for item in tp.items))
+    if isinstance(tp, TypeNamed):
+        alias = ctx.type_aliases.get(tp.name)
+        if alias is None and "." in tp.name:
+            alias = ctx.type_aliases.get(tp.name.rsplit(".", 1)[1])
+        if alias is None:
+            return tp
+        if len(tp.args) != len(alias.params):
+            return tp
+        subst = {name: dim for name, dim in zip(alias.params, tp.args, strict=True)}
+        return _expand_alias(_substitute_alias_dims(alias.value, subst=subst), ctx)
+    return tp
+
+
+def _substitute_alias_dims(tp: TypeExpr, *, subst: dict[str, DimToken]) -> TypeExpr:
+    def _sub_dim(dim: DimToken) -> DimToken:
+        if isinstance(dim, str):
+            return subst.get(dim, dim)
+        if isinstance(dim, int):
+            return dim
+        return type(dim)(op=dim.op, left=_sub_dim(dim.left), right=_sub_dim(dim.right))
+
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(inner=_substitute_alias_dims(tp.inner, subst=subst))
+    if isinstance(tp, TypeList):
+        return TypeList(item=_substitute_alias_dims(tp.item, subst=subst))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(
+            items=tuple(_substitute_alias_dims(item, subst=subst) for item in tp.items)
+        )
+    if isinstance(tp, TypeTensor):
+        return TypeTensor(base=tp.base, dims=tuple(_sub_dim(dim) for dim in tp.dims))
+    if isinstance(tp, TypeNamed):
+        return TypeNamed(name=tp.name, args=tuple(_sub_dim(dim) for dim in tp.args))
+    return tp
+
+
+def _substitute_type_dims(
+    tp: TypeExpr, *, subst: Mapping[str, DimToken | tuple[DimToken, ...]]
+) -> TypeExpr:
+    def _sub_dim(dim: DimToken) -> tuple[DimToken, ...]:
+        if isinstance(dim, str):
+            mapped = subst.get(dim)
+            if mapped is None:
+                return (dim,)
+            if isinstance(mapped, tuple):
+                return mapped
+            return (mapped,)
+        if isinstance(dim, int):
+            return (dim,)
+        left = _sub_dim(dim.left)
+        right = _sub_dim(dim.right)
+        if len(left) == 1 and len(right) == 1:
+            return (DimExprBinary(op=dim.op, left=left[0], right=right[0]),)
+        return (dim,)
+
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(inner=_substitute_type_dims(tp.inner, subst=subst))
+    if isinstance(tp, TypeList):
+        return TypeList(item=_substitute_type_dims(tp.item, subst=subst))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(items=tuple(_substitute_type_dims(item, subst=subst) for item in tp.items))
+    if isinstance(tp, TypeTensor):
+        dims: list[DimToken] = []
+        for dim in tp.dims:
+            dims.extend(_sub_dim(dim))
+        return TypeTensor(base=tp.base, dims=tuple(dims))
+    if isinstance(tp, TypeNamed):
+        args: list[DimToken] = []
+        for dim in tp.args:
+            args.extend(_sub_dim(dim))
+        return TypeNamed(name=tp.name, args=tuple(args))
+    return tp
+
+
+def _has_variadic_dims(dims: tuple[DimToken, ...]) -> bool:
+    return any(isinstance(dim, str) and dim.startswith("..") for dim in dims)
+
+
+def _occurs(var_name: str, tp: TypeExpr, ctx: _TcCtx) -> bool:
+    tp = _apply_subst(tp, ctx)
+    if isinstance(tp, TypeVar):
+        return tp.name == var_name
+    if isinstance(tp, TypeOptional):
+        return _occurs(var_name, tp.inner, ctx)
+    if isinstance(tp, TypeList):
+        return _occurs(var_name, tp.item, ctx)
+    if isinstance(tp, TypeTuple):
+        return any(_occurs(var_name, item, ctx) for item in tp.items)
+    return False
+
+
+def _bind_var(var: TypeVar, tp: TypeExpr, ctx: _TcCtx) -> None:
+    tp = _apply_subst(tp, ctx)
+    if isinstance(tp, TypeVar) and tp.name == var.name:
+        return
+    if _occurs(var.name, tp, ctx):
+        raise ValueError(f"Axon typecheck failed: recursive type variable {var.name!r}")
+    ctx.substitutions[var.name] = tp
+
+
+def _dim_name_priority(name: str) -> tuple[int, int]:
+    def _priority(inner: str, full_len: int) -> tuple[int, int]:
+        if inner.startswith("__d") or inner.startswith("__tc") or inner.startswith("_T"):
+            return (0, -full_len)
+        if len(inner) == 1:
+            if any(ch.isupper() for ch in inner):
+                return (2, -full_len)
+            if any(ch.islower() for ch in inner):
+                return (1, -full_len)
+        if any(ch.isupper() for ch in inner):
+            return (4, -full_len)
+        if any(ch.islower() for ch in inner):
+            return (3, -full_len)
+        return (3, -full_len)
+
+    if name.startswith(".."):
+        return _priority(name[2:], len(name))
+    return _priority(name, len(name))
+
+
+def _typevar_name_priority(name: str) -> tuple[int, int]:
+    if name.startswith("__tc") or name.startswith("_T"):
+        return (0, -len(name))
+    if "::" in name:
+        return (2, -len(name))
+    return (1, -len(name))
+
+
+def _apply_dim_subst_token(dim: DimToken, ctx: _TcCtx) -> DimToken | tuple[DimToken, ...]:
+    if isinstance(dim, str):
+        mapped = ctx.dim_substitutions.get(dim)
+        if mapped is None:
+            return dim
+        if isinstance(mapped, tuple):
+            return tuple(_normalize_dim_token(item, ctx) for item in mapped)
+        return _normalize_dim_token(mapped, ctx)
+    if isinstance(dim, int):
+        return dim
+    return DimExprBinary(
+        op=dim.op,
+        left=_normalize_dim_token(dim.left, ctx),
+        right=_normalize_dim_token(dim.right, ctx),
+    )
+
+
+def _normalize_dim_token(dim: DimToken, ctx: _TcCtx) -> DimToken:
+    normalized = _apply_dim_subst_token(dim, ctx)
+    if isinstance(normalized, tuple):
+        if len(normalized) == 1:
+            return normalized[0]
+        return dim
+    return normalized
+
+
+def _bind_dim_name(name: str, value: DimToken | tuple[DimToken, ...], ctx: _TcCtx) -> None:
+    if name.startswith(".."):
+        if isinstance(value, tuple):
+            if value == (name,):
+                return
+        elif value == name:
+            return
+        ctx.dim_substitutions[name] = value
+        return
+    if isinstance(value, tuple):
+        if len(value) != 1:
+            ctx.dim_substitutions[name] = value
+            return
+        value = value[0]
+    value = _normalize_dim_token(value, ctx)
+    if value == name:
+        return
+    if name in dim_token_names(value):
+        raise ValueError(f"Axon typecheck failed: recursive dim variable {name!r}")
+    ctx.dim_substitutions[name] = value
+
+
+def _unify_dim_token(left: DimToken, right: DimToken, ctx: _TcCtx) -> DimToken:
+    left = _normalize_dim_token(left, ctx)
+    right = _normalize_dim_token(right, ctx)
+    if left == right:
+        return left
+    if (
+        isinstance(left, str)
+        and not left.startswith("..")
+        and isinstance(right, str)
+        and not right.startswith("..")
+    ):
+        if _dim_name_priority(left) >= _dim_name_priority(right):
+            _bind_dim_name(right, left, ctx)
+            return _normalize_dim_token(left, ctx)
+        _bind_dim_name(left, right, ctx)
+        return _normalize_dim_token(right, ctx)
+    if isinstance(left, str) and not left.startswith(".."):
+        _bind_dim_name(left, right, ctx)
+        return _normalize_dim_token(right, ctx)
+    if isinstance(right, str) and not right.startswith(".."):
+        _bind_dim_name(right, left, ctx)
+        return _normalize_dim_token(left, ctx)
+    if isinstance(left, int) and isinstance(right, int):
+        if left != right:
+            raise ValueError(f"Axon typecheck failed: dim mismatch {left!r} vs {right!r}")
+        return left
+    if isinstance(left, DimExprBinary) and isinstance(right, DimExprBinary) and left.op == right.op:
+        return DimExprBinary(
+            op=left.op,
+            left=_unify_dim_token(left.left, right.left, ctx),
+            right=_unify_dim_token(left.right, right.right, ctx),
+        )
+    raise ValueError(f"Axon typecheck failed: dim mismatch {left!r} vs {right!r}")
+
+
+def _unify_dim_sequence(
+    expected: tuple[DimToken, ...],
+    actual: tuple[DimToken, ...],
+    ctx: _TcCtx,
+) -> tuple[DimToken, ...]:
+    left_var = next(
+        (idx for idx, dim in enumerate(expected) if isinstance(dim, str) and dim.startswith("..")),
+        None,
+    )
+    right_var = next(
+        (idx for idx, dim in enumerate(actual) if isinstance(dim, str) and dim.startswith("..")),
+        None,
+    )
+    if left_var is None and right_var is None:
+        if len(expected) != len(actual):
+            raise ValueError("Axon typecheck failed: tensor rank mismatch")
+        return tuple(
+            _unify_dim_token(left, right, ctx) for left, right in zip(expected, actual, strict=True)
+        )
+    if left_var is not None and right_var is None:
+        prefix = expected[:left_var]
+        suffix = expected[left_var + 1 :]
+        if len(actual) < len(prefix) + len(suffix):
+            raise ValueError("Axon typecheck failed: tensor rank mismatch")
+        head = [
+            _unify_dim_token(left, right, ctx)
+            for left, right in zip(prefix, actual[: len(prefix)], strict=True)
+        ]
+        tail = [
+            _unify_dim_token(left, right, ctx)
+            for left, right in zip(suffix, actual[-len(suffix) :] if suffix else (), strict=True)
+        ]
+        variadic_name = expected[left_var]
+        assert isinstance(variadic_name, str)
+        middle = actual[len(prefix) : len(actual) - len(suffix) if suffix else len(actual)]
+        _bind_dim_name(variadic_name, middle, ctx)
+        return tuple(head) + tuple(middle) + tuple(tail)
+    if right_var is not None and left_var is None:
+        return _unify_dim_sequence(actual, expected, ctx)
+    assert left_var is not None and right_var is not None
+    left_prefix = expected[:left_var]
+    left_suffix = expected[left_var + 1 :]
+    right_prefix = actual[:right_var]
+    right_suffix = actual[right_var + 1 :]
+    if not left_prefix and not left_suffix:
+        left_name = expected[left_var]
+        assert isinstance(left_name, str)
+        _bind_dim_name(left_name, actual, ctx)
+        return tuple(_normalize_dim_token(dim, ctx) for dim in actual)
+    if not right_prefix and not right_suffix:
+        right_name = actual[right_var]
+        assert isinstance(right_name, str)
+        _bind_dim_name(right_name, expected, ctx)
+        return tuple(_normalize_dim_token(dim, ctx) for dim in expected)
+    if len(left_prefix) != len(right_prefix) or len(left_suffix) != len(right_suffix):
+        raise ValueError("Axon typecheck failed: cannot unify multiple variadic tensor dims")
+    head = [
+        _unify_dim_token(left, right, ctx)
+        for left, right in zip(left_prefix, right_prefix, strict=True)
+    ]
+    tail = [
+        _unify_dim_token(left, right, ctx)
+        for left, right in zip(left_suffix, right_suffix, strict=True)
+    ]
+    left_name = expected[left_var]
+    right_name = actual[right_var]
+    assert isinstance(left_name, str)
+    assert isinstance(right_name, str)
+    left_middle = expected[
+        len(left_prefix) : len(expected) - len(left_suffix) if left_suffix else len(expected)
+    ]
+    right_middle = actual[
+        len(right_prefix) : len(actual) - len(right_suffix) if right_suffix else len(actual)
+    ]
+    if (
+        len(left_middle) == 1
+        and left_middle[0] == left_name
+        and len(right_middle) == 1
+        and right_middle[0] == right_name
+    ):
+        if _dim_name_priority(left_name) >= _dim_name_priority(right_name):
+            _bind_dim_name(right_name, left_middle, ctx)
+            middle = tuple(_normalize_dim_token(dim, ctx) for dim in left_middle)
+        else:
+            _bind_dim_name(left_name, right_middle, ctx)
+            middle = tuple(_normalize_dim_token(dim, ctx) for dim in right_middle)
+    else:
+        if len(left_middle) == 1 and left_middle[0] == left_name:
+            _bind_dim_name(left_name, right_middle, ctx)
+        middle = tuple(_normalize_dim_token(dim, ctx) for dim in right_middle)
+    return tuple(head) + middle + tuple(tail)
+
+
+def _unify(left: TypeExpr, right: TypeExpr, ctx: _TcCtx) -> TypeExpr:
+    left = _expand_alias(_apply_subst(left, ctx), ctx)
+    right = _expand_alias(_apply_subst(right, ctx), ctx)
+    if left == right:
+        return left
+    if isinstance(left, TypeVar) and isinstance(right, TypeVar):
+        if _typevar_name_priority(left.name) >= _typevar_name_priority(right.name):
+            _bind_var(right, left, ctx)
+            return _apply_subst(left, ctx)
+        _bind_var(left, right, ctx)
+        return _apply_subst(right, ctx)
+    if isinstance(left, TypeVar):
+        _bind_var(left, right, ctx)
+        return _apply_subst(right, ctx)
+    if isinstance(right, TypeVar):
+        _bind_var(right, left, ctx)
+        return _apply_subst(left, ctx)
+    if isinstance(left, TypeAny):
+        return right
+    if isinstance(right, TypeAny):
+        return left
+    if (isinstance(left, TypeInt) and isinstance(right, TypeFloat)) or (
+        isinstance(left, TypeFloat) and isinstance(right, TypeInt)
+    ):
+        return TypeFloat()
+    if (isinstance(left, TypeDim) and isinstance(right, TypeFloat)) or (
+        isinstance(left, TypeFloat) and isinstance(right, TypeDim)
+    ):
+        return TypeFloat()
+    if (isinstance(left, TypeInt) and isinstance(right, TypeDim)) or (
+        isinstance(left, TypeDim) and isinstance(right, TypeInt)
+    ):
+        return TypeDim()
+    if isinstance(left, TypeOptional) and isinstance(right, TypeNull):
+        return left
+    if isinstance(right, TypeOptional) and isinstance(left, TypeNull):
+        return right
+    if isinstance(left, TypeNull):
+        return TypeOptional(inner=right)
+    if isinstance(right, TypeNull):
+        return TypeOptional(inner=left)
+    if isinstance(left, TypeOptional) and isinstance(right, TypeOptional):
+        return TypeOptional(inner=_unify(left.inner, right.inner, ctx))
+    if isinstance(left, TypeOptional):
+        return TypeOptional(inner=_unify(left.inner, right, ctx))
+    if isinstance(right, TypeOptional):
+        return TypeOptional(inner=_unify(left, right.inner, ctx))
+    if isinstance(left, TypeList) and isinstance(right, TypeList):
+        return TypeList(item=_unify(left.item, right.item, ctx))
+    if isinstance(left, TypeTuple) and isinstance(right, TypeTuple):
+        if len(left.items) != len(right.items):
+            raise ValueError("Axon typecheck failed: tuple arity mismatch")
+        return TypeTuple(
+            items=tuple(_unify(a, b, ctx) for a, b in zip(left.items, right.items, strict=True))
+        )
+    if isinstance(left, TypeTensor) and isinstance(right, TypeTensor):
+        if left.base != right.base and left.base != "Tensor" and right.base != "Tensor":
+            raise ValueError(
+                f"Axon typecheck failed: tensor base mismatch {left.base!r} vs {right.base!r}"
+            )
+        if left.dims and right.dims:
+            return TypeTensor(base="Tensor", dims=_unify_dim_sequence(left.dims, right.dims, ctx))
+        if left.dims:
+            return TypeTensor(
+                base="Tensor",
+                dims=tuple(_normalize_dim_token(dim, ctx) for dim in left.dims),
+            )
+        return TypeTensor(
+            base="Tensor",
+            dims=tuple(_normalize_dim_token(dim, ctx) for dim in right.dims),
+        )
+    if type(left) is type(right):
+        return left
+    if (
+        isinstance(left, TypeNamed)
+        and isinstance(right, TypeNamed)
+        and left.name == right.name
+        and left.args == right.args
+    ):
+        return left
+    raise ValueError(f"Axon typecheck failed: cannot unify {left!r} with {right!r}")
+
+
+def _scoped_typevars(
+    tp: TypeExpr | None,
+    *,
+    module_name: str,
+    ctx: _TcCtx,
+    freshen_generics: bool,
+    preserve_dim_names: set[str] | None = None,
+) -> TypeExpr:
+    preserved = preserve_dim_names or set()
+    dim_subst: dict[str, DimToken] = {}
+
+    def _fresh_dim_name(name: str) -> str:
+        existing = dim_subst.get(name)
+        if isinstance(existing, str):
+            return existing
+        ctx.fresh_counter += 1
+        fresh = f"__d{ctx.fresh_counter}"
+        if name.startswith(".."):
+            fresh = ".." + fresh
+        dim_subst[name] = fresh
+        return fresh
+
+    def _rewrite_dim(dim: DimToken) -> DimToken:
+        if isinstance(dim, str):
+            if dim in preserved:
+                return dim
+            return _fresh_dim_name(dim) if freshen_generics else dim
+        if isinstance(dim, int):
+            return dim
+        return DimExprBinary(op=dim.op, left=_rewrite_dim(dim.left), right=_rewrite_dim(dim.right))
+
+    def _rewrite_type(inner: TypeExpr) -> TypeExpr:
+        if isinstance(inner, TypeVar):
+            if freshen_generics:
+                return ctx.fresh_type_var()
+            return TypeVar(name=f"{module_name}::{inner.name}")
+        if isinstance(inner, TypeNamed) and _is_generic_named_type(
+            inner, type_aliases=ctx.type_aliases
+        ):
+            if freshen_generics:
+                return ctx.fresh_type_var()
+            return TypeVar(name=f"{module_name}::{inner.name}")
+        if isinstance(inner, TypeOptional):
+            return TypeOptional(inner=_rewrite_type(inner.inner))
+        if isinstance(inner, TypeList):
+            return TypeList(item=_rewrite_type(inner.item))
+        if isinstance(inner, TypeTuple):
+            return TypeTuple(items=tuple(_rewrite_type(item) for item in inner.items))
+        if isinstance(inner, TypeNamed):
+            return TypeNamed(name=inner.name, args=tuple(_rewrite_dim(dim) for dim in inner.args))
+        if isinstance(inner, TypeTensor):
+            return TypeTensor(base=inner.base, dims=tuple(_rewrite_dim(dim) for dim in inner.dims))
+        return inner
+
+    if tp is None:
+        return TypeAny()
+    return _rewrite_type(tp)
+
+
+def _module_return_types(
+    module: AxonModule, ctx: _TcCtx, *, freshen_generics: bool
+) -> tuple[TypeExpr, ...]:
+    preserve_dim_names = {
+        param.name
+        for param in module.params
+        if isinstance(param.type_expr, TypeDim)
+        or (
+            isinstance(param.type_expr, TypeOptional) and isinstance(param.type_expr.inner, TypeDim)
+        )
+    }
+    if module.return_type_expr is None:
+        return (TypeAny(),)
+    scoped = _scoped_typevars(
+        module.return_type_expr,
+        module_name=module.name,
+        ctx=ctx,
+        freshen_generics=freshen_generics,
+        preserve_dim_names=preserve_dim_names,
+    )
+    if isinstance(scoped, TypeTuple):
+        return scoped.items
+    return (scoped,)
+
+
+def _instantiate_module_signature(
+    module: AxonModule, ctx: _TcCtx
+) -> tuple[list[TypeExpr], list[TypeExpr]]:
+    preserve_dim_names = {
+        param.name
+        for param in module.params
+        if isinstance(param.type_expr, TypeDim)
+        or (
+            isinstance(param.type_expr, TypeOptional) and isinstance(param.type_expr.inner, TypeDim)
+        )
+    }
+    dim_subst: dict[str, DimToken] = {}
+    type_subst: dict[str, TypeVar] = {}
+
+    def _fresh_dim_name(name: str) -> str:
+        existing = dim_subst.get(name)
+        if isinstance(existing, str):
+            return existing
+        ctx.fresh_counter += 1
+        fresh = f"__d{ctx.fresh_counter}"
+        if name.startswith(".."):
+            fresh = ".." + fresh
+        dim_subst[name] = fresh
+        return fresh
+
+    def _rewrite_dim(dim: DimToken) -> DimToken:
+        if isinstance(dim, str):
+            if dim in preserve_dim_names:
+                return dim
+            return _fresh_dim_name(dim)
+        if isinstance(dim, int):
+            return dim
+        return DimExprBinary(op=dim.op, left=_rewrite_dim(dim.left), right=_rewrite_dim(dim.right))
+
+    def _rewrite_type(tp: TypeExpr | None) -> TypeExpr:
+        if tp is None:
+            return TypeAny()
+        if isinstance(tp, TypeVar):
+            existing = type_subst.get(tp.name)
+            if existing is None:
+                existing = ctx.fresh_type_var()
+                type_subst[tp.name] = existing
+            return existing
+        if isinstance(tp, TypeNamed) and _is_generic_named_type(tp, type_aliases=ctx.type_aliases):
+            existing = type_subst.get(tp.name)
+            if existing is None:
+                existing = ctx.fresh_type_var()
+                type_subst[tp.name] = existing
+            return existing
+        if isinstance(tp, TypeOptional):
+            return TypeOptional(inner=_rewrite_type(tp.inner))
+        if isinstance(tp, TypeList):
+            return TypeList(item=_rewrite_type(tp.item))
+        if isinstance(tp, TypeTuple):
+            return TypeTuple(items=tuple(_rewrite_type(item) for item in tp.items))
+        if isinstance(tp, TypeNamed):
+            return TypeNamed(name=tp.name, args=tuple(_rewrite_dim(dim) for dim in tp.args))
+        if isinstance(tp, TypeTensor):
+            return TypeTensor(base=tp.base, dims=tuple(_rewrite_dim(dim) for dim in tp.dims))
+        return tp
+
+    param_types: list[TypeExpr] = [TypePath() for _ in module.path_params]
+    for param in module.params:
+        param_type = _rewrite_type(param.type_expr)
+        if param.optional:
+            param_type = TypeOptional(inner=param_type)
+        param_types.append(param_type)
+    if module.return_type_expr is None:
+        return param_types, [TypeAny()]
+    return_tp = _rewrite_type(module.return_type_expr)
+    if isinstance(return_tp, TypeTuple):
+        return param_types, list(return_tp.items)
+    return param_types, [return_tp]
+
+
+def _clone_type_expr(tp: TypeExpr) -> TypeExpr:
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(inner=_clone_type_expr(tp.inner))
+    if isinstance(tp, TypeList):
+        return TypeList(item=_clone_type_expr(tp.item))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(items=tuple(_clone_type_expr(item) for item in tp.items))
+    if isinstance(tp, TypeTensor):
+        return TypeTensor(base=tp.base, dims=tuple(tp.dims))
+    if isinstance(tp, TypeNamed):
+        return TypeNamed(name=tp.name, args=tuple(tp.args))
+    if isinstance(tp, TypeVar):
+        return TypeVar(name=tp.name)
+    return tp
+
+
+def _clone_signature(
+    signature: tuple[list[TypeExpr], list[TypeExpr]],
+) -> tuple[list[TypeExpr], list[TypeExpr]]:
+    param_types, return_types = signature
+    return (
+        [_clone_type_expr(tp) for tp in param_types],
+        [_clone_type_expr(tp) for tp in return_types],
+    )
+
+
+def _signature_from_module_header(module: AxonModule) -> tuple[list[TypeExpr], list[TypeExpr]]:
+    param_types: list[TypeExpr] = [TypePath() for _ in module.path_params]
+    for param in module.params:
+        param_tp = _clone_type_expr(param.type_expr or TypeAny())
+        if param.optional:
+            param_tp = TypeOptional(inner=param_tp)
+        param_types.append(param_tp)
+    if module.return_type_expr is None:
+        return param_types, [TypeAny()]
+    return_tp = _clone_type_expr(module.return_type_expr)
+    if isinstance(return_tp, TypeTuple):
+        return param_types, [_clone_type_expr(item) for item in return_tp.items]
+    return param_types, [return_tp]
+
+
+def _canonicalize_generated_signature_type(
+    tp: TypeExpr,
+    *,
+    type_names: dict[str, str],
+    dim_names: dict[str, str],
+    type_counter: list[int],
+    dim_counter: list[int],
+) -> TypeExpr:
+    def _canon_dim(dim: DimToken) -> DimToken:
+        if isinstance(dim, str):
+            if _is_generated_dim_name(dim):
+                mapped = dim_names.get(dim)
+                if mapped is None:
+                    dim_counter[0] += 1
+                    mapped = f"__gdim{dim_counter[0]}"
+                    dim_names[dim] = mapped
+                return mapped
+            return dim
+        if isinstance(dim, int):
+            return dim
+        return DimExprBinary(op=dim.op, left=_canon_dim(dim.left), right=_canon_dim(dim.right))
+
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(
+            inner=_canonicalize_generated_signature_type(
+                tp.inner,
+                type_names=type_names,
+                dim_names=dim_names,
+                type_counter=type_counter,
+                dim_counter=dim_counter,
+            )
+        )
+    if isinstance(tp, TypeList):
+        return TypeList(
+            item=_canonicalize_generated_signature_type(
+                tp.item,
+                type_names=type_names,
+                dim_names=dim_names,
+                type_counter=type_counter,
+                dim_counter=dim_counter,
+            )
+        )
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(
+            items=tuple(
+                _canonicalize_generated_signature_type(
+                    item,
+                    type_names=type_names,
+                    dim_names=dim_names,
+                    type_counter=type_counter,
+                    dim_counter=dim_counter,
+                )
+                for item in tp.items
+            )
+        )
+    if isinstance(tp, TypeTensor):
+        return TypeTensor(base=tp.base, dims=tuple(_canon_dim(dim) for dim in tp.dims))
+    if isinstance(tp, TypeNamed):
+        return TypeNamed(name=tp.name, args=tuple(_canon_dim(dim) for dim in tp.args))
+    if isinstance(tp, TypeVar):
+        if _is_generated_dim_name(tp.name) or "::" in tp.name:
+            mapped = type_names.get(tp.name)
+            if mapped is None:
+                type_counter[0] += 1
+                mapped = f"__gt{type_counter[0]}"
+                type_names[tp.name] = mapped
+            return TypeVar(name=mapped)
+        return TypeVar(name=tp.name)
+    return _clone_type_expr(tp)
+
+
+def _canonicalize_generated_signature(
+    signature: tuple[list[TypeExpr], list[TypeExpr]],
+) -> tuple[list[TypeExpr], list[TypeExpr]]:
+    type_names: dict[str, str] = {}
+    dim_names: dict[str, str] = {}
+    type_counter = [0]
+    dim_counter = [0]
+    return (
+        [
+            _canonicalize_generated_signature_type(
+                tp,
+                type_names=type_names,
+                dim_names=dim_names,
+                type_counter=type_counter,
+                dim_counter=dim_counter,
+            )
+            for tp in signature[0]
+        ],
+        [
+            _canonicalize_generated_signature_type(
+                tp,
+                type_names=type_names,
+                dim_names=dim_names,
+                type_counter=type_counter,
+                dim_counter=dim_counter,
+            )
+            for tp in signature[1]
+        ],
+    )
+
+
+def _module_param_types(
+    module: AxonModule, ctx: _TcCtx, *, freshen_generics: bool
+) -> list[TypeExpr]:
+    preserve_dim_names = {
+        param.name
+        for param in module.params
+        if isinstance(param.type_expr, TypeDim)
+        or (
+            isinstance(param.type_expr, TypeOptional) and isinstance(param.type_expr.inner, TypeDim)
+        )
+    }
+    out: list[TypeExpr] = [TypePath() for _ in module.path_params]
+    for param in module.params:
+        param_type = _scoped_typevars(
+            param.type_expr,
+            module_name=module.name,
+            ctx=ctx,
+            freshen_generics=freshen_generics,
+            preserve_dim_names=preserve_dim_names,
+        )
+        if param.optional:
+            param_type = TypeOptional(inner=param_type)
+        out.append(param_type)
+    return out
+
+
+def _type_dims(tp: TypeExpr, ctx: _TcCtx) -> tuple[DimToken, ...] | None:
+    expanded = _expand_alias(tp, ctx)
+    if isinstance(expanded, TypeOptional):
+        return _type_dims(expanded.inner, ctx)
+    if isinstance(expanded, TypeTensor):
+        return expanded.dims
+    return None
+
+
+def _expr_to_dim_token(expr: AxonExpr) -> DimToken | None:
+    if isinstance(expr, AxonExprAscribe):
+        return _expr_to_dim_token(expr.expr)
+    if isinstance(expr, AxonExprParen):
+        return _expr_to_dim_token(expr.inner)
+    if isinstance(expr, AxonExprInt):
+        return expr.value
+    if isinstance(expr, AxonExprName):
+        return expr.name
+    if isinstance(expr, AxonExprBinary) and expr.op in {"+", "-", "*", "/"}:
+        left = _expr_to_dim_token(expr.left)
+        right = _expr_to_dim_token(expr.right)
+        if left is None or right is None:
+            return None
+        return DimExprBinary(op=expr.op, left=left, right=right)
+    return None
+
+
+def _normalize_constraint_operand(
+    operand: ConstraintAtom | tuple[ConstraintAtom, ...],
+    ctx: _TcCtx,
+    *,
+    preferred_dim_roots: dict[str, str] | None = None,
+) -> ConstraintAtom | tuple[ConstraintAtom, ...]:
+    if isinstance(operand, tuple):
+        normalized_items: list[ConstraintAtom] = []
+        for item in operand:
+            if isinstance(item, bool) or item is None:
+                normalized_items.append(item)
+            else:
+                normalized_items.append(
+                    _normalize_dim_token_for_module(item, ctx, preferred_dim_roots)
+                )
+        return tuple(normalized_items)
+    if isinstance(operand, bool) or operand is None:
+        return operand
+    return _normalize_dim_token_for_module(operand, ctx, preferred_dim_roots)
+
+
+def _normalize_constraint(
+    constraint: Constraint,
+    ctx: _TcCtx,
+    *,
+    preferred_dim_roots: dict[str, str] | None = None,
+) -> Constraint:
+    return Constraint(
+        relation=constraint.relation,
+        left=_normalize_constraint_operand(
+            constraint.left, ctx, preferred_dim_roots=preferred_dim_roots
+        ),
+        right=(
+            _normalize_constraint_operand(
+                constraint.right, ctx, preferred_dim_roots=preferred_dim_roots
+            )
+            if constraint.right is not None
+            else None
+        ),
+        guards=tuple(
+            _normalize_constraint(item, ctx, preferred_dim_roots=preferred_dim_roots)
+            for item in constraint.guards
+        ),
+    )
+
+
+def _expr_to_constraint_operand(expr: AxonExpr) -> ConstraintAtom | None:
+    if isinstance(expr, AxonExprAscribe):
+        return _expr_to_constraint_operand(expr.expr)
+    if isinstance(expr, AxonExprParen):
+        return _expr_to_constraint_operand(expr.inner)
+    if isinstance(expr, AxonExprInt):
+        return expr.value
+    if isinstance(expr, AxonExprBool):
+        return expr.value
+    if isinstance(expr, AxonExprNull):
+        return None
+    if isinstance(expr, AxonExprName):
+        return expr.name
+    if isinstance(expr, AxonExprBinary) and expr.op in {"+", "-", "*", "/"}:
+        left = _expr_to_constraint_operand(expr.left)
+        right = _expr_to_constraint_operand(expr.right)
+        if left is None or right is None or isinstance(left, bool) or isinstance(right, bool):
+            return None
+        return DimExprBinary(op=expr.op, left=left, right=right)
+    return None
+
+
+def _condition_constraint_from_expr(cond: AxonExpr, *, truthy: bool) -> Constraint | None:
+    if isinstance(cond, AxonExprName):
+        return Constraint(relation="is_true" if truthy else "is_false", left=cond.name)
+    if isinstance(cond, AxonExprBinary):
+        if cond.op in {"==", "!="}:
+            if isinstance(cond.left, AxonExprName) and isinstance(cond.right, AxonExprNull):
+                return Constraint(
+                    relation="is_null" if (truthy == (cond.op == "==")) else "not_null",
+                    left=cond.left.name,
+                )
+            if isinstance(cond.right, AxonExprName) and isinstance(cond.left, AxonExprNull):
+                return Constraint(
+                    relation="is_null" if (truthy == (cond.op == "==")) else "not_null",
+                    left=cond.right.name,
+                )
+            left = _expr_to_constraint_operand(cond.left)
+            right = _expr_to_constraint_operand(cond.right)
+            if left is not None and right is not None:
+                relation = cond.op if truthy else ("!=" if cond.op == "==" else "==")
+                return Constraint(relation=relation, left=left, right=right)
+        if cond.op in _COMPARE_OPS:
+            left = _expr_to_constraint_operand(cond.left)
+            right = _expr_to_constraint_operand(cond.right)
+            if left is None or right is None or isinstance(left, bool) or isinstance(right, bool):
+                return None
+            relation = cond.op
+            if not truthy:
+                relation = {
+                    "==": "!=",
+                    "!=": "==",
+                    "<": ">=",
+                    "<=": ">",
+                    ">": "<=",
+                    ">=": "<",
+                }[relation]
+            return Constraint(relation=relation, left=left, right=right)
+    return None
+
+
+def _collect_stmt_constraints(
+    statements: tuple[AxonStatement, ...],
+    *,
+    out: list[Constraint],
+    ctx: _TcCtx,
+    guards: tuple[Constraint, ...] = (),
+    condition_defs: dict[str, AxonExpr] | None = None,
+) -> None:
+    current_condition_defs = dict(condition_defs or {})
+
+    def _append(constraint: Constraint) -> None:
+        out.append(
+            Constraint(
+                relation=constraint.relation,
+                left=constraint.left,
+                right=constraint.right,
+                guards=guards,
+            )
+        )
+
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            if len(stmt.targets) == 1:
+                if isinstance(stmt.expr, AxonExprBinary) and stmt.expr.op in {"==", "!="}:
+                    current_condition_defs[stmt.targets[0]] = stmt.expr
+                else:
+                    current_condition_defs.pop(stmt.targets[0], None)
+            if len(stmt.targets) == 1 and stmt.targets[0] != "_":
+                if isinstance(stmt.expr, AxonExprTernary):
+                    target = stmt.targets[0]
+                    refine_expr = (
+                        current_condition_defs.get(stmt.expr.cond.name, stmt.expr.cond)
+                        if isinstance(stmt.expr.cond, AxonExprName)
+                        else stmt.expr.cond
+                    )
+                    true_guard = _condition_constraint_from_expr(refine_expr, truthy=True)
+                    false_guard = _condition_constraint_from_expr(refine_expr, truthy=False)
+                    true_operand = _expr_to_constraint_operand(stmt.expr.true_expr)
+                    false_operand = _expr_to_constraint_operand(stmt.expr.false_expr)
+                    expr_type = _apply_subst(stmt.expr.inferred_type or TypeAny(), ctx)
+                    if isinstance(
+                        _expand_alias(expr_type, ctx), TypeDim | TypeInt | TypeBool | TypeNull
+                    ):
+                        if true_operand is not None and true_operand != target:
+                            out.append(
+                                Constraint(
+                                    relation="=",
+                                    left=target,
+                                    right=true_operand,
+                                    guards=guards if true_guard is None else (*guards, true_guard),
+                                )
+                            )
+                        if false_operand is not None and false_operand != target:
+                            out.append(
+                                Constraint(
+                                    relation="=",
+                                    left=target,
+                                    right=false_operand,
+                                    guards=guards
+                                    if false_guard is None
+                                    else (*guards, false_guard),
+                                )
+                            )
+                expr_type = _apply_subst(stmt.expr.inferred_type or TypeAny(), ctx)
+                if isinstance(
+                    _expand_alias(expr_type, ctx), TypeDim | TypeInt | TypeBool | TypeNull
+                ):
+                    operand = _expr_to_constraint_operand(stmt.expr)
+                    if operand is not None and operand != stmt.targets[0]:
+                        _append(Constraint(relation="=", left=stmt.targets[0], right=operand))
+        elif isinstance(stmt, AxonCond):
+            refine_expr = (
+                current_condition_defs.get(stmt.cond.name, stmt.cond)
+                if isinstance(stmt.cond, AxonExprName)
+                else stmt.cond
+            )
+            true_guard = _condition_constraint_from_expr(refine_expr, truthy=True)
+            false_guard = _condition_constraint_from_expr(refine_expr, truthy=False)
+            _collect_stmt_constraints(
+                stmt.true_body,
+                out=out,
+                ctx=ctx,
+                guards=guards if true_guard is None else (*guards, true_guard),
+                condition_defs=current_condition_defs,
+            )
+            _collect_stmt_constraints(
+                stmt.false_body,
+                out=out,
+                ctx=ctx,
+                guards=guards if false_guard is None else (*guards, false_guard),
+                condition_defs=current_condition_defs,
+            )
+        elif isinstance(stmt, AxonRepeat):
+            _collect_stmt_constraints(
+                stmt.body, out=out, ctx=ctx, guards=guards, condition_defs=current_condition_defs
+            )
+        elif isinstance(stmt, AxonScopeBind):
+            _collect_stmt_constraints(
+                stmt.body, out=out, ctx=ctx, guards=guards, condition_defs=current_condition_defs
+            )
+
+
+def _collect_module_constraints(
+    module: AxonModule,
+    *,
+    statements: tuple[AxonStatement, ...],
+    ctx: _TcCtx,
+) -> tuple[Constraint, ...]:
+    constraints: list[Constraint] = list(module.constraints or ())
+    for name, value in sorted(ctx.dim_substitutions.items()):
+        if name.startswith(".."):
+            continue
+        normalized = _normalize_constraint_operand(value, ctx)
+        if normalized != name:
+            constraints.append(Constraint(relation="=", left=name, right=normalized))
+    _collect_stmt_constraints(statements, out=constraints, ctx=ctx, condition_defs={})
+    normalized_constraints = tuple(_normalize_constraint(item, ctx) for item in constraints)
+    deduped: list[Constraint] = []
+    seen: set[tuple[object, object, object, object]] = set()
+    for item in normalized_constraints:
+        key = (item.relation, item.left, item.right, item.guards)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return tuple(deduped)
+
+
+def _constraint_operand_param_bindings(
+    *,
+    callee: AxonModule,
+    args: tuple[AxonExpr, ...],
+    kwargs: dict[str, AxonKwargValue],
+) -> dict[ConstraintAtom, str]:
+    bindings: dict[ConstraintAtom, str] = {}
+    param_names = [*callee.path_params, *(param.name for param in callee.params)]
+    for idx, arg in enumerate(args):
+        if idx >= len(param_names) or idx < len(callee.path_params):
+            continue
+        operand = _expr_to_constraint_operand(arg)
+        if isinstance(operand, str | DimExprBinary):
+            bindings.setdefault(operand, param_names[idx])
+    for key, raw_value in kwargs.items():
+        if key not in param_names:
+            continue
+        param_idx = param_names.index(key)
+        if param_idx < len(callee.path_params) or not isinstance(raw_value, AxonExpr):
+            continue
+        operand = _expr_to_constraint_operand(raw_value)
+        if isinstance(operand, str | DimExprBinary):
+            bindings.setdefault(operand, key)
+    return bindings
+
+
+def _call_param_constraints(
+    *,
+    callee: AxonModule,
+    args: tuple[AxonExpr, ...],
+    kwargs: dict[str, AxonKwargValue],
+) -> tuple[Constraint, ...]:
+    constraints: list[Constraint] = []
+    param_names = [*callee.path_params, *(param.name for param in callee.params)]
+    for idx, arg in enumerate(args):
+        if idx >= len(param_names) or idx < len(callee.path_params):
+            continue
+        operand = _expr_to_constraint_operand(arg)
+        if operand is None:
+            continue
+        constraints.append(Constraint(relation="=", left=param_names[idx], right=operand))
+    for key, raw_value in kwargs.items():
+        if key not in param_names or not isinstance(raw_value, AxonExpr):
+            continue
+        param_idx = param_names.index(key)
+        if param_idx < len(callee.path_params):
+            continue
+        operand = _expr_to_constraint_operand(raw_value)
+        if operand is None:
+            continue
+        constraints.append(Constraint(relation="=", left=key, right=operand))
+    return tuple(constraints)
+
+
+def _translate_constraint_operand(
+    operand: ConstraintOperand,
+    *,
+    bindings: dict[ConstraintAtom, str],
+) -> ConstraintOperand | None:
+    if isinstance(operand, tuple):
+        translated_items: list[ConstraintAtom] = []
+        for item in operand:
+            translated = _translate_constraint_operand(item, bindings=bindings)
+            if translated is None or isinstance(translated, tuple):
+                return None
+            translated_items.append(translated)
+        return tuple(translated_items)
+    if isinstance(operand, bool) or operand is None or isinstance(operand, int):
+        return operand
+    if isinstance(operand, str):
+        return bindings.get(operand, operand)
+    translated_left = _translate_constraint_operand(operand.left, bindings=bindings)
+    translated_right = _translate_constraint_operand(operand.right, bindings=bindings)
+    if translated_left is None or translated_right is None:
+        return None
+    if isinstance(translated_left, tuple) or isinstance(translated_right, tuple):
+        return None
+    return DimExprBinary(op=operand.op, left=translated_left, right=translated_right)
+
+
+def _translate_constraint_to_callee(
+    constraint: Constraint,
+    *,
+    bindings: dict[ConstraintAtom, str],
+) -> Constraint | None:
+    left = _translate_constraint_operand(constraint.left, bindings=bindings)
+    if left is None:
+        return None
+    right = (
+        _translate_constraint_operand(constraint.right, bindings=bindings)
+        if constraint.right is not None
+        else None
+    )
+    if constraint.right is not None and right is None:
+        return None
+    translated_guards: list[Constraint] = []
+    for guard in constraint.guards:
+        translated_guard = _translate_constraint_to_callee(guard, bindings=bindings)
+        if translated_guard is None:
+            return None
+        translated_guards.append(translated_guard)
+    return Constraint(
+        relation=constraint.relation,
+        left=left,
+        right=right,
+        guards=tuple(translated_guards),
+    )
+
+
+def _collect_expr_call_constraints(
+    expr: AxonExpr,
+    *,
+    caller: AxonModule,
+    modules_by_name: dict[str, AxonModule],
+    out: dict[str, list[Constraint]],
+    guards: tuple[Constraint, ...],
+    condition_defs: dict[str, AxonExpr],
+    callsite_counter: list[int],
+) -> None:
+    if isinstance(expr, AxonExprCall):
+        for arg in expr.args:
+            _collect_expr_call_constraints(
+                arg,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards,
+                condition_defs=condition_defs,
+                callsite_counter=callsite_counter,
+            )
+        for raw_value in expr.kwargs.values():
+            if isinstance(raw_value, AxonExpr):
+                _collect_expr_call_constraints(
+                    raw_value,
+                    caller=caller,
+                    modules_by_name=modules_by_name,
+                    out=out,
+                    guards=guards,
+                    condition_defs=condition_defs,
+                    callsite_counter=callsite_counter,
+                )
+        callee = modules_by_name.get(expr.callee)
+        if callee is None:
+            return
+        bindings = _constraint_operand_param_bindings(
+            callee=callee,
+            args=expr.args,
+            kwargs=expr.kwargs,
+        )
+        callsite_counter[0] += 1
+        callsite_guard = Constraint(
+            relation="callsite",
+            left=f"{caller.name}->{callee.name}#{callsite_counter[0]}",
+        )
+        for param_constraint in _call_param_constraints(
+            callee=callee,
+            args=expr.args,
+            kwargs=expr.kwargs,
+        ):
+            out.setdefault(callee.name, []).append(
+                Constraint(
+                    relation=param_constraint.relation,
+                    left=param_constraint.left,
+                    right=param_constraint.right,
+                    guards=(callsite_guard,),
+                )
+            )
+        if not guards or not bindings:
+            return
+        translated_guards: list[Constraint] = []
+        for guard in guards:
+            translated = _translate_constraint_to_callee(guard, bindings=bindings)
+            if translated is not None:
+                translated_guards.append(translated)
+        if not translated_guards:
+            return
+        for translated in translated_guards:
+            out.setdefault(callee.name, []).append(
+                Constraint(
+                    relation=translated.relation,
+                    left=translated.left,
+                    right=translated.right,
+                    guards=(callsite_guard, *translated.guards),
+                )
+            )
+        return
+    if isinstance(expr, AxonExprBinary):
+        _collect_expr_call_constraints(
+            expr.left,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards,
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        _collect_expr_call_constraints(
+            expr.right,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards,
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        return
+    if isinstance(expr, AxonExprBind):
+        _collect_expr_call_constraints(
+            expr.value,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards,
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        _collect_expr_call_constraints(
+            expr.body,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards,
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        return
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        refine_expr = (
+            condition_defs.get(expr.cond.name, expr.cond)
+            if isinstance(expr.cond, AxonExprName)
+            else expr.cond
+        )
+        true_guard = _condition_constraint_from_expr(refine_expr, truthy=True)
+        false_guard = _condition_constraint_from_expr(refine_expr, truthy=False)
+        _collect_expr_call_constraints(
+            expr.cond,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards,
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        _collect_expr_call_constraints(
+            expr.true_expr,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards if true_guard is None else (*guards, true_guard),
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        _collect_expr_call_constraints(
+            expr.false_expr,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards if false_guard is None else (*guards, false_guard),
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        return
+    if isinstance(expr, AxonExprLambda):
+        _collect_expr_call_constraints(
+            expr.body,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards,
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        return
+    if isinstance(expr, AxonExprAscribe):
+        _collect_expr_call_constraints(
+            expr.expr,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards,
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        return
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            _collect_expr_call_constraints(
+                item,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards,
+                condition_defs=condition_defs,
+                callsite_counter=callsite_counter,
+            )
+        return
+    if isinstance(expr, AxonExprParen):
+        _collect_expr_call_constraints(
+            expr.inner,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards,
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+        return
+    if isinstance(expr, AxonExprDo):
+        _collect_stmt_call_constraints(
+            expr.body,
+            caller=caller,
+            modules_by_name=modules_by_name,
+            out=out,
+            guards=guards,
+            condition_defs=condition_defs,
+            callsite_counter=callsite_counter,
+        )
+
+
+def _collect_stmt_call_constraints(
+    statements: tuple[AxonStatement, ...],
+    *,
+    caller: AxonModule,
+    modules_by_name: dict[str, AxonModule],
+    out: dict[str, list[Constraint]],
+    guards: tuple[Constraint, ...] = (),
+    condition_defs: dict[str, AxonExpr] | None = None,
+    callsite_counter: list[int] | None = None,
+) -> None:
+    current_condition_defs = dict(condition_defs or {})
+    current_counter = callsite_counter if callsite_counter is not None else [0]
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            if len(stmt.targets) == 1:
+                if isinstance(stmt.expr, AxonExprBinary) and stmt.expr.op in {"==", "!="}:
+                    current_condition_defs[stmt.targets[0]] = stmt.expr
+                else:
+                    current_condition_defs.pop(stmt.targets[0], None)
+            _collect_expr_call_constraints(
+                stmt.expr,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards,
+                condition_defs=current_condition_defs,
+                callsite_counter=current_counter,
+            )
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                _collect_expr_call_constraints(
+                    value,
+                    caller=caller,
+                    modules_by_name=modules_by_name,
+                    out=out,
+                    guards=guards,
+                    condition_defs=current_condition_defs,
+                    callsite_counter=current_counter,
+                )
+        elif isinstance(stmt, AxonCond):
+            refine_expr = (
+                current_condition_defs.get(stmt.cond.name, stmt.cond)
+                if isinstance(stmt.cond, AxonExprName)
+                else stmt.cond
+            )
+            true_guard = _condition_constraint_from_expr(refine_expr, truthy=True)
+            false_guard = _condition_constraint_from_expr(refine_expr, truthy=False)
+            _collect_expr_call_constraints(
+                stmt.cond,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards,
+                condition_defs=current_condition_defs,
+                callsite_counter=current_counter,
+            )
+            _collect_stmt_call_constraints(
+                stmt.true_body,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards if true_guard is None else (*guards, true_guard),
+                condition_defs=current_condition_defs,
+                callsite_counter=current_counter,
+            )
+            _collect_stmt_call_constraints(
+                stmt.false_body,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards if false_guard is None else (*guards, false_guard),
+                condition_defs=current_condition_defs,
+                callsite_counter=current_counter,
+            )
+        elif isinstance(stmt, AxonRepeat):
+            _collect_expr_call_constraints(
+                stmt.from_expr,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards,
+                condition_defs=current_condition_defs,
+                callsite_counter=current_counter,
+            )
+            _collect_expr_call_constraints(
+                stmt.to_expr,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards,
+                condition_defs=current_condition_defs,
+                callsite_counter=current_counter,
+            )
+            _collect_expr_call_constraints(
+                stmt.step_expr,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards,
+                condition_defs=current_condition_defs,
+                callsite_counter=current_counter,
+            )
+            _collect_stmt_call_constraints(
+                stmt.body,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards,
+                condition_defs=current_condition_defs,
+                callsite_counter=current_counter,
+            )
+        elif isinstance(stmt, AxonScopeBind):
+            for raw_value in stmt.kwargs.values():
+                if isinstance(raw_value, AxonExpr):
+                    _collect_expr_call_constraints(
+                        raw_value,
+                        caller=caller,
+                        modules_by_name=modules_by_name,
+                        out=out,
+                        guards=guards,
+                        condition_defs=current_condition_defs,
+                        callsite_counter=current_counter,
+                    )
+            _collect_stmt_call_constraints(
+                stmt.body,
+                caller=caller,
+                modules_by_name=modules_by_name,
+                out=out,
+                guards=guards,
+                condition_defs=current_condition_defs,
+                callsite_counter=current_counter,
+            )
+
+
+def _thread_interprocedural_call_guards(program: AxonFile) -> AxonFile:
+    modules_by_name = {module.name: module for module in program.modules}
+    imported_constraints: dict[str, list[Constraint]] = {}
+    for module in program.modules:
+        _collect_stmt_call_constraints(
+            module.statements,
+            caller=module,
+            modules_by_name=modules_by_name,
+            out=imported_constraints,
+        )
+    rewritten_modules: list[AxonModule] = []
+    for module in program.modules:
+        merged_constraints = list(module.constraints or ())
+        merged_constraints.extend(imported_constraints.get(module.name, ()))
+        deduped: list[Constraint] = []
+        seen: set[tuple[object, object, object, object]] = set()
+        for item in merged_constraints:
+            key = (item.relation, item.left, item.right, item.guards)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        rewritten_modules.append(replace(module, constraints=tuple(deduped)))
+    return replace(program, modules=tuple(rewritten_modules))
+
+
+def _bind_dim_tokens(
+    expected: tuple[DimToken, ...],
+    actual: tuple[DimToken, ...],
+    *,
+    subst: dict[str, DimToken | tuple[DimToken, ...]],
+) -> None:
+    variadic_positions = [
+        idx for idx, dim in enumerate(expected) if isinstance(dim, str) and dim.startswith("..")
+    ]
+    if not variadic_positions:
+        if len(expected) != len(actual):
+            return
+        for exp_dim, act_dim in zip(expected, actual, strict=True):
+            if isinstance(exp_dim, str):
+                subst.setdefault(exp_dim, act_dim)
+        return
+    if len(variadic_positions) != 1:
+        return
+    variadic_idx = variadic_positions[0]
+    prefix = expected[:variadic_idx]
+    suffix = expected[variadic_idx + 1 :]
+    if len(actual) < len(prefix) + len(suffix):
+        return
+    for exp_dim, act_dim in zip(prefix, actual[: len(prefix)], strict=True):
+        if isinstance(exp_dim, str):
+            subst.setdefault(exp_dim, act_dim)
+    if suffix:
+        actual_suffix = actual[-len(suffix) :]
+        for exp_dim, act_dim in zip(suffix, actual_suffix, strict=True):
+            if isinstance(exp_dim, str):
+                subst.setdefault(exp_dim, act_dim)
+    variadic_name = expected[variadic_idx]
+    assert isinstance(variadic_name, str)
+    subst.setdefault(
+        variadic_name, actual[len(prefix) : len(actual) - len(suffix) if suffix else len(actual)]
+    )
+
+
+def _collect_module_call_dim_subst(
+    *,
+    expected_type: TypeExpr | None,
+    actual_type: TypeExpr,
+    actual_expr: AxonExpr,
+    ctx: _TcCtx,
+    subst: dict[str, DimToken | tuple[DimToken, ...]],
+) -> None:
+    if expected_type is None:
+        return
+    expected_expanded = _expand_alias(expected_type, ctx)
+    actual_expanded = _expand_alias(actual_type, ctx)
+    if isinstance(expected_expanded, TypeOptional):
+        _collect_module_call_dim_subst(
+            expected_type=expected_expanded.inner,
+            actual_type=actual_type,
+            actual_expr=actual_expr,
+            ctx=ctx,
+            subst=subst,
+        )
+        return
+    if isinstance(expected_expanded, TypeDim):
+        dim_token = _expr_to_dim_token(actual_expr)
+        if dim_token is not None:
+            if isinstance(actual_expr, AxonExprName):
+                subst.setdefault(actual_expr.name, dim_token)
+        return
+    if isinstance(expected_expanded, TypeTensor) and isinstance(actual_expanded, TypeTensor):
+        _bind_dim_tokens(expected_expanded.dims, actual_expanded.dims, subst=subst)
+        return
+
+
+def _primitive_op_name(callee: str) -> str | None:
+    if not callee.startswith("_"):
+        return None
+    return callee[1:]
+
+
+def _type_expr_from_spec(spec: str, *, ctx: _TcCtx, module_name: str) -> TypeExpr:
+    return _scoped_typevars(
+        parse_type_expr(spec), module_name=module_name, ctx=ctx, freshen_generics=True
+    )
+
+
+def _collect_type_dim_names(tp: TypeExpr | None) -> set[str]:
+    if tp is None:
+        return set()
+    if isinstance(tp, TypeOptional):
+        return _collect_type_dim_names(tp.inner)
+    if isinstance(tp, TypeList):
+        return _collect_type_dim_names(tp.item)
+    if isinstance(tp, TypeTuple):
+        tuple_names: set[str] = set()
+        for item in tp.items:
+            tuple_names.update(_collect_type_dim_names(item))
+        return tuple_names
+    if isinstance(tp, TypeTensor):
+        tensor_names: set[str] = set()
+        for dim in tp.dims:
+            tensor_names.update(name for name in dim_token_names(dim) if name.isidentifier())
+        return tensor_names
+    if isinstance(tp, TypeNamed):
+        return {name for name in tp.args if isinstance(name, str) and name.isidentifier()}
+    return set()
+
+
+def _preferred_module_dim_names(
+    raw_params: tuple[AxonParam, ...], refined_return: TypeExpr | None
+) -> set[str]:
+    names = _collect_type_dim_names(refined_return)
+    for param in raw_params:
+        names.update(_collect_type_dim_names(param.type_expr))
+        if isinstance(param.type_expr, TypeDim) or (
+            isinstance(param.type_expr, TypeOptional) and isinstance(param.type_expr.inner, TypeDim)
+        ):
+            names.add(param.name)
+    return names
+
+
+def _collect_statement_dim_names(statements: tuple[AxonStatement, ...]) -> set[str]:
+    names: set[str] = set()
+
+    def _visit_expr(expr: AxonExpr) -> None:
+        if isinstance(expr, AxonExprName) and isinstance(expr.inferred_type, TypeDim):
+            names.add(expr.name)
+            return
+        if isinstance(expr, AxonExprCall):
+            for arg in expr.args:
+                _visit_expr(arg)
+            for value in expr.kwargs.values():
+                if isinstance(value, AxonExpr):
+                    _visit_expr(value)
+            return
+        if isinstance(expr, AxonExprList | AxonExprTuple):
+            for item in expr.items:
+                _visit_expr(item)
+            return
+        if isinstance(expr, AxonExprAscribe):
+            _visit_expr(expr.expr)
+            return
+        if isinstance(expr, AxonExprBinary):
+            _visit_expr(expr.left)
+            _visit_expr(expr.right)
+            return
+        if isinstance(expr, AxonExprIf | AxonExprTernary):
+            _visit_expr(expr.cond)
+            _visit_expr(expr.true_expr)
+            _visit_expr(expr.false_expr)
+            return
+        if isinstance(expr, AxonExprBind):
+            _visit_expr(expr.value)
+            _visit_expr(expr.body)
+            return
+        if isinstance(expr, AxonExprDo):
+            for stmt in expr.body:
+                _visit_stmt(stmt)
+            return
+        if isinstance(expr, AxonExprLambda):
+            _visit_expr(expr.body)
+            return
+        if isinstance(expr, AxonExprParen):
+            _visit_expr(expr.inner)
+            return
+        if isinstance(expr, AxonExprPipe):
+            _visit_expr(expr.value)
+            for stage in expr.stages:
+                _visit_expr(stage)
+
+    def _visit_stmt(stmt: AxonStatement) -> None:
+        if isinstance(stmt, AxonBind):
+            _visit_expr(stmt.expr)
+            return
+        if isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                _visit_expr(value)
+            return
+        if isinstance(stmt, AxonCond):
+            _visit_expr(stmt.cond)
+            for item in stmt.true_body:
+                _visit_stmt(item)
+            for item in stmt.false_body:
+                _visit_stmt(item)
+            return
+        if isinstance(stmt, AxonRepeat):
+            _visit_expr(stmt.from_expr)
+            _visit_expr(stmt.to_expr)
+            _visit_expr(stmt.step_expr)
+            for item in stmt.body:
+                _visit_stmt(item)
+            return
+        if isinstance(stmt, AxonScopeBind):
+            for raw_value in stmt.kwargs.values():
+                if isinstance(raw_value, AxonExpr):
+                    _visit_expr(raw_value)
+            for item in stmt.body:
+                _visit_stmt(item)
+
+    for statement in statements:
+        _visit_stmt(statement)
+    return names
+
+
+def _bind_header_dim_preferences_from_tokens(
+    expected: DimToken,
+    actual: DimToken,
+    *,
+    subst: dict[str, DimToken],
+) -> None:
+    if isinstance(expected, str):
+        if _is_generated_dim_name(expected):
+            subst.setdefault(expected, actual)
+        return
+    if isinstance(expected, int):
+        return
+    if isinstance(actual, DimExprBinary) and expected.op == actual.op:
+        _bind_header_dim_preferences_from_tokens(expected.left, actual.left, subst=subst)
+        _bind_header_dim_preferences_from_tokens(expected.right, actual.right, subst=subst)
+
+
+def _bind_header_dim_preferences_from_types(
+    expected: TypeExpr | None,
+    actual: TypeExpr | None,
+    *,
+    subst: dict[str, DimToken],
+) -> None:
+    if expected is None or actual is None:
+        return
+    if isinstance(expected, TypeOptional):
+        inner_actual = actual.inner if isinstance(actual, TypeOptional) else actual
+        _bind_header_dim_preferences_from_types(expected.inner, inner_actual, subst=subst)
+        return
+    if isinstance(actual, TypeOptional):
+        _bind_header_dim_preferences_from_types(expected, actual.inner, subst=subst)
+        return
+    if isinstance(expected, TypeTensor) and isinstance(actual, TypeTensor):
+        if len(expected.dims) != len(actual.dims):
+            return
+        for left, right in zip(expected.dims, actual.dims, strict=True):
+            _bind_header_dim_preferences_from_tokens(left, right, subst=subst)
+        return
+    if isinstance(expected, TypeNamed) and isinstance(actual, TypeNamed):
+        if len(expected.args) != len(actual.args):
+            return
+        for left, right in zip(expected.args, actual.args, strict=True):
+            _bind_header_dim_preferences_from_tokens(left, right, subst=subst)
+        return
+    if isinstance(expected, TypeList) and isinstance(actual, TypeList):
+        _bind_header_dim_preferences_from_types(expected.item, actual.item, subst=subst)
+        return
+    if (
+        isinstance(expected, TypeTuple)
+        and isinstance(actual, TypeTuple)
+        and len(expected.items) == len(actual.items)
+    ):
+        for expected_item, actual_item in zip(expected.items, actual.items, strict=True):
+            _bind_header_dim_preferences_from_types(expected_item, actual_item, subst=subst)
+
+
+def _collect_header_dim_preferences_from_param_uses(
+    raw_params: tuple[AxonParam, ...],
+    statements: tuple[AxonStatement, ...],
+) -> dict[str, DimToken]:
+    params_by_name = {param.name: param for param in raw_params}
+    subst: dict[str, DimToken] = {}
+
+    def _visit_expr(expr: AxonExpr) -> None:
+        if isinstance(expr, AxonExprName):
+            param = params_by_name.get(expr.name)
+            if param is not None:
+                _bind_header_dim_preferences_from_types(
+                    param.type_expr, expr.inferred_type, subst=subst
+                )
+            return
+        if isinstance(expr, AxonExprCall):
+            for arg in expr.args:
+                _visit_expr(arg)
+            for value in expr.kwargs.values():
+                if isinstance(value, AxonExpr):
+                    _visit_expr(value)
+            return
+        if isinstance(expr, AxonExprList | AxonExprTuple):
+            for item in expr.items:
+                _visit_expr(item)
+            return
+        if isinstance(expr, AxonExprAscribe):
+            _visit_expr(expr.expr)
+            return
+        if isinstance(expr, AxonExprBinary):
+            _visit_expr(expr.left)
+            _visit_expr(expr.right)
+            return
+        if isinstance(expr, AxonExprIf | AxonExprTernary):
+            _visit_expr(expr.cond)
+            _visit_expr(expr.true_expr)
+            _visit_expr(expr.false_expr)
+            return
+        if isinstance(expr, AxonExprBind):
+            _visit_expr(expr.value)
+            _visit_expr(expr.body)
+            return
+        if isinstance(expr, AxonExprDo):
+            for stmt in expr.body:
+                _visit_stmt(stmt)
+            return
+        if isinstance(expr, AxonExprLambda):
+            _visit_expr(expr.body)
+            return
+        if isinstance(expr, AxonExprParen):
+            _visit_expr(expr.inner)
+            return
+        if isinstance(expr, AxonExprPipe):
+            _visit_expr(expr.value)
+            for stage in expr.stages:
+                _visit_expr(stage)
+
+    def _visit_stmt(stmt: AxonStatement) -> None:
+        if isinstance(stmt, AxonBind):
+            _visit_expr(stmt.expr)
+            return
+        if isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                _visit_expr(value)
+            return
+        if isinstance(stmt, AxonCond):
+            _visit_expr(stmt.cond)
+            for item in stmt.true_body:
+                _visit_stmt(item)
+            for item in stmt.false_body:
+                _visit_stmt(item)
+            return
+        if isinstance(stmt, AxonRepeat):
+            _visit_expr(stmt.from_expr)
+            _visit_expr(stmt.to_expr)
+            _visit_expr(stmt.step_expr)
+            for item in stmt.body:
+                _visit_stmt(item)
+            return
+        if isinstance(stmt, AxonScopeBind):
+            for raw_value in stmt.kwargs.values():
+                if isinstance(raw_value, AxonExpr):
+                    _visit_expr(raw_value)
+            for item in stmt.body:
+                _visit_stmt(item)
+
+    for statement in statements:
+        _visit_stmt(statement)
+    return subst
+
+
+@dataclass(frozen=True)
+class _PrimitiveTypeHelpers:
+    type_dims: Any
+    expr_to_dim_token: Any
+    type_tensor: Any
+    resolve_name_expr: Any
+
+
+def _is_type_expr_instance(value: object) -> bool:
+    return isinstance(
+        value,
+        (
+            TypeAny,
+            TypeInt,
+            TypeFloat,
+            TypeBool,
+            TypeNull,
+            TypeString,
+            TypePath,
+            TypeDim,
+            TypeVar,
+            TypeNamed,
+            TypeOptional,
+            TypeTensor,
+            TypeList,
+            TypeTuple,
+        ),
+    )
+
+
+def _infer_primitive_call(
+    *,
+    callee: str,
+    typed_args: list[AxonExpr],
+    arg_types: list[TypeExpr],
+    typed_kwargs: dict[str, AxonKwargValue],
+    kwarg_types: dict[str, TypeExpr],
+    ctx: _TcCtx,
+    module_name: str,
+    expected_arity: int | None,
+    expr_defs: dict[str, AxonExpr],
+) -> tuple[AxonExpr, TypeExpr, int] | None:
+    op_name = _primitive_op_name(callee)
+    if op_name is None:
+        return None
+    type_signature = get_op_lowering_type_signature(op_name)
+    if type_signature is None:
+        return None
+    typed_call = replace(
+        AxonExprCall(callee=callee, args=tuple(typed_args), kwargs=typed_kwargs),
+        inferred_type=None,
+        inferred_arity=None,
+        inferred_dims=None,
+    )
+    arg_specs = type_signature.get("args")
+    if isinstance(arg_specs, tuple):
+        for arg_tp, spec in zip(arg_types, arg_specs, strict=False):
+            if isinstance(spec, str):
+                _unify(
+                    arg_tp, _type_expr_from_spec(spec, ctx=ctx, module_name=f"_op::{op_name}"), ctx
+                )
+    kwarg_specs = type_signature.get("kwargs")
+    if isinstance(kwarg_specs, dict):
+        for key, value_tp in kwarg_types.items():
+            spec = kwarg_specs.get(key)
+            if isinstance(spec, str):
+                _unify(
+                    value_tp,
+                    _type_expr_from_spec(spec, ctx=ctx, module_name=f"_op::{op_name}"),
+                    ctx,
+                )
+    type_rule = get_op_type_rule(op_name)
+    if type_rule is not None:
+        inferred = type_rule(
+            arg_types=tuple(arg_types),
+            kwarg_types=dict(kwarg_types),
+            args=tuple(typed_args),
+            kwargs=dict(typed_kwargs),
+            helpers=_PrimitiveTypeHelpers(
+                type_dims=lambda tp: _type_dims(tp, ctx),
+                expr_to_dim_token=_expr_to_dim_token,
+                type_tensor=lambda *, dims: TypeTensor(base="Tensor", dims=tuple(dims)),
+                resolve_name_expr=lambda name: expr_defs.get(name),
+            ),
+        )
+        if _is_type_expr_instance(inferred):
+            return _annotate_expr(typed_call, inferred, arity=1, ctx=ctx), inferred, 1
+    returns_spec = type_signature.get("returns")
+    if (
+        isinstance(returns_spec, tuple)
+        and len(returns_spec) == 1
+        and isinstance(returns_spec[0], str)
+    ):
+        result_tp = _type_expr_from_spec(returns_spec[0], ctx=ctx, module_name=f"_op::{op_name}")
+        return _annotate_expr(typed_call, result_tp, arity=1, ctx=ctx), result_tp, 1
+    return None
+
+
+def _annotate_expr(expr: AxonExpr, tp: TypeExpr, *, arity: int, ctx: _TcCtx) -> AxonExpr:
+    inferred_type = _apply_subst(tp, ctx)
+    inferred_arity = arity
+    if isinstance(inferred_type, TypeTuple):
+        inferred_arity = len(inferred_type.items)
+    return replace(
+        expr,
+        inferred_type=inferred_type,
+        inferred_arity=inferred_arity,
+        inferred_dims=_type_dims(tp, ctx),
+    )
+
+
+def _retag_numeric_literals(expr: AxonExpr, expected: TypeExpr, ctx: _TcCtx) -> AxonExpr:
+    expected_tp = _expand_alias(_apply_subst(expected, ctx), ctx)
+    if isinstance(expected_tp, TypeOptional):
+        expected_tp = expected_tp.inner
+    if isinstance(expr, AxonExprInt):
+        if isinstance(expected_tp, TypeDim):
+            return _annotate_expr(expr, TypeDim(), arity=1, ctx=ctx)
+        if isinstance(expected_tp, TypeFloat):
+            return _annotate_expr(expr, TypeFloat(), arity=1, ctx=ctx)
+        return expr
+    if isinstance(expr, AxonExprFloat):
+        if isinstance(expected_tp, TypeFloat):
+            return _annotate_expr(expr, TypeFloat(), arity=1, ctx=ctx)
+        return expr
+    if isinstance(expr, AxonExprParen):
+        inner = _retag_numeric_literals(expr.inner, expected_tp, ctx)
+        return _annotate_expr(replace(expr, inner=inner), expected_tp, arity=1, ctx=ctx)
+    if isinstance(expr, AxonExprAscribe):
+        inner = _retag_numeric_literals(expr.expr, expected_tp, ctx)
+        return _annotate_expr(replace(expr, expr=inner), expected_tp, arity=1, ctx=ctx)
+    if isinstance(expr, AxonExprList) and isinstance(expected_tp, TypeList):
+        items = tuple(_retag_numeric_literals(item, expected_tp.item, ctx) for item in expr.items)
+        return _annotate_expr(replace(expr, items=items), expected_tp, arity=1, ctx=ctx)
+    if (
+        isinstance(expr, AxonExprTuple)
+        and isinstance(expected_tp, TypeTuple)
+        and len(expr.items) == len(expected_tp.items)
+    ):
+        items = tuple(
+            _retag_numeric_literals(item, item_tp, ctx)
+            for item, item_tp in zip(expr.items, expected_tp.items, strict=True)
+        )
+        return _annotate_expr(replace(expr, items=items), expected_tp, arity=len(items), ctx=ctx)
+    if isinstance(expr, AxonExprBinary) and expr.op in _ARITH_OPS:
+        left = _retag_numeric_literals(expr.left, expected_tp, ctx)
+        right = _retag_numeric_literals(expr.right, expected_tp, ctx)
+        return _annotate_expr(replace(expr, left=left, right=right), expected_tp, arity=1, ctx=ctx)
+    return expr
+
+
+def _destructure_type(tp: TypeExpr, arity: int, ctx: _TcCtx) -> tuple[TypeExpr, ...]:
+    tp = _apply_subst(tp, ctx)
+    expanded = _expand_alias(tp, ctx)
+    if arity == 1:
+        return (expanded,)
+    if isinstance(expanded, TypeTuple):
+        if len(expanded.items) != arity:
+            raise ValueError("Axon typecheck failed: tuple bind arity mismatch")
+        return expanded.items
+    if isinstance(expanded, TypeList):
+        return tuple(expanded.item for _ in range(arity))
+    if isinstance(expanded, TypeVar):
+        items = tuple(ctx.fresh_type_var() for _ in range(arity))
+        _unify(expanded, TypeTuple(items=items), ctx)
+        return items
+    raise ValueError("Axon typecheck failed: cannot destructure non-tuple/list expression")
+
+
+def _infer_expr(
+    expr: AxonExpr,
+    *,
+    env: dict[str, TypeExpr],
+    expr_defs: dict[str, AxonExpr],
+    ctx: _TcCtx,
+    module_name: str,
+    recursive_env: _RecursiveInterfaces | None = None,
+    expected_arity: int | None = None,
+) -> tuple[AxonExpr, TypeExpr, int]:
+    if isinstance(expr, AxonExprName):
+        tp = env.get(expr.name, TypeAny())
+        return _annotate_expr(expr, tp, arity=1, ctx=ctx), tp, 1
+    if isinstance(expr, AxonExprInt):
+        return _annotate_expr(expr, TypeInt(), arity=1, ctx=ctx), TypeInt(), 1
+    if isinstance(expr, AxonExprFloat):
+        return _annotate_expr(expr, TypeFloat(), arity=1, ctx=ctx), TypeFloat(), 1
+    if isinstance(expr, AxonExprBool):
+        return _annotate_expr(expr, TypeBool(), arity=1, ctx=ctx), TypeBool(), 1
+    if isinstance(expr, AxonExprNull):
+        return _annotate_expr(expr, TypeNull(), arity=1, ctx=ctx), TypeNull(), 1
+    if isinstance(expr, AxonExprString):
+        return _annotate_expr(expr, TypeString(), arity=1, ctx=ctx), TypeString(), 1
+    if isinstance(expr, AxonExprPath):
+        return _annotate_expr(expr, TypePath(), arity=1, ctx=ctx), TypePath(), 1
+    if isinstance(expr, AxonExprParen):
+        inner_expr, tp, arity = _infer_expr(
+            expr.inner,
+            env=env,
+            expr_defs=expr_defs,
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=recursive_env,
+            expected_arity=expected_arity,
+        )
+        return _annotate_expr(replace(expr, inner=inner_expr), tp, arity=arity, ctx=ctx), tp, arity
+    if isinstance(expr, AxonExprAscribe):
+        inner_expr, inner_tp, _ = _infer_expr(
+            expr.expr,
+            env=env,
+            expr_defs=expr_defs,
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=recursive_env,
+        )
+        _unify(
+            inner_tp,
+            _scoped_typevars(
+                expr.type_expr, module_name=module_name, ctx=ctx, freshen_generics=False
+            ),
+            ctx,
+        )
+        tp = _scoped_typevars(
+            expr.type_expr, module_name=module_name, ctx=ctx, freshen_generics=False
+        )
+        return _annotate_expr(replace(expr, expr=inner_expr), tp, arity=1, ctx=ctx), tp, 1
+    if isinstance(expr, AxonExprList):
+        typed_items: list[AxonExpr] = []
+        item_type: TypeExpr | None = None
+        for item in expr.items:
+            typed_item, item_tp, _ = _infer_expr(
+                item,
+                env=env,
+                expr_defs=expr_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+            )
+            typed_items.append(typed_item)
+            item_type = item_tp if item_type is None else _unify(item_type, item_tp, ctx)
+        if item_type is not None:
+            typed_items = [_retag_numeric_literals(item, item_type, ctx) for item in typed_items]
+        list_type = TypeList(item=item_type or TypeAny())
+        return (
+            _annotate_expr(replace(expr, items=tuple(typed_items)), list_type, arity=1, ctx=ctx),
+            list_type,
+            1,
+        )
+    if isinstance(expr, AxonExprTuple):
+        typed_tuple_items: list[AxonExpr] = []
+        item_types: list[TypeExpr] = []
+        for item in expr.items:
+            typed_item, item_tp, _ = _infer_expr(
+                item,
+                env=env,
+                expr_defs=expr_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+            )
+            typed_tuple_items.append(typed_item)
+            item_types.append(item_tp)
+        tuple_type = TypeTuple(items=tuple(item_types))
+        return (
+            _annotate_expr(
+                replace(expr, items=tuple(typed_tuple_items)),
+                tuple_type,
+                arity=len(item_types),
+                ctx=ctx,
+            ),
+            tuple_type,
+            len(item_types),
+        )
+    if isinstance(expr, AxonExprBinary):
+        left_expr, left_tp, _ = _infer_expr(
+            expr.left,
+            env=env,
+            expr_defs=expr_defs,
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=recursive_env,
+        )
+        right_expr, right_tp, _ = _infer_expr(
+            expr.right,
+            env=env,
+            expr_defs=expr_defs,
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=recursive_env,
+        )
+        if expr.op in _COMPARE_OPS | _BOOL_OPS:
+            if expr.op in _COMPARE_OPS:
+                _unify(left_tp, right_tp, ctx)
+            else:
+                _unify(left_tp, TypeBool(), ctx)
+                _unify(right_tp, TypeBool(), ctx)
+            tp = TypeBool()
+        elif expr.op in _ARITH_OPS:
+            left_expanded = _expand_alias(_apply_subst(left_tp, ctx), ctx)
+            right_expanded = _expand_alias(_apply_subst(right_tp, ctx), ctx)
+            if isinstance(left_expanded, TypeTensor) and isinstance(right_expanded, TypeTensor):
+                tp = _unify(left_tp, right_tp, ctx)
+            elif isinstance(left_expanded, TypeTensor):
+                tp = _apply_subst(left_tp, ctx)
+            elif isinstance(right_expanded, TypeTensor):
+                tp = _apply_subst(right_tp, ctx)
+            elif isinstance(left_expanded, TypeDim) or isinstance(right_expanded, TypeDim):
+                tp = TypeDim()
+                _unify(left_tp, tp, ctx)
+                _unify(right_tp, tp, ctx)
+            elif isinstance(left_expanded, TypeVar | TypeAny) and isinstance(
+                right_expanded, TypeFloat | TypeInt
+            ):
+                tp = _apply_subst(left_tp, ctx)
+            elif isinstance(right_expanded, TypeVar | TypeAny) and isinstance(
+                left_expanded, TypeFloat | TypeInt
+            ):
+                tp = _apply_subst(right_tp, ctx)
+            elif isinstance(left_expanded, TypeFloat) or isinstance(right_expanded, TypeFloat):
+                tp = TypeFloat()
+                _unify(left_tp, tp, ctx)
+                _unify(right_tp, tp, ctx)
+            elif isinstance(left_expanded, TypeInt) and isinstance(right_expanded, TypeInt):
+                _unify(left_tp, TypeInt(), ctx)
+                _unify(right_tp, TypeInt(), ctx)
+                tp = TypeInt()
+            else:
+                tp = ctx.fresh_type_var()
+                _unify(left_tp, tp, ctx)
+                _unify(right_tp, tp, ctx)
+            left_expr = _retag_numeric_literals(left_expr, tp, ctx)
+            right_expr = _retag_numeric_literals(right_expr, tp, ctx)
+        else:
+            tp = TypeAny()
+        typed = replace(expr, left=left_expr, right=right_expr)
+        return _annotate_expr(typed, tp, arity=1, ctx=ctx), tp, 1
+    if isinstance(expr, AxonExprCall):
+        typed_args: list[AxonExpr] = []
+        arg_types: list[TypeExpr] = []
+        for arg in expr.args:
+            typed_arg, arg_tp, _ = _infer_expr(
+                arg,
+                env=env,
+                expr_defs=expr_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+            )
+            typed_args.append(typed_arg)
+            arg_types.append(arg_tp)
+        typed_kwargs: dict[str, AxonKwargValue] = {}
+        kwarg_types: dict[str, TypeExpr] = {}
+        for key, raw_value in expr.kwargs.items():
+            if isinstance(raw_value, AxonExpr):
+                typed_value, value_tp, _ = _infer_expr(
+                    raw_value,
+                    env=env,
+                    expr_defs=expr_defs,
+                    ctx=ctx,
+                    module_name=module_name,
+                    recursive_env=recursive_env,
+                )
+                typed_kwargs[key] = typed_value
+                kwarg_types[key] = value_tp
+            else:
+                typed_kwargs[key] = raw_value
+        callee = ctx.modules_by_name.get(expr.callee)
+        if callee is None:
+            primitive = _infer_primitive_call(
+                callee=expr.callee,
+                typed_args=typed_args,
+                arg_types=arg_types,
+                typed_kwargs=typed_kwargs,
+                kwarg_types=kwarg_types,
+                ctx=ctx,
+                module_name=module_name,
+                expected_arity=expected_arity,
+                expr_defs=expr_defs,
+            )
+            if primitive is not None:
+                return primitive
+            missing_callee_result_type: TypeExpr = ctx.fresh_type_var()
+            typed_call = replace(expr, args=tuple(typed_args), kwargs=typed_kwargs)
+            return (
+                _annotate_expr(
+                    typed_call, missing_callee_result_type, arity=expected_arity or 1, ctx=ctx
+                ),
+                missing_callee_result_type,
+                expected_arity or 1,
+            )
+
+        if recursive_env is not None and expr.callee in recursive_env.signatures:
+            param_types, return_types = recursive_env.signatures[expr.callee]
+        else:
+            param_types, return_types = _instantiate_module_signature(callee, ctx)
+        param_names = [*callee.path_params, *(param.name for param in callee.params)]
+        dim_subst: dict[str, DimToken | tuple[DimToken, ...]] = {}
+        positional_count = len(typed_args)
+        for idx, (arg_tp, param_tp) in enumerate(
+            zip(arg_types, param_types[:positional_count], strict=False)
+        ):
+            _unify(arg_tp, param_tp, ctx)
+            typed_args[idx] = _retag_numeric_literals(typed_args[idx], param_tp, ctx)
+            if idx >= len(callee.path_params):
+                param_idx = idx - len(callee.path_params)
+                if 0 <= param_idx < len(callee.params):
+                    _collect_module_call_dim_subst(
+                        expected_type=param_types[idx],
+                        actual_type=arg_tp,
+                        actual_expr=typed_args[idx],
+                        ctx=ctx,
+                        subst=dim_subst,
+                    )
+                    raw_param_type = callee.params[param_idx].type_expr
+                    dim_expr = typed_args[idx]
+                    if isinstance(raw_param_type, TypeDim) or (
+                        isinstance(raw_param_type, TypeOptional)
+                        and isinstance(raw_param_type.inner, TypeDim)
+                    ):
+                        dim_token = _expr_to_dim_token(dim_expr)
+                        if dim_token is not None:
+                            dim_subst.setdefault(callee.params[param_idx].name, dim_token)
+        for key, value_tp in kwarg_types.items():
+            if key in param_names:
+                param_idx = param_names.index(key)
+                if param_idx < len(param_types):
+                    _unify(value_tp, param_types[param_idx], ctx)
+                    typed_kwarg_expr = typed_kwargs.get(key)
+                    if isinstance(typed_kwarg_expr, AxonExpr):
+                        typed_kwargs[key] = _retag_numeric_literals(
+                            typed_kwarg_expr, param_types[param_idx], ctx
+                        )
+                    if param_idx >= len(callee.path_params):
+                        raw_param_idx = param_idx - len(callee.path_params)
+                        if 0 <= raw_param_idx < len(callee.params):
+                            raw_value = typed_kwargs.get(key)
+                            if isinstance(raw_value, AxonExpr):
+                                _collect_module_call_dim_subst(
+                                    expected_type=param_types[param_idx],
+                                    actual_type=value_tp,
+                                    actual_expr=raw_value,
+                                    ctx=ctx,
+                                    subst=dim_subst,
+                                )
+                                raw_param_type = callee.params[raw_param_idx].type_expr
+                                if isinstance(raw_param_type, TypeDim) or (
+                                    isinstance(raw_param_type, TypeOptional)
+                                    and isinstance(raw_param_type.inner, TypeDim)
+                                ):
+                                    dim_token = _expr_to_dim_token(raw_value)
+                                    if dim_token is not None:
+                                        dim_subst.setdefault(
+                                            callee.params[raw_param_idx].name, dim_token
+                                        )
+        if dim_subst:
+            return_types = [_substitute_type_dims(tp, subst=dim_subst) for tp in return_types]
+        if len(return_types) == 1:
+            call_result_type: TypeExpr = return_types[0]
+            arity = (
+                expected_arity
+                if isinstance(_expand_alias(call_result_type, ctx), TypeList) and expected_arity
+                else 1
+            )
+        else:
+            call_result_type = TypeTuple(items=tuple(return_types))
+            arity = len(return_types)
+        typed_call = replace(expr, args=tuple(typed_args), kwargs=typed_kwargs)
+        return (
+            _annotate_expr(typed_call, call_result_type, arity=arity, ctx=ctx),
+            call_result_type,
+            arity,
+        )
+    if isinstance(expr, AxonExprLambda):
+        body_env = dict(env)
+        body_env[expr.var] = ctx.fresh_type_var()
+        body_expr_defs = dict(expr_defs)
+        body_expr_defs.pop(expr.var, None)
+        typed_body, body_tp, _ = _infer_expr(
+            expr.body,
+            env=body_env,
+            expr_defs=body_expr_defs,
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=recursive_env,
+        )
+        lambda_type = ctx.fresh_type_var()
+        return (
+            _annotate_expr(replace(expr, body=typed_body), lambda_type, arity=1, ctx=ctx),
+            lambda_type,
+            1,
+        )
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        cond_expr, cond_tp, _ = _infer_expr(
+            expr.cond,
+            env=env,
+            expr_defs=expr_defs,
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=recursive_env,
+        )
+        _unify(cond_tp, TypeBool(), ctx)
+        true_expr, true_tp, _ = _infer_expr(
+            expr.true_expr,
+            env=env,
+            expr_defs=expr_defs,
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=recursive_env,
+            expected_arity=expected_arity,
+        )
+        false_expr, false_tp, _ = _infer_expr(
+            expr.false_expr,
+            env=env,
+            expr_defs=expr_defs,
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=recursive_env,
+            expected_arity=expected_arity,
+        )
+        result_tp = _unify(true_tp, false_tp, ctx)
+        typed_cond_expr = replace(expr, cond=cond_expr, true_expr=true_expr, false_expr=false_expr)
+        return (
+            _annotate_expr(typed_cond_expr, result_tp, arity=expected_arity or 1, ctx=ctx),
+            result_tp,
+            expected_arity or 1,
+        )
+    if isinstance(expr, AxonExprDo):
+        typed_do_body, _, body_return_types = _infer_statements(
+            expr.body,
+            env=dict(env),
+            expr_defs=dict(expr_defs),
+            condition_defs={},
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=recursive_env,
+            expected_return_types=None,
+        )
+        if not body_return_types:
+            do_result_tp: TypeExpr = TypeAny()
+            arity = 1
+        elif len(body_return_types[0]) == 1:
+            do_result_tp = body_return_types[0][0]
+            arity = 1
+        else:
+            tuple_items = body_return_types[0]
+            do_result_tp = TypeTuple(items=tuple_items)
+            arity = len(tuple_items)
+        return (
+            _annotate_expr(replace(expr, body=typed_do_body), do_result_tp, arity=arity, ctx=ctx),
+            do_result_tp,
+            arity,
+        )
+    if isinstance(expr, AxonExprPipe):
+        raise ValueError("Axon typecheck failed: pipe should not remain in flat AST")
+    result_tp = TypeAny()
+    return _annotate_expr(expr, result_tp, arity=1, ctx=ctx), result_tp, 1
+
+
+def _merge_branch_envs(
+    base_env: dict[str, TypeExpr],
+    left_env: dict[str, TypeExpr],
+    right_env: dict[str, TypeExpr],
+    ctx: _TcCtx,
+) -> dict[str, TypeExpr]:
+    merged = dict(base_env)
+    for name in set(left_env) & set(right_env):
+        try:
+            merged[name] = _unify(left_env[name], right_env[name], ctx)
+        except ValueError:
+            base_tp = base_env.get(name)
+            if base_tp is None:
+                raise
+            try:
+                _unify(left_env[name], base_tp, ctx)
+                _unify(right_env[name], base_tp, ctx)
+            except ValueError:
+                raise
+            merged[name] = _apply_subst(base_tp, ctx)
+    return merged
+
+
+def _refine_env_for_condition(
+    cond: AxonExpr,
+    *,
+    env: dict[str, TypeExpr],
+    ctx: _TcCtx,
+    truthy: bool,
+) -> dict[str, TypeExpr]:
+    refined = dict(env)
+    if not isinstance(cond, AxonExprBinary) or cond.op not in {"==", "!="}:
+        return refined
+    if isinstance(cond.left, AxonExprName) and isinstance(cond.right, AxonExprNull):
+        name = cond.left.name
+    elif isinstance(cond.right, AxonExprName) and isinstance(cond.left, AxonExprNull):
+        name = cond.right.name
+    else:
+        return refined
+    current = refined.get(name)
+    if current is None:
+        return refined
+    current = _apply_subst(current, ctx)
+    matches_null = truthy if cond.op == "==" else not truthy
+    if matches_null:
+        refined[name] = TypeNull()
+        return refined
+    expanded = _expand_alias(current, ctx)
+    if isinstance(expanded, TypeOptional):
+        refined[name] = expanded.inner
+    return refined
+
+
+def _infer_scope_body_return(
+    statements: tuple[AxonStatement, ...],
+    *,
+    env: dict[str, TypeExpr],
+    expr_defs: dict[str, AxonExpr],
+    condition_defs: dict[str, AxonExpr],
+    ctx: _TcCtx,
+    module_name: str,
+    recursive_env: _RecursiveInterfaces | None,
+    expected_arity: int | None,
+) -> tuple[tuple[AxonStatement, ...], tuple[TypeExpr, ...]]:
+    typed_body, _, return_types = _infer_statements(
+        statements,
+        env=dict(env),
+        expr_defs=dict(expr_defs),
+        condition_defs=dict(condition_defs),
+        ctx=ctx,
+        module_name=module_name,
+        recursive_env=recursive_env,
+        expected_return_types=None,
+        in_loop=False,
+    )
+    if not return_types:
+        if expected_arity is None:
+            return typed_body, (TypeAny(),)
+        return typed_body, tuple(ctx.fresh_type_var() for _ in range(expected_arity))
+    target = return_types[0]
+    for branch in return_types[1:]:
+        if len(branch) != len(target):
+            raise ValueError("Axon typecheck failed: inconsistent scope return arity")
+        target = tuple(_unify(a, b, ctx) for a, b in zip(target, branch, strict=True))
+    return typed_body, target
+
+
+def _infer_statements(
+    statements: tuple[AxonStatement, ...],
+    *,
+    env: dict[str, TypeExpr],
+    expr_defs: dict[str, AxonExpr],
+    condition_defs: dict[str, AxonExpr],
+    ctx: _TcCtx,
+    module_name: str,
+    recursive_env: _RecursiveInterfaces | None,
+    expected_return_types: tuple[TypeExpr, ...] | None,
+    in_loop: bool = False,
+) -> tuple[tuple[AxonStatement, ...], dict[str, TypeExpr], list[tuple[TypeExpr, ...]]]:
+    typed: list[AxonStatement] = []
+    current_env = dict(env)
+    current_expr_defs = dict(expr_defs)
+    current_condition_defs = dict(condition_defs)
+    returns: list[tuple[TypeExpr, ...]] = []
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            typed_expr, expr_tp, expr_arity = _infer_expr(
+                stmt.expr,
+                env=current_env,
+                expr_defs=current_expr_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+                expected_arity=len(stmt.targets) if len(stmt.targets) > 1 else None,
+            )
+            target_types = _destructure_type(expr_tp, len(stmt.targets), ctx)
+            for name, tp in zip(stmt.targets, target_types, strict=True):
+                if name != "_":
+                    current_env[name] = tp
+                    if len(stmt.targets) == 1:
+                        current_expr_defs[name] = typed_expr
+                    else:
+                        current_expr_defs.pop(name, None)
+                    if (
+                        len(stmt.targets) == 1
+                        and isinstance(stmt.expr, AxonExprBinary)
+                        and stmt.expr.op in {"==", "!="}
+                    ):
+                        current_condition_defs[name] = stmt.expr
+                    else:
+                        current_condition_defs.pop(name, None)
+                else:
+                    current_expr_defs.pop(name, None)
+            typed.append(replace(stmt, expr=typed_expr))
+            continue
+        if isinstance(stmt, AxonReturn | AxonYield):
+            if in_loop and isinstance(stmt, AxonReturn):
+                raise ValueError(
+                    "Axon typecheck failed: return is not valid inside for-loop bodies; use yield"
+                )
+            typed_values: list[AxonExpr] = []
+            value_types: list[TypeExpr] = []
+            for value in stmt.values:
+                typed_value, value_tp, _ = _infer_expr(
+                    value,
+                    env=current_env,
+                    expr_defs=current_expr_defs,
+                    ctx=ctx,
+                    module_name=module_name,
+                    recursive_env=recursive_env,
+                )
+                typed_values.append(typed_value)
+                value_types.append(value_tp)
+            if expected_return_types is not None:
+                if len(value_types) == 1 and len(expected_return_types) > 1:
+                    value_types = list(
+                        _destructure_type(value_types[0], len(expected_return_types), ctx)
+                    )
+                if len(expected_return_types) != len(value_types):
+                    raise ValueError("Axon typecheck failed: return arity mismatch")
+                value_types = [
+                    _unify(actual, expected, ctx)
+                    for actual, expected in zip(value_types, expected_return_types, strict=True)
+                ]
+                if len(typed_values) == len(value_types):
+                    typed_values = [
+                        _retag_numeric_literals(value, expected, ctx)
+                        for value, expected in zip(typed_values, value_types, strict=True)
+                    ]
+            returns.append(tuple(value_types))
+            typed.append(replace(stmt, values=tuple(typed_values)))
+            continue
+        if isinstance(stmt, AxonCond):
+            typed_cond, cond_tp, _ = _infer_expr(
+                stmt.cond,
+                env=current_env,
+                expr_defs=current_expr_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+            )
+            _unify(cond_tp, TypeBool(), ctx)
+            refine_expr = (
+                current_condition_defs.get(stmt.cond.name, stmt.cond)
+                if isinstance(stmt.cond, AxonExprName)
+                else stmt.cond
+            )
+            typed_true, env_true, returns_true = _infer_statements(
+                stmt.true_body,
+                env=_refine_env_for_condition(refine_expr, env=current_env, ctx=ctx, truthy=True),
+                expr_defs=dict(current_expr_defs),
+                condition_defs=dict(current_condition_defs),
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+                expected_return_types=expected_return_types,
+                in_loop=in_loop,
+            )
+            typed_false, env_false, returns_false = _infer_statements(
+                stmt.false_body,
+                env=_refine_env_for_condition(refine_expr, env=current_env, ctx=ctx, truthy=False),
+                expr_defs=dict(current_expr_defs),
+                condition_defs=dict(current_condition_defs),
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+                expected_return_types=expected_return_types,
+                in_loop=in_loop,
+            )
+            current_env = _merge_branch_envs(current_env, env_true, env_false, ctx)
+            returns.extend(returns_true)
+            returns.extend(returns_false)
+            typed.append(
+                replace(stmt, cond=typed_cond, true_body=typed_true, false_body=typed_false)
+            )
+            continue
+        if isinstance(stmt, AxonScopeBind):
+            typed_body, scope_return_types = _infer_scope_body_return(
+                stmt.body,
+                env=current_env,
+                expr_defs=current_expr_defs,
+                condition_defs=current_condition_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+                expected_arity=len(stmt.targets) if len(stmt.targets) > 1 else 1,
+            )
+            for name, tp in zip(stmt.targets, scope_return_types, strict=True):
+                if name != "_":
+                    current_env[name] = tp
+                    current_expr_defs.pop(name, None)
+            typed_kwargs: dict[str, AxonKwargValue] = {}
+            for key, raw_value in stmt.kwargs.items():
+                if isinstance(raw_value, AxonExpr):
+                    typed_value, _, _ = _infer_expr(
+                        raw_value,
+                        env=current_env,
+                        expr_defs=current_expr_defs,
+                        ctx=ctx,
+                        module_name=module_name,
+                        recursive_env=recursive_env,
+                    )
+                    typed_kwargs[key] = typed_value
+                else:
+                    typed_kwargs[key] = raw_value
+            typed.append(replace(stmt, body=typed_body, kwargs=typed_kwargs))
+            continue
+        if isinstance(stmt, AxonRepeat):
+            typed_from, from_tp, _ = _infer_expr(
+                stmt.from_expr,
+                env=current_env,
+                expr_defs=current_expr_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+            )
+            typed_to, to_tp, _ = _infer_expr(
+                stmt.to_expr,
+                env=current_env,
+                expr_defs=current_expr_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+            )
+            typed_step, step_tp, _ = _infer_expr(
+                stmt.step_expr,
+                env=current_env,
+                expr_defs=current_expr_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+            )
+            _unify(from_tp, TypeInt(), ctx)
+            _unify(to_tp, TypeInt(), ctx)
+            _unify(step_tp, TypeInt(), ctx)
+            loop_env = dict(current_env)
+            loop_env[stmt.var] = TypeInt()
+            carry_names = tuple(stmt.carry or ())
+            carry_types: list[TypeExpr] = []
+            for name in carry_names:
+                carry_types.append(loop_env.get(name, ctx.fresh_type_var()))
+                loop_env[name] = carry_types[-1]
+            typed_body, _, loop_returns = _infer_statements(
+                stmt.body,
+                env=loop_env,
+                expr_defs={},
+                condition_defs={},
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=recursive_env,
+                expected_return_types=tuple(carry_types) if carry_types else None,
+                in_loop=True,
+            )
+            if carry_names and stmt.targets is not None:
+                for name, tp in zip(stmt.targets, carry_types, strict=True):
+                    if name != "_":
+                        current_env[name] = tp
+                        current_expr_defs.pop(name, None)
+            returns.extend(loop_returns)
+            typed.append(
+                replace(
+                    stmt,
+                    from_expr=typed_from,
+                    to_expr=typed_to,
+                    step_expr=typed_step,
+                    body=typed_body,
+                )
+            )
+            continue
+        typed.append(stmt)
+    return tuple(typed), current_env, returns
+
+
+def _normalize_type_expr(tp: TypeExpr | None, ctx: _TcCtx) -> TypeExpr | None:
+    if tp is None:
+        return None
+    return _apply_subst(tp, ctx)
+
+
+def _is_generated_dim_name(name: str) -> bool:
+    inner = name[2:] if name.startswith("..") else name
+    return inner.startswith("__d") or inner.startswith("__tc") or inner.startswith("_T")
+
+
+def _preferred_dim_roots_for_module(
+    ctx: _TcCtx,
+    header_names: set[str],
+    statement_names: set[str],
+) -> dict[str, str]:
+    if not header_names and not statement_names:
+        return {}
+    by_root: dict[str, list[str]] = {}
+    for name in header_names | statement_names:
+        normalized = _normalize_dim_token(name, ctx)
+        if isinstance(normalized, str):
+            by_root.setdefault(normalized, []).append(name)
+    out: dict[str, str] = {}
+    for root, members in by_root.items():
+        header_members = [name for name in members if name in header_names]
+        readable_header_members = [
+            name for name in header_members if not _is_generated_dim_name(name)
+        ]
+        if readable_header_members:
+            if len(set(readable_header_members)) > 1:
+                continue
+            chosen = max(readable_header_members, key=_dim_name_priority)
+        elif header_members:
+            readable_statement_members = [
+                name
+                for name in members
+                if name in statement_names and not _is_generated_dim_name(name)
+            ]
+            chosen = (
+                max(readable_statement_members, key=_dim_name_priority)
+                if readable_statement_members
+                else max(header_members, key=_dim_name_priority)
+            )
+        else:
+            continue
+        if root != chosen:
+            out[root] = chosen
+        for name in header_members:
+            if name != chosen:
+                out[name] = chosen
+    return out
+
+
+def _rewrite_preferred_dim_token(
+    dim: DimToken, preferred_dim_roots: dict[str, str] | None
+) -> DimToken:
+    if not preferred_dim_roots:
+        return dim
+    if isinstance(dim, str):
+        return preferred_dim_roots.get(dim, dim)
+    if isinstance(dim, int):
+        return dim
+    return DimExprBinary(
+        op=dim.op,
+        left=_rewrite_preferred_dim_token(dim.left, preferred_dim_roots),
+        right=_rewrite_preferred_dim_token(dim.right, preferred_dim_roots),
+    )
+
+
+def _normalize_dim_token_for_module(
+    dim: DimToken,
+    ctx: _TcCtx,
+    preferred_dim_roots: dict[str, str] | None = None,
+) -> DimToken:
+    return _rewrite_preferred_dim_token(_normalize_dim_token(dim, ctx), preferred_dim_roots)
+
+
+def _apply_preferred_dim_names_to_type_expr(
+    tp: TypeExpr | None,
+    preferred_dim_roots: dict[str, str] | None = None,
+) -> TypeExpr | None:
+    if tp is None or not preferred_dim_roots:
+        return tp
+    if isinstance(tp, TypeOptional):
+        inner = _apply_preferred_dim_names_to_type_expr(tp.inner, preferred_dim_roots)
+        assert inner is not None
+        return TypeOptional(inner=inner)
+    if isinstance(tp, TypeList):
+        item = _apply_preferred_dim_names_to_type_expr(tp.item, preferred_dim_roots)
+        assert item is not None
+        return TypeList(item=item)
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(
+            items=tuple(
+                item
+                for item in (
+                    _apply_preferred_dim_names_to_type_expr(item, preferred_dim_roots)
+                    for item in tp.items
+                )
+                if item is not None
+            )
+        )
+    if isinstance(tp, TypeTensor):
+        return TypeTensor(
+            base=tp.base,
+            dims=tuple(_rewrite_preferred_dim_token(dim, preferred_dim_roots) for dim in tp.dims),
+        )
+    if isinstance(tp, TypeNamed):
+        return TypeNamed(
+            name=tp.name,
+            args=tuple(_rewrite_preferred_dim_token(dim, preferred_dim_roots) for dim in tp.args),
+        )
+    return tp
+
+
+def _normalize_type_expr_for_module(
+    tp: TypeExpr | None,
+    ctx: _TcCtx,
+    preferred_dim_roots: dict[str, str] | None = None,
+) -> TypeExpr | None:
+    return _apply_preferred_dim_names_to_type_expr(
+        _normalize_type_expr(tp, ctx), preferred_dim_roots
+    )
+
+
+def _apply_type_subst_only(tp: TypeExpr, ctx: _TcCtx) -> TypeExpr:
+    if isinstance(tp, TypeVar):
+        current: TypeExpr = tp
+        seen: set[str] = set()
+        while (
+            isinstance(current, TypeVar)
+            and current.name in ctx.substitutions
+            and current.name not in seen
+        ):
+            seen.add(current.name)
+            next_tp = ctx.substitutions[current.name]
+            if next_tp == current:
+                break
+            current = next_tp
+        if current != tp:
+            return _apply_type_subst_only(current, ctx)
+        return current
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(inner=_apply_type_subst_only(tp.inner, ctx))
+    if isinstance(tp, TypeList):
+        return TypeList(item=_apply_type_subst_only(tp.item, ctx))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(items=tuple(_apply_type_subst_only(item, ctx) for item in tp.items))
+    return tp
+
+
+def _replace_expr_annotations(
+    expr: AxonExpr,
+    *,
+    inferred_type: TypeExpr | None,
+    inferred_arity: int | None,
+    inferred_dims: tuple[DimToken, ...] | None,
+) -> AxonExpr:
+    return replace(
+        expr,
+        inferred_type=inferred_type,
+        inferred_arity=inferred_arity,
+        inferred_dims=inferred_dims,
+    )
+
+
+def _normalize_expr(
+    expr: AxonExpr,
+    ctx: _TcCtx,
+    *,
+    preferred_dim_roots: dict[str, str] | None = None,
+) -> AxonExpr:
+    inferred_type = _normalize_type_expr_for_module(expr.inferred_type, ctx, preferred_dim_roots)
+    inferred_arity = expr.inferred_arity
+    if isinstance(inferred_type, TypeTuple):
+        inferred_arity = len(inferred_type.items)
+    inferred_dims = (
+        tuple(
+            _normalize_dim_token_for_module(dim, ctx, preferred_dim_roots)
+            for dim in expr.inferred_dims
+        )
+        if expr.inferred_dims
+        else None
+    )
+    if inferred_dims is None and inferred_type is not None:
+        inferred_dims = _type_dims(inferred_type, ctx)
+    if isinstance(expr, AxonExprList):
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                items=tuple(
+                    _normalize_expr(item, ctx, preferred_dim_roots=preferred_dim_roots)
+                    for item in expr.items
+                ),
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprTuple):
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                items=tuple(
+                    _normalize_expr(item, ctx, preferred_dim_roots=preferred_dim_roots)
+                    for item in expr.items
+                ),
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprCall):
+        kwargs: dict[str, AxonKwargValue] = {}
+        for key, raw_value in expr.kwargs.items():
+            kwargs[key] = (
+                _normalize_expr(raw_value, ctx, preferred_dim_roots=preferred_dim_roots)
+                if isinstance(raw_value, AxonExpr)
+                else raw_value
+            )
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                args=tuple(
+                    _normalize_expr(arg, ctx, preferred_dim_roots=preferred_dim_roots)
+                    for arg in expr.args
+                ),
+                kwargs=kwargs,
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprPipe):
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                value=_normalize_expr(expr.value, ctx, preferred_dim_roots=preferred_dim_roots),
+                stages=tuple(
+                    _normalize_expr(stage, ctx, preferred_dim_roots=preferred_dim_roots)
+                    for stage in expr.stages
+                ),
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprBind):
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                value=_normalize_expr(expr.value, ctx, preferred_dim_roots=preferred_dim_roots),
+                body=_normalize_expr(expr.body, ctx, preferred_dim_roots=preferred_dim_roots),
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                cond=_normalize_expr(expr.cond, ctx, preferred_dim_roots=preferred_dim_roots),
+                true_expr=_normalize_expr(
+                    expr.true_expr, ctx, preferred_dim_roots=preferred_dim_roots
+                ),
+                false_expr=_normalize_expr(
+                    expr.false_expr, ctx, preferred_dim_roots=preferred_dim_roots
+                ),
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprBinary):
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                left=_normalize_expr(expr.left, ctx, preferred_dim_roots=preferred_dim_roots),
+                right=_normalize_expr(expr.right, ctx, preferred_dim_roots=preferred_dim_roots),
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprLambda):
+        return _replace_expr_annotations(
+            replace(
+                expr, body=_normalize_expr(expr.body, ctx, preferred_dim_roots=preferred_dim_roots)
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprParen):
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                inner=_normalize_expr(expr.inner, ctx, preferred_dim_roots=preferred_dim_roots),
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprAscribe):
+        normalized_type_expr = _normalize_type_expr_for_module(
+            expr.type_expr, ctx, preferred_dim_roots
+        )
+        assert normalized_type_expr is not None
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                expr=_normalize_expr(expr.expr, ctx, preferred_dim_roots=preferred_dim_roots),
+                type_expr=normalized_type_expr,
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    if isinstance(expr, AxonExprDo):
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                body=tuple(
+                    _normalize_statement(stmt, ctx, preferred_dim_roots=preferred_dim_roots)
+                    for stmt in expr.body
+                ),
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=inferred_arity,
+            inferred_dims=inferred_dims,
+        )
+    return _replace_expr_annotations(
+        expr,
+        inferred_type=inferred_type,
+        inferred_arity=inferred_arity,
+        inferred_dims=inferred_dims,
+    )
+
+
+def _normalize_statement(
+    stmt: AxonStatement,
+    ctx: _TcCtx,
+    *,
+    preferred_dim_roots: dict[str, str] | None = None,
+) -> AxonStatement:
+    if isinstance(stmt, AxonBind):
+        return replace(
+            stmt, expr=_normalize_expr(stmt.expr, ctx, preferred_dim_roots=preferred_dim_roots)
+        )
+    if isinstance(stmt, AxonReturn | AxonYield):
+        return replace(
+            stmt,
+            values=tuple(
+                _normalize_expr(value, ctx, preferred_dim_roots=preferred_dim_roots)
+                for value in stmt.values
+            ),
+        )
+    if isinstance(stmt, AxonCond):
+        return replace(
+            stmt,
+            cond=_normalize_expr(stmt.cond, ctx, preferred_dim_roots=preferred_dim_roots),
+            true_body=tuple(
+                _normalize_statement(item, ctx, preferred_dim_roots=preferred_dim_roots)
+                for item in stmt.true_body
+            ),
+            false_body=tuple(
+                _normalize_statement(item, ctx, preferred_dim_roots=preferred_dim_roots)
+                for item in stmt.false_body
+            ),
+        )
+    if isinstance(stmt, AxonScopeBind):
+        kwargs: dict[str, AxonKwargValue] = {}
+        for key, raw_value in stmt.kwargs.items():
+            kwargs[key] = (
+                _normalize_expr(raw_value, ctx, preferred_dim_roots=preferred_dim_roots)
+                if isinstance(raw_value, AxonExpr)
+                else raw_value
+            )
+        return replace(
+            stmt,
+            body=tuple(
+                _normalize_statement(item, ctx, preferred_dim_roots=preferred_dim_roots)
+                for item in stmt.body
+            ),
+            kwargs=kwargs,
+        )
+    if isinstance(stmt, AxonRepeat):
+        return replace(
+            stmt,
+            from_expr=_normalize_expr(stmt.from_expr, ctx, preferred_dim_roots=preferred_dim_roots),
+            to_expr=_normalize_expr(stmt.to_expr, ctx, preferred_dim_roots=preferred_dim_roots),
+            step_expr=_normalize_expr(stmt.step_expr, ctx, preferred_dim_roots=preferred_dim_roots),
+            body=tuple(
+                _normalize_statement(item, ctx, preferred_dim_roots=preferred_dim_roots)
+                for item in stmt.body
+            ),
+        )
+    return stmt
+
+
+def _normalize_module(
+    module: AxonModule,
+    *,
+    raw_params: tuple[AxonParam, ...],
+    refined_return: TypeExpr | None,
+    ctx: _TcCtx,
+    normalize_header_dims: bool,
+) -> AxonModule:
+    normalized_statements = tuple(_normalize_statement(stmt, ctx) for stmt in module.statements)
+    header_dim_preferences = _collect_header_dim_preferences_from_param_uses(
+        raw_params, normalized_statements
+    )
+    preferred_dim_roots = _preferred_dim_roots_for_module(
+        ctx,
+        _preferred_module_dim_names(raw_params, refined_return),
+        _collect_statement_dim_names(normalized_statements),
+    )
+    return replace(
+        module,
+        params=tuple(
+            replace(
+                param,
+                type_expr=_apply_preferred_dim_names_to_type_expr(
+                    _substitute_type_dims(
+                        (
+                            _normalize_type_expr_for_module(
+                                param.type_expr or TypeAny(), ctx, preferred_dim_roots
+                            )
+                            if normalize_header_dims
+                            else _apply_type_subst_only(param.type_expr or TypeAny(), ctx)
+                        )
+                        or TypeAny(),
+                        subst=header_dim_preferences,
+                    ),
+                    preferred_dim_roots,
+                ),
+                default_expr=(
+                    _normalize_expr(param.default_expr, ctx)
+                    if param.default_expr is not None
+                    else None
+                ),
+            )
+            for param in raw_params
+        ),
+        statements=normalized_statements,
+        return_type_expr=(
+            _apply_preferred_dim_names_to_type_expr(
+                _substitute_type_dims(
+                    (
+                        _normalize_type_expr_for_module(refined_return, ctx, preferred_dim_roots)
+                        if normalize_header_dims
+                        else _apply_type_subst_only(refined_return, ctx)
+                    )
+                    or TypeAny(),
+                    subst=header_dim_preferences,
+                ),
+                preferred_dim_roots,
+            )
+            if refined_return is not None
+            else None
+        ),
+        constraints=tuple(
+            _normalize_constraint(item, ctx, preferred_dim_roots=preferred_dim_roots)
+            for item in (module.constraints or ())
+        ),
+    )
+
+
+def _typed_module_raw(
+    module: AxonModule,
+    *,
+    constants_env: dict[str, TypeExpr],
+    ctx: _TcCtx,
+    recursive_env: _RecursiveInterfaces | None,
+) -> tuple[AxonModule, tuple[AxonParam, ...], TypeExpr | None, _TcCtx]:
+    share_constraints = recursive_env is not None and bool(recursive_env.members)
+    module_ctx = ctx.child(share_constraints=share_constraints)
+    env = dict(constants_env)
+    refined_params: list = []
+    shared_signature = None if recursive_env is None else recursive_env.signatures.get(module.name)
+    if shared_signature is None:
+        scoped_param_types = [
+            _scoped_typevars(
+                param.type_expr, module_name=module.name, ctx=module_ctx, freshen_generics=False
+            )
+            for param in module.params
+        ]
+        expected_returns = _module_return_types(module, module_ctx, freshen_generics=False)
+    else:
+        scoped_param_types = [tp for tp in shared_signature[0][len(module.path_params) :]]
+        expected_returns = tuple(shared_signature[1])
+    for param, inner_tp in zip(module.params, scoped_param_types, strict=True):
+        env[param.name] = TypeOptional(inner=inner_tp) if param.optional else inner_tp
+        refined_params.append(replace(param, type_expr=inner_tp))
+    dim_bound_names = _collect_type_dim_names(module.return_type_expr)
+    for param in module.params:
+        dim_bound_names.update(_collect_type_dim_names(param.type_expr))
+    for name in sorted(dim_bound_names):
+        if name not in env:
+            env[name] = TypeDim()
+    for name in module.path_params:
+        env[name] = TypePath()
+    if module.path_param is not None:
+        env[module.path_param] = TypePath()
+    typed_statements, _, _ = _infer_statements(
+        module.statements,
+        env=env,
+        expr_defs={},
+        condition_defs={},
+        ctx=module_ctx,
+        module_name=module.name,
+        recursive_env=recursive_env,
+        expected_return_types=expected_returns,
+        in_loop=False,
+    )
+    if shared_signature is not None:
+        if len(shared_signature[1]) == 1:
+            refined_return = _apply_type_subst_only(shared_signature[1][0], module_ctx)
+        else:
+            refined_return = TypeTuple(
+                items=tuple(
+                    _apply_type_subst_only(item, module_ctx) for item in shared_signature[1]
+                )
+            )
+    elif module.return_type_expr is None:
+        refined_return = None
+    else:
+        refined_return = _apply_type_subst_only(
+            _scoped_typevars(
+                module.return_type_expr,
+                module_name=module.name,
+                ctx=module_ctx,
+                freshen_generics=False,
+            ),
+            module_ctx,
+        )
+    ctx.fresh_counter = module_ctx.fresh_counter
+    raw_params = tuple(refined_params)
+    raw_module = replace(
+        module,
+        params=raw_params,
+        statements=typed_statements,
+        return_type_expr=refined_return,
+        constraints=_collect_module_constraints(
+            module, statements=typed_statements, ctx=module_ctx
+        ),
+    )
+    return raw_module, raw_params, refined_return, module_ctx
+
+
+def _typed_module(
+    module: AxonModule,
+    *,
+    constants_env: dict[str, TypeExpr],
+    ctx: _TcCtx,
+    recursive_env: _RecursiveInterfaces | None,
+) -> AxonModule:
+    raw_module, raw_params, refined_return, module_ctx = _typed_module_raw(
+        module,
+        constants_env=constants_env,
+        ctx=ctx,
+        recursive_env=recursive_env,
+    )
+    return _normalize_module(
+        raw_module,
+        raw_params=raw_params,
+        refined_return=refined_return,
+        ctx=module_ctx,
+        normalize_header_dims=False,
+    )
+
+
+def _rewrite_typed_module_headers_from_param_uses(module: AxonModule) -> AxonModule:
+    header_dim_preferences = _collect_header_dim_preferences_from_param_uses(
+        module.params, module.statements
+    )
+    if not header_dim_preferences:
+        return module
+    return replace(
+        module,
+        params=tuple(
+            replace(
+                param,
+                type_expr=_substitute_type_dims(param.type_expr, subst=header_dim_preferences)
+                if param.type_expr is not None
+                else None,
+            )
+            for param in module.params
+        ),
+        return_type_expr=(
+            _substitute_type_dims(module.return_type_expr, subst=header_dim_preferences)
+            if module.return_type_expr is not None
+            else None
+        ),
+    )
+
+
+def _infer_constant_types(program: AxonFile, ctx: _TcCtx) -> dict[str, TypeExpr]:
+    constant_names = set(program.constants)
+    deps_by_name = {
+        name: _constant_name_deps_expr(expr, constant_names)
+        for name, expr in program.constants.items()
+    }
+    memo: dict[str, TypeExpr] = {}
+    visiting: set[str] = set()
+
+    def _infer_one(name: str) -> TypeExpr:
+        cached = memo.get(name)
+        if cached is not None:
+            return cached
+        if name in visiting:
+            raise ValueError(f"Axon typecheck failed: cyclic constant definition {name!r}")
+        visiting.add(name)
+        local_env = {dep: _infer_one(dep) for dep in deps_by_name[name]}
+        local_ctx = ctx.child(share_constraints=False)
+        local_ctx.fresh_counter = ctx.fresh_counter
+        _, tp, _ = _infer_expr(
+            program.constants[name],
+            env=local_env,
+            expr_defs={},
+            ctx=local_ctx,
+            module_name="__constants__",
+        )
+        tp = _apply_subst(tp, local_ctx)
+        ctx.fresh_counter = max(ctx.fresh_counter, local_ctx.fresh_counter)
+        visiting.remove(name)
+        memo[name] = tp
+        return tp
+
+    for name in program.constants:
+        _infer_one(name)
+    return memo
+
+
+def _typed_constants(
+    program: AxonFile, ctx: _TcCtx, env: dict[str, TypeExpr]
+) -> dict[str, AxonExpr]:
+    typed: dict[str, AxonExpr] = {}
+    current = dict(env)
+    current_expr_defs: dict[str, AxonExpr] = {}
+    for name, expr in program.constants.items():
+        typed_expr, tp, _ = _infer_expr(
+            expr, env=current, expr_defs=current_expr_defs, ctx=ctx, module_name="__constants__"
+        )
+        typed[name] = _normalize_expr(typed_expr, ctx)
+        current[name] = tp
+        current_expr_defs[name] = typed_expr
+    return typed
+
+
+def _walk_typed_exprs(expr: AxonExpr):
+    yield expr
+    if isinstance(expr, AxonExprBinary):
+        yield from _walk_typed_exprs(expr.left)
+        yield from _walk_typed_exprs(expr.right)
+    elif isinstance(expr, AxonExprBind):
+        yield from _walk_typed_exprs(expr.value)
+        yield from _walk_typed_exprs(expr.body)
+    elif isinstance(expr, AxonExprCall):
+        for arg in expr.args:
+            yield from _walk_typed_exprs(arg)
+        for value in expr.kwargs.values():
+            if isinstance(value, AxonExpr):
+                yield from _walk_typed_exprs(value)
+    elif isinstance(expr, AxonExprDo):
+        for stmt in expr.body:
+            yield from _walk_typed_stmts((stmt,))
+    elif isinstance(expr, AxonExprIf | AxonExprTernary):
+        yield from _walk_typed_exprs(expr.cond)
+        yield from _walk_typed_exprs(expr.true_expr)
+        yield from _walk_typed_exprs(expr.false_expr)
+    elif isinstance(expr, AxonExprLambda):
+        yield from _walk_typed_exprs(expr.body)
+    elif isinstance(expr, AxonExprAscribe):
+        yield from _walk_typed_exprs(expr.expr)
+    elif isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            yield from _walk_typed_exprs(item)
+    elif isinstance(expr, AxonExprParen):
+        yield from _walk_typed_exprs(expr.inner)
+
+
+def _walk_typed_stmts(statements: tuple[AxonStatement, ...]):
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            yield from _walk_typed_exprs(stmt.expr)
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                yield from _walk_typed_exprs(value)
+        elif isinstance(stmt, AxonCond):
+            yield from _walk_typed_exprs(stmt.cond)
+            yield from _walk_typed_stmts(stmt.true_body)
+            yield from _walk_typed_stmts(stmt.false_body)
+        elif isinstance(stmt, AxonRepeat):
+            yield from _walk_typed_exprs(stmt.from_expr)
+            yield from _walk_typed_exprs(stmt.to_expr)
+            yield from _walk_typed_exprs(stmt.step_expr)
+            yield from _walk_typed_stmts(stmt.body)
+        elif isinstance(stmt, AxonScopeBind):
+            for raw_value in stmt.kwargs.values():
+                if isinstance(raw_value, AxonExpr):
+                    yield from _walk_typed_exprs(raw_value)
+            yield from _walk_typed_stmts(stmt.body)
+
+
+def _walk_call_callees_expr(expr: AxonExpr):
+    if isinstance(expr, AxonExprCall):
+        yield expr.callee
+        for arg in expr.args:
+            yield from _walk_call_callees_expr(arg)
+        for value in expr.kwargs.values():
+            if isinstance(value, AxonExpr):
+                yield from _walk_call_callees_expr(value)
+        return
+    if isinstance(expr, AxonExprBinary):
+        yield from _walk_call_callees_expr(expr.left)
+        yield from _walk_call_callees_expr(expr.right)
+        return
+    if isinstance(expr, AxonExprBind):
+        yield from _walk_call_callees_expr(expr.value)
+        yield from _walk_call_callees_expr(expr.body)
+        return
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        yield from _walk_call_callees_expr(expr.cond)
+        yield from _walk_call_callees_expr(expr.true_expr)
+        yield from _walk_call_callees_expr(expr.false_expr)
+        return
+    if isinstance(expr, AxonExprLambda):
+        yield from _walk_call_callees_expr(expr.body)
+        return
+    if isinstance(expr, AxonExprAscribe):
+        yield from _walk_call_callees_expr(expr.expr)
+        return
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            yield from _walk_call_callees_expr(item)
+        return
+    if isinstance(expr, AxonExprParen):
+        yield from _walk_call_callees_expr(expr.inner)
+        return
+    if isinstance(expr, AxonExprDo):
+        yield from _walk_call_callees_stmts(expr.body)
+
+
+def _constant_name_deps_expr(expr: AxonExpr, constant_names: set[str]) -> set[str]:
+    deps: set[str] = set()
+    if isinstance(expr, AxonExprName):
+        if expr.name in constant_names:
+            deps.add(expr.name)
+        return deps
+    if isinstance(expr, AxonExprBinary):
+        deps.update(_constant_name_deps_expr(expr.left, constant_names))
+        deps.update(_constant_name_deps_expr(expr.right, constant_names))
+        return deps
+    if isinstance(expr, AxonExprBind):
+        deps.update(_constant_name_deps_expr(expr.value, constant_names))
+        deps.update(_constant_name_deps_expr(expr.body, constant_names))
+        deps.discard(expr.var)
+        return deps
+    if isinstance(expr, AxonExprCall):
+        for arg in expr.args:
+            deps.update(_constant_name_deps_expr(arg, constant_names))
+        for raw_value in expr.kwargs.values():
+            if isinstance(raw_value, AxonExpr):
+                deps.update(_constant_name_deps_expr(raw_value, constant_names))
+        return deps
+    if isinstance(expr, AxonExprDo):
+        for stmt in expr.body:
+            deps.update(_constant_name_deps_stmt(stmt, constant_names))
+        return deps
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        deps.update(_constant_name_deps_expr(expr.cond, constant_names))
+        deps.update(_constant_name_deps_expr(expr.true_expr, constant_names))
+        deps.update(_constant_name_deps_expr(expr.false_expr, constant_names))
+        return deps
+    if isinstance(expr, AxonExprLambda):
+        deps.update(_constant_name_deps_expr(expr.body, constant_names))
+        deps.discard(expr.var)
+        return deps
+    if isinstance(expr, AxonExprAscribe):
+        return _constant_name_deps_expr(expr.expr, constant_names)
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            deps.update(_constant_name_deps_expr(item, constant_names))
+        return deps
+    if isinstance(expr, AxonExprParen):
+        return _constant_name_deps_expr(expr.inner, constant_names)
+    if isinstance(expr, AxonExprPipe):
+        deps.update(_constant_name_deps_expr(expr.value, constant_names))
+        for item in expr.stages:
+            deps.update(_constant_name_deps_expr(item, constant_names))
+        return deps
+    return deps
+
+
+def _constant_name_deps_stmt(stmt: AxonStatement, constant_names: set[str]) -> set[str]:
+    deps: set[str] = set()
+    if isinstance(stmt, AxonBind):
+        deps.update(_constant_name_deps_expr(stmt.expr, constant_names))
+        for target in stmt.targets:
+            deps.discard(target)
+        return deps
+    if isinstance(stmt, AxonReturn | AxonYield):
+        for value in stmt.values:
+            deps.update(_constant_name_deps_expr(value, constant_names))
+        return deps
+    if isinstance(stmt, AxonCond):
+        deps.update(_constant_name_deps_expr(stmt.cond, constant_names))
+        for child in stmt.true_body:
+            deps.update(_constant_name_deps_stmt(child, constant_names))
+        for child in stmt.false_body:
+            deps.update(_constant_name_deps_stmt(child, constant_names))
+        return deps
+    if isinstance(stmt, AxonRepeat):
+        deps.update(_constant_name_deps_expr(stmt.from_expr, constant_names))
+        deps.update(_constant_name_deps_expr(stmt.to_expr, constant_names))
+        deps.update(_constant_name_deps_expr(stmt.step_expr, constant_names))
+        for child in stmt.body:
+            deps.update(_constant_name_deps_stmt(child, constant_names))
+        deps.discard(stmt.var)
+        for name in stmt.targets or ():
+            deps.discard(name)
+        for name in stmt.carry or ():
+            deps.discard(name)
+        return deps
+    if isinstance(stmt, AxonScopeBind):
+        for raw_value in stmt.kwargs.values():
+            if isinstance(raw_value, AxonExpr):
+                deps.update(_constant_name_deps_expr(raw_value, constant_names))
+        for child in stmt.body:
+            deps.update(_constant_name_deps_stmt(child, constant_names))
+        for target in stmt.targets:
+            deps.discard(target)
+        return deps
+    return deps
+
+
+def _walk_call_callees_stmts(statements: tuple[AxonStatement, ...]):
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            yield from _walk_call_callees_expr(stmt.expr)
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                yield from _walk_call_callees_expr(value)
+        elif isinstance(stmt, AxonCond):
+            yield from _walk_call_callees_expr(stmt.cond)
+            yield from _walk_call_callees_stmts(stmt.true_body)
+            yield from _walk_call_callees_stmts(stmt.false_body)
+        elif isinstance(stmt, AxonRepeat):
+            yield from _walk_call_callees_expr(stmt.from_expr)
+            yield from _walk_call_callees_expr(stmt.to_expr)
+            yield from _walk_call_callees_expr(stmt.step_expr)
+            yield from _walk_call_callees_stmts(stmt.body)
+        elif isinstance(stmt, AxonScopeBind):
+            for raw_value in stmt.kwargs.values():
+                if isinstance(raw_value, AxonExpr):
+                    yield from _walk_call_callees_expr(raw_value)
+            yield from _walk_call_callees_stmts(stmt.body)
+
+
+def _module_call_graph(program: AxonFile) -> dict[str, set[str]]:
+    module_names = {module.name for module in program.modules}
+    graph: dict[str, set[str]] = {module.name: set() for module in program.modules}
+    for module in program.modules:
+        for callee in _walk_call_callees_stmts(module.statements):
+            if callee in module_names:
+                graph[module.name].add(callee)
+    return graph
+
+
+def _module_sccs(graph: dict[str, set[str]]) -> list[tuple[str, ...]]:
+    index = 0
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    indices: dict[str, int] = {}
+    lowlink: dict[str, int] = {}
+    sccs: list[tuple[str, ...]] = []
+
+    def strongconnect(node: str) -> None:
+        nonlocal index
+        indices[node] = index
+        lowlink[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+        for succ in graph[node]:
+            if succ not in indices:
+                strongconnect(succ)
+                lowlink[node] = min(lowlink[node], lowlink[succ])
+            elif succ in on_stack:
+                lowlink[node] = min(lowlink[node], indices[succ])
+        if lowlink[node] != indices[node]:
+            return
+        component: list[str] = []
+        while stack:
+            item = stack.pop()
+            on_stack.remove(item)
+            component.append(item)
+            if item == node:
+                break
+        sccs.append(tuple(component))
+
+    for node in graph:
+        if node not in indices:
+            strongconnect(node)
+    return sccs
+
+
+def _program_type_order(program: AxonFile) -> tuple[list[tuple[str, ...]], _RecursiveInterfaces]:
+    graph = _module_call_graph(program)
+    sccs = _module_sccs(graph)
+    component_of: dict[str, int] = {}
+    for idx, component in enumerate(sccs):
+        for name in component:
+            component_of[name] = idx
+    condensed: dict[int, set[int]] = {idx: set() for idx in range(len(sccs))}
+    indegree: dict[int, int] = {idx: 0 for idx in range(len(sccs))}
+    for caller, callees in graph.items():
+        caller_comp = component_of[caller]
+        for callee in callees:
+            callee_comp = component_of[callee]
+            if caller_comp == callee_comp or callee_comp in condensed[caller_comp]:
+                continue
+            condensed[caller_comp].add(callee_comp)
+            indegree[callee_comp] += 1
+    queue = [idx for idx, degree in indegree.items() if degree == 0]
+    topo: list[int] = []
+    while queue:
+        current = queue.pop()
+        topo.append(current)
+        for succ in condensed[current]:
+            indegree[succ] -= 1
+            if indegree[succ] == 0:
+                queue.append(succ)
+    ordered_components: list[tuple[str, ...]] = []
+    recursive_members: set[str] = set()
+    for comp_idx in topo:
+        component = tuple(
+            module.name for module in program.modules if component_of[module.name] == comp_idx
+        )
+        ordered_components.append(component)
+        if len(component) > 1:
+            recursive_members.update(component)
+            continue
+        only = component[0]
+        if only in graph[only]:
+            recursive_members.add(only)
+    return ordered_components, _RecursiveInterfaces(
+        signatures={}, members=frozenset(recursive_members)
+    )
+
+
+def _is_generated_helper(module_name: str) -> bool:
+    return "__loop_" in module_name or "__cond_" in module_name
+
+
+def _is_loop_helper(module_name: str) -> bool:
+    return "__loop_" in module_name
+
+
+def _type_specificity_score(tp: TypeExpr | None) -> int:
+    if tp is None:
+        return 1000
+    if isinstance(tp, TypeAny):
+        return 1000
+    if isinstance(tp, TypeVar):
+        return 100
+    if isinstance(tp, TypeOptional):
+        return _type_specificity_score(tp.inner)
+    if isinstance(tp, TypeList):
+        return _type_specificity_score(tp.item)
+    if isinstance(tp, TypeTuple):
+        return sum(_type_specificity_score(item) for item in tp.items)
+    if isinstance(tp, TypeTensor):
+        score = 0
+        for dim in tp.dims:
+            if isinstance(dim, str) and dim.startswith("__"):
+                score += 5
+        return score
+    if isinstance(tp, TypeNamed):
+        score = 0
+        for dim in tp.args:
+            if isinstance(dim, str) and dim.startswith("__"):
+                score += 5
+        return score
+    return 0
+
+
+def _more_specific_type(candidate: TypeExpr | None, fallback: TypeExpr | None) -> TypeExpr | None:
+    if candidate is None:
+        return fallback
+    if fallback is None:
+        return candidate
+    return (
+        candidate
+        if _type_specificity_score(candidate) <= _type_specificity_score(fallback)
+        else fallback
+    )
+
+
+def _module_param_type_by_name(module: AxonModule, name: str) -> TypeExpr | None:
+    if name in module.path_params or name == module.path_param:
+        return TypePath()
+    for param in module.params:
+        if param.name == name:
+            return param.type_expr
+    return None
+
+
+def _loop_helper_return_arity(module: AxonModule) -> int:
+    if isinstance(module.return_type_expr, TypeTuple):
+        return len(module.return_type_expr.items)
+    return 1
+
+
+def _build_recursive_interfaces(
+    program: AxonFile, ctx: _TcCtx, recursive_members: frozenset[str]
+) -> _RecursiveInterfaces:
+    signatures: dict[str, tuple[list[TypeExpr], list[TypeExpr]]] = {}
+    for module in program.modules:
+        if module.name not in recursive_members:
+            continue
+        signatures[module.name] = _clone_signature(_instantiate_module_signature(module, ctx))
+    return _RecursiveInterfaces(signatures=signatures, members=recursive_members)
+
+
+def _typecheck_recursive_component(
+    component: tuple[str, ...],
+    *,
+    modules_by_name: dict[str, AxonModule],
+    constants_env: dict[str, TypeExpr],
+    ctx: _TcCtx,
+    recursive_env: _RecursiveInterfaces,
+) -> dict[str, AxonModule]:
+    component_signatures = {
+        name: _clone_signature(recursive_env.signatures[name]) for name in component
+    }
+    final_group: dict[str, AxonModule] = {}
+    max_iterations = 12
+    for _ in range(max_iterations):
+        iter_ctx = _TcCtx(
+            modules_by_name=ctx.modules_by_name,
+            type_aliases=ctx.type_aliases,
+            substitutions={},
+            dim_substitutions={},
+            fresh_counter=ctx.fresh_counter,
+        )
+        iter_recursive_signatures = {
+            **{
+                name: _clone_signature(sig)
+                for name, sig in recursive_env.signatures.items()
+                if name not in component_signatures
+            },
+            **{name: _clone_signature(sig) for name, sig in component_signatures.items()},
+        }
+        iter_recursive_env = _RecursiveInterfaces(
+            signatures=iter_recursive_signatures, members=recursive_env.members
+        )
+        raw_group: list[tuple[str, AxonModule, tuple[AxonParam, ...], TypeExpr | None, _TcCtx]] = []
+        normalized_group: dict[str, AxonModule] = {}
+        for name in component:
+            raw_module, raw_params, refined_return, module_ctx = _typed_module_raw(
+                modules_by_name[name],
+                constants_env=constants_env,
+                ctx=iter_ctx,
+                recursive_env=iter_recursive_env,
+            )
+            raw_group.append((name, raw_module, raw_params, refined_return, module_ctx))
+        for name, raw_module, raw_params, refined_return, module_ctx in raw_group:
+            normalized_group[name] = _normalize_module(
+                raw_module,
+                raw_params=raw_params,
+                refined_return=refined_return,
+                ctx=module_ctx,
+                normalize_header_dims=True,
+            )
+        new_signatures = {
+            name: _canonicalize_generated_signature(
+                _signature_from_module_header(normalized_group[name])
+            )
+            for name in component
+        }
+        old_signatures = {
+            name: _canonicalize_generated_signature(component_signatures[name])
+            for name in component
+        }
+        ctx.fresh_counter = max(
+            ctx.fresh_counter,
+            iter_ctx.fresh_counter,
+            *(module_ctx.fresh_counter for _, _, _, _, module_ctx in raw_group),
+        )
+        final_group = normalized_group
+        if all(new_signatures[name] == old_signatures[name] for name in component):
+            for name in component:
+                recursive_env.signatures[name] = _clone_signature(
+                    _signature_from_module_header(normalized_group[name])
+                )
+            return final_group
+        component_signatures = {
+            name: _clone_signature(_signature_from_module_header(normalized_group[name]))
+            for name in component
+        }
+    raise ValueError(
+        f"Axon typecheck failed: recursive signature refinement did not converge for {component!r}"
+    )
+
+
+def _typecheck_flat_once(program: AxonFile) -> AxonFile:
+    ctx = _TcCtx(
+        modules_by_name={module.name: module for module in program.modules},
+        type_aliases=dict(program.type_aliases),
+        substitutions={},
+        dim_substitutions={},
+    )
+    ordered_components, recursive_stub = _program_type_order(program)
+    recursive_env = _build_recursive_interfaces(program, ctx, recursive_stub.members)
+    constant_types = _infer_constant_types(program, ctx)
+    typed_constants = _typed_constants(program, ctx, constant_types)
+    modules_by_name = {module.name: module for module in program.modules}
+    typed_modules_by_name: dict[str, AxonModule] = {}
+    for component in ordered_components:
+        if len(component) > 1 or (len(component) == 1 and component[0] in recursive_env.members):
+            typed_modules_by_name.update(
+                _typecheck_recursive_component(
+                    component,
+                    modules_by_name=modules_by_name,
+                    constants_env=constant_types,
+                    ctx=ctx,
+                    recursive_env=recursive_env,
+                )
+            )
+            continue
+        name = component[0]
+        typed_modules_by_name[name] = _typed_module(
+            modules_by_name[name],
+            constants_env=constant_types,
+            ctx=ctx,
+            recursive_env=recursive_env,
+        )
+    typed_modules = tuple(
+        _rewrite_typed_module_headers_from_param_uses(typed_modules_by_name[module.name])
+        for module in program.modules
+    )
+    typed_program = AxonFile(
+        modules=typed_modules,
+        imports=program.imports,
+        imported_members=dict(program.imported_members),
+        exports=program.exports,
+        pragmas=dict(program.pragmas),
+        constants=typed_constants,
+        type_aliases=dict(program.type_aliases),
+        origin_path=program.origin_path,
+    )
+    return _thread_interprocedural_call_guards(typed_program)
+
+
+def typecheck_flat_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
+    validate_flat_axon_file(program, main_module=main_module)
+    return _typecheck_flat_once(program)
+
+
+__all__ = ["typecheck_flat_axon_file"]

@@ -182,6 +182,47 @@ LOWERING_TYPE_SIGNATURE = {
     "returns": ("Tensor",),
 }
 
+
+def _permute_indices(expr: Any, *, rank: int, helpers: Any) -> tuple[int, ...] | None:
+    items = getattr(expr, "items", None)
+    if not isinstance(items, tuple):
+        return None
+    raw: list[int] = []
+    for item in items:
+        token = helpers.expr_to_dim_token(item)
+        if not isinstance(token, int):
+            return None
+        raw.append(token)
+    if len(raw) != rank:
+        return None
+    normalized = tuple(idx if idx >= 0 else rank + idx for idx in raw)
+    if any(idx < 0 or idx >= rank for idx in normalized):
+        return None
+    if len(set(normalized)) != rank:
+        return None
+    return normalized
+
+
+def type_rule(
+    *,
+    arg_types: tuple[Any, ...],
+    kwarg_types: dict[str, Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    helpers: Any,
+) -> Any | None:
+    del kwarg_types, kwargs
+    if len(arg_types) != 2 or len(args) != 2:
+        return None
+    input_dims = helpers.type_dims(arg_types[0])
+    if input_dims is None:
+        return None
+    order = _permute_indices(args[1], rank=len(input_dims), helpers=helpers)
+    if order is None:
+        return None
+    return helpers.type_tensor(dims=tuple(input_dims[idx] for idx in order))
+
+
 __all__ = [
     "LOWERING_ARITY",
     "LOWERING_ALLOWED_KWARGS",
@@ -194,4 +235,5 @@ __all__ = [
     "compile",
     "uses_node_path",
     "LOWERING_TYPE_SIGNATURE",
+    "type_rule",
 ]

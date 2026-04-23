@@ -5,7 +5,7 @@ import Activations (gelu_new)
 import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Positions (position_ids)
-import Cache
+import Cache (Cache, CacheLayer)
 import NN
 import Tensor
 
@@ -15,9 +15,8 @@ CONTEXT_SIZE = 1024
 MODEL_DIM = 1600
 NUM_LAYERS = 48
 NUM_HEADS = 25
-MODEL_HEAD_DIM = (MODEL_DIM / NUM_HEADS)
 
-gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gpt2_block x attn_mask past_kv = do
   x1 <- NN.layernorm@ln_1 x
   a, new_kv <- scope@attn do
@@ -35,15 +34,16 @@ gpt2_block x attn_mask past_kv = do
     return NN.linear@c_fc x3 dim=(4 * MODEL_DIM) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
   return x + m, new_kv
 
-gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gpt2 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 gpt2 input_ids attn_mask past_kv use_cache = do
   tok <- NN.embedding@wte input_ids dim=MODEL_DIM
   pos <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=1 |> NN.embedding@wpe
   x <- tok + pos
   new_kv <- use_cache ? Cache.init : null
-  for@h i <- [0..NUM_LAYERS) do
+  x, new_kv <- for@h i <- [0..NUM_LAYERS) carry (x, new_kv) do
     past_i <- Cache.index past_kv i
     x, new_i <- gpt2_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i
+    yield x, new_kv
   logits <- NN.layernorm@ln_f x |> NN.linear@wte
   return logits, new_kv

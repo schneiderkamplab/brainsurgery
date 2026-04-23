@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from .grammar import ParsedProgramSource
-from .types import (
+from typing import Any
+
+from ..ast.nodes import (
     AxonBind,
+    AxonCond,
     AxonExpr,
     AxonExprDo,
     AxonRepeat,
@@ -55,6 +57,8 @@ def _has_return_statement(stmts: tuple[AxonStatement, ...]) -> bool:
         nested: tuple[AxonStatement, ...] = ()
         if isinstance(stmt, AxonRepeat | AxonScopeBind):
             nested = stmt.body
+        elif isinstance(stmt, AxonCond):
+            nested = (*stmt.true_body, *stmt.false_body)
         elif isinstance(stmt, AxonBind) and isinstance(stmt.expr, AxonExprDo):
             nested = stmt.expr.body
         if nested and _has_return_statement(nested):
@@ -77,7 +81,7 @@ def _do_expr_requires_return(expr: AxonExpr, *, module_index: int, module_name: 
         )
 
 
-def validate_parsed_program_source(parsed_source: ParsedProgramSource) -> None:
+def validate_parsed_program_source(parsed_source: Any) -> None:
     modules = parsed_source.modules
     seen_module_decls: set[str] = set()
     for idx, module in enumerate(modules):

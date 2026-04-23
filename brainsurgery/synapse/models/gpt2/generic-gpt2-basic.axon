@@ -4,24 +4,22 @@
 import Activations (gelu_new)
 import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Math (sqrt)
 import Positions (position_ids)
-import Cache
+import Cache (Cache, CacheLayer)
 import Config
 import NN
 import Tensor
 
 
 
-CONTEXT_SIZE   = Config.int@n_positions default=1024
-MODEL_DIM   = Config.int@n_embd default=768
-NUM_LAYERS   = Config.int@n_layer default=12
-NUM_HEADS   = Config.int@n_head default=12
-VOCAB_SIZE   = Config.int@vocab_size default=50257
+CONTEXT_SIZE   = Config.dim@n_positions default=1024
+MODEL_DIM   = Config.dim@n_embd default=768
+NUM_LAYERS   = Config.dim@n_layer default=12
+NUM_HEADS   = Config.dim@n_head default=12
+VOCAB_SIZE   = Config.dim@vocab_size default=50257
 PAD_FILL = 1
-ATTN_SCALE = 1.0 / sqrt (MODEL_DIM / NUM_HEADS)
 
-gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gpt2_block x attn_mask past_kv = do
   x1 <- NN.layernorm@ln_1 x
   a, new_kv <- scope@attn do
@@ -30,8 +28,8 @@ gpt2_block x attn_mask past_kv = do
     k <- reshape_heads k_lin heads=NUM_HEADS
     v <- reshape_heads v_lin heads=NUM_HEADS
     k, v, new_kv <- Cache.update past_kv k v
-    mask <- causal_mask q k attn_mask
-    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
+    mask <- causal_mask q k window=CONTEXT_SIZE padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
     return a, new_kv
   x <- x + a
   x3 <- NN.layernorm@ln_2 x
@@ -39,7 +37,7 @@ gpt2_block x attn_mask past_kv = do
     return NN.linear@c_fc x3 dim=(4 * MODEL_DIM) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
   return x + m, new_kv
 
-gpt2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gpt2 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 gpt2 input_ids attn_mask past_kv use_cache = do
   tok <- NN.embedding@wte input_ids dim=MODEL_DIM
   pos <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=PAD_FILL |> NN.embedding@wpe

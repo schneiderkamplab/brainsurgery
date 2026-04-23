@@ -6,30 +6,11 @@ from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
 from typing import Callable, TypeGuard
 
-from .ast_validation import validate_axon_program
-from .grammar import (
-    ParsedDefinition,
-    ParsedModuleSource,
-    ParsedPathTypeParam,
-    ParsedProgramSource,
-    ParsedSignature,
-    parse_program_source,
-)
-from .syntax_validation import validate_parsed_program_source
-from .type_system import (
-    DimToken,
-    TypeExpr,
-    TypeList,
-    TypeNamed,
-    TypeOptional,
-    TypeTensor,
-    TypeTuple,
-    dim_token_names,
-    render_type,
-)
-from .types import (
+from ..ast.nodes import (
     AxonBind,
+    AxonCond,
     AxonExpr,
+    AxonExprAscribe,
     AxonExprBinary,
     AxonExprBind,
     AxonExprBool,
@@ -55,6 +36,30 @@ from .types import (
     AxonScopeBind,
     AxonStatement,
 )
+from ..ast.source import AxonFile
+from ..ast.types import (
+    DimToken,
+    TypeAliasDef,
+    TypeExpr,
+    TypeList,
+    TypeNamed,
+    TypeOptional,
+    TypePath,
+    TypeTensor,
+    TypeTuple,
+    dim_token_names,
+    render_type,
+)
+from ..validate.ast import validate_axon_program
+from ..validate.surface import validate_parsed_program_source
+from ._cst import (
+    CstDefinition,
+    CstModuleSource,
+    CstPathTypeParam,
+    CstProgramSource,
+    CstSignature,
+)
+from .grammar import parse_surface_program_source
 
 
 def _is_ident(token: str) -> bool:
@@ -109,6 +114,11 @@ def _collect_type_dim_names_recursive(type_expr: TypeExpr) -> set[str]:
         for dim in root.dims:
             out.update(_collect_dim_names(dim))
         return out
+    if isinstance(root, TypeNamed):
+        named_out: set[str] = set()
+        for dim in root.args:
+            named_out.update(_collect_dim_names(dim))
+        return named_out
     if isinstance(root, TypeList):
         return _collect_type_dim_names_recursive(root.item)
     if isinstance(root, TypeTuple):
@@ -135,6 +145,9 @@ def _collect_expr_names(expr: AxonExpr) -> set[str]:
             continue
         if isinstance(current, AxonExprParen):
             stack.append(current.inner)
+            continue
+        if isinstance(current, AxonExprAscribe):
+            stack.append(current.expr)
             continue
         if isinstance(current, AxonExprList):
             stack.extend(list(current.items))
@@ -183,6 +196,11 @@ def _collect_statement_exprs(statements: tuple[AxonStatement, ...]) -> list[Axon
         if isinstance(stmt, AxonReturn):
             out.extend(list(stmt.values))
             continue
+        if isinstance(stmt, AxonCond):
+            out.append(stmt.cond)
+            out.extend(_collect_statement_exprs(stmt.true_body))
+            out.extend(_collect_statement_exprs(stmt.false_body))
+            continue
         if isinstance(stmt, AxonRepeat):
             out.append(stmt.from_expr)
             out.append(stmt.to_expr)
@@ -209,9 +227,15 @@ def _collect_statement_symbol_names(statements: tuple[AxonStatement, ...]) -> se
             if isinstance(stmt, AxonRepeat):
                 stack.append(stmt.body)
                 continue
+            if isinstance(stmt, AxonCond):
+                out.update(_collect_expr_names(stmt.cond))
+                stack.append(stmt.true_body)
+                stack.append(stmt.false_body)
+                continue
             if isinstance(stmt, AxonScopeBind):
-                for match in path_placeholder_re.finditer(stmt.prefix):
-                    out.add(match.group(1))
+                for part in stmt.prefix.parts:
+                    for match in path_placeholder_re.finditer(part):
+                        out.add(match.group(1))
                 stack.append(stmt.body)
     return out
 
@@ -262,12 +286,15 @@ def _ordered_runtime_constant_items(
 
 
 def _is_direct_symbol_default_call(expr: AxonExpr) -> bool:
-    root = expr.inner if isinstance(expr, AxonExprParen) else expr
+    root = expr
+    while isinstance(root, AxonExprParen | AxonExprAscribe):
+        root = root.inner if isinstance(root, AxonExprParen) else root.expr
     if not isinstance(root, AxonExprCall):
         return False
     callee = root.callee.strip().split("@", 1)[0]
     return callee in {
         "Config.int",
+        "Config.dim",
         "Config.float",
         "Config.str",
         "Config.bool",
@@ -344,6 +371,8 @@ def _eval_const_expr(
         return tuple(_eval_const_expr(item, resolve_name=resolve_name) for item in expr.items)
     if isinstance(expr, AxonExprParen):
         return _eval_const_expr(expr.inner, resolve_name=resolve_name)
+    if isinstance(expr, AxonExprAscribe):
+        return _eval_const_expr(expr.expr, resolve_name=resolve_name)
     if isinstance(expr, AxonExprIf | AxonExprTernary):
         cond = _eval_const_expr(expr.cond, resolve_name=resolve_name)
         branch = expr.true_expr if bool(cond) else expr.false_expr
@@ -490,6 +519,8 @@ def _eval_symbol_default_expr(
         )
     if isinstance(expr, AxonExprParen):
         return _eval_symbol_default_expr(expr.inner, resolve_name=resolve_name)
+    if isinstance(expr, AxonExprAscribe):
+        return _eval_symbol_default_expr(expr.expr, resolve_name=resolve_name)
     if isinstance(expr, AxonExprIf | AxonExprTernary):
         cond = _eval_symbol_default_expr(expr.cond, resolve_name=resolve_name)
         branch = expr.true_expr if bool(cond) else expr.false_expr
@@ -584,12 +615,12 @@ def _eval_symbol_default_expr(
             if len(arg_values) < 1:
                 raise ValueError("max symbol-default call expects at least one positional argument")
             return max(_ensure_const_number(value, context="max") for value in arg_values)
-        if callee_base == "Config.int":
+        if callee_base in {"Config.int", "Config.dim"}:
             default = kw_values.get("default")
             if default is None:
                 return None
             if isinstance(default, bool) or not isinstance(default, int | float):
-                raise ValueError("Config.int symbol-default call expects numeric default")
+                raise ValueError(f"{callee_base} symbol-default call expects numeric default")
             return int(default)
         if callee_base == "Config.float":
             default = kw_values.get("default")
@@ -687,6 +718,7 @@ def _inject_symbols_meta(module: AxonModule, symbols: dict[str, object]) -> Axon
         params=module.params,
         returns=module.returns,
         statements=module.statements,
+        body_expr=module.body_expr,
         imports=module.imports,
         imported_members=module.imported_members,
         exports=module.exports,
@@ -711,6 +743,7 @@ def _inject_pragmas(module: AxonModule, pragmas: dict[str, object]) -> AxonModul
         params=module.params,
         returns=module.returns,
         statements=module.statements,
+        body_expr=module.body_expr,
         imports=module.imports,
         imported_members=module.imported_members,
         exports=module.exports,
@@ -740,8 +773,8 @@ def _split_module_path_params(name: str) -> tuple[str, tuple[str, ...]]:
 
 def _parse_haskell_header(
     *,
-    signature: ParsedSignature,
-    definition: ParsedDefinition,
+    signature: CstSignature,
+    definition: CstDefinition,
 ) -> tuple[
     str,
     str | None,
@@ -779,14 +812,14 @@ def _parse_haskell_header(
         arg_types_raw = list(sig_type.arg_types)
         if len(arg_types_raw) < len(path_params):
             raise ValueError("signature must provide one Path argument per module path parameter")
-        inferred_path_params: list[ParsedPathTypeParam] = []
+        inferred_path_params: list[CstPathTypeParam] = []
         for idx, path_name in enumerate(path_params):
             path_type = arg_types_raw[idx]
-            if not isinstance(path_type, TypeNamed) or path_type.name != "Path":
+            if not isinstance(path_type, TypePath):
                 raise ValueError(
                     "path-bound module parameters require leading Path arguments in signature"
                 )
-            inferred_path_params.append(ParsedPathTypeParam(name=path_name, type_expr=path_type))
+            inferred_path_params.append(CstPathTypeParam(name=path_name, type_expr=path_type))
         sig_path_params = tuple(inferred_path_params)
         arg_types = arg_types_raw[len(path_params) :]
     else:
@@ -795,7 +828,7 @@ def _parse_haskell_header(
         raise ValueError("path signature annotation count must match module path parameter count")
     for idx, path_sig in enumerate(sig_path_params):
         path_type = path_sig.type_expr
-        if not isinstance(path_type, TypeNamed) or path_type.name != "Path":
+        if not isinstance(path_type, TypePath):
             raise ValueError(f"path signature type must be Path, got {render_type(path_type)!r}.")
         expected_name = path_params[idx]
         if isinstance(path_sig.name, str) and path_sig.name and path_sig.name != expected_name:
@@ -880,7 +913,7 @@ def _parse_haskell_header(
 
 def _build_module_from_source(
     *,
-    module_source: ParsedModuleSource,
+    module_source: CstModuleSource,
     merged_constants: dict[str, AxonExpr],
     runtime_constant_names: set[str],
     global_expr_refs: set[str],
@@ -891,7 +924,7 @@ def _build_module_from_source(
     imports: tuple[str, ...],
     imported_members: dict[str, tuple[str, ...]],
     exports: tuple[str, ...],
-    type_aliases: dict[str, TypeExpr],
+    type_aliases: dict[str, TypeAliasDef],
 ) -> AxonModule:
     (
         module_name,
@@ -963,8 +996,44 @@ def _build_module_from_source(
     return module
 
 
-def build_axon_modules_from_parsed_source(
-    parsed_source: ParsedProgramSource,
+def _build_file_module_from_surface_source(
+    *,
+    module_source: CstModuleSource,
+) -> AxonModule:
+    (
+        module_name,
+        module_path_param,
+        module_path_params,
+        params,
+        returns,
+        rhs_expr,
+        _annotation_symbols,
+        return_type_expr,
+        return_shape,
+    ) = _parse_haskell_header(
+        signature=module_source.signature, definition=module_source.definition
+    )
+    return AxonModule(
+        name=module_name,
+        path_param=module_path_param,
+        path_params=module_path_params,
+        params=params,
+        returns=returns,
+        statements=(),
+        body_expr=rhs_expr,
+        imports=(),
+        imported_members=None,
+        exports=(),
+        symbols=None,
+        pragmas=None,
+        type_aliases=None,
+        return_type_expr=return_type_expr,
+        return_shape=return_shape,
+    )
+
+
+def build_axon_modules_from_surface_source(
+    parsed_source: CstProgramSource,
     *,
     validate: bool = True,
     extra_constants: dict[str, AxonExpr] | None = None,
@@ -1018,8 +1087,8 @@ def build_axon_modules_from_parsed_source(
     return out
 
 
-def build_surface_axon_modules_from_parsed_source(
-    parsed_source: ParsedProgramSource,
+def build_surface_modules_from_surface_source(
+    parsed_source: CstProgramSource,
     *,
     validate: bool = True,
     extra_imports: tuple[str, ...] | None = None,
@@ -1080,29 +1149,48 @@ def build_surface_axon_modules_from_parsed_source(
 
 
 def parse_axon_module(source: str) -> AxonModule:
-    parsed_source = parse_program_source(source)
-    validate_parsed_program_source(parsed_source)
-    if len(parsed_source.modules) != 1:
+    ast = parse_axon_program(source)
+    if len(ast.modules) != 1:
         raise ValueError("expected exactly one module in Axon source")
-    modules = build_axon_modules_from_parsed_source(parsed_source, validate=True)
-    return modules[0]
+    return ast.modules[0]
 
 
-def parse_axon_program(source: str) -> tuple[AxonModule, ...]:
-    parsed_source = parse_program_source(source)
+def parse_axon_program(source: str) -> AxonFile:
+    parsed_source = parse_surface_program_source(source)
     validate_parsed_program_source(parsed_source)
-    return build_axon_modules_from_parsed_source(parsed_source, validate=True)
+    modules = tuple(
+        _build_file_module_from_surface_source(module_source=module_source)
+        for module_source in parsed_source.modules
+    )
+    validate_axon_program(modules)
+    return AxonFile(
+        modules=modules,
+        imports=parsed_source.imports,
+        imported_members=dict(parsed_source.imported_members),
+        exports=parsed_source.exports,
+        pragmas=dict(parsed_source.pragmas),
+        constants=dict(parsed_source.constants),
+        type_aliases=dict(parsed_source.type_aliases),
+    )
 
 
-def parse_axon_program_from_path(path: Path) -> tuple[AxonModule, ...]:
-    from .import_loader import load_axon_program_from_path
-
-    return load_axon_program_from_path(path)
+def parse_axon_program_from_path(path: Path) -> AxonFile:
+    ast = parse_axon_program(path.read_text(encoding="utf-8"))
+    return AxonFile(
+        modules=ast.modules,
+        imports=ast.imports,
+        imported_members=dict(ast.imported_members),
+        exports=ast.exports,
+        pragmas=dict(ast.pragmas),
+        constants=dict(ast.constants),
+        type_aliases=dict(ast.type_aliases),
+        origin_path=path.resolve(),
+    )
 
 
 __all__ = [
-    "build_axon_modules_from_parsed_source",
-    "build_surface_axon_modules_from_parsed_source",
+    "build_axon_modules_from_surface_source",
+    "build_surface_modules_from_surface_source",
     "parse_axon_module",
     "parse_axon_program",
     "parse_axon_program_from_path",
