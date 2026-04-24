@@ -52,6 +52,8 @@ from .ast import (
     render_type,
 )
 from .expression_codec import axon_expr_to_runtime_value as _expr_to_runtime_value
+from .ast.path import parse_path_token, path_expr_to_runtime_value
+from .canonicalize import canonicalize_typed_axon_file
 from .flatten import flatten_closed_axon_file
 from .optimize import optimize_flat_typed_axon_file
 from .resolve import resolve_axon_program_from_path
@@ -76,6 +78,10 @@ def _is_name_token(token: str) -> bool:
 
 def _path_expr_to_source(expr: AxonExprPath) -> str:
     return expr.to_source()
+
+
+def _path_source_to_runtime_value(source: str) -> dict[str, Any]:
+    return path_expr_to_runtime_value(parse_path_token(source, op_name="lowered path"))
 
 
 def _expr_name(expr: AxonExpr) -> str | None:
@@ -124,7 +130,7 @@ def _parse_scalar_token(token: str) -> Any:
 _NO_CONST = object()
 
 _CANONICAL_PATH_ARG_PRIMITIVES = frozenset(
-    {"_embedding", "_linear", "_layernorm", "_rmsnorm", "_activations_xielu"}
+    {"_embedding", "_linear", "_layernorm", "_activations_xielu"}
 )
 
 
@@ -198,20 +204,29 @@ def _prepare_program_for_lowering(
     program = modules if isinstance(modules, AxonFile) else _wrap_modules_as_file(modules)
     try:
         validate_typed_axon_file(program, main_module=main_module)
-        return optimize_flat_typed_axon_file(program, main_module=main_module)
+        return canonicalize_typed_axon_file(
+            optimize_flat_typed_axon_file(program, main_module=main_module),
+            main_module=main_module,
+        )
     except Exception:
         pass
     try:
         validate_flat_axon_file(program, main_module=main_module)
         typed = typecheck_flat_axon_file(program, main_module=main_module)
-        return optimize_flat_typed_axon_file(typed, main_module=main_module)
+        return canonicalize_typed_axon_file(
+            optimize_flat_typed_axon_file(typed, main_module=main_module),
+            main_module=main_module,
+        )
     except Exception:
         pass
     try:
         validate_closed_axon_file(program, main_module=main_module)
         flat = flatten_closed_axon_file(program, main_module=main_module)
         typed = typecheck_flat_axon_file(flat, main_module=main_module)
-        return optimize_flat_typed_axon_file(typed, main_module=main_module)
+        return canonicalize_typed_axon_file(
+            optimize_flat_typed_axon_file(typed, main_module=main_module),
+            main_module=main_module,
+        )
     except Exception:
         pass
     if program.origin_path is None:
@@ -221,7 +236,10 @@ def _prepare_program_for_lowering(
     resolved = resolve_axon_program_from_path(program.origin_path).ast
     flat = flatten_closed_axon_file(resolved, main_module=main_module)
     typed = typecheck_flat_axon_file(flat, main_module=main_module)
-    return optimize_flat_typed_axon_file(typed, main_module=main_module)
+    return canonicalize_typed_axon_file(
+        optimize_flat_typed_axon_file(typed, main_module=main_module),
+        main_module=main_module,
+    )
 
 
 def _const_fold_expr(expr: AxonExpr, ctx: "_LowerCtx") -> Any:
@@ -1432,8 +1450,6 @@ def _lower_simple_call(
         raise ValueError(
             "_linear only accepts positional arguments; use Prelude.linear for keyword/default syntax"
         )
-    if raw_base == "_repeat":
-        raise ValueError("_repeat must be flattened away before lowering")
     if raw_base == "_layernorm" and kwargs_expr:
         raise ValueError(
             "_layernorm only accepts positional arguments; use Prelude.layernorm for keyword/default syntax"
@@ -2953,7 +2969,7 @@ def _normalize_bound_params_on_node(
         if isinstance(mapped_base, str) and mapped_base.strip():
             normalized_base = mapped_base.strip()
     if is_absolute:
-        node_spec["_abs_path"] = normalized_base
+        node_spec["_abs_path"] = _path_source_to_runtime_value(base_path)
         node_spec.pop("_scope", None)
     for param_name in _path_bound_param_names(node_spec):
         explicit_value = params.get(param_name)
@@ -2967,25 +2983,31 @@ def _normalize_bound_params_on_node(
                 explicit_value = override_token
         if isinstance(explicit_value, str) and explicit_value.strip():
             token = explicit_value.strip()
+            original_token = token
             # If the explicit value refers to another bound path input name,
             # resolve through inherited/specialized `_params` first.
             mapped = params.get(token)
             if isinstance(mapped, str) and mapped.strip():
                 token = mapped.strip()
+                original_token = token
             else:
                 # Token may refer to another node input/default (for example
                 # `scale=scale_path` where `scale_path` defaulted to `@weight`).
                 token_from_node = _as_concrete_path(node_spec.get(token))
                 if isinstance(token_from_node, str) and token_from_node.strip():
                     token = token_from_node.strip()
+                    original_token = token
             # Resolve tokens prefixed by inherited path-param names (e.g. `path.weight`).
             head, sep, tail = token.partition(".")
             mapped_head = inherited.get(head)
             if isinstance(mapped_head, str) and mapped_head.strip():
                 token = f"{mapped_head.strip()}{sep}{tail}" if sep else mapped_head.strip()
+                original_token = token
             explicit_absolute = token.startswith("@@")
             if explicit_absolute:
-                token = token[2:]
+                params[param_name] = _path_source_to_runtime_value(original_token)
+                node_spec[param_name] = param_name
+                continue
             elif token.startswith("@"):
                 token = token[1:]
             if is_absolute or explicit_absolute:

@@ -649,12 +649,20 @@ class SynapseProgramModel(nn.Module):
         def _effective_scope() -> str:
             abs_path = node_spec.get("_abs_path")
             if isinstance(abs_path, (str, dict)) and abs_path:
-                return resolve_path_expr_to_key(abs_path, env, op_name="_abs_path")
+                return resolve_path_expr_to_key(
+                    abs_path,
+                    self._path_template_env(env),
+                    op_name="_abs_path",
+                )
             return self._scope_of(node_path)
 
         def _explicit_candidates(raw_path: Any) -> list[str]:
             expr = runtime_value_to_path_expr(raw_path, op_name=f"{param_name} path")
-            key = resolve_path_expr_to_key(expr, env, op_name=f"{param_name} path")
+            key = resolve_path_expr_to_key(
+                expr,
+                self._path_template_env(env),
+                op_name=f"{param_name} path",
+            )
             if expr.absolute:
                 return [key] if key else []
             scope_prefix = _effective_scope()
@@ -966,7 +974,11 @@ class SynapseProgramModel(nn.Module):
     def _resolve_config_path_key(
         self, raw: Any, env: Mapping[str, Any], op_name: str = "Config"
     ) -> str:
-        return resolve_path_expr_to_key(raw, env, op_name=op_name)
+        return resolve_path_expr_to_key(
+            raw,
+            self._path_template_env(env, symbols=self._symbols),
+            op_name=op_name,
+        )
 
     def _expr_config_lookup(self, key: str) -> tuple[bool, Any]:
         value: Any = self._expr_config_root()
@@ -1207,11 +1219,48 @@ class SynapseProgramModel(nn.Module):
             return ""
         return node_path.rsplit(".", 1)[0]
 
+    def _path_template_env(
+        self,
+        env: Mapping[str, Any] | None,
+        *,
+        symbols: Mapping[str, SymbolValue] | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(env, Mapping):
+            return {}
+        raw_env = dict(env)
+        resolved: dict[str, Any] = {}
+        symbol_values = self._symbols if symbols is None else dict(symbols)
+        for key, value in raw_env.items():
+            if isinstance(value, dict | list | tuple):
+                try:
+                    resolved[key] = self._eval_expr(value, raw_env, symbol_values)
+                    continue
+                except Exception:
+                    pass
+            resolved[key] = value
+        for key, value in list(resolved.items()):
+            if not isinstance(value, (str, dict)):
+                continue
+            try:
+                expr = runtime_value_to_path_expr(value, op_name="path template env")
+                resolved[key] = resolve_path_expr_to_key(
+                    expr,
+                    resolved,
+                    op_name="path template env",
+                )
+            except Exception:
+                pass
+        return resolved
+
     def _resolve_state_path(
         self, *, node_path: str, raw_path: Any, env: Mapping[str, Any] | None = None
     ) -> str:
         expr = runtime_value_to_path_expr(raw_path, op_name="state path")
-        token = resolve_path_expr_to_key(expr, env or {}, op_name="state path")
+        token = resolve_path_expr_to_key(
+            expr,
+            self._path_template_env(env),
+            op_name="state path",
+        )
         if expr.absolute:
             return token
         scope = self._scope_of(node_path)

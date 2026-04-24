@@ -51,7 +51,7 @@ split_qkv_grouped x ?heads=1 ?kv_heads=1 ?head_dim=null = do
 
 
 -- === ATTENTION ===
-mask_to_additive :: Tensor[..S] -> Tensor[..S] -> Tensor[..S]
+mask_to_additive :: Tensor[..S] -> Tensor[..M] -> Tensor[..S]
 mask_to_additive ref keep = Tensor.where keep (Tensor.zeros_like ref) (Tensor.min_like ref)
 
 

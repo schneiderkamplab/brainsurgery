@@ -15,16 +15,16 @@ export (
 
 PI = 3.141592653589793
 
-add :: T -> T -> T
+add :: Any -> Any -> Any
 add = _add
 
-div :: T -> T -> T
+div :: Any -> Any -> Any
 div = _div
 
-mul :: T -> T -> T
+mul :: Any -> Any -> Any
 mul = _mul
 
-pow :: T -> T -> T
+pow :: Any -> Any -> Any
 pow = _pow
 
 exp :: T -> T

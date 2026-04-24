@@ -201,6 +201,149 @@ def _wrap_inline_do(prelude: list[AxonStatement], expr: AxonExpr) -> AxonExpr:
     return AxonExprDo(body=tuple([*prelude, AxonReturn(values=(expr,))]), inline=True)
 
 
+def _substitute_name_expr(expr: AxonExpr, *, name: str, replacement: AxonExpr) -> AxonExpr:
+    if isinstance(expr, AxonExprName):
+        return replacement if expr.name == name else expr
+    if isinstance(expr, AxonExprCall):
+        return replace(
+            expr,
+            args=tuple(_substitute_name_expr(arg, name=name, replacement=replacement) for arg in expr.args),
+            kwargs={
+                key: (
+                    _substitute_name_expr(raw_value, name=name, replacement=replacement)
+                    if isinstance(raw_value, AxonExpr)
+                    else raw_value
+                )
+                for key, raw_value in expr.kwargs.items()
+            },
+        )
+    if isinstance(expr, AxonExprBinary):
+        return replace(
+            expr,
+            left=_substitute_name_expr(expr.left, name=name, replacement=replacement),
+            right=_substitute_name_expr(expr.right, name=name, replacement=replacement),
+        )
+    if isinstance(expr, AxonExprBind):
+        value = _substitute_name_expr(expr.value, name=name, replacement=replacement)
+        if expr.var == name:
+            return replace(expr, value=value)
+        return replace(
+            expr,
+            value=value,
+            body=_substitute_name_expr(expr.body, name=name, replacement=replacement),
+        )
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        return replace(
+            expr,
+            cond=_substitute_name_expr(expr.cond, name=name, replacement=replacement),
+            true_expr=_substitute_name_expr(expr.true_expr, name=name, replacement=replacement),
+            false_expr=_substitute_name_expr(expr.false_expr, name=name, replacement=replacement),
+        )
+    if isinstance(expr, AxonExprLambda):
+        if expr.var == name:
+            return expr
+        return replace(
+            expr,
+            body=_substitute_name_expr(expr.body, name=name, replacement=replacement),
+        )
+    if isinstance(expr, AxonExprParen):
+        return replace(
+            expr,
+            inner=_substitute_name_expr(expr.inner, name=name, replacement=replacement),
+        )
+    if isinstance(expr, AxonExprAscribe):
+        return replace(
+            expr,
+            expr=_substitute_name_expr(expr.expr, name=name, replacement=replacement),
+        )
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        return replace(
+            expr,
+            items=tuple(
+                _substitute_name_expr(item, name=name, replacement=replacement)
+                for item in expr.items
+            ),
+        )
+    if isinstance(expr, AxonExprPipe):
+        return replace(
+            expr,
+            value=_substitute_name_expr(expr.value, name=name, replacement=replacement),
+            stages=tuple(
+                _substitute_name_expr(stage, name=name, replacement=replacement)
+                for stage in expr.stages
+            ),
+        )
+    if isinstance(expr, AxonExprDo):
+        return replace(
+            expr,
+            body=tuple(_substitute_name_stmt(stmt, name=name, replacement=replacement) for stmt in expr.body),
+        )
+    return expr
+
+
+def _substitute_name_stmt(stmt: AxonStatement, *, name: str, replacement: AxonExpr) -> AxonStatement:
+    if isinstance(stmt, AxonBind):
+        expr = _substitute_name_expr(stmt.expr, name=name, replacement=replacement)
+        if name in stmt.targets:
+            return replace(stmt, expr=expr)
+        return replace(stmt, expr=expr)
+    if isinstance(stmt, AxonReturn | AxonYield):
+        return replace(
+            stmt,
+            values=tuple(
+                _substitute_name_expr(value, name=name, replacement=replacement) for value in stmt.values
+            ),
+        )
+    if isinstance(stmt, AxonCond):
+        return replace(
+            stmt,
+            cond=_substitute_name_expr(stmt.cond, name=name, replacement=replacement),
+            true_body=tuple(
+                _substitute_name_stmt(inner, name=name, replacement=replacement)
+                for inner in stmt.true_body
+            ),
+            false_body=tuple(
+                _substitute_name_stmt(inner, name=name, replacement=replacement)
+                for inner in stmt.false_body
+            ),
+        )
+    if isinstance(stmt, AxonRepeat):
+        if stmt.var == name or name in (stmt.targets or ()) or name in (stmt.carry or ()):
+            return stmt
+        return replace(
+            stmt,
+            from_expr=_substitute_name_expr(stmt.from_expr, name=name, replacement=replacement),
+            to_expr=_substitute_name_expr(stmt.to_expr, name=name, replacement=replacement),
+            step_expr=_substitute_name_expr(stmt.step_expr, name=name, replacement=replacement),
+            body=tuple(_substitute_name_stmt(inner, name=name, replacement=replacement) for inner in stmt.body),
+        )
+    if isinstance(stmt, AxonScopeBind):
+        if name in stmt.targets:
+            return stmt
+        return replace(
+            stmt,
+            kwargs={
+                key: (
+                    _substitute_name_expr(raw_value, name=name, replacement=replacement)
+                    if isinstance(raw_value, AxonExpr)
+                    else raw_value
+                )
+                for key, raw_value in stmt.kwargs.items()
+            },
+            body=tuple(_substitute_name_stmt(inner, name=name, replacement=replacement) for inner in stmt.body),
+        )
+    return stmt
+
+
+def _inline_flat_prelude_expr(prelude: list[AxonStatement], expr: AxonExpr) -> AxonExpr:
+    inlined = expr
+    for stmt in reversed(prelude):
+        if not isinstance(stmt, AxonBind) or len(stmt.targets) != 1 or stmt.targets[0] == "_":
+            raise ValueError("flatten failed: constants require single-target bind preludes")
+        inlined = _substitute_name_expr(inlined, name=stmt.targets[0], replacement=stmt.expr)
+    return inlined
+
+
 def _reduce_do_expr(
     expr: AxonExprDo,
     ctx: _FlattenCtx,
@@ -354,9 +497,16 @@ def _loop_scope_parts(stmt: AxonRepeat) -> tuple[str, ...]:
     return (stmt.name, f"{{{stmt.var}}}")
 
 
-def _normalize_path_expr(expr: AxonExprPath, *, path_prefix: tuple[str, ...]) -> AxonExprPath:
+def _normalize_path_expr(
+    expr: AxonExprPath,
+    *,
+    path_prefix: tuple[str, ...],
+    path_names: tuple[str, ...] = (),
+) -> AxonExprPath:
     if expr.absolute:
         return expr
+    if len(expr.parts) == 1 and expr.parts[0] in path_names:
+        return AxonExprPath(absolute=True, parts=(f"{{{expr.parts[0]}}}",))
     return absolutize_path_expr(expr, prefix=path_prefix)
 
 
@@ -1618,7 +1768,9 @@ def _flatten_expr(
 ) -> tuple[list[AxonStatement], AxonExpr]:
     if isinstance(expr, _ATOMIC_EXPR_TYPES):
         if isinstance(expr, AxonExprPath):
-            return [], _normalize_path_expr(expr, path_prefix=path_prefix)
+            return [], _normalize_path_expr(
+                expr, path_prefix=path_prefix, path_names=ctx.module_path_params
+            )
         return [], expr
     if isinstance(expr, AxonExprParen):
         return _flatten_expr(expr.inner, ctx, path_prefix=path_prefix, program_ctx=program_ctx)
@@ -1949,7 +2101,9 @@ def _flatten_statement(
     if isinstance(stmt, AxonScopeBind):
         scope_prelude: list[AxonStatement] = []
         kwargs: dict[str, AxonKwargValue] = {}
-        normalized_prefix = _normalize_path_expr(stmt.prefix, path_prefix=path_prefix)
+        normalized_prefix = _normalize_path_expr(
+            stmt.prefix, path_prefix=path_prefix, path_names=ctx.module_path_params
+        )
         for key in stmt.kwargs:
             scope_value: AxonKwargValue = stmt.kwargs[key]
             kw_pre, kw_value = _flatten_kwarg_value(
@@ -2021,9 +2175,18 @@ def _flatten_module(
     *,
     globals_by_name: set[str],
 ) -> tuple[AxonModule, tuple[AxonModule, ...]]:
-    module_path_params = module.path_params
+    module_path_params = tuple(
+        dict.fromkeys(
+            (
+                *((module.path_param,) if module.path_param is not None else ()),
+                *module.path_params,
+            )
+        )
+    )
     initial_path_prefix: tuple[str, ...] = ()
     used_names = _module_used_names(module)
+    if module.path_param is not None:
+        initial_path_prefix = (f"{{{module.path_param}}}",)
     if (
         module.name in program_ctx.scoped_modules
         and program_ctx.scope_param_name not in module_path_params
@@ -2149,9 +2312,14 @@ def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = Non
                 pragmas=dict(program.pragmas),
                 constants={
                     name: _expand_expr_aliases(
-                        _flatten_expr(expr, constants_ctx, path_prefix=(), program_ctx=program_ctx)[
-                            1
-                        ],
+                        _inline_flat_prelude_expr(
+                            *_flatten_expr(
+                                expr,
+                                constants_ctx,
+                                path_prefix=(),
+                                program_ctx=program_ctx,
+                            )
+                        ),
                         type_aliases=program_ctx.type_aliases,
                     )
                     for name, expr in program.constants.items()

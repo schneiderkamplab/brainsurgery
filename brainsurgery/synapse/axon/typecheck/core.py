@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 from ...ops import get_op_lowering_type_signature, get_op_type_rule
+from ...ops._broadcast import broadcast_shape
 from ..ast import (
     AxonBind,
     AxonCond,
@@ -96,7 +97,12 @@ class _RecursiveInterfaces:
 
 
 def _is_generic_named_type(tp: TypeExpr, *, type_aliases: dict[str, TypeAliasDef]) -> bool:
-    return isinstance(tp, TypeNamed) and tp.name not in type_aliases and "." not in tp.name
+    return (
+        isinstance(tp, TypeNamed)
+        and tp.name not in type_aliases
+        and "." not in tp.name
+        and "::" not in tp.name
+    )
 
 
 def _apply_subst(tp: TypeExpr, ctx: _TcCtx) -> TypeExpr:
@@ -548,6 +554,107 @@ def _unify(left: TypeExpr, right: TypeExpr, ctx: _TcCtx) -> TypeExpr:
     raise ValueError(f"Axon typecheck failed: cannot unify {left!r} with {right!r}")
 
 
+def _broadcast_tensor_branch_types(
+    left: TypeExpr,
+    right: TypeExpr,
+    ctx: _TcCtx,
+) -> TypeExpr:
+    left_applied = _apply_subst(left, ctx)
+    right_applied = _apply_subst(right, ctx)
+    left_expanded = _expand_alias(left_applied, ctx)
+    right_expanded = _expand_alias(right_applied, ctx)
+    if not isinstance(left_expanded, TypeTensor) or not isinstance(right_expanded, TypeTensor):
+        return _unify(left, right, ctx)
+    if (
+        left_expanded.base != right_expanded.base
+        and left_expanded.base != "Tensor"
+        and right_expanded.base != "Tensor"
+    ):
+        return _unify(left, right, ctx)
+    if not left_expanded.dims or not right_expanded.dims:
+        return _unify(left, right, ctx)
+    dims = broadcast_shape(
+        tuple(_normalize_dim_token(dim, ctx) for dim in left_expanded.dims),
+        tuple(_normalize_dim_token(dim, ctx) for dim in right_expanded.dims),
+    )
+    if dims is None:
+        return _unify(left, right, ctx)
+    return TypeTensor(base="Tensor", dims=tuple(_normalize_dim_token(dim, ctx) for dim in dims))
+
+
+def _fresh_dim_name(ctx: _TcCtx) -> str:
+    ctx.fresh_counter += 1
+    return f"__d{ctx.fresh_counter}"
+
+
+def _join_dim_token(left: DimToken, right: DimToken, ctx: _TcCtx) -> DimToken:
+    left = _normalize_dim_token(left, ctx)
+    right = _normalize_dim_token(right, ctx)
+    if left == right:
+        return left
+    if left == 1:
+        return right
+    if right == 1:
+        return left
+    try:
+        return _unify_dim_token(left, right, ctx)
+    except ValueError:
+        return _fresh_dim_name(ctx)
+
+
+def _join_tensor_dims(
+    left: tuple[DimToken, ...],
+    right: tuple[DimToken, ...],
+    ctx: _TcCtx,
+) -> tuple[DimToken, ...] | None:
+    if len(left) != len(right):
+        return None
+    return tuple(
+        _join_dim_token(left_dim, right_dim, ctx)
+        for left_dim, right_dim in zip(left, right, strict=True)
+    )
+
+
+def _join_branch_types(left: TypeExpr, right: TypeExpr, ctx: _TcCtx) -> TypeExpr:
+    left_applied = _apply_subst(left, ctx)
+    right_applied = _apply_subst(right, ctx)
+    left_expanded = _expand_alias(left_applied, ctx)
+    right_expanded = _expand_alias(right_applied, ctx)
+    if isinstance(left_expanded, TypeTuple) and isinstance(right_expanded, TypeTuple):
+        if len(left_expanded.items) != len(right_expanded.items):
+            return _unify(left, right, ctx)
+        return TypeTuple(
+            items=tuple(
+                _join_branch_types(left_item, right_item, ctx)
+                for left_item, right_item in zip(
+                    left_expanded.items, right_expanded.items, strict=True
+                )
+            )
+        )
+    if isinstance(left_expanded, TypeTensor) and isinstance(right_expanded, TypeTensor):
+        if (
+            left_expanded.base != right_expanded.base
+            and left_expanded.base != "Tensor"
+            and right_expanded.base != "Tensor"
+        ):
+            return _unify(left, right, ctx)
+        if left_expanded.dims and right_expanded.dims:
+            broadcast_dims = broadcast_shape(
+                tuple(_normalize_dim_token(dim, ctx) for dim in left_expanded.dims),
+                tuple(_normalize_dim_token(dim, ctx) for dim in right_expanded.dims),
+            )
+            if broadcast_dims is not None:
+                return TypeTensor(
+                    base="Tensor",
+                    dims=tuple(_normalize_dim_token(dim, ctx) for dim in broadcast_dims),
+                )
+            joined_dims = _join_tensor_dims(left_expanded.dims, right_expanded.dims, ctx)
+            if joined_dims is not None:
+                return TypeTensor(base="Tensor", dims=joined_dims)
+        return _broadcast_tensor_branch_types(left, right, ctx)
+    return _unify(left, right, ctx)
+
+
 def _scoped_typevars(
     tp: TypeExpr | None,
     *,
@@ -581,6 +688,8 @@ def _scoped_typevars(
 
     def _rewrite_type(inner: TypeExpr) -> TypeExpr:
         if isinstance(inner, TypeVar):
+            if not freshen_generics and "::" in inner.name:
+                return inner
             if freshen_generics:
                 return ctx.fresh_type_var()
             return TypeVar(name=f"{module_name}::{inner.name}")
@@ -2062,6 +2171,124 @@ def _infer_primitive_call(
     return None
 
 
+def _primitive_wrapper_parts(callee: AxonModule) -> tuple[AxonBind, AxonReturn] | None:
+    if len(callee.statements) != 2:
+        return None
+    bind_stmt, return_stmt = callee.statements
+    if (
+        not isinstance(bind_stmt, AxonBind)
+        or len(bind_stmt.targets) != 1
+        or not isinstance(bind_stmt.expr, AxonExprCall)
+        or _primitive_op_name(bind_stmt.expr.callee) is None
+        or not isinstance(return_stmt, AxonReturn)
+        or len(return_stmt.values) != 1
+    ):
+        return None
+    returned = return_stmt.values[0]
+    if not isinstance(returned, AxonExprName) or returned.name != bind_stmt.targets[0]:
+        return None
+    return bind_stmt, return_stmt
+
+
+def _primitive_wrapper_call_result_type(
+    *,
+    callee: AxonModule,
+    typed_args: tuple[AxonExpr, ...],
+    arg_types: tuple[TypeExpr, ...],
+    typed_kwargs: dict[str, AxonKwargValue],
+    kwarg_types: dict[str, TypeExpr],
+    ctx: _TcCtx,
+    module_name: str,
+    expected_arity: int | None,
+    expr_defs: dict[str, AxonExpr],
+) -> TypeExpr | None:
+    wrapper_parts = _primitive_wrapper_parts(callee)
+    if wrapper_parts is None:
+        return None
+    bind_stmt, _ = wrapper_parts
+    primitive_call = bind_stmt.expr
+    assert isinstance(primitive_call, AxonExprCall)
+
+    param_names = [*callee.path_params, *(param.name for param in callee.params)]
+    actual_exprs: dict[str, AxonExpr] = {}
+    actual_types: dict[str, TypeExpr] = {}
+    for idx, (expr, tp) in enumerate(zip(typed_args, arg_types, strict=False)):
+        if idx < len(param_names):
+            actual_exprs[param_names[idx]] = expr
+            actual_types[param_names[idx]] = tp
+    for key, value in typed_kwargs.items():
+        if isinstance(value, AxonExpr) and key in kwarg_types:
+            actual_exprs[key] = value
+            actual_types[key] = kwarg_types[key]
+
+    primitive_args: list[AxonExpr] = []
+    primitive_arg_types: list[TypeExpr] = []
+    for arg in primitive_call.args:
+        if isinstance(arg, AxonExprName) and arg.name in actual_exprs:
+            primitive_args.append(actual_exprs[arg.name])
+            primitive_arg_types.append(actual_types[arg.name])
+            continue
+        typed_arg, arg_tp, _ = _infer_expr(
+            arg,
+            env=actual_types,
+            expr_defs=expr_defs,
+            ctx=ctx,
+            module_name=module_name,
+            recursive_env=None,
+        )
+        primitive_args.append(typed_arg)
+        primitive_arg_types.append(arg_tp)
+
+    primitive_kwargs: dict[str, AxonKwargValue] = {}
+    primitive_kwarg_types: dict[str, TypeExpr] = {}
+    for key, value in primitive_call.kwargs.items():
+        if isinstance(value, AxonExprName) and value.name in actual_exprs:
+            primitive_kwargs[key] = actual_exprs[value.name]
+            primitive_kwarg_types[key] = actual_types[value.name]
+            continue
+        if isinstance(value, AxonExpr):
+            typed_value, value_tp, _ = _infer_expr(
+                value,
+                env=actual_types,
+                expr_defs=expr_defs,
+                ctx=ctx,
+                module_name=module_name,
+                recursive_env=None,
+            )
+            primitive_kwargs[key] = typed_value
+            primitive_kwarg_types[key] = value_tp
+            continue
+        primitive_kwargs[key] = value
+
+    primitive = _infer_primitive_call(
+        callee=primitive_call.callee,
+        typed_args=primitive_args,
+        arg_types=primitive_arg_types,
+        typed_kwargs=primitive_kwargs,
+        kwarg_types=primitive_kwarg_types,
+        ctx=ctx,
+        module_name=module_name,
+        expected_arity=expected_arity,
+        expr_defs=expr_defs,
+    )
+    if primitive is None:
+        return None
+    _, result_tp, _ = primitive
+    return result_tp
+
+
+def _is_broad_wrapper_return_type(tp: TypeExpr | None, ctx: _TcCtx) -> bool:
+    if tp is None:
+        return True
+    if isinstance(tp, TypeAny | TypeVar):
+        return True
+    if isinstance(tp, TypeNamed) and _is_generic_named_type(tp, type_aliases=ctx.type_aliases):
+        return True
+    if isinstance(tp, TypeOptional):
+        return _is_broad_wrapper_return_type(tp.inner, ctx)
+    return False
+
+
 def _annotate_expr(expr: AxonExpr, tp: TypeExpr, *, arity: int, ctx: _TcCtx) -> AxonExpr:
     inferred_type = _apply_subst(tp, ctx)
     inferred_arity = arity
@@ -2264,7 +2491,17 @@ def _infer_expr(
             left_expanded = _expand_alias(_apply_subst(left_tp, ctx), ctx)
             right_expanded = _expand_alias(_apply_subst(right_tp, ctx), ctx)
             if isinstance(left_expanded, TypeTensor) and isinstance(right_expanded, TypeTensor):
-                tp = _unify(left_tp, right_tp, ctx)
+                dims = broadcast_shape(
+                    tuple(_normalize_dim_token(dim, ctx) for dim in left_expanded.dims),
+                    tuple(_normalize_dim_token(dim, ctx) for dim in right_expanded.dims),
+                )
+                if dims is None:
+                    tp = _unify(left_tp, right_tp, ctx)
+                else:
+                    tp = TypeTensor(
+                        base="Tensor",
+                        dims=tuple(_normalize_dim_token(dim, ctx) for dim in dims),
+                    )
             elif isinstance(left_expanded, TypeTensor):
                 tp = _apply_subst(left_tp, ctx)
             elif isinstance(right_expanded, TypeTensor):
@@ -2419,6 +2656,31 @@ def _infer_expr(
                                         )
         if dim_subst:
             return_types = [_substitute_type_dims(tp, subst=dim_subst) for tp in return_types]
+        refined_call_result = _primitive_wrapper_call_result_type(
+            callee=callee,
+            typed_args=tuple(typed_args),
+            arg_types=tuple(arg_types),
+            typed_kwargs=typed_kwargs,
+            kwarg_types=kwarg_types,
+            ctx=ctx,
+            module_name=module_name,
+            expected_arity=expected_arity,
+            expr_defs=expr_defs,
+        )
+        if refined_call_result is not None:
+            if len(return_types) == 1:
+                if _is_broad_wrapper_return_type(callee.return_type_expr, ctx):
+                    return_types = [_apply_subst(refined_call_result, ctx)]
+                else:
+                    _unify(refined_call_result, return_types[0], ctx)
+                    return_types = [_apply_subst(refined_call_result, ctx)]
+            elif isinstance(refined_call_result, TypeTuple) and len(refined_call_result.items) == len(
+                return_types
+            ):
+                return_types = [
+                    _unify(item, expected, ctx)
+                    for item, expected in zip(refined_call_result.items, return_types, strict=True)
+                ]
         if len(return_types) == 1:
             call_result_type: TypeExpr = return_types[0]
             arity = (
@@ -2482,7 +2744,7 @@ def _infer_expr(
             recursive_env=recursive_env,
             expected_arity=expected_arity,
         )
-        result_tp = _unify(true_tp, false_tp, ctx)
+        result_tp = _join_branch_types(true_tp, false_tp, ctx)
         typed_cond_expr = replace(expr, cond=cond_expr, true_expr=true_expr, false_expr=false_expr)
         return (
             _annotate_expr(typed_cond_expr, result_tp, arity=expected_arity or 1, ctx=ctx),

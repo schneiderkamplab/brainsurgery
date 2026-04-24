@@ -1,26 +1,19 @@
 {-# CHECKPOINTS ["google/gemma-3-4b-pt", "google/gemma-3-4b-it"] #-}
 
-import Activations
 import Activations (gelu_pytorch_tanh)
-import Attention
 import Attention (attention, merge_heads, reshape_heads)
-import Masking
 import Masking (causal_mask)
-import Math
 import Math (mul)
-import Params
 import Params (has_root)
-import Positions
 import Positions (position_ids, rope_pair_base)
-import Cache
+import Cache (Cache, CacheLayer)
 import NN
 import Tensor
 
 HAS_MODEL_LM_MODEL = has_root "model.language_model.model"
 HAS_LM_MODEL = has_root "language_model.model"
-PARAM_ROOT = HAS_MODEL_LM_MODEL ? "model.language_model" : (HAS_LM_MODEL ? "language_model" : "")
 
-gemma3_block :: Tensor -> Int -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
+gemma3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gemma3_block x i pos_ids attn_mask past_kv = do
   xn <- NN.rmsnorm@input_layernorm x cast_float=true unit_offset=true
   a, new_kv <- scope@self_attn do
@@ -48,17 +41,20 @@ gemma3_block x i pos_ids attn_mask past_kv = do
   m <- NN.rmsnorm@post_feedforward_layernorm m cast_float=true unit_offset=true
   return x + m, new_kv
 
-gemma3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
-gemma3 input_ids attn_mask past_kv use_cache = do
+gemma3_body :: Path -> Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+gemma3_body@__scope input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
-  logits, new_kv <- scope@'{PARAM_ROOT}.model' do
-    x <- NN.embedding@embed_tokens input_ids dim=2560 scale=50.59644256269407
-    new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..34) do
-      past_i <- Cache.index past_kv i
-      x, new_i <- gemma3_block x i pos_ids attn_mask past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
-    logits <- NN.rmsnorm@norm x cast_float=true unit_offset=true |> NN.linear@embed_tokens
-    return logits, new_kv
+  x <- NN.embedding@embed_tokens input_ids dim=2560 scale=50.59644256269407
+  new_kv <- use_cache ? Cache.init : null
+  x, new_kv <- for@layers i <- [0..34) carry (x, new_kv) do
+    past_i <- Cache.index past_kv i
+    x, new_i <- gemma3_block x i pos_ids attn_mask past_i
+    new_kv <- Cache.append new_kv new_i
+    yield x, new_kv
+  logits <- NN.rmsnorm@norm x cast_float=true unit_offset=true |> NN.linear@embed_tokens
+  return logits, new_kv
+
+gemma3 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+gemma3 input_ids attn_mask past_kv use_cache = do
+  logits, new_kv <- HAS_MODEL_LM_MODEL ? (gemma3_body@model.language_model.model input_ids attn_mask past_kv use_cache) : (HAS_LM_MODEL ? (gemma3_body@language_model.model input_ids attn_mask past_kv use_cache) : (gemma3_body@model input_ids attn_mask past_kv use_cache))
   return logits, new_kv

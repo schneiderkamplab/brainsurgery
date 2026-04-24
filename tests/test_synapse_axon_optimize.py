@@ -240,6 +240,18 @@ main flag keep x = do
     assert "targets=('y',)" not in text
 
 
+def test_optimize_rewrites_list_destructuring_to_index_binds() -> None:
+    resolved = resolve_axon_program_from_path(
+        Path("brainsurgery/synapse/models/gpt2/gpt2.axon")
+    ).ast
+    flat = flatten_closed_axon_file(resolved, main_module="gpt2")
+    typed = typecheck_flat_axon_file(flat, main_module="gpt2")
+    optimized = optimize_flat_typed_axon_file(typed, main_module="gpt2")
+    validate_typed_axon_file(optimized, main_module="gpt2")
+    text = "\n".join(str(stmt) for module in optimized.modules for stmt in module.statements)
+    assert "callee='_list_index'" in text
+
+
 def test_optimize_reapplies_structural_passes_until_fixpoint_on_generic_gpt2() -> None:
     resolved = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")

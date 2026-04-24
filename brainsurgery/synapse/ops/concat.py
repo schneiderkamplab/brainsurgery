@@ -4,13 +4,23 @@ from typing import Any
 
 import torch
 
-from ..axon.ast import AxonExprAscribe, AxonExprInt, AxonExprParen
+from ..axon.ast import AxonExprAscribe, AxonExprInt, AxonExprParen, DimExprBinary
 
 OP_NAME = "concat"
 LOWERING_ARITY = (2, 2)
 LOWERING_ALLOWED_KWARGS: set[str] = {"dim"}
 LOWERING_REQUIRED_KWARGS: set[str] = set()
 LOWERING_KWARG_KINDS: dict[str, Any] = {"dim": "int"}
+
+
+def _dim_add(left: Any, right: Any) -> Any:
+    if isinstance(left, int) and isinstance(right, int):
+        return left + right
+    if isinstance(right, DimExprBinary) and right.op == "-" and right.right == left:
+        return right.left
+    if isinstance(left, DimExprBinary) and left.op == "-" and left.right == right:
+        return left.left
+    return DimExprBinary(op="+", left=left, right=right)
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -58,8 +68,10 @@ def interpret(
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
         raise ValueError("concat expects two inputs [x, y]")
-    x = env[ins[0]]
-    y = env[ins[1]]
+    x_ref = ins[0]
+    y_ref = ins[1]
+    x = env[x_ref] if isinstance(x_ref, str) and x_ref in env else model._eval_expr(x_ref, env, symbols)
+    y = env[y_ref] if isinstance(y_ref, str) and y_ref in env else model._eval_expr(y_ref, env, symbols)
     dim = int(model._eval_expr(node_spec.get("dim", -1), env, symbols))
     out = model._require_name(node_spec.get("_bind"), field="concat._bind")
     env[out] = torch.cat([x, y], dim=dim)
@@ -79,8 +91,10 @@ def compile(
     ins = node_spec.get("_args")
     if not isinstance(ins, list) or len(ins) != 2:
         raise ValueError("concat expects two inputs [x, y]")
-    x = emitter._read_env_var(env, str(ins[0]))
-    y = emitter._read_env_var(env, str(ins[1]))
+    x_ref = ins[0]
+    y_ref = ins[1]
+    x = emitter._read_env_var(env, str(x_ref)) if isinstance(x_ref, str) and str(x_ref) in env else emitter._expr_code(x_ref, env)
+    y = emitter._read_env_var(env, str(y_ref)) if isinstance(y_ref, str) and str(y_ref) in env else emitter._expr_code(y_ref, env)
     out = emitter._assign_out_var(env, str(node_spec.get("_bind")))
     dim_expr = emitter._expr_code(node_spec.get("dim", -1), env)
     return [f"{indent}{out} = torch.cat([{x}, {y}], dim=int({dim_expr}))"]
@@ -124,7 +138,7 @@ def type_rule(
     out_dims: list[Any] = []
     for idx, (left_dim, right_dim) in enumerate(zip(left_dims, right_dims, strict=True)):
         if idx == dim:
-            out_dims.append(left_dim + right_dim)
+            out_dims.append(_dim_add(left_dim, right_dim))
             continue
         if left_dim != right_dim:
             return None

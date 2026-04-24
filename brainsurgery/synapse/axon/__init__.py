@@ -8,6 +8,7 @@ from .ast import (
     ast_equal,
     render_axon_file,
 )
+from .canonicalize import canonicalize_typed_axon_file
 from .expression_codec import axon_expr_to_runtime_value, parse_expression_to_runtime_value
 from .flatten import flatten_closed_axon_file
 from .load import LoadedAxonFile, LoadedAxonProgram, load_axon_files_from_path, resolve_import_path
@@ -80,6 +81,7 @@ __all__ = [
     "ResolveReport",
     "ResolveDiagnostic",
     "flatten_closed_axon_file",
+    "canonicalize_typed_axon_file",
     "optimize_flat_typed_axon_file",
     "validate_axon_program",
     "validate_closed_axon_file",

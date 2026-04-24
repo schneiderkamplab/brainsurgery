@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..axon.ast import TypeTuple
+from ..axon.ast import TypeList
 
 OP_NAME = "chunk"
 LOWERING_ARITY = (1, 3)
@@ -242,11 +242,9 @@ def type_rule(
     input_dims = helpers.type_dims(arg_types[0])
     if input_dims is None:
         return None
-    parts_token = helpers.expr_to_dim_token(args[2]) if len(args) >= 3 else None
-    if isinstance(parts_token, int) and parts_token > 0:
-        item_tp = helpers.type_tensor(dims=input_dims)
-        return TypeTuple(items=tuple(item_tp for _ in range(parts_token)))
-    return None
+    del args
+    item_tp = helpers.type_tensor(dims=input_dims)
+    return TypeList(item=item_tp)
 
 
 __all__ = [

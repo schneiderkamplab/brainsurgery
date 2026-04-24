@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 import math
+from collections.abc import Iterable
 from typing import Any
 
 from omegaconf import OmegaConf
@@ -195,9 +196,51 @@ class _Emitter:
                 "            return ''",
                 "        return node_path.rsplit('.', 1)[0]",
                 "",
+                "    def _is_runtime_expr_payload(self, value: Any) -> bool:",
+                "        if isinstance(value, dict):",
+                "            return isinstance(value.get('_expr'), str)",
+                "        if isinstance(value, (list, tuple)):",
+                "            return all(self._is_runtime_expr_payload(item) or isinstance(item, (str, int, float, bool, type(None))) for item in value)",
+                "        return False",
+                "",
+                "    def _resolve_call_path_arg(self, raw: Any, env: dict[str, Any]) -> Any:",
+                "        if not isinstance(raw, (str, dict)):",
+                "            return raw",
+                "        try:",
+                "            expr = runtime_value_to_path_expr(raw, op_name='call path arg')",
+                "            return resolve_path_expr_to_key(expr, self._path_template_env(env), op_name='call path arg')",
+                "        except Exception:",
+                "            return raw",
+                "",
+                "    def _path_template_env(self, env: dict[str, Any] | None, *, symbols: dict[str, Any] | None = None) -> dict[str, Any]:",
+                "        if not isinstance(env, dict):",
+                "            return {}",
+                "        raw_env = dict(env)",
+                "        resolved: dict[str, Any] = {}",
+                "        symbol_values = self._symbols if symbols is None else dict(symbols)",
+                "        for key, value in raw_env.items():",
+                "            if self._is_runtime_expr_payload(value):",
+                "                try:",
+                "                    resolved[key] = self._eval_expr(value, raw_env, symbol_values)",
+                "                    continue",
+                "                except Exception:",
+                "                    pass",
+                "            resolved[key] = value",
+                "        for key, value in list(resolved.items()):",
+                "            if isinstance(value, dict) and value.get('_expr') != 'path':",
+                "                continue",
+                "            if not isinstance(value, (str, dict)):",
+                "                continue",
+                "            try:",
+                "                expr = runtime_value_to_path_expr(value, op_name='path template env')",
+                "                resolved[key] = resolve_path_expr_to_key(expr, resolved, op_name='path template env')",
+                "            except Exception:",
+                "                pass",
+                "        return resolved",
+                "",
                 "    def _resolve_state_path(self, *, node_path: str, raw_path: Any, env: dict[str, Any] | None = None) -> str:",
                 "        expr = runtime_value_to_path_expr(raw_path, op_name='state path')",
-                "        token = resolve_path_expr_to_key(expr, env or {}, op_name='state path')",
+                "        token = resolve_path_expr_to_key(expr, self._path_template_env(env), op_name='state path')",
                 "        if expr.absolute:",
                 "            return token",
                 "        scope = self._scope_of(node_path)",
@@ -278,20 +321,31 @@ class _Emitter:
                 "                    return out",
                 "        return out",
                 "",
+                "    def _resolve_param_scope(self, scope: str, env: dict[str, Any]) -> str:",
+                "        token = scope.strip()",
+                "        if not token:",
+                "            return token",
+                "        raw = token if token.startswith('@') else '@@' + token",
+                "        try:",
+                "            return resolve_path_expr_to_key(raw, self._path_template_env(env), op_name='parameter scope')",
+                "        except Exception:",
+                "            return token",
+                "",
                 "    def _pick_param_path(self, scope: str, candidates: list[Any], env: dict[str, Any]) -> str:",
                 "        scoped: list[str] = []",
+                "        resolved_scope = self._resolve_param_scope(scope, env)",
                 "        for candidate in candidates:",
                 "            if not isinstance(candidate, (str, dict)):",
                 "                continue",
                 "            if isinstance(candidate, str) and candidate and not candidate.startswith('@'):",
                 "                candidate = '@' + candidate",
                 "            expr = runtime_value_to_path_expr(candidate, op_name='parameter path')",
-                "            key = resolve_path_expr_to_key(expr, env, op_name='parameter path')",
+                "            key = resolve_path_expr_to_key(expr, self._path_template_env(env), op_name='parameter path')",
                 "            if expr.absolute:",
                 "                if key:",
                 "                    scoped.append(key)",
                 "                continue",
-                "            base = self._join_scope(scope, key)",
+                "            base = self._join_scope(resolved_scope, key)",
                 "            scoped.append(base)",
                 "        if not scoped:",
                 "            raise ValueError('parameter candidate list is empty')",
@@ -301,13 +355,14 @@ class _Emitter:
                 "        return scoped[0]",
                 "",
                 "    def _pick_param_from_single(self, scope: str, candidate: Any, env: dict[str, Any]) -> str:",
+                "        resolved_scope = self._resolve_param_scope(scope, env)",
                 "        if isinstance(candidate, str) and candidate and not candidate.startswith('@'):",
                 "            candidate = '@' + candidate",
                 "        expr = runtime_value_to_path_expr(candidate, op_name='parameter path')",
-                "        key = resolve_path_expr_to_key(expr, env, op_name='parameter path')",
+                "        key = resolve_path_expr_to_key(expr, self._path_template_env(env), op_name='parameter path')",
                 "        if expr.absolute:",
                 "            return key",
-                "        base = self._join_scope(scope, key)",
+                "        base = self._join_scope(resolved_scope, key)",
                 "        if base in self._state:",
                 "            return base",
                 "        return base",
@@ -315,7 +370,7 @@ class _Emitter:
                 "    def _infer_param_path(self, node_spec: dict[str, Any], *, node_path: str, param_name: str, env: dict[str, Any]) -> str:",
                 "        abs_path = node_spec.get('_abs_path')",
                 "        if isinstance(abs_path, (str, dict)) and abs_path:",
-                "            scope = resolve_path_expr_to_key(abs_path, env, op_name='_abs_path')",
+                "            scope = resolve_path_expr_to_key(abs_path, self._path_template_env(env), op_name='_abs_path')",
                 "        else:",
                 "            scope = self._scope_of(node_path)",
                 "        explicit_params = node_spec.get('_params')",
@@ -338,7 +393,7 @@ class _Emitter:
                 "        return cfg if isinstance(cfg, dict) else {}",
                 "",
                 "    def _resolve_config_path_key(self, raw: Any, env: dict[str, Any], op_name: str = 'Config') -> str:",
-                "        return resolve_path_expr_to_key(raw, env, op_name=op_name)",
+                "        return resolve_path_expr_to_key(raw, self._path_template_env(env, symbols=self._symbols), op_name=op_name)",
                 "",
                 "    def _expr_config_lookup(self, key: str) -> tuple[bool, Any]:",
                 "        value: Any = self._expr_config_root()",
@@ -607,8 +662,9 @@ class _Emitter:
         if not isinstance(outputs, dict):
             raise ValueError("block outputs must be mapping")
 
-        arg_names = [self._py_name(name) for name in inputs]
-        env: dict[str, str] = {name: py for name, py in zip(inputs, arg_names, strict=True)}
+        input_py_names = self._unique_py_name_map(inputs.keys(), reserved={"self", "scope"})
+        arg_names = [input_py_names[name] for name in inputs]
+        env: dict[str, str] = {name: input_py_names[name] for name in inputs}
         block_types = self.block_io_types.get(block_name, {})
         input_types = block_types.get("inputs", {}) if isinstance(block_types, dict) else {}
         shape_aliases = (
@@ -673,10 +729,11 @@ class _Emitter:
             "        emitter = self",
         ]
 
+        input_py_names = self._unique_py_name_map(inputs.keys(), reserved={"self", "scope", "env"})
         env: dict[str, str] = {}
         for name, input_spec in inputs.items():
             is_optional = isinstance(input_spec, dict) and bool(input_spec.get("optional", False))
-            py_name = self._py_name(name)
+            py_name = input_py_names[name]
             if is_optional:
                 lines.append(f"        {py_name} = env.get({name!r})")
             else:
@@ -961,6 +1018,14 @@ class _Emitter:
         if not isinstance(block_inputs, dict):
             raise ValueError("block must define mapping inputs")
         input_names = list(block_inputs.keys())
+        input_py_names = self._unique_py_name_map(input_names, reserved={"self", "scope"})
+        block_types = self.block_io_types.get(block_name, {})
+        input_types = block_types.get("inputs", {}) if isinstance(block_types, dict) else {}
+
+        def _path_typed_input(name: str) -> bool:
+            raw_type = input_types.get(name) if isinstance(input_types, dict) else None
+            return isinstance(raw_type, str) and raw_type.strip() in {"Path", "?Path"}
+
         raw_args = node_spec.get("_args")
         positional: list[Any]
         if raw_args is None:
@@ -974,19 +1039,27 @@ class _Emitter:
             if idx >= len(input_names):
                 raise ValueError(f"too many positional args for call {block_name!r}")
             block_input_name = input_names[idx]
+            py_input_name = input_py_names[block_input_name]
             if isinstance(src, str) and src in env:
-                arg_codes.append(f"{block_input_name}={env[src]}")
+                value_code = env[src]
             else:
-                arg_codes.append(f"{block_input_name}={self._expr_code(src, env)}")
+                value_code = self._expr_code(src, env)
+            if _path_typed_input(block_input_name):
+                value_code = f"self._resolve_call_path_arg({value_code}, locals())"
+            arg_codes.append(f"{py_input_name}={value_code}")
         for key, value in node_spec.items():
             if key.startswith("_") or key == "graph":
                 continue
             if key not in block_inputs:
                 continue
+            py_input_name = input_py_names[key]
             if isinstance(value, str) and value in env:
-                arg_codes.append(f"{key}={env[value]}")
+                value_code = env[value]
             else:
-                arg_codes.append(f"{key}={self._expr_code(value, env)}")
+                value_code = self._expr_code(value, env)
+            if _path_typed_input(key):
+                value_code = f"self._resolve_call_path_arg({value_code}, locals())"
+            arg_codes.append(f"{py_input_name}={value_code}")
 
         block_outputs = block_spec.get("outputs", {})
         if not isinstance(block_outputs, dict):
@@ -1021,7 +1094,6 @@ class _Emitter:
             )
             lines.append(f"{indent}{dst_var} = {tmp}")
             env[dst_name] = dst_var
-        block_types = self.block_io_types.get(block_name, {})
         output_types = block_types.get("outputs", {}) if isinstance(block_types, dict) else {}
         exact_output_types = node_spec.get("_out_types")
         if isinstance(exact_output_types, dict):
@@ -1102,9 +1174,13 @@ class _Emitter:
         expr_env = self._active_env if env is None else env
         env_expr = "locals()"
         abs_path = node_spec.get("_abs_path")
-        scope_expr = (
-            repr(abs_path) if isinstance(abs_path, str) else f"self._scope_of({node_path_var})"
-        )
+        if isinstance(abs_path, (str, dict)):
+            scope_expr = (
+                "resolve_path_expr_to_key("
+                f"{repr(abs_path)}, self._path_template_env({env_expr}), op_name='_abs_path')"
+            )
+        else:
+            scope_expr = f"self._scope_of({node_path_var})"
         param_base = node_spec.get("param_base")
         if isinstance(param_base, str):
             if param_base in expr_env:
@@ -1132,10 +1208,12 @@ class _Emitter:
         # Next precedence level: lowered path bindings from _params.
         if isinstance(explicit_params, dict):
             explicit = explicit_params.get(param_name)
-            if isinstance(explicit, str):
+            if isinstance(explicit, (str, dict)):
                 expr = f"self._pick_param_from_single({scope_expr}, {explicit!r}, {env_expr})"
                 return expr
-            if isinstance(explicit, list) and all(isinstance(item, str) for item in explicit):
+            if isinstance(explicit, list) and all(
+                isinstance(item, (str, dict)) for item in explicit
+            ):
                 expr = f"self._pick_param_path({scope_expr}, {explicit!r}, {env_expr})"
                 return expr
         fallback_expr = f"self._pick_param_from_single({scope_expr}, {param_name!r}, {env_expr})"
@@ -1356,9 +1434,27 @@ class _Emitter:
         name = "".join(out_chars)
         if not name:
             name = "v"
+        if name.startswith("__"):
+            name = f"v{name}"
         if name[0].isdigit():
             name = f"v_{name}"
         return name
+
+    def _unique_py_name_map(
+        self, values: Iterable[str], *, reserved: set[str] | None = None
+    ) -> dict[str, str]:
+        used = set(reserved or ())
+        mapping: dict[str, str] = {}
+        for value in values:
+            base = self._py_name(value)
+            candidate = base
+            suffix = 1
+            while candidate in used:
+                suffix += 1
+                candidate = f"{base}_{suffix}"
+            used.add(candidate)
+            mapping[value] = candidate
+        return mapping
 
     def _fresh(self, base: str) -> str:
         self._counter += 1

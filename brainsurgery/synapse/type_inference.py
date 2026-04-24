@@ -12,6 +12,7 @@ from .axon.ast import (
     TypeNamed,
     TypeNull,
     TypeOptional,
+    TypePath,
     TypeString,
     TypeTensor,
     TypeTuple,
@@ -27,6 +28,7 @@ _TYPE_EXPR_CLASSES = (
     TypeBool,
     TypeNull,
     TypeString,
+    TypePath,
     TypeNamed,
     TypeOptional,
     TypeTensor,
@@ -260,6 +262,13 @@ def module_io_types(
     output_names: list[str],
 ) -> dict[str, dict[str, str]]:
     input_types: dict[str, str] = {}
+    path_param_names = tuple(getattr(module, "path_params", ()) or ())
+    path_param = getattr(module, "path_param", None)
+    if not path_param_names and isinstance(path_param, str):
+        path_param_names = (path_param,)
+    for name in path_param_names:
+        if isinstance(name, str) and name in input_names:
+            input_types[name] = "Path"
     for param in getattr(module, "params", ()):
         name = getattr(param, "name", None)
         if not isinstance(name, str) or name not in input_names:

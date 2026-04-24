@@ -298,6 +298,24 @@ def test_flatten_threads_loop_scope_into_called_module_paths() -> None:
     assert "@@'{__scope}.attn.c_attn'" in rendered
 
 
+def test_flatten_threads_explicit_path_param_into_absolute_templates() -> None:
+    source = """
+use :: Path -> Tensor[B,S] -> ?Path -> Tensor[B,S]
+use@path x ?weight_path=@weight = x
+
+wrap :: Path -> Tensor[B,S] -> Tensor[B,S]
+wrap@__scope x = do
+  y <- use@proj x weight_path=@weight
+  return y
+"""
+    program = parse_axon_program(source)
+    flat = flatten_closed_axon_file(program, main_module="wrap")
+    validate_flat_axon_file(flat, main_module="wrap")
+    rendered = render_axon_file(flat)
+    assert "@@'{__scope}.proj'" in rendered
+    assert "@@'{__scope}.proj.weight'" in rendered
+
+
 def test_flatten_eliminates_type_aliases() -> None:
     source = """
 type TokenIds[B,S] = Tensor[B,S]
@@ -335,3 +353,20 @@ main input_ids past_kv = do
                     isinstance(value, (AxonExprAscribe, AxonExprName, AxonExprTuple))
                     for value in stmt.values
                 )
+
+
+def test_flatten_constants_inline_prelude_temps() -> None:
+    source = """
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = x
+
+A = Config.int @text_config.hidden_size default=(Config.int @hidden_size default=640)
+"""
+    program = parse_axon_program(source)
+    flat = flatten_closed_axon_file(program, main_module="main")
+    const_expr = flat.constants["A"]
+    assert isinstance(const_expr, AxonExprCall)
+    default_expr = const_expr.kwargs["default"]
+    assert isinstance(default_expr, AxonExprCall)
+    rendered = render_axon_file(flat)
+    assert "__flat_" not in rendered

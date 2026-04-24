@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
+import time
+from difflib import unified_diff
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Mapping
 
@@ -48,8 +52,82 @@ from ..ast import (
     TypeTuple,
     ast_equal,
 )
+from ..ast.render import render_axon_file
 from ..typecheck import typecheck_flat_axon_file
 from ..validate import validate_typed_axon_file
+
+
+_OPT_DEBUG_ENV = "AXON_OPTIMIZE_DEBUG"
+_OPT_DEBUG_ONE_PASS_ENV = "AXON_OPTIMIZE_DEBUG_ONE_PASS"
+_OPT_DEBUG_DIFF_ENV = "AXON_OPTIMIZE_DEBUG_DIFF"
+_OPT_DEBUG_ACTIVE = False
+_OPT_DEBUG_PASS = 0
+_OPT_DEBUG_STATS: dict[str, float | int] = {}
+
+
+def _opt_debug_enabled(*, pass_index: int) -> bool:
+    if os.environ.get(_OPT_DEBUG_ENV) not in {"1", "true", "TRUE", "yes", "YES"}:
+        return False
+    if os.environ.get(_OPT_DEBUG_ONE_PASS_ENV) in {"1", "true", "TRUE", "yes", "YES"}:
+        return pass_index == 1
+    return True
+
+
+def _opt_debug_begin_pass(*, pass_index: int) -> None:
+    global _OPT_DEBUG_ACTIVE, _OPT_DEBUG_PASS, _OPT_DEBUG_STATS
+    _OPT_DEBUG_ACTIVE = _opt_debug_enabled(pass_index=pass_index)
+    _OPT_DEBUG_PASS = pass_index
+    _OPT_DEBUG_STATS = {}
+
+
+def _opt_debug_record(counter: str, seconds_key: str, elapsed: float) -> None:
+    if not _OPT_DEBUG_ACTIVE:
+        return
+    _OPT_DEBUG_STATS[counter] = int(_OPT_DEBUG_STATS.get(counter, 0)) + 1
+    _OPT_DEBUG_STATS[seconds_key] = float(_OPT_DEBUG_STATS.get(seconds_key, 0.0)) + elapsed
+
+
+@contextmanager
+def _opt_debug_time(name: str):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        _opt_debug_record(f"{name}_calls", f"{name}_seconds", time.perf_counter() - start)
+
+
+def _opt_debug_end_pass(*, modules: int) -> None:
+    if not _OPT_DEBUG_ACTIVE:
+        return
+    keys = sorted(key[:-8] for key in _OPT_DEBUG_STATS if key.endswith("_seconds"))
+    print(f"[axon-optimize] pass={_OPT_DEBUG_PASS} modules={modules}")
+    for key in keys:
+        print(
+            "[axon-optimize]"
+            f" pass={_OPT_DEBUG_PASS}"
+            f" fn={key}"
+            f" calls={int(_OPT_DEBUG_STATS.get(f'{key}_calls', 0))}"
+            f" seconds={float(_OPT_DEBUG_STATS.get(f'{key}_seconds', 0.0)):.6f}"
+        )
+
+
+def _opt_debug_print_diff(*, before: AxonFile, after: AxonFile, pass_index: int) -> None:
+    if os.environ.get(_OPT_DEBUG_DIFF_ENV) not in {"1", "true", "TRUE", "yes", "YES"}:
+        return
+    before_lines = render_axon_file(before, show_types=True).splitlines()
+    after_lines = render_axon_file(after, show_types=True).splitlines()
+    diff_lines = list(
+        unified_diff(
+            before_lines,
+            after_lines,
+            fromfile=f"pass_{pass_index}_input.axon",
+            tofile=f"pass_{pass_index}_output.axon",
+            lineterm="",
+        )
+    )
+    print(f"[axon-optimize-diff] pass={pass_index} lines={len(diff_lines)}")
+    for line in diff_lines:
+        print(line)
 
 
 def _is_atomic_expr(expr: AxonExpr) -> bool:
@@ -344,62 +422,63 @@ def _rename_path(expr: AxonExprPath, renames: Mapping[str, str]) -> AxonExprPath
 def _substitute_expr(
     expr: AxonExpr, subst: Mapping[str, AxonExpr], *, for_return: bool = False
 ) -> AxonExpr:
-    if isinstance(expr, AxonExprName) and expr.name in subst:
-        replacement = subst[expr.name]
-        if for_return and not isinstance(replacement, AxonExprName):
-            return expr
-        return replacement
-    if isinstance(expr, AxonExprPath):
-        return _substitute_path(expr, subst)
-    if isinstance(expr, AxonExprBinary):
-        return replace(
-            expr,
-            left=_substitute_expr(expr.left, subst),
-            right=_substitute_expr(expr.right, subst),
-        )
-    if isinstance(expr, AxonExprBind):
-        next_subst = dict(subst)
-        next_subst.pop(expr.var, None)
-        return replace(
-            expr,
-            value=_substitute_expr(expr.value, subst),
-            body=_substitute_expr(expr.body, next_subst),
-        )
-    if isinstance(expr, AxonExprCall):
-        return replace(
-            expr,
-            args=tuple(_substitute_expr(arg, subst) for arg in expr.args),
-            kwargs={
-                key: _substitute_expr(value, subst) if isinstance(value, AxonExpr) else value
-                for key, value in expr.kwargs.items()
-            },
-        )
-    if isinstance(expr, AxonExprDo):
-        return replace(expr, body=_substitute_stmts(expr.body, subst))
-    if isinstance(expr, AxonExprIf | AxonExprTernary):
-        return replace(
-            expr,
-            cond=_substitute_expr(expr.cond, subst),
-            true_expr=_substitute_expr(expr.true_expr, subst),
-            false_expr=_substitute_expr(expr.false_expr, subst),
-        )
-    if isinstance(expr, AxonExprLambda):
-        next_subst = dict(subst)
-        next_subst.pop(expr.var, None)
-        return replace(expr, body=_substitute_expr(expr.body, next_subst))
-    if isinstance(expr, AxonExprAscribe):
-        return replace(expr, expr=_substitute_expr(expr.expr, subst, for_return=for_return))
-    if isinstance(expr, AxonExprList | AxonExprTuple):
-        return replace(expr, items=tuple(_substitute_expr(item, subst) for item in expr.items))
-    if isinstance(expr, AxonExprParen):
-        return replace(expr, inner=_substitute_expr(expr.inner, subst))
-    if isinstance(expr, AxonExprPipe):
-        return replace(
-            expr,
-            value=_substitute_expr(expr.value, subst),
-            stages=tuple(_substitute_expr(item, subst) for item in expr.stages),
-        )
-    return expr
+    with _opt_debug_time("substitute_expr"):
+        if isinstance(expr, AxonExprName) and expr.name in subst:
+            replacement = subst[expr.name]
+            if for_return and not isinstance(replacement, AxonExprName):
+                return expr
+            return replacement
+        if isinstance(expr, AxonExprPath):
+            return _substitute_path(expr, subst)
+        if isinstance(expr, AxonExprBinary):
+            return replace(
+                expr,
+                left=_substitute_expr(expr.left, subst),
+                right=_substitute_expr(expr.right, subst),
+            )
+        if isinstance(expr, AxonExprBind):
+            next_subst = dict(subst)
+            next_subst.pop(expr.var, None)
+            return replace(
+                expr,
+                value=_substitute_expr(expr.value, subst),
+                body=_substitute_expr(expr.body, next_subst),
+            )
+        if isinstance(expr, AxonExprCall):
+            return replace(
+                expr,
+                args=tuple(_substitute_expr(arg, subst) for arg in expr.args),
+                kwargs={
+                    key: _substitute_expr(value, subst) if isinstance(value, AxonExpr) else value
+                    for key, value in expr.kwargs.items()
+                },
+            )
+        if isinstance(expr, AxonExprDo):
+            return replace(expr, body=_substitute_stmts(expr.body, subst))
+        if isinstance(expr, AxonExprIf | AxonExprTernary):
+            return replace(
+                expr,
+                cond=_substitute_expr(expr.cond, subst),
+                true_expr=_substitute_expr(expr.true_expr, subst),
+                false_expr=_substitute_expr(expr.false_expr, subst),
+            )
+        if isinstance(expr, AxonExprLambda):
+            next_subst = dict(subst)
+            next_subst.pop(expr.var, None)
+            return replace(expr, body=_substitute_expr(expr.body, next_subst))
+        if isinstance(expr, AxonExprAscribe):
+            return replace(expr, expr=_substitute_expr(expr.expr, subst, for_return=for_return))
+        if isinstance(expr, AxonExprList | AxonExprTuple):
+            return replace(expr, items=tuple(_substitute_expr(item, subst) for item in expr.items))
+        if isinstance(expr, AxonExprParen):
+            return replace(expr, inner=_substitute_expr(expr.inner, subst))
+        if isinstance(expr, AxonExprPipe):
+            return replace(
+                expr,
+                value=_substitute_expr(expr.value, subst),
+                stages=tuple(_substitute_expr(item, subst) for item in expr.stages),
+            )
+        return expr
 
 
 def _rename_expr(expr: AxonExpr, renames: Mapping[str, str]) -> AxonExpr:
@@ -820,67 +899,68 @@ def _can_inline_module_at_call(
 def _substitute_stmts(
     statements: tuple[AxonStatement, ...], subst: Mapping[str, AxonExpr]
 ) -> tuple[AxonStatement, ...]:
-    rewritten: list[AxonStatement] = []
-    current_subst = dict(subst)
-    for stmt in statements:
-        if isinstance(stmt, AxonBind):
-            rewritten_expr = _substitute_expr(stmt.expr, current_subst)
-            for target in stmt.targets:
-                current_subst.pop(target, None)
-            rewritten.append(replace(stmt, expr=rewritten_expr))
-        elif isinstance(stmt, AxonReturn | AxonYield):
-            rewritten.append(
-                replace(
-                    stmt,
-                    values=tuple(
-                        _substitute_expr(value, current_subst, for_return=True)
-                        for value in stmt.values
-                    ),
+    with _opt_debug_time("substitute_stmts"):
+        rewritten: list[AxonStatement] = []
+        current_subst = dict(subst)
+        for stmt in statements:
+            if isinstance(stmt, AxonBind):
+                rewritten_expr = _substitute_expr(stmt.expr, current_subst)
+                for target in stmt.targets:
+                    current_subst.pop(target, None)
+                rewritten.append(replace(stmt, expr=rewritten_expr))
+            elif isinstance(stmt, AxonReturn | AxonYield):
+                rewritten.append(
+                    replace(
+                        stmt,
+                        values=tuple(
+                            _substitute_expr(value, current_subst, for_return=True)
+                            for value in stmt.values
+                        ),
+                    )
                 )
-            )
-        elif isinstance(stmt, AxonCond):
-            rewritten.append(
-                replace(
-                    stmt,
-                    cond=_substitute_expr(stmt.cond, current_subst),
-                    true_body=_substitute_stmts(stmt.true_body, dict(current_subst)),
-                    false_body=_substitute_stmts(stmt.false_body, dict(current_subst)),
+            elif isinstance(stmt, AxonCond):
+                rewritten.append(
+                    replace(
+                        stmt,
+                        cond=_substitute_expr(stmt.cond, current_subst),
+                        true_body=_substitute_stmts(stmt.true_body, dict(current_subst)),
+                        false_body=_substitute_stmts(stmt.false_body, dict(current_subst)),
+                    )
                 )
-            )
-        elif isinstance(stmt, AxonRepeat):
-            loop_subst = dict(current_subst)
-            loop_subst.pop(stmt.var, None)
-            for name in stmt.targets or ():
-                loop_subst.pop(name, None)
-            for name in stmt.carry or ():
-                loop_subst.pop(name, None)
-            rewritten.append(
-                replace(
-                    stmt,
-                    from_expr=_substitute_expr(stmt.from_expr, current_subst),
-                    to_expr=_substitute_expr(stmt.to_expr, current_subst),
-                    step_expr=_substitute_expr(stmt.step_expr, current_subst),
-                    body=_substitute_stmts(stmt.body, loop_subst),
+            elif isinstance(stmt, AxonRepeat):
+                loop_subst = dict(current_subst)
+                loop_subst.pop(stmt.var, None)
+                for name in stmt.targets or ():
+                    loop_subst.pop(name, None)
+                for name in stmt.carry or ():
+                    loop_subst.pop(name, None)
+                rewritten.append(
+                    replace(
+                        stmt,
+                        from_expr=_substitute_expr(stmt.from_expr, current_subst),
+                        to_expr=_substitute_expr(stmt.to_expr, current_subst),
+                        step_expr=_substitute_expr(stmt.step_expr, current_subst),
+                        body=_substitute_stmts(stmt.body, loop_subst),
+                    )
                 )
-            )
-        elif isinstance(stmt, AxonScopeBind):
-            scope_subst = dict(current_subst)
-            for target in stmt.targets:
-                scope_subst.pop(target, None)
-            rewritten.append(
-                replace(
-                    stmt,
-                    prefix=_substitute_path(stmt.prefix, current_subst),
-                    body=_substitute_stmts(stmt.body, scope_subst),
-                    kwargs={
-                        key: _substitute_expr(value, current_subst)
-                        if isinstance(value, AxonExpr)
-                        else value
-                        for key, value in stmt.kwargs.items()
-                    },
+            elif isinstance(stmt, AxonScopeBind):
+                scope_subst = dict(current_subst)
+                for target in stmt.targets:
+                    scope_subst.pop(target, None)
+                rewritten.append(
+                    replace(
+                        stmt,
+                        prefix=_substitute_path(stmt.prefix, current_subst),
+                        body=_substitute_stmts(stmt.body, scope_subst),
+                        kwargs={
+                            key: _substitute_expr(value, current_subst)
+                            if isinstance(value, AxonExpr)
+                            else value
+                            for key, value in stmt.kwargs.items()
+                        },
+                    )
                 )
-            )
-    return tuple(rewritten)
+        return tuple(rewritten)
 
 
 def _literal_from_template(value: object, template: AxonExpr) -> AxonExpr:
@@ -1208,28 +1288,29 @@ def _is_pure_expr(expr: AxonExpr) -> bool:
 def _inline_atomic_alias_statements(
     statements: tuple[AxonStatement, ...],
 ) -> tuple[AxonStatement, ...]:
-    counts: dict[str, int] = {}
-    _count_name_uses_stmts(statements, counts)
-    return_names = _return_position_names(statements)
-    subst: dict[str, AxonExpr] = {}
-    rewritten: list[AxonStatement] = []
-    for stmt in statements:
-        current = _substitute_stmts((stmt,), subst)[0]
-        if (
-            isinstance(current, AxonBind)
-            and len(current.targets) == 1
-            and current.targets[0] != "_"
-            and _is_atomic_expr(current.expr)
-            and counts.get(current.targets[0], 0) <= 1
-            and (isinstance(current.expr, AxonExprName) or current.targets[0] not in return_names)
-        ):
-            subst[current.targets[0]] = current.expr
-            continue
-        rewritten.append(current)
-        if isinstance(current, AxonBind):
-            for target in current.targets:
-                subst.pop(target, None)
-    return tuple(rewritten)
+    with _opt_debug_time("inline_atomic_alias_statements"):
+        counts: dict[str, int] = {}
+        _count_name_uses_stmts(statements, counts)
+        return_names = _return_position_names(statements)
+        subst: dict[str, AxonExpr] = {}
+        rewritten: list[AxonStatement] = []
+        for stmt in statements:
+            current = _substitute_stmts((stmt,), subst)[0]
+            if (
+                isinstance(current, AxonBind)
+                and len(current.targets) == 1
+                and current.targets[0] != "_"
+                and _is_atomic_expr(current.expr)
+                and counts.get(current.targets[0], 0) <= 1
+                and (isinstance(current.expr, AxonExprName) or current.targets[0] not in return_names)
+            ):
+                subst[current.targets[0]] = current.expr
+                continue
+            rewritten.append(current)
+            if isinstance(current, AxonBind):
+                for target in current.targets:
+                    subst.pop(target, None)
+        return tuple(rewritten)
 
 
 def _expr_has_flat_shape(expr: AxonExpr) -> bool:
@@ -1266,70 +1347,72 @@ def _stmt_has_flat_shape(stmt: AxonStatement) -> bool:
 def _inline_single_use_pure_binds(
     statements: tuple[AxonStatement, ...],
 ) -> tuple[AxonStatement, ...]:
-    current = statements
-    while True:
-        counts: dict[str, int] = {}
-        _count_name_uses_stmts(current, counts)
-        return_names = _return_position_names(current)
-        changed = False
-        for idx, stmt in enumerate(current):
-            if not isinstance(stmt, AxonBind) or len(stmt.targets) != 1 or stmt.targets[0] == "_":
-                continue
-            target = stmt.targets[0]
-            if counts.get(target, 0) > 1 or target in return_names or not _is_pure_expr(stmt.expr):
-                continue
-            substituted_tail = _substitute_stmts(current[idx + 1 :], {target: stmt.expr})
-            if not all(_stmt_has_flat_shape(item) for item in substituted_tail):
-                continue
-            current = current[:idx] + substituted_tail
-            changed = True
-            break
-        if not changed:
-            return current
+    with _opt_debug_time("inline_single_use_pure_binds"):
+        current = statements
+        while True:
+            counts: dict[str, int] = {}
+            _count_name_uses_stmts(current, counts)
+            return_names = _return_position_names(current)
+            changed = False
+            for idx, stmt in enumerate(current):
+                if not isinstance(stmt, AxonBind) or len(stmt.targets) != 1 or stmt.targets[0] == "_":
+                    continue
+                target = stmt.targets[0]
+                if counts.get(target, 0) > 1 or target in return_names or not _is_pure_expr(stmt.expr):
+                    continue
+                substituted_tail = _substitute_stmts(current[idx + 1 :], {target: stmt.expr})
+                if not all(_stmt_has_flat_shape(item) for item in substituted_tail):
+                    continue
+                current = current[:idx] + substituted_tail
+                changed = True
+                break
+            if not changed:
+                return current
 
 
 def _dead_code_eliminate_statements(
     statements: tuple[AxonStatement, ...],
 ) -> tuple[AxonStatement, ...]:
-    live: set[str] = set()
-    kept_rev: list[AxonStatement] = []
-    for stmt in reversed(statements):
-        if isinstance(stmt, AxonReturn | AxonYield):
-            for value in stmt.values:
-                live.update(_expr_names(value))
-            kept_rev.append(stmt)
-            continue
-        if isinstance(stmt, AxonBind):
-            targets = {target for target in stmt.targets if target != "_"}
-            used = bool(targets & live)
-            if not used and targets and _is_pure_expr(stmt.expr):
+    with _opt_debug_time("dead_code_eliminate_statements"):
+        live: set[str] = set()
+        kept_rev: list[AxonStatement] = []
+        for stmt in reversed(statements):
+            if isinstance(stmt, AxonReturn | AxonYield):
+                for value in stmt.values:
+                    live.update(_expr_names(value))
+                kept_rev.append(stmt)
                 continue
-            live.difference_update(targets)
-            live.update(_expr_names(stmt.expr))
-            kept_rev.append(stmt)
-            continue
-        if isinstance(stmt, AxonCond):
-            true_body = _dead_code_eliminate_statements(stmt.true_body)
-            false_body = _dead_code_eliminate_statements(stmt.false_body)
-            live.update(_expr_names(stmt.cond))
-            kept_rev.append(replace(stmt, true_body=true_body, false_body=false_body))
-            continue
-        if isinstance(stmt, AxonRepeat):
-            body = _dead_code_eliminate_statements(stmt.body)
-            live.update(_expr_names(stmt.from_expr))
-            live.update(_expr_names(stmt.to_expr))
-            live.update(_expr_names(stmt.step_expr))
-            live.update(_stmt_names(body))
-            kept_rev.append(replace(stmt, body=body))
-            continue
-        if isinstance(stmt, AxonScopeBind):
-            body = _dead_code_eliminate_statements(stmt.body)
-            live.update(_stmt_names(body))
-            for raw_value in stmt.kwargs.values():
-                if isinstance(raw_value, AxonExpr):
-                    live.update(_expr_names(raw_value))
-            kept_rev.append(replace(stmt, body=body))
-    return tuple(reversed(kept_rev))
+            if isinstance(stmt, AxonBind):
+                targets = {target for target in stmt.targets if target != "_"}
+                used = bool(targets & live)
+                if not used and targets and _is_pure_expr(stmt.expr):
+                    continue
+                live.difference_update(targets)
+                live.update(_expr_names(stmt.expr))
+                kept_rev.append(stmt)
+                continue
+            if isinstance(stmt, AxonCond):
+                true_body = _dead_code_eliminate_statements(stmt.true_body)
+                false_body = _dead_code_eliminate_statements(stmt.false_body)
+                live.update(_expr_names(stmt.cond))
+                kept_rev.append(replace(stmt, true_body=true_body, false_body=false_body))
+                continue
+            if isinstance(stmt, AxonRepeat):
+                body = _dead_code_eliminate_statements(stmt.body)
+                live.update(_expr_names(stmt.from_expr))
+                live.update(_expr_names(stmt.to_expr))
+                live.update(_expr_names(stmt.step_expr))
+                live.update(_stmt_names(body))
+                kept_rev.append(replace(stmt, body=body))
+                continue
+            if isinstance(stmt, AxonScopeBind):
+                body = _dead_code_eliminate_statements(stmt.body)
+                live.update(_stmt_names(body))
+                for raw_value in stmt.kwargs.values():
+                    if isinstance(raw_value, AxonExpr):
+                        live.update(_expr_names(raw_value))
+                kept_rev.append(replace(stmt, body=body))
+        return tuple(reversed(kept_rev))
 
 
 def _known_bool_constraints(module: AxonModule) -> dict[str, bool]:
@@ -1430,110 +1513,111 @@ def _fold_statements_by_known_bool(
     known: Mapping[str, bool],
     known_literals: Mapping[str, AxonExpr] | None = None,
 ) -> tuple[AxonStatement, ...]:
-    local_known = dict(known)
-    local_literals = dict(known_literals or {})
+    with _opt_debug_time("fold_statements_by_known_bool"):
+        local_known = dict(known)
+        local_literals = dict(known_literals or {})
 
-    def _known_value(expr: AxonExpr) -> bool | None:
-        inner = _unwrap_expr(expr)
-        if isinstance(inner, AxonExprBool):
-            return inner.value
-        if isinstance(inner, AxonExprName):
-            return local_known.get(inner.name)
-        return None
+        def _known_value(expr: AxonExpr) -> bool | None:
+            inner = _unwrap_expr(expr)
+            if isinstance(inner, AxonExprBool):
+                return inner.value
+            if isinstance(inner, AxonExprName):
+                return local_known.get(inner.name)
+            return None
 
-    def _literal_expr(expr: AxonExpr) -> AxonExpr | None:
-        inner = _unwrap_expr(expr)
-        if isinstance(inner, AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull):
-            return inner
-        return None
+        def _literal_expr(expr: AxonExpr) -> AxonExpr | None:
+            inner = _unwrap_expr(expr)
+            if isinstance(inner, AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull):
+                return inner
+            return None
 
-    out: list[AxonStatement] = []
-    for stmt in statements:
-        if isinstance(stmt, AxonBind):
-            folded_expr = _fold_expr_by_known_bool(
-                _substitute_expr(stmt.expr, local_literals), local_known
-            )
-            out.append(replace(stmt, expr=folded_expr))
-            if len(stmt.targets) == 1 and stmt.targets[0] != "_":
-                target = stmt.targets[0]
-                value = _known_value(folded_expr)
-                if value is None:
-                    local_known.pop(target, None)
-                else:
-                    local_known[target] = value
-                literal = _literal_expr(folded_expr)
-                if literal is None:
-                    local_literals.pop(target, None)
-                else:
-                    local_literals[target] = literal
-            continue
-        if isinstance(stmt, AxonReturn | AxonYield):
-            out.append(
-                replace(
-                    stmt,
-                    values=tuple(
-                        _fold_expr_by_known_bool(value, local_known) for value in stmt.values
-                    ),
+        out: list[AxonStatement] = []
+        for stmt in statements:
+            if isinstance(stmt, AxonBind):
+                folded_expr = _fold_expr_by_known_bool(
+                    _substitute_expr(stmt.expr, local_literals), local_known
                 )
-            )
-            continue
-        if isinstance(stmt, AxonCond):
-            folded_cond = _fold_expr_by_known_bool(
-                _substitute_expr(stmt.cond, local_literals), local_known
-            )
-            cond_value = _known_value(folded_cond)
-            if cond_value is not None:
-                chosen = stmt.true_body if cond_value else stmt.false_body
-                out.extend(_fold_statements_by_known_bool(chosen, local_known, local_literals))
+                out.append(replace(stmt, expr=folded_expr))
+                if len(stmt.targets) == 1 and stmt.targets[0] != "_":
+                    target = stmt.targets[0]
+                    value = _known_value(folded_expr)
+                    if value is None:
+                        local_known.pop(target, None)
+                    else:
+                        local_known[target] = value
+                    literal = _literal_expr(folded_expr)
+                    if literal is None:
+                        local_literals.pop(target, None)
+                    else:
+                        local_literals[target] = literal
                 continue
-            out.append(
-                replace(
-                    stmt,
-                    cond=folded_cond,
-                    true_body=_fold_statements_by_known_bool(
-                        stmt.true_body, local_known, local_literals
-                    ),
-                    false_body=_fold_statements_by_known_bool(
-                        stmt.false_body, local_known, local_literals
-                    ),
+            if isinstance(stmt, AxonReturn | AxonYield):
+                out.append(
+                    replace(
+                        stmt,
+                        values=tuple(
+                            _fold_expr_by_known_bool(value, local_known) for value in stmt.values
+                        ),
+                    )
                 )
-            )
-            continue
-        if isinstance(stmt, AxonRepeat):
-            out.append(
-                replace(
-                    stmt,
-                    from_expr=_fold_expr_by_known_bool(
-                        _substitute_expr(stmt.from_expr, local_literals), local_known
-                    ),
-                    to_expr=_fold_expr_by_known_bool(
-                        _substitute_expr(stmt.to_expr, local_literals), local_known
-                    ),
-                    step_expr=_fold_expr_by_known_bool(
-                        _substitute_expr(stmt.step_expr, local_literals), local_known
-                    ),
-                    body=_fold_statements_by_known_bool(stmt.body, local_known, local_literals),
+                continue
+            if isinstance(stmt, AxonCond):
+                folded_cond = _fold_expr_by_known_bool(
+                    _substitute_expr(stmt.cond, local_literals), local_known
                 )
-            )
-            continue
-        if isinstance(stmt, AxonScopeBind):
-            out.append(
-                replace(
-                    stmt,
-                    body=_fold_statements_by_known_bool(stmt.body, local_known, local_literals),
-                    kwargs={
-                        key: _fold_expr_by_known_bool(
-                            _substitute_expr(value, local_literals), local_known
-                        )
-                        if isinstance(value, AxonExpr)
-                        else value
-                        for key, value in stmt.kwargs.items()
-                    },
+                cond_value = _known_value(folded_cond)
+                if cond_value is not None:
+                    chosen = stmt.true_body if cond_value else stmt.false_body
+                    out.extend(_fold_statements_by_known_bool(chosen, local_known, local_literals))
+                    continue
+                out.append(
+                    replace(
+                        stmt,
+                        cond=folded_cond,
+                        true_body=_fold_statements_by_known_bool(
+                            stmt.true_body, local_known, local_literals
+                        ),
+                        false_body=_fold_statements_by_known_bool(
+                            stmt.false_body, local_known, local_literals
+                        ),
+                    )
                 )
-            )
-            continue
-        out.append(stmt)
-    return tuple(out)
+                continue
+            if isinstance(stmt, AxonRepeat):
+                out.append(
+                    replace(
+                        stmt,
+                        from_expr=_fold_expr_by_known_bool(
+                            _substitute_expr(stmt.from_expr, local_literals), local_known
+                        ),
+                        to_expr=_fold_expr_by_known_bool(
+                            _substitute_expr(stmt.to_expr, local_literals), local_known
+                        ),
+                        step_expr=_fold_expr_by_known_bool(
+                            _substitute_expr(stmt.step_expr, local_literals), local_known
+                        ),
+                        body=_fold_statements_by_known_bool(stmt.body, local_known, local_literals),
+                    )
+                )
+                continue
+            if isinstance(stmt, AxonScopeBind):
+                out.append(
+                    replace(
+                        stmt,
+                        body=_fold_statements_by_known_bool(stmt.body, local_known, local_literals),
+                        kwargs={
+                            key: _fold_expr_by_known_bool(
+                                _substitute_expr(value, local_literals), local_known
+                            )
+                            if isinstance(value, AxonExpr)
+                            else value
+                            for key, value in stmt.kwargs.items()
+                        },
+                    )
+                )
+                continue
+            out.append(stmt)
+        return tuple(out)
 
 
 def _is_identity_tuple_bind(targets: tuple[str, ...], expr: AxonExpr) -> bool:
@@ -1547,70 +1631,119 @@ def _is_identity_tuple_bind(targets: tuple[str, ...], expr: AxonExpr) -> bool:
     return True
 
 
+def _is_list_destructure_expr(expr: AxonExpr) -> bool:
+    tp = expr.inferred_type
+    while isinstance(tp, TypeOptional):
+        tp = tp.inner
+    return isinstance(tp, TypeList)
+
+
+def _normalize_list_destructure_binds(
+    statements: tuple[AxonStatement, ...],
+) -> tuple[AxonStatement, ...]:
+    with _opt_debug_time("normalize_list_destructure_binds"):
+        used_names = _bound_names_statements(statements)
+        out: list[AxonStatement] = []
+        next_idx = 1
+
+        def fresh_temp() -> str:
+            nonlocal next_idx
+            while True:
+                candidate = f"__list_unpack_{next_idx}"
+                next_idx += 1
+                if candidate not in used_names:
+                    used_names.add(candidate)
+                    return candidate
+
+        for stmt in statements:
+            if not isinstance(stmt, AxonBind) or len(stmt.targets) <= 1:
+                out.append(stmt)
+                continue
+            if not _is_list_destructure_expr(stmt.expr):
+                out.append(stmt)
+                continue
+            temp_name = fresh_temp()
+            out.append(AxonBind(targets=(temp_name,), expr=stmt.expr))
+            for idx, target in enumerate(stmt.targets):
+                out.append(
+                    AxonBind(
+                        targets=(target,),
+                        expr=AxonExprCall(
+                            callee="_list_index",
+                            args=(AxonExprName(name=temp_name), AxonExprInt(value=idx)),
+                            kwargs={},
+                        ),
+                    )
+                )
+            used_names.update(name for name in stmt.targets if name != "_")
+        return tuple(out)
+
+
 def _rewrite_statements(
     statements: tuple[AxonStatement, ...],
     *,
     alias_modules: dict[str, tuple[AxonModule, AxonExpr]],
 ) -> tuple[AxonStatement, ...]:
-    rewritten: list[AxonStatement] = []
-    for stmt in statements:
-        if isinstance(stmt, AxonBind):
-            rewritten_expr = _rewrite_expr(stmt.expr, alias_modules=alias_modules)
-            if (
-                len(stmt.targets) == 1
-                and stmt.targets[0] != "_"
-                and isinstance(rewritten_expr, AxonExprName)
-                and stmt.targets[0] == rewritten_expr.name
-            ):
-                continue
-            if len(stmt.targets) > 1 and _is_identity_tuple_bind(stmt.targets, rewritten_expr):
-                continue
-            rewritten.append(replace(stmt, expr=rewritten_expr))
-        elif isinstance(stmt, AxonReturn | AxonYield):
-            rewritten.append(
-                replace(
-                    stmt,
-                    values=tuple(
-                        _rewrite_expr(value, alias_modules=alias_modules) for value in stmt.values
-                    ),
+    with _opt_debug_time("rewrite_statements"):
+        rewritten: list[AxonStatement] = []
+        for stmt in statements:
+            if isinstance(stmt, AxonBind):
+                rewritten_expr = _rewrite_expr(stmt.expr, alias_modules=alias_modules)
+                if (
+                    len(stmt.targets) == 1
+                    and stmt.targets[0] != "_"
+                    and isinstance(rewritten_expr, AxonExprName)
+                    and stmt.targets[0] == rewritten_expr.name
+                ):
+                    continue
+                if len(stmt.targets) > 1 and _is_identity_tuple_bind(stmt.targets, rewritten_expr):
+                    continue
+                rewritten.append(replace(stmt, expr=rewritten_expr))
+            elif isinstance(stmt, AxonReturn | AxonYield):
+                rewritten.append(
+                    replace(
+                        stmt,
+                        values=tuple(
+                            _rewrite_expr(value, alias_modules=alias_modules) for value in stmt.values
+                        ),
+                    )
                 )
-            )
-        elif isinstance(stmt, AxonCond):
-            rewritten.append(
-                replace(
-                    stmt,
-                    cond=_rewrite_expr(stmt.cond, alias_modules=alias_modules),
-                    true_body=_rewrite_statements(stmt.true_body, alias_modules=alias_modules),
-                    false_body=_rewrite_statements(stmt.false_body, alias_modules=alias_modules),
+            elif isinstance(stmt, AxonCond):
+                rewritten.append(
+                    replace(
+                        stmt,
+                        cond=_rewrite_expr(stmt.cond, alias_modules=alias_modules),
+                        true_body=_rewrite_statements(stmt.true_body, alias_modules=alias_modules),
+                        false_body=_rewrite_statements(stmt.false_body, alias_modules=alias_modules),
+                    )
                 )
-            )
-        elif isinstance(stmt, AxonRepeat):
-            rewritten.append(
-                replace(
-                    stmt,
-                    from_expr=_rewrite_expr(stmt.from_expr, alias_modules=alias_modules),
-                    to_expr=_rewrite_expr(stmt.to_expr, alias_modules=alias_modules),
-                    step_expr=_rewrite_expr(stmt.step_expr, alias_modules=alias_modules),
-                    body=_rewrite_statements(stmt.body, alias_modules=alias_modules),
+            elif isinstance(stmt, AxonRepeat):
+                rewritten.append(
+                    replace(
+                        stmt,
+                        from_expr=_rewrite_expr(stmt.from_expr, alias_modules=alias_modules),
+                        to_expr=_rewrite_expr(stmt.to_expr, alias_modules=alias_modules),
+                        step_expr=_rewrite_expr(stmt.step_expr, alias_modules=alias_modules),
+                        body=_rewrite_statements(stmt.body, alias_modules=alias_modules),
+                    )
                 )
-            )
-        elif isinstance(stmt, AxonScopeBind):
-            rewritten.append(
-                replace(
-                    stmt,
-                    prefix=_substitute_path(stmt.prefix, {}),
-                    body=_rewrite_statements(stmt.body, alias_modules=alias_modules),
-                    kwargs={
-                        key: _rewrite_expr(value, alias_modules=alias_modules)
-                        if isinstance(value, AxonExpr)
-                        else value
-                        for key, value in stmt.kwargs.items()
-                    },
+            elif isinstance(stmt, AxonScopeBind):
+                rewritten.append(
+                    replace(
+                        stmt,
+                        prefix=_substitute_path(stmt.prefix, {}),
+                        body=_rewrite_statements(stmt.body, alias_modules=alias_modules),
+                        kwargs={
+                            key: _rewrite_expr(value, alias_modules=alias_modules)
+                            if isinstance(value, AxonExpr)
+                            else value
+                            for key, value in stmt.kwargs.items()
+                        },
+                    )
                 )
-            )
-    return _dead_code_eliminate_statements(
-        _inline_single_use_pure_binds(_inline_atomic_alias_statements(tuple(rewritten)))
-    )
+        return _dead_code_eliminate_statements(
+            _inline_single_use_pure_binds(_inline_atomic_alias_statements(tuple(rewritten)))
+        )
 
 
 def _optimize_statements_fixpoint(
@@ -1618,12 +1751,14 @@ def _optimize_statements_fixpoint(
     *,
     alias_modules: dict[str, tuple[AxonModule, AxonExpr]],
 ) -> tuple[AxonStatement, ...]:
-    current = statements
-    while True:
-        rewritten = _rewrite_statements(current, alias_modules=alias_modules)
-        if ast_equal(AxonExprDo(body=current), AxonExprDo(body=rewritten)):
-            return rewritten
-        current = rewritten
+    with _opt_debug_time("optimize_statements_fixpoint"):
+        current = _normalize_list_destructure_binds(statements)
+        while True:
+            rewritten = _rewrite_statements(current, alias_modules=alias_modules)
+            rewritten = _normalize_list_destructure_binds(rewritten)
+            if ast_equal(AxonExprDo(body=current), AxonExprDo(body=rewritten)):
+                return rewritten
+            current = rewritten
 
 
 def _bound_names_in_order(statements: tuple[AxonStatement, ...]) -> list[str]:
@@ -2049,26 +2184,27 @@ def _rewrite_calls_stmts(
 
 
 def _prune_unused_module_params(program: AxonFile) -> AxonFile:
-    rewritten_modules: list[AxonModule] = []
-    specs: dict[str, tuple[AxonModule, AxonModule]] = {}
-    for module in program.modules:
-        used = _module_used_names(module)
-        new_module = replace(
-            module,
-            path_param=module.path_param
-            if module.path_param is not None and module.path_param in used
-            else None,
-            path_params=tuple(name for name in module.path_params if name in used),
-            params=tuple(param for param in module.params if param.name in used),
+    with _opt_debug_time("prune_unused_module_params"):
+        rewritten_modules: list[AxonModule] = []
+        specs: dict[str, tuple[AxonModule, AxonModule]] = {}
+        for module in program.modules:
+            used = _module_used_names(module)
+            new_module = replace(
+                module,
+                path_param=module.path_param
+                if module.path_param is not None and module.path_param in used
+                else None,
+                path_params=tuple(name for name in module.path_params if name in used),
+                params=tuple(param for param in module.params if param.name in used),
+            )
+            specs[module.name] = (module, new_module)
+            rewritten_modules.append(new_module)
+        rewritten_program = replace(program, modules=tuple(rewritten_modules))
+        final_modules = tuple(
+            replace(module, statements=_rewrite_calls_stmts(module.statements, specs))
+            for module in rewritten_program.modules
         )
-        specs[module.name] = (module, new_module)
-        rewritten_modules.append(new_module)
-    rewritten_program = replace(program, modules=tuple(rewritten_modules))
-    final_modules = tuple(
-        replace(module, statements=_rewrite_calls_stmts(module.statements, specs))
-        for module in rewritten_program.modules
-    )
-    return replace(rewritten_program, modules=final_modules)
+        return replace(rewritten_program, modules=final_modules)
 
 
 def _module_scope_param_name(module: AxonModule) -> str | None:
@@ -2095,53 +2231,55 @@ def _is_safe_specialization_actual(expr: AxonExpr) -> bool:
 
 
 def _specialize_single_callsite_modules(program: AxonFile, *, main_module: str | None) -> AxonFile:
-    graph = _module_call_graph(program)
-    callsites = _module_callsites(program)
-    sccs = _module_sccs(graph)
-    scc_by_module: dict[str, tuple[str, ...]] = {}
-    for component in sccs:
-        for name in component:
-            scc_by_module[name] = component
+    with _opt_debug_time("specialize_single_callsite_modules"):
+        graph = _module_call_graph(program)
+        callsites = _module_callsites(program)
+        sccs = _module_sccs(graph)
+        scc_by_module: dict[str, tuple[str, ...]] = {}
+        for component in sccs:
+            for name in component:
+                scc_by_module[name] = component
 
-    rewritten_modules: list[AxonModule] = []
-    specs: dict[str, tuple[AxonModule, AxonModule]] = {}
+        rewritten_modules: list[AxonModule] = []
+        specs: dict[str, tuple[AxonModule, AxonModule]] = {}
 
-    for module in program.modules:
-        callers = callsites.get(module.name, [])
-        recursive_component = scc_by_module.get(module.name, ())
-        if (
-            main_module is not None
-            and module.name == main_module
-            or len(callers) != 1
-            or len(recursive_component) > 1
-            or (callers and callers[0][0] == module.name)
-        ):
-            specs[module.name] = (module, module)
-            rewritten_modules.append(module)
-            continue
-        caller_name, call = callers[0]
-        actuals = _call_actual_by_param(module, call)
-        subst = {
-            name: expr for name, expr in actuals.items() if _is_safe_specialization_actual(expr)
-        }
-        if not subst:
-            specs[module.name] = (module, module)
-            rewritten_modules.append(module)
-            continue
-        new_module = replace(
-            module,
-            params=tuple(param for param in module.params if param.name not in subst),
-            statements=_substitute_stmts(module.statements, subst),
+        for module in program.modules:
+            callers = callsites.get(module.name, [])
+            recursive_component = scc_by_module.get(module.name, ())
+            if (
+                main_module is not None
+                and module.name == main_module
+                or len(callers) != 1
+                or len(recursive_component) > 1
+                or (callers and callers[0][0] == module.name)
+            ):
+                specs[module.name] = (module, module)
+                rewritten_modules.append(module)
+                continue
+            caller_name, call = callers[0]
+            del caller_name
+            actuals = _call_actual_by_param(module, call)
+            subst = {
+                name: expr for name, expr in actuals.items() if _is_safe_specialization_actual(expr)
+            }
+            if not subst:
+                specs[module.name] = (module, module)
+                rewritten_modules.append(module)
+                continue
+            new_module = replace(
+                module,
+                params=tuple(param for param in module.params if param.name not in subst),
+                statements=_substitute_stmts(module.statements, subst),
+            )
+            specs[module.name] = (module, new_module)
+            rewritten_modules.append(new_module)
+
+        rewritten_program = replace(program, modules=tuple(rewritten_modules))
+        final_modules = tuple(
+            replace(module, statements=_rewrite_calls_stmts(module.statements, specs))
+            for module in rewritten_program.modules
         )
-        specs[module.name] = (module, new_module)
-        rewritten_modules.append(new_module)
-
-    rewritten_program = replace(program, modules=tuple(rewritten_modules))
-    final_modules = tuple(
-        replace(module, statements=_rewrite_calls_stmts(module.statements, specs))
-        for module in rewritten_program.modules
-    )
-    return replace(rewritten_program, modules=final_modules)
+        return replace(rewritten_program, modules=final_modules)
 
 
 def _is_straight_line_module(module: AxonModule) -> bool:
@@ -2457,38 +2595,39 @@ def _inline_expression_position_modules(program: AxonFile, *, main_module: str |
 
 
 def _inline_single_callsite_modules(program: AxonFile, *, main_module: str | None) -> AxonFile:
-    callsites = _module_callsites(program)
+    with _opt_debug_time("inline_single_callsite_modules"):
+        callsites = _module_callsites(program)
 
-    inline_modules: dict[str, AxonModule] = {}
-    for module in program.modules:
-        callers = callsites.get(module.name, [])
-        if main_module is not None and module.name == main_module:
-            continue
-        if len(callers) != 1:
-            continue
-        if callers and callers[0][0] == module.name:
-            continue
-        if not _is_straight_line_module(module):
-            continue
-        inline_modules[module.name] = module
+        inline_modules: dict[str, AxonModule] = {}
+        for module in program.modules:
+            callers = callsites.get(module.name, [])
+            if main_module is not None and module.name == main_module:
+                continue
+            if len(callers) != 1:
+                continue
+            if callers and callers[0][0] == module.name:
+                continue
+            if not _is_straight_line_module(module):
+                continue
+            inline_modules[module.name] = module
 
-    if not inline_modules:
-        return program
+        if not inline_modules:
+            return program
 
-    rewritten_modules: list[AxonModule] = []
-    for module in program.modules:
-        rewritten_modules.append(
-            replace(
-                module,
-                statements=_inline_call_bind_statements(
-                    module.statements,
-                    caller=module,
-                    inline_modules=inline_modules,
-                ),
+        rewritten_modules: list[AxonModule] = []
+        for module in program.modules:
+            rewritten_modules.append(
+                replace(
+                    module,
+                    statements=_inline_call_bind_statements(
+                        module.statements,
+                        caller=module,
+                        inline_modules=inline_modules,
+                    ),
+                )
             )
-        )
-    rewritten = replace(program, modules=tuple(rewritten_modules))
-    return _prune_unreachable_modules(rewritten, main_module=main_module)
+        rewritten = replace(program, modules=tuple(rewritten_modules))
+        return _prune_unreachable_modules(rewritten, main_module=main_module)
 
 
 def _call_actual_by_param(module: AxonModule, call: AxonExprCall) -> dict[str, AxonExpr]:
@@ -2507,25 +2646,26 @@ def _resolve_constant_actual(
     known: Mapping[str, AxonExpr],
     *,
     caller_dynamic_names: set[str],
+    constant_names: set[str],
 ) -> AxonExpr | None:
+    if isinstance(expr, AxonExprAscribe):
+        return _resolve_constant_actual(
+            expr.expr,
+            known,
+            caller_dynamic_names=caller_dynamic_names,
+            constant_names=constant_names,
+        )
     if _is_atomic_expr(expr):
         if isinstance(expr, AxonExprName):
             resolved = known.get(expr.name)
             if resolved is not None:
                 return resolved
             if expr.name not in caller_dynamic_names:
-                return expr
+                return expr if expr.name in constant_names else None
             return None
         if isinstance(expr, AxonExprPath):
             return None
         return expr
-    if isinstance(expr, AxonExprAscribe):
-        inner = _resolve_constant_actual(
-            expr.expr, known, caller_dynamic_names=caller_dynamic_names
-        )
-        if inner is None:
-            return None
-        return replace(expr, expr=inner)
     return None
 
 
@@ -2536,101 +2676,182 @@ def _join_constant_actual(
         return current
     if current is None:
         return candidate
-    if ast_equal(current, candidate):
+    if _constant_actual_key(current) == _constant_actual_key(candidate):
         return current
     return False
 
 
+def _constant_actual_key(expr: AxonExpr) -> tuple[object, ...]:
+    if isinstance(expr, AxonExprAscribe):
+        return ("ascribe", _constant_actual_key(expr.expr), expr.type_expr)
+    if isinstance(expr, AxonExprName):
+        return ("name", expr.name)
+    if isinstance(expr, AxonExprInt):
+        return ("int", expr.value)
+    if isinstance(expr, AxonExprFloat):
+        return ("float", expr.value, expr.lexeme)
+    if isinstance(expr, AxonExprBool):
+        return ("bool", expr.value)
+    if isinstance(expr, AxonExprNull):
+        return ("null",)
+    if isinstance(expr, AxonExprString):
+        return ("string", expr.value)
+    if isinstance(expr, AxonExprPath):
+        return ("path", expr.absolute, expr.parts)
+    return ("other", repr(expr))
+
+
 def _specialize_modules_by_constant_params(program: AxonFile) -> AxonFile:
-    graph = _module_call_graph(program)
-    callsites = _module_callsites(program)
-    sccs = _module_sccs(graph)
-    modules_by_name = {module.name: module for module in program.modules}
-    known_by_module: dict[str, dict[str, AxonExpr]] = {
-        module.name: {} for module in program.modules
-    }
-    for component in sccs:
-        changed = True
-        while changed:
-            changed = False
-            for module_name in component:
-                module = modules_by_name[module_name]
-                candidates: dict[str, AxonExpr] = dict(known_by_module[module_name])
-                valid = {name: True for name in _param_names(module)}
-                for caller_name, call in callsites[module_name]:
-                    actuals = _call_actual_by_param(module, call)
-                    caller_known = known_by_module.get(caller_name, {})
-                    caller_module = modules_by_name.get(caller_name)
-                    caller_param_names = (
-                        set(_param_names(caller_module)) if caller_module is not None else set()
-                    )
-                    caller_bound_names = (
-                        _bound_names_statements(caller_module.statements)
-                        if caller_module is not None
-                        else set()
-                    )
-                    caller_dynamic_names = caller_param_names | caller_bound_names
-                    for name in _param_names(module):
-                        if name not in actuals or not valid.get(name, True):
-                            continue
-                        actual_expr = actuals[name]
-                        resolved = _resolve_constant_actual(
-                            actual_expr,
-                            caller_known,
-                            caller_dynamic_names=caller_dynamic_names,
-                        )
-                        if resolved is None:
-                            actual_inner = _unwrap_expr(actual_expr)
-                            # Recursive or interprocedural pass-through of a caller param
-                            # does not disprove a constant candidate; keep it neutral.
-                            if (
-                                isinstance(actual_inner, AxonExprName)
-                                and actual_inner.name in caller_param_names
-                            ):
-                                continue
-                            valid[name] = False
-                            candidates.pop(name, None)
-                            continue
-                        joined = _join_constant_actual(candidates.get(name), resolved)
-                        if joined is False:
-                            valid[name] = False
-                            candidates.pop(name, None)
-                            continue
-                        if isinstance(joined, AxonExprName) and joined.name == name:
-                            continue
-                        if isinstance(joined, AxonExpr) and name not in candidates:
-                            candidates[name] = joined
-                for name in list(candidates):
-                    if not valid.get(name, True):
-                        candidates.pop(name, None)
-                if candidates != known_by_module[module_name]:
-                    known_by_module[module_name] = candidates
-                    changed = True
-    rewritten_modules: list[AxonModule] = []
-    specs: dict[str, tuple[AxonModule, AxonModule]] = {}
-    for module in program.modules:
-        subst = {
-            name: expr
-            for name, expr in known_by_module[module.name].items()
-            if not (isinstance(expr, AxonExprName) and expr.name == name)
+    with _opt_debug_time("specialize_modules_by_constant_params"):
+        graph = _module_call_graph(program)
+        callsites = _module_callsites(program)
+        sccs = _module_sccs(graph)
+        modules_by_name = {module.name: module for module in program.modules}
+        param_names_by_module = {
+            module.name: _param_names(module) for module in program.modules
         }
-        if not subst:
-            specs[module.name] = (module, module)
-            rewritten_modules.append(module)
-            continue
-        new_module = replace(
-            module,
-            params=tuple(param for param in module.params if param.name not in subst),
-            statements=_substitute_stmts(module.statements, subst),
+        param_name_sets_by_module = {
+            name: set(param_names) for name, param_names in param_names_by_module.items()
+        }
+        bound_names_by_module = {
+            module.name: _bound_names_statements(module.statements)
+            for module in program.modules
+        }
+        call_actuals_by_module: dict[str, list[tuple[str, dict[str, AxonExpr]]]] = {
+            module.name: [] for module in program.modules
+        }
+        constant_names = set(program.constants)
+        for module_name, module_callsites in callsites.items():
+            module = modules_by_name[module_name]
+            call_actuals_by_module[module_name] = [
+                (caller_name, _call_actual_by_param(module, call))
+                for caller_name, call in module_callsites
+            ]
+        known_by_module: dict[str, dict[str, AxonExpr]] = {
+            module.name: {} for module in program.modules
+        }
+        for component in sccs:
+            component_set = set(component)
+            recursive_component = len(component) > 1 or any(
+                module_name in graph.get(module_name, set()) for module_name in component
+            )
+            changed = True
+            iteration = 0
+            while changed:
+                iteration += 1
+                if _OPT_DEBUG_ACTIVE and iteration > 1000:
+                    snapshot = {
+                        name: tuple(sorted(known_by_module[name]))
+                        for name in component
+                    }
+                    raise RuntimeError(
+                        "Axon optimize constant specialization did not converge "
+                        f"for component {component!r}; known={snapshot!r}"
+                    )
+                changed = False
+                for module_name in component:
+                    param_names = param_names_by_module[module_name]
+                    candidates: dict[str, AxonExpr] = dict(known_by_module[module_name])
+                    valid = {name: True for name in param_names}
+                    for caller_name, actuals in call_actuals_by_module[module_name]:
+                        if caller_name in component_set:
+                            caller_known = known_by_module.get(caller_name, {})
+                            for name in param_names:
+                                if name not in actuals or not valid.get(name, True):
+                                    continue
+                                actual_inner = _unwrap_expr(actuals[name])
+                                if isinstance(actual_inner, AxonExprName):
+                                    resolved = caller_known.get(actual_inner.name)
+                                    if resolved is not None:
+                                        joined = _join_constant_actual(
+                                            candidates.get(name), resolved
+                                        )
+                                        if joined is False:
+                                            valid[name] = False
+                                            candidates.pop(name, None)
+                                            continue
+                                        if (
+                                            isinstance(joined, AxonExpr)
+                                            and not (
+                                                isinstance(joined, AxonExprName)
+                                                and joined.name == name
+                                            )
+                                            and name not in candidates
+                                        ):
+                                            candidates[name] = joined
+                                    elif actual_inner.name != name:
+                                        valid[name] = False
+                                        candidates.pop(name, None)
+                                    continue
+                                valid[name] = False
+                                candidates.pop(name, None)
+                            continue
+                        caller_known = known_by_module.get(caller_name, {})
+                        caller_param_names = param_name_sets_by_module.get(caller_name, set())
+                        caller_bound_names = bound_names_by_module.get(caller_name, set())
+                        caller_dynamic_names = caller_param_names | caller_bound_names
+                        for name in param_names:
+                            if name not in actuals or not valid.get(name, True):
+                                continue
+                            actual_expr = actuals[name]
+                            resolved = _resolve_constant_actual(
+                                actual_expr,
+                                caller_known,
+                                caller_dynamic_names=caller_dynamic_names,
+                                constant_names=constant_names,
+                            )
+                            if resolved is None:
+                                actual_inner = _unwrap_expr(actual_expr)
+                                if (
+                                    isinstance(actual_inner, AxonExprName)
+                                    and actual_inner.name in caller_param_names
+                                ):
+                                    continue
+                                valid[name] = False
+                                candidates.pop(name, None)
+                                continue
+                            joined = _join_constant_actual(candidates.get(name), resolved)
+                            if joined is False:
+                                valid[name] = False
+                                candidates.pop(name, None)
+                                continue
+                            if isinstance(joined, AxonExprName) and joined.name == name:
+                                continue
+                            if isinstance(joined, AxonExpr) and name not in candidates:
+                                candidates[name] = joined
+                    for name in list(candidates):
+                        if not valid.get(name, True):
+                            candidates.pop(name, None)
+                    if candidates != known_by_module[module_name]:
+                        known_by_module[module_name] = candidates
+                        changed = True
+                if not recursive_component:
+                    break
+        rewritten_modules: list[AxonModule] = []
+        specs: dict[str, tuple[AxonModule, AxonModule]] = {}
+        for module in program.modules:
+            subst = {
+                name: expr
+                for name, expr in known_by_module[module.name].items()
+                if not (isinstance(expr, AxonExprName) and expr.name == name)
+            }
+            if not subst:
+                specs[module.name] = (module, module)
+                rewritten_modules.append(module)
+                continue
+            new_module = replace(
+                module,
+                params=tuple(param for param in module.params if param.name not in subst),
+                statements=_substitute_stmts(module.statements, subst),
+            )
+            specs[module.name] = (module, new_module)
+            rewritten_modules.append(new_module)
+        rewritten_program = replace(program, modules=tuple(rewritten_modules))
+        final_modules = tuple(
+            replace(module, statements=_rewrite_calls_stmts(module.statements, specs))
+            for module in rewritten_program.modules
         )
-        specs[module.name] = (module, new_module)
-        rewritten_modules.append(new_module)
-    rewritten_program = replace(program, modules=tuple(rewritten_modules))
-    final_modules = tuple(
-        replace(module, statements=_rewrite_calls_stmts(module.statements, specs))
-        for module in rewritten_program.modules
-    )
-    return replace(rewritten_program, modules=final_modules)
+        return replace(rewritten_program, modules=final_modules)
 
 
 def _reachable_modules(program: AxonFile, *, root: str | None) -> frozenset[str]:
@@ -2649,27 +2870,33 @@ def _reachable_modules(program: AxonFile, *, root: str | None) -> frozenset[str]
 
 
 def _prune_unreachable_modules(program: AxonFile, *, main_module: str | None) -> AxonFile:
-    keep = _reachable_modules(program, root=main_module)
-    return replace(
-        program, modules=tuple(module for module in program.modules if module.name in keep)
-    )
+    with _opt_debug_time("prune_unreachable_modules"):
+        keep = _reachable_modules(program, root=main_module)
+        return replace(
+            program, modules=tuple(module for module in program.modules if module.name in keep)
+        )
 
 
 def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
     validate_typed_axon_file(program, main_module=main_module)
-    current = _canonicalize_path_params(program)
+    current = program
+    pass_index = 0
     while True:
-        constraint_folded_modules = tuple(
-            replace(
-                module,
-                statements=_fold_statements_by_known_bool(
-                    module.statements,
-                    _known_bool_constraints(module),
-                    _known_literal_constraints(module),
-                ),
+        pass_index += 1
+        current_before_pass = current
+        _opt_debug_begin_pass(pass_index=pass_index)
+        with _opt_debug_time("pass_constraint_fold"):
+            constraint_folded_modules = tuple(
+                replace(
+                    module,
+                    statements=_fold_statements_by_known_bool(
+                        module.statements,
+                        _known_bool_constraints(module),
+                        _known_literal_constraints(module),
+                    ),
+                )
+                for module in current.modules
             )
-            for module in current.modules
-        )
         current = replace(current, modules=constraint_folded_modules)
         specialized = _specialize_modules_by_constant_params(current)
         specialized = _specialize_single_callsite_modules(specialized, main_module=main_module)
@@ -2679,29 +2906,28 @@ def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None 
             for module in specialized.modules
             if (alias_expr := _module_alias_expr(module)) is not None
         }
-        optimized_modules = tuple(
-            replace(
-                module,
-                statements=_optimize_statements_fixpoint(
-                    module.statements, alias_modules=alias_modules
-                ),
+        with _opt_debug_time("pass_optimize_statements"):
+            optimized_modules = tuple(
+                replace(
+                    module,
+                    statements=_optimize_statements_fixpoint(
+                        module.statements, alias_modules=alias_modules
+                    ),
+                )
+                for module in specialized.modules
             )
-            for module in specialized.modules
-        )
         optimized = replace(specialized, modules=optimized_modules)
         optimized = _prune_unused_module_params(optimized)
         optimized = _prune_unreachable_modules(optimized, main_module=main_module)
-        optimized = _canonicalize_generated_helper_names(optimized)
-        optimized = replace(
-            optimized,
-            modules=tuple(
-                _canonicalize_generated_local_names(module) for module in optimized.modules
-            ),
-        )
-        retyped = typecheck_flat_axon_file(optimized, main_module=main_module)
-        validate_typed_axon_file(retyped, main_module=main_module)
+        _opt_debug_end_pass(modules=len(optimized.modules))
+        with _opt_debug_time("pass_retype"):
+            retyped = typecheck_flat_axon_file(optimized, main_module=main_module)
+        with _opt_debug_time("pass_validate_typed"):
+            validate_typed_axon_file(retyped, main_module=main_module)
         if ast_equal(current, retyped):
+            _opt_debug_print_diff(before=current_before_pass, after=retyped, pass_index=pass_index)
             return retyped
+        _opt_debug_print_diff(before=current_before_pass, after=retyped, pass_index=pass_index)
         current = retyped
 
 

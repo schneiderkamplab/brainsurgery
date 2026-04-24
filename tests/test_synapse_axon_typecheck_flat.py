@@ -7,14 +7,18 @@ from brainsurgery.synapse.axon.ast import (
     AxonRepeat,
     AxonReturn,
     Constraint,
+    TypeAliasDef,
     TypeDim,
     TypeInt,
+    TypeNamed,
     TypeTensor,
+    TypeVar,
 )
 from brainsurgery.synapse.axon.ast.render import render_axon_file
 from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
 from brainsurgery.synapse.axon.parse import parse_axon_program
 from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
+from brainsurgery.synapse.axon.typecheck.core import _TcCtx, _is_generic_named_type, _scoped_typevars
 from brainsurgery.synapse.axon.typecheck import typecheck_flat_axon_file
 from brainsurgery.synapse.axon.validate import validate_typed_axon_file
 
@@ -204,3 +208,71 @@ def test_typecheck_flat_preserves_cache_update_shape_information() -> None:
         "?CacheLayer[B,H,K,DH]" in block_sig or "?(Tensor[B,H,K,DH], Tensor[B,H,K,DH])" in block_sig
     )
     assert "Any" not in update_line
+
+
+def test_typecheck_attention_mask_helper_does_not_force_equal_shapes() -> None:
+    resolved = resolve_axon_program_from_path(
+        Path("brainsurgery/synapse/builtins/Attention.axon")
+    ).ast
+    flat = flatten_closed_axon_file(resolved, main_module="attention")
+    typed = typecheck_flat_axon_file(flat, main_module="attention")
+    validate_typed_axon_file(typed, main_module="attention")
+    text = render_axon_file(typed, show_types=True)
+    mask_sig = next(line for line in text.splitlines() if line.startswith("mask_to_additive ::"))
+    assert "Tensor[..S] -> Tensor[..M] -> Tensor[..S]" in mask_sig
+
+
+def test_typecheck_attention_preserves_matmul_and_mask_broadcast_shapes() -> None:
+    resolved = resolve_axon_program_from_path(
+        Path("brainsurgery/synapse/builtins/Attention.axon")
+    ).ast
+    flat = flatten_closed_axon_file(resolved, main_module="attention")
+    typed = typecheck_flat_axon_file(flat, main_module="attention")
+    validate_typed_axon_file(typed, main_module="attention")
+    text = render_axon_file(typed, show_types=True)
+    assert "Tensor[B,H,1,1]" not in text
+    assert "Tensor[B,H,Q,K]" in next(
+        line for line in text.splitlines() if "scores <- (Tensor.matmul" in line
+    )
+    assert "Tensor[B,H,Q,K]" in next(
+        line for line in text.splitlines() if "mask <- (mask_to_additive" in line
+    )
+    assert "Tensor[B,H,Q,HD]" in next(
+        line for line in text.splitlines() if "out <- (Tensor.matmul" in line
+    )
+
+
+def test_typecheck_chunk_stays_list_typed_with_constant_parts() -> None:
+    source = """
+main :: Tensor[B,S,D] -> List[Tensor[B,S,D]]
+main x = do
+  y <- _chunk x -1 3
+  return y
+"""
+    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    typed = typecheck_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    text = render_axon_file(typed, show_types=True)
+    assert "_chunk" in text
+    assert "List[Tensor[B,S,D]]" in text
+
+
+def test_scoped_typevars_does_not_rescope_already_scoped_typevars() -> None:
+    ctx = _TcCtx(modules_by_name={}, type_aliases={}, substitutions={}, dim_substitutions={})
+    tp = TypeVar(name="Tensor.reshape::Tensor")
+    scoped = _scoped_typevars(
+        tp, module_name="Tensor.reshape", ctx=ctx, freshen_generics=False
+    )
+    assert scoped == tp
+
+
+def test_generic_named_type_rejects_already_scoped_names() -> None:
+    assert _is_generic_named_type(TypeNamed(name="Tensor"), type_aliases={})
+    assert not _is_generic_named_type(
+        TypeNamed(name="Tensor.reshape::Tensor"),
+        type_aliases={},
+    )
+    assert not _is_generic_named_type(
+        TypeNamed(name="TokenIds"),
+        type_aliases={"TokenIds": TypeAliasDef(params=(), value=TypeTensor(base="Tensor", dims=()))},
+    )

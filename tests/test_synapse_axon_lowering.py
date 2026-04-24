@@ -50,6 +50,79 @@ def test_lowering_preprocesses_surface_generic_gpt2_without_scope_or_root() -> N
     assert len(spec["model"].get("blocks", {})) > 0
 
 
+def test_lowering_preserves_path_typed_block_inputs_for_gemma3_scope() -> None:
+    program = parse_axon_program_from_path(
+        Path("brainsurgery/synapse/models/gemma3/gemma-3-270m.axon")
+    )
+    spec = lower_axon_program_to_synapse_spec(program, main_module="gemma3")
+
+    block_io = spec["model"]["types"]["block_io"]
+    assert block_io["gemma3_body"]["inputs"]["__scope"] == "Path"
+    assert block_io["NN.embedding"]["inputs"]["path"] == "Path"
+
+    body_graph = spec["model"]["blocks"]["gemma3_body"]["graph"]
+    embedding_call = next(
+        node["n_call_13"] for node in body_graph if "n_call_13" in node
+    )
+    assert embedding_call["_args"][0] == "@@'{__scope}.embed_tokens'"
+
+    embedding_graph = spec["model"]["blocks"]["NN.embedding"]["graph"]
+    embedding_node = next(node["n_op_1"] for node in embedding_graph if "n_op_1" in node)
+    assert embedding_node["_abs_path"] == {
+        "_expr": "path",
+        "absolute": True,
+        "parts": ["{path}"],
+    }
+
+
+def test_lowering_keeps_config_symbols_as_path_payloads_for_gpt2() -> None:
+    program = parse_axon_program_from_path(
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
+    )
+    spec = lower_axon_program_to_synapse_spec(program, main_module="gpt2")
+
+    symbols = spec["model"]["symbols"]
+    num_heads = symbols["NUM_HEADS"]
+    assert num_heads["callee"] == "Config.dim"
+    assert num_heads["args"][0] == {
+        "_expr": "path",
+        "absolute": True,
+        "parts": ["n_head"],
+    }
+
+
+def test_lowering_canonicalizes_generated_dim_terms_before_codegen() -> None:
+    program = parse_axon_program_from_path(
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
+    )
+    spec = lower_axon_program_to_synapse_spec(program, main_module="gpt2")
+
+    h1_graph = spec["model"]["blocks"]["gpt2_h1"]["graph"]
+    sqrt_node = next(node for raw in h1_graph for node in raw.values() if node.get("_op") == "sqrt")
+    assert sqrt_node["_args"] == "DH"
+
+    shape_node = next(
+        node
+        for raw in h1_graph
+        for node in raw.values()
+        if node.get("_op") == "_ir_expr"
+        and isinstance(node.get("value"), list)
+        and node.get("_bind") == "_v16"
+    )
+    assert shape_node["value"] == [
+        {"_expr": "name", "id": "B"},
+        {"_expr": "name", "id": "S"},
+        {
+            "_expr": "binary",
+            "op": "*",
+            "left": {"_expr": "name", "id": "H"},
+            "right": {"_expr": "name", "id": "DH"},
+        },
+    ]
+
+    emit_model_code_from_synapse_spec(spec, class_name="Generated")
+
+
 def test_backends_pruned_for_lowered_generic_gpt2_contract() -> None:
     program = parse_axon_program_from_path(
         Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
@@ -77,17 +150,19 @@ main x = do
     assert "_param_root" not in source
 
 
-def test_lowering_rejects_repeat_primitive() -> None:
+def test_lowering_supports_repeat_primitive_via_repeat_op() -> None:
     program = parse_axon_program(
         """
-main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main :: Tensor[B,KVH,T,HD] -> Tensor[B,H,T,HD]
 main x = do
-  y <- _repeat x 2 -1
+  y <- _repeat x 2 1
   return y
 """
     )
-    with pytest.raises(ValueError, match="_repeat must be flattened away before lowering"):
-        lower_axon_program_to_synapse_spec(program, main_module="main")
+    spec = lower_axon_program_to_synapse_spec(program, main_module="main")
+    text = _spec_text(spec)
+    assert "'_op': 'repeat'" in text
+    assert "_repeat" not in text
 
 
 def test_codegen_resolves_shape_symbol_strings_in_flat_ops() -> None:
@@ -243,3 +318,93 @@ def test_codegen_parses_null_scalar_tokens_in_flat_ops() -> None:
     out = model(x=x)
 
     assert torch.allclose(out["out"], torch.softmax(x, dim=-1))
+
+
+def test_codegen_sanitizes_internal_dunder_block_params() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {
+                    "n_call_1": {
+                        "_op": "call",
+                        "_target": "wrap",
+                        "_args": ["@@root", "x"],
+                        "_bind": "out",
+                    }
+                }
+            ],
+            "blocks": {
+                "wrap": {
+                    "graph": [],
+                    "inputs": {"__scope": {"optional": False}, "x": {"optional": False}},
+                    "outputs": {"out": "x"},
+                }
+            },
+            "inputs": {"x": {"optional": False}},
+            "outputs": {"out": "out"},
+            "symbols": {},
+            "types": {"block_io": {"wrap": {"inputs": {"path": "Path"}}}},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="Generated")
+
+    assert "def _block_wrap(self, __scope" not in source
+    assert "(__scope=" not in source
+    assert ", __scope=" not in source
+    assert "def _block_wrap(self, v__scope" in source
+    assert "v__scope='@@root'" in source
+
+
+def test_codegen_resolves_nested_path_param_scopes_for_params() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {
+                    "n_call_1": {
+                        "_op": "call",
+                        "_target": "wrap",
+                        "_args": ["@@root", "x"],
+                        "_bind": "out",
+                    }
+                }
+            ],
+            "blocks": {
+                "wrap": {
+                    "graph": [
+                        {
+                            "n_op_1": {
+                                "_op": "embedding",
+                                "_bind": "y",
+                                "_args": ["x", "2"],
+                                "_abs_path": {
+                                    "_expr": "path",
+                                    "absolute": True,
+                                    "parts": ["{path}"],
+                                },
+                                "weight": "weight",
+                                "_params": {"weight": "weight"},
+                            }
+                        }
+                    ],
+                    "inputs": {"path": {"optional": False}, "x": {"optional": False}},
+                    "outputs": {"out": "y"},
+                }
+            },
+            "inputs": {"x": {"optional": False}},
+            "outputs": {"out": "out"},
+            "symbols": {},
+            "types": {"block_io": {"wrap": {"inputs": {"path": "Path"}}}},
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="Generated")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - test-controlled generated source
+    model_cls = namespace["Generated"]
+    weight = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
+    model = model_cls.from_state_dict({"root.weight": weight})  # type: ignore[attr-defined]
+
+    out = model(x=torch.tensor([[1]], dtype=torch.long))
+
+    assert torch.equal(out["out"], weight[torch.tensor([[1]])])

@@ -171,6 +171,11 @@ Stage status as of now:
 - still open:
   - more of the old helper layer can still be deleted
   - final cleanup should keep only the minimal graph forms actually produced by the new lowering path
+  - typed artifact loading is not stage-correct yet:
+    - rendered `*.typed.axon` files currently print inferred metadata as normal `::` ascriptions
+    - parsing those files back treats annotations as source-level ascriptions, which can change re-typechecking behavior
+    - lowering should eventually have a typed-artifact loader mode that restores rendered annotations into `inferred_type` / `inferred_arity` / `inferred_dims` metadata and then consumes the flat typed AST directly, without re-running typecheck/optimize unless explicitly requested
+    - until that exists, benchmark and lowering entrypoints should use original source Axon files rather than generated `tmp/*.typed.axon` inspection artifacts
 
 10. `runtime`
 - input: Synapse graph

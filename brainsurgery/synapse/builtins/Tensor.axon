@@ -42,10 +42,10 @@ split x ?dim=-1 ?sizes=null = _split x dim sizes
 chunk :: Tensor[..S] -> ?Int -> ?Dim -> List[Tensor[..S]]
 chunk x ?dim=-1 ?parts=null = _chunk x dim parts
 
-permute :: Tensor -> ?Any -> Tensor
+permute :: Tensor[..S] -> ?Any -> Tensor
 permute x ?dims=null = _permute x dims
 
-transpose :: Tensor -> ?Int -> ?Int -> Tensor
+transpose :: Tensor[..S] -> ?Int -> ?Int -> Tensor
 transpose x ?dim1=1 ?dim2=2 = _transpose x dim1 dim2
 
 reshape :: Any -> ?List[Dim] -> Tensor
@@ -77,28 +77,28 @@ arange_step x ?start=0 ?end=null ?stride=1 = do
 
   return (fwd ? ((idx * stride_abs) + start) : (start - (idx * stride_abs)))
 
-cast :: Tensor -> ?String -> Tensor
+cast :: Tensor[..S] -> ?String -> Tensor[..S]
 cast x ?dtype=null = _cast x dtype
 
-cast_like :: Tensor -> Tensor -> Tensor
+cast_like :: Tensor[..S] -> Tensor[..R] -> Tensor[..S]
 cast_like x ref = _cast_like x ref
 
-tensor_like :: Any -> Tensor -> ?String -> Tensor
+tensor_like :: Any -> Tensor[..S] -> ?String -> Tensor[..S]
 tensor_like value ref ?dtype=null = _tensor_like value ref dtype
 
-cumsum :: Tensor -> ?Int -> Tensor
+cumsum :: Tensor[..S] -> ?Int -> Tensor[..S]
 cumsum x ?dim=-1 = _cumsum x dim
 
-unsqueeze :: Tensor -> ?Int -> Tensor
+unsqueeze :: Tensor[..S] -> ?Int -> Tensor
 unsqueeze x ?dim=0 = _unsqueeze x dim
 
 repeat :: Tensor[B,KVH,T,HD] -> ?Dim -> ?Int -> Tensor[B,H,T,HD]
 repeat x ?repeats=2 ?dim=1 = _repeat x repeats dim
 
-concat :: Tensor -> Tensor -> ?Int -> Tensor
+concat :: Tensor[..S] -> Tensor[..T] -> ?Int -> Tensor
 concat x y ?dim=-1 = _concat x y dim=dim
 
-matmul :: Tensor -> Tensor -> Tensor
+matmul :: Tensor[..S] -> Tensor[..T] -> Tensor
 matmul = _matmul
 
 eq :: Any -> Any -> Tensor
@@ -107,10 +107,10 @@ eq = _eq
 le :: Any -> Any -> Tensor
 le = _le
 
-and :: Tensor -> Tensor -> Tensor
+and :: Tensor[..S] -> Tensor[..T] -> Tensor
 and = _and
 
-where :: Tensor -> Any -> Any -> Tensor
+where :: Tensor[..S] -> Any -> Any -> Tensor
 where = _where
 
 where_indices :: Tensor -> (IdxTensor, IdxTensor)
@@ -126,19 +126,19 @@ deinterleave_last2 x = do
   odd <- slice pair dim=-1 start=1 end=2 |> reshape shape=[n, h]
   return even, odd
 
-masked_fill :: Tensor -> Tensor -> Tensor -> Tensor
+masked_fill :: Tensor[..S] -> Tensor[..M] -> Tensor[..V] -> Tensor
 masked_fill x mask value = where mask value x
 
-slice :: Tensor -> Int -> Int -> Int -> Tensor
+slice :: Tensor[..S] -> Int -> Int -> Int -> Tensor
 slice x dim start end = _slice x dim start end
 
-softmax :: Tensor -> ?Int -> ?String -> Tensor
+softmax :: Tensor[..S] -> ?Int -> ?String -> Tensor[..S]
 softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype
 
-topk :: Tensor -> Dim -> ?Int -> ?Bool -> ?Bool -> (Tensor, IdxTensor)
+topk :: Tensor[..S] -> Dim -> ?Int -> ?Bool -> ?Bool -> (Tensor, IdxTensor)
 topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted
 
-dtype_value :: Tensor -> String -> Float
+dtype_value :: Tensor[..S] -> String -> Float
 dtype_value x kind = _dtype_value x kind
 
 empty_like :: Tensor[..S] -> ?String -> Tensor[..S]
@@ -147,13 +147,13 @@ empty_like x ?dtype=null = _empty_like x dtype
 fill :: Tensor[..S] -> Any -> ?String -> Tensor[..S]
 fill x value ?dtype=null = _fill x value dtype
 
-gather :: Tensor -> IdxTensor -> ?Int -> Tensor
+gather :: Tensor[..S] -> IdxTensor -> ?Int -> Tensor
 gather x index ?dim=-1 = _gather x index dim
 
-scatter :: Tensor -> IdxTensor -> Any -> ?Int -> Tensor
+scatter :: Tensor[..S] -> IdxTensor -> Any -> ?Int -> Tensor
 scatter x index src ?dim=-1 = _scatter x index src dim
 
-index_add :: Tensor -> IdxTensor -> Tensor -> ?Int -> Tensor
+index_add :: Tensor[..S] -> IdxTensor -> Tensor[..T] -> ?Int -> Tensor
 index_add x index src ?dim=0 = _index_add x index src dim
 
 zeros_like :: Tensor[..S] -> Tensor[..S]
