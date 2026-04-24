@@ -176,18 +176,21 @@ def interpret(
                 path_spec,
                 node_path=node_path,
                 param_name=weight_param,
+                env=env,
             )
     else:
         weight_path = model._infer_param_path(
             path_spec,
             node_path=node_path,
             param_name=weight_param,
+            env=env,
         )
     if isinstance(weight_path, str) and weight_path.strip() in {"@weight", "weight"}:
         weight_path = model._infer_param_path(
             path_spec,
             node_path=node_path,
             param_name=weight_param,
+            env=env,
         )
     weight = model._state_tensor_from_resolved_path(weight_path, field="layernorm.weight")
     has_bias = bool(model._eval_expr(bias_expr, env, symbols))
@@ -202,18 +205,21 @@ def interpret(
                 path_spec,
                 node_path=node_path,
                 param_name=bias_param,
+                env=env,
             )
     else:
         bias_path = model._infer_param_path(
             path_spec,
             node_path=node_path,
             param_name=bias_param,
+            env=env,
         )
     if isinstance(bias_path, str) and bias_path.strip() in {"@bias", "bias"}:
         bias_path = model._infer_param_path(
             path_spec,
             node_path=node_path,
             param_name=bias_param,
+            env=env,
         )
     bias = (
         model._state_tensor_from_resolved_path(bias_path, field="layernorm.bias")

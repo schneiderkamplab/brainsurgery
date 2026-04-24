@@ -195,6 +195,7 @@ def interpret(
         path_spec,
         node_path=node_path,
         param_name=weight_param,
+        env=env,
     )
     weight = model._state[linear_weight_path]
     expert_idx: int | None = None
@@ -217,6 +218,7 @@ def interpret(
             path_spec,
             node_path=node_path,
             param_name=bias_param,
+            env=env,
         )
         bias = model._state_tensor_from_resolved_path(bias_path, field="linear.bias")
         if bias is not None and expert_idx is not None and bias.ndim >= 2:

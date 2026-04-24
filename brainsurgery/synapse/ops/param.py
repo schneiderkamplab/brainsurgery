@@ -44,7 +44,7 @@ def interpret(
     path_value = model._eval_expr(raw, env, symbols)
     path_spec = dict(node_spec)
     path_spec["value"] = path_value
-    resolved = model._infer_param_path(path_spec, node_path=node_path, param_name="value")
+    resolved = model._infer_param_path(path_spec, node_path=node_path, param_name="value", env=env)
     out_name = model._require_name(node_spec.get("_bind"), field="params_param._bind")
     value = model._state.get(resolved)
     if not torch.is_tensor(value):
@@ -78,7 +78,7 @@ def compile(
     if "_param_root" in node_spec:
         lines.append(f"{indent}{path_spec_var}['_param_root'] = {node_spec.get('_param_root')!r}")
     lines.append(
-        f"{indent}{resolved_var} = self._infer_param_path({path_spec_var}, node_path={node_path_var}, param_name='value')"
+        f"{indent}{resolved_var} = self._infer_param_path({path_spec_var}, node_path={node_path_var}, param_name='value', env={{**env, **locals()}})"
     )
     lines.append(f"{indent}{out_var} = emitter._param({resolved_var})")
     return lines

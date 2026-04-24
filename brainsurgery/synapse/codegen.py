@@ -1045,7 +1045,7 @@ class _Emitter:
             else:
                 value_code = self._expr_code(src, env)
             if _path_typed_input(block_input_name):
-                value_code = f"self._resolve_call_path_arg({value_code}, locals())"
+                value_code = f"self._resolve_call_path_arg({value_code}, {{**env, **locals()}})"
             arg_codes.append(f"{py_input_name}={value_code}")
         for key, value in node_spec.items():
             if key.startswith("_") or key == "graph":
@@ -1058,7 +1058,7 @@ class _Emitter:
             else:
                 value_code = self._expr_code(value, env)
             if _path_typed_input(key):
-                value_code = f"self._resolve_call_path_arg({value_code}, locals())"
+                value_code = f"self._resolve_call_path_arg({value_code}, {{**env, **locals()}})"
             arg_codes.append(f"{py_input_name}={value_code}")
 
         block_outputs = block_spec.get("outputs", {})
@@ -1172,7 +1172,7 @@ class _Emitter:
         scope_var: str | None = None,
     ) -> str:
         expr_env = self._active_env if env is None else env
-        env_expr = "locals()"
+        env_expr = "{**env, **locals()}"
         abs_path = node_spec.get("_abs_path")
         if isinstance(abs_path, (str, dict)):
             scope_expr = (

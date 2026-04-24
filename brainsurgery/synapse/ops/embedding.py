@@ -69,7 +69,7 @@ def interpret(
     if not args:
         raise ValueError("embedding requires positional args: x [dim]")
     x = model._read_tensor_input(args[0], env)
-    weight_path = model._infer_param_path(node_spec, node_path=node_path, param_name="weight")
+    weight_path = model._infer_param_path(node_spec, node_path=node_path, param_name="weight", env=env)
     weight = model._state_tensor_from_resolved_path(weight_path, field="embedding.weight")
     if torch.is_tensor(weight) and torch.is_tensor(x) and weight.device != x.device:
         weight = weight.to(device=x.device)

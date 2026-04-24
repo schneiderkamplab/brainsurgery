@@ -408,3 +408,76 @@ def test_codegen_resolves_nested_path_param_scopes_for_params() -> None:
     out = model(x=torch.tensor([[1]], dtype=torch.long))
 
     assert torch.equal(out["out"], weight[torch.tensor([[1]])])
+
+
+def test_codegen_resolves_source_named_path_template_args() -> None:
+    spec = {
+        "synapse": 1,
+        "model": {
+            "graph": [
+                {
+                    "n_call_1": {
+                        "_op": "call",
+                        "_target": "body",
+                        "_args": ["@@model", "x"],
+                        "_bind": "out",
+                    }
+                }
+            ],
+            "blocks": {
+                "body": {
+                    "graph": [
+                        {
+                            "n_call_1": {
+                                "_op": "call",
+                                "_target": "NN.embedding",
+                                "_args": ["@@'{__scope}.embed_tokens'", "x"],
+                                "_bind": "y",
+                            }
+                        }
+                    ],
+                    "inputs": {"__scope": {"optional": False}, "x": {"optional": False}},
+                    "outputs": {"out": "y"},
+                },
+                "NN.embedding": {
+                    "graph": [
+                        {
+                            "n_op_1": {
+                                "_op": "embedding",
+                                "_bind": "y",
+                                "_args": ["x", "2"],
+                                "_abs_path": {
+                                    "_expr": "path",
+                                    "absolute": True,
+                                    "parts": ["{path}"],
+                                },
+                                "weight": "weight",
+                                "_params": {"weight": "weight"},
+                            }
+                        }
+                    ],
+                    "inputs": {"path": {"optional": False}, "x": {"optional": False}},
+                    "outputs": {"out": "y"},
+                },
+            },
+            "inputs": {"x": {"optional": False}},
+            "outputs": {"out": "out"},
+            "symbols": {},
+            "types": {
+                "block_io": {
+                    "body": {"inputs": {"__scope": "Path"}},
+                    "NN.embedding": {"inputs": {"path": "Path"}},
+                }
+            },
+        },
+    }
+    source = emit_model_code_from_synapse_spec(spec, class_name="Generated")
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - test-controlled generated source
+    model_cls = namespace["Generated"]
+    weight = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
+    model = model_cls.from_state_dict({"model.embed_tokens.weight": weight})  # type: ignore[attr-defined]
+
+    out = model(x=torch.tensor([[1]], dtype=torch.long))
+
+    assert torch.equal(out["out"], weight[torch.tensor([[1]])])
