@@ -1,12 +1,12 @@
 {-# CHECKPOINTS ["google/gemma-4-31B", "google/gemma-4-31B-it"] #-}
 
 import Activations (gelu_pytorch_tanh, tanh)
-import Attention (attention, merge_heads, reshape_heads)
+import Attention (attention_scaled, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Math (mul, sqrt)
-import Params (param_scale)
+import Params (has_root, param_scale)
 import Positions (position_ids, rope_pair_proportional)
-import Cache
+import Cache (Cache, CacheLayer)
 import Config
 import NN
 import Tensor
@@ -16,46 +16,45 @@ import Tensor
 CFG = "text_config"
 PARAM_ROOT = (has_root "model.language_model") ? "model" : ""
 
-MODEL_DIM = Config.int @'{CFG}.hidden_size' default=5376
-VOCAB_SIZE = Config.int @'{CFG}.vocab_size' default=262144
-NUM_LAYERS = Config.int @'{CFG}.num_hidden_layers' default=60
-NUM_HEADS = Config.int @'{CFG}.num_attention_heads' default=32
-KVH = Config.int @'{CFG}.num_key_value_heads' default=16
-GKVH = Config.int @'{CFG}.num_global_key_value_heads' default=KVH
-MODEL_HEAD_DIM = Config.int @'{CFG}.head_dim' default=256
-GHD = Config.int @'{CFG}.global_head_dim' default=MODEL_HEAD_DIM
-FFN = Config.int @'{CFG}.intermediate_size' default=21504
-MOE_FFN = Config.int @'{CFG}.moe_intermediate_size' default=1408
-PLI = Config.int @'{CFG}.hidden_size_per_layer_input' default=0
-WIN_LOCAL = Config.int @'{CFG}.sliding_window' default=1024
-WIN_FULL = Config.int @'{CFG}.max_position_embeddings' default=262144
-EPS = Config.float @'{CFG}.rms_norm_eps' default=1e-06
-THETA_LOCAL = Config.float @'{CFG}.rope_parameters.sliding_attention.rope_theta' default=10000.0
-THETA_FULL = Config.float @'{CFG}.rope_parameters.full_attention.rope_theta' default=1000000.0
-ROPE_SCALE_FULL = Config.float @'{CFG}.rope_parameters.full_attention.factor' default=1.0
-ROTARY_PARTIAL_FULL = Config.float @'{CFG}.rope_parameters.full_attention.partial_rotary_factor' default=0.25
-ROPE_PERIOD = Config.int @'{CFG}.sliding_window_pattern' default=(USE_DOUBLE_WIDE_MLP ? 5 : 6)
-ATTN_K_EQ_V = Config.bool @'{CFG}.attention_k_eq_v' default=false
-LOGIT_SOFTCAP = Config.float @'{CFG}.final_logit_softcapping' default=30.0
+MODEL_DIM = Config.int @@'{CFG}.hidden_size' default=5376
+VOCAB_SIZE = Config.int @@'{CFG}.vocab_size' default=262144
+NUM_LAYERS = Config.int @@'{CFG}.num_hidden_layers' default=60
+NUM_HEADS = Config.int @@'{CFG}.num_attention_heads' default=32
+KVH = Config.int @@'{CFG}.num_key_value_heads' default=16
+GKVH = Config.int @@'{CFG}.num_global_key_value_heads' default=KVH
+MODEL_HEAD_DIM = Config.int @@'{CFG}.head_dim' default=256
+GHD = Config.int @@'{CFG}.global_head_dim' default=MODEL_HEAD_DIM
+FFN = Config.int @@'{CFG}.intermediate_size' default=21504
+MOE_FFN = Config.int @@'{CFG}.moe_intermediate_size' default=1408
+PLI = Config.int @@'{CFG}.hidden_size_per_layer_input' default=0
+WIN_LOCAL = Config.int @@'{CFG}.sliding_window' default=1024
+WIN_FULL = Config.int @@'{CFG}.max_position_embeddings' default=262144
+EPS = Config.float @@'{CFG}.rms_norm_eps' default=1e-06
+THETA_LOCAL = Config.float @@'{CFG}.rope_parameters.sliding_attention.rope_theta' default=10000.0
+THETA_FULL = Config.float @@'{CFG}.rope_parameters.full_attention.rope_theta' default=1000000.0
+ROPE_SCALE_FULL = Config.float @@'{CFG}.rope_parameters.full_attention.factor' default=1.0
+ROTARY_PARTIAL_FULL = Config.float @@'{CFG}.rope_parameters.full_attention.partial_rotary_factor' default=0.25
+ROPE_PERIOD = Config.int @@'{CFG}.sliding_window_pattern' default=(USE_DOUBLE_WIDE_MLP ? 5 : 6)
+ATTN_K_EQ_V = Config.bool @@'{CFG}.attention_k_eq_v' default=false
+LOGIT_SOFTCAP = Config.float @@'{CFG}.final_logit_softcapping' default=30.0
 HAS_PLI = PLI > 0
 PER_LAYER_INPUT_SCALE = 0.7071067811865476
-PER_LAYER_PROJ_SCALE = 1.0 / sqrt MODEL_DIM
-NUM_KV_SHARED = Config.int @'{CFG}.num_kv_shared_layers' default=0
-USE_DOUBLE_WIDE_MLP = Config.bool @'{CFG}.use_double_wide_mlp' default=false
-TOPK_EXPERTS = Config.int @'{CFG}.top_k_experts' default=8
-NUM_EXPERTS = Config.int @'{CFG}.num_experts' default=128
+NUM_KV_SHARED = Config.int @@'{CFG}.num_kv_shared_layers' default=0
+USE_DOUBLE_WIDE_MLP = Config.bool @@'{CFG}.use_double_wide_mlp' default=false
+TOPK_EXPERTS = Config.int @@'{CFG}.top_k_experts' default=8
+NUM_EXPERTS = Config.int @@'{CFG}.num_experts' default=128
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x cast_float=true
 
-gemma4_kv_shared :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
+gemma4_kv_shared :: Tensor[B,S,D] -> Dim -> Dim -> Dim -> (Tensor[B,kv_heads,S,hd], Tensor[B,kv_heads,S,hd])
 gemma4_kv_shared xn kv_dim kv_heads hd = do
   kv <- NN.linear@k_proj xn dim=kv_dim bias=false |> reshape_heads heads=kv_heads
   k <- NN.rmsnorm@k_norm kv dim=hd cast_float=true
   v <- NN.rmsnorm_noscale kv dim=hd cast_float=true
   return k, v
 
-gemma4_kv_separate :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
+gemma4_kv_separate :: Tensor[B,S,D] -> Dim -> Dim -> Dim -> (Tensor[B,kv_heads,S,hd], Tensor[B,kv_heads,S,hd])
 gemma4_kv_separate xn kv_dim kv_heads hd = do
   k <- NN.linear@k_proj xn dim=kv_dim bias=false |>
     reshape_heads heads=kv_heads |>
@@ -65,7 +64,7 @@ gemma4_kv_separate xn kv_dim kv_heads hd = do
     NN.rmsnorm_noscale dim=hd cast_float=true
   return k, v
 
-gemma4_dense_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gemma4_dense_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gemma4_dense_block x i pos_ids attn_mask past_kv = do
   full <- ((i + 1) % ROPE_PERIOD) == 0
   use_global_kv <- full and ATTN_K_EQ_V
@@ -87,7 +86,7 @@ gemma4_dense_block x i pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(NUM_HEADS / kv_heads)
     v <- Tensor.repeat v repeats=(NUM_HEADS / kv_heads)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
-    a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+    a <- attention_scaled q k v mask 1.0 |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
     return a, new_kv
 
   a <- rms@post_attention_layernorm a
@@ -102,11 +101,12 @@ gemma4_dense_block x i pos_ids attn_mask past_kv = do
   x <- param_scale x
   return x, new_kv
 
-gemma4_dense :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gemma4_dense :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 gemma4_dense input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model.language_model do
-    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=(sqrt MODEL_DIM)
+    emb_scale <- _sqrt (Config.float @@'{CFG}.hidden_size' default=5376.0)
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=emb_scale
     new_kv <- use_cache ? Cache.init : null
     x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i

@@ -99,6 +99,7 @@ class _RecursiveInterfaces:
 def _is_generic_named_type(tp: TypeExpr, *, type_aliases: dict[str, TypeAliasDef]) -> bool:
     return (
         isinstance(tp, TypeNamed)
+        and tp.name not in {"Tensor", "IdxTensor"}
         and tp.name not in type_aliases
         and "." not in tp.name
         and "::" not in tp.name
@@ -161,6 +162,8 @@ def _expand_alias(tp: TypeExpr, ctx: _TcCtx) -> TypeExpr:
     tp = _apply_subst(tp, ctx)
     if isinstance(tp, TypeNamed) and tp.name == "Tensor" and not tp.args:
         return TypeTensor(base="Tensor", dims=())
+    if isinstance(tp, TypeNamed) and tp.name == "IdxTensor" and not tp.args:
+        return TypeTensor(base="IdxTensor", dims=())
     if isinstance(tp, TypeOptional):
         return TypeOptional(inner=_expand_alias(tp.inner, ctx))
     if isinstance(tp, TypeList):
@@ -178,6 +181,14 @@ def _expand_alias(tp: TypeExpr, ctx: _TcCtx) -> TypeExpr:
         subst = {name: dim for name, dim in zip(alias.params, tp.args, strict=True)}
         return _expand_alias(_substitute_alias_dims(alias.value, subst=subst), ctx)
     return tp
+
+
+def _optional_inner_type(tp: TypeExpr) -> TypeExpr:
+    return tp.inner if isinstance(tp, TypeOptional) else tp
+
+
+def _is_scalar_numeric_type(tp: TypeExpr) -> bool:
+    return isinstance(_optional_inner_type(tp), TypeFloat | TypeInt | TypeDim)
 
 
 def _substitute_alias_dims(tp: TypeExpr, *, subst: dict[str, DimToken]) -> TypeExpr:
@@ -318,20 +329,73 @@ def _normalize_dim_token(dim: DimToken, ctx: _TcCtx) -> DimToken:
         if len(normalized) == 1:
             return normalized[0]
         return dim
+    if isinstance(normalized, DimExprBinary):
+        return _simplify_dim_expr(normalized)
     return normalized
 
 
+def _simplify_dim_expr(dim: DimExprBinary) -> DimToken:
+    left: DimToken = _simplify_dim_expr(dim.left) if isinstance(dim.left, DimExprBinary) else dim.left
+    right: DimToken = _simplify_dim_expr(dim.right) if isinstance(dim.right, DimExprBinary) else dim.right
+    if isinstance(left, int) and isinstance(right, int):
+        if dim.op == "+":
+            return left + right
+        if dim.op == "-":
+            return left - right
+        if dim.op == "*":
+            return left * right
+        if dim.op == "/" and right != 0 and left % right == 0:
+            return left // right
+    if dim.op == "+":
+        if right == 0:
+            return left
+        if left == 0:
+            return right
+    if dim.op == "-":
+        if right == 0:
+            return left
+        if left == right:
+            return 0
+        if isinstance(left, DimExprBinary) and left.op == "+" and left.right == right:
+            return left.left
+        if isinstance(left, DimExprBinary) and left.op == "+" and left.left == right:
+            return left.right
+    if dim.op == "*":
+        if isinstance(right, DimExprBinary) and right.op == "/" and right.right == left:
+            return right.left
+        if isinstance(left, DimExprBinary) and left.op == "/" and left.right == right:
+            return left.left
+        if right == 1:
+            return left
+        if left == 1:
+            return right
+        if right == 0 or left == 0:
+            return 0
+    if dim.op == "/" and right == 1:
+        return left
+    return DimExprBinary(op=dim.op, left=left, right=right)
+
+
+def _dim_value_contains_name(value: DimToken | tuple[DimToken, ...], name: str) -> bool:
+    if isinstance(value, tuple):
+        return any(_dim_value_contains_name(item, name) for item in value)
+    if value == name:
+        return True
+    if isinstance(value, DimExprBinary):
+        return name in dim_token_names(value)
+    return False
+
+
 def _bind_dim_name(name: str, value: DimToken | tuple[DimToken, ...], ctx: _TcCtx) -> None:
+    if _dim_value_contains_name(value, name):
+        return
     if name.startswith(".."):
-        if isinstance(value, tuple):
-            if value == (name,):
-                return
-        elif value == name:
-            return
         ctx.dim_substitutions[name] = value
         return
     if isinstance(value, tuple):
         if len(value) != 1:
+            if _dim_value_contains_name(value, name):
+                return
             ctx.dim_substitutions[name] = value
             return
         value = value[0]
@@ -432,6 +496,28 @@ def _unify_dim_sequence(
         assert isinstance(right_name, str)
         _bind_dim_name(right_name, expected, ctx)
         return tuple(_normalize_dim_token(dim, ctx) for dim in expected)
+    if not left_prefix and left_suffix and len(actual) >= len(left_suffix):
+        tail_actual = actual[-len(left_suffix) :]
+        tail = [
+            _unify_dim_token(left, right, ctx)
+            for left, right in zip(left_suffix, tail_actual, strict=True)
+        ]
+        left_name = expected[left_var]
+        assert isinstance(left_name, str)
+        middle = actual[: len(actual) - len(left_suffix)]
+        _bind_dim_name(left_name, middle, ctx)
+        return tuple(_normalize_dim_token(dim, ctx) for dim in middle) + tuple(tail)
+    if not right_prefix and right_suffix and len(expected) >= len(right_suffix):
+        tail_expected = expected[-len(right_suffix) :]
+        tail = [
+            _unify_dim_token(left, right, ctx)
+            for left, right in zip(tail_expected, right_suffix, strict=True)
+        ]
+        right_name = actual[right_var]
+        assert isinstance(right_name, str)
+        middle = expected[: len(expected) - len(right_suffix)]
+        _bind_dim_name(right_name, middle, ctx)
+        return tuple(_normalize_dim_token(dim, ctx) for dim in middle) + tuple(tail)
     if len(left_prefix) != len(right_prefix) or len(left_suffix) != len(right_suffix):
         raise ValueError("Axon typecheck failed: cannot unify multiple variadic tensor dims")
     head = [
@@ -592,10 +678,6 @@ def _join_dim_token(left: DimToken, right: DimToken, ctx: _TcCtx) -> DimToken:
     right = _normalize_dim_token(right, ctx)
     if left == right:
         return left
-    if left == 1:
-        return right
-    if right == 1:
-        return left
     try:
         return _unify_dim_token(left, right, ctx)
     except ValueError:
@@ -631,6 +713,12 @@ def _join_branch_types(left: TypeExpr, right: TypeExpr, ctx: _TcCtx) -> TypeExpr
                 )
             )
         )
+    if isinstance(left_expanded, TypeOptional) and isinstance(right_expanded, TypeOptional):
+        return TypeOptional(inner=_join_branch_types(left_expanded.inner, right_expanded.inner, ctx))
+    if isinstance(left_expanded, TypeOptional):
+        return TypeOptional(inner=_join_branch_types(left_expanded.inner, right_expanded, ctx))
+    if isinstance(right_expanded, TypeOptional):
+        return TypeOptional(inner=_join_branch_types(left_expanded, right_expanded.inner, ctx))
     if isinstance(left_expanded, TypeTensor) and isinstance(right_expanded, TypeTensor):
         if (
             left_expanded.base != right_expanded.base
@@ -639,15 +727,6 @@ def _join_branch_types(left: TypeExpr, right: TypeExpr, ctx: _TcCtx) -> TypeExpr
         ):
             return _unify(left, right, ctx)
         if left_expanded.dims and right_expanded.dims:
-            broadcast_dims = broadcast_shape(
-                tuple(_normalize_dim_token(dim, ctx) for dim in left_expanded.dims),
-                tuple(_normalize_dim_token(dim, ctx) for dim in right_expanded.dims),
-            )
-            if broadcast_dims is not None:
-                return TypeTensor(
-                    base="Tensor",
-                    dims=tuple(_normalize_dim_token(dim, ctx) for dim in broadcast_dims),
-                )
             joined_dims = _join_tensor_dims(left_expanded.dims, right_expanded.dims, ctx)
             if joined_dims is not None:
                 return TypeTensor(base="Tensor", dims=joined_dims)
@@ -1010,6 +1089,17 @@ def _expr_to_dim_token(expr: AxonExpr) -> DimToken | None:
             return None
         return DimExprBinary(op=expr.op, left=left, right=right)
     return None
+
+
+def _expr_to_dim_token_resolved(
+    expr: AxonExpr, expr_defs: dict[str, AxonExpr], seen: frozenset[str] = frozenset()
+) -> DimToken | None:
+    token = _expr_to_dim_token(expr)
+    if isinstance(token, str) and token not in seen:
+        resolved = expr_defs.get(token)
+        if resolved is not None:
+            return _expr_to_dim_token_resolved(resolved, expr_defs, seen | {token})
+    return token
 
 
 def _normalize_constraint_operand(
@@ -2159,7 +2249,8 @@ def _infer_primitive_call(
             ),
         )
         if _is_type_expr_instance(inferred):
-            return _annotate_expr(typed_call, inferred, arity=1, ctx=ctx), inferred, 1
+            arity = len(inferred.items) if isinstance(inferred, TypeTuple) else 1
+            return _annotate_expr(typed_call, inferred, arity=arity, ctx=ctx), inferred, arity
     returns_spec = type_signature.get("returns")
     if (
         isinstance(returns_spec, tuple)
@@ -2502,9 +2593,21 @@ def _infer_expr(
                         base="Tensor",
                         dims=tuple(_normalize_dim_token(dim, ctx) for dim in dims),
                     )
+            elif isinstance(left_expanded, TypeTensor) and _is_scalar_numeric_type(right_expanded):
+                tp = _apply_subst(left_tp, ctx)
+            elif isinstance(right_expanded, TypeTensor) and _is_scalar_numeric_type(left_expanded):
+                tp = _apply_subst(right_tp, ctx)
             elif isinstance(left_expanded, TypeTensor):
                 tp = _apply_subst(left_tp, ctx)
             elif isinstance(right_expanded, TypeTensor):
+                tp = _apply_subst(right_tp, ctx)
+            elif isinstance(left_expanded, TypeVar | TypeAny) and _is_scalar_numeric_type(
+                right_expanded
+            ):
+                tp = _apply_subst(left_tp, ctx)
+            elif isinstance(right_expanded, TypeVar | TypeAny) and _is_scalar_numeric_type(
+                left_expanded
+            ):
                 tp = _apply_subst(right_tp, ctx)
             elif isinstance(left_expanded, TypeDim) or isinstance(right_expanded, TypeDim):
                 tp = TypeDim()
@@ -2518,6 +2621,10 @@ def _infer_expr(
                 left_expanded, TypeFloat | TypeInt
             ):
                 tp = _apply_subst(right_tp, ctx)
+            elif isinstance(left_expanded, TypeVar | TypeAny) and isinstance(
+                right_expanded, TypeVar | TypeAny
+            ):
+                tp = _apply_subst(left_tp, ctx)
             elif isinstance(left_expanded, TypeFloat) or isinstance(right_expanded, TypeFloat):
                 tp = TypeFloat()
                 _unify(left_tp, tp, ctx)
@@ -2601,7 +2708,13 @@ def _infer_expr(
         for idx, (arg_tp, param_tp) in enumerate(
             zip(arg_types, param_types[:positional_count], strict=False)
         ):
-            _unify(arg_tp, param_tp, ctx)
+            try:
+                _unify(arg_tp, param_tp, ctx)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{expr.callee} positional arg {idx + 1}: {exc}; "
+                    f"actual={arg_tp!r} expected={param_tp!r}"
+                ) from exc
             typed_args[idx] = _retag_numeric_literals(typed_args[idx], param_tp, ctx)
             if idx >= len(callee.path_params):
                 param_idx = idx - len(callee.path_params)
@@ -2619,14 +2732,17 @@ def _infer_expr(
                         isinstance(raw_param_type, TypeOptional)
                         and isinstance(raw_param_type.inner, TypeDim)
                     ):
-                        dim_token = _expr_to_dim_token(dim_expr)
+                        dim_token = _expr_to_dim_token_resolved(dim_expr, expr_defs)
                         if dim_token is not None:
                             dim_subst.setdefault(callee.params[param_idx].name, dim_token)
         for key, value_tp in kwarg_types.items():
             if key in param_names:
                 param_idx = param_names.index(key)
                 if param_idx < len(param_types):
-                    _unify(value_tp, param_types[param_idx], ctx)
+                    try:
+                        _unify(value_tp, param_types[param_idx], ctx)
+                    except ValueError as exc:
+                        raise ValueError(f"{expr.callee} kwarg {key}: {exc}") from exc
                     typed_kwarg_expr = typed_kwargs.get(key)
                     if isinstance(typed_kwarg_expr, AxonExpr):
                         typed_kwargs[key] = _retag_numeric_literals(
@@ -2649,7 +2765,7 @@ def _infer_expr(
                                     isinstance(raw_param_type, TypeOptional)
                                     and isinstance(raw_param_type.inner, TypeDim)
                                 ):
-                                    dim_token = _expr_to_dim_token(raw_value)
+                                    dim_token = _expr_to_dim_token_resolved(raw_value, expr_defs)
                                     if dim_token is not None:
                                         dim_subst.setdefault(
                                             callee.params[raw_param_idx].name, dim_token
@@ -3283,6 +3399,24 @@ def _normalize_expr(
     )
     if inferred_dims is None and inferred_type is not None:
         inferred_dims = _type_dims(inferred_type, ctx)
+    if isinstance(expr, AxonExprName) and expr.name.startswith("__d"):
+        mapped = ctx.dim_substitutions.get(expr.name)
+        if not isinstance(mapped, tuple) and mapped is not None:
+            normalized_mapped = _normalize_dim_token(mapped, ctx)
+            if isinstance(normalized_mapped, int):
+                return _replace_expr_annotations(
+                    AxonExprInt(value=normalized_mapped),
+                    inferred_type=inferred_type,
+                    inferred_arity=inferred_arity,
+                    inferred_dims=inferred_dims,
+                )
+            if isinstance(normalized_mapped, str) and normalized_mapped != expr.name:
+                return _replace_expr_annotations(
+                    AxonExprName(name=normalized_mapped),
+                    inferred_type=inferred_type,
+                    inferred_arity=inferred_arity,
+                    inferred_dims=inferred_dims,
+                )
     if isinstance(expr, AxonExprList):
         return _replace_expr_annotations(
             replace(
@@ -3573,7 +3707,11 @@ def _typed_module_raw(
     ctx: _TcCtx,
     recursive_env: _RecursiveInterfaces | None,
 ) -> tuple[AxonModule, tuple[AxonParam, ...], TypeExpr | None, _TcCtx]:
-    share_constraints = recursive_env is not None and bool(recursive_env.members)
+    share_constraints = (
+        recursive_env is not None
+        and bool(recursive_env.members)
+        and module.name in recursive_env.members
+    )
     module_ctx = ctx.child(share_constraints=share_constraints)
     env = dict(constants_env)
     refined_params: list = []
@@ -3602,17 +3740,20 @@ def _typed_module_raw(
         env[name] = TypePath()
     if module.path_param is not None:
         env[module.path_param] = TypePath()
-    typed_statements, _, _ = _infer_statements(
-        module.statements,
-        env=env,
-        expr_defs={},
-        condition_defs={},
-        ctx=module_ctx,
-        module_name=module.name,
-        recursive_env=recursive_env,
-        expected_return_types=expected_returns,
-        in_loop=False,
-    )
+    try:
+        typed_statements, _, _ = _infer_statements(
+            module.statements,
+            env=env,
+            expr_defs={},
+            condition_defs={},
+            ctx=module_ctx,
+            module_name=module.name,
+            recursive_env=recursive_env,
+            expected_return_types=expected_returns,
+            in_loop=False,
+        )
+    except ValueError as exc:
+        raise ValueError(f"{module.name}: {exc}") from exc
     if shared_signature is not None:
         if len(shared_signature[1]) == 1:
             refined_return = _apply_type_subst_only(shared_signature[1][0], module_ctx)
@@ -3666,7 +3807,7 @@ def _typed_module(
         raw_params=raw_params,
         refined_return=refined_return,
         ctx=module_ctx,
-        normalize_header_dims=False,
+        normalize_header_dims=True,
     )
 
 
@@ -3968,6 +4109,32 @@ def _module_call_graph(program: AxonFile) -> dict[str, set[str]]:
     return graph
 
 
+def _reachable_modules(program: AxonFile, *, main_module: str | None) -> frozenset[str]:
+    if main_module is None:
+        return frozenset(module.name for module in program.modules)
+    graph = _module_call_graph(program)
+    if main_module not in graph:
+        return frozenset()
+    seen: set[str] = set()
+    stack = [main_module]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(sorted(graph.get(current, ())))
+    return frozenset(seen)
+
+
+def _prune_to_main(program: AxonFile, *, main_module: str | None) -> AxonFile:
+    keep = _reachable_modules(program, main_module=main_module)
+    if main_module is not None and main_module not in keep:
+        raise ValueError(f"Axon typecheck failed: main module {main_module!r} not found")
+    if len(keep) == len(program.modules):
+        return program
+    return replace(program, modules=tuple(module for module in program.modules if module.name in keep))
+
+
 def _module_sccs(graph: dict[str, set[str]]) -> list[tuple[str, ...]]:
     index = 0
     stack: list[str] = []
@@ -4034,7 +4201,7 @@ def _program_type_order(program: AxonFile) -> tuple[list[tuple[str, ...]], _Recu
                 queue.append(succ)
     ordered_components: list[tuple[str, ...]] = []
     recursive_members: set[str] = set()
-    for comp_idx in topo:
+    for comp_idx in reversed(topo):
         component = tuple(
             module.name for module in program.modules if component_of[module.name] == comp_idx
         )
@@ -4220,15 +4387,15 @@ def _typecheck_flat_once(program: AxonFile) -> AxonFile:
     typed_modules_by_name: dict[str, AxonModule] = {}
     for component in ordered_components:
         if len(component) > 1 or (len(component) == 1 and component[0] in recursive_env.members):
-            typed_modules_by_name.update(
-                _typecheck_recursive_component(
-                    component,
-                    modules_by_name=modules_by_name,
-                    constants_env=constant_types,
-                    ctx=ctx,
-                    recursive_env=recursive_env,
-                )
+            typed_component = _typecheck_recursive_component(
+                component,
+                modules_by_name=modules_by_name,
+                constants_env=constant_types,
+                ctx=ctx,
+                recursive_env=recursive_env,
             )
+            typed_modules_by_name.update(typed_component)
+            ctx.modules_by_name.update(typed_component)
             continue
         name = component[0]
         typed_modules_by_name[name] = _typed_module(
@@ -4237,6 +4404,7 @@ def _typecheck_flat_once(program: AxonFile) -> AxonFile:
             ctx=ctx,
             recursive_env=recursive_env,
         )
+        ctx.modules_by_name[name] = typed_modules_by_name[name]
     typed_modules = tuple(
         _rewrite_typed_module_headers_from_param_uses(typed_modules_by_name[module.name])
         for module in program.modules
@@ -4255,6 +4423,7 @@ def _typecheck_flat_once(program: AxonFile) -> AxonFile:
 
 
 def typecheck_flat_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
+    program = _prune_to_main(program, main_module=main_module)
     validate_flat_axon_file(program, main_module=main_module)
     return _typecheck_flat_once(program)
 

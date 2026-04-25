@@ -13,7 +13,7 @@ import Params
 import Params (has_root)
 import Positions
 import Positions (position_ids, rope_pair_base)
-import Cache
+import Cache (Cache, CacheLayer)
 import NN
 import Tensor
 
@@ -22,7 +22,7 @@ HAS_LM_HEAD = has_root "lm_head"
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-06 cast_float=true unit_offset=true
 
-gemma2_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gemma2_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gemma2_block x i pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -48,13 +48,13 @@ gemma2_block x i pos_ids attn_mask past_kv = do
   m <- rms@post_feedforward_layernorm m
   return x + m, new_kv
 
-gemma2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gemma2 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 gemma2 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=3584 scale=59.86651818838306
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..42) do
+    x, new_kv <- for@layers i <- [0..42) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- gemma2_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i

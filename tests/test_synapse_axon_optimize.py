@@ -48,6 +48,32 @@ main = do
     assert "true" not in str(main.statements[0]).lower()
 
 
+def test_optimize_does_not_specialize_shared_callee_through_unresolved_forwarder() -> None:
+    source = """
+wrap :: Float -> Float
+wrap scale = do
+  y <- scale + 1.0
+  return y
+
+helper :: Float -> Float
+helper embed_scale = wrap embed_scale
+
+main :: Float
+main = do
+  a <- wrap 39.0
+  b <- helper 16.0
+  c <- a + b
+  return c
+"""
+    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    typed = typecheck_flat_axon_file(flat, main_module="main")
+    optimized = optimize_flat_typed_axon_file(typed, main_module="main")
+    validate_typed_axon_file(optimized, main_module="main")
+    text = "\n".join(str(stmt) for module in optimized.modules for stmt in module.statements)
+    assert "57.0" in text
+    assert "80.0" not in text
+
+
 def test_optimize_specializes_single_entry_recursive_helper_params() -> None:
     source = """
 loop_continue :: Int -> Int -> Int -> Int -> Int
@@ -78,6 +104,34 @@ main acc = loop_recur 0 10 1 acc
     assert "name='i'), right=AxonExprInt" in text
     assert "name='le_limit'" not in text
     assert "name='positive'" not in text
+
+
+def test_optimize_does_not_specialize_rebound_recursive_carry_to_null() -> None:
+    source = """
+loop_continue :: Int -> Int -> Int
+loop_continue i state = do
+  state <- (i == 0) ? 1 : state
+  next <- i + 1
+  out <- loop_recur next state
+  return out
+
+loop_recur :: Int -> Int -> Int
+loop_recur i state = do
+  flag <- i >= 3
+  out <- flag ? state : (loop_continue i state)
+  return out
+
+main :: Int
+main = loop_recur 0 0
+"""
+    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    typed = typecheck_flat_axon_file(flat, main_module="main")
+    optimized = optimize_flat_typed_axon_file(typed, main_module="main")
+    validate_typed_axon_file(optimized, main_module="main")
+    recur = next(module for module in optimized.modules if module.name == "loop_recur")
+    cont = next(module for module in optimized.modules if module.name == "loop_continue")
+    assert "state" in [param.name for param in recur.params]
+    assert "state" in [param.name for param in cont.params]
 
 
 def test_optimize_prunes_unused_path_and_value_params() -> None:
@@ -260,4 +314,15 @@ def test_optimize_reapplies_structural_passes_until_fixpoint_on_generic_gpt2() -
     typed = typecheck_flat_axon_file(flat, main_module="gpt2")
     optimized = optimize_flat_typed_axon_file(typed, main_module="gpt2")
     validate_typed_axon_file(optimized, main_module="gpt2")
-    assert len(optimized.modules) == 12
+    assert {module.name for module in optimized.modules} == {
+        "Attention.reshape_heads",
+        "Cache.update__cond_else_1",
+        "Masking.causal_mask_keep__cond_else_1",
+        "Masking.causal_mask_keep",
+        "Masking.causal_mask_masked",
+        "Positions.position_ids_masked",
+        "Positions.position_ids_nomask",
+        "gpt2__loop_h_recur_continue_2",
+        "gpt2__loop_h_recur_1",
+        "gpt2",
+    }

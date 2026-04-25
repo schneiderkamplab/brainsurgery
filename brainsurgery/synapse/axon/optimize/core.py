@@ -46,6 +46,7 @@ from ..ast import (
     TypeDim,
     TypeExpr,
     TypeList,
+    TypeNull,
     TypeOptional,
     TypePath,
     TypeTensor,
@@ -994,6 +995,16 @@ def _literal_from_template(value: object, template: AxonExpr) -> AxonExpr:
     raise TypeError(f"unsupported folded literal {value!r}")
 
 
+def _expr_known_non_null(expr: AxonExpr) -> bool:
+    inner = _unwrap_expr(expr)
+    if isinstance(inner, AxonExprNull):
+        return False
+    if isinstance(inner, AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprString | AxonExprPath):
+        return True
+    inferred_type = expr.inferred_type or inner.inferred_type
+    return inferred_type is not None and not isinstance(inferred_type, TypeNull | TypeOptional)
+
+
 def _fold_binary(expr: AxonExprBinary) -> AxonExpr:
     left = _unwrap_expr(expr.left)
     right = _unwrap_expr(expr.right)
@@ -1015,6 +1026,16 @@ def _fold_binary(expr: AxonExprBinary) -> AxonExpr:
         return _literal_from_template(True, expr)
     if expr.op == "!=" and _folded_expr_eq(expr.left, expr.right):
         return _literal_from_template(False, expr)
+    if isinstance(left, AxonExprNull) and _expr_known_non_null(expr.right):
+        if expr.op == "==":
+            return _literal_from_template(False, expr)
+        if expr.op == "!=":
+            return _literal_from_template(True, expr)
+    if isinstance(right, AxonExprNull) and _expr_known_non_null(expr.left):
+        if expr.op == "==":
+            return _literal_from_template(False, expr)
+        if expr.op == "!=":
+            return _literal_from_template(True, expr)
     if isinstance(left, AxonExprInt) and isinstance(right, AxonExprInt):
         if expr.op == "+":
             return _literal_from_template(left.value + right.value, expr)
@@ -1344,6 +1365,52 @@ def _stmt_has_flat_shape(stmt: AxonStatement) -> bool:
     return True
 
 
+def _name_used_as_call_arg_expr(expr: AxonExpr, name: str) -> bool:
+    inner = _unwrap_expr(expr)
+    if isinstance(inner, AxonExprCall):
+        for arg in inner.args:
+            arg_inner = _unwrap_expr(arg)
+            if isinstance(arg_inner, AxonExprName) and arg_inner.name == name:
+                return True
+        for value in inner.kwargs.values():
+            if not isinstance(value, AxonExpr):
+                continue
+            value_inner = _unwrap_expr(value)
+            if isinstance(value_inner, AxonExprName) and value_inner.name == name:
+                return True
+        return any(_name_used_as_call_arg_expr(arg, name) for arg in inner.args) or any(
+            _name_used_as_call_arg_expr(value, name)
+            for value in inner.kwargs.values()
+            if isinstance(value, AxonExpr)
+        )
+    if isinstance(inner, AxonExprBinary):
+        return _name_used_as_call_arg_expr(inner.left, name) or _name_used_as_call_arg_expr(
+            inner.right, name
+        )
+    if isinstance(inner, AxonExprTernary):
+        return (
+            _name_used_as_call_arg_expr(inner.cond, name)
+            or _name_used_as_call_arg_expr(inner.true_expr, name)
+            or _name_used_as_call_arg_expr(inner.false_expr, name)
+        )
+    if isinstance(inner, AxonExprList | AxonExprTuple):
+        return any(_name_used_as_call_arg_expr(item, name) for item in inner.items)
+    if isinstance(inner, AxonExprAscribe):
+        return _name_used_as_call_arg_expr(inner.expr, name)
+    return False
+
+
+def _name_used_as_call_arg_stmts(statements: tuple[AxonStatement, ...], name: str) -> bool:
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            if _name_used_as_call_arg_expr(stmt.expr, name):
+                return True
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            if any(_name_used_as_call_arg_expr(value, name) for value in stmt.values):
+                return True
+    return False
+
+
 def _inline_single_use_pure_binds(
     statements: tuple[AxonStatement, ...],
 ) -> tuple[AxonStatement, ...]:
@@ -1360,6 +1427,10 @@ def _inline_single_use_pure_binds(
                 target = stmt.targets[0]
                 if counts.get(target, 0) > 1 or target in return_names or not _is_pure_expr(stmt.expr):
                     continue
+                if not _is_atomic_expr(stmt.expr) and _name_used_as_call_arg_stmts(
+                    current[idx + 1 :], target
+                ):
+                    continue
                 substituted_tail = _substitute_stmts(current[idx + 1 :], {target: stmt.expr})
                 if not all(_stmt_has_flat_shape(item) for item in substituted_tail):
                     continue
@@ -1368,6 +1439,81 @@ def _inline_single_use_pure_binds(
                 break
             if not changed:
                 return current
+
+
+def _atomicize_call_args_expr(expr: AxonExpr, blocked_names: set[str]) -> tuple[tuple[AxonStatement, ...], AxonExpr]:
+    prefix: list[AxonStatement] = []
+
+    def _atomicize(value: AxonExpr) -> AxonExpr:
+        if _is_atomic_expr(value):
+            return value
+        temp = _fresh_name("arg", blocked_names)
+        prefix.append(AxonBind(targets=(temp,), expr=value))
+        return _as_temp_name_expr(temp, value)
+
+    inner = _unwrap_expr(expr)
+    if isinstance(inner, AxonExprCall):
+        args: list[AxonExpr] = []
+        for arg in inner.args:
+            arg_prefix, rewritten_arg = _atomicize_call_args_expr(arg, blocked_names)
+            prefix.extend(arg_prefix)
+            args.append(_atomicize(rewritten_arg))
+        kwargs: dict[str, AxonKwargValue] = {}
+        for key, value in inner.kwargs.items():
+            if not isinstance(value, AxonExpr):
+                kwargs[key] = value
+                continue
+            value_prefix, rewritten_value = _atomicize_call_args_expr(value, blocked_names)
+            prefix.extend(value_prefix)
+            kwargs[key] = _atomicize(rewritten_value)
+        return tuple(prefix), replace(inner, args=tuple(args), kwargs=kwargs)
+    if isinstance(inner, AxonExprBinary):
+        left_prefix, left = _atomicize_call_args_expr(inner.left, blocked_names)
+        right_prefix, right = _atomicize_call_args_expr(inner.right, blocked_names)
+        prefix.extend(left_prefix)
+        prefix.extend(right_prefix)
+        return tuple(prefix), replace(inner, left=left, right=right)
+    if isinstance(inner, AxonExprTernary):
+        cond_prefix, cond = _atomicize_call_args_expr(inner.cond, blocked_names)
+        true_prefix, true_expr = _atomicize_call_args_expr(inner.true_expr, blocked_names)
+        false_prefix, false_expr = _atomicize_call_args_expr(inner.false_expr, blocked_names)
+        prefix.extend(cond_prefix)
+        prefix.extend(true_prefix)
+        prefix.extend(false_prefix)
+        return tuple(prefix), replace(inner, cond=cond, true_expr=true_expr, false_expr=false_expr)
+    if isinstance(inner, AxonExprList | AxonExprTuple):
+        items: list[AxonExpr] = []
+        for item in inner.items:
+            item_prefix, rewritten_item = _atomicize_call_args_expr(item, blocked_names)
+            prefix.extend(item_prefix)
+            items.append(rewritten_item)
+        return tuple(prefix), replace(inner, items=tuple(items))
+    if isinstance(inner, AxonExprAscribe):
+        inner_prefix, rewritten = _atomicize_call_args_expr(inner.expr, blocked_names)
+        prefix.extend(inner_prefix)
+        return tuple(prefix), replace(inner, expr=rewritten)
+    return (), expr
+
+
+def _atomicize_call_args_statements(statements: tuple[AxonStatement, ...]) -> tuple[AxonStatement, ...]:
+    blocked = _bound_names_statements(statements)
+    rewritten: list[AxonStatement] = []
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            prefix, expr = _atomicize_call_args_expr(stmt.expr, blocked)
+            rewritten.extend(prefix)
+            rewritten.append(replace(stmt, expr=expr))
+            continue
+        if isinstance(stmt, AxonReturn | AxonYield):
+            values: list[AxonExpr] = []
+            for value in stmt.values:
+                prefix, rewritten_value = _atomicize_call_args_expr(value, blocked)
+                rewritten.extend(prefix)
+                values.append(rewritten_value)
+            rewritten.append(replace(stmt, values=tuple(values)))
+            continue
+        rewritten.append(stmt)
+    return tuple(rewritten)
 
 
 def _dead_code_eliminate_statements(
@@ -2649,12 +2795,29 @@ def _resolve_constant_actual(
     constant_names: set[str],
 ) -> AxonExpr | None:
     if isinstance(expr, AxonExprAscribe):
-        return _resolve_constant_actual(
+        resolved = _resolve_constant_actual(
             expr.expr,
             known,
             caller_dynamic_names=caller_dynamic_names,
             constant_names=constant_names,
         )
+        if resolved is not None and _constant_actual_key(resolved) == _constant_actual_key(
+            _unwrap_expr(expr)
+        ):
+            return expr
+        return resolved
+    if isinstance(expr, AxonExprParen):
+        resolved = _resolve_constant_actual(
+            expr.inner,
+            known,
+            caller_dynamic_names=caller_dynamic_names,
+            constant_names=constant_names,
+        )
+        if resolved is not None and _constant_actual_key(resolved) == _constant_actual_key(
+            _unwrap_expr(expr)
+        ):
+            return expr
+        return resolved
     if _is_atomic_expr(expr):
         if isinstance(expr, AxonExprName):
             resolved = known.get(expr.name)
@@ -2756,11 +2919,16 @@ def _specialize_modules_by_constant_params(program: AxonFile) -> AxonFile:
                     for caller_name, actuals in call_actuals_by_module[module_name]:
                         if caller_name in component_set:
                             caller_known = known_by_module.get(caller_name, {})
+                            caller_bound_names = bound_names_by_module.get(caller_name, set())
                             for name in param_names:
                                 if name not in actuals or not valid.get(name, True):
                                     continue
                                 actual_inner = _unwrap_expr(actuals[name])
                                 if isinstance(actual_inner, AxonExprName):
+                                    if actual_inner.name in caller_bound_names:
+                                        valid[name] = False
+                                        candidates.pop(name, None)
+                                        continue
                                     resolved = caller_known.get(actual_inner.name)
                                     if resolved is not None:
                                         joined = _join_constant_actual(
@@ -2801,12 +2969,6 @@ def _specialize_modules_by_constant_params(program: AxonFile) -> AxonFile:
                                 constant_names=constant_names,
                             )
                             if resolved is None:
-                                actual_inner = _unwrap_expr(actual_expr)
-                                if (
-                                    isinstance(actual_inner, AxonExprName)
-                                    and actual_inner.name in caller_param_names
-                                ):
-                                    continue
                                 valid[name] = False
                                 candidates.pop(name, None)
                                 continue
@@ -2878,6 +3040,7 @@ def _prune_unreachable_modules(program: AxonFile, *, main_module: str | None) ->
 
 
 def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
+    program = _prune_unreachable_modules(program, main_module=main_module)
     validate_typed_axon_file(program, main_module=main_module)
     current = program
     pass_index = 0
@@ -2919,6 +3082,13 @@ def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None 
         optimized = replace(specialized, modules=optimized_modules)
         optimized = _prune_unused_module_params(optimized)
         optimized = _prune_unreachable_modules(optimized, main_module=main_module)
+        optimized = replace(
+            optimized,
+            modules=tuple(
+                replace(module, statements=_atomicize_call_args_statements(module.statements))
+                for module in optimized.modules
+            ),
+        )
         _opt_debug_end_pass(modules=len(optimized.modules))
         with _opt_debug_time("pass_retype"):
             retyped = typecheck_flat_axon_file(optimized, main_module=main_module)

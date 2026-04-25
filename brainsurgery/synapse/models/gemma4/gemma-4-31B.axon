@@ -3,7 +3,7 @@
 import Activations
 import Activations (gelu_pytorch_tanh, tanh)
 import Attention
-import Attention (attention, merge_heads, reshape_heads)
+import Attention (attention_scaled, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
 import Math
@@ -12,27 +12,27 @@ import Params
 import Params (param_scale)
 import Positions
 import Positions (position_ids, rope_pair_proportional)
-import Cache
+import Cache (Cache, CacheLayer)
 import NN
 import Tensor
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x cast_float=true
 
-gemma4_kv_shared :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
+gemma4_kv_shared :: Tensor[B,S,D] -> Dim -> Dim -> Dim -> (Tensor[B,kv_heads,S,hd], Tensor[B,kv_heads,S,hd])
 gemma4_kv_shared xn kv_dim kv_heads hd = do
   kv <- NN.linear@k_proj xn dim=kv_dim bias=false |> reshape_heads heads=kv_heads
   k <- NN.rmsnorm@k_norm kv dim=hd cast_float=true
   v <- NN.rmsnorm_noscale kv dim=hd cast_float=true
   return k, v
 
-gemma4_kv_separate :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
+gemma4_kv_separate :: Tensor[B,S,D] -> Dim -> Dim -> Dim -> (Tensor[B,kv_heads,S,hd], Tensor[B,kv_heads,S,hd])
 gemma4_kv_separate xn kv_dim kv_heads hd = do
   k <- NN.linear@k_proj xn dim=kv_dim bias=false |> reshape_heads heads=kv_heads |> NN.rmsnorm@k_norm dim=hd cast_float=true
   v <- NN.linear@v_proj xn dim=kv_dim bias=false |> reshape_heads heads=kv_heads |> NN.rmsnorm_noscale dim=hd cast_float=true
   return k, v
 
-gemma4_dense_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gemma4_dense_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gemma4_dense_block x i pos_ids attn_mask past_kv = do
   full <- ((i + 1) % 6) == 0
   use_global_kv <- full and true
@@ -51,7 +51,7 @@ gemma4_dense_block x i pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(32 / kv_heads)
     v <- Tensor.repeat v repeats=(32 / kv_heads)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
-    a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=5376 bias=false
+    a <- attention_scaled q k v mask 1.0 |> merge_heads |> NN.linear@o_proj dim=5376 bias=false
     return a, new_kv
   a <- rms@post_attention_layernorm a
   x <- x + a
@@ -65,13 +65,13 @@ gemma4_dense_block x i pos_ids attn_mask past_kv = do
   x <- param_scale x
   return x, new_kv
 
-gemma4_dense :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gemma4_dense :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 gemma4_dense input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model.language_model do
     x <- NN.embedding@embed_tokens input_ids dim=5376 scale=73.32121111929344
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..60) do
+    x, new_kv <- for@layers i <- [0..60) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- gemma4_dense_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i

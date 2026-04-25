@@ -13,11 +13,17 @@ LOWERING_KWARG_KINDS: dict[str, Any] = {}
 
 
 def _dims_compatible(left: Any, right: Any) -> bool:
+    if _is_variadic_dim(left) or _is_variadic_dim(right):
+        return True
     if isinstance(left, str) and left.strip().lstrip("-").isdigit():
         left = int(left.strip())
     if isinstance(right, str) and right.strip().lstrip("-").isdigit():
         right = int(right.strip())
     return left == right
+
+
+def _is_variadic_dim(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().startswith("..")
 
 
 def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
@@ -95,6 +101,8 @@ def lowering_infer_metadata(
         if isinstance(first_in, str) and first_in.isidentifier()
         else None
     )
+    if _is_variadic_dim(first_dim):
+        first_dim = None
     norm_dim = args[2] if len(args) >= 3 else None
     if isinstance(norm_dim, str) and norm_dim.strip().lower() == "null":
         norm_dim = None
@@ -113,8 +121,9 @@ def lowering_infer_metadata(
             raise ValueError(f"layernorm dim={norm_dim!r} mismatches input last-dim {first_dim!r}")
         if first_dim is None and isinstance(first_in, str) and first_in.isidentifier():
             ctx.tensor_last_dim[first_in] = norm_dim
-    if first_dim is not None:
-        ctx.tensor_last_dim[out] = first_dim
+    output_dim = first_dim if first_dim is not None else norm_dim
+    if output_dim is not None:
+        ctx.tensor_last_dim[out] = output_dim
     return True
 
 

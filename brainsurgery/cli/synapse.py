@@ -335,6 +335,11 @@ def axon_test(
         "--model-task",
         help="Model execution task (auto, causal_lm, masked_lm, or seq2seq_lm).",
     ),
+    trace_layers: bool = typer.Option(
+        False,
+        "--trace-layers/--no-trace-layers",
+        help="Compare traced HF and Axon layer inputs/outputs when supported.",
+    ),
     hf_align_bf16_profile: bool = typer.Option(
         False,
         "--hf-align-bf16-profile/--no-hf-align-bf16-profile",
@@ -405,6 +410,11 @@ def axon_test(
         "--oom-cpu-fallback/--no-oom-cpu-fallback",
         help="On CUDA OOM, retry HF/Axon on CPU (disable to fail fast on OOM).",
     ),
+    optimize: bool = typer.Option(
+        True,
+        "--optimize/--no-optimize",
+        help="Enable the Axon optimizer before lowering.",
+    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -424,6 +434,7 @@ def axon_test(
             main_module=main_module,
             dtype=dtype,
             model_task=model_task,
+            trace_layers=trace_layers,
             hf_align_bf16_profile=hf_align_bf16_profile,
             hf_align_mask_contract=hf_align_mask_contract,
             hf_align_position_ids=hf_align_position_ids,
@@ -437,6 +448,7 @@ def axon_test(
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
             hf_strict_dtype=hf_strict_dtype,
+            optimize=optimize,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -604,6 +616,11 @@ def axon_benchmark(
         "--model-task",
         help="Model execution task (auto, causal_lm, masked_lm, or seq2seq_lm).",
     ),
+    trace_layers: bool = typer.Option(
+        False,
+        "--trace-layers/--no-trace-layers",
+        help="Compare traced HF and Axon layer inputs/outputs when supported.",
+    ),
     hf_align_bf16_profile: bool = typer.Option(
         False,
         "--hf-align-bf16-profile/--no-hf-align-bf16-profile",
@@ -678,6 +695,11 @@ def axon_benchmark(
             "With --processes > 1, each worker gets pp GPUs via CUDA_VISIBLE_DEVICES partitioning."
         ),
     ),
+    optimize: bool = typer.Option(
+        True,
+        "--optimize/--no-optimize",
+        help="Enable the Axon optimizer before lowering.",
+    ),
     skip_hf: bool = typer.Option(
         False,
         "--skip-hf/--no-skip-hf",
@@ -741,6 +763,7 @@ def axon_benchmark(
             main_module=main_module,
             dtype=dtype,
             model_task=model_task,
+            trace_layers=trace_layers,
             hf_align_bf16_profile=hf_align_bf16_profile,
             hf_align_mask_contract=hf_align_mask_contract,
             hf_align_position_ids=hf_align_position_ids,
@@ -755,6 +778,7 @@ def axon_benchmark(
             compile_dynamic=compile_dynamic,
             axon_backend=axon_backend,
             pipeline_parallel_size=pipeline_parallel_size,
+            optimize=optimize,
             skip_hf=skip_hf,
             hf_strict_dtype=hf_strict_dtype,
             oom_cpu_fallback=oom_cpu_fallback,

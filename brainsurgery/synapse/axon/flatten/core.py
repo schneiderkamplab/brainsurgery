@@ -465,6 +465,19 @@ def _expand_call_surface(
             f"flatten failed: too many path args in call {expr.callee!r} for module {module.name!r}"
         )
 
+    original_kwargs = dict(expr.kwargs)
+    if len(explicit_args) < path_slot_count:
+        path_param_names = list(module.path_params)
+        path_param_names.extend(
+            param.name for param in module.params[: _leading_path_param_count(module)]
+        )
+        for name in path_param_names[len(explicit_args) : path_slot_count]:
+            value = original_kwargs.get(name)
+            if not isinstance(value, AxonExpr):
+                break
+            explicit_args.append(value)
+            original_kwargs.pop(name, None)
+
     if len(explicit_args) < path_slot_count:
         raise ValueError(
             f"flatten failed: missing path args in call {expr.callee!r} for module {module.name!r}"
@@ -473,7 +486,6 @@ def _expand_call_surface(
     kwargs: dict[str, AxonKwargValue] = {}
     provided_positional = max(0, len(explicit_args) - len(module.path_params))
     known_param_names = {param.name for param in module.params}
-    original_kwargs = dict(expr.kwargs)
 
     for idx, param in enumerate(module.params):
         if idx < provided_positional:
@@ -759,12 +771,15 @@ def _absolutize_call_relative_paths(
     callee: str,
     args: list[AxonExpr],
     kwargs: dict[str, AxonKwargValue],
+    path_prefix: tuple[str, ...],
     program_ctx: _FlattenProgramCtx,
 ) -> None:
     module = program_ctx.modules_by_name.get(callee)
     if module is None:
         return
     path_slot_count = len(module.path_params) + _leading_path_param_count(module)
+    if path_slot_count <= 0 and callee in program_ctx.scoped_modules and args:
+        path_slot_count = 1
     if path_slot_count <= 0 or not args:
         return
     base_path = next(
@@ -776,18 +791,18 @@ def _absolutize_call_relative_paths(
     params_by_name = {param.name: param for param in module.params}
     for key, raw_value in list(kwargs.items()):
         param = params_by_name.get(key)
-        if (
-            param is not None
-            and isinstance(param.default_expr, AxonExprPath)
-            and not param.default_expr.absolute
-        ):
-            kwargs[key] = absolutize_path_expr(param.default_expr, prefix=base_path.parts)
+        if isinstance(raw_value, AxonExprPath):
+            if raw_value.absolute:
+                continue
+            if (
+                param is not None
+                and isinstance(param.default_expr, AxonExprPath)
+                and raw_value == param.default_expr
+            ):
+                kwargs[key] = absolutize_path_expr(raw_value, prefix=base_path.parts)
+            else:
+                kwargs[key] = absolutize_path_expr(raw_value, prefix=path_prefix)
             continue
-        if not isinstance(raw_value, AxonExprPath):
-            continue
-        if raw_value.absolute:
-            continue
-        kwargs[key] = absolutize_path_expr(raw_value, prefix=base_path.parts)
 
 
 def _expr_name_uses(expr: AxonExpr) -> list[str]:
@@ -1839,6 +1854,9 @@ def _flatten_expr(
             args.append(arg_atom)
         kwargs: dict[str, AxonKwargValue] = {}
         for key, raw_value in call_expr.kwargs.items():
+            if isinstance(raw_value, AxonExprPath):
+                kwargs[key] = raw_value
+                continue
             if isinstance(raw_value, AxonExpr):
                 kw_pre, kw_atom = _ensure_atom(
                     raw_value,
@@ -1854,6 +1872,7 @@ def _flatten_expr(
             callee=call_expr.callee,
             args=args,
             kwargs=kwargs,
+            path_prefix=path_prefix,
             program_ctx=program_ctx,
         )
         return call_prelude, AxonExprCall(callee=call_expr.callee, args=tuple(args), kwargs=kwargs)

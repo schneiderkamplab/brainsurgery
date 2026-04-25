@@ -52,7 +52,8 @@ def lowering_infer_metadata(
     source_shape = ctx.tensor_shape.get(source_name)
     if isinstance(source_shape, tuple):
         ctx.tensor_shape[out] = source_shape
-        ctx.tensor_last_dim[out] = source_shape[-1]
+        if source_shape:
+            ctx.tensor_last_dim[out] = source_shape[-1]
         return True
     if source_name in ctx.tensor_last_dim:
         ctx.tensor_last_dim[out] = ctx.tensor_last_dim[source_name]

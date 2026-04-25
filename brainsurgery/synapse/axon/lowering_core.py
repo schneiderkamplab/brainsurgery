@@ -200,33 +200,30 @@ def _prepare_program_for_lowering(
     modules: AxonFile | tuple[AxonModule, ...],
     *,
     main_module: str | None,
+    optimize: bool = True,
 ) -> AxonFile:
+    def finish_typed(program: AxonFile) -> AxonFile:
+        if optimize:
+            program = optimize_flat_typed_axon_file(program, main_module=main_module)
+        return canonicalize_typed_axon_file(program, main_module=main_module)
+
     program = modules if isinstance(modules, AxonFile) else _wrap_modules_as_file(modules)
     try:
         validate_typed_axon_file(program, main_module=main_module)
-        return canonicalize_typed_axon_file(
-            optimize_flat_typed_axon_file(program, main_module=main_module),
-            main_module=main_module,
-        )
+        return finish_typed(program)
     except Exception:
         pass
     try:
         validate_flat_axon_file(program, main_module=main_module)
         typed = typecheck_flat_axon_file(program, main_module=main_module)
-        return canonicalize_typed_axon_file(
-            optimize_flat_typed_axon_file(typed, main_module=main_module),
-            main_module=main_module,
-        )
+        return finish_typed(typed)
     except Exception:
         pass
     try:
         validate_closed_axon_file(program, main_module=main_module)
         flat = flatten_closed_axon_file(program, main_module=main_module)
         typed = typecheck_flat_axon_file(flat, main_module=main_module)
-        return canonicalize_typed_axon_file(
-            optimize_flat_typed_axon_file(typed, main_module=main_module),
-            main_module=main_module,
-        )
+        return finish_typed(typed)
     except Exception:
         pass
     if program.origin_path is None:
@@ -236,10 +233,7 @@ def _prepare_program_for_lowering(
     resolved = resolve_axon_program_from_path(program.origin_path).ast
     flat = flatten_closed_axon_file(resolved, main_module=main_module)
     typed = typecheck_flat_axon_file(flat, main_module=main_module)
-    return canonicalize_typed_axon_file(
-        optimize_flat_typed_axon_file(typed, main_module=main_module),
-        main_module=main_module,
-    )
+    return finish_typed(typed)
 
 
 def _const_fold_expr(expr: AxonExpr, ctx: "_LowerCtx") -> Any:
@@ -506,7 +500,7 @@ def _dims_compatible(left: Any, right: Any) -> bool:
     # that are unknown-but-consistent at compile time. Typecheck already
     # enforces stricter symbolic contracts; lowering should avoid false
     # negatives when both sides are unresolved symbolic dims.
-    if isinstance(left_n, str) and isinstance(right_n, str):
+    if isinstance(left_n, str) or isinstance(right_n, str):
         return True
     return False
 
@@ -516,6 +510,58 @@ def _is_symbolic_dim_token(value: Any) -> bool:
         return False
     token = value.strip()
     return not _is_int_literal(token)
+
+
+def _is_variadic_shape_token(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().startswith("..")
+
+
+def _bind_shape_symbols(
+    *,
+    formal_shape: tuple[Any, ...],
+    actual_shape: tuple[Any, ...],
+    symbol_bindings: dict[str, Any],
+) -> None:
+    variadic_positions = [
+        idx for idx, token in enumerate(formal_shape) if _is_variadic_shape_token(token)
+    ]
+    if not variadic_positions:
+        if len(formal_shape) != len(actual_shape):
+            return
+        for sym, actual in zip(formal_shape, actual_shape, strict=True):
+            if isinstance(sym, str) and sym not in symbol_bindings:
+                symbol_bindings[sym] = actual
+        return
+    if len(variadic_positions) != 1:
+        return
+    idx = variadic_positions[0]
+    prefix = formal_shape[:idx]
+    suffix = formal_shape[idx + 1 :]
+    if len(actual_shape) < len(prefix) + len(suffix):
+        return
+    for sym, actual in zip(prefix, actual_shape[: len(prefix)], strict=True):
+        if isinstance(sym, str) and sym not in symbol_bindings:
+            symbol_bindings[sym] = actual
+    if suffix:
+        suffix_actual = actual_shape[-len(suffix) :]
+        for sym, actual in zip(suffix, suffix_actual, strict=True):
+            if isinstance(sym, str) and sym not in symbol_bindings:
+                symbol_bindings[sym] = actual
+    captured = actual_shape[len(prefix) : len(actual_shape) - len(suffix) if suffix else len(actual_shape)]
+    token = formal_shape[idx]
+    if isinstance(token, str) and token not in symbol_bindings:
+        symbol_bindings[token] = tuple(captured)
+
+
+def _resolve_shape_tokens(shape_tokens: tuple[Any, ...], symbol_bindings: dict[str, Any]) -> tuple[Any, ...]:
+    resolved: list[Any] = []
+    for token in shape_tokens:
+        value = symbol_bindings.get(token, token) if isinstance(token, str) else token
+        if _is_variadic_shape_token(token) and isinstance(value, tuple):
+            resolved.extend(value)
+        else:
+            resolved.append(value)
+    return tuple(resolved)
 
 
 def _is_kind(value: Any, kind: str) -> bool:
@@ -710,16 +756,19 @@ def _record_last_dim_for_call(
             actual_shape = ctx.tensor_shape.get(raw)
             if not isinstance(actual_shape, tuple):
                 continue
-            if len(shape_tokens) != len(actual_shape):
-                continue
-            for sym, actual in zip(shape_tokens, actual_shape, strict=True):
-                if not isinstance(sym, str):
-                    continue
-                if sym in symbol_bindings:
-                    continue
-                symbol_bindings[sym] = actual
+            _bind_shape_symbols(
+                formal_shape=tuple(shape_tokens),
+                actual_shape=actual_shape,
+                symbol_bindings=symbol_bindings,
+            )
         for param_name, sym in param_last_dims.items():
             if param_name in symbol_bindings and isinstance(sym, str):
+                if _is_variadic_shape_token(sym):
+                    if sym in symbol_bindings:
+                        continue
+                    # A variadic shape capture is not a scalar last-dim alias.
+                    # It is only usable when a real argument shape bound it above.
+                    continue
                 symbol_bindings[sym] = symbol_bindings[param_name]
         output_last_dims = (
             ctx.block_output_last_dims.get(block_name, {})
@@ -738,6 +787,8 @@ def _record_last_dim_for_call(
             stripped = token.strip()
             if not stripped:
                 return True
+            if _is_variadic_shape_token(stripped):
+                return isinstance(symbol_bindings.get(stripped), tuple)
             if stripped in symbol_bindings:
                 return True
             if stripped in ctx.symbol_values:
@@ -753,6 +804,10 @@ def _record_last_dim_for_call(
                 if not _is_token_resolved(dim_token):
                     continue
                 resolved_dim = symbol_bindings.get(dim_token, dim_token)
+                if _is_variadic_shape_token(dim_token) and isinstance(resolved_dim, tuple):
+                    if not resolved_dim:
+                        continue
+                    resolved_dim = resolved_dim[-1]
                 ctx.tensor_last_dim[target] = resolved_dim
             elif dim_token is not None:
                 ctx.tensor_last_dim[target] = dim_token
@@ -760,7 +815,7 @@ def _record_last_dim_for_call(
             if out_shape_tokens is not None:
                 if not all(_is_token_resolved(tok) for tok in out_shape_tokens):
                     continue
-                resolved_shape = tuple(symbol_bindings.get(tok, tok) for tok in out_shape_tokens)
+                resolved_shape = _resolve_shape_tokens(tuple(out_shape_tokens), symbol_bindings)
                 ctx.tensor_shape[target] = resolved_shape
 
     op_name = _canonical_op_name(callee)
@@ -1741,10 +1796,6 @@ def _lower_simple_call(
         for param_name, param_shape in param_shapes.items():
             if param_name not in provided:
                 continue
-            if any(isinstance(tok, str) and tok.startswith("..") for tok in param_shape):
-                # Variadic rank capture (e.g., Tensor[..S]) is typechecked upstream.
-                # Lowering shape checks stay conservative and skip fixed-rank assertions here.
-                continue
             raw_value = provided[param_name]
             if not isinstance(raw_value, str):
                 continue
@@ -1754,14 +1805,19 @@ def _lower_simple_call(
             arg_shape = ctx.tensor_shape.get(token)
             if arg_shape is None:
                 continue
-            if len(arg_shape) != len(param_shape):
+            has_variadic_shape = any(_is_variadic_shape_token(tok) for tok in param_shape)
+            if len(arg_shape) != len(param_shape) and not has_variadic_shape:
                 raise ValueError(
                     f"shape mismatch in call {callee!r} for param {param_name!r}: "
                     f"expected rank {len(param_shape)} from signature {param_shape}, got rank {len(arg_shape)} from {arg_shape}"
                 )
-            for sym, actual in zip(param_shape, arg_shape, strict=True):
-                if _is_symbolic_dim_token(sym) and sym not in symbol_bindings:
-                    symbol_bindings[sym] = actual
+            _bind_shape_symbols(
+                formal_shape=tuple(param_shape),
+                actual_shape=arg_shape,
+                symbol_bindings=symbol_bindings,
+            )
+            if has_variadic_shape:
+                continue
             expected_shape = tuple(symbol_bindings.get(sym, sym) for sym in param_shape)
             if len(expected_shape) != len(arg_shape) or any(
                 not _dims_compatible(exp, got)
@@ -1771,7 +1827,12 @@ def _lower_simple_call(
                     f"shape mismatch in call {callee!r} for param {param_name!r}: "
                     f"expected {expected_shape} from signature, got {arg_shape} from argument {token!r}"
                 )
-        out_values = [out] if isinstance(out, str) else list(out)
+        tuple_result_out: str | None = None
+        if isinstance(out, str) and len(output_names) > 1:
+            tuple_result_out = out
+            out_values = [ctx.fresh(f"{_sanitize_token(out, default='out')}_{idx}") for idx in range(len(output_names))]
+        else:
+            out_values = [out] if isinstance(out, str) else list(out)
         if len(out_values) != len(output_names):
             raise ValueError(
                 f"block call {callee!r} expects {len(output_names)} outputs, got {len(out_values)}"
@@ -1814,9 +1875,18 @@ def _lower_simple_call(
             callee=block_name,
             args=args_text,
             kwargs=kwargs,
-            out=out,
+            out=out_values,
             ctx=ctx,
         )
+        if tuple_result_out is not None:
+            nodes.extend(
+                _lower_expr(
+                    AxonExprTuple(items=tuple(AxonExprName(name=name) for name in out_values)),
+                    tuple_result_out,
+                    ctx,
+                    guard=guard,
+                )
+            )
         return [
             *pre_graph,
             *nodes,
@@ -1899,6 +1969,9 @@ def _lower_simple_call(
 def _lower_alias_or_const(
     expr: AxonExpr, out: str | list[str], ctx: _LowerCtx, *, guard: str | None = None
 ) -> list[dict[str, Any]]:
+    if isinstance(expr, AxonExprAscribe | AxonExprParen):
+        inner = expr.expr if isinstance(expr, AxonExprAscribe) else expr.inner
+        return _lower_alias_or_const(inner, out, ctx, guard=guard)
     if isinstance(expr, AxonExprName):
         resolved = _resolve_block_call(expr.name, ctx)
         if resolved is not None and ctx.block_signatures is not None:
@@ -2372,47 +2445,58 @@ def _module_output_names_from_declared_arity(
 
 
 def _module_return_last_dims(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
-    if not returns or module.return_shape is None or len(module.return_shape) == 0:
+    return_shape = _shape_from_type_expr(module.return_type_expr) or module.return_shape
+    if not returns or return_shape is None or len(return_shape) == 0:
         return {}
     if len(returns) != 1:
         return {}
-    return {returns[0]: module.return_shape[-1]}
+    return {returns[0]: return_shape[-1]}
+
+
+def _shape_from_type_expr(type_expr: TypeExpr | None) -> tuple[Any, ...] | None:
+    if isinstance(type_expr, TypeTensor):
+        return tuple(type_expr.dims)
+    return None
 
 
 def _module_param_last_dims(module: AxonModule) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for param in module.params:
-        if param.shape is None or len(param.shape) == 0:
+        shape = _shape_from_type_expr(param.type_expr) or param.shape
+        if shape is None or len(shape) == 0:
             continue
-        out[param.name] = param.shape[-1]
+        out[param.name] = shape[-1]
     return out
 
 
 def _module_param_shapes(module: AxonModule) -> dict[str, tuple[Any, ...]]:
     out: dict[str, tuple[Any, ...]] = {}
     for param in module.params:
-        if param.shape is None:
+        shape = _shape_from_type_expr(param.type_expr) or param.shape
+        if shape is None:
             continue
-        out[param.name] = tuple(param.shape)
+        out[param.name] = tuple(shape)
     return out
 
 
 def _module_return_shapes(
     module: AxonModule, returns: tuple[str, ...]
 ) -> dict[str, tuple[Any, ...]]:
-    if not returns or module.return_shape is None:
+    return_shape = _shape_from_type_expr(module.return_type_expr) or module.return_shape
+    if not returns or return_shape is None:
         return {}
     if len(returns) != 1:
         return {}
-    return {returns[0]: tuple(module.return_shape)}
+    return {returns[0]: tuple(return_shape)}
 
 
 def _module_return_heads(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
-    if not returns or module.return_shape is None or len(module.return_shape) < 2:
+    return_shape = _shape_from_type_expr(module.return_type_expr) or module.return_shape
+    if not returns or return_shape is None or len(return_shape) < 2:
         return {}
     if len(returns) != 1:
         return {}
-    return {returns[0]: module.return_shape[1]}
+    return {returns[0]: return_shape[1]}
 
 
 def _module_inputs(module: AxonModule) -> dict[str, dict[str, bool]]:
@@ -2426,9 +2510,10 @@ def _module_inputs(module: AxonModule) -> dict[str, dict[str, bool]]:
 
 def _module_initial_dims(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
     initial_dims = {
-        param.name: param.shape[-1]
+        param.name: shape[-1]
         for param in module.params
-        if param.shape is not None and len(param.shape) > 0
+        for shape in (_shape_from_type_expr(param.type_expr) or param.shape,)
+        if shape is not None and len(shape) > 0
     }
     initial_dims.update(_module_return_last_dims(module, returns))
     return initial_dims
@@ -2438,7 +2523,10 @@ def _module_initial_shapes(
     module: AxonModule, returns: tuple[str, ...]
 ) -> dict[str, tuple[Any, ...]]:
     initial_shapes = {
-        param.name: tuple(param.shape) for param in module.params if param.shape is not None
+        param.name: tuple(shape)
+        for param in module.params
+        for shape in (_shape_from_type_expr(param.type_expr) or param.shape,)
+        if shape is not None
     }
     initial_shapes.update(_module_return_shapes(module, returns))
     return initial_shapes
@@ -2446,9 +2534,10 @@ def _module_initial_shapes(
 
 def _module_initial_heads(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
     initial_heads = {
-        param.name: param.shape[1]
+        param.name: shape[1]
         for param in module.params
-        if param.shape is not None and len(param.shape) >= 2
+        for shape in (_shape_from_type_expr(param.type_expr) or param.shape,)
+        if shape is not None and len(shape) >= 2
     }
     initial_heads.update(_module_return_heads(module, returns))
     return initial_heads
@@ -2825,6 +2914,30 @@ def _lower_statements(
     ctx: _LowerCtx,
     guard: str | None = None,
 ) -> None:
+    def _record_bind_type(targets: tuple[str, ...], type_expr: TypeExpr | None) -> None:
+        def record_shape(target: str, shape: tuple[Any, ...]) -> None:
+            current = ctx.tensor_shape.get(target)
+            if current is not None and len(current) == len(shape):
+                return
+            ctx.tensor_shape[target] = shape
+            if shape:
+                ctx.tensor_last_dim[target] = shape[-1]
+
+        if type_expr is None:
+            return
+        if len(targets) == 1:
+            shape = _shape_from_type_expr(type_expr)
+            if shape is not None:
+                record_shape(targets[0], shape)
+            return
+        if not isinstance(type_expr, TypeTuple):
+            return
+        for target, item_type in zip(targets, type_expr.items, strict=False):
+            shape = _shape_from_type_expr(item_type)
+            if shape is None:
+                continue
+            record_shape(target, shape)
+
     for stmt in statements:
         if isinstance(stmt, AxonRepeat):
             raise ValueError("lowering requires flat Axon; for/repeat must be flattened first")
@@ -2839,6 +2952,8 @@ def _lower_statements(
         if isinstance(stmt, AxonBind):
             if len(stmt.targets) == 1:
                 graph.extend(_lower_expr(stmt.expr, stmt.targets[0], ctx, guard=guard))
+                if not isinstance(stmt.expr, AxonExprCall):
+                    _record_bind_type(stmt.targets, stmt.expr.inferred_type)
                 continue
             if isinstance(stmt.expr, AxonExprCall) and ctx.block_signatures is not None:
                 call_expr = _with_multibind_inference(
@@ -2886,6 +3001,8 @@ def _lower_statements(
 
             out: str | list[str] = list(stmt.targets)
             graph.extend(_lower_expr(stmt.expr, out, ctx, guard=guard))
+            if not isinstance(stmt.expr, AxonExprCall):
+                _record_bind_type(stmt.targets, stmt.expr.inferred_type)
             continue
 
         if isinstance(stmt, AxonReturn):
@@ -3123,9 +3240,14 @@ def _finalize_block_io_types_for_model(
 
 
 def lower_axon_program_to_synapse_spec(
-    modules: AxonFile | tuple[AxonModule, ...], *, main_module: str | None = None
+    modules: AxonFile | tuple[AxonModule, ...],
+    *,
+    main_module: str | None = None,
+    optimize: bool = True,
 ) -> dict[str, Any]:
-    program = _prepare_program_for_lowering(modules, main_module=main_module)
+    program = _prepare_program_for_lowering(
+        modules, main_module=main_module, optimize=optimize
+    )
     validate_typed_axon_file(program, main_module=main_module)
     program_symbol_values = _lower_program_symbol_values(program)
     modules = program.modules

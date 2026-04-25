@@ -52,7 +52,8 @@ def lowering_infer_metadata(
     source_shape = ctx.tensor_shape.get(source_name)
     if isinstance(source_shape, tuple):
         ctx.tensor_shape[out] = source_shape
-        ctx.tensor_last_dim[out] = source_shape[-1]
+        if source_shape:
+            ctx.tensor_last_dim[out] = source_shape[-1]
         return True
     if source_name in ctx.tensor_last_dim:
         ctx.tensor_last_dim[out] = ctx.tensor_last_dim[source_name]
@@ -109,6 +110,23 @@ LOWERING_TYPE_SIGNATURE = {
 }
 
 
+def type_rule(
+    *,
+    arg_types: tuple[Any, ...],
+    kwarg_types: dict[str, Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    helpers: Any,
+) -> Any | None:
+    del kwarg_types, args, kwargs
+    if len(arg_types) < 1:
+        return None
+    input_dims = helpers.type_dims(arg_types[0])
+    if input_dims is None:
+        return None
+    return helpers.type_tensor(dims=input_dims)
+
+
 __all__ = [
     "LOWERING_ARITY",
     "LOWERING_ALLOWED_KWARGS",
@@ -121,4 +139,5 @@ __all__ = [
     "compile",
     "uses_node_path",
     "LOWERING_TYPE_SIGNATURE",
+    "type_rule",
 ]

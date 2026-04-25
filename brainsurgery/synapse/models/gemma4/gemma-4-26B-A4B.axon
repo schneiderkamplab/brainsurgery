@@ -3,7 +3,7 @@
 import Activations
 import Activations (gelu_pytorch_tanh, tanh)
 import Attention
-import Attention (attention, merge_heads, reshape_heads)
+import Attention (attention_scaled, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
 import Math
@@ -14,14 +14,14 @@ import Params
 import Params (param_scale)
 import Positions
 import Positions (position_ids, rope_pair_proportional)
-import Cache
+import Cache (Cache, CacheLayer)
 import NN
 import Tensor
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x cast_float=true
 
-gemma4_router :: Tensor -> Int -> ?Float -> ?Float -> (Tensor, IdxTensor)
+gemma4_router :: Tensor[B,S,D] -> Int -> ?Float -> ?Float -> (Tensor[B,S,top_k], IdxTensor[B,S,top_k])
 gemma4_router x top_k ?scalar_root_size=null ?rms_eps=null = do
   scalar <- (scalar_root_size == null) ? 1.0 : scalar_root_size
   eps <- (rms_eps == null) ? 1e-06 : rms_eps
@@ -38,10 +38,10 @@ gemma4_router x top_k ?scalar_root_size=null ?rms_eps=null = do
     return w, i
   return topk_weights, topk_indices
 
-gemma4_moe_experts :: Tensor -> Tensor -> Tensor -> Int -> Tensor
+gemma4_moe_experts :: Tensor[B,S,D] -> Tensor[B,S,K] -> Tensor[B,S,K] -> Int -> Tensor[B,S,D]
 gemma4_moe_experts hidden topk_weights topk_indices num_experts = do
   routed <- Tensor.zeros_like hidden
-  for e <- [0..num_experts) do
+  routed <- for e <- [0..num_experts) carry (routed) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
     gate_up <- NN.linear@experts x_sel expert=e weight_path=@experts.gate_up_proj
     gate, up <- Tensor.chunk gate_up parts=2
@@ -50,20 +50,20 @@ gemma4_moe_experts hidden topk_weights topk_indices num_experts = do
     yield routed
   return routed
 
-gemma4_kv_shared :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
+gemma4_kv_shared :: Tensor[B,S,D] -> Dim -> Dim -> Dim -> (Tensor[B,kv_heads,S,hd], Tensor[B,kv_heads,S,hd])
 gemma4_kv_shared xn kv_dim kv_heads hd = do
   kv <- NN.linear@k_proj xn dim=kv_dim bias=false |> reshape_heads heads=kv_heads
   k <- NN.rmsnorm@k_norm kv dim=hd cast_float=true
   v <- NN.rmsnorm_noscale kv dim=hd cast_float=true
   return k, v
 
-gemma4_kv_separate :: Tensor[B,S,D] -> Int -> Int -> Int -> (Tensor, Tensor)
+gemma4_kv_separate :: Tensor[B,S,D] -> Dim -> Dim -> Dim -> (Tensor[B,kv_heads,S,hd], Tensor[B,kv_heads,S,hd])
 gemma4_kv_separate xn kv_dim kv_heads hd = do
   k <- NN.linear@k_proj xn dim=kv_dim bias=false |> reshape_heads heads=kv_heads |> NN.rmsnorm@k_norm dim=hd cast_float=true
   v <- NN.linear@v_proj xn dim=kv_dim bias=false |> reshape_heads heads=kv_heads |> NN.rmsnorm_noscale dim=hd cast_float=true
   return k, v
 
-gemma4_moe_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gemma4_moe_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gemma4_moe_block x i pos_ids attn_mask past_kv = do
   full <- ((i + 1) % 6) == 0
   use_global_kv <- full and true
@@ -82,7 +82,7 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
     k <- Tensor.repeat k repeats=(16 / kv_heads)
     v <- Tensor.repeat v repeats=(16 / kv_heads)
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
-    a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@o_proj dim=2816 bias=false
+    a <- attention_scaled q k v mask 1.0 |> merge_heads |> NN.linear@o_proj dim=2816 bias=false
     return a, new_kv
   a <- rms@post_attention_layernorm a
   x <- x + a
@@ -102,13 +102,13 @@ gemma4_moe_block x i pos_ids attn_mask past_kv = do
   x <- param_scale x
   return x, new_kv
 
-gemma4_moe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gemma4_moe :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 gemma4_moe input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model.language_model do
     x <- NN.embedding@embed_tokens input_ids dim=2816 scale=53.0659966456864
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..30) do
+    x, new_kv <- for@layers i <- [0..30) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- gemma4_moe_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i

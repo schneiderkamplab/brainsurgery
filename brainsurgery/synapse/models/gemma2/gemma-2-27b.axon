@@ -4,7 +4,7 @@
 import Activations
 import Activations (gelu_pytorch_tanh, tanh)
 import Attention
-import Attention (attention, merge_heads, reshape_heads)
+import Attention (attention_softcap, merge_heads, reshape_heads)
 import Masking
 import Masking (causal_mask)
 import Math
@@ -13,7 +13,7 @@ import Params
 import Params (has_root)
 import Positions
 import Positions (position_ids, rope_pair_base)
-import Cache
+import Cache (Cache, CacheLayer)
 import NN
 import Tensor
 
@@ -22,7 +22,7 @@ HAS_LM_HEAD = has_root "lm_head"
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-06 cast_float=true unit_offset=true
 
-gemma2_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gemma2_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gemma2_block x i pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -35,7 +35,7 @@ gemma2_block x i pos_ids attn_mask past_kv = do
     v <- Tensor.repeat v repeats=2
     window <- (i % 2) == 0 ? 4096 : 8192
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- (attention q k v mask softcap=50.0 scale=0.08333333333333333 zero_masked_after_softmax=false fp32_compute=true)
+    a <- attention_softcap q k v mask 50.0 0.08333333333333333
     a <- a |> merge_heads |> NN.linear@o_proj dim=4608
     return a, new_kv
   a <- rms@post_attention_layernorm a
@@ -48,13 +48,13 @@ gemma2_block x i pos_ids attn_mask past_kv = do
   m <- rms@post_feedforward_layernorm m
   return x + m, new_kv
 
-gemma2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gemma2 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 gemma2 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=4608 scale=67.88225099390856
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..46) do
+    x, new_kv <- for@layers i <- [0..46) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- gemma2_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i

@@ -12,37 +12,37 @@ export (
   xielu,
 )
 
-gelu :: Tensor[B,T,D] -> Tensor[B,T,D]
+gelu :: Tensor[..S] -> Tensor[..S]
 gelu = _activations_gelu
 
-gelu_new :: Tensor[B,T,D] -> Tensor[B,T,D]
+gelu_new :: Tensor[..S] -> Tensor[..S]
 gelu_new = _activations_gelu_new
 
-gelu_pytorch_tanh :: Tensor[B,T,D] -> Tensor[B,T,D]
+gelu_pytorch_tanh :: Tensor[..S] -> Tensor[..S]
 gelu_pytorch_tanh = _activations_gelu_pytorch_tanh
 
-gegelu :: Tensor[B,T,D] -> ?Float -> Tensor[B,T,D]
+gegelu :: Tensor[..S] -> ?Float -> Tensor[..S]
 gegelu x ?limit=null = _activations_gegelu x limit
 
-relu :: Tensor[B,T,D] -> Tensor[B,T,D]
+relu :: Tensor[..S] -> Tensor[..S]
 relu = _activations_relu
 
-relu2 :: Tensor[B,T,D] -> Tensor[B,T,D]
+relu2 :: Tensor[..S] -> Tensor[..S]
 relu2 = _activations_relu2
 
-sigmoid :: Tensor[B,T,D] -> Tensor[B,T,D]
+sigmoid :: Tensor[..S] -> Tensor[..S]
 sigmoid = _activations_sigmoid
 
-tanh :: Tensor[B,T,D] -> Tensor[B,T,D]
+tanh :: Tensor[..S] -> Tensor[..S]
 tanh = _activations_tanh
 
-silu :: Tensor[B,T,D] -> Tensor[B,T,D]
+silu :: Tensor[..S] -> Tensor[..S]
 silu = _activations_silu
 
-swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
+swiglu :: Tensor[..S] -> Tensor[..S]
 swiglu = _activations_swiglu
 
-xielu :: Path -> Tensor[B,T,D] -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor[B,T,D]
+xielu :: Path -> Tensor[..S] -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor[..S]
 xielu@path x ?alpha_p_path=null ?alpha_n_path=null ?beta_path=null ?eps_path=null = do
   alpha_p <- (alpha_p_path == null) ? (param @'{path}.alpha_p') : (param alpha_p_path)
   alpha_n <- (alpha_n_path == null) ? (param @'{path}.alpha_n') : (param alpha_n_path)

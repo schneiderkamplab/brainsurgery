@@ -3,6 +3,8 @@ import Math (add, sqrt)
 import Tensor (concat, slice, softmax)
 export (
   attention,
+  attention_scaled,
+  attention_softcap,
   merge_heads,
   reshape_heads,
   split_qkv_grouped,
@@ -51,8 +53,8 @@ split_qkv_grouped x ?heads=1 ?kv_heads=1 ?head_dim=null = do
 
 
 -- === ATTENTION ===
-mask_to_additive :: Tensor[..S] -> Tensor[..M] -> Tensor[..S]
-mask_to_additive ref keep = Tensor.where keep (Tensor.zeros_like ref) (Tensor.min_like ref)
+mask_to_additive :: Tensor[B,H,Q,K] -> Tensor[B,1,Q,K] -> Tensor[B,H,Q,K]
+mask_to_additive ref keep = _where keep (Tensor.zeros_like ref) (Tensor.min_like ref)
 
 
 attention :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,HD]
@@ -70,8 +72,34 @@ attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null 
   probs_in <- (rel_bias == null) ? probs_in : add probs_in rel_bias
   probs_in <- (sink_logits == null) ? probs_in : concat probs_in sink_logits dim=-1
   probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
-  probs <- (sink_logits == null) ? probs : slice probs dim=-1 start=0 end=K
-  probs <- zero_masked_after_softmax ? (Tensor.where keep probs 0) : probs
+  K <- Tensor.size v dim=-2
+  probs <- slice probs dim=-1 start=0 end=K
+  probs <- zero_masked_after_softmax ? (_where keep probs 0) : probs
   v_work <- fp32_compute ? (Tensor.cast v dtype="float32") : v
   out <- Tensor.matmul probs v_work
   return fp32_compute ? (Tensor.cast out dtype="float32") : out
+
+
+attention_scaled :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> Float -> Tensor[B,H,Q,HD]
+attention_scaled q k v keep scale = do
+  scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
+  scores <- scores * scale
+  mask <- mask_to_additive scores keep
+  probs_in <- add scores mask
+  probs <- softmax probs_in dim=-1
+  probs <- _where keep probs 0
+  return Tensor.matmul probs v
+
+
+attention_softcap :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> Float -> Float -> Tensor[B,H,Q,HD]
+attention_softcap q k v keep softcap scale = do
+  scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
+  scores <- scores * scale
+  scaled <- scores / softcap
+  squashed <- tanh scaled
+  scores <- squashed * softcap
+  mask <- mask_to_additive scores keep
+  probs_in <- add scores mask
+  probs <- softmax probs_in dim=-1 dtype="float32"
+  out <- Tensor.matmul probs (Tensor.cast v dtype="float32")
+  return Tensor.cast out dtype="float32"

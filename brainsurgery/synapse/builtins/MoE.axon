@@ -98,7 +98,7 @@ scatter_add accum token_idx updates scores = do
   accum_flat <- index_add accum_flat token_idx weighted 0
   return reshape accum_flat shape=[b, t, d]
 
-softmax_topk_router :: Path -> Tensor -> Dim -> ?Float -> ?Path -> (Tensor, IdxTensor)
+softmax_topk_router :: Path -> Tensor[B,S,D] -> Dim -> ?Float -> ?Path -> (Tensor[B,S,top_k], IdxTensor[B,S,top_k])
 softmax_topk_router@path x top_k ?routed_scaling_factor=1.0 ?weight=@weight = do
   x32 <- cast x dtype="float32"
   logits <- linear@path x32 dim=null bias=false weight_path=weight
@@ -107,7 +107,7 @@ softmax_topk_router@path x top_k ?routed_scaling_factor=1.0 ?weight=@weight = do
   topk_weights <- cast_like topk_weights x
   return (topk_weights * routed_scaling_factor), topk_indices
 
-sigmoid_topk_router :: Path -> Tensor -> Dim -> ?Path -> (Tensor, IdxTensor)
+sigmoid_topk_router :: Path -> Tensor[B,S,D] -> Dim -> ?Path -> (Tensor[B,S,top_k], IdxTensor[B,S,top_k])
 sigmoid_topk_router@path x top_k ?weight=@weight = do
   x32 <- cast x dtype="float32"
   logits <- linear@path x32 dim=null bias=false weight_path=weight

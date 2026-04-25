@@ -305,7 +305,7 @@ use@path x ?weight_path=@weight = x
 
 wrap :: Path -> Tensor[B,S] -> Tensor[B,S]
 wrap@__scope x = do
-  y <- use@proj x weight_path=@weight
+  y <- use@proj x
   return y
 """
     program = parse_axon_program(source)
@@ -314,6 +314,60 @@ wrap@__scope x = do
     rendered = render_axon_file(flat)
     assert "@@'{__scope}.proj'" in rendered
     assert "@@'{__scope}.proj.weight'" in rendered
+
+
+def test_flatten_preserves_explicit_relative_path_kwarg() -> None:
+    source = """
+use :: Path -> Tensor[B,S] -> ?Path -> Tensor[B,S]
+use@path x ?weight_path=@weight = x
+
+wrap :: Path -> Tensor[B,S] -> Tensor[B,S]
+wrap@__scope x = do
+  y <- use@proj x weight_path=@experts.gate_up_proj
+  return y
+"""
+    program = parse_axon_program(source)
+    flat = flatten_closed_axon_file(program, main_module="wrap")
+    validate_flat_axon_file(flat, main_module="wrap")
+    rendered = render_axon_file(flat)
+    assert "@@'{__scope}.proj'" in rendered
+    assert "@@'{__scope}.experts.gate_up_proj'" in rendered
+    assert "@@'{__scope}.proj.weight'" not in rendered
+
+
+def test_flatten_absolutizes_relative_defaults_for_synthesized_scope_args() -> None:
+    source = """
+scale :: Tensor[B,S] -> ?Path -> Tensor[B,S]
+scale x ?scale_path=@layer_scalar = x
+
+wrap :: Path -> Tensor[B,S] -> Tensor[B,S]
+wrap@__scope x = do
+  y <- scale x
+  return y
+"""
+    program = parse_axon_program(source)
+    flat = flatten_closed_axon_file(program, main_module="wrap")
+    validate_flat_axon_file(flat, main_module="wrap")
+    rendered = render_axon_file(flat)
+    assert "scale @@'{__scope}' x scale_path=@@'{__scope}.layer_scalar'" in rendered
+
+
+def test_flatten_preserves_forwarded_path_kwarg_for_synthesized_scope_args() -> None:
+    source = """
+scale :: Tensor[B,S] -> ?Path -> Tensor[B,S]
+scale x ?scale_path=@layer_scalar = x
+
+norm :: Path -> Tensor[B,S] -> ?Path -> Tensor[B,S]
+norm@path x ?scale_path=@weight = do
+  y <- scale x scale_path=scale_path
+  return y
+"""
+    program = parse_axon_program(source)
+    flat = flatten_closed_axon_file(program, main_module="norm")
+    validate_flat_axon_file(flat, main_module="norm")
+    rendered = render_axon_file(flat)
+    assert "scale @@'{path}' x scale_path=scale_path" in rendered
+    assert "scale_path=@@'{path}.layer_scalar'" not in rendered
 
 
 def test_flatten_eliminates_type_aliases() -> None:

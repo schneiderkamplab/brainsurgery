@@ -4,6 +4,8 @@ from typing import Any
 
 import torch
 
+from ..axon.ast import AxonExprAscribe, AxonExprInt, AxonExprParen, TypeTuple, TypeTensor
+
 OP_NAME = "topk"
 LOWERING_ARITY = (5, 5)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
@@ -27,6 +29,11 @@ def _name_expr(value: str) -> dict[str, Any]:
 def _expr_payload(value: Any) -> Any:
     if isinstance(value, str):
         token = value.strip()
+        lowered = token.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
         if token.isidentifier():
             return _name_expr(token)
     return value
@@ -129,6 +136,51 @@ LOWERING_TYPE_SIGNATURE = {
     "returns": ("Tensor", "IdxTensor"),
 }
 
+
+def _unwrap_expr(expr: Any) -> Any:
+    while isinstance(expr, AxonExprAscribe | AxonExprParen):
+        expr = expr.expr if isinstance(expr, AxonExprAscribe) else expr.inner
+    return expr
+
+
+def type_rule(
+    *,
+    arg_types: tuple[Any, ...],
+    kwarg_types: dict[str, Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    helpers: Any,
+) -> Any | None:
+    del kwarg_types, kwargs
+    if len(arg_types) != 5 or len(args) != 5:
+        return None
+    input_dims = helpers.type_dims(arg_types[0])
+    if input_dims is None:
+        return None
+    k_dim = helpers.expr_to_dim_token(args[1])
+    if k_dim is None:
+        return None
+    raw_axis = _unwrap_expr(args[2])
+    if isinstance(raw_axis, AxonExprInt):
+        axis_value = raw_axis.value
+    elif isinstance(raw_axis, int):
+        axis_value = raw_axis
+    else:
+        return None
+    rank = len(input_dims)
+    axis = axis_value if axis_value >= 0 else rank + axis_value
+    if axis < 0 or axis >= rank:
+        return None
+    out_dims = list(input_dims)
+    out_dims[axis] = k_dim
+    dims = tuple(out_dims)
+    return TypeTuple(
+        items=(
+            TypeTensor(base="Tensor", dims=dims),
+            TypeTensor(base="IdxTensor", dims=dims),
+        )
+    )
+
 __all__ = [
     "OP_NAME",
     "LOWERING_ARITY",
@@ -141,4 +193,5 @@ __all__ = [
     "compile",
     "uses_node_path",
     "LOWERING_TYPE_SIGNATURE",
+    "type_rule",
 ]

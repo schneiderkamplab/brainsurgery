@@ -1884,6 +1884,7 @@ def _run_axon_test_single(
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
     axon_backend: str = "codegen",
+    optimize: bool = True,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
@@ -1989,7 +1990,9 @@ def _run_axon_test_single(
                 transformers_hub.HF_MODULES_CACHE = str(modules_cache)
 
         modules = parse_axon_program_from_path(axon_file)
-        synapse_spec = lower_axon_program_to_synapse_spec(modules, main_module=main_module)
+        synapse_spec = lower_axon_program_to_synapse_spec(
+            modules, main_module=main_module, optimize=optimize
+        )
         if model_config is not None:
             model_section = synapse_spec.get("model")
             if not isinstance(model_section, dict):
@@ -3293,6 +3296,7 @@ def run_axon_test(
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
     axon_backend: str = "codegen",
+    optimize: bool = True,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
 ) -> dict[str, Any]:
@@ -3323,6 +3327,7 @@ def run_axon_test(
         compile_dynamic=compile_dynamic,
         trust_remote_code=trust_remote_code,
         axon_backend=axon_backend,
+        optimize=optimize,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
     )

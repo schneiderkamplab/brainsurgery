@@ -4,6 +4,11 @@ from pathlib import Path
 
 from brainsurgery.synapse.axon.ast import (
     AxonBind,
+    AxonExprCall,
+    AxonExprInt,
+    AxonExprName,
+    AxonFile,
+    AxonModule,
     AxonRepeat,
     AxonReturn,
     Constraint,
@@ -21,6 +26,18 @@ from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
 from brainsurgery.synapse.axon.typecheck.core import _TcCtx, _is_generic_named_type, _scoped_typevars
 from brainsurgery.synapse.axon.typecheck import typecheck_flat_axon_file
 from brainsurgery.synapse.axon.validate import validate_typed_axon_file
+
+
+def _resolve_attention_wrapper(tmp_path: Path):
+    source = """
+import Attention (attention)
+
+main :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> Tensor[B,H,Q,HD]
+main q k v keep = attention q k v keep
+"""
+    path = tmp_path / "attention_main.axon"
+    path.write_text(source)
+    return resolve_axon_program_from_path(path).ast
 
 
 def test_typecheck_flat_narrows_generated_loop_helper_signature() -> None:
@@ -68,6 +85,43 @@ main x = do
     assert bind_stmt.expr.inferred_arity == 1
     repeat_stmts = [stmt for stmt in module.statements if isinstance(stmt, AxonRepeat)]
     assert repeat_stmts == []
+
+
+def test_typecheck_flat_is_rooted_at_selected_main_module() -> None:
+    source = """
+main :: Int
+main = do
+  x <- 1
+  return x
+"""
+    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    bad = AxonModule(
+        name="bad",
+        path_param=None,
+        params=(),
+        returns=(),
+        statements=(
+            AxonBind(
+                targets=("x",),
+                expr=AxonExprCall(callee="missing", args=(AxonExprInt(1),), kwargs={}),
+            ),
+            AxonReturn(values=(AxonExprName("x"),)),
+        ),
+        return_type_expr=TypeInt(),
+    )
+    flat = AxonFile(
+        modules=(*flat.modules, bad),
+        imports=flat.imports,
+        imported_members=flat.imported_members,
+        exports=flat.exports,
+        pragmas=flat.pragmas,
+        constants=flat.constants,
+        type_aliases=flat.type_aliases,
+        origin_path=flat.origin_path,
+    )
+    typed = typecheck_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    assert [module.name for module in typed.modules] == ["main"]
 
 
 def test_typecheck_flat_unifies_embedding_dim_from_add() -> None:
@@ -200,42 +254,41 @@ def test_typecheck_flat_preserves_cache_update_shape_information() -> None:
     update_line = next(
         line for line in text.splitlines() if "k, v, new_kv <- (Cache.update " in line
     )
-    assert "?Tensor[B,K]" in block_sig
+    assert "?Tensor[B,P + S]" in block_sig
     assert (
         "?CacheLayer[B,H,P,DH]" in block_sig or "?(Tensor[B,H,P,DH], Tensor[B,H,P,DH])" in block_sig
     )
     assert (
-        "?CacheLayer[B,H,K,DH]" in block_sig or "?(Tensor[B,H,K,DH], Tensor[B,H,K,DH])" in block_sig
+        "?CacheLayer[B,H,P + S,DH]" in block_sig
+        or "?(Tensor[B,H,P + S,DH], Tensor[B,H,P + S,DH])" in block_sig
     )
     assert "Any" not in update_line
 
 
-def test_typecheck_attention_mask_helper_does_not_force_equal_shapes() -> None:
-    resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/builtins/Attention.axon")
-    ).ast
-    flat = flatten_closed_axon_file(resolved, main_module="attention")
-    typed = typecheck_flat_axon_file(flat, main_module="attention")
-    validate_typed_axon_file(typed, main_module="attention")
+def test_typecheck_attention_mask_helper_does_not_force_equal_shapes(tmp_path: Path) -> None:
+    resolved = _resolve_attention_wrapper(tmp_path)
+    flat = flatten_closed_axon_file(resolved, main_module="main")
+    typed = typecheck_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
     text = render_axon_file(typed, show_types=True)
-    mask_sig = next(line for line in text.splitlines() if line.startswith("mask_to_additive ::"))
-    assert "Tensor[..S] -> Tensor[..M] -> Tensor[..S]" in mask_sig
+    mask_sig = next(
+        line for line in text.splitlines() if line.startswith("Attention.mask_to_additive ::")
+    )
+    assert "Tensor[B,H,Q,K] -> Tensor[B,1,Q,K] -> Tensor[B,H,Q,K]" in mask_sig
 
 
-def test_typecheck_attention_preserves_matmul_and_mask_broadcast_shapes() -> None:
-    resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/builtins/Attention.axon")
-    ).ast
-    flat = flatten_closed_axon_file(resolved, main_module="attention")
-    typed = typecheck_flat_axon_file(flat, main_module="attention")
-    validate_typed_axon_file(typed, main_module="attention")
+def test_typecheck_attention_preserves_matmul_and_mask_broadcast_shapes(tmp_path: Path) -> None:
+    resolved = _resolve_attention_wrapper(tmp_path)
+    flat = flatten_closed_axon_file(resolved, main_module="main")
+    typed = typecheck_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
     text = render_axon_file(typed, show_types=True)
     assert "Tensor[B,H,1,1]" not in text
     assert "Tensor[B,H,Q,K]" in next(
         line for line in text.splitlines() if "scores <- (Tensor.matmul" in line
     )
     assert "Tensor[B,H,Q,K]" in next(
-        line for line in text.splitlines() if "mask <- (mask_to_additive" in line
+        line for line in text.splitlines() if "mask <- (Attention.mask_to_additive" in line
     )
     assert "Tensor[B,H,Q,HD]" in next(
         line for line in text.splitlines() if "out <- (Tensor.matmul" in line
@@ -267,7 +320,7 @@ def test_scoped_typevars_does_not_rescope_already_scoped_typevars() -> None:
 
 
 def test_generic_named_type_rejects_already_scoped_names() -> None:
-    assert _is_generic_named_type(TypeNamed(name="Tensor"), type_aliases={})
+    assert not _is_generic_named_type(TypeNamed(name="Tensor"), type_aliases={})
     assert not _is_generic_named_type(
         TypeNamed(name="Tensor.reshape::Tensor"),
         type_aliases={},

@@ -92,7 +92,7 @@ cumsum x ?dim=-1 = _cumsum x dim
 unsqueeze :: Tensor[..S] -> ?Int -> Tensor
 unsqueeze x ?dim=0 = _unsqueeze x dim
 
-repeat :: Tensor[B,KVH,T,HD] -> ?Dim -> ?Int -> Tensor[B,H,T,HD]
+repeat :: Tensor[B,KVH,T,HD] -> ?Dim -> ?Int -> Tensor[B,KVH * repeats,T,HD]
 repeat x ?repeats=2 ?dim=1 = _repeat x repeats dim
 
 concat :: Tensor[..S] -> Tensor[..T] -> ?Int -> Tensor
