@@ -58,20 +58,18 @@ def test_lowering_preserves_path_typed_block_inputs_for_gemma3_scope() -> None:
 
     block_io = spec["model"]["types"]["block_io"]
     assert block_io["gemma3_body"]["inputs"]["__scope"] == "Path"
-    assert block_io["NN.embedding"]["inputs"]["path"] == "Path"
 
     body_graph = spec["model"]["blocks"]["gemma3_body"]["graph"]
-    embedding_call = next(
-        node["n_call_13"] for node in body_graph if "n_call_13" in node
+    embedding_node = next(
+        node
+        for raw in body_graph
+        for node in raw.values()
+        if node.get("_op") == "embedding"
     )
-    assert embedding_call["_args"][0] == "@@'{__scope}.embed_tokens'"
-
-    embedding_graph = spec["model"]["blocks"]["NN.embedding"]["graph"]
-    embedding_node = next(node["n_op_1"] for node in embedding_graph if "n_op_1" in node)
     assert embedding_node["_abs_path"] == {
         "_expr": "path",
         "absolute": True,
-        "parts": ["{path}"],
+        "parts": ["{__scope}", "embed_tokens"],
     }
 
 
@@ -101,15 +99,7 @@ def test_lowering_canonicalizes_generated_dim_terms_before_codegen() -> None:
     sqrt_node = next(node for raw in h1_graph for node in raw.values() if node.get("_op") == "sqrt")
     assert sqrt_node["_args"] == "DH"
 
-    shape_node = next(
-        node
-        for raw in h1_graph
-        for node in raw.values()
-        if node.get("_op") == "_ir_expr"
-        and isinstance(node.get("value"), list)
-        and node.get("_bind") == "_v16"
-    )
-    assert shape_node["value"] == [
+    expected_shape_value = [
         {"_expr": "name", "id": "B"},
         {"_expr": "name", "id": "S"},
         {
@@ -119,6 +109,15 @@ def test_lowering_canonicalizes_generated_dim_terms_before_codegen() -> None:
             "right": {"_expr": "name", "id": "DH"},
         },
     ]
+    shape_node = next(
+        node
+        for raw in h1_graph
+        for node in raw.values()
+        if node.get("_op") == "_ir_expr"
+        and isinstance(node.get("value"), list)
+        and node.get("value") == expected_shape_value
+    )
+    assert isinstance(shape_node.get("_bind"), str)
 
     emit_model_code_from_synapse_spec(spec, class_name="Generated")
 

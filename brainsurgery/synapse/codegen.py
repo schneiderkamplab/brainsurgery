@@ -74,21 +74,42 @@ class _Emitter:
         self._active_env: dict[str, str] = {}
         self._active_shape_aliases: dict[str, str] = {}
         self._active_shape_alias_penalties: dict[str, int] = {}
+        self._active_non_null_names: set[str] = set()
+        self._active_type_facts: dict[str, Any] = {}
+        self._active_null_tests: dict[str, tuple[str, bool]] = {}
         self._node_hoists: dict[tuple[str, str], str] = {}
 
     def _shape_symbol_alias_candidates(
-        self, *, env: dict[str, str], input_types: dict[str, Any]
+        self,
+        *,
+        env: dict[str, str],
+        input_types: dict[str, Any],
+        non_null_names: set[str] | None = None,
     ) -> dict[str, tuple[int, str]]:
         aliases: dict[str, tuple[int, str]] = {}
+        proven_non_null = self._active_non_null_names if non_null_names is None else non_null_names
 
         def _record(dim: str, penalty: int, expr: str) -> None:
             current = aliases.get(dim)
             if current is None or penalty < current[0]:
                 aliases[dim] = (penalty, expr)
 
-        def _collect_aliases(type_expr: Any, src_expr: str, *, penalty: int = 0) -> None:
+        def _collect_aliases(
+            type_expr: Any,
+            src_expr: str,
+            *,
+            source_name: str,
+            penalty: int = 0,
+        ) -> None:
             if isinstance(type_expr, TypeOptional):
-                _collect_aliases(type_expr.inner, src_expr, penalty=penalty + 4)
+                if source_name not in proven_non_null:
+                    return
+                _collect_aliases(
+                    type_expr.inner,
+                    src_expr,
+                    source_name=source_name,
+                    penalty=penalty + 1,
+                )
                 return
             if isinstance(type_expr, TypeTensor):
                 for axis, dim in enumerate(type_expr.dims):
@@ -96,11 +117,21 @@ class _Emitter:
                         _record(dim, penalty, f"int({src_expr}.shape[{axis}])")
                 return
             if isinstance(type_expr, TypeList):
-                _collect_aliases(type_expr.item, f"{src_expr}[0]", penalty=penalty + 3)
+                _collect_aliases(
+                    type_expr.item,
+                    f"{src_expr}[0]",
+                    source_name=source_name,
+                    penalty=penalty + 3,
+                )
                 return
             if isinstance(type_expr, TypeTuple):
                 for idx, item in enumerate(type_expr.items):
-                    _collect_aliases(item, f"{src_expr}[{idx}]", penalty=penalty + 2)
+                    _collect_aliases(
+                        item,
+                        f"{src_expr}[{idx}]",
+                        source_name=source_name,
+                        penalty=penalty + 2,
+                    )
                 return
 
         for input_name, type_expr in input_types.items():
@@ -111,8 +142,128 @@ class _Emitter:
             except Exception:
                 continue
             src = env[input_name]
-            _collect_aliases(parsed, src)
+            _collect_aliases(parsed, src, source_name=input_name)
         return aliases
+
+    def _non_null_names_from_types(
+        self, *, env: dict[str, str], input_types: dict[str, Any]
+    ) -> set[str]:
+        names: set[str] = set()
+        for input_name, type_expr in input_types.items():
+            if input_name not in env or not isinstance(type_expr, str):
+                continue
+            try:
+                parsed = parse_type_expr(type_expr)
+            except Exception:
+                continue
+            if isinstance(parsed, TypeTensor):
+                names.add(input_name)
+        return names
+
+    def _apply_output_type_facts(
+        self, *, env: dict[str, str], output_types: dict[str, Any]
+    ) -> None:
+        self._active_type_facts.update(output_types)
+        for out_name, type_expr in output_types.items():
+            if out_name not in env or not isinstance(type_expr, str):
+                continue
+            try:
+                parsed = parse_type_expr(type_expr)
+            except Exception:
+                continue
+            if isinstance(parsed, TypeTensor):
+                self._active_non_null_names.add(out_name)
+        for dim_name, (penalty, expr) in self._shape_symbol_alias_candidates(
+            env=env, input_types=output_types
+        ).items():
+            current_penalty = self._active_shape_alias_penalties.get(dim_name)
+            if current_penalty is None or penalty < current_penalty:
+                self._active_shape_aliases[dim_name] = expr
+                self._active_shape_alias_penalties[dim_name] = penalty
+
+    def _mark_names_non_null(self, *, env: dict[str, str], names: set[str]) -> None:
+        typed_names = {
+            name: self._active_type_facts[name]
+            for name in names
+            if name in env and isinstance(self._active_type_facts.get(name), str)
+        }
+        if not typed_names:
+            self._active_non_null_names.update(names)
+            return
+        self._active_non_null_names.update(typed_names)
+        self._apply_output_type_facts(env=env, output_types=typed_names)
+
+    def _non_null_names_for_condition(self, cond: Any, *, truthy: bool) -> set[str]:
+        if isinstance(cond, str):
+            fact = self._active_null_tests.get(cond)
+            if fact is None:
+                return set()
+            name, true_means_null = fact
+            return {name} if truthy != true_means_null else set()
+        if not isinstance(cond, dict) or cond.get("_expr") != "binary":
+            return set()
+        op = cond.get("op")
+        if op not in {"==", "!="}:
+            return set()
+        left = cond.get("left")
+        right = cond.get("right")
+
+        def _name_if_null_test(name_expr: Any, null_expr: Any) -> str | None:
+            if null_expr is not None:
+                return None
+            if isinstance(name_expr, dict) and name_expr.get("_expr") == "name":
+                ident = name_expr.get("id", name_expr.get("value"))
+                return ident if isinstance(ident, str) else None
+            if isinstance(name_expr, str):
+                return name_expr
+            return None
+
+        name = _name_if_null_test(left, right)
+        if name is None:
+            name = _name_if_null_test(right, left)
+        if name is None:
+            return set()
+        true_means_null = op == "=="
+        return {name} if truthy != true_means_null else set()
+
+    def _record_null_test_fact(self, *, node_spec: dict[str, Any]) -> None:
+        if node_spec.get("_op") != "_ir_expr":
+            return
+        bind = node_spec.get("_bind")
+        if not isinstance(bind, str):
+            return
+        cond = node_spec.get("value")
+        names = self._non_null_names_for_condition(cond, truthy=False)
+        if names:
+            self._active_null_tests[bind] = (next(iter(names)), True)
+            return
+        names = self._non_null_names_for_condition(cond, truthy=True)
+        if names:
+            self._active_null_tests[bind] = (next(iter(names)), False)
+
+    def _compile_graph_with_non_null(
+        self,
+        *,
+        graph: list[Any],
+        env: dict[str, str],
+        scope_var: str,
+        indent: str,
+        non_null_names: set[str],
+    ) -> list[str]:
+        prev_non_null_names = set(self._active_non_null_names)
+        prev_shape_aliases = dict(self._active_shape_aliases)
+        prev_shape_alias_penalties = dict(self._active_shape_alias_penalties)
+        prev_type_facts = dict(self._active_type_facts)
+        prev_null_tests = dict(self._active_null_tests)
+        self._mark_names_non_null(env=env, names=non_null_names)
+        try:
+            return self._compile_graph(graph=graph, env=env, scope_var=scope_var, indent=indent)
+        finally:
+            self._active_non_null_names = prev_non_null_names
+            self._active_shape_aliases = prev_shape_aliases
+            self._active_shape_alias_penalties = prev_shape_alias_penalties
+            self._active_type_facts = prev_type_facts
+            self._active_null_tests = prev_null_tests
 
     def _shape_symbol_aliases(
         self, *, env: dict[str, str], input_types: dict[str, Any]
@@ -737,6 +888,17 @@ class _Emitter:
         env: dict[str, str] = {name: input_py_names[name] for name in inputs}
         block_types = self.block_io_types.get(block_name, {})
         input_types = block_types.get("inputs", {}) if isinstance(block_types, dict) else {}
+        non_null_names = (
+            self._non_null_names_from_types(env=env, input_types=input_types)
+            if isinstance(input_types, dict)
+            else set()
+        )
+        prev_non_null_names = self._active_non_null_names
+        prev_type_facts = self._active_type_facts
+        prev_null_tests = self._active_null_tests
+        self._active_non_null_names = set(non_null_names)
+        self._active_type_facts = dict(input_types) if isinstance(input_types, dict) else {}
+        self._active_null_tests = {}
         shape_aliases = (
             self._shape_symbol_aliases(env=env, input_types=input_types)
             if isinstance(input_types, dict)
@@ -764,6 +926,9 @@ class _Emitter:
         finally:
             self._active_shape_aliases = prev_shape_aliases
             self._active_shape_alias_penalties = prev_shape_alias_penalties
+            self._active_non_null_names = prev_non_null_names
+            self._active_type_facts = prev_type_facts
+            self._active_null_tests = prev_null_tests
         lines.extend(body)
 
         return_values: list[str] = []
@@ -811,6 +976,17 @@ class _Emitter:
             env[name] = py_name
         main_types = self.block_io_types.get("main", {})
         main_input_types = main_types.get("inputs", {}) if isinstance(main_types, dict) else {}
+        non_null_names = (
+            self._non_null_names_from_types(env=env, input_types=main_input_types)
+            if isinstance(main_input_types, dict)
+            else set()
+        )
+        prev_non_null_names = self._active_non_null_names
+        prev_type_facts = self._active_type_facts
+        prev_null_tests = self._active_null_tests
+        self._active_non_null_names = set(non_null_names)
+        self._active_type_facts = dict(main_input_types) if isinstance(main_input_types, dict) else {}
+        self._active_null_tests = {}
         shape_aliases = (
             self._shape_symbol_aliases(env=env, input_types=main_input_types)
             if isinstance(main_input_types, dict)
@@ -833,6 +1009,9 @@ class _Emitter:
         finally:
             self._active_shape_aliases = prev_shape_aliases
             self._active_shape_alias_penalties = prev_shape_alias_penalties
+            self._active_non_null_names = prev_non_null_names
+            self._active_type_facts = prev_type_facts
+            self._active_null_tests = prev_null_tests
 
         lines.append("        outputs: dict[str, Any] = {}")
         for out_name, ref in outputs.items():
@@ -1036,6 +1215,15 @@ class _Emitter:
                     indent=inner_indent,
                 )
             )
+            exact_output_types = node_spec.get("_out_types")
+            if isinstance(exact_output_types, dict):
+                typed_outputs = {
+                    out_name: exact_output_types[out_name]
+                    for out_name in self._node_output_names(node_spec)
+                    if isinstance(exact_output_types.get(out_name), str)
+                }
+                self._apply_output_type_facts(env=env, output_types=typed_outputs)
+            self._record_null_test_fact(node_spec=node_spec)
             for out_name in self._node_output_names(node_spec):
                 _out_var = env.get(out_name)
                 if isinstance(_out_var, str):
@@ -1181,13 +1369,7 @@ class _Emitter:
         else:
             bound_output_types = {}
         if bound_output_types:
-            for dim_name, (penalty, expr) in self._shape_symbol_alias_candidates(
-                env=env, input_types=bound_output_types
-            ).items():
-                current_penalty = self._active_shape_alias_penalties.get(dim_name)
-                if current_penalty is None or penalty < current_penalty:
-                    self._active_shape_aliases[dim_name] = expr
-                    self._active_shape_alias_penalties[dim_name] = penalty
+            self._apply_output_type_facts(env=env, output_types=bound_output_types)
         return lines
 
     def _compile_op(
@@ -1206,6 +1388,7 @@ class _Emitter:
         prev_env = self._active_env
         prev_shape_aliases = self._active_shape_aliases
         prev_shape_alias_penalties = self._active_shape_alias_penalties
+        prev_non_null_names = self._active_non_null_names
         prev_hoists = self._node_hoists
         self._active_env = env
         self._node_hoists = {}
@@ -1222,6 +1405,7 @@ class _Emitter:
             self._active_env = prev_env
             self._active_shape_aliases = prev_shape_aliases
             self._active_shape_alias_penalties = prev_shape_alias_penalties
+            self._active_non_null_names = prev_non_null_names
             self._node_hoists = prev_hoists
 
     def _assign_out_var(self, env: dict[str, str], out_name: str) -> str:
@@ -1416,10 +1600,10 @@ class _Emitter:
                 if isinstance(ident, str):
                     if ident in env:
                         return env[ident]
-                    if ident in self._active_shape_aliases:
-                        return self._active_shape_aliases[ident]
                     if ident in self.symbols:
                         return self._expr_code(self.symbols[ident], env)
+                    if ident in self._active_shape_aliases:
+                        return self._active_shape_aliases[ident]
                     raise ValueError(f"Unknown symbol in expression: {ident}")
             if kind == "tuple":
                 items_raw = expr.get("items")
@@ -1489,10 +1673,10 @@ class _Emitter:
             token = expr.strip()
             if token in env:
                 return env[token]
-            if token in self._active_shape_aliases:
-                return self._active_shape_aliases[token]
             if token in self.symbols:
                 return self._expr_code(self.symbols[token], env)
+            if token in self._active_shape_aliases:
+                return self._active_shape_aliases[token]
             scalar_code = self._scalar_token_code(token)
             if scalar_code is not None:
                 return scalar_code

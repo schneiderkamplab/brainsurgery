@@ -50,7 +50,8 @@ from ..ast import (
     TypeVar,
     absolutize_path_expr,
 )
-from ..validate import validate_closed_axon_file
+from ..validate import validate_closed_axon_file, validate_normalized_axon_file
+from ..normalize import normalize_closed_axon_file
 
 _ATOMIC_EXPR_TYPES = (
     AxonExprName,
@@ -401,19 +402,6 @@ def _split_callee_path_sugar(callee: str) -> tuple[str, tuple[AxonExprPath, ...]
     return base, tuple(path_args)
 
 
-def _default_value_expr(module: AxonModule, param_name: str) -> AxonExpr:
-    param = next((item for item in module.params if item.name == param_name), None)
-    if param is None:
-        raise ValueError(f"flatten failed: unknown param {param_name!r} for module {module.name!r}")
-    if param.default_expr is not None:
-        return param.default_expr
-    if param.optional:
-        return AxonExprNull()
-    raise ValueError(
-        f"flatten failed: missing required arg {param_name!r} for call to {module.name!r}"
-    )
-
-
 def _leading_path_param_count(module: AxonModule) -> int:
     count = 0
     for param in module.params:
@@ -452,55 +440,28 @@ def _expand_call_surface(
     program_ctx: _FlattenProgramCtx,
 ) -> AxonExprCall:
     base_callee, sugared_path_args = _split_callee_path_sugar(expr.callee)
-    explicit_args = [*sugared_path_args, *expr.args]
+    if sugared_path_args:
+        raise ValueError(
+            f"flatten failed: callee path sugar remains after normalize: {expr.callee!r}"
+        )
     module = program_ctx.modules_by_name.get(base_callee)
     if module is None:
-        if base_callee == expr.callee:
-            return expr
-        return AxonExprCall(callee=base_callee, args=tuple(explicit_args), kwargs=dict(expr.kwargs))
+        return expr
 
     path_slot_count = len(module.path_params) + _leading_path_param_count(module)
-    if len(sugared_path_args) > path_slot_count:
+    if len(expr.args) < path_slot_count:
         raise ValueError(
-            f"flatten failed: too many path args in call {expr.callee!r} for module {module.name!r}"
+            f"flatten failed: explicit path args are missing after normalize in call {expr.callee!r}"
         )
-
-    original_kwargs = dict(expr.kwargs)
-    if len(explicit_args) < path_slot_count:
-        path_param_names = list(module.path_params)
-        path_param_names.extend(
-            param.name for param in module.params[: _leading_path_param_count(module)]
-        )
-        for name in path_param_names[len(explicit_args) : path_slot_count]:
-            value = original_kwargs.get(name)
-            if not isinstance(value, AxonExpr):
-                break
-            explicit_args.append(value)
-            original_kwargs.pop(name, None)
-
-    if len(explicit_args) < path_slot_count:
-        raise ValueError(
-            f"flatten failed: missing path args in call {expr.callee!r} for module {module.name!r}"
-        )
-
-    kwargs: dict[str, AxonKwargValue] = {}
-    provided_positional = max(0, len(explicit_args) - len(module.path_params))
-    known_param_names = {param.name for param in module.params}
-
+    provided_positional = max(0, len(expr.args) - len(module.path_params))
     for idx, param in enumerate(module.params):
         if idx < provided_positional:
             continue
-        if param.name in original_kwargs:
-            kwargs[param.name] = original_kwargs.pop(param.name)
-            continue
-        if param.optional or param.default_expr is not None:
-            kwargs[param.name] = _default_value_expr(module, param.name)
-
-    for key, value in original_kwargs.items():
-        if key not in known_param_names:
-            kwargs[key] = value
-
-    return AxonExprCall(callee=base_callee, args=tuple(explicit_args), kwargs=kwargs)
+        if param.name not in expr.kwargs and (param.optional or param.default_expr is not None):
+            raise ValueError(
+                f"flatten failed: optional/default arg {param.name!r} was not expanded before flatten"
+            )
+    return expr
 
 
 def _loop_scope_parts(stmt: AxonRepeat) -> tuple[str, ...]:
@@ -901,38 +862,8 @@ def _statement_name_uses(stmt: AxonStatement) -> list[str]:
 
 def _normalize_repeat_yield(stmt: AxonRepeat) -> AxonRepeat:
     if stmt.body and isinstance(stmt.body[-1], AxonYield):
-        if stmt.carry is not None:
-            return stmt
-        if stmt.targets is not None:
-            return AxonRepeat(
-                name=stmt.name,
-                var=stmt.var,
-                to_expr=stmt.to_expr,
-                from_expr=stmt.from_expr,
-                step_expr=stmt.step_expr,
-                body=stmt.body,
-                targets=stmt.targets,
-                carry=stmt.targets,
-            )
         return stmt
-    if stmt.targets is None:
-        return stmt
-    normalized_body = tuple(
-        [
-            *stmt.body,
-            AxonYield(values=tuple(AxonExprName(name=name) for name in stmt.targets)),
-        ]
-    )
-    return AxonRepeat(
-        name=stmt.name,
-        var=stmt.var,
-        to_expr=stmt.to_expr,
-        from_expr=stmt.from_expr,
-        step_expr=stmt.step_expr,
-        body=normalized_body,
-        targets=stmt.targets,
-        carry=stmt.targets if stmt.carry is None else stmt.carry,
-    )
+    raise ValueError("flatten failed: repeat/for loop was not yield-normalized before flatten")
 
 
 def _repeat_yield_expr(stmt: AxonRepeat) -> AxonExpr:
@@ -2296,6 +2227,8 @@ def _flatten_module(
 
 def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
     validate_closed_axon_file(program, main_module=main_module)
+    program = normalize_closed_axon_file(program, main_module=main_module)
+    validate_normalized_axon_file(program, main_module=main_module)
     scoped_modules: frozenset[str] = frozenset()
     globals_by_name = {
         *program.constants.keys(),

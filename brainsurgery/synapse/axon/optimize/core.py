@@ -55,7 +55,7 @@ from ..ast import (
 )
 from ..ast.render import render_axon_file
 from ..typecheck import typecheck_flat_axon_file
-from ..validate import validate_typed_axon_file
+from ..validate import validate_backend_required_flat_typed_axon_file, validate_typed_axon_file
 
 
 _OPT_DEBUG_ENV = "AXON_OPTIMIZE_DEBUG"
@@ -2431,10 +2431,61 @@ def _specialize_single_callsite_modules(program: AxonFile, *, main_module: str |
 def _is_straight_line_module(module: AxonModule) -> bool:
     if not module.statements or not isinstance(module.statements[-1], AxonReturn):
         return False
+    contains_control_select = False
     for stmt in module.statements:
         if isinstance(stmt, AxonCond | AxonRepeat | AxonScopeBind | AxonYield):
             return False
-    return True
+        if isinstance(stmt, AxonBind) and _expr_contains_control_select(stmt.expr):
+            contains_control_select = True
+        if isinstance(stmt, AxonReturn) and any(
+            _expr_contains_control_select(value) for value in stmt.values
+        ):
+            contains_control_select = True
+    return not contains_control_select or _is_trivial_control_wrapper_module(module)
+
+
+def _is_trivial_control_wrapper_module(module: AxonModule) -> bool:
+    if len(module.statements) < 2:
+        return False
+    *prefix, ret = module.statements
+    if not isinstance(ret, AxonReturn) or len(ret.values) != 1:
+        return False
+    value = _unwrap_expr(ret.values[0])
+    if not isinstance(value, AxonExprName):
+        return False
+    control_bind_count = 0
+    control_target: str | None = None
+    for stmt in prefix:
+        if not isinstance(stmt, AxonBind) or len(stmt.targets) != 1:
+            return False
+        if not _expr_contains_control_select(stmt.expr):
+            continue
+        control_bind_count += 1
+        control_target = stmt.targets[0]
+    return control_bind_count == 1 and value.name == control_target
+
+
+def _expr_contains_control_select(expr: AxonExpr) -> bool:
+    inner = _unwrap_expr(expr)
+    if isinstance(inner, AxonExprIf | AxonExprTernary | AxonExprDo | AxonExprLambda):
+        return True
+    if isinstance(inner, AxonExprCall):
+        return any(_expr_contains_control_select(arg) for arg in inner.args) or any(
+            _expr_contains_control_select(value)
+            for value in inner.kwargs.values()
+            if isinstance(value, AxonExpr)
+        )
+    if isinstance(inner, AxonExprBinary):
+        return _expr_contains_control_select(inner.left) or _expr_contains_control_select(
+            inner.right
+        )
+    if isinstance(inner, AxonExprList | AxonExprTuple):
+        return any(_expr_contains_control_select(item) for item in inner.items)
+    if isinstance(inner, AxonExprAscribe):
+        return _expr_contains_control_select(inner.expr)
+    if isinstance(inner, AxonExprParen):
+        return _expr_contains_control_select(inner.inner)
+    return False
 
 
 def _inline_call_bind_statements(
@@ -3096,9 +3147,32 @@ def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None 
             validate_typed_axon_file(retyped, main_module=main_module)
         if ast_equal(current, retyped):
             _opt_debug_print_diff(before=current_before_pass, after=retyped, pass_index=pass_index)
+            validate_backend_required_flat_typed_axon_file(retyped, main_module=main_module)
             return retyped
         _opt_debug_print_diff(before=current_before_pass, after=retyped, pass_index=pass_index)
         current = retyped
 
 
-__all__ = ["optimize_flat_typed_axon_file"]
+def normalize_backend_required_flat_typed_axon_file(
+    program: AxonFile, *, main_module: str | None = None
+) -> AxonFile:
+    """Run flat-Axon rewrites required by the current backend contract.
+
+    These are not semantic optimizations and therefore still run when CLI
+    optimization is disabled.
+    """
+
+    validate_typed_axon_file(program, main_module=main_module)
+    normalized = replace(
+        program,
+        modules=tuple(
+            replace(module, statements=_normalize_list_destructure_binds(module.statements))
+            for module in program.modules
+        ),
+    )
+    normalized = typecheck_flat_axon_file(normalized, main_module=main_module)
+    validate_backend_required_flat_typed_axon_file(normalized, main_module=main_module)
+    return normalized
+
+
+__all__ = ["normalize_backend_required_flat_typed_axon_file", "optimize_flat_typed_axon_file"]

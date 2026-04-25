@@ -14,6 +14,8 @@ LOWERING_KWARG_KINDS: dict[str, Any] = {}
 def _dims_compatible(left: Any, right: Any) -> bool:
     if _is_variadic_dim(left) or _is_variadic_dim(right):
         return True
+    if _is_fresh_dim(left) or _is_fresh_dim(right):
+        return True
     if isinstance(left, str) and left.strip().lstrip("-").isdigit():
         left = int(left.strip())
     if isinstance(right, str) and right.strip().lstrip("-").isdigit():
@@ -23,6 +25,10 @@ def _dims_compatible(left: Any, right: Any) -> bool:
 
 def _is_variadic_dim(value: Any) -> bool:
     return isinstance(value, str) and value.strip().startswith("..")
+
+
+def _is_fresh_dim(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().startswith("__d")
 
 
 def _bool_expr_or_default(
@@ -93,8 +99,11 @@ def lowering_infer_metadata(
     if norm_dim is not None:
         if first_dim is not None and not _dims_compatible(norm_dim, first_dim):
             raise ValueError(f"rmsnorm dim={norm_dim!r} mismatches input last-dim {first_dim!r}")
-        if first_dim is None and isinstance(first_in, str) and first_in.isidentifier():
+        if (first_dim is None or _is_fresh_dim(first_dim)) and isinstance(first_in, str) and first_in.isidentifier():
             ctx.tensor_last_dim[first_in] = norm_dim
+            if first_in in ctx.tensor_shape:
+                ctx.tensor_shape[first_in] = (*ctx.tensor_shape[first_in][:-1], norm_dim)
+            first_dim = norm_dim
     output_dim = first_dim if first_dim is not None else norm_dim
     if output_dim is not None:
         ctx.tensor_last_dim[out] = output_dim

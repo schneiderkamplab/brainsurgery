@@ -25,7 +25,8 @@ from .materialize import (
     materialize_axon_file,
     normalize_checkpoint_name,
 )
-from .optimize import optimize_flat_typed_axon_file
+from .normalize import normalize_closed_axon_file
+from .optimize import normalize_backend_required_flat_typed_axon_file, optimize_flat_typed_axon_file
 from .parse import (
     parse_axon_module,
     parse_axon_program,
@@ -68,6 +69,8 @@ __all__ = [
     "group_output_name",
     "materialize_axon_file",
     "normalize_checkpoint_name",
+    "normalize_closed_axon_file",
+    "normalize_backend_required_flat_typed_axon_file",
     "parse_expression_to_runtime_value",
     "ast_equal",
     "render_axon_file",

@@ -222,9 +222,12 @@ def _compile_lookup_lines(
     raw_template = args[0]
     template_text: str | None = None
     if isinstance(raw_template, str):
-        template_text = path_expr_template_text(
-            runtime_value_to_path_expr(raw_template, op_name=op_name)
-        )
+        if raw_template in env:
+            template_text = None
+        else:
+            template_text = path_expr_template_text(
+                runtime_value_to_path_expr(raw_template, op_name=op_name)
+            )
     elif isinstance(raw_template, dict):
         kind = raw_template.get("_expr")
         if kind == "path":

@@ -64,7 +64,7 @@ gemma4_kv_separate xn kv_dim kv_heads hd = do
     NN.rmsnorm_noscale dim=hd cast_float=true
   return k, v
 
-gemma4_dense_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+gemma4_dense_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 gemma4_dense_block x i pos_ids attn_mask past_kv = do
   full <- ((i + 1) % ROPE_PERIOD) == 0
   use_global_kv <- full and ATTN_K_EQ_V
@@ -101,7 +101,7 @@ gemma4_dense_block x i pos_ids attn_mask past_kv = do
   x <- param_scale x
   return x, new_kv
 
-gemma4_dense :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+gemma4_dense :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 gemma4_dense input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model.language_model do

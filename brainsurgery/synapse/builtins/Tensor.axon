@@ -116,6 +116,9 @@ where = _where
 where_indices :: Tensor -> (IdxTensor, IdxTensor)
 where_indices = _where_indices
 
+require :: Any -> Any
+require = _require
+
 deinterleave_last2 :: Tensor[N,W] -> (Tensor[N,H], Tensor[N,H])
 deinterleave_last2 x = do
   n <- size x 0

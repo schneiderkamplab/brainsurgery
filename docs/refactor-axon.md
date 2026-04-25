@@ -13,7 +13,7 @@ The key design constraint is:
 Stage status as of now:
 
 - done for current slice: `parse`, `load`, `materialize`, `resolve`, `validate`
-- usable, but not final-form complete: `flatten`, `typecheck`, `optimize`
+- usable, but not final-form complete: `normalize`, `flatten`, `typecheck`, `optimize`
 - active refactor now started, but still not final-form complete: `lower`
 - active-path aligned but still not final-form complete: `runtime`, `codegen`
 - separate legacy area still ahead: `pipeline`
@@ -69,7 +69,34 @@ Stage status as of now:
   - no lowering-time fallback inference
 - status: done
 
-6. `flatten`
+6. `normalize-calls`
+- input: validated closed Axon AST
+- output: closed Axon AST with explicit call surfaces
+- responsibilities:
+  - desugar callee path suffixes such as `NN.linear@w` into ordinary `Path` arguments
+  - desugar pipe syntax before default expansion so positional order is unambiguous
+  - expand omitted kwargs / optional positional defaults according to callee signatures
+  - keep all rewrites structural in the AST; no render/parse roundtrips
+- invariants after this stage:
+  - no callee path sugar remains
+  - omitted optional/default args are explicit at call sites
+  - certified by `validate.normalized`
+- status: implemented as mandatory pre-flatten normalization
+
+7. `normalize-loops`
+- input: closed Axon AST after call normalization
+- output: closed Axon AST with explicit loop result protocol
+- responsibilities:
+  - make implied loop `carry` explicit when assignment-target loop rules imply it
+  - make implied final `yield` explicit
+  - insert explicit null-yield for effect-only loops so flatten has one loop protocol
+- invariants after this stage:
+  - every loop body has an explicit final `yield`
+  - every value-producing loop has explicit `carry`
+  - certified by `validate.normalized`
+- status: implemented as mandatory pre-flatten normalization
+
+8. `flatten`
 - input: validated closed Axon AST
 - output: flat closed Axon AST
 - responsibilities:
@@ -87,8 +114,9 @@ Stage status as of now:
 - still open:
   - some helper shapes remain flattening artifacts rather than a final canonical presentation
   - some path/template normalization is intentionally left for `optimize`
+  - synthesized scope arguments are still introduced here because flatten owns scope elimination
 
-7. `typecheck`
+9. `typecheck`
 - input: flat closed Axon AST
 - output: fully typed flat closed Axon AST
 - responsibilities:
@@ -115,7 +143,7 @@ Stage status as of now:
   - richer future type/inference cases are still ahead
   - lowering-oriented typing concerns are intentionally deferred to later stages
 
-8. `optimize`
+10. `optimize`
 - input: flat fully typed closed Axon AST
 - output: optimized flat fully typed closed Axon AST
 - responsibilities:
@@ -155,7 +183,20 @@ Stage status as of now:
   - further cleanup of flattening artifact helpers where semantics permit
   - any more aggressive inlining/specialization only with careful semantic justification
 
-9. `lower`
+11. `backend-required-normalize`
+- input: flat fully typed closed Axon AST
+- output: flat fully typed closed Axon AST satisfying backend shape requirements
+- responsibilities:
+  - run structural rewrites required by lowering/runtime even when `--no-optimize` is set
+  - currently includes list destructuring normalization into explicit `_list_index` binds
+- invariants after this stage:
+  - no list-valued multi-target destructuring bind remains
+  - certified by `validate.backend_required`
+- status: implemented as a non-optional lowering preparation pass
+- note:
+  - `--optimize/--no-optimize` controls semantic optimization, not required canonical backend shape
+
+12. `lower`
 - input: flat fully typed closed Axon AST
 - output: Synapse graph
 - responsibilities:
@@ -177,7 +218,7 @@ Stage status as of now:
     - lowering should eventually have a typed-artifact loader mode that restores rendered annotations into `inferred_type` / `inferred_arity` / `inferred_dims` metadata and then consumes the flat typed AST directly, without re-running typecheck/optimize unless explicitly requested
     - until that exists, benchmark and lowering entrypoints should use original source Axon files rather than generated `tmp/*.typed.axon` inspection artifacts
 
-10. `runtime`
+13. `runtime`
 - input: Synapse graph
 - output: executed model outputs
 - status: active emitted-graph path partly aligned, but not final-form complete
@@ -189,7 +230,7 @@ Stage status as of now:
   - broader backend cleanup against the smaller emitted graph contract
   - separation from still-legacy pipeline/runtime consumers that build older graph forms manually
 
-11. `codegen`
+14. `codegen`
 - input: Synapse graph
 - output: generated PyTorch code
 - status: active emitted-graph path partly aligned, but not final-form complete
@@ -201,7 +242,7 @@ Stage status as of now:
   - further pruning of legacy helper/code paths not exercised by the new lowering output
   - separation from still-legacy pipeline/codegen consumers
 
-12. `pipeline`
+15. `pipeline`
 - input: either compiler metadata plus lowered graph, or analysis results over the closed/flat/typed AST
 - output: pipeline partitioning plan and stage-specific lowered graphs/specs
 - status: still legacy-backed
@@ -211,6 +252,43 @@ Stage status as of now:
 - note:
   - this should be treated as a separate design problem from the active lowering/runtime/codegen cleanup
   - the current pipeline backend still assumes older `for`-based graph structure
+
+## Next IR Direction
+
+The current Synapse YAML-shaped graph should be replaced by an in-memory graph IR before runtime/codegen.
+
+Reasons:
+
+- YAML-shaped dictionaries keep reintroducing string serialization bugs.
+- Many lowering/codegen bugs come from reconstructing typed facts from strings.
+- Path templates, symbolic dims, tuple/list values, and op kwargs need typed fields, not ad-hoc payload conventions.
+
+Recommended direction:
+
+- Keep Axon AST through `canonicalize`.
+- Lower canonical flat typed Axon into a typed graph IR, not directly into YAML dictionaries.
+- Make graph nodes dataclasses with typed fields:
+  - `op`
+  - `inputs`
+  - `outputs`
+  - `kwargs`
+  - `path`
+  - `type/shape metadata`
+  - optional guards / constraints
+- Make runtime/codegen consume this graph IR directly.
+- Add a debug/export renderer from graph IR to YAML or JSON only for inspection, not as an internal compiler boundary.
+
+Direct AST-to-codegen/runtime is possible, but less attractive:
+
+- codegen/runtime would need to understand too much Axon semantics
+- graph-level backend passes would become harder to isolate
+- pipeline partitioning still wants a backend-neutral graph-like representation
+
+So the target should be:
+
+```text
+canonical flat typed Axon AST -> typed Graph IR -> runtime/codegen/pipeline
+```
 
 ## Canonical AST
 
@@ -352,17 +430,24 @@ Representative validator groups:
 
 - `validate.surface`
 - `validate.closed`
-- `validate.typed`
 - `validate.flat`
+- `validate.normalized`
+- `validate.typed`
+- `validate.backend_required`
 
 Validation owns:
 
 - structural closedness checks
+- explicit normalized-call and normalized-loop protocol checks
+- flat-core checks
+- typed metadata checks
+- backend-required flat typed checks
 - unused-import warnings
 - unused-definition warnings
 - strict-mode warning escalation used by CLI/workflow layers
 
-Stage packages should return ASTs plus diagnostics where needed.
+Stage packages should validate their required input shape and validate the properties they produce.
+They should return ASTs plus diagnostics where needed.
 They should not own user-facing warning policy.
 
 Validation modules report structural problems.

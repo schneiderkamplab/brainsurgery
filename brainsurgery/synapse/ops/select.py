@@ -91,11 +91,14 @@ def compile(
     lines: list[str] = [f"{indent}if {cond_code}:"]
     then_env = dict(env)
     lines.extend(
-        emitter._compile_graph(
+        emitter._compile_graph_with_non_null(
             graph=then_graph,
             env=then_env,
             scope_var=scope_var,
             indent=indent + "    ",
+            non_null_names=emitter._non_null_names_for_condition(
+                node_spec.get("cond"), truthy=True
+            ),
         )
     )
     for out_name, branch_name in zip(out_names, then_binds, strict=True):
@@ -105,11 +108,14 @@ def compile(
     lines.append(f"{indent}else:")
     else_env = dict(env)
     lines.extend(
-        emitter._compile_graph(
+        emitter._compile_graph_with_non_null(
             graph=else_graph,
             env=else_env,
             scope_var=scope_var,
             indent=indent + "    ",
+            non_null_names=emitter._non_null_names_for_condition(
+                node_spec.get("cond"), truthy=False
+            ),
         )
     )
     for out_name, branch_name in zip(out_names, else_binds, strict=True):

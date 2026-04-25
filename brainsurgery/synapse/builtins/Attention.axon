@@ -12,15 +12,15 @@ export (
 )
 
 -- === HEAD LAYOUT ===
-reshape_heads :: Tensor[B,S,D] -> Dim -> Tensor[B,H,S,DH]
+reshape_heads :: Tensor[B,S,D] -> Dim -> Tensor[B,heads,S,DH]
 reshape_heads x heads = do
   hd <- D / heads
   return Tensor.reshape x shape=[B, S, heads, hd] |> Tensor.permute dims=[0, 2, 1, 3]
 
 
-merge_heads :: Tensor[B,H,S,HD] -> Tensor[B,S,H * HD]
+merge_heads :: Tensor[B,heads,S,HD] -> Tensor[B,S,heads * HD]
 merge_heads x = do
-  return Tensor.permute x dims=[0, 2, 1, 3] |> Tensor.reshape shape=[B, S, (H * HD)]
+  return Tensor.permute x dims=[0, 2, 1, 3] |> Tensor.reshape shape=[B, S, (heads * HD)]
 
 
 split_qkv_heads :: Tensor[B,T,D] -> ?Dim -> ?String -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD], Tensor[B,H,T,HD])

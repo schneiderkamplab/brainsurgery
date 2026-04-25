@@ -123,6 +123,10 @@ def type_rule(
     if left_dims is None or right_dims is None:
         return None
     if len(left_dims) != len(right_dims):
+        if any(isinstance(dim, str) and dim.startswith("..") for dim in left_dims):
+            return helpers.type_tensor(dims=left_dims)
+        if any(isinstance(dim, str) and dim.startswith("..") for dim in right_dims):
+            return helpers.type_tensor(dims=right_dims)
         return None
     raw_dim = kwargs.get("dim", -1)
     while isinstance(raw_dim, AxonExprAscribe | AxonExprParen):
