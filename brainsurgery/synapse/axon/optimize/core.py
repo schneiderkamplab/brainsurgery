@@ -56,6 +56,7 @@ from ..ast import (
 from ..ast.render import render_axon_file
 from ..typecheck import typecheck_flat_axon_file
 from ..validate import validate_backend_required_flat_typed_axon_file, validate_typed_axon_file
+from ..validate.optimized import validate_optimized_flat_typed_axon_file
 
 
 _OPT_DEBUG_ENV = "AXON_OPTIMIZE_DEBUG"
@@ -3147,7 +3148,7 @@ def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None 
             validate_typed_axon_file(retyped, main_module=main_module)
         if ast_equal(current, retyped):
             _opt_debug_print_diff(before=current_before_pass, after=retyped, pass_index=pass_index)
-            validate_backend_required_flat_typed_axon_file(retyped, main_module=main_module)
+            validate_optimized_flat_typed_axon_file(retyped, main_module=main_module)
             return retyped
         _opt_debug_print_diff(before=current_before_pass, after=retyped, pass_index=pass_index)
         current = retyped

@@ -13,6 +13,7 @@ from .expression_codec import axon_expr_to_runtime_value, parse_expression_to_ru
 from .flatten import flatten_closed_axon_file
 from .load import LoadedAxonFile, LoadedAxonProgram, load_axon_files_from_path, resolve_import_path
 from .lowering import (
+    lower_axon_program_to_graph_ir,
     lower_axon_module_to_synapse_block,
     lower_axon_module_to_synapse_spec,
     lower_axon_program_to_synapse_spec,
@@ -92,6 +93,7 @@ __all__ = [
     "lower_axon_module_to_synapse_block",
     "lower_axon_module_to_synapse_spec",
     "lower_axon_program_to_synapse_spec",
+    "lower_axon_program_to_graph_ir",
     "load_tokenizer",
     "looks_like_tokenizer_dir",
     "candidate_tokenizer_dirs",

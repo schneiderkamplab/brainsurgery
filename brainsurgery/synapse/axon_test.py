@@ -36,10 +36,13 @@ from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Co
 from .axon import (
     candidate_tokenizer_dirs,
     looks_like_tokenizer_dir,
+    lower_axon_program_to_graph_ir,
     lower_axon_program_to_synapse_spec,
     parse_axon_program_from_path,
     tokenize_prompts,
 )
+from .axon.ast import TypeOptional
+from .axon.codegen2 import emit_model_code_from_graph_ir, make_runtime2_model_class
 from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
 from .axon_runner_common import is_cuda_oom as _is_cuda_oom
 from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
@@ -1909,8 +1912,10 @@ def _run_axon_test_single(
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
         backend_token = "codegen"
-    if backend_token not in {"codegen", "runtime", "pipeline"}:
-        raise ValueError("axon_backend must be 'codegen', 'runtime', or 'pipeline'")
+    if backend_token not in {"codegen", "codegen2", "runtime", "runtime2", "pipeline"}:
+        raise ValueError(
+            "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', or 'pipeline'"
+        )
     axon_backend = backend_token
     if axon_backend == "pipeline":
         if resolved_model_task not in {"causal_lm", "masked_lm", "seq2seq_lm"}:
@@ -1924,8 +1929,8 @@ def _run_axon_test_single(
             raise ValueError("compile_axon is not supported with axon_backend='pipeline'")
         if trace_layers:
             raise ValueError("trace_layers is not supported with axon_backend='pipeline'")
-    if axon_backend == "runtime" and trace_layers:
-        raise ValueError("trace_layers is not supported with axon_backend='runtime'")
+    if axon_backend in {"runtime", "runtime2"} and trace_layers:
+        raise ValueError(f"trace_layers is not supported with axon_backend={axon_backend!r}")
 
     safetensors_files = _resolve_safetensors_paths(weights_path)
     default_hf_dir = weights_path if weights_path.is_dir() else safetensors_files[0].parent
@@ -1990,32 +1995,72 @@ def _run_axon_test_single(
                 transformers_hub.HF_MODULES_CACHE = str(modules_cache)
 
         modules = parse_axon_program_from_path(axon_file)
-        synapse_spec = lower_axon_program_to_synapse_spec(
-            modules, main_module=main_module, optimize=optimize
-        )
-        if model_config is not None:
-            model_section = synapse_spec.get("model")
-            if not isinstance(model_section, dict):
-                raise ValueError("Lowered synapse spec has invalid model section")
-            model_section["config"] = model_config
+        if axon_backend in {"codegen2", "runtime2"}:
+            graph_program = lower_axon_program_to_graph_ir(
+                modules, main_module=main_module, optimize=optimize
+            )
+            main_graph_module = next(
+                module
+                for module in graph_program.modules
+                if module.name == graph_program.main_module
+            )
+            output_names = main_graph_module.output_names or tuple(
+                getattr(operand, "name", f"out{idx}")
+                for idx, operand in enumerate(main_graph_module.outputs)
+            )
+            lowered_spec = {
+                "synapse": 1,
+                "model": {
+                    "inputs": {
+                        value.name: {
+                            "optional": value.optional
+                            or isinstance(value.type_expr, TypeOptional)
+                        }
+                        for value in main_graph_module.inputs
+                    },
+                    "outputs": {name: name for name in output_names},
+                    "graph": [],
+                    "blocks": {},
+                    "config": model_config or {},
+                },
+            }
+            if axon_backend == "runtime2":
+                model_cls = make_runtime2_model_class(graph_program, model_config=model_config)
+            else:
+                code = emit_model_code_from_graph_ir(
+                    graph_program,
+                    class_name=class_name,
+                    model_config=model_config,
+                )
+                generated_py_path.write_text(code, encoding="utf-8")
+                model_cls = _load_generated_class(generated_py_path, class_name)
+        else:
+            synapse_spec = lower_axon_program_to_synapse_spec(
+                modules, main_module=main_module, optimize=optimize
+            )
+            if model_config is not None:
+                model_section = synapse_spec.get("model")
+                if not isinstance(model_section, dict):
+                    raise ValueError("Lowered synapse spec has invalid model section")
+                model_section["config"] = model_config
 
-        synapse_yaml_path.write_text(
-            OmegaConf.to_yaml(synapse_spec, resolve=True), encoding="utf-8"
-        )
-        loaded = OmegaConf.load(synapse_yaml_path)
-        loaded_dict = OmegaConf.to_container(loaded, resolve=True)
-        if not isinstance(loaded_dict, dict):
-            raise ValueError("Lowered synapse YAML did not produce a mapping")
-        lowered_spec: dict[str, Any] = {str(key): value for key, value in loaded_dict.items()}
-        if model_config is not None:
-            lowered_model = lowered_spec.get("model")
-            if isinstance(lowered_model, dict):
-                lowered_model["config"] = model_config
+            synapse_yaml_path.write_text(
+                OmegaConf.to_yaml(synapse_spec, resolve=True), encoding="utf-8"
+            )
+            loaded = OmegaConf.load(synapse_yaml_path)
+            loaded_dict = OmegaConf.to_container(loaded, resolve=True)
+            if not isinstance(loaded_dict, dict):
+                raise ValueError("Lowered synapse YAML did not produce a mapping")
+            lowered_spec: dict[str, Any] = {str(key): value for key, value in loaded_dict.items()}
+            if model_config is not None:
+                lowered_model = lowered_spec.get("model")
+                if isinstance(lowered_model, dict):
+                    lowered_model["config"] = model_config
 
-        code = emit_model_code_from_synapse_spec(lowered_spec, class_name=class_name)
-        generated_py_path.write_text(code, encoding="utf-8")
+            code = emit_model_code_from_synapse_spec(lowered_spec, class_name=class_name)
+            generated_py_path.write_text(code, encoding="utf-8")
 
-        model_cls = _load_generated_class(generated_py_path, class_name)
+            model_cls = _load_generated_class(generated_py_path, class_name)
 
         hf_config: Any | None = None
         reference_quant_config: Any | None = None

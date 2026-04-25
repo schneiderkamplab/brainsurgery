@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from ...ops import get_op_lowering_type_signature, get_op_type_rule
 from ...ops._broadcast import broadcast_shape
@@ -61,7 +61,7 @@ from ..ast import (
     dim_token_names,
     parse_type_expr,
 )
-from ..validate import validate_flat_axon_file
+from ..validate import validate_flat_axon_file, validate_typed_axon_file
 
 _COMPARE_OPS = {"==", "!=", "<", "<=", ">", ">="}
 _BOOL_OPS = {"and", "or"}
@@ -3652,9 +3652,8 @@ def _substitute_expr_dim_names(
                 else:
                     replaced.append(mapped)
                 continue
-            replaced.extend(
-                _substitute_type_dims(TypeTensor(base="Tensor", dims=(dim,)), subst=subst).dims
-            )
+            substituted = _substitute_type_dims(TypeTensor(base="Tensor", dims=(dim,)), subst=subst)
+            replaced.extend(cast(TypeTensor, substituted).dims)
         return tuple(replaced)
 
     def retag(updated: AxonExpr) -> AxonExpr:
@@ -4543,9 +4542,10 @@ def _strip_inferred_stmt(stmt: AxonStatement) -> AxonStatement:
             body=tuple(_strip_inferred_stmt(item) for item in stmt.body),
         )
     if isinstance(stmt, AxonScopeBind):
+        prefix = _strip_inferred_expr(stmt.prefix)
         return replace(
             stmt,
-            prefix=_strip_inferred_expr(stmt.prefix),
+            prefix=cast(AxonExprPath, prefix),
             body=tuple(_strip_inferred_stmt(item) for item in stmt.body),
             kwargs={
                 key: _strip_inferred_expr(value) if isinstance(value, AxonExpr) else value
@@ -4708,7 +4708,9 @@ def _typecheck_flat_once(program: AxonFile) -> AxonFile:
 def typecheck_flat_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
     program = _prune_to_main(program, main_module=main_module)
     validate_flat_axon_file(program, main_module=main_module)
-    return _typecheck_flat_once(program)
+    typed = _typecheck_flat_once(program)
+    validate_typed_axon_file(typed, main_module=main_module)
+    return typed
 
 
 __all__ = ["typecheck_flat_axon_file"]

@@ -14,6 +14,7 @@ from ..ops import (
 from ..type_inference import annotate_spec_with_block_io_types, infer_block_io_types_from_modules
 from .ast import (
     AxonBind,
+    AxonCond,
     AxonExpr,
     AxonExprAscribe,
     AxonExprBinary,
@@ -42,6 +43,7 @@ from .ast import (
     AxonScopeBind,
     AxonStatement,
     AxonYield,
+    DimExprBinary,
     TypeExpr,
     TypeList,
     TypeNamed,
@@ -67,6 +69,7 @@ from .validate.closed import validate_closed_axon_file
 from .validate.flat import validate_flat_axon_file
 from .validate.typed import validate_typed_axon_file
 from .validate.backend_required import validate_backend_required_flat_typed_axon_file
+from .validate.lowerable import validate_lowerable_axon_file
 
 
 def _is_identifier(token: str) -> bool:
@@ -201,6 +204,84 @@ def _lower_program_symbol_values(program: AxonFile) -> dict[str, Any]:
     return lowered
 
 
+def _program_has_import_surface(program: AxonFile) -> bool:
+    if program.imports or program.imported_members or program.exports:
+        return True
+    return any(module.imports or module.imported_members or module.exports for module in program.modules)
+
+
+def _program_has_body_expr(program: AxonFile) -> bool:
+    return any(module.body_expr is not None for module in program.modules)
+
+
+def _expr_has_inferred_metadata(expr: AxonExpr) -> bool:
+    if expr.inferred_type is not None or expr.inferred_arity is not None or expr.inferred_dims is not None:
+        return True
+    if isinstance(expr, AxonExprCall):
+        return any(_expr_has_inferred_metadata(arg) for arg in expr.args) or any(
+            _expr_has_inferred_metadata(value)
+            for value in expr.kwargs.values()
+            if isinstance(value, AxonExpr)
+        )
+    if isinstance(expr, AxonExprTuple | AxonExprList):
+        return any(_expr_has_inferred_metadata(item) for item in expr.items)
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        return (
+            _expr_has_inferred_metadata(expr.cond)
+            or _expr_has_inferred_metadata(expr.true_expr)
+            or _expr_has_inferred_metadata(expr.false_expr)
+        )
+    if isinstance(expr, AxonExprBinary):
+        return _expr_has_inferred_metadata(expr.left) or _expr_has_inferred_metadata(expr.right)
+    if isinstance(expr, AxonExprBind):
+        return _expr_has_inferred_metadata(expr.value) or _expr_has_inferred_metadata(expr.body)
+    if isinstance(expr, AxonExprDo):
+        return any(_stmt_has_inferred_metadata(stmt) for stmt in expr.body)
+    for attr in ("value", "inner", "expr", "body"):
+        value = getattr(expr, attr, None)
+        if isinstance(value, AxonExpr) and _expr_has_inferred_metadata(value):
+            return True
+    if isinstance(expr, AxonExprPipe):
+        return _expr_has_inferred_metadata(expr.value) or any(
+            _expr_has_inferred_metadata(stage) for stage in expr.stages
+        )
+    return False
+
+
+def _stmt_has_inferred_metadata(stmt: AxonStatement) -> bool:
+    if isinstance(stmt, AxonBind):
+        return _expr_has_inferred_metadata(stmt.expr)
+    if isinstance(stmt, AxonReturn | AxonYield):
+        return any(_expr_has_inferred_metadata(value) for value in stmt.values)
+    if isinstance(stmt, AxonCond):
+        return (
+            _expr_has_inferred_metadata(stmt.cond)
+            or any(_stmt_has_inferred_metadata(inner) for inner in stmt.true_body)
+            or any(_stmt_has_inferred_metadata(inner) for inner in stmt.false_body)
+        )
+    if isinstance(stmt, AxonRepeat):
+        return (
+            _expr_has_inferred_metadata(stmt.from_expr)
+            or _expr_has_inferred_metadata(stmt.to_expr)
+            or _expr_has_inferred_metadata(stmt.step_expr)
+            or any(_stmt_has_inferred_metadata(inner) for inner in stmt.body)
+        )
+    if isinstance(stmt, AxonScopeBind):
+        return any(
+            _expr_has_inferred_metadata(value)
+            for value in stmt.kwargs.values()
+            if isinstance(value, AxonExpr)
+        ) or any(_stmt_has_inferred_metadata(inner) for inner in stmt.body)
+    return False
+
+
+def _program_has_inferred_metadata(program: AxonFile) -> bool:
+    for expr in program.constants.values():
+        if _expr_has_inferred_metadata(expr):
+            return True
+    return any(_stmt_has_inferred_metadata(stmt) for module in program.modules for stmt in module.statements)
+
+
 def _prepare_program_for_lowering(
     modules: AxonFile | tuple[AxonModule, ...],
     *,
@@ -216,35 +297,26 @@ def _prepare_program_for_lowering(
             )
         validate_backend_required_flat_typed_axon_file(program, main_module=main_module)
         canonical = canonicalize_typed_axon_file(program, main_module=main_module)
-        validate_backend_required_flat_typed_axon_file(canonical, main_module=main_module)
+        validate_lowerable_axon_file(canonical, main_module=main_module)
         return canonical
 
     program = modules if isinstance(modules, AxonFile) else _wrap_modules_as_file(modules)
-    try:
-        validate_typed_axon_file(program, main_module=main_module)
-        return finish_typed(program)
-    except Exception:
-        pass
-    try:
+
+    if _program_has_import_surface(program):
+        if program.origin_path is None:
+            raise ValueError("lowering requires resolved/closed Axon input; import surface remains")
+        program = resolve_axon_program_from_path(program.origin_path).ast
+
+    if not _program_has_body_expr(program):
+        if _program_has_inferred_metadata(program):
+            validate_typed_axon_file(program, main_module=main_module)
+            return finish_typed(program)
         validate_flat_axon_file(program, main_module=main_module)
         typed = typecheck_flat_axon_file(program, main_module=main_module)
         return finish_typed(typed)
-    except Exception:
-        pass
-    try:
-        validate_closed_axon_file(program, main_module=main_module)
-        normalized = normalize_closed_axon_file(program, main_module=main_module)
-        flat = flatten_closed_axon_file(normalized, main_module=main_module)
-        typed = typecheck_flat_axon_file(flat, main_module=main_module)
-        return finish_typed(typed)
-    except Exception:
-        pass
-    if program.origin_path is None:
-        raise ValueError(
-            "lowering requires a closed Axon program or an AxonFile with origin_path for resolve"
-        )
-    resolved = resolve_axon_program_from_path(program.origin_path).ast
-    normalized = normalize_closed_axon_file(resolved, main_module=main_module)
+
+    validate_closed_axon_file(program, main_module=main_module)
+    normalized = normalize_closed_axon_file(program, main_module=main_module)
     flat = flatten_closed_axon_file(normalized, main_module=main_module)
     typed = typecheck_flat_axon_file(flat, main_module=main_module)
     return finish_typed(typed)

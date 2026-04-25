@@ -1057,8 +1057,10 @@ def run_axon_benchmark(
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
         backend_token = "codegen"
-    if backend_token not in {"codegen", "runtime", "pipeline"}:
-        raise ValueError("axon_backend must be 'codegen', 'runtime', or 'pipeline'")
+    if backend_token not in {"codegen", "codegen2", "runtime", "runtime2", "pipeline"}:
+        raise ValueError(
+            "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', or 'pipeline'"
+        )
     axon_backend = backend_token
     if axon_backend != "pipeline" and pipeline_parallel_size is not None:
         raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline")

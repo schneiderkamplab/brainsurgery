@@ -684,7 +684,7 @@ def axon_benchmark(
     axon_backend: str = typer.Option(
         "codegen",
         "--axon-backend",
-        help="Axon execution backend (codegen, runtime, or pipeline).",
+        help="Axon execution backend (codegen, codegen2, runtime, runtime2, or pipeline).",
     ),
     pipeline_parallel_size: int | None = typer.Option(
         None,

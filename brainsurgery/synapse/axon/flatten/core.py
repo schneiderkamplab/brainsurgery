@@ -50,8 +50,7 @@ from ..ast import (
     TypeVar,
     absolutize_path_expr,
 )
-from ..validate import validate_closed_axon_file, validate_normalized_axon_file
-from ..normalize import normalize_closed_axon_file
+from ..validate import validate_flat_axon_file, validate_normalized_axon_file
 
 _ATOMIC_EXPR_TYPES = (
     AxonExprName,
@@ -2226,8 +2225,6 @@ def _flatten_module(
 
 
 def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
-    validate_closed_axon_file(program, main_module=main_module)
-    program = normalize_closed_axon_file(program, main_module=main_module)
     validate_normalized_axon_file(program, main_module=main_module)
     scoped_modules: frozenset[str] = frozenset()
     globals_by_name = {
@@ -2256,7 +2253,7 @@ def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = Non
             program_ctx.nonempty_called_modules - program_ctx.root_called_modules
         )
         if discovered == scoped_modules:
-            return AxonFile(
+            flat_program = AxonFile(
                 modules=tuple(flattened_modules),
                 imports=program.imports,
                 imported_members=dict(program.imported_members),
@@ -2279,6 +2276,8 @@ def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = Non
                 type_aliases={},
                 origin_path=program.origin_path,
             )
+            validate_flat_axon_file(flat_program, main_module=main_module)
+            return flat_program
         scoped_modules = discovered
 
 

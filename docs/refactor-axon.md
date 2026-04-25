@@ -257,6 +257,15 @@ Stage status as of now:
 
 The current Synapse YAML-shaped graph should be replaced by an in-memory graph IR before runtime/codegen.
 
+Initial implementation status:
+
+- `brainsurgery/synapse/axon/graph_ir/` defines a typed in-memory graph IR.
+- `lower_axon_program_to_graph_ir(...)` is available as an alternative lowering target.
+- The graph IR lowering reuses the existing canonical flat typed Axon preparation pipeline.
+- Graph nodes carry typed positional operands, typed kwarg operands, SSA-style outputs, structured paths, constraints, constants, and inferred type metadata.
+- `brainsurgery/synapse/axon/codegen2/` exists as the separate future backend entry point and consumes graph IR, not Synapse spec dictionaries.
+- Existing Synapse-spec lowering/codegen remains unchanged while codegen2 is filled in incrementally.
+
 Reasons:
 
 - YAML-shaped dictionaries keep reintroducing string serialization bugs.
@@ -288,6 +297,13 @@ So the target should be:
 
 ```text
 canonical flat typed Axon AST -> typed Graph IR -> runtime/codegen/pipeline
+```
+
+Active transition shape:
+
+```text
+canonical flat typed Axon AST -> Synapse graph -> runtime/codegen
+canonical flat typed Axon AST -> typed Graph IR -> codegen2
 ```
 
 ## Canonical AST
