@@ -23,7 +23,6 @@ def _replace_checkpoints(ast: Any, checkpoints: list[str]) -> Any:
         ast,
         pragmas=pragmas,
         imported_members=dict(ast.imported_members),
-        constants=dict(ast.constants),
         type_aliases=dict(ast.type_aliases),
     )
 

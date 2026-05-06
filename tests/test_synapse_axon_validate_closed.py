@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from brainsurgery.synapse.axon.ast import AxonExprName, AxonFile, AxonModule
+from brainsurgery.synapse.axon.ast import AxonExprName, AxonFile, AxonDefinition
+from brainsurgery.synapse.axon.entrypoint import resolve_main_module
+from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
 from brainsurgery.synapse.axon.parse import parse_axon_program, parse_axon_program_from_path
 from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
 from brainsurgery.synapse.axon.validate import validate_closed_axon_file
@@ -29,6 +31,58 @@ main x = do
 """
     program = parse_axon_program(source)
     validate_closed_axon_file(program, main_module="main")
+
+
+def test_main_pragma_selects_entry_definition_when_no_explicit_main() -> None:
+    source = """
+{-# MAIN "entry" #-}
+helper :: Tensor[B,S,D] -> Tensor[B,S,D]
+helper x = x
+
+entry :: Tensor[B,S,D] -> Tensor[B,S,D]
+entry x = helper x
+
+not_entry :: Tensor[B,S,D] -> Tensor[B,S,D]
+not_entry x = x
+"""
+    program = normalize_closed_axon_file(parse_axon_program(source))
+    validate_closed_axon_file(program)
+    assert resolve_main_module(program) == "entry"
+
+
+def test_explicit_main_overrides_main_pragma() -> None:
+    source = """
+{-# MAIN "entry" #-}
+entry :: Tensor[B,S,D] -> Tensor[B,S,D]
+entry x = x
+
+other :: Tensor[B,S,D] -> Tensor[B,S,D]
+other x = x
+"""
+    program = normalize_closed_axon_file(parse_axon_program(source))
+    validate_closed_axon_file(program, main_module="other")
+    assert resolve_main_module(program, main_module="other") == "other"
+
+
+def test_validate_closed_rejects_unknown_main_pragma() -> None:
+    source = """
+{-# MAIN "missing" #-}
+entry :: Tensor[B,S,D] -> Tensor[B,S,D]
+entry x = x
+"""
+    program = parse_axon_program(source)
+    with pytest.raises(ValueError, match="MAIN pragma references unknown definition"):
+        validate_closed_axon_file(program)
+
+
+def test_normalize_rejects_invalid_main_pragma() -> None:
+    source = """
+{-# MAIN ["entry"] #-}
+entry :: Tensor[B,S,D] -> Tensor[B,S,D]
+entry x = x
+"""
+    with pytest.raises(ValueError, match="MAIN.*non-empty string"):
+        normalize_closed_axon_file(parse_axon_program(source))
 
 
 def test_validate_closed_rejects_non_closed_axon_file(tmp_path: Path) -> None:
@@ -138,7 +192,7 @@ main x = do
 def test_validate_closed_rejects_module_level_import_state() -> None:
     program = AxonFile(
         modules=(
-            AxonModule(
+            AxonDefinition(
                 name="main",
                 path_param=None,
                 path_params=(),
@@ -153,7 +207,6 @@ def test_validate_closed_rejects_module_level_import_state() -> None:
         imported_members={},
         exports=(),
         pragmas={},
-        constants={},
         type_aliases={},
     )
     with pytest.raises(ValueError, match="module imports must be empty"):

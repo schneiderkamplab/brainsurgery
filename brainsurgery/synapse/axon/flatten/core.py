@@ -28,7 +28,7 @@ from ..ast import (
     AxonExprTuple,
     AxonFile,
     AxonKwargValue,
-    AxonModule,
+    AxonDefinition,
     AxonParam,
     AxonRepeat,
     AxonReturn,
@@ -94,7 +94,7 @@ class _FlattenCtx:
 
 @dataclass
 class _FlattenProgramCtx:
-    modules_by_name: dict[str, AxonModule]
+    modules_by_name: dict[str, AxonDefinition]
     type_aliases: dict[str, TypeAliasDef]
     scoped_modules: frozenset[str]
     root_called_modules: set[str]
@@ -102,7 +102,158 @@ class _FlattenProgramCtx:
     scope_param_name: str = "__scope"
 
 
-def _module_used_names(module: AxonModule) -> set[str]:
+def _expr_has_relative_path(expr: AxonExpr) -> bool:
+    if isinstance(expr, AxonExprPath):
+        return not expr.absolute
+    if isinstance(expr, AxonExprCall):
+        return any(_expr_has_relative_path(arg) for arg in expr.args) or any(
+            _expr_has_relative_path(value)
+            for value in expr.kwargs.values()
+            if isinstance(value, AxonExpr)
+        )
+    if isinstance(expr, AxonExprPipe):
+        return _expr_has_relative_path(expr.value) or any(
+            _expr_has_relative_path(stage) for stage in expr.stages
+        )
+    if isinstance(expr, AxonExprBind):
+        return _expr_has_relative_path(expr.value) or _expr_has_relative_path(expr.body)
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        return (
+            _expr_has_relative_path(expr.cond)
+            or _expr_has_relative_path(expr.true_expr)
+            or _expr_has_relative_path(expr.false_expr)
+        )
+    if isinstance(expr, AxonExprBinary):
+        return _expr_has_relative_path(expr.left) or _expr_has_relative_path(expr.right)
+    if isinstance(expr, AxonExprLambda):
+        return _expr_has_relative_path(expr.body)
+    if isinstance(expr, AxonExprParen):
+        return _expr_has_relative_path(expr.inner)
+    if isinstance(expr, AxonExprAscribe):
+        return _expr_has_relative_path(expr.expr)
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        return any(_expr_has_relative_path(item) for item in expr.items)
+    if isinstance(expr, AxonExprDo):
+        return any(_stmt_has_lexical_path_dependency(stmt) for stmt in expr.body)
+    return False
+
+
+def _stmt_has_lexical_path_dependency(stmt: AxonStatement) -> bool:
+    if isinstance(stmt, AxonScopeBind):
+        return True
+    if isinstance(stmt, AxonBind):
+        return _expr_has_relative_path(stmt.expr)
+    if isinstance(stmt, AxonReturn | AxonYield):
+        return any(_expr_has_relative_path(value) for value in stmt.values)
+    if isinstance(stmt, AxonCond):
+        return (
+            _expr_has_relative_path(stmt.cond)
+            or any(_stmt_has_lexical_path_dependency(item) for item in stmt.true_body)
+            or any(_stmt_has_lexical_path_dependency(item) for item in stmt.false_body)
+        )
+    if isinstance(stmt, AxonRepeat):
+        return (
+            _expr_has_relative_path(stmt.from_expr)
+            or _expr_has_relative_path(stmt.to_expr)
+            or _expr_has_relative_path(stmt.step_expr)
+            or any(_stmt_has_lexical_path_dependency(item) for item in stmt.body)
+        )
+    return False
+
+
+def _expr_called_definitions(expr: AxonExpr, module_names: set[str]) -> set[str]:
+    out: set[str] = set()
+    if isinstance(expr, AxonExprCall):
+        if expr.callee in module_names:
+            out.add(expr.callee)
+        for arg in expr.args:
+            out.update(_expr_called_definitions(arg, module_names))
+        for value in expr.kwargs.values():
+            if isinstance(value, AxonExpr):
+                out.update(_expr_called_definitions(value, module_names))
+    elif isinstance(expr, AxonExprPipe):
+        out.update(_expr_called_definitions(expr.value, module_names))
+        for stage in expr.stages:
+            out.update(_expr_called_definitions(stage, module_names))
+    elif isinstance(expr, AxonExprBind):
+        out.update(_expr_called_definitions(expr.value, module_names))
+        out.update(_expr_called_definitions(expr.body, module_names))
+    elif isinstance(expr, AxonExprIf | AxonExprTernary):
+        out.update(_expr_called_definitions(expr.cond, module_names))
+        out.update(_expr_called_definitions(expr.true_expr, module_names))
+        out.update(_expr_called_definitions(expr.false_expr, module_names))
+    elif isinstance(expr, AxonExprBinary):
+        out.update(_expr_called_definitions(expr.left, module_names))
+        out.update(_expr_called_definitions(expr.right, module_names))
+    elif isinstance(expr, AxonExprLambda):
+        out.update(_expr_called_definitions(expr.body, module_names))
+    elif isinstance(expr, AxonExprParen):
+        out.update(_expr_called_definitions(expr.inner, module_names))
+    elif isinstance(expr, AxonExprAscribe):
+        out.update(_expr_called_definitions(expr.expr, module_names))
+    elif isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            out.update(_expr_called_definitions(item, module_names))
+    elif isinstance(expr, AxonExprDo):
+        for stmt in expr.body:
+            out.update(_stmt_called_definitions(stmt, module_names))
+    return out
+
+
+def _stmt_called_definitions(stmt: AxonStatement, module_names: set[str]) -> set[str]:
+    out: set[str] = set()
+    if isinstance(stmt, AxonBind):
+        out.update(_expr_called_definitions(stmt.expr, module_names))
+    elif isinstance(stmt, AxonReturn | AxonYield):
+        for value in stmt.values:
+            out.update(_expr_called_definitions(value, module_names))
+    elif isinstance(stmt, AxonCond):
+        out.update(_expr_called_definitions(stmt.cond, module_names))
+        for item in stmt.true_body:
+            out.update(_stmt_called_definitions(item, module_names))
+        for item in stmt.false_body:
+            out.update(_stmt_called_definitions(item, module_names))
+    elif isinstance(stmt, AxonRepeat):
+        out.update(_expr_called_definitions(stmt.from_expr, module_names))
+        out.update(_expr_called_definitions(stmt.to_expr, module_names))
+        out.update(_expr_called_definitions(stmt.step_expr, module_names))
+        for item in stmt.body:
+            out.update(_stmt_called_definitions(item, module_names))
+    elif isinstance(stmt, AxonScopeBind):
+        for raw_value in stmt.kwargs.values():
+            if isinstance(raw_value, AxonExpr):
+                out.update(_expr_called_definitions(raw_value, module_names))
+        for item in stmt.body:
+            out.update(_stmt_called_definitions(item, module_names))
+    return out
+
+
+def _lexically_path_dependent_modules(modules: tuple[AxonDefinition, ...]) -> frozenset[str]:
+    module_names = {module.name for module in modules}
+    direct: set[str] = set()
+    calls: dict[str, set[str]] = {}
+    for module in modules:
+        body = _module_body_statements(module)
+        if any(_stmt_has_lexical_path_dependency(stmt) for stmt in body):
+            direct.add(module.name)
+        calls[module.name] = set()
+        for stmt in body:
+            calls[module.name].update(_stmt_called_definitions(stmt, module_names))
+
+    dependent = set(direct)
+    changed = True
+    while changed:
+        changed = False
+        for name, callees in calls.items():
+            if name in dependent:
+                continue
+            if callees & dependent:
+                dependent.add(name)
+                changed = True
+    return frozenset(dependent)
+
+
+def _module_used_names(module: AxonDefinition) -> set[str]:
     names = {module.name}
     if module.path_param is not None:
         names.add(module.path_param)
@@ -335,15 +486,6 @@ def _substitute_name_stmt(stmt: AxonStatement, *, name: str, replacement: AxonEx
     return stmt
 
 
-def _inline_flat_prelude_expr(prelude: list[AxonStatement], expr: AxonExpr) -> AxonExpr:
-    inlined = expr
-    for stmt in reversed(prelude):
-        if not isinstance(stmt, AxonBind) or len(stmt.targets) != 1 or stmt.targets[0] == "_":
-            raise ValueError("flatten failed: constants require single-target bind preludes")
-        inlined = _substitute_name_expr(inlined, name=stmt.targets[0], replacement=stmt.expr)
-    return inlined
-
-
 def _reduce_do_expr(
     expr: AxonExprDo,
     ctx: _FlattenCtx,
@@ -401,7 +543,7 @@ def _split_callee_path_sugar(callee: str) -> tuple[str, tuple[AxonExprPath, ...]
     return base, tuple(path_args)
 
 
-def _leading_path_param_count(module: AxonModule) -> int:
+def _leading_path_param_count(module: AxonDefinition) -> int:
     count = 0
     for param in module.params:
         if isinstance(param.type_expr, TypePath):
@@ -411,7 +553,7 @@ def _leading_path_param_count(module: AxonModule) -> int:
     return count
 
 
-def _module_declares_path_inputs(module: AxonModule) -> bool:
+def _module_declares_path_inputs(module: AxonDefinition) -> bool:
     return (
         bool(module.path_params)
         or module.path_param is not None
@@ -452,14 +594,6 @@ def _expand_call_surface(
         raise ValueError(
             f"flatten failed: explicit path args are missing after normalize in call {expr.callee!r}"
         )
-    provided_positional = max(0, len(expr.args) - len(module.path_params))
-    for idx, param in enumerate(module.params):
-        if idx < provided_positional:
-            continue
-        if param.name not in expr.kwargs and (param.optional or param.default_expr is not None):
-            raise ValueError(
-                f"flatten failed: optional/default arg {param.name!r} was not expanded before flatten"
-            )
     return expr
 
 
@@ -482,16 +616,51 @@ def _normalize_path_expr(
     return absolutize_path_expr(expr, prefix=path_prefix)
 
 
-def _substitute_alias_dim(dim: DimToken, *, subst: dict[str, DimToken]) -> DimToken:
+def _substitute_alias_dim(
+    dim: DimToken, *, subst: dict[str, DimToken | tuple[DimToken, ...]]
+) -> tuple[DimToken, ...]:
     if isinstance(dim, str):
-        return subst.get(dim, dim)
+        mapped = subst.get(dim)
+        if mapped is None:
+            return (dim,)
+        if isinstance(mapped, tuple):
+            return mapped
+        return (mapped,)
     if isinstance(dim, int):
-        return dim
-    return DimExprBinary(
-        op=dim.op,
-        left=_substitute_alias_dim(dim.left, subst=subst),
-        right=_substitute_alias_dim(dim.right, subst=subst),
-    )
+        return (dim,)
+    left = _substitute_alias_dim(dim.left, subst=subst)
+    right = _substitute_alias_dim(dim.right, subst=subst)
+    if len(left) == 1 and len(right) == 1:
+        return (
+            DimExprBinary(
+                op=dim.op,
+                left=left[0],
+                right=right[0],
+            ),
+        )
+    raise ValueError("variadic type alias dimension cannot appear inside dimension arithmetic")
+
+
+def _match_type_alias_dims(
+    params: tuple[str, ...], args: tuple[DimToken, ...]
+) -> dict[str, DimToken | tuple[DimToken, ...]] | None:
+    variadic_idx = next((idx for idx, param in enumerate(params) if param.startswith("..")), None)
+    if variadic_idx is None:
+        if len(args) != len(params):
+            return None
+        return {name: dim for name, dim in zip(params, args, strict=True)}
+    fixed_after = len(params) - variadic_idx - 1
+    if len(args) < variadic_idx + fixed_after:
+        return None
+    subst: dict[str, DimToken | tuple[DimToken, ...]] = {}
+    for name, dim in zip(params[:variadic_idx], args[:variadic_idx], strict=True):
+        subst[name] = dim
+    variadic_end = len(args) - fixed_after
+    subst[params[variadic_idx]] = tuple(args[variadic_idx:variadic_end])
+    if fixed_after:
+        for name, dim in zip(params[variadic_idx + 1 :], args[variadic_end:], strict=True):
+            subst[name] = dim
+    return subst
 
 
 def _expand_type_aliases(
@@ -525,18 +694,20 @@ def _expand_type_aliases(
             alias = type_aliases.get(tp.name.rsplit(".", 1)[1])
         if alias is None:
             return TypeNamed(name=tp.name, args=tp.args)
-        if len(tp.args) != len(alias.params):
+        subst = _match_type_alias_dims(alias.params, tp.args)
+        if subst is None:
             raise ValueError(
                 f"flatten failed: type alias {tp.name!r} expects {len(alias.params)} args, got {len(tp.args)}"
             )
-        subst = {name: dim for name, dim in zip(alias.params, tp.args, strict=True)}
         expanded = _expand_type_aliases(alias.value, type_aliases=type_aliases)
         assert expanded is not None
         return _substitute_type_alias_dims(expanded, subst=subst)
     return tp
 
 
-def _substitute_type_alias_dims(tp: TypeExpr, *, subst: dict[str, DimToken]) -> TypeExpr:
+def _substitute_type_alias_dims(
+    tp: TypeExpr, *, subst: dict[str, DimToken | tuple[DimToken, ...]]
+) -> TypeExpr:
     if isinstance(tp, TypeOptional):
         return TypeOptional(inner=_substitute_type_alias_dims(tp.inner, subst=subst))
     if isinstance(tp, TypeList):
@@ -547,11 +718,21 @@ def _substitute_type_alias_dims(tp: TypeExpr, *, subst: dict[str, DimToken]) -> 
         )
     if isinstance(tp, TypeTensor):
         return TypeTensor(
-            base=tp.base, dims=tuple(_substitute_alias_dim(dim, subst=subst) for dim in tp.dims)
+            base=tp.base,
+            dims=tuple(
+                item
+                for dim in tp.dims
+                for item in _substitute_alias_dim(dim, subst=subst)
+            ),
         )
     if isinstance(tp, TypeNamed):
         return TypeNamed(
-            name=tp.name, args=tuple(_substitute_alias_dim(dim, subst=subst) for dim in tp.args)
+            name=tp.name,
+            args=tuple(
+                item
+                for dim in tp.args
+                for item in _substitute_alias_dim(dim, subst=subst)
+            ),
         )
     return tp
 
@@ -880,7 +1061,7 @@ def _extract_repeat_recursive_helper(
     module_name: str,
     ctx: _FlattenCtx,
     globals_by_name: set[str],
-) -> tuple[list[AxonStatement], tuple[AxonModule, ...]]:
+) -> tuple[list[AxonStatement], tuple[AxonDefinition, ...]]:
     normalized = _normalize_repeat_yield(stmt)
     last_stmt = normalized.body[-1]
     assert isinstance(last_stmt, AxonYield)
@@ -889,7 +1070,7 @@ def _extract_repeat_recursive_helper(
     continue_helper_name = ctx.fresh_helper(prefix=f"{helper_prefix}_continue")
 
     carry_names = tuple(normalized.carry or ())
-    local_bound = {normalized.var, *carry_names}
+    local_bound = {normalized.var, *carry_names, *ctx.module_path_params}
     free_names: list[str] = []
     seen_free: set[str] = set()
     for inner in normalized.body:
@@ -985,7 +1166,7 @@ def _extract_repeat_recursive_helper(
         false_body.append(AxonBind(targets=(recur_temp,), expr=recur_call_expr))
         false_body.append(AxonReturn(values=(AxonExprName(name=recur_temp),)))
 
-    continue_helper_module = AxonModule(
+    continue_helper_module = AxonDefinition(
         name=continue_helper_name,
         path_param=None,
         params=tuple(_make_path_param(name) for name in ctx.module_path_params)
@@ -1007,7 +1188,6 @@ def _extract_repeat_recursive_helper(
         )
         if carry_param_types
         else TypeNull(),
-        return_shape=None,
         constraints=None,
     )
 
@@ -1062,7 +1242,7 @@ def _extract_repeat_recursive_helper(
         helper_body.append(AxonBind(targets=("_",), expr=helper_result_expr))
         helper_body.append(AxonReturn(values=(AxonExprName(name="_"),)))
 
-    helper_module = AxonModule(
+    helper_module = AxonDefinition(
         name=helper_name,
         path_param=None,
         params=tuple(_make_path_param(name) for name in ctx.module_path_params)
@@ -1084,7 +1264,6 @@ def _extract_repeat_recursive_helper(
         )
         if carry_param_types
         else TypeNull(),
-        return_shape=None,
         constraints=None,
     )
 
@@ -1120,7 +1299,7 @@ def _extract_repeat_helper(
     module_name: str,
     ctx: _FlattenCtx,
     globals_by_name: set[str],
-) -> tuple[AxonRepeat, AxonModule] | None:
+) -> tuple[AxonRepeat, AxonDefinition] | None:
     normalized = _normalize_repeat_yield(stmt)
     if not normalized.body or not isinstance(normalized.body[-1], AxonYield):
         return None
@@ -1136,7 +1315,7 @@ def _extract_repeat_helper(
     helper_name = ctx.fresh_helper(prefix=helper_prefix)
 
     carry_names = tuple(normalized.carry or ())
-    local_bound = {normalized.var, *carry_names}
+    local_bound = {normalized.var, *carry_names, *ctx.module_path_params}
     free_names: list[str] = []
     seen_free: set[str] = set()
 
@@ -1175,7 +1354,7 @@ def _extract_repeat_helper(
         helper_body.append(inner)
     helper_body.append(AxonReturn(values=normalized.body[-1].values))
 
-    helper_module = AxonModule(
+    helper_module = AxonDefinition(
         name=helper_name,
         path_param=None,
         params=tuple(_make_path_param(name) for name in ctx.module_path_params)
@@ -1201,7 +1380,6 @@ def _extract_repeat_helper(
             if len(normalized.body[-1].values) == 1
             else TypeTuple(items=tuple(ctx.fresh_type_var() for _ in normalized.body[-1].values))
         ),
-        return_shape=None,
         constraints=None,
     )
 
@@ -1230,9 +1408,9 @@ def _extract_repeat_helpers_from_statements(
     module_name: str,
     ctx: _FlattenCtx,
     globals_by_name: set[str],
-) -> tuple[tuple[AxonStatement, ...], tuple[AxonModule, ...]]:
+) -> tuple[tuple[AxonStatement, ...], tuple[AxonDefinition, ...]]:
     out: list[AxonStatement] = []
-    helpers: list[AxonModule] = []
+    helpers: list[AxonDefinition] = []
     for stmt in statements:
         if isinstance(stmt, AxonCond):
             true_body, true_helpers = _extract_repeat_helpers_from_statements(
@@ -1344,7 +1522,7 @@ def _extract_cond_branch_helper_expr(
     branch_stmts: tuple[AxonStatement, ...],
     branch_expr: AxonExpr,
     helper_suffix: str,
-) -> tuple[AxonExpr, AxonModule | None]:
+) -> tuple[AxonExpr, AxonDefinition | None]:
     if not branch_stmts:
         return branch_expr, None
     helper_prefix = f"{module_name}__cond_{helper_suffix}"
@@ -1352,7 +1530,7 @@ def _extract_cond_branch_helper_expr(
 
     free_names: list[str] = []
     seen_free: set[str] = set()
-    local_bound: set[str] = set()
+    local_bound: set[str] = set(ctx.module_path_params)
     all_stmts = [*branch_stmts, AxonReturn(values=(branch_expr,))]
     for stmt in all_stmts:
         for name in _statement_name_uses(stmt):
@@ -1388,7 +1566,7 @@ def _extract_cond_branch_helper_expr(
             ]
         )
         helper_return_type = TypeTuple(items=tuple(ctx.fresh_type_var() for _ in temp_names))
-        helper_module = AxonModule(
+        helper_module = AxonDefinition(
             name=helper_name,
             path_param=None,
             params=tuple(_make_path_param(name) for name in ctx.module_path_params) + helper_params,
@@ -1403,7 +1581,6 @@ def _extract_cond_branch_helper_expr(
             pragmas=None,
             type_aliases=None,
             return_type_expr=helper_return_type,
-            return_shape=None,
             constraints=None,
         )
         helper_call = AxonExprCall(
@@ -1416,7 +1593,7 @@ def _extract_cond_branch_helper_expr(
         temp_name = ctx.fresh(prefix="__cond_result")
         helper_return_expr = AxonExprName(name=temp_name)
         helper_return_type = ctx.fresh_type_var()
-        helper_module = AxonModule(
+        helper_module = AxonDefinition(
             name=helper_name,
             path_param=None,
             params=tuple(_make_path_param(name) for name in ctx.module_path_params) + helper_params,
@@ -1437,7 +1614,6 @@ def _extract_cond_branch_helper_expr(
             pragmas=None,
             type_aliases=None,
             return_type_expr=helper_return_type,
-            return_shape=None,
             constraints=None,
         )
         helper_call = AxonExprCall(
@@ -1447,7 +1623,7 @@ def _extract_cond_branch_helper_expr(
         )
         return helper_call, helper_module
 
-    helper_module = AxonModule(
+    helper_module = AxonDefinition(
         name=helper_name,
         path_param=None,
         params=tuple(_make_path_param(name) for name in ctx.module_path_params) + helper_params,
@@ -1462,7 +1638,6 @@ def _extract_cond_branch_helper_expr(
         pragmas=None,
         type_aliases=None,
         return_type_expr=helper_return_type,
-        return_shape=None,
         constraints=None,
     )
     helper_call = AxonExprCall(
@@ -1481,9 +1656,9 @@ def _extract_cond_helpers_from_statements(
     globals_by_name: set[str],
     local_bound_names: set[str],
     known_types: Mapping[str, TypeExpr],
-) -> tuple[tuple[AxonStatement, ...], tuple[AxonModule, ...]]:
+) -> tuple[tuple[AxonStatement, ...], tuple[AxonDefinition, ...]]:
     out: list[AxonStatement] = []
-    helpers: list[AxonModule] = []
+    helpers: list[AxonDefinition] = []
     local = set(local_bound_names)
     for stmt in statements:
         if isinstance(stmt, AxonBind) and isinstance(stmt.expr, AxonExprTernary):
@@ -1774,28 +1949,28 @@ def _flatten_expr(
         call_prelude: list[AxonStatement] = []
         args: list[AxonExpr] = []
         for arg in call_expr.args:
-            arg_pre, arg_atom = _ensure_atom(
+            arg_pre, arg_expr = _flatten_expr(
                 arg,
                 ctx,
                 path_prefix=path_prefix,
                 program_ctx=program_ctx,
             )
             call_prelude.extend(arg_pre)
-            args.append(arg_atom)
+            args.append(arg_expr)
         kwargs: dict[str, AxonKwargValue] = {}
         for key, raw_value in call_expr.kwargs.items():
             if isinstance(raw_value, AxonExprPath):
                 kwargs[key] = raw_value
                 continue
             if isinstance(raw_value, AxonExpr):
-                kw_pre, kw_atom = _ensure_atom(
+                kw_pre, kw_expr = _flatten_expr(
                     raw_value,
                     ctx,
                     path_prefix=path_prefix,
                     program_ctx=program_ctx,
                 )
                 call_prelude.extend(kw_pre)
-                kwargs[key] = kw_atom
+                kwargs[key] = kw_expr
             else:
                 kwargs[key] = raw_value
         _absolutize_call_relative_paths(
@@ -1807,19 +1982,28 @@ def _flatten_expr(
         )
         return call_prelude, AxonExprCall(callee=call_expr.callee, args=tuple(args), kwargs=kwargs)
     if isinstance(expr, AxonExprBinary):
-        left_pre, left_atom = _ensure_atom(
+        left_pre, left_expr = _flatten_expr(
             expr.left,
             ctx,
             path_prefix=path_prefix,
             program_ctx=program_ctx,
         )
-        right_pre, right_atom = _ensure_atom(
+        right_pre, right_expr = _flatten_expr(
             expr.right,
             ctx,
             path_prefix=path_prefix,
             program_ctx=program_ctx,
         )
-        return [*left_pre, *right_pre], AxonExprBinary(op=expr.op, left=left_atom, right=right_atom)
+        prelude = [*left_pre, *right_pre]
+        if not _is_atomic_expr(left_expr):
+            temp = ctx.fresh()
+            prelude.append(AxonBind(targets=(temp,), expr=left_expr))
+            left_expr = AxonExprName(name=temp)
+        if not _is_atomic_expr(right_expr):
+            temp = ctx.fresh()
+            prelude.append(AxonBind(targets=(temp,), expr=right_expr))
+            right_expr = AxonExprName(name=temp)
+        return prelude, AxonExprBinary(op=expr.op, left=left_expr, right=right_expr)
     if isinstance(expr, AxonExprBind):
         value_pre, value_expr = _flatten_expr(
             expr.value,
@@ -1836,7 +2020,7 @@ def _flatten_expr(
         value_stmt = AxonBind(targets=(expr.var,), expr=value_expr)
         return [*value_pre, value_stmt, *body_pre], body_expr
     if isinstance(expr, AxonExprIf):
-        cond_pre, cond_atom = _ensure_atom(
+        cond_pre, cond_expr = _flatten_expr(
             expr.cond,
             ctx,
             path_prefix=path_prefix,
@@ -1856,19 +2040,19 @@ def _flatten_expr(
         )
         if not true_pre and not false_pre:
             return [*cond_pre], AxonExprTernary(
-                cond=cond_atom, true_expr=true_expr, false_expr=false_expr
+                cond=cond_expr, true_expr=true_expr, false_expr=false_expr
             )
         temp = ctx.fresh()
         return [
             *cond_pre,
             AxonCond(
-                cond=cond_atom,
+                cond=cond_expr,
                 true_body=tuple([*true_pre, AxonBind(targets=(temp,), expr=true_expr)]),
                 false_body=tuple([*false_pre, AxonBind(targets=(temp,), expr=false_expr)]),
             ),
         ], AxonExprName(name=temp)
     if isinstance(expr, AxonExprTernary):
-        cond_pre, cond_atom = _ensure_atom(
+        cond_pre, cond_expr = _flatten_expr(
             expr.cond,
             ctx,
             path_prefix=path_prefix,
@@ -1888,13 +2072,13 @@ def _flatten_expr(
         )
         if not true_pre and not false_pre:
             return [*cond_pre], AxonExprTernary(
-                cond=cond_atom, true_expr=true_expr, false_expr=false_expr
+                cond=cond_expr, true_expr=true_expr, false_expr=false_expr
             )
         temp = ctx.fresh()
         return [
             *cond_pre,
             AxonCond(
-                cond=cond_atom,
+                cond=cond_expr,
                 true_body=tuple([*true_pre, AxonBind(targets=(temp,), expr=true_expr)]),
                 false_body=tuple([*false_pre, AxonBind(targets=(temp,), expr=false_expr)]),
             ),
@@ -2008,19 +2192,19 @@ def _flatten_statement(
             ),
         ]
     if isinstance(stmt, AxonRepeat):
-        from_pre, from_expr = _flatten_expr(
+        from_pre, from_expr = _ensure_atom(
             stmt.from_expr,
             ctx,
             path_prefix=path_prefix,
             program_ctx=program_ctx,
         )
-        to_pre, to_expr = _flatten_expr(
+        to_pre, to_expr = _ensure_atom(
             stmt.to_expr,
             ctx,
             path_prefix=path_prefix,
             program_ctx=program_ctx,
         )
-        step_pre, step_expr = _flatten_expr(
+        step_pre, step_expr = _ensure_atom(
             stmt.step_expr,
             ctx,
             path_prefix=path_prefix,
@@ -2110,7 +2294,36 @@ def _flatten_statements(
     return tuple(out)
 
 
-def _module_body_statements(module: AxonModule) -> tuple[AxonStatement, ...]:
+def _is_inlineable_flat_temp_expr(expr: AxonExpr) -> bool:
+    return isinstance(expr, AxonExprCall) and not expr.args and not expr.kwargs
+
+
+def _inline_trivial_temp_binds(stmts: tuple[AxonStatement, ...]) -> tuple[AxonStatement, ...]:
+    out: list[AxonStatement] = []
+    idx = 0
+    while idx < len(stmts):
+        stmt = stmts[idx]
+        if (
+            isinstance(stmt, AxonBind)
+            and len(stmt.targets) == 1
+            and stmt.targets[0].startswith("__flat_")
+            and _is_inlineable_flat_temp_expr(stmt.expr)
+        ):
+            name = stmt.targets[0]
+            rest = stmts[idx + 1 :]
+            if sum(_statement_name_uses(item).count(name) for item in rest) == 1:
+                replacement = stmt.expr
+                out.extend(
+                    _substitute_name_stmt(item, name=name, replacement=replacement)
+                    for item in rest
+                )
+                return _inline_trivial_temp_binds(tuple(out))
+        out.append(stmt)
+        idx += 1
+    return tuple(out)
+
+
+def _module_body_statements(module: AxonDefinition) -> tuple[AxonStatement, ...]:
     if module.body_expr is None:
         return module.statements
     if isinstance(module.body_expr, AxonExprDo) and not module.body_expr.inline:
@@ -2119,11 +2332,11 @@ def _module_body_statements(module: AxonModule) -> tuple[AxonStatement, ...]:
 
 
 def _flatten_module(
-    module: AxonModule,
+    module: AxonDefinition,
     program_ctx: _FlattenProgramCtx,
     *,
     globals_by_name: set[str],
-) -> tuple[AxonModule, tuple[AxonModule, ...]]:
+) -> tuple[AxonDefinition, tuple[AxonDefinition, ...]]:
     module_path_params = tuple(
         dict.fromkeys(
             (
@@ -2151,7 +2364,6 @@ def _flatten_module(
             name=param.name,
             optional=param.optional,
             type_expr=_expand_type_aliases(param.type_expr, type_aliases=program_ctx.type_aliases),
-            shape=param.shape,
             default_expr=(
                 _expand_expr_aliases(param.default_expr, type_aliases=program_ctx.type_aliases)
                 if param.default_expr is not None
@@ -2188,6 +2400,7 @@ def _flatten_module(
         ctx=ctx,
         globals_by_name=globals_by_name,
     )
+    statements = _inline_trivial_temp_binds(statements)
     seen_path_param_names: set[str] = set()
     ordered_path_param_names: list[str] = []
     for name in (
@@ -2199,7 +2412,7 @@ def _flatten_module(
         seen_path_param_names.add(name)
         ordered_path_param_names.append(name)
     desugared_path_params = tuple(_make_path_param(name) for name in ordered_path_param_names)
-    flattened = AxonModule(
+    flattened = AxonDefinition(
         name=module.name,
         path_param=None,
         params=desugared_path_params + expanded_params,
@@ -2218,7 +2431,6 @@ def _flatten_module(
         return_type_expr=_expand_type_aliases(
             module.return_type_expr, type_aliases=program_ctx.type_aliases
         ),
-        return_shape=module.return_shape,
         constraints=module.constraints,
     )
     return flattened, tuple([*cond_helper_modules, *helper_modules])
@@ -2227,10 +2439,8 @@ def _flatten_module(
 def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
     validate_normalized_axon_file(program, main_module=main_module)
     scoped_modules: frozenset[str] = frozenset()
-    globals_by_name = {
-        *program.constants.keys(),
-        *(module.name for module in program.modules),
-    }
+    globals_by_name = {module.name for module in program.modules}
+    source_path_dependent_modules = _lexically_path_dependent_modules(program.modules)
     while True:
         program_ctx = _FlattenProgramCtx(
             modules_by_name={module.name: module for module in program.modules},
@@ -2239,8 +2449,7 @@ def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = Non
             root_called_modules=set(),
             nonempty_called_modules=set(),
         )
-        constants_ctx = _FlattenCtx(used_names=set(program.constants))
-        flattened_modules: list[AxonModule] = []
+        flattened_modules: list[AxonDefinition] = []
         for module in program.modules:
             flattened, helper_modules = _flatten_module(
                 module,
@@ -2249,8 +2458,12 @@ def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = Non
             )
             flattened_modules.extend(helper_modules)
             flattened_modules.append(flattened)
+        path_dependent_modules = source_path_dependent_modules | _lexically_path_dependent_modules(
+            tuple(flattened_modules)
+        )
         discovered = frozenset(
-            program_ctx.nonempty_called_modules - program_ctx.root_called_modules
+            (program_ctx.nonempty_called_modules - program_ctx.root_called_modules)
+            & path_dependent_modules
         )
         if discovered == scoped_modules:
             flat_program = AxonFile(
@@ -2259,20 +2472,6 @@ def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = Non
                 imported_members=dict(program.imported_members),
                 exports=program.exports,
                 pragmas=dict(program.pragmas),
-                constants={
-                    name: _expand_expr_aliases(
-                        _inline_flat_prelude_expr(
-                            *_flatten_expr(
-                                expr,
-                                constants_ctx,
-                                path_prefix=(),
-                                program_ctx=program_ctx,
-                            )
-                        ),
-                        type_aliases=program_ctx.type_aliases,
-                    )
-                    for name, expr in program.constants.items()
-                },
                 type_aliases={},
                 origin_path=program.origin_path,
             )

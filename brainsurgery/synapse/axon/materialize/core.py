@@ -27,7 +27,7 @@ from ..ast import (
     AxonExprTuple,
     AxonFile,
     AxonKwargValue,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -103,6 +103,13 @@ def _eval_expr(
     if isinstance(expr, AxonExprName):
         if expr.name in env:
             return env[expr.name]
+        if "@" in expr.name:
+            return _eval_expr(
+                AxonExprCall(callee=expr.name, args=(), kwargs={}),
+                env=env,
+                ctx=ctx,
+                resolve_names=resolve_names,
+            )
         if not resolve_names:
             raise ValueError(f"name resolution disabled: {expr.name}")
         raise ValueError(f"unknown runtime name: {expr.name}")
@@ -517,6 +524,10 @@ def _materialize_expr(
                 for stmt in expr.body
             ),
         )
+    if isinstance(expr, AxonExprName) and "@" in expr.name:
+        evaluated = _try_eval_expr(expr, env=env, ctx=ctx, resolve_names=resolve_names)
+        if evaluated is not _NOT_EVALUABLE:
+            return _expr_from_scalar(evaluated)
     return expr
 
 
@@ -578,38 +589,11 @@ def _materialize_statement(
     raise ValueError(f"Unsupported statement type: {type(stmt).__name__}")
 
 
-def _materialize_constant_env(
-    constants: dict[str, AxonExpr],
-    *,
-    ctx: MaterializeContext,
-) -> tuple[dict[str, AxonExpr], dict[str, object]]:
-    env: dict[str, object] = {}
-    constants_out: dict[str, AxonExpr] = dict(constants)
-    for _ in range(max(1, len(constants_out) * 2)):
-        changed = False
-        for name, expr in constants.items():
-            materialized = _materialize_expr(
-                constants_out.get(name, expr),
-                env=env,
-                ctx=ctx,
-                resolve_names=True,
-            )
-            if materialized != constants_out.get(name):
-                constants_out[name] = materialized
-                changed = True
-            value = _try_eval_expr(materialized, env=env, ctx=ctx)
-            if value is not _NOT_EVALUABLE and env.get(name) != value:
-                env[name] = value
-                changed = True
-        if not changed:
-            break
-    return constants_out, env
-
-
 def materialize_axon_file(ast: AxonFile, *, context: MaterializeContext) -> AxonFile:
-    constants_out, env = _materialize_constant_env(ast.constants, ctx=context)
-    modules_out: list[AxonModule] = []
+    env: dict[str, object] = {}
+    modules_out: list[AxonDefinition] = []
     for module in ast.modules:
+        is_zero_arg_value = not module.params and module.body_expr is not None and not module.statements
         params = tuple(
             replace(
                 param,
@@ -626,7 +610,12 @@ def materialize_axon_file(ast: AxonFile, *, context: MaterializeContext) -> Axon
         body_expr = (
             None
             if module.body_expr is None
-            else _materialize_expr(module.body_expr, env=env, ctx=context, resolve_names=False)
+            else _materialize_expr(
+                module.body_expr,
+                env=env,
+                ctx=context,
+                resolve_names=is_zero_arg_value,
+            )
         )
         statements = tuple(
             _materialize_statement(stmt, env=env, ctx=context, resolve_names=False)
@@ -640,9 +629,17 @@ def materialize_axon_file(ast: AxonFile, *, context: MaterializeContext) -> Axon
                 statements=statements,
             )
         )
+        if is_zero_arg_value and body_expr is not None:
+            evaluated = _try_eval_expr(
+                body_expr,
+                env=env,
+                ctx=context,
+                resolve_names=True,
+            )
+            if evaluated is not _NOT_EVALUABLE:
+                env[module.name] = evaluated
     return replace(
         ast,
-        constants=constants_out,
         modules=tuple(modules_out),
     )
 

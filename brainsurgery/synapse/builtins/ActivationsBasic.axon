@@ -16,48 +16,48 @@ export (
 )
 
 
-sigmoid :: Tensor -> Tensor
+sigmoid :: Tensor[..S] -> Tensor[..S]
 sigmoid x = 1.0 / (1.0 + (exp (0.0 - x)))
 
 
-tanh :: Tensor -> Tensor
+tanh :: Tensor[..S] -> Tensor[..S]
 tanh x = (2.0 * (sigmoid (2.0 * x))) - 1.0
 
 
-relu :: Tensor -> Tensor
+relu :: Tensor[..S] -> Tensor[..S]
 relu x = do
   zero <- x * 0.0
   return where (le x zero) zero x
 
 
-relu2 :: Tensor -> Tensor
+relu2 :: Tensor[..S] -> Tensor[..S]
 relu2 x = do
   y <- relu x
   return y * y
 
 
-silu :: Tensor -> Tensor
+silu :: Tensor[..S] -> Tensor[..S]
 silu x = x * (sigmoid x)
 
 
-swiglu :: Tensor -> Tensor
+swiglu :: Tensor[..S] -> Tensor[..S]
 swiglu x = (silu x) * x
 
 
-gelu_new :: Tensor -> Tensor
+gelu_new :: Tensor[..S] -> Tensor[..S]
 gelu_new x = 0.5 * x * (1.0 + (tanh (0.7978845608028654 * (x + (0.044715 * x * x * x)))))
 
 
-gelu_pytorch_tanh :: Tensor -> Tensor
+gelu_pytorch_tanh :: Tensor[..S] -> Tensor[..S]
 gelu_pytorch_tanh x = gelu_new x
 
 
 -- Derived approximation; uses the tanh form.
-gelu :: Tensor -> Tensor
+gelu :: Tensor[..S] -> Tensor[..S]
 gelu x = gelu_new x
 
 
-gegelu :: Tensor -> ?Float -> Tensor
+gegelu :: Tensor[..S] -> ?Float -> Tensor[..R]
 gegelu x ?limit=null = do
   d <- size x -1
   pair <- reshape x shape=[-1, (d / 2), 2]
@@ -68,7 +68,7 @@ gegelu x ?limit=null = do
   return x_gelu * (sigmoid (1.702 * x_gelu)) * (x_linear + 1.0)
 
 
-xielu_basic :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor -> Tensor
+xielu_basic :: Tensor[..S] -> Tensor[..A] -> Tensor[..B] -> Tensor[..C] -> Tensor[..D] -> Tensor[..S]
 xielu_basic x alpha_p_raw alpha_n_raw beta eps = do
   alpha_p <- log ((exp alpha_p_raw) + 1.0)
   alpha_n <- beta + (log ((exp alpha_n_raw) + 1.0))
@@ -79,7 +79,7 @@ xielu_basic x alpha_p_raw alpha_n_raw beta eps = do
   return where (le x zero) neg pos
 
 
-xielu :: Path -> Tensor -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor
+xielu :: Path -> Tensor[..S] -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor[..S]
 xielu@path x ?alpha_p_path=null ?alpha_n_path=null ?beta_path=null ?eps_path=null = do
   alpha_p <- (alpha_p_path == null) ? (param @'{path}.alpha_p') : (param alpha_p_path)
   alpha_n <- (alpha_n_path == null) ? (param @'{path}.alpha_n') : (param alpha_n_path)

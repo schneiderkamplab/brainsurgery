@@ -12,11 +12,11 @@ import Tensor
 
 
 
-CONTEXT_SIZE   = Config.dim@n_positions default=1024
-MODEL_DIM   = Config.dim@n_embd default=768
-NUM_LAYERS   = Config.dim@n_layer default=12
-NUM_HEADS   = Config.dim@n_head default=12
-VOCAB_SIZE   = Config.dim@vocab_size default=52057
+CONTEXT_SIZE   = Config.dim @@n_positions default=1024
+MODEL_DIM   = Config.dim @@n_embd default=768
+NUM_LAYERS   = Config.dim @@n_layer default=12
+NUM_HEADS   = Config.dim @@n_head default=12
+VOCAB_SIZE   = Config.dim @@vocab_size default=52057
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gpt2_block x attn_mask past_kv = do

@@ -10,7 +10,8 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from ..core import StateDictLike
-from .axon.ast import TypeTensor, parse_type_expr
+from .axon.ast import TypeList, TypeNamed, TypeOptional, TypeTensor, TypeTuple, parse_type_expr
+from .axon.ast.types import dim_token_names
 from .axon.ast.path import (
     path_expr_to_runtime_value,
     resolve_path_expr_to_key,
@@ -127,6 +128,7 @@ class SynapseProgramModel(nn.Module):
             k: v for k, v in symbols_raw.items() if _is_symbol_value(v)
         }
         self._refresh_symbols_from_config(model, symbols)
+        self._symbols = symbols
         blocks = model.get("blocks", {})
         input_specs = model.get("inputs", {})
         if not isinstance(input_specs, dict):
@@ -529,9 +531,13 @@ class SynapseProgramModel(nn.Module):
         block_graph = block_spec.get("graph")
         if not isinstance(block_graph, list):
             raise ValueError("block spec must include list graph")
-        # Keep shape/type symbol inference local to the block call so that
-        # helper signatures (e.g. Tensor[B,S,D]) do not leak/lock caller symbols.
-        block_symbols = dict(symbols)
+        # Keep shape/type symbol inference local to the block call so helper
+        # signatures (e.g. Tensor[B,S,D]) neither leak nor reuse caller dims.
+        block_symbols = self._local_shape_symbols(
+            symbols,
+            input_types=self._block_input_types(block_name),
+            env=block_env,
+        )
         self._bind_shape_symbols_from_types(
             env=block_env,
             input_types=self._block_input_types(block_name),
@@ -709,9 +715,11 @@ class SynapseProgramModel(nn.Module):
                     return explicit
         # Next precedence level: lowered path bindings.
         if isinstance(explicit_params, dict):
-            explicit = _pick_explicit_candidate(explicit_params.get(param_name))
-            if isinstance(explicit, str):
-                return explicit
+            raw_explicit = explicit_params.get(param_name)
+            if not (isinstance(raw_explicit, str) and raw_explicit == param_name):
+                explicit = _pick_explicit_candidate(raw_explicit)
+                if isinstance(explicit, str):
+                    return explicit
         scope_fallback = self._join(_effective_scope(), param_name)
         fallback = scope_fallback if scope_fallback else param_name
         if fallback in self._state:
@@ -827,17 +835,25 @@ class SynapseProgramModel(nn.Module):
         input_types: dict[str, str],
         symbols: dict[str, SymbolValue],
     ) -> None:
-        for input_name, type_expr in input_types.items():
-            value = env.get(input_name)
-            if not torch.is_tensor(value):
-                continue
-            try:
-                parsed = parse_type_expr(type_expr)
-            except Exception:
-                continue
-            if not isinstance(parsed, TypeTensor):
-                continue
-            for axis, dim in enumerate(parsed.dims):
+        def bind_value(type_expr: Any, value: Any) -> None:
+            if isinstance(type_expr, TypeOptional):
+                if value is None:
+                    return
+                bind_value(type_expr.inner, value)
+                return
+            if isinstance(type_expr, TypeList):
+                if isinstance(value, (list, tuple)) and value:
+                    bind_value(type_expr.item, value[0])
+                return
+            if isinstance(type_expr, TypeTuple):
+                if not isinstance(value, (list, tuple)):
+                    return
+                for item_type, item_value in zip(type_expr.items, value, strict=False):
+                    bind_value(item_type, item_value)
+                return
+            if not isinstance(type_expr, TypeTensor) or not torch.is_tensor(value):
+                return
+            for axis, dim in enumerate(type_expr.dims):
                 if not isinstance(dim, str):
                     continue
                 if axis >= value.ndim:
@@ -847,13 +863,72 @@ class SynapseProgramModel(nn.Module):
                 if isinstance(current, bool):
                     raise ValueError(f"Invalid boolean symbol value for {dim!r}")
                 if isinstance(current, int):
-                    # Block-call symbol bindings are local to the callee frame.
-                    # Allow type-driven dimensions to shadow caller-carried values
-                    # when symbol names are reused across blocks.
                     if current != actual:
-                        symbols[dim] = actual
+                        continue
                     continue
                 symbols[dim] = actual
+
+        for input_name, type_expr in input_types.items():
+            try:
+                parsed = parse_type_expr(type_expr)
+            except Exception:
+                continue
+            bind_value(parsed, env.get(input_name))
+
+    def _local_shape_symbols(
+        self,
+        symbols: dict[str, SymbolValue],
+        *,
+        input_types: dict[str, str],
+        env: dict[str, Any],
+    ) -> dict[str, SymbolValue]:
+        local_symbols = dict(symbols)
+        declared_symbols = self._declared_symbol_names()
+        for name in self._input_type_dim_names(input_types):
+            if name not in declared_symbols:
+                local_symbols.pop(name, None)
+            value = env.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                local_symbols[name] = int(value)
+        return local_symbols
+
+    def _declared_symbol_names(self) -> set[str]:
+        model = self.spec.get("model", {})
+        if not isinstance(model, dict):
+            return set()
+        raw = model.get("symbols", {})
+        if not isinstance(raw, dict):
+            return set()
+        return {key for key in raw if isinstance(key, str)}
+
+    def _input_type_dim_names(self, input_types: dict[str, str]) -> set[str]:
+        names: set[str] = set()
+
+        def collect(type_expr: Any) -> None:
+            if isinstance(type_expr, TypeTensor):
+                for dim in type_expr.dims:
+                    names.update(dim_token_names(dim))
+                return
+            if isinstance(type_expr, TypeOptional):
+                collect(type_expr.inner)
+                return
+            if isinstance(type_expr, TypeList):
+                collect(type_expr.item)
+                return
+            if isinstance(type_expr, TypeTuple):
+                for item in type_expr.items:
+                    collect(item)
+                return
+            if isinstance(type_expr, TypeNamed):
+                for dim in type_expr.args:
+                    names.update(dim_token_names(dim))
+
+        for type_expr in input_types.values():
+            try:
+                collect(parse_type_expr(type_expr))
+            except Exception:
+                continue
+        return names
 
     def _read_tensor_input(self, ref: Any, env: dict[str, Any]) -> torch.Tensor:
         if not isinstance(ref, str):
@@ -1229,7 +1304,7 @@ class SynapseProgramModel(nn.Module):
             return {}
         raw_env = dict(env)
         resolved: dict[str, Any] = {}
-        symbol_values = self._symbols if symbols is None else dict(symbols)
+        symbol_values = getattr(self, "_symbols", {}) if symbols is None else dict(symbols)
         for key, value in raw_env.items():
             if isinstance(value, dict | list | tuple):
                 try:
@@ -1250,6 +1325,25 @@ class SynapseProgramModel(nn.Module):
                 )
             except Exception:
                 pass
+        for _ in range(4):
+            changed = False
+            for key, value in list(resolved.items()):
+                if not isinstance(value, (str, dict)):
+                    continue
+                try:
+                    expr = runtime_value_to_path_expr(value, op_name="path template env")
+                    next_value = resolve_path_expr_to_key(
+                        expr,
+                        resolved,
+                        op_name="path template env",
+                    )
+                except Exception:
+                    continue
+                if next_value != value:
+                    resolved[key] = next_value
+                    changed = True
+            if not changed:
+                break
         return resolved
 
     def _resolve_state_path(

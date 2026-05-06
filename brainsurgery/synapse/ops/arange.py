@@ -4,6 +4,8 @@ from typing import Any
 
 import torch
 
+from ..axon.ast import AxonExprAscribe, AxonExprNull, AxonExprParen, DimExprBinary
+
 OP_NAME = "arange"
 LOWERING_ARITY = (1, 3)
 LOWERING_ALLOWED_KWARGS: set[str] = set()
@@ -149,10 +151,51 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "Any", "Any"),
+    "args": ("Tensor[..S]", "?Dim", "?Dim"),
     "kwargs": dict(LOWERING_KWARG_KINDS),
-    "returns": ("IdxTensor",),
+    "returns": ("IdxTensor[..R]",),
 }
+
+
+def _dim_sub(left: Any, right: Any) -> Any:
+    if right == 0:
+        return left
+    if left == right:
+        return 0
+    if isinstance(left, int) and isinstance(right, int):
+        return left - right
+    return DimExprBinary(op="-", left=left, right=right)
+
+
+def _is_null_expr(expr: Any) -> bool:
+    current = expr
+    while isinstance(current, AxonExprAscribe | AxonExprParen):
+        current = current.expr if isinstance(current, AxonExprAscribe) else current.inner
+    return isinstance(current, AxonExprNull)
+
+
+def type_rule(
+    *,
+    arg_types: tuple[Any, ...],
+    kwarg_types: dict[str, Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    helpers: Any,
+) -> Any | None:
+    del kwarg_types, kwargs
+    if len(args) < 3:
+        return None
+    start = helpers.expr_to_dim_token(args[1])
+    if start is None:
+        return None
+    end = helpers.expr_to_dim_token(args[2])
+    if end is None and _is_null_expr(args[2]) and arg_types:
+        ref_dims = helpers.type_dims(arg_types[0])
+        if ref_dims:
+            end = ref_dims[-2] if len(ref_dims) >= 2 else ref_dims[-1]
+    if end is None:
+        return None
+    return helpers.type_tensor(dims=(_dim_sub(end, start),))
 
 __all__ = [
     "LOWERING_ARITY",
@@ -166,4 +209,5 @@ __all__ = [
     "compile",
     "uses_node_path",
     "LOWERING_TYPE_SIGNATURE",
+    "type_rule",
 ]

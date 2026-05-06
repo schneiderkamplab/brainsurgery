@@ -162,9 +162,9 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "Tensor", "Any"),
+    "args": ("Any", "Tensor[..S]", "Any"),
     "kwargs": {},
-    "returns": ("Tensor",),
+    "returns": ("Tensor[..S]",),
 }
 
 

@@ -16,34 +16,34 @@ export (
 PI = 3.141592653589793
 
 add :: Any -> Any -> Any
-add = _add
+add x y = _add x y
 
 div :: Any -> Any -> Any
-div = _div
+div x y = _div x y
 
 mul :: Any -> Any -> Any
-mul = _mul
+mul x y = _mul x y
 
 pow :: Any -> Any -> Any
-pow = _pow
+pow x y = _pow x y
 
 exp :: T -> T
-exp = _exp
+exp x = _exp x
 
 log :: T -> T
-log = _log
+log x = _log x
 
 floor :: T -> T
-floor = _floor
+floor x = _floor x
 
 sin :: T -> T
-sin = _sin
+sin x = _sin x
 
 cos :: T -> T
-cos = _cos
+cos x = _cos x
 
 sqrt :: Float -> Float
-sqrt = _sqrt
+sqrt x = _sqrt x
 
-clamp :: Tensor -> ?Float -> ?Float -> Tensor
+clamp :: Tensor[..S] -> ?Float -> ?Float -> Tensor[..S]
 clamp x ?min=null ?max=null = _clamp x min max

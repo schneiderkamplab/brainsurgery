@@ -31,6 +31,10 @@ def emit_model_code_from_synapse_spec(
     class_name: str = "GeneratedSynapseModel",
     op_map: dict[str, Any] | None = None,
 ) -> str:
+    raise RuntimeError(
+        "The synapse YAML/codegen backend is deprecated and disabled. "
+        "Use graph IR/codegen2 instead."
+    )
     if not class_name.isidentifier():
         raise ValueError(f"Invalid class name: {class_name!r}")
     normalized_spec = normalize_synapse_spec_expressions(spec)
@@ -218,13 +222,13 @@ class _Emitter:
                 return name_expr
             return None
 
-        name = _name_if_null_test(left, right)
-        if name is None:
-            name = _name_if_null_test(right, left)
-        if name is None:
+        name_opt = _name_if_null_test(left, right)
+        if name_opt is None:
+            name_opt = _name_if_null_test(right, left)
+        if name_opt is None:
             return set()
         true_means_null = op == "=="
-        return {name} if truthy != true_means_null else set()
+        return {name_opt} if truthy != true_means_null else set()
 
     def _record_null_test_fact(self, *, node_spec: dict[str, Any]) -> None:
         if node_spec.get("_op") != "_ir_expr":
@@ -359,7 +363,8 @@ class _Emitter:
                 "            return raw",
                 "        try:",
                 "            expr = runtime_value_to_path_expr(raw, op_name='call path arg')",
-                "            return resolve_path_expr_to_key(expr, self._path_template_env(env), op_name='call path arg')",
+                "            key = resolve_path_expr_to_key(expr, self._path_template_env(env), op_name='call path arg')",
+                "            return ('@@' if expr.absolute else '@') + key",
                 "        except Exception:",
                 "            return raw",
                 "",
@@ -457,6 +462,23 @@ class _Emitter:
                 "                resolved[key] = resolve_path_expr_to_key(expr, resolved, op_name='path template env')",
                 "            except Exception:",
                 "                pass",
+                "        for _ in range(4):",
+                "            changed = False",
+                "            for key, value in list(resolved.items()):",
+                "                if isinstance(value, dict) and value.get('_expr') != 'path':",
+                "                    continue",
+                "                if not isinstance(value, (str, dict)):",
+                "                    continue",
+                "                try:",
+                "                    expr = runtime_value_to_path_expr(value, op_name='path template env')",
+                "                    next_value = resolve_path_expr_to_key(expr, resolved, op_name='path template env')",
+                "                except Exception:",
+                "                    continue",
+                "                if next_value != value:",
+                "                    resolved[key] = next_value",
+                "                    changed = True",
+                "            if not changed:",
+                "                break",
                 "        return resolved",
                 "",
                 "    def _resolve_state_path(self, *, node_path: str, raw_path: Any, env: dict[str, Any] | None = None) -> str:",
@@ -650,9 +672,12 @@ class _Emitter:
                 "        method = getattr(self, self._block_method_name_for_expr_call(callee), None)",
                 "        if method is None:",
                 "            return False, None",
-                "        scope = env.get('__scope', '')",
+                "        scope = env.get('__codegen_scope', '')",
                 "        if not isinstance(scope, str):",
                 "            scope = ''",
+                "        call_env = {**env, '__codegen_scope': scope}",
+                "        args = [self._resolve_call_path_arg(arg, call_env) for arg in args]",
+                "        kwargs = {key: self._resolve_call_path_arg(value, call_env) for key, value in kwargs.items()}",
                 "        return True, method(*args, **kwargs, scope=scope)",
                 "",
                 "    def _eval_expr_call(self, callee: str, args: list[Any], kwargs: dict[str, Any], env: dict[str, Any], symbols: dict[str, Any]) -> Any:",
@@ -814,6 +839,13 @@ class _Emitter:
                 "            if values is None:",
                 "                raise ValueError('list_append expression call received null list')",
                 "            return [*values, value]",
+                "        if callee in {'_require', 'require', 'Tensor.require'}:",
+                "            if len(args) != 1 or kwargs:",
+                "                raise ValueError('require expression call expects one argument')",
+                "            value = args[0]",
+                "            if value is None:",
+                "                raise ValueError('require expression call received null')",
+                "            return value",
                 "        handled, block_value = self._eval_expr_block_call(callee, args, kwargs, env)",
                 "        if handled:",
                 "            return block_value",
@@ -955,8 +987,13 @@ class _Emitter:
         lines = [f"    def _block_{self._py_name(block_name)}({sig}) -> tuple[Any, ...]:"]
         lines.append("        emitter = self")
         lines.append("        env: dict[str, Any] = {}")
-        lines.append("        env['__scope'] = scope")
+        lines.append("        env['__codegen_scope'] = scope")
         for syn_name, py_name in env.items():
+            raw_type = input_types.get(syn_name) if isinstance(input_types, dict) else None
+            if isinstance(raw_type, str) and raw_type.strip() in {"Path", "?Path"}:
+                lines.append(
+                    f"        {py_name} = self._resolve_call_path_arg({py_name}, {{**env, **locals()}})"
+                )
             lines.append(f"        env[{syn_name!r}] = {py_name}")
 
         prev_shape_aliases = self._active_shape_aliases
@@ -1003,7 +1040,7 @@ class _Emitter:
             f"        input_specs = {repr(inputs)}",
             "        env = self._prepare_env(input_ids, inputs, input_specs)",
             "        scope = ''",
-            "        env['__scope'] = scope",
+            "        env['__codegen_scope'] = scope",
             "        emitter = self",
         ]
 
@@ -1368,7 +1405,12 @@ class _Emitter:
         output_names = list(block_outputs.keys())
         raw_bind = node_spec.get("_bind")
         binds = raw_bind if isinstance(raw_bind, list) else [raw_bind]
-        if raw_bind is None or len(binds) != len(output_names):
+        bind_tuple_output = (
+            raw_bind is not None
+            and not isinstance(raw_bind, list)
+            and len(output_names) > 1
+        )
+        if raw_bind is None or (not bind_tuple_output and len(binds) != len(output_names)):
             raise ValueError(
                 f"call {block_name!r} bind arity mismatch: expected {len(output_names)}, got {len(binds)}"
             )
@@ -1388,16 +1430,28 @@ class _Emitter:
             call_line = f"{indent}{', '.join(tmp_vars)} = self._block_{self._py_name(block_name)}({call_args})"
 
         lines.append(call_line)
-        for dst_name, tmp in zip(binds, tmp_vars, strict=True):
+        if bind_tuple_output:
+            dst_name = str(raw_bind)
             existing = env.get(dst_name)
             dst_var = (
                 existing if isinstance(existing, str) else self._fresh(self._py_name(dst_name))
             )
-            lines.append(f"{indent}{dst_var} = {tmp}")
+            tuple_expr = ", ".join(tmp_vars)
+            lines.append(f"{indent}{dst_var} = ({tuple_expr})")
             env[dst_name] = dst_var
+        else:
+            for dst_name, tmp in zip(binds, tmp_vars, strict=True):
+                existing = env.get(dst_name)
+                dst_var = (
+                    existing if isinstance(existing, str) else self._fresh(self._py_name(dst_name))
+                )
+                lines.append(f"{indent}{dst_var} = {tmp}")
+                env[dst_name] = dst_var
         output_types = block_types.get("outputs", {}) if isinstance(block_types, dict) else {}
         exact_output_types = node_spec.get("_out_types")
-        if isinstance(exact_output_types, dict):
+        if bind_tuple_output:
+            bound_output_types = {}
+        elif isinstance(exact_output_types, dict):
             bound_output_types = {
                 str(dst_name): exact_output_types[dst_name]
                 for dst_name in binds
@@ -1498,8 +1552,10 @@ class _Emitter:
                 f"{scope_expr}, self._join_scope({base_expr}, {param_name!r}), {env_expr})"
             )
         explicit_params = node_spec.get("_params")
-        if isinstance(node_spec.get(param_name), str):
-            candidate = node_spec[param_name]
+        candidate = node_spec.get(param_name)
+        if isinstance(candidate, dict):
+            return f"self._pick_param_from_single({scope_expr}, {candidate!r}, {env_expr})"
+        if isinstance(candidate, str):
             if candidate != param_name and (candidate.startswith("@") or "." in candidate):
                 return f"self._pick_param_from_single({scope_expr}, {candidate!r}, {env_expr})"
         # Next precedence level: lowered path bindings from _params.

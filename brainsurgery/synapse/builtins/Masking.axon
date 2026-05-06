@@ -37,7 +37,7 @@ causal_mask_masked q k attn_mask ?window=null = do
   return and keep pad_keep
 
 
-causal_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,K] -> ?Dim -> ?Bool -> Tensor
+causal_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,K] -> ?Dim -> ?Bool -> Tensor[B,1,Q,K]
 causal_mask q k ?padding_mask=null ?window=null ?early_exit=false = if padding_mask == null then
     causal_mask_keep q k window=window
   else
@@ -52,9 +52,14 @@ bidirectional_mask_keep q k ?window=null = do
   aligned <- row_ids + (K - Q)
   all_rows <- row_ids - row_ids
   all_cols <- col_ids - col_ids
-  keep <- (window == null) ? eq all_rows all_cols : (and (le col_ids (aligned + window)) (le (aligned - window) col_ids))
+  keep <- (window == null) ? eq all_rows all_cols : bidirectional_mask_keep_window aligned col_ids window
   keep <- reshape keep shape=[1, 1, Q, K]
   return expand keep shape=[B, 1, Q, K]
+
+
+bidirectional_mask_keep_window :: Tensor[Q,K] -> Tensor[1,K] -> Dim -> Tensor[Q,K]
+bidirectional_mask_keep_window aligned col_ids window = do
+  return and (le col_ids (aligned + window)) (le (aligned - window) col_ids)
 
 
 bidirectional_mask_masked :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,SM] -> ?Dim -> Tensor[B,1,Q,K]

@@ -4,7 +4,7 @@ from ..ast import (
     AxonBind,
     AxonCond,
     AxonFile,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -22,7 +22,7 @@ def _is_list_type(value: object) -> bool:
     return isinstance(value, TypeList)
 
 
-def _validate_statement_backend_required(stmt: AxonStatement, *, module: AxonModule) -> None:
+def _validate_statement_backend_required(stmt: AxonStatement, *, module: AxonDefinition) -> None:
     if isinstance(stmt, AxonBind):
         if len(stmt.targets) > 1 and _is_list_type(stmt.expr.inferred_type):
             raise ValueError(

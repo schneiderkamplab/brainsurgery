@@ -34,14 +34,22 @@ from transformers.utils import import_utils as transformers_import_utils
 from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Config
 
 from .axon import (
+    canonicalize_typed_axon_file,
     candidate_tokenizer_dirs,
+    flatten_closed_axon_file,
     looks_like_tokenizer_dir,
     lower_axon_program_to_graph_ir,
     lower_axon_program_to_synapse_spec,
+    normalize_closed_axon_file,
+    optimize_flat_typed_axon_file,
     parse_axon_program_from_path,
+    resolve_axon_program_from_path,
+    resolve_main_module,
     tokenize_prompts,
+    typecheck2_flat_axon_file,
+    typecheck_flat_axon_file,
 )
-from .axon.ast import TypeOptional
+from .axon.ast import AxonFile, TypeOptional
 from .axon.codegen2 import emit_model_code_from_graph_ir, make_runtime2_model_class
 from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
 from .axon_runner_common import is_cuda_oom as _is_cuda_oom
@@ -205,7 +213,7 @@ def _resolve_model_task(name: str) -> str:
 
 def _task_pragma_from_axon(*, axon_file: Path) -> str | None:
     modules = parse_axon_program_from_path(axon_file)
-    module = _select_main_axon_module(modules, main_module=None)
+    module = _select_main_axon_module(modules)
     raw = (getattr(module, "pragmas", None) or {}).get("task")
     if raw is None:
         return None
@@ -218,9 +226,9 @@ def _task_pragma_from_axon(*, axon_file: Path) -> str | None:
     )
 
 
-def _tokenizer_pragma_from_axon(*, axon_file: Path, main_module: str | None) -> str | None:
+def _tokenizer_pragma_from_axon(*, axon_file: Path) -> str | None:
     modules = parse_axon_program_from_path(axon_file)
-    module = _select_main_axon_module(modules, main_module=main_module)
+    module = _select_main_axon_module(modules)
     raw = (getattr(module, "pragmas", None) or {}).get("tokenizer")
     if raw is None:
         return None
@@ -235,11 +243,10 @@ def _tokenizer_pragma_from_axon(*, axon_file: Path, main_module: str | None) -> 
 def _tokenizer_pragma_for_checkpoint(
     *,
     axon_file: Path,
-    main_module: str | None,
     checkpoint_id: str,
 ) -> str | None:
     modules = parse_axon_program_from_path(axon_file)
-    module = _select_main_axon_module(modules, main_module=main_module)
+    module = _select_main_axon_module(modules)
     raw = (getattr(module, "pragmas", None) or {}).get("tokenizer")
     if raw is None:
         return None
@@ -1803,14 +1810,15 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _select_main_axon_module(modules: Sequence[Any] | Any, *, main_module: str | None) -> Any:
+def _select_main_axon_module(modules: Sequence[Any] | Any) -> Any:
     raw_modules = getattr(modules, "modules", modules)
     if not isinstance(raw_modules, Sequence):
         raise TypeError("expected AxonFile or sequence of modules")
     if not raw_modules:
         raise ValueError("Axon program contains no modules")
-    if main_module is None:
+    if not hasattr(modules, "pragmas"):
         return raw_modules[-1]
+    main_module = resolve_main_module(cast(AxonFile, modules))
     for module in raw_modules:
         if getattr(module, "name", None) == main_module:
             return module
@@ -1820,17 +1828,15 @@ def _select_main_axon_module(modules: Sequence[Any] | Any, *, main_module: str |
 def _declared_checkpoints_from_axon(
     *,
     axon_file: Path,
-    main_module: str | None,
 ) -> tuple[str, ...]:
     parsed = parse_axon_program_from_path(axon_file)
-    module = _select_main_axon_module(parsed, main_module=main_module)
+    module = _select_main_axon_module(parsed)
     raw = (getattr(module, "pragmas", None) or {}).get("checkpoints")
     if raw is None:
         raw = (getattr(parsed, "pragmas", None) or {}).get("checkpoints")
     if raw is None:
         raise ValueError(
             f"No CHECKPOINTS pragma declared in {axon_file}"
-            + ("" if main_module is None else f" for main module {main_module!r}")
         )
     checkpoints: tuple[str, ...]
     if isinstance(raw, str):
@@ -1869,7 +1875,6 @@ def _run_axon_test_single(
     hf_model_dir: Path | None = None,
     tokenizer: str | None = None,
     class_name: str = "AxonGeneratedModel",
-    main_module: str | None = None,
     dtype: str = "float32",
     model_task: str = "auto",
     trace_layers: bool = False,
@@ -1887,7 +1892,9 @@ def _run_axon_test_single(
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
     axon_backend: str = "codegen",
-    optimize: bool = True,
+    axon_typechecker: str = "typecheck2",
+    optimize: bool = False,
+    canonicalize: bool = False,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
@@ -1917,6 +1924,17 @@ def _run_axon_test_single(
             "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', or 'pipeline'"
         )
     axon_backend = backend_token
+    if axon_backend == "codegen":
+        raise RuntimeError(
+            "The synapse YAML/codegen backend is deprecated and disabled. "
+            "Use --axon-backend codegen2."
+        )
+    typechecker_token = str(axon_typechecker).strip().lower()
+    if typechecker_token not in {"typecheck", "typecheck2"}:
+        raise ValueError("axon_typechecker must be 'typecheck' or 'typecheck2'")
+    axon_typechecker = typechecker_token
+    if axon_typechecker == "typecheck" and axon_backend not in {"codegen2", "runtime2"}:
+        raise ValueError("axon_typechecker='typecheck' is only supported with codegen2/runtime2")
     if axon_backend == "pipeline":
         if resolved_model_task not in {"causal_lm", "masked_lm", "seq2seq_lm"}:
             raise ValueError(
@@ -1957,7 +1975,6 @@ def _run_axon_test_single(
         _ensure_einops_import_compat()
     declared_tokenizer = _tokenizer_pragma_for_checkpoint(
         axon_file=axon_file,
-        main_module=main_module,
         checkpoint_id=str(resolved_hf_model_dir.relative_to(_repo_root() / "models"))
         if (_repo_root() / "models") in resolved_hf_model_dir.parents
         else resolved_hf_model_dir.name,
@@ -1994,11 +2011,22 @@ def _run_axon_test_single(
             if hasattr(transformers_hub, "HF_MODULES_CACHE"):
                 transformers_hub.HF_MODULES_CACHE = str(modules_cache)
 
-        modules = parse_axon_program_from_path(axon_file)
+        lowered_spec: dict[str, Any]
         if axon_backend in {"codegen2", "runtime2"}:
-            graph_program = lower_axon_program_to_graph_ir(
-                modules, main_module=main_module, optimize=optimize
+            resolved_axon = resolve_axon_program_from_path(axon_file).ast
+            normalized_axon = normalize_closed_axon_file(resolved_axon)
+            flat_axon = flatten_closed_axon_file(normalized_axon)
+            typecheck_fn = (
+                typecheck_flat_axon_file
+                if axon_typechecker == "typecheck"
+                else typecheck2_flat_axon_file
             )
+            typed_axon = typecheck_fn(flat_axon)
+            if optimize:
+                typed_axon = optimize_flat_typed_axon_file(typed_axon)
+            if canonicalize:
+                typed_axon = canonicalize_typed_axon_file(typed_axon)
+            graph_program = lower_axon_program_to_graph_ir(typed_axon)
             main_graph_module = next(
                 module
                 for module in graph_program.modules
@@ -2035,8 +2063,9 @@ def _run_axon_test_single(
                 generated_py_path.write_text(code, encoding="utf-8")
                 model_cls = _load_generated_class(generated_py_path, class_name)
         else:
+            modules = parse_axon_program_from_path(axon_file)
             synapse_spec = lower_axon_program_to_synapse_spec(
-                modules, main_module=main_module, optimize=optimize
+                modules, optimize=optimize
             )
             if model_config is not None:
                 model_section = synapse_spec.get("model")
@@ -2051,7 +2080,7 @@ def _run_axon_test_single(
             loaded_dict = OmegaConf.to_container(loaded, resolve=True)
             if not isinstance(loaded_dict, dict):
                 raise ValueError("Lowered synapse YAML did not produce a mapping")
-            lowered_spec: dict[str, Any] = {str(key): value for key, value in loaded_dict.items()}
+            lowered_spec = {str(key): value for key, value in loaded_dict.items()}
             if model_config is not None:
                 lowered_model = lowered_spec.get("model")
                 if isinstance(lowered_model, dict):
@@ -3323,7 +3352,6 @@ def run_axon_test(
     hf_model_dir: Path | None = None,
     tokenizer: str | None = None,
     class_name: str = "AxonGeneratedModel",
-    main_module: str | None = None,
     dtype: str = "float32",
     model_task: str = "auto",
     trace_layers: bool = False,
@@ -3341,7 +3369,9 @@ def run_axon_test(
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
     axon_backend: str = "codegen",
-    optimize: bool = True,
+    axon_typechecker: str = "typecheck2",
+    optimize: bool = False,
+    canonicalize: bool = False,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
 ) -> dict[str, Any]:
@@ -3354,7 +3384,6 @@ def run_axon_test(
         hf_model_dir=hf_model_dir,
         tokenizer=tokenizer,
         class_name=class_name,
-        main_module=main_module,
         dtype=dtype,
         model_task=model_task,
         trace_layers=trace_layers,
@@ -3372,7 +3401,9 @@ def run_axon_test(
         compile_dynamic=compile_dynamic,
         trust_remote_code=trust_remote_code,
         axon_backend=axon_backend,
+        axon_typechecker=axon_typechecker,
         optimize=optimize,
+        canonicalize=canonicalize,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
     )

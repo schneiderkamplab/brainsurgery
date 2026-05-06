@@ -33,7 +33,7 @@ from ..ast import (
     AxonExprTuple,
     AxonFile,
     AxonKwargValue,
-    AxonModule,
+    AxonDefinition,
     AxonParam,
     AxonRepeat,
     AxonReturn,
@@ -43,6 +43,7 @@ from ..ast import (
     Constraint,
     DimExprBinary,
     TypeBool,
+    TypeAny,
     TypeDim,
     TypeExpr,
     TypeList,
@@ -55,7 +56,11 @@ from ..ast import (
 )
 from ..ast.render import render_axon_file
 from ..typecheck import typecheck_flat_axon_file
-from ..validate import validate_backend_required_flat_typed_axon_file, validate_typed_axon_file
+from ..validate import (
+    validate_backend_required_flat_typed_axon_file,
+    validate_flat_axon_file,
+    validate_typed_axon_file,
+)
 from ..validate.optimized import validate_optimized_flat_typed_axon_file
 
 
@@ -258,6 +263,74 @@ def _expr_param_like_names(expr: AxonExpr) -> set[str]:
     return names
 
 
+def _type_expr_dim_names(tp: TypeExpr | None) -> set[str]:
+    return _type_dim_names(tp)
+
+
+def _inferred_dim_names_expr(expr: AxonExpr) -> set[str]:
+    names = _type_expr_dim_names(expr.inferred_type)
+    if expr.inferred_dims is not None:
+        names.update(_constraint_operand_names(expr.inferred_dims))
+    if isinstance(expr, AxonExprBinary):
+        names.update(_inferred_dim_names_expr(expr.left))
+        names.update(_inferred_dim_names_expr(expr.right))
+    elif isinstance(expr, AxonExprBind):
+        names.update(_inferred_dim_names_expr(expr.value))
+        names.update(_inferred_dim_names_expr(expr.body))
+    elif isinstance(expr, AxonExprCall):
+        for arg in expr.args:
+            names.update(_inferred_dim_names_expr(arg))
+        for value in expr.kwargs.values():
+            if isinstance(value, AxonExpr):
+                names.update(_inferred_dim_names_expr(value))
+    elif isinstance(expr, AxonExprDo):
+        names.update(_inferred_dim_names_stmts(expr.body))
+    elif isinstance(expr, AxonExprIf | AxonExprTernary):
+        names.update(_inferred_dim_names_expr(expr.cond))
+        names.update(_inferred_dim_names_expr(expr.true_expr))
+        names.update(_inferred_dim_names_expr(expr.false_expr))
+    elif isinstance(expr, AxonExprLambda):
+        names.update(_inferred_dim_names_expr(expr.body))
+    elif isinstance(expr, AxonExprAscribe):
+        names.update(_inferred_dim_names_expr(expr.expr))
+    elif isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            names.update(_inferred_dim_names_expr(item))
+    elif isinstance(expr, AxonExprParen):
+        names.update(_inferred_dim_names_expr(expr.inner))
+    elif isinstance(expr, AxonExprPipe):
+        names.update(_inferred_dim_names_expr(expr.value))
+        for item in expr.stages:
+            names.update(_inferred_dim_names_expr(item))
+    return {name for name in names if isinstance(name, str) and name.isidentifier()}
+
+
+def _inferred_dim_names_stmts(statements: tuple[AxonStatement, ...]) -> set[str]:
+    names: set[str] = set()
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            names.update(_inferred_dim_names_expr(stmt.expr))
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                names.update(_inferred_dim_names_expr(value))
+        elif isinstance(stmt, AxonCond):
+            names.update(_inferred_dim_names_expr(stmt.cond))
+            names.update(_inferred_dim_names_stmts(stmt.true_body))
+            names.update(_inferred_dim_names_stmts(stmt.false_body))
+        elif isinstance(stmt, AxonRepeat):
+            names.update(_inferred_dim_names_expr(stmt.from_expr))
+            names.update(_inferred_dim_names_expr(stmt.to_expr))
+            names.update(_inferred_dim_names_expr(stmt.step_expr))
+            names.update(_inferred_dim_names_stmts(stmt.body))
+        elif isinstance(stmt, AxonScopeBind):
+            names.update(_inferred_dim_names_expr(stmt.prefix))
+            for raw_value in stmt.kwargs.values():
+                if isinstance(raw_value, AxonExpr):
+                    names.update(_inferred_dim_names_expr(raw_value))
+            names.update(_inferred_dim_names_stmts(stmt.body))
+    return names
+
+
 def _stmt_param_like_names(statements: tuple[AxonStatement, ...]) -> set[str]:
     names: set[str] = set()
     for stmt in statements:
@@ -282,6 +355,67 @@ def _stmt_param_like_names(statements: tuple[AxonStatement, ...]) -> set[str]:
                     names.update(_expr_param_like_names(raw_value))
             names.update(_stmt_param_like_names(stmt.body))
     return names
+
+
+def _stmt_expr_names(statements: tuple[AxonStatement, ...]) -> set[str]:
+    names: set[str] = set()
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            names.update(_expr_names(stmt.expr))
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                names.update(_expr_names(value))
+        elif isinstance(stmt, AxonCond):
+            names.update(_expr_names(stmt.cond))
+            names.update(_stmt_expr_names(stmt.true_body))
+            names.update(_stmt_expr_names(stmt.false_body))
+        elif isinstance(stmt, AxonRepeat):
+            names.update(_expr_names(stmt.from_expr))
+            names.update(_expr_names(stmt.to_expr))
+            names.update(_expr_names(stmt.step_expr))
+            names.update(_stmt_expr_names(stmt.body))
+        elif isinstance(stmt, AxonScopeBind):
+            names.update(_expr_names(stmt.prefix))
+            for raw_value in stmt.kwargs.values():
+                if isinstance(raw_value, AxonExpr):
+                    names.update(_expr_names(raw_value))
+            names.update(_stmt_expr_names(stmt.body))
+    return names
+
+
+def _inline_free_names(statements: tuple[AxonStatement, ...]) -> set[str]:
+    return _stmt_expr_names(statements) - _bound_names_statements(statements)
+
+
+def _module_referenced_dim_names_after_subst(
+    module: AxonDefinition, subst: Mapping[str, AxonExpr]
+) -> set[str]:
+    rewritten = _substitute_stmts(module.statements, subst)
+    names = _stmt_param_like_names(rewritten)
+    names.update(_inferred_dim_names_stmts(rewritten))
+    names.update(_type_dim_names(module.return_type_expr))
+    for constraint in module.constraints or ():
+        if not _is_trivial_identity_constraint(constraint):
+            names.update(_constraint_names(constraint))
+    return {name for name in names if isinstance(name, str) and name.isidentifier()}
+
+
+def _filter_dim_safe_param_subst(module: AxonDefinition, subst: Mapping[str, AxonExpr]) -> dict[str, AxonExpr]:
+    filtered = dict(subst)
+    params_by_name = {param.name: param for param in module.params}
+    changed = True
+    while changed:
+        changed = False
+        referenced_dims = _module_referenced_dim_names_after_subst(module, filtered)
+        for name in tuple(filtered):
+            param = params_by_name.get(name)
+            if param is None:
+                continue
+            param_dims = _type_dim_names(param.type_expr)
+            if param_dims & referenced_dims:
+                filtered.pop(name)
+                changed = True
+    return filtered
 
 
 def _stmt_names(statements: tuple[AxonStatement, ...]) -> set[str]:
@@ -649,7 +783,7 @@ def _fresh_name(base: str, used: set[str]) -> str:
 
 
 def _freshen_inline_module_statements(
-    module: AxonModule,
+    module: AxonDefinition,
     *,
     blocked_names: set[str],
 ) -> tuple[tuple[AxonStatement, ...], dict[str, str]]:
@@ -732,7 +866,7 @@ def _type_dim_names(tp: TypeExpr | None) -> set[str]:
     return set()
 
 
-def _module_dim_names(module: AxonModule) -> set[str]:
+def _module_dim_names(module: AxonDefinition) -> set[str]:
     names: set[str] = set()
     for param in module.params:
         names.update(_type_dim_names(param.type_expr))
@@ -861,10 +995,11 @@ def _dim_token_to_expr_inline(
 
 
 def _call_inline_dim_subst(
-    module: AxonModule,
+    module: AxonDefinition,
     call: AxonExprCall,
     *,
     caller_dim_names: set[str],
+    protected_names: set[str] | None = None,
 ) -> dict[str, AxonExpr]:
     actuals = _call_actual_by_param(module, call)
     raw_subst: dict[str, int | str | DimExprBinary | tuple[int | str | DimExprBinary, ...]] = {}
@@ -874,7 +1009,10 @@ def _call_inline_dim_subst(
             continue
         _collect_inline_dim_subst_for_param(param=param, actual_expr=actual_expr, subst=raw_subst)
     out: dict[str, AxonExpr] = {}
+    protected = protected_names or set()
     for name, token in raw_subst.items():
+        if name in protected:
+            continue
         if isinstance(token, tuple):
             continue
         converted = _dim_token_to_expr_inline(
@@ -888,13 +1026,20 @@ def _call_inline_dim_subst(
 
 
 def _can_inline_module_at_call(
-    module: AxonModule,
+    module: AxonDefinition,
     call: AxonExprCall,
     *,
     caller_dim_names: set[str],
+    protected_names: set[str] | None = None,
 ) -> bool:
-    dim_actuals = _call_inline_dim_subst(module, call, caller_dim_names=caller_dim_names)
-    unresolved = _module_dim_names(module) - set(dim_actuals) - caller_dim_names
+    protected = protected_names or set()
+    dim_actuals = _call_inline_dim_subst(
+        module,
+        call,
+        caller_dim_names=caller_dim_names,
+        protected_names=protected,
+    )
+    unresolved = _module_dim_names(module) - set(dim_actuals) - caller_dim_names - protected
     return not unresolved
 
 
@@ -1003,7 +1148,7 @@ def _expr_known_non_null(expr: AxonExpr) -> bool:
     if isinstance(inner, AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprString | AxonExprPath):
         return True
     inferred_type = expr.inferred_type or inner.inferred_type
-    return inferred_type is not None and not isinstance(inferred_type, TypeNull | TypeOptional)
+    return inferred_type is not None and not isinstance(inferred_type, TypeAny | TypeNull | TypeOptional)
 
 
 def _fold_binary(expr: AxonExprBinary) -> AxonExpr:
@@ -1084,7 +1229,7 @@ def _fold_binary(expr: AxonExprBinary) -> AxonExpr:
     return expr
 
 
-def _module_alias_expr(module: AxonModule) -> AxonExpr | None:
+def _module_alias_expr(module: AxonDefinition) -> AxonExpr | None:
     def _unwrap_name(expr: AxonExpr) -> str | None:
         current = expr
         while isinstance(current, AxonExprAscribe | AxonExprParen):
@@ -1176,7 +1321,7 @@ def _module_alias_expr(module: AxonModule) -> AxonExpr | None:
 def _inline_alias_expr(
     expr: AxonExpr,
     *,
-    alias_modules: dict[str, tuple[AxonModule, AxonExpr]],
+    alias_modules: dict[str, tuple[AxonDefinition, AxonExpr]],
     active: frozenset[str] = frozenset(),
 ) -> AxonExpr:
     if (
@@ -1207,7 +1352,7 @@ def _inline_alias_expr(
 def _rewrite_expr(
     expr: AxonExpr,
     *,
-    alias_modules: dict[str, tuple[AxonModule, AxonExpr]],
+    alias_modules: dict[str, tuple[AxonDefinition, AxonExpr]],
     active: frozenset[str] = frozenset(),
 ) -> AxonExpr:
     if isinstance(expr, AxonExprBinary):
@@ -1562,7 +1707,7 @@ def _dead_code_eliminate_statements(
         return tuple(reversed(kept_rev))
 
 
-def _known_bool_constraints(module: AxonModule) -> dict[str, bool]:
+def _known_bool_constraints(module: AxonDefinition) -> dict[str, bool]:
     known: dict[str, bool] = {}
     for item in module.constraints or ():
         if item.guards:
@@ -1576,7 +1721,7 @@ def _known_bool_constraints(module: AxonModule) -> dict[str, bool]:
     return known
 
 
-def _known_literal_constraints(module: AxonModule) -> dict[str, AxonExpr]:
+def _known_literal_constraints(module: AxonDefinition) -> dict[str, AxonExpr]:
     known: dict[str, AxonExpr] = {}
     for item in module.constraints or ():
         if item.guards or item.relation != "=" or not isinstance(item.left, str):
@@ -1829,7 +1974,7 @@ def _normalize_list_destructure_binds(
 def _rewrite_statements(
     statements: tuple[AxonStatement, ...],
     *,
-    alias_modules: dict[str, tuple[AxonModule, AxonExpr]],
+    alias_modules: dict[str, tuple[AxonDefinition, AxonExpr]],
 ) -> tuple[AxonStatement, ...]:
     with _opt_debug_time("rewrite_statements"):
         rewritten: list[AxonStatement] = []
@@ -1896,13 +2041,12 @@ def _rewrite_statements(
 def _optimize_statements_fixpoint(
     statements: tuple[AxonStatement, ...],
     *,
-    alias_modules: dict[str, tuple[AxonModule, AxonExpr]],
+    alias_modules: dict[str, tuple[AxonDefinition, AxonExpr]],
 ) -> tuple[AxonStatement, ...]:
     with _opt_debug_time("optimize_statements_fixpoint"):
-        current = _normalize_list_destructure_binds(statements)
+        current = statements
         while True:
             rewritten = _rewrite_statements(current, alias_modules=alias_modules)
-            rewritten = _normalize_list_destructure_binds(rewritten)
             if ast_equal(AxonExprDo(body=current), AxonExprDo(body=rewritten)):
                 return rewritten
             current = rewritten
@@ -1918,7 +2062,7 @@ def _bound_names_in_order(statements: tuple[AxonStatement, ...]) -> list[str]:
     return names
 
 
-def _canonicalize_generated_local_names(module: AxonModule) -> AxonModule:
+def _canonicalize_generated_local_names(module: AxonDefinition) -> AxonDefinition:
     used = set(_param_names(module)) | _bound_names_statements(module.statements)
     renames: dict[str, str] = {}
     next_idx = 1
@@ -2134,7 +2278,7 @@ def _module_sccs(graph: dict[str, set[str]]) -> list[tuple[str, ...]]:
     return sccs
 
 
-def _deduped_path_names(module: AxonModule) -> tuple[str, ...]:
+def _deduped_path_names(module: AxonDefinition) -> tuple[str, ...]:
     names = list(module.path_params)
     if module.path_param is not None and module.path_param not in names:
         names.append(module.path_param)
@@ -2171,7 +2315,7 @@ def _is_trivial_identity_constraint(constraint: Constraint) -> bool:
     )
 
 
-def _module_used_names(module: AxonModule) -> set[str]:
+def _module_used_names(module: AxonDefinition) -> set[str]:
     used = _stmt_param_like_names(module.statements)
     for param in module.params:
         if param.default_expr is not None:
@@ -2190,14 +2334,73 @@ def _module_used_names(module: AxonModule) -> set[str]:
     return used
 
 
-def _param_names(module: AxonModule) -> tuple[str, ...]:
+def _param_names(module: AxonDefinition) -> tuple[str, ...]:
     names: list[str] = list(_deduped_path_names(module))
     names.extend(param.name for param in module.params)
     return tuple(names)
 
 
+def _param_defaults(module: AxonDefinition) -> dict[str, AxonExpr]:
+    defaults: dict[str, AxonExpr] = {}
+    for param in module.params:
+        if param.default_expr is not None:
+            defaults[param.name] = param.default_expr
+        elif param.optional:
+            defaults[param.name] = AxonExprNull()
+    return defaults
+
+
+def _provided_call_actuals_by_param(module: AxonDefinition, call: AxonExprCall) -> dict[str, AxonExpr]:
+    names = _param_names(module)
+    actuals: dict[str, AxonExpr] = {}
+    for name, arg in zip(names, call.args, strict=False):
+        actuals[name] = arg
+    for key, value in call.kwargs.items():
+        if key in names and isinstance(value, AxonExpr):
+            actuals[key] = value
+    return actuals
+
+
+def _call_actual_by_param(module: AxonDefinition, call: AxonExprCall) -> dict[str, AxonExpr]:
+    actuals = _param_defaults(module)
+    actuals.update(_provided_call_actuals_by_param(module, call))
+    return actuals
+
+
+def _rewrite_call_for_signature_change(
+    call: AxonExprCall, *, old_module: AxonDefinition, new_module: AxonDefinition
+) -> AxonExprCall:
+    provided_actuals = _provided_call_actuals_by_param(old_module, call)
+    old_names = _param_names(old_module)
+    kept_names = set(_param_names(new_module))
+    original_positional_names = old_names[: len(call.args)]
+
+    new_args: list[AxonExpr] = []
+    new_kwargs: dict[str, AxonKwargValue] = {
+        key: value
+        for key, value in call.kwargs.items()
+        if key not in old_names and key not in kept_names
+    }
+    positional_prefix_open = True
+    for name in _param_names(new_module):
+        provided = provided_actuals.get(name)
+        if provided is None:
+            positional_prefix_open = False
+            continue
+        if (
+            positional_prefix_open
+            and len(new_args) < len(original_positional_names)
+            and original_positional_names[len(new_args)] == name
+        ):
+            new_args.append(provided)
+            continue
+        positional_prefix_open = False
+        new_kwargs[name] = provided
+    return replace(call, args=tuple(new_args), kwargs=new_kwargs)
+
+
 def _canonicalize_path_params(program: AxonFile) -> AxonFile:
-    modules: list[AxonModule] = []
+    modules: list[AxonDefinition] = []
     for module in program.modules:
         path_names = _deduped_path_names(module)
         if not path_names:
@@ -2216,7 +2419,7 @@ def _canonicalize_path_params(program: AxonFile) -> AxonFile:
 
 
 def _rewrite_calls_expr(
-    expr: AxonExpr, specs: Mapping[str, tuple[AxonModule, AxonModule]]
+    expr: AxonExpr, specs: Mapping[str, tuple[AxonDefinition, AxonDefinition]]
 ) -> AxonExpr:
     if isinstance(expr, AxonExprBinary):
         return replace(
@@ -2243,19 +2446,9 @@ def _rewrite_calls_expr(
         if spec is None:
             return rewritten
         old_module, new_module = spec
-        old_names = _param_names(old_module)
-        kept_names = set(_param_names(new_module))
-        new_args = tuple(
-            arg
-            for idx, arg in enumerate(rewritten.args)
-            if idx >= len(old_names) or old_names[idx] in kept_names
+        return _rewrite_call_for_signature_change(
+            rewritten, old_module=old_module, new_module=new_module
         )
-        new_kwargs = {
-            key: value
-            for key, value in rewritten.kwargs.items()
-            if key not in old_names or key in kept_names
-        }
-        return replace(rewritten, args=new_args, kwargs=new_kwargs)
     if isinstance(expr, AxonExprDo):
         return replace(expr, body=_rewrite_calls_stmts(expr.body, specs))
     if isinstance(expr, AxonExprIf | AxonExprTernary):
@@ -2283,7 +2476,7 @@ def _rewrite_calls_expr(
 
 
 def _rewrite_calls_stmts(
-    statements: tuple[AxonStatement, ...], specs: Mapping[str, tuple[AxonModule, AxonModule]]
+    statements: tuple[AxonStatement, ...], specs: Mapping[str, tuple[AxonDefinition, AxonDefinition]]
 ) -> tuple[AxonStatement, ...]:
     rewritten: list[AxonStatement] = []
     for stmt in statements:
@@ -2332,8 +2525,8 @@ def _rewrite_calls_stmts(
 
 def _prune_unused_module_params(program: AxonFile) -> AxonFile:
     with _opt_debug_time("prune_unused_module_params"):
-        rewritten_modules: list[AxonModule] = []
-        specs: dict[str, tuple[AxonModule, AxonModule]] = {}
+        rewritten_modules: list[AxonDefinition] = []
+        specs: dict[str, tuple[AxonDefinition, AxonDefinition]] = {}
         for module in program.modules:
             used = _module_used_names(module)
             new_module = replace(
@@ -2347,18 +2540,233 @@ def _prune_unused_module_params(program: AxonFile) -> AxonFile:
             specs[module.name] = (module, new_module)
             rewritten_modules.append(new_module)
         rewritten_program = replace(program, modules=tuple(rewritten_modules))
+        validate_flat_axon_file(rewritten_program)
         final_modules = tuple(
             replace(module, statements=_rewrite_calls_stmts(module.statements, specs))
             for module in rewritten_program.modules
         )
-        return replace(rewritten_program, modules=final_modules)
+        final_program = replace(
+            rewritten_program,
+            modules=final_modules,
+        )
+        validate_flat_axon_file(final_program)
+        return final_program
 
 
-def _module_scope_param_name(module: AxonModule) -> str | None:
+def _module_scope_param_name(module: AxonDefinition) -> str | None:
     for param in module.params:
         if isinstance(param.type_expr, TypePath):
             return param.name
     return None
+
+
+def _loop_helper_scope(module: AxonDefinition) -> tuple[str, str] | None:
+    marker = "__loop_"
+    before, sep, after = module.name.partition(marker)
+    del before
+    if not sep:
+        return None
+    loop_name, sep, _rest = after.partition("_")
+    if not sep or not loop_name or not module.params:
+        return None
+    loop_var = module.params[0].name
+    return loop_name, loop_var
+
+
+def _prefix_loop_path(expr: AxonExprPath, *, loop_name: str, loop_var: str) -> AxonExprPath:
+    if not expr.absolute or not expr.parts:
+        return expr
+    prefix = (loop_name, f"{{{loop_var}}}")
+    if expr.parts[: len(prefix)] == prefix:
+        return expr
+    if expr.parts[0].startswith("{") and expr.parts[0].endswith("}"):
+        return expr
+    return replace(expr, parts=(*prefix, *expr.parts))
+
+
+def _prefix_loop_paths_expr(expr: AxonExpr, *, loop_name: str, loop_var: str) -> AxonExpr:
+    if isinstance(expr, AxonExprPath):
+        return _prefix_loop_path(expr, loop_name=loop_name, loop_var=loop_var)
+    if isinstance(expr, AxonExprBinary):
+        return replace(
+            expr,
+            left=_prefix_loop_paths_expr(expr.left, loop_name=loop_name, loop_var=loop_var),
+            right=_prefix_loop_paths_expr(expr.right, loop_name=loop_name, loop_var=loop_var),
+        )
+    if isinstance(expr, AxonExprCall):
+        if expr.callee.startswith("_config_") or expr.callee.startswith("Config."):
+            return replace(
+                expr,
+                args=tuple(
+                    arg
+                    if isinstance(arg, AxonExprPath)
+                    else _prefix_loop_paths_expr(arg, loop_name=loop_name, loop_var=loop_var)
+                    for arg in expr.args
+                ),
+                kwargs={
+                    key: (
+                        value
+                        if isinstance(value, AxonExprPath)
+                        else _prefix_loop_paths_expr(value, loop_name=loop_name, loop_var=loop_var)
+                    )
+                    if isinstance(value, AxonExpr)
+                    else value
+                    for key, value in expr.kwargs.items()
+                },
+            )
+        return replace(
+            expr,
+            args=tuple(
+                _prefix_loop_paths_expr(arg, loop_name=loop_name, loop_var=loop_var)
+                for arg in expr.args
+            ),
+            kwargs={
+                key: _prefix_loop_paths_expr(value, loop_name=loop_name, loop_var=loop_var)
+                if isinstance(value, AxonExpr)
+                else value
+                for key, value in expr.kwargs.items()
+            },
+        )
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        return replace(
+            expr,
+            cond=_prefix_loop_paths_expr(expr.cond, loop_name=loop_name, loop_var=loop_var),
+            true_expr=_prefix_loop_paths_expr(expr.true_expr, loop_name=loop_name, loop_var=loop_var),
+            false_expr=_prefix_loop_paths_expr(expr.false_expr, loop_name=loop_name, loop_var=loop_var),
+        )
+    if isinstance(expr, AxonExprBind):
+        return replace(
+            expr,
+            value=_prefix_loop_paths_expr(expr.value, loop_name=loop_name, loop_var=loop_var),
+            body=_prefix_loop_paths_expr(expr.body, loop_name=loop_name, loop_var=loop_var),
+        )
+    if isinstance(expr, AxonExprDo):
+        return replace(
+            expr,
+            body=_prefix_loop_paths_statements(expr.body, loop_name=loop_name, loop_var=loop_var),
+        )
+    if isinstance(expr, AxonExprLambda):
+        return replace(
+            expr,
+            body=_prefix_loop_paths_expr(expr.body, loop_name=loop_name, loop_var=loop_var),
+        )
+    if isinstance(expr, AxonExprAscribe):
+        return replace(
+            expr,
+            expr=_prefix_loop_paths_expr(expr.expr, loop_name=loop_name, loop_var=loop_var),
+        )
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        return replace(
+            expr,
+            items=tuple(
+                _prefix_loop_paths_expr(item, loop_name=loop_name, loop_var=loop_var)
+                for item in expr.items
+            ),
+        )
+    if isinstance(expr, AxonExprParen):
+        return replace(
+            expr,
+            inner=_prefix_loop_paths_expr(expr.inner, loop_name=loop_name, loop_var=loop_var),
+        )
+    if isinstance(expr, AxonExprPipe):
+        return replace(
+            expr,
+            value=_prefix_loop_paths_expr(expr.value, loop_name=loop_name, loop_var=loop_var),
+            stages=tuple(
+                _prefix_loop_paths_expr(item, loop_name=loop_name, loop_var=loop_var)
+                for item in expr.stages
+            ),
+        )
+    return expr
+
+
+def _prefix_loop_paths_statements(
+    statements: tuple[AxonStatement, ...], *, loop_name: str, loop_var: str
+) -> tuple[AxonStatement, ...]:
+    out: list[AxonStatement] = []
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            out.append(
+                replace(
+                    stmt,
+                    expr=_prefix_loop_paths_expr(stmt.expr, loop_name=loop_name, loop_var=loop_var),
+                )
+            )
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            out.append(
+                replace(
+                    stmt,
+                    values=tuple(
+                        _prefix_loop_paths_expr(value, loop_name=loop_name, loop_var=loop_var)
+                        for value in stmt.values
+                    ),
+                )
+            )
+        elif isinstance(stmt, AxonCond):
+            out.append(
+                replace(
+                    stmt,
+                    cond=_prefix_loop_paths_expr(stmt.cond, loop_name=loop_name, loop_var=loop_var),
+                    true_body=_prefix_loop_paths_statements(
+                        stmt.true_body, loop_name=loop_name, loop_var=loop_var
+                    ),
+                    false_body=_prefix_loop_paths_statements(
+                        stmt.false_body, loop_name=loop_name, loop_var=loop_var
+                    ),
+                )
+            )
+        elif isinstance(stmt, AxonRepeat):
+            out.append(
+                replace(
+                    stmt,
+                    from_expr=_prefix_loop_paths_expr(
+                        stmt.from_expr, loop_name=loop_name, loop_var=loop_var
+                    ),
+                    to_expr=_prefix_loop_paths_expr(
+                        stmt.to_expr, loop_name=loop_name, loop_var=loop_var
+                    ),
+                    step_expr=_prefix_loop_paths_expr(
+                        stmt.step_expr, loop_name=loop_name, loop_var=loop_var
+                    ),
+                    body=_prefix_loop_paths_statements(
+                        stmt.body, loop_name=loop_name, loop_var=loop_var
+                    ),
+                )
+            )
+        elif isinstance(stmt, AxonScopeBind):
+            out.append(
+                replace(
+                    stmt,
+                    prefix=_prefix_loop_path(stmt.prefix, loop_name=loop_name, loop_var=loop_var),
+                    body=_prefix_loop_paths_statements(
+                        stmt.body, loop_name=loop_name, loop_var=loop_var
+                    ),
+                    kwargs={
+                        key: _prefix_loop_paths_expr(value, loop_name=loop_name, loop_var=loop_var)
+                        if isinstance(value, AxonExpr)
+                        else value
+                        for key, value in stmt.kwargs.items()
+                    },
+                )
+            )
+    return tuple(out)
+
+
+def _prefix_loop_helper_paths(program: AxonFile) -> AxonFile:
+    modules: list[AxonDefinition] = []
+    changed = False
+    for module in program.modules:
+        scope = _loop_helper_scope(module)
+        if scope is None:
+            modules.append(module)
+            continue
+        loop_name, loop_var = scope
+        statements = _prefix_loop_paths_statements(
+            module.statements, loop_name=loop_name, loop_var=loop_var
+        )
+        changed = changed or statements != module.statements
+        modules.append(replace(module, statements=statements))
+    return replace(program, modules=tuple(modules)) if changed else program
 
 
 def _is_safe_specialization_actual(expr: AxonExpr) -> bool:
@@ -2387,8 +2795,8 @@ def _specialize_single_callsite_modules(program: AxonFile, *, main_module: str |
             for name in component:
                 scc_by_module[name] = component
 
-        rewritten_modules: list[AxonModule] = []
-        specs: dict[str, tuple[AxonModule, AxonModule]] = {}
+        rewritten_modules: list[AxonDefinition] = []
+        specs: dict[str, tuple[AxonDefinition, AxonDefinition]] = {}
 
         for module in program.modules:
             callers = callsites.get(module.name, [])
@@ -2407,8 +2815,11 @@ def _specialize_single_callsite_modules(program: AxonFile, *, main_module: str |
             del caller_name
             actuals = _call_actual_by_param(module, call)
             subst = {
-                name: expr for name, expr in actuals.items() if _is_safe_specialization_actual(expr)
+                name: expr
+                for name, expr in actuals.items()
+                if _is_safe_specialization_actual(expr)
             }
+            subst = _filter_dim_safe_param_subst(module, subst)
             if not subst:
                 specs[module.name] = (module, module)
                 rewritten_modules.append(module)
@@ -2422,14 +2833,20 @@ def _specialize_single_callsite_modules(program: AxonFile, *, main_module: str |
             rewritten_modules.append(new_module)
 
         rewritten_program = replace(program, modules=tuple(rewritten_modules))
+        validate_flat_axon_file(rewritten_program, main_module=main_module)
         final_modules = tuple(
             replace(module, statements=_rewrite_calls_stmts(module.statements, specs))
             for module in rewritten_program.modules
         )
-        return replace(rewritten_program, modules=final_modules)
+        final_program = replace(
+            rewritten_program,
+            modules=final_modules,
+        )
+        validate_flat_axon_file(final_program, main_module=main_module)
+        return final_program
 
 
-def _is_straight_line_module(module: AxonModule) -> bool:
+def _is_straight_line_module(module: AxonDefinition) -> bool:
     if not module.statements or not isinstance(module.statements[-1], AxonReturn):
         return False
     contains_control_select = False
@@ -2445,7 +2862,7 @@ def _is_straight_line_module(module: AxonModule) -> bool:
     return not contains_control_select or _is_trivial_control_wrapper_module(module)
 
 
-def _is_trivial_control_wrapper_module(module: AxonModule) -> bool:
+def _is_trivial_control_wrapper_module(module: AxonDefinition) -> bool:
     if len(module.statements) < 2:
         return False
     *prefix, ret = module.statements
@@ -2492,8 +2909,9 @@ def _expr_contains_control_select(expr: AxonExpr) -> bool:
 def _inline_call_bind_statements(
     statements: tuple[AxonStatement, ...],
     *,
-    caller: AxonModule,
-    inline_modules: Mapping[str, AxonModule],
+    caller: AxonDefinition,
+    inline_modules: Mapping[str, AxonDefinition],
+    protected_names: set[str] | None = None,
 ) -> tuple[AxonStatement, ...]:
     blocked = set(_param_names(caller))
     blocked.update(_bound_names_statements(statements))
@@ -2507,13 +2925,19 @@ def _inline_call_bind_statements(
             rewritten.append(stmt)
             continue
         if not _can_inline_module_at_call(
-            callee, stmt.expr, caller_dim_names=_module_dim_names(caller)
+            callee,
+            stmt.expr,
+            caller_dim_names=_module_dim_names(caller),
+            protected_names=protected_names,
         ):
             rewritten.append(stmt)
             continue
         actuals = _call_actual_by_param(callee, stmt.expr)
         dim_actuals = _call_inline_dim_subst(
-            callee, stmt.expr, caller_dim_names=_module_dim_names(caller)
+            callee,
+            stmt.expr,
+            caller_dim_names=_module_dim_names(caller),
+            protected_names=protected_names,
         )
         freshened, renames = _freshen_inline_module_statements(
             callee,
@@ -2524,22 +2948,37 @@ def _inline_call_bind_statements(
             subst[renames.get(name, name)] = value
         substituted = _substitute_stmts(freshened, subst)
         inlined = _replace_returns_with_bind(substituted, targets=stmt.targets, call_expr=stmt.expr)
+        allowed_free = blocked | set(_param_names(caller)) | set(stmt.targets)
+        if _inline_free_names(inlined) - allowed_free:
+            rewritten.append(stmt)
+            continue
         blocked.update(_bound_names_statements(inlined))
         rewritten.extend(inlined)
     return tuple(rewritten)
 
 
 def _call_inline_result_expr(
-    callee: AxonModule,
+    callee: AxonDefinition,
     call: AxonExprCall,
     *,
-    caller: AxonModule,
+    caller: AxonDefinition,
     blocked_names: set[str],
+    protected_names: set[str] | None = None,
 ) -> tuple[tuple[AxonStatement, ...], AxonExpr] | None:
-    if not _can_inline_module_at_call(callee, call, caller_dim_names=_module_dim_names(caller)):
+    if not _can_inline_module_at_call(
+        callee,
+        call,
+        caller_dim_names=_module_dim_names(caller),
+        protected_names=protected_names,
+    ):
         return None
     actuals = _call_actual_by_param(callee, call)
-    dim_actuals = _call_inline_dim_subst(callee, call, caller_dim_names=_module_dim_names(caller))
+    dim_actuals = _call_inline_dim_subst(
+        callee,
+        call,
+        caller_dim_names=_module_dim_names(caller),
+        protected_names=protected_names,
+    )
     freshened, renames = _freshen_inline_module_statements(callee, blocked_names=blocked_names)
     subst: dict[str, AxonExpr] = {}
     for name, value in {**dim_actuals, **actuals}.items():
@@ -2553,7 +2992,13 @@ def _call_inline_result_expr(
     prefix = substituted[:-1]
     blocked_names.update(_bound_names_statements(prefix))
     if len(last.values) == 1:
+        candidate = (*prefix, AxonReturn(values=(last.values[0],)))
+        if _inline_free_names(candidate) - blocked_names - set(_param_names(caller)):
+            return None
         return prefix, last.values[0]
+    candidate = (*prefix, last)
+    if _inline_free_names(candidate) - blocked_names - set(_param_names(caller)):
+        return None
     return (
         prefix,
         AxonExprTuple(
@@ -2577,10 +3022,11 @@ def _as_temp_name_expr(name: str, template: AxonExpr) -> AxonExprName:
 def _inline_expr_position_modules_expr(
     expr: AxonExpr,
     *,
-    caller: AxonModule,
-    inline_modules: Mapping[str, AxonModule],
+    caller: AxonDefinition,
+    inline_modules: Mapping[str, AxonDefinition],
     blocked_names: set[str],
     need_atomic: bool,
+    protected_names: set[str] | None = None,
 ) -> tuple[tuple[AxonStatement, ...], AxonExpr]:
     prefix: list[AxonStatement] = []
 
@@ -2600,6 +3046,7 @@ def _inline_expr_position_modules_expr(
                 inline_modules=inline_modules,
                 blocked_names=blocked_names,
                 need_atomic=True,
+                protected_names=protected_names,
             )
             prefix.extend(arg_prefix)
             rewritten_args.append(arg_expr)
@@ -2614,6 +3061,7 @@ def _inline_expr_position_modules_expr(
                 inline_modules=inline_modules,
                 blocked_names=blocked_names,
                 need_atomic=True,
+                protected_names=protected_names,
             )
             prefix.extend(value_prefix)
             rewritten_kwargs[key] = value_expr
@@ -2625,9 +3073,11 @@ def _inline_expr_position_modules_expr(
                 rewritten_call,
                 caller=caller,
                 blocked_names=blocked_names,
+                protected_names=protected_names,
             )
             if inlined is not None:
                 inline_prefix, inline_expr = inlined
+                original_prefix_len = len(prefix)
                 prefix.extend(inline_prefix)
                 nested_prefix, nested_expr = _inline_expr_position_modules_expr(
                     inline_expr,
@@ -2635,8 +3085,18 @@ def _inline_expr_position_modules_expr(
                     inline_modules=inline_modules,
                     blocked_names=blocked_names,
                     need_atomic=need_atomic,
+                    protected_names=protected_names,
                 )
                 prefix.extend(nested_prefix)
+                candidate_prefix = tuple(prefix)
+                allowed_free = blocked_names | set(_param_names(caller))
+                allowed_free.update(_bound_names_statements(candidate_prefix))
+                if (
+                    _stmt_expr_names(candidate_prefix)
+                    | _expr_names(nested_expr)
+                ) - allowed_free:
+                    prefix = prefix[:original_prefix_len]
+                    return tuple(prefix), _atomicize(rewritten_call)
                 return tuple(prefix), nested_expr
         return tuple(prefix), _atomicize(rewritten_call)
     if isinstance(expr, AxonExprBinary):
@@ -2646,6 +3106,7 @@ def _inline_expr_position_modules_expr(
             inline_modules=inline_modules,
             blocked_names=blocked_names,
             need_atomic=True,
+            protected_names=protected_names,
         )
         right_prefix, right_expr = _inline_expr_position_modules_expr(
             expr.right,
@@ -2653,6 +3114,7 @@ def _inline_expr_position_modules_expr(
             inline_modules=inline_modules,
             blocked_names=blocked_names,
             need_atomic=True,
+            protected_names=protected_names,
         )
         prefix.extend(left_prefix)
         prefix.extend(right_prefix)
@@ -2664,6 +3126,7 @@ def _inline_expr_position_modules_expr(
             inline_modules=inline_modules,
             blocked_names=blocked_names,
             need_atomic=True,
+            protected_names=protected_names,
         )
         true_prefix, true_expr = _inline_expr_position_modules_expr(
             expr.true_expr,
@@ -2671,6 +3134,7 @@ def _inline_expr_position_modules_expr(
             inline_modules=inline_modules,
             blocked_names=blocked_names,
             need_atomic=False,
+            protected_names=protected_names,
         )
         false_prefix, false_expr = _inline_expr_position_modules_expr(
             expr.false_expr,
@@ -2678,6 +3142,7 @@ def _inline_expr_position_modules_expr(
             inline_modules=inline_modules,
             blocked_names=blocked_names,
             need_atomic=False,
+            protected_names=protected_names,
         )
         prefix.extend(cond_prefix)
         prefix.extend(true_prefix)
@@ -2693,6 +3158,7 @@ def _inline_expr_position_modules_expr(
             inline_modules=inline_modules,
             blocked_names=blocked_names,
             need_atomic=need_atomic,
+            protected_names=protected_names,
         )
         prefix.extend(inner_prefix)
         return tuple(prefix), replace(expr, expr=inner_expr)
@@ -2703,6 +3169,7 @@ def _inline_expr_position_modules_expr(
             inline_modules=inline_modules,
             blocked_names=blocked_names,
             need_atomic=need_atomic,
+            protected_names=protected_names,
         )
         prefix.extend(inner_prefix)
         return tuple(prefix), replace(expr, inner=inner_expr)
@@ -2715,6 +3182,7 @@ def _inline_expr_position_modules_expr(
                 inline_modules=inline_modules,
                 blocked_names=blocked_names,
                 need_atomic=True,
+                protected_names=protected_names,
             )
             prefix.extend(item_prefix)
             rewritten_items.append(item_expr)
@@ -2725,8 +3193,9 @@ def _inline_expr_position_modules_expr(
 def _inline_expr_position_modules_stmts(
     statements: tuple[AxonStatement, ...],
     *,
-    caller: AxonModule,
-    inline_modules: Mapping[str, AxonModule],
+    caller: AxonDefinition,
+    inline_modules: Mapping[str, AxonDefinition],
+    protected_names: set[str] | None = None,
 ) -> tuple[AxonStatement, ...]:
     blocked = set(_param_names(caller))
     blocked.update(_bound_names_statements(statements))
@@ -2739,6 +3208,7 @@ def _inline_expr_position_modules_stmts(
                 inline_modules=inline_modules,
                 blocked_names=blocked,
                 need_atomic=False,
+                protected_names=protected_names,
             )
             rewritten.extend(prefix)
             rewritten.append(replace(stmt, expr=expr))
@@ -2752,6 +3222,7 @@ def _inline_expr_position_modules_stmts(
                     inline_modules=inline_modules,
                     blocked_names=blocked,
                     need_atomic=True,
+                    protected_names=protected_names,
                 )
                 rewritten.extend(prefix)
                 new_values.append(rewritten_value)
@@ -2763,7 +3234,8 @@ def _inline_expr_position_modules_stmts(
 
 def _inline_expression_position_modules(program: AxonFile, *, main_module: str | None) -> AxonFile:
     callsites = _module_callsites(program)
-    inline_modules: dict[str, AxonModule] = {}
+    protected_names: set[str] = set()
+    inline_modules: dict[str, AxonDefinition] = {}
     for module in program.modules:
         callers = callsites.get(module.name, [])
         if main_module is not None and module.name == main_module:
@@ -2784,6 +3256,7 @@ def _inline_expression_position_modules(program: AxonFile, *, main_module: str |
                     module.statements,
                     caller=module,
                     inline_modules=inline_modules,
+                    protected_names=protected_names,
                 ),
             )
             for module in program.modules
@@ -2795,8 +3268,9 @@ def _inline_expression_position_modules(program: AxonFile, *, main_module: str |
 def _inline_single_callsite_modules(program: AxonFile, *, main_module: str | None) -> AxonFile:
     with _opt_debug_time("inline_single_callsite_modules"):
         callsites = _module_callsites(program)
+        protected_names: set[str] = set()
 
-        inline_modules: dict[str, AxonModule] = {}
+        inline_modules: dict[str, AxonDefinition] = {}
         for module in program.modules:
             callers = callsites.get(module.name, [])
             if main_module is not None and module.name == main_module:
@@ -2812,7 +3286,7 @@ def _inline_single_callsite_modules(program: AxonFile, *, main_module: str | Non
         if not inline_modules:
             return program
 
-        rewritten_modules: list[AxonModule] = []
+        rewritten_modules: list[AxonDefinition] = []
         for module in program.modules:
             rewritten_modules.append(
                 replace(
@@ -2821,22 +3295,12 @@ def _inline_single_callsite_modules(program: AxonFile, *, main_module: str | Non
                         module.statements,
                         caller=module,
                         inline_modules=inline_modules,
+                        protected_names=protected_names,
                     ),
                 )
             )
         rewritten = replace(program, modules=tuple(rewritten_modules))
         return _prune_unreachable_modules(rewritten, main_module=main_module)
-
-
-def _call_actual_by_param(module: AxonModule, call: AxonExprCall) -> dict[str, AxonExpr]:
-    names = _param_names(module)
-    actuals: dict[str, AxonExpr] = {}
-    for name, arg in zip(names, call.args, strict=False):
-        actuals[name] = arg
-    for key, value in call.kwargs.items():
-        if key in names and isinstance(value, AxonExpr):
-            actuals[key] = value
-    return actuals
 
 
 def _resolve_constant_actual(
@@ -2935,7 +3399,7 @@ def _specialize_modules_by_constant_params(program: AxonFile) -> AxonFile:
         call_actuals_by_module: dict[str, list[tuple[str, dict[str, AxonExpr]]]] = {
             module.name: [] for module in program.modules
         }
-        constant_names = set(program.constants)
+        constant_names: set[str] = set()
         for module_name, module_callsites in callsites.items():
             module = modules_by_name[module_name]
             call_actuals_by_module[module_name] = [
@@ -3041,14 +3505,15 @@ def _specialize_modules_by_constant_params(program: AxonFile) -> AxonFile:
                         changed = True
                 if not recursive_component:
                     break
-        rewritten_modules: list[AxonModule] = []
-        specs: dict[str, tuple[AxonModule, AxonModule]] = {}
+        rewritten_modules: list[AxonDefinition] = []
+        specs: dict[str, tuple[AxonDefinition, AxonDefinition]] = {}
         for module in program.modules:
             subst = {
                 name: expr
                 for name, expr in known_by_module[module.name].items()
                 if not (isinstance(expr, AxonExprName) and expr.name == name)
             }
+            subst = _filter_dim_safe_param_subst(module, subst)
             if not subst:
                 specs[module.name] = (module, module)
                 rewritten_modules.append(module)
@@ -3065,7 +3530,10 @@ def _specialize_modules_by_constant_params(program: AxonFile) -> AxonFile:
             replace(module, statements=_rewrite_calls_stmts(module.statements, specs))
             for module in rewritten_program.modules
         )
-        return replace(rewritten_program, modules=final_modules)
+        return replace(
+            rewritten_program,
+            modules=final_modules,
+        )
 
 
 def _reachable_modules(program: AxonFile, *, root: str | None) -> frozenset[str]:
@@ -3114,8 +3582,24 @@ def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None 
             )
         current = replace(current, modules=constraint_folded_modules)
         specialized = _specialize_modules_by_constant_params(current)
-        specialized = _specialize_single_callsite_modules(specialized, main_module=main_module)
-        specialized = _inline_single_callsite_modules(specialized, main_module=main_module)
+        try:
+            validate_flat_axon_file(specialized, main_module=main_module)
+        except ValueError:
+            specialized = current
+        single_callsite_specialized = _specialize_single_callsite_modules(
+            specialized, main_module=main_module
+        )
+        try:
+            validate_flat_axon_file(single_callsite_specialized, main_module=main_module)
+            specialized = single_callsite_specialized
+        except ValueError:
+            pass
+        inlined = _inline_single_callsite_modules(specialized, main_module=main_module)
+        try:
+            validate_flat_axon_file(inlined, main_module=main_module)
+            specialized = inlined
+        except ValueError:
+            pass
         alias_modules = {
             module.name: (module, alias_expr)
             for module in specialized.modules
@@ -3132,7 +3616,12 @@ def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None 
                 for module in specialized.modules
             )
         optimized = replace(specialized, modules=optimized_modules)
+        try:
+            validate_flat_axon_file(optimized, main_module=main_module)
+        except ValueError:
+            optimized = specialized
         optimized = _prune_unused_module_params(optimized)
+        validate_flat_axon_file(optimized, main_module=main_module)
         optimized = _prune_unreachable_modules(optimized, main_module=main_module)
         optimized = replace(
             optimized,

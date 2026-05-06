@@ -18,7 +18,7 @@ from ..ast import (
     AxonExprTernary,
     AxonExprTuple,
     AxonFile,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -36,7 +36,7 @@ def _split_callee_path_sugar(callee: str) -> tuple[str, tuple[str, ...]]:
     return parts[0], tuple(parts[1:])
 
 
-def _leading_path_param_count(module: AxonModule) -> int:
+def _leading_path_param_count(module: AxonDefinition) -> int:
     count = 0
     for param in module.params:
         if isinstance(param.type_expr, TypePath):
@@ -46,49 +46,8 @@ def _leading_path_param_count(module: AxonModule) -> int:
     return count
 
 
-def _is_atomic_expr(expr: AxonExpr) -> bool:
-    from ..ast import (
-        AxonExprBool,
-        AxonExprFloat,
-        AxonExprInt,
-        AxonExprName,
-        AxonExprNull,
-        AxonExprPath,
-        AxonExprString,
-    )
-
-    if isinstance(
-        expr,
-        (
-            AxonExprName,
-            AxonExprInt,
-            AxonExprFloat,
-            AxonExprBool,
-            AxonExprNull,
-            AxonExprString,
-            AxonExprPath,
-        ),
-    ):
-        return True
-    if isinstance(expr, AxonExprList | AxonExprTuple):
-        return all(_is_atomic_expr(item) for item in expr.items)
-    if isinstance(expr, AxonExprAscribe):
-        return _is_atomic_expr(expr.expr)
-    return False
-
-
-def _is_atomic_return_value(expr: AxonExpr) -> bool:
-    if isinstance(expr, AxonExprName):
-        return True
-    if isinstance(expr, AxonExprTuple):
-        return all(isinstance(item, AxonExprName) for item in expr.items)
-    if isinstance(expr, AxonExprAscribe):
-        return _is_atomic_return_value(expr.expr)
-    return False
-
-
 def _validate_expr_flat(
-    expr: AxonExpr, *, module: AxonModule, modules_by_name: dict[str, AxonModule]
+    expr: AxonExpr, *, module: AxonDefinition, modules_by_name: dict[str, AxonDefinition]
 ) -> None:
     if isinstance(expr, AxonExprParen):
         raise ValueError(f"Axon flat validation failed in module {module.name!r}: parens remain")
@@ -102,17 +61,9 @@ def _validate_expr_flat(
             )
         callee_module = modules_by_name.get(base_callee)
         for arg in expr.args:
-            if not _is_atomic_expr(arg):
-                raise ValueError(
-                    f"Axon flat validation failed in module {module.name!r}: call arg is not atomic"
-                )
             _validate_expr_flat(arg, module=module, modules_by_name=modules_by_name)
         for value in expr.kwargs.values():
             if isinstance(value, AxonExpr):
-                if not _is_atomic_expr(value):
-                    raise ValueError(
-                        f"Axon flat validation failed in module {module.name!r}: call kwarg is not atomic"
-                    )
                 _validate_expr_flat(value, module=module, modules_by_name=modules_by_name)
         if callee_module is not None:
             path_slot_count = len(callee_module.path_params) + _leading_path_param_count(
@@ -122,22 +73,8 @@ def _validate_expr_flat(
                 raise ValueError(
                     f"Axon flat validation failed in module {module.name!r}: explicit path args are missing"
                 )
-            provided_positional = max(0, len(expr.args) - len(callee_module.path_params))
-            for idx, param in enumerate(callee_module.params):
-                if idx < provided_positional:
-                    continue
-                if param.name in expr.kwargs:
-                    continue
-                if param.optional or param.default_expr is not None:
-                    raise ValueError(
-                        f"Axon flat validation failed in module {module.name!r}: optional/default arg {param.name!r} is not explicit"
-                    )
         return
     if isinstance(expr, AxonExprBinary):
-        if not _is_atomic_expr(expr.left) or not _is_atomic_expr(expr.right):
-            raise ValueError(
-                f"Axon flat validation failed in module {module.name!r}: binary operand is not atomic"
-            )
         _validate_expr_flat(expr.left, module=module, modules_by_name=modules_by_name)
         _validate_expr_flat(expr.right, module=module, modules_by_name=modules_by_name)
         return
@@ -157,10 +94,6 @@ def _validate_expr_flat(
             f"Axon flat validation failed in module {module.name!r}: conditional expression remains"
         )
     if isinstance(expr, AxonExprTernary):
-        if not _is_atomic_expr(expr.cond):
-            raise ValueError(
-                f"Axon flat validation failed in module {module.name!r}: ternary guard is not atomic"
-            )
         _validate_expr_flat(expr.cond, module=module, modules_by_name=modules_by_name)
         _validate_expr_flat(expr.true_expr, module=module, modules_by_name=modules_by_name)
         _validate_expr_flat(expr.false_expr, module=module, modules_by_name=modules_by_name)
@@ -175,17 +108,13 @@ def _validate_expr_flat(
 
 
 def _validate_statement_flat(
-    stmt: AxonStatement, *, module: AxonModule, modules_by_name: dict[str, AxonModule]
+    stmt: AxonStatement, *, module: AxonDefinition, modules_by_name: dict[str, AxonDefinition]
 ) -> None:
     if isinstance(stmt, AxonBind):
         _validate_expr_flat(stmt.expr, module=module, modules_by_name=modules_by_name)
         return
     if isinstance(stmt, AxonReturn | AxonYield):
         for value in stmt.values:
-            if not _is_atomic_return_value(value):
-                raise ValueError(
-                    f"Axon flat validation failed in module {module.name!r}: return/yield value is not atomic"
-                )
             _validate_expr_flat(value, module=module, modules_by_name=modules_by_name)
         return
     if isinstance(stmt, AxonCond):
@@ -201,7 +130,7 @@ def _validate_statement_flat(
 
 
 def _validate_statements_flat(
-    stmts: tuple[AxonStatement, ...], *, module: AxonModule, modules_by_name: dict[str, AxonModule]
+    stmts: tuple[AxonStatement, ...], *, module: AxonDefinition, modules_by_name: dict[str, AxonDefinition]
 ) -> None:
     for stmt in stmts:
         _validate_statement_flat(stmt, module=module, modules_by_name=modules_by_name)

@@ -7,7 +7,7 @@ export (
 has_root :: String -> Bool
 has_root root = _params_has_root root
 
-param :: Path -> Tensor
+param :: Path -> Tensor[..S]
 param path = _params_param path
 
 param_scale :: Tensor[..S] -> ?Path -> Tensor[..S]

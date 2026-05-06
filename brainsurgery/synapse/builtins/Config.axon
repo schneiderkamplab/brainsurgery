@@ -15,7 +15,7 @@ has_key :: Path -> Bool
 has_key key = _config_has key
 
 has_value :: Path -> Bool
-has_value key = (Config.value key default=null) != null
+has_value key = (value key default=null) != null
 
 int :: Path -> ?Int -> Int
 int key ?default=null = _config_int key default

@@ -93,6 +93,11 @@ def _resolve_template_text(text: str, env: Mapping[str, Any], op_name: str) -> s
         if name not in env:
             raise ValueError(f"{op_name} key template placeholder {name!r} is not defined")
         value = env[name]
+        if isinstance(value, dict) or (isinstance(value, str) and value.startswith("@")):
+            try:
+                value = resolve_path_expr_to_key(value, env, op_name=op_name)
+            except Exception:
+                pass
         if not isinstance(value, (str, int, float, bool)):
             raise ValueError(
                 f"{op_name} key template placeholder {name!r} must resolve to scalar, got {type(value).__name__}"

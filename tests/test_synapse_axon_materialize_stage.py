@@ -33,7 +33,7 @@ def test_materialize_stage_rewrites_only_config_calls_and_preserves_structure() 
     )
 
     assert out.imports == ("Config", "Params")
-    assert "UNUSED" in out.constants
+    assert any(module.name == "UNUSED" for module in out.modules)
 
     rendered = render_axon_file(out)
     assert 'CFG = true ? "text_config" : ""' in rendered

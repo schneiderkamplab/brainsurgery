@@ -175,9 +175,11 @@ def interpret(
         override_value: Any = weight_override
         if isinstance(weight_override, str) and weight_override.isidentifier():
             resolved = env.get(weight_override)
-            if resolved is not None:
+            if resolved is None:
+                override_value = None
+            else:
                 override_value = resolved
-        if not _is_default_path_expr(override_value, kind="weight"):
+        if override_value is not None and not _is_default_path_expr(override_value, kind="weight"):
             path_spec["weight_path"] = override_value
             weight_param = "weight_path"
     bias_param = "bias_path" if _has_explicit_path(path_spec, "bias_path") else "bias"
@@ -185,9 +187,11 @@ def interpret(
         bias_override_value: Any = bias_override
         if isinstance(bias_override, str) and bias_override.isidentifier():
             resolved = env.get(bias_override)
-            if resolved is not None:
+            if resolved is None:
+                bias_override_value = None
+            else:
                 bias_override_value = resolved
-        if not _is_default_path_expr(bias_override_value, kind="bias"):
+        if bias_override_value is not None and not _is_default_path_expr(bias_override_value, kind="bias"):
             path_spec["bias_path"] = bias_override_value
             bias_param = "bias_path"
 
@@ -296,9 +300,9 @@ def compile(
         if (
             isinstance(weight_override, str)
             and weight_override.isidentifier()
-            and weight_override in env
         ):
-            weight_override_name = weight_override
+            if weight_override in env:
+                weight_override_name = weight_override
         else:
             path_spec["weight_path"] = weight_override
             weight_param = "weight_path"
@@ -306,8 +310,9 @@ def compile(
     bias_param_expr: str | None = None
     bias_override_name: str | None = None
     if bias_override is not None:
-        if isinstance(bias_override, str) and bias_override.isidentifier() and bias_override in env:
-            bias_override_name = bias_override
+        if isinstance(bias_override, str) and bias_override.isidentifier():
+            if bias_override in env:
+                bias_override_name = bias_override
         else:
             path_spec["bias_path"] = bias_override
             bias_param = "bias_path"

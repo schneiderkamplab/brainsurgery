@@ -17,7 +17,7 @@ from ..ast import (
     AxonExprTernary,
     AxonExprTuple,
     AxonFile,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -35,7 +35,7 @@ def _split_callee_path_sugar(callee: str) -> tuple[str, tuple[str, ...]]:
     return parts[0], tuple(parts[1:])
 
 
-def _leading_path_param_count(module: AxonModule) -> int:
+def _leading_path_param_count(module: AxonDefinition) -> int:
     count = 0
     for param in module.params:
         if isinstance(param.type_expr, TypePath):
@@ -46,7 +46,7 @@ def _leading_path_param_count(module: AxonModule) -> int:
 
 
 def _validate_expr_normalized(
-    expr: AxonExpr, *, module: AxonModule, modules_by_name: dict[str, AxonModule]
+    expr: AxonExpr, *, module: AxonDefinition, modules_by_name: dict[str, AxonDefinition]
 ) -> None:
     if isinstance(expr, AxonExprCall):
         base_callee, path_suffixes = _split_callee_path_sugar(expr.callee)
@@ -65,17 +65,6 @@ def _validate_expr_normalized(
                     f"Axon normalized validation failed in module {module.name!r}: "
                     f"missing explicit path args for call to {base_callee!r}"
                 )
-            provided_positional = max(0, len(expr.args) - len(callee_module.path_params))
-            for idx, param in enumerate(callee_module.params):
-                if idx < provided_positional:
-                    continue
-                if param.name in expr.kwargs:
-                    continue
-                if param.optional or param.default_expr is not None:
-                    raise ValueError(
-                        f"Axon normalized validation failed in module {module.name!r}: "
-                        f"optional/default arg {param.name!r} is not explicit"
-                    )
         for arg in expr.args:
             _validate_expr_normalized(arg, module=module, modules_by_name=modules_by_name)
         for value in expr.kwargs.values():
@@ -119,7 +108,7 @@ def _validate_expr_normalized(
             )
 
 
-def _validate_repeat_normalized(stmt: AxonRepeat, *, module: AxonModule) -> None:
+def _validate_repeat_normalized(stmt: AxonRepeat, *, module: AxonDefinition) -> None:
     if not stmt.body or not isinstance(stmt.body[-1], AxonYield):
         raise ValueError(
             f"Axon normalized validation failed in module {module.name!r}: "
@@ -139,7 +128,7 @@ def _validate_repeat_normalized(stmt: AxonRepeat, *, module: AxonModule) -> None
 
 
 def _validate_statement_normalized(
-    stmt: AxonStatement, *, module: AxonModule, modules_by_name: dict[str, AxonModule]
+    stmt: AxonStatement, *, module: AxonDefinition, modules_by_name: dict[str, AxonDefinition]
 ) -> None:
     if isinstance(stmt, AxonBind):
         _validate_expr_normalized(stmt.expr, module=module, modules_by_name=modules_by_name)
@@ -170,10 +159,10 @@ def _validate_statement_normalized(
             )
         return
     if isinstance(stmt, AxonScopeBind):
-        for value in stmt.kwargs.values():
-            if isinstance(value, AxonExpr):
+        for raw_value in stmt.kwargs.values():
+            if isinstance(raw_value, AxonExpr):
                 _validate_expr_normalized(
-                    value, module=module, modules_by_name=modules_by_name
+                    raw_value, module=module, modules_by_name=modules_by_name
                 )
         for inner in stmt.body:
             _validate_statement_normalized(
@@ -184,17 +173,6 @@ def _validate_statement_normalized(
 def validate_normalized_axon_file(ast: AxonFile, *, main_module: str | None = None) -> None:
     validate_closed_axon_file(ast, main_module=main_module)
     modules_by_name = {module.name: module for module in ast.modules}
-    diagnostic_module = modules_by_name.get(main_module or "") or AxonModule(
-        name="<constants>",
-        path_param=None,
-        params=(),
-        returns=(),
-        statements=(),
-    )
-    for expr in ast.constants.values():
-        _validate_expr_normalized(
-            expr, module=diagnostic_module, modules_by_name=modules_by_name
-        )
     for module in ast.modules:
         for param in module.params:
             if param.default_expr is not None:

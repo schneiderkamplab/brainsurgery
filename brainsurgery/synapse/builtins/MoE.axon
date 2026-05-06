@@ -87,7 +87,7 @@ select hidden topk_scores topk_indices expert = do
   selected_scores <- gather selected_scores_all (unsqueeze topk_pos 1) 1 |> reshape shape=[n]
   return selected_hidden, token_idx, topk_pos, selected_scores
 
-scatter_add :: Tensor -> Tensor -> Tensor -> Tensor -> Tensor
+scatter_add :: Tensor[B,T,D] -> Tensor[N] -> Tensor[N,D] -> Tensor[N] -> Tensor[B,T,D]
 scatter_add accum token_idx updates scores = do
   b <- size accum 0
   t <- size accum 1

@@ -17,7 +17,7 @@ from ..ast.nodes import (
     AxonExprPipe,
     AxonExprTernary,
     AxonExprTuple,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -33,6 +33,13 @@ class ImportUsage:
     unqualified_symbols: frozenset[str]
 
 
+def _call_base_name(name: str) -> str:
+    indexes = [idx for idx in (name.find("@"), name.find("::")) if idx >= 0]
+    if not indexes:
+        return name
+    return name[: min(indexes)]
+
+
 def _track_import_usage_expr(
     expr: AxonExpr,
     *,
@@ -41,11 +48,12 @@ def _track_import_usage_expr(
     unqualified_symbols: set[str],
 ) -> None:
     if isinstance(expr, AxonExprName):
-        if "." in expr.name:
-            namespace, _ = expr.name.rsplit(".", 1)
+        base = _call_base_name(expr.name)
+        if "." in base:
+            namespace, _ = base.rsplit(".", 1)
             qualified_namespaces.add(namespace)
-        elif expr.name not in bound_names:
-            unqualified_symbols.add(expr.name)
+        elif base not in bound_names:
+            unqualified_symbols.add(base)
         return
     if isinstance(expr, AxonExprParen):
         _track_import_usage_expr(
@@ -123,7 +131,7 @@ def _track_import_usage_expr(
             )
         return
     if isinstance(expr, AxonExprCall):
-        base = expr.callee.split("@", 1)[0]
+        base = _call_base_name(expr.callee)
         if "." in base:
             namespace, _ = base.rsplit(".", 1)
             qualified_namespaces.add(namespace)
@@ -278,7 +286,7 @@ def _track_import_usage_type(
         return
 
 
-def collect_import_usage(modules: tuple[AxonModule, ...]) -> ImportUsage:
+def collect_import_usage(modules: tuple[AxonDefinition, ...]) -> ImportUsage:
     qualified_namespaces: set[str] = set()
     unqualified_symbols: set[str] = set()
     for module in modules:

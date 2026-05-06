@@ -148,9 +148,9 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "List[Dim]"),
+    "args": ("Tensor[..S]", "List[Dim]"),
     "kwargs": {},
-    "returns": ("Tensor",),
+    "returns": ("Tensor[..R]",),
 }
 
 
@@ -191,9 +191,6 @@ def type_rule(
 ) -> Any | None:
     del kwarg_types, kwargs
     if len(arg_types) != 2 or len(args) != 2:
-        return None
-    input_dims = helpers.type_dims(arg_types[0])
-    if input_dims is None:
         return None
     shape_dims = _shape_dim_tokens(args[1], helpers)
     if shape_dims is None:

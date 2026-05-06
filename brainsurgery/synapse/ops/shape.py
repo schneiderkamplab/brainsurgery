@@ -77,7 +77,7 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Tensor",),
+    "args": ("Tensor[..S]",),
     "kwargs": dict(LOWERING_KWARG_KINDS),
     "returns": ("List[Dim]",),
 }

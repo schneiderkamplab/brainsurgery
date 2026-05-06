@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from ..ast import (
     AxonBind,
@@ -28,7 +28,7 @@ from ..ast import (
     AxonExprTernary,
     AxonExprTuple,
     AxonFile,
-    AxonModule,
+    AxonDefinition,
     AxonParam,
     AxonRepeat,
     AxonReturn,
@@ -60,13 +60,20 @@ from ..validate import validate_typed_axon_file
 _GENERATED_HELPER_RE = re.compile(
     r"^(?P<base>.+?)(?:__cond_(?:true|else)_\d+|__loop_[A-Za-z0-9_]+_\d+)$"
 )
-_GENERATED_DIM_RE = re.compile(r"^__d\d+$")
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _is_generated_dim(name: str) -> bool:
-    token = name[2:] if name.startswith("..") else name
-    return bool(_GENERATED_DIM_RE.match(token))
+@dataclass(frozen=True)
+class _DimProvenance:
+    signature: frozenset[str]
+    body_terms: frozenset[str]
+    inferred: frozenset[str]
+    synthetic_signature: frozenset[str] = frozenset()
+    allow_external_signature_names: bool = False
+
+
+def _is_generated_helper(name: str) -> bool:
+    return bool(_GENERATED_HELPER_RE.match(name))
 
 
 def _split_variadic_dim(name: str) -> tuple[bool, str]:
@@ -76,9 +83,8 @@ def _split_variadic_dim(name: str) -> tuple[bool, str]:
 
 
 def _dim_score(name: str) -> tuple[int, int, int, str]:
-    generated = 1 if _is_generated_dim(name) else 0
     generic = 1 if len(name) == 1 and name.isupper() else 0
-    return (generated, generic, len(name), name)
+    return (generic, len(name), name)
 
 
 def _expr_names(expr: AxonExpr) -> set[str]:
@@ -229,20 +235,20 @@ def _bound_names_in_order(statements: tuple[AxonStatement, ...]) -> list[str]:
     return names
 
 
-def _deduped_path_names(module: AxonModule) -> tuple[str, ...]:
+def _deduped_path_names(module: AxonDefinition) -> tuple[str, ...]:
     names = list(module.path_params)
     if module.path_param is not None and module.path_param not in names:
         names.append(module.path_param)
     return tuple(names)
 
 
-def _param_names(module: AxonModule) -> tuple[str, ...]:
+def _param_names(module: AxonDefinition) -> tuple[str, ...]:
     names: list[str] = list(_deduped_path_names(module))
     names.extend(param.name for param in module.params)
     return tuple(names)
 
 
-def _canonicalize_generated_local_names(module: AxonModule) -> AxonModule:
+def _canonicalize_generated_local_names(module: AxonDefinition) -> AxonDefinition:
     used = set(_param_names(module)) | _bound_names_statements(module.statements)
     renames: dict[str, str] = {}
     next_idx = 1
@@ -463,7 +469,7 @@ def _rename_callee_stmts(
 
 
 def _canonicalize_path_params(program: AxonFile) -> AxonFile:
-    modules: list[AxonModule] = []
+    modules: list[AxonDefinition] = []
     for module in program.modules:
         path_names = _deduped_path_names(module)
         if not path_names:
@@ -629,7 +635,7 @@ def _type_dim_names(tp: TypeExpr | None) -> set[str]:
     return set()
 
 
-def _module_dim_names(module: AxonModule) -> set[str]:
+def _module_dim_names(module: AxonDefinition) -> set[str]:
     names: set[str] = set()
     for param in module.params:
         names.update(_type_dim_names(param.type_expr))
@@ -639,6 +645,51 @@ def _module_dim_names(module: AxonModule) -> set[str]:
     for constraint in module.constraints or ():
         names.update(_constraint_dim_names(constraint))
     return names
+
+
+def _module_signature_dim_names(module: AxonDefinition) -> set[str]:
+    names: set[str] = set()
+    for param in module.params:
+        names.update(_type_dim_names(param.type_expr))
+    names.update(_type_dim_names(module.return_type_expr))
+    for constraint in module.constraints or ():
+        names.update(_constraint_dim_names(constraint))
+    return names
+
+
+def _module_body_term_dim_names(module: AxonDefinition) -> set[str]:
+    local_names = set(_param_names(module))
+    local_names.update(_bound_names_statements(module.statements))
+    names = {
+        name
+        for name in _stmt_names(module.statements)
+        if name not in local_names
+    }
+    for expr in _walk_stmt_exprs(module.statements):
+        token = _dim_token_from_expr(expr)
+        if isinstance(token, str) and token not in local_names:
+            names.add(token)
+    return names
+
+
+def _module_dim_provenance(
+    module: AxonDefinition, *, source_dim_names: frozenset[str] = frozenset()
+) -> _DimProvenance:
+    signature = _module_signature_dim_names(module)
+    body_terms = _module_body_term_dim_names(module)
+    all_dims = _module_dim_names(module)
+    synthetic_signature = (
+        frozenset(signature - body_terms - set(source_dim_names))
+        if _is_generated_helper(module.name)
+        else frozenset()
+    )
+    return _DimProvenance(
+        signature=frozenset(signature),
+        body_terms=frozenset(body_terms),
+        inferred=frozenset(all_dims - signature - body_terms),
+        synthetic_signature=synthetic_signature,
+        allow_external_signature_names=_is_generated_helper(module.name),
+    )
 
 
 def _stmt_dim_names(stmt: AxonStatement) -> set[str]:
@@ -713,83 +764,94 @@ def _expr_dim_names(expr: AxonExpr) -> set[str]:
     return names
 
 
-def _expr_generated_dim_term_names(expr: AxonExpr) -> set[str]:
+def _expr_inferred_dim_term_names(expr: AxonExpr, inferred_names: frozenset[str]) -> set[str]:
     expr = _unwrap_dim_expr(expr)
     if isinstance(expr, AxonExprName):
-        return {expr.name} if _is_generated_dim(expr.name) else set()
+        return {expr.name} if expr.name in inferred_names else set()
     if isinstance(expr, AxonExprBinary):
-        return _expr_generated_dim_term_names(expr.left) | _expr_generated_dim_term_names(expr.right)
+        return _expr_inferred_dim_term_names(
+            expr.left, inferred_names
+        ) | _expr_inferred_dim_term_names(expr.right, inferred_names)
     if isinstance(expr, AxonExprBind):
-        return _expr_generated_dim_term_names(expr.value) | _expr_generated_dim_term_names(expr.body)
+        return _expr_inferred_dim_term_names(
+            expr.value, inferred_names
+        ) | _expr_inferred_dim_term_names(expr.body, inferred_names)
     if isinstance(expr, AxonExprCall):
         names: set[str] = set()
         for arg in expr.args:
-            names.update(_expr_generated_dim_term_names(arg))
+            names.update(_expr_inferred_dim_term_names(arg, inferred_names))
         for value in expr.kwargs.values():
             if isinstance(value, AxonExpr):
-                names.update(_expr_generated_dim_term_names(value))
+                names.update(_expr_inferred_dim_term_names(value, inferred_names))
         return names
     if isinstance(expr, AxonExprDo):
-        return _stmt_generated_dim_term_names(expr.body)
+        return _stmt_inferred_dim_term_names(expr.body, inferred_names)
     if isinstance(expr, AxonExprIf | AxonExprTernary):
         return (
-            _expr_generated_dim_term_names(expr.cond)
-            | _expr_generated_dim_term_names(expr.true_expr)
-            | _expr_generated_dim_term_names(expr.false_expr)
+            _expr_inferred_dim_term_names(expr.cond, inferred_names)
+            | _expr_inferred_dim_term_names(expr.true_expr, inferred_names)
+            | _expr_inferred_dim_term_names(expr.false_expr, inferred_names)
         )
     if isinstance(expr, AxonExprLambda):
-        return _expr_generated_dim_term_names(expr.body)
+        return _expr_inferred_dim_term_names(expr.body, inferred_names)
     if isinstance(expr, AxonExprList | AxonExprTuple):
         item_names: set[str] = set()
         for item in expr.items:
-            item_names.update(_expr_generated_dim_term_names(item))
+            item_names.update(_expr_inferred_dim_term_names(item, inferred_names))
         return item_names
     if isinstance(expr, AxonExprPipe):
-        names = _expr_generated_dim_term_names(expr.value)
+        names = _expr_inferred_dim_term_names(expr.value, inferred_names)
         for stage in expr.stages:
-            names.update(_expr_generated_dim_term_names(stage))
+            names.update(_expr_inferred_dim_term_names(stage, inferred_names))
         return names
     return set()
 
 
-def _stmt_generated_dim_term_names(statements: tuple[AxonStatement, ...]) -> set[str]:
+def _stmt_inferred_dim_term_names(
+    statements: tuple[AxonStatement, ...], inferred_names: frozenset[str]
+) -> set[str]:
     names: set[str] = set()
     for stmt in statements:
         if isinstance(stmt, AxonBind):
-            names.update(_expr_generated_dim_term_names(stmt.expr))
+            names.update(_expr_inferred_dim_term_names(stmt.expr, inferred_names))
         elif isinstance(stmt, AxonReturn | AxonYield):
             for value in stmt.values:
-                names.update(_expr_generated_dim_term_names(value))
+                names.update(_expr_inferred_dim_term_names(value, inferred_names))
         elif isinstance(stmt, AxonCond):
-            names.update(_expr_generated_dim_term_names(stmt.cond))
-            names.update(_stmt_generated_dim_term_names(stmt.true_body))
-            names.update(_stmt_generated_dim_term_names(stmt.false_body))
+            names.update(_expr_inferred_dim_term_names(stmt.cond, inferred_names))
+            names.update(_stmt_inferred_dim_term_names(stmt.true_body, inferred_names))
+            names.update(_stmt_inferred_dim_term_names(stmt.false_body, inferred_names))
         elif isinstance(stmt, AxonRepeat):
-            names.update(_expr_generated_dim_term_names(stmt.from_expr))
-            names.update(_expr_generated_dim_term_names(stmt.to_expr))
-            names.update(_expr_generated_dim_term_names(stmt.step_expr))
-            names.update(_stmt_generated_dim_term_names(stmt.body))
+            names.update(_expr_inferred_dim_term_names(stmt.from_expr, inferred_names))
+            names.update(_expr_inferred_dim_term_names(stmt.to_expr, inferred_names))
+            names.update(_expr_inferred_dim_term_names(stmt.step_expr, inferred_names))
+            names.update(_stmt_inferred_dim_term_names(stmt.body, inferred_names))
         elif isinstance(stmt, AxonScopeBind):
-            names.update(_expr_generated_dim_term_names(stmt.prefix))
+            names.update(_expr_inferred_dim_term_names(stmt.prefix, inferred_names))
             for raw in stmt.kwargs.values():
                 if isinstance(raw, AxonExpr):
-                    names.update(_expr_generated_dim_term_names(raw))
-            names.update(_stmt_generated_dim_term_names(stmt.body))
+                    names.update(_expr_inferred_dim_term_names(raw, inferred_names))
+            names.update(_stmt_inferred_dim_term_names(stmt.body, inferred_names))
     return names
 
 
 def _assert_no_free_generated_dim_terms(program: AxonFile) -> None:
     for module in program.modules:
-        allowed: set[str] = set()
-        for param in module.params:
-            allowed.update(name for name in _type_dim_names(param.type_expr) if _is_generated_dim(name))
-        allowed.update(name for name in _type_dim_names(module.return_type_expr) if _is_generated_dim(name))
+        provenance = _module_dim_provenance(module)
+        allowed = set(provenance.signature)
         for constraint in module.constraints or ():
-            allowed.update(name for name in _constraint_dim_names(constraint) if _is_generated_dim(name))
-        free = sorted(_stmt_generated_dim_term_names(module.statements) - allowed, key=_dim_score)
+            allowed.update(_constraint_dim_names(constraint))
+        free = sorted(
+            _stmt_inferred_dim_term_names(
+                module.statements,
+                provenance.inferred | provenance.synthetic_signature,
+            )
+            - allowed,
+            key=_dim_score,
+        )
         if free:
             joined = ", ".join(free)
-            raise ValueError(f"module {module.name}: generated dim term is not bound by signature or constraints: {joined}")
+            raise ValueError(f"module {module.name}: inferred dim term is not bound by signature or constraints: {joined}")
 
 
 def _constraint_dim_names(constraint: Constraint) -> set[str]:
@@ -825,47 +887,102 @@ def _collect_module_callsites(program: AxonFile) -> dict[str, list[AxonExprCall]
     return out
 
 
+def _dim_is_inferred(name: str, provenance: _DimProvenance) -> bool:
+    return name in provenance.inferred or name in provenance.synthetic_signature
+
+
+def _dim_is_source(name: str, provenance: _DimProvenance) -> bool:
+    return name in provenance.signature or name in provenance.body_terms
+
+
+def _record_dim_candidate(
+    left: object,
+    right: object,
+    out: dict[str, set[str]],
+    provenance: _DimProvenance,
+) -> None:
+    if not isinstance(left, str) or not isinstance(right, str) or left == right:
+        return
+    left_variadic, _left_base = _split_variadic_dim(left)
+    right_variadic, _right_base = _split_variadic_dim(right)
+    if left_variadic != right_variadic:
+        return
+    if _dim_is_inferred(left, provenance) and _dim_is_source(right, provenance):
+        out.setdefault(left, set()).add(right)
+        return
+    if _dim_is_inferred(right, provenance) and _dim_is_source(left, provenance):
+        out.setdefault(right, set()).add(left)
+        return
+    if left in provenance.signature and right in provenance.body_terms:
+        out.setdefault(left, set()).add(right)
+        return
+    if right in provenance.signature and left in provenance.body_terms:
+        out.setdefault(right, set()).add(left)
+        return
+    if (
+        provenance.allow_external_signature_names
+        and
+        left in provenance.signature
+        and right not in provenance.signature
+        and not _dim_is_inferred(right, provenance)
+    ):
+        out.setdefault(left, set()).add(right)
+        return
+    if (
+        provenance.allow_external_signature_names
+        and
+        right in provenance.signature
+        and left not in provenance.signature
+        and not _dim_is_inferred(left, provenance)
+    ):
+        out.setdefault(right, set()).add(left)
+
+
 def _match_type_dims(
-    formal: TypeExpr | None, actual: TypeExpr | None, out: dict[str, str]
+    formal: TypeExpr | None,
+    actual: TypeExpr | None,
+    out: dict[str, set[str]],
+    provenance: _DimProvenance,
 ) -> None:
     if formal is None or actual is None:
         return
     if isinstance(formal, TypeOptional) and isinstance(actual, TypeOptional):
-        _match_type_dims(formal.inner, actual.inner, out)
+        _match_type_dims(formal.inner, actual.inner, out, provenance)
+        return
+    if isinstance(formal, TypeOptional):
+        _match_type_dims(formal.inner, actual, out, provenance)
+        return
+    if isinstance(actual, TypeOptional):
+        _match_type_dims(formal, actual.inner, out, provenance)
         return
     if isinstance(formal, TypeList) and isinstance(actual, TypeList):
-        _match_type_dims(formal.item, actual.item, out)
+        _match_type_dims(formal.item, actual.item, out, provenance)
         return
     if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple):
         for left, right in zip(formal.items, actual.items, strict=False):
-            _match_type_dims(left, right, out)
+            _match_type_dims(left, right, out, provenance)
         return
     if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor):
         for formal_dim, actual_dim in zip(formal.dims, actual.dims, strict=False):
-            _match_dim_tokens(formal_dim, actual_dim, out)
+            _match_dim_tokens(formal_dim, actual_dim, out, provenance)
         return
     if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed) and formal.name == actual.name:
         for formal_dim, actual_dim in zip(formal.args, actual.args, strict=False):
-            _match_dim_tokens(formal_dim, actual_dim, out)
+            _match_dim_tokens(formal_dim, actual_dim, out, provenance)
 
 
-def _match_dim_tokens(formal: object, actual: object, out: dict[str, str]) -> None:
+def _match_dim_tokens(
+    formal: object,
+    actual: object,
+    out: dict[str, set[str]],
+    provenance: _DimProvenance,
+) -> None:
     if isinstance(formal, str):
-        if isinstance(actual, str):
-            formal_variadic, formal_base = _split_variadic_dim(formal)
-            actual_variadic, actual_base = _split_variadic_dim(actual)
-            if formal_variadic != actual_variadic:
-                return
-            formal_generated = _is_generated_dim(formal)
-            actual_generated = _is_generated_dim(actual)
-            if formal_generated and not actual_generated:
-                out.setdefault(formal, actual)
-            elif not formal_generated and actual_generated:
-                out.setdefault(actual, formal)
+        _record_dim_candidate(formal, actual, out, provenance)
         return
     if isinstance(formal, DimExprBinary) and isinstance(actual, DimExprBinary) and formal.op == actual.op:
-        _match_dim_tokens(formal.left, actual.left, out)
-        _match_dim_tokens(formal.right, actual.right, out)
+        _match_dim_tokens(formal.left, actual.left, out, provenance)
+        _match_dim_tokens(formal.right, actual.right, out, provenance)
 
 
 def _unwrap_dim_expr(expr: AxonExpr) -> AxonExpr:
@@ -874,17 +991,54 @@ def _unwrap_dim_expr(expr: AxonExpr) -> AxonExpr:
     return expr
 
 
-def _match_dim_expr_to_token(expr: AxonExpr, actual: object, out: dict[str, str]) -> None:
+def _match_dim_expr_to_token(
+    expr: AxonExpr,
+    actual: object,
+    out: dict[str, set[str]],
+    provenance: _DimProvenance,
+) -> None:
     expr = _unwrap_dim_expr(expr)
     if isinstance(expr, AxonExprName):
-        _match_dim_tokens(expr.name, actual, out)
+        _match_dim_tokens(expr.name, actual, out, provenance)
         return
     if isinstance(expr, AxonExprInt):
-        _match_dim_tokens(expr.value, actual, out)
+        _match_dim_tokens(expr.value, actual, out, provenance)
         return
     if isinstance(expr, AxonExprBinary) and isinstance(actual, DimExprBinary) and expr.op == actual.op:
-        _match_dim_expr_to_token(expr.left, actual.left, out)
-        _match_dim_expr_to_token(expr.right, actual.right, out)
+        _match_dim_expr_to_token(expr.left, actual.left, out, provenance)
+        _match_dim_expr_to_token(expr.right, actual.right, out, provenance)
+
+
+def _is_dim_typed_expr(expr: AxonExpr) -> bool:
+    return isinstance(expr.inferred_type, TypeDim | TypeInt)
+
+
+def _dim_token_from_expr(expr: AxonExpr) -> object | None:
+    expr = _unwrap_dim_expr(expr)
+    if isinstance(expr, AxonExprName):
+        return expr.name
+    if isinstance(expr, AxonExprInt):
+        return expr.value
+    if isinstance(expr, AxonExprCall) and not expr.args and not expr.kwargs and _is_dim_typed_expr(expr):
+        return expr.callee
+    if isinstance(expr, AxonExprBinary):
+        left = _dim_token_from_expr(expr.left)
+        right = _dim_token_from_expr(expr.right)
+        if left is not None and right is not None:
+            return DimExprBinary(op=expr.op, left=left, right=right)
+    return None
+
+
+def _substitute_dim_token(dim: object, subst: Mapping[str, object]) -> object:
+    if isinstance(dim, str):
+        return subst.get(dim, dim)
+    if isinstance(dim, DimExprBinary):
+        return DimExprBinary(
+            op=dim.op,
+            left=_substitute_dim_token(dim.left, subst),
+            right=_substitute_dim_token(dim.right, subst),
+        )
+    return dim
 
 
 def _single_bind_exprs(statements: tuple[AxonStatement, ...]) -> dict[str, AxonExpr]:
@@ -921,7 +1075,11 @@ def _shape_expr_from_call(call: AxonExprCall, binds: Mapping[str, AxonExpr]) -> 
     return _resolve_bound_expr(raw, binds)
 
 
-def _collect_shape_dim_candidates(module: AxonModule, out: dict[str, set[str]]) -> None:
+def _collect_shape_dim_candidates(
+    module: AxonDefinition,
+    out: dict[str, set[str]],
+    provenance: _DimProvenance,
+) -> None:
     binds = _single_bind_exprs(module.statements)
     for expr in _walk_stmt_exprs(module.statements):
         if not isinstance(expr, AxonExprCall) or not isinstance(expr.inferred_type, TypeTensor):
@@ -932,62 +1090,228 @@ def _collect_shape_dim_candidates(module: AxonModule, out: dict[str, set[str]]) 
         shape_expr = _unwrap_dim_expr(shape_expr)
         if not isinstance(shape_expr, AxonExprList | AxonExprTuple):
             continue
-        local: dict[str, str] = {}
+        local: dict[str, set[str]] = {}
         for item, actual in zip(shape_expr.items, expr.inferred_type.dims, strict=False):
-            _match_dim_expr_to_token(item, actual, local)
-        for generated, actual in local.items():
-            out.setdefault(generated, set()).add(actual)
+            _match_dim_expr_to_token(item, actual, local, provenance)
+        for inferred, actuals in local.items():
+            out.setdefault(inferred, set()).update(actuals)
+
+
+def _param_accepts_dim_value(param: AxonParam) -> bool:
+    tp = param.type_expr
+    return isinstance(tp, TypeDim) or (
+        isinstance(tp, TypeOptional) and isinstance(tp.inner, TypeDim)
+    )
+
+
+def _call_actual_by_param(callee: AxonDefinition, call: AxonExprCall) -> dict[str, AxonExpr]:
+    actuals: dict[str, AxonExpr] = {}
+    for param, arg in zip(callee.params, call.args, strict=False):
+        actuals[param.name] = arg
+    for key, value in call.kwargs.items():
+        if isinstance(value, AxonExpr):
+            actuals[key] = value
+    return actuals
+
+
+def _collect_call_dim_param_candidates(
+    *,
+    caller: AxonDefinition,
+    call: AxonExprCall,
+    callee: AxonDefinition,
+    out: dict[str, set[str]],
+    provenance: _DimProvenance,
+) -> None:
+    binds = _single_bind_exprs(caller.statements)
+    actuals = _call_actual_by_param(callee, call)
+    dim_actuals: dict[str, object] = {}
+    for param in callee.params:
+        if not _param_accepts_dim_value(param):
+            continue
+        raw_actual = actuals.get(param.name)
+        if raw_actual is None:
+            continue
+        token = _dim_token_from_expr(_resolve_bound_expr(raw_actual, binds))
+        if token is not None:
+            dim_actuals[param.name] = token
+    if not dim_actuals:
+        return
+    _match_call_return_dims(
+        callee.return_type_expr,
+        call.inferred_type,
+        dim_actuals=dim_actuals,
+        out=out,
+        provenance=provenance,
+    )
+
+
+def _match_call_return_dims(
+    formal: TypeExpr | None,
+    actual: TypeExpr | None,
+    *,
+    dim_actuals: Mapping[str, object],
+    out: dict[str, set[str]],
+    provenance: _DimProvenance,
+) -> None:
+    if formal is None or actual is None:
+        return
+    if isinstance(formal, TypeOptional) and isinstance(actual, TypeOptional):
+        _match_call_return_dims(
+            formal.inner,
+            actual.inner,
+            dim_actuals=dim_actuals,
+            out=out,
+            provenance=provenance,
+        )
+        return
+    if isinstance(formal, TypeOptional):
+        _match_call_return_dims(
+            formal.inner,
+            actual,
+            dim_actuals=dim_actuals,
+            out=out,
+            provenance=provenance,
+        )
+        return
+    if isinstance(actual, TypeOptional):
+        _match_call_return_dims(
+            formal,
+            actual.inner,
+            dim_actuals=dim_actuals,
+            out=out,
+            provenance=provenance,
+        )
+        return
+    if isinstance(formal, TypeList) and isinstance(actual, TypeList):
+        _match_call_return_dims(
+            formal.item,
+            actual.item,
+            dim_actuals=dim_actuals,
+            out=out,
+            provenance=provenance,
+        )
+        return
+    if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple):
+        for formal_item, actual_item in zip(formal.items, actual.items, strict=False):
+            _match_call_return_dims(
+                formal_item,
+                actual_item,
+                dim_actuals=dim_actuals,
+                out=out,
+                provenance=provenance,
+            )
+        return
+    if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor):
+        for formal_dim, actual_dim in _aligned_dim_pairs(formal.dims, actual.dims):
+            substituted = _substitute_dim_token(formal_dim, dim_actuals)
+            _match_dim_tokens(actual_dim, substituted, out, provenance)
+        return
+    if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed) and formal.name == actual.name:
+        for formal_dim, actual_dim in _aligned_dim_pairs(formal.args, actual.args):
+            substituted = _substitute_dim_token(formal_dim, dim_actuals)
+            _match_dim_tokens(actual_dim, substituted, out, provenance)
+
+
+def _aligned_dim_pairs(
+    formal: tuple[object, ...],
+    actual: tuple[object, ...],
+) -> tuple[tuple[object, object], ...]:
+    variadic_idx = next(
+        (idx for idx, dim in enumerate(formal) if isinstance(dim, str) and dim.startswith("..")),
+        None,
+    )
+    if variadic_idx is None:
+        return tuple(zip(formal, actual, strict=False))
+    prefix = formal[:variadic_idx]
+    suffix = formal[variadic_idx + 1 :]
+    if len(actual) < len(prefix) + len(suffix):
+        return ()
+    pairs: list[tuple[object, object]] = list(zip(prefix, actual[: len(prefix)], strict=False))
+    if suffix:
+        pairs.extend(zip(suffix, actual[-len(suffix) :], strict=False))
+    return tuple(pairs)
 
 
 def _preferred_module_dim_renames(program: AxonFile) -> dict[str, dict[str, str]]:
     callsites = _collect_module_callsites(program)
+    modules_by_name = {module.name: module for module in program.modules}
+    source_dim_names: set[str] = set()
+    for module in program.modules:
+        if _is_generated_helper(module.name):
+            continue
+        source_dim_names.update(_module_signature_dim_names(module))
+        source_dim_names.update(_module_body_term_dim_names(module))
     out: dict[str, dict[str, str]] = {}
     for module in program.modules:
+        provenance = _module_dim_provenance(
+            module, source_dim_names=frozenset(source_dim_names)
+        )
         candidates: dict[str, set[str]] = {}
         exprs = list(_walk_stmt_exprs(module.statements))
         module_calls = callsites.get(module.name, ())
         for expr in exprs:
+            if isinstance(expr, AxonExprCall):
+                callee = modules_by_name.get(expr.callee)
+                if callee is not None:
+                    _collect_call_dim_param_candidates(
+                        caller=module,
+                        call=expr,
+                        callee=callee,
+                        out=candidates,
+                        provenance=provenance,
+                    )
             if isinstance(expr, AxonExprName):
                 param = next((item for item in module.params if item.name == expr.name), None)
                 if param is not None:
-                    name_match: dict[str, str] = {}
-                    _match_type_dims(param.type_expr, expr.inferred_type, name_match)
-                    for generated, actual in name_match.items():
-                        candidates.setdefault(generated, set()).add(actual)
+                    name_match: dict[str, set[str]] = {}
+                    _match_type_dims(param.type_expr, expr.inferred_type, name_match, provenance)
+                    for inferred, actuals in name_match.items():
+                        candidates.setdefault(inferred, set()).update(actuals)
         for stmt in module.statements:
             if not isinstance(stmt, AxonReturn):
                 continue
             if module.return_type_expr is None:
                 continue
             if len(stmt.values) == 1:
-                return_local: dict[str, str] = {}
-                _match_type_dims(module.return_type_expr, stmt.values[0].inferred_type, return_local)
-                for generated, actual in return_local.items():
-                        candidates.setdefault(generated, set()).add(actual)
+                return_local: dict[str, set[str]] = {}
+                _match_type_dims(
+                    module.return_type_expr,
+                    stmt.values[0].inferred_type,
+                    return_local,
+                    provenance,
+                )
+                for inferred, actuals in return_local.items():
+                    candidates.setdefault(inferred, set()).update(actuals)
         for call in module_calls:
-            local: dict[str, str] = {}
+            local: dict[str, set[str]] = {}
             for param, arg in zip(module.params, call.args, strict=False):
-                _match_type_dims(param.type_expr, arg.inferred_type, local)
+                _match_type_dims(param.type_expr, arg.inferred_type, local, provenance)
             for key, raw in call.kwargs.items():
                 if not isinstance(raw, AxonExpr):
                     continue
                 kw_param = next((item for item in module.params if item.name == key), None)
                 if kw_param is None:
                     continue
-                _match_type_dims(kw_param.type_expr, raw.inferred_type, local)
-            _match_type_dims(module.return_type_expr, call.inferred_type, local)
-            for generated, actual in local.items():
-                candidates.setdefault(generated, set()).add(actual)
-        _collect_shape_dim_candidates(module, candidates)
+                _match_type_dims(kw_param.type_expr, raw.inferred_type, local, provenance)
+            _match_type_dims(module.return_type_expr, call.inferred_type, local, provenance)
+            for inferred, actuals in local.items():
+                candidates.setdefault(inferred, set()).update(actuals)
+        _collect_shape_dim_candidates(module, candidates, provenance)
         if not candidates:
             continue
         used_in_module = _module_dim_names(module)
-        used_targets: set[str] = set(name for name in used_in_module if not _is_generated_dim(name))
+        used_targets: set[str] = set(name for name in used_in_module if not _dim_is_inferred(name, provenance))
         renames: dict[str, str] = {}
         for generated in sorted(candidates, key=_dim_score):
             options = sorted(candidates[generated], key=_dim_score)
             chosen: str | None = None
             for candidate in options:
+                if _dim_is_inferred(candidate, provenance):
+                    continue
+                if candidate not in source_dim_names and candidate not in provenance.body_terms:
+                    continue
+                if not _dim_is_inferred(generated, provenance) and _dim_score(candidate) >= _dim_score(generated):
+                    continue
                 existing = next((old for old, new in renames.items() if new == candidate), None)
                 if existing is not None and existing != generated:
                     continue
@@ -1069,7 +1393,7 @@ def _rename_expr_dims(expr: AxonExpr, renames: Mapping[str, str]) -> AxonExpr:
         else None
     )
     expr = replace(expr, inferred_type=inferred_type, inferred_dims=inferred_dims)
-    if isinstance(expr, AxonExprName) and _is_generated_dim(expr.name):
+    if isinstance(expr, AxonExprName) and expr.name in renames:
         return replace(expr, name=renames.get(expr.name, expr.name))
     if isinstance(expr, AxonExprBinary):
         return replace(expr, left=_rename_expr_dims(expr.left, renames), right=_rename_expr_dims(expr.right, renames))
@@ -1136,7 +1460,7 @@ def _rename_stmt_dims(stmt: AxonStatement, renames: Mapping[str, str]) -> AxonSt
     return stmt
 
 
-def _canonicalize_module_dims(module: AxonModule, renames: Mapping[str, str]) -> AxonModule:
+def _canonicalize_module_dims(module: AxonDefinition, renames: Mapping[str, str]) -> AxonDefinition:
     if not renames:
         return module
     return replace(
@@ -1151,7 +1475,6 @@ def _canonicalize_module_dims(module: AxonModule, renames: Mapping[str, str]) ->
 def canonicalize_typed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
     validate_typed_axon_file(program, main_module=main_module)
     current = _canonicalize_path_params(program)
-    current = _canonicalize_generated_helper_names(current)
     current = replace(
         current,
         modules=tuple(_canonicalize_generated_local_names(module) for module in current.modules),
@@ -1170,6 +1493,7 @@ def canonicalize_typed_axon_file(program: AxonFile, *, main_module: str | None =
         if ast_equal(current, rewritten):
             break
         current = rewritten
+    current = _canonicalize_generated_helper_names(current)
     _assert_no_free_generated_dim_terms(current)
     validate_typed_axon_file(current, main_module=main_module)
     return current

@@ -562,7 +562,6 @@ def _run_benchmark_pair(
     max_len: int,
     tokenizer: str | None,
     class_name: str,
-    main_module: str | None,
     dtype: str,
     model_task: str,
     trace_layers: bool,
@@ -580,7 +579,9 @@ def _run_benchmark_pair(
     compile_dynamic: bool,
     trust_remote_code: bool,
     axon_backend: str,
+    axon_typechecker: str,
     optimize: bool,
+    canonicalize: bool,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
@@ -602,7 +603,6 @@ def _run_benchmark_pair(
         hf_model_dir=model_dir,
         tokenizer=tokenizer,
         class_name=class_name,
-        main_module=main_module,
         dtype=dtype,
         model_task=model_task,
         trace_layers=trace_layers,
@@ -620,7 +620,9 @@ def _run_benchmark_pair(
         compile_dynamic=compile_dynamic,
         trust_remote_code=trust_remote_code,
         axon_backend=axon_backend,
+        axon_typechecker=axon_typechecker,
         optimize=optimize,
+        canonicalize=canonicalize,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
         oom_cpu_fallback=oom_cpu_fallback,
@@ -1024,7 +1026,6 @@ def run_axon_benchmark(
     max_len: int = 32,
     tokenizer: str | None = None,
     class_name: str = "AxonGeneratedModel",
-    main_module: str | None = None,
     dtype: str = "float32",
     model_task: str = "auto",
     trace_layers: bool = False,
@@ -1042,8 +1043,10 @@ def run_axon_benchmark(
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
     axon_backend: str = "codegen",
+    axon_typechecker: str = "typecheck2",
     pipeline_parallel_size: int | None = None,
-    optimize: bool = True,
+    optimize: bool = False,
+    canonicalize: bool = False,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
@@ -1062,6 +1065,12 @@ def run_axon_benchmark(
             "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', or 'pipeline'"
         )
     axon_backend = backend_token
+    typechecker_token = str(axon_typechecker).strip().lower()
+    if typechecker_token not in {"typecheck", "typecheck2"}:
+        raise ValueError("axon_typechecker must be 'typecheck' or 'typecheck2'")
+    axon_typechecker = typechecker_token
+    if axon_typechecker == "typecheck" and axon_backend not in {"codegen2", "runtime2"}:
+        raise ValueError("--axon-typechecker typecheck is only supported with codegen2/runtime2")
     if axon_backend != "pipeline" and pipeline_parallel_size is not None:
         raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline")
     repo_root = _repo_root()
@@ -1077,7 +1086,6 @@ def run_axon_benchmark(
         else:
             declared_checkpoints = _declared_checkpoints_from_axon(
                 axon_file=resolved_axon_file,
-                main_module=main_module,
             )
             checkpoints_to_run = declared_checkpoints
         for checkpoint_id in checkpoints_to_run:
@@ -1112,7 +1120,6 @@ def run_axon_benchmark(
         "max_len": max_len,
         "tokenizer": tokenizer,
         "class_name": class_name,
-        "main_module": main_module,
         "dtype": dtype,
         "model_task": model_task,
         "trace_layers": trace_layers,
@@ -1130,7 +1137,9 @@ def run_axon_benchmark(
         "compile_dynamic": compile_dynamic,
         "trust_remote_code": trust_remote_code,
         "axon_backend": axon_backend,
+        "axon_typechecker": axon_typechecker,
         "optimize": optimize,
+        "canonicalize": canonicalize,
         "skip_hf": skip_hf,
         "hf_strict_dtype": hf_strict_dtype,
         "oom_cpu_fallback": oom_cpu_fallback,

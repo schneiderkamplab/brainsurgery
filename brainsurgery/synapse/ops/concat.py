@@ -16,11 +16,30 @@ LOWERING_KWARG_KINDS: dict[str, Any] = {"dim": "int"}
 def _dim_add(left: Any, right: Any) -> Any:
     if isinstance(left, int) and isinstance(right, int):
         return left + right
+    if (
+        isinstance(left, DimExprBinary)
+        and left.op == "/"
+        and isinstance(right, DimExprBinary)
+        and right.op == "/"
+        and left.left == right.left
+        and left.right == right.right == 2
+    ):
+        return left.left
     if isinstance(right, DimExprBinary) and right.op == "-" and right.right == left:
         return right.left
     if isinstance(left, DimExprBinary) and left.op == "-" and left.right == right:
         return left.left
     return DimExprBinary(op="+", left=left, right=right)
+
+
+def _resolve_dim_alias(dim: Any, helpers: Any) -> Any:
+    if not isinstance(dim, str):
+        return dim
+    resolved = helpers.resolve_name_expr(dim)
+    if resolved is None:
+        return dim
+    token = helpers.expr_to_dim_token(resolved)
+    return dim if token is None else token
 
 
 def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
@@ -133,6 +152,10 @@ def type_rule(
         raw_dim = raw_dim.expr if isinstance(raw_dim, AxonExprAscribe) else raw_dim.inner
     if isinstance(raw_dim, AxonExprInt):
         raw_dim = raw_dim.value
+    else:
+        resolved_dim = helpers.expr_to_dim_token(raw_dim)
+        if isinstance(resolved_dim, int):
+            raw_dim = resolved_dim
     if isinstance(raw_dim, bool) or not isinstance(raw_dim, int):
         return None
     rank = len(left_dims)
@@ -142,7 +165,12 @@ def type_rule(
     out_dims: list[Any] = []
     for idx, (left_dim, right_dim) in enumerate(zip(left_dims, right_dims, strict=True)):
         if idx == dim:
-            out_dims.append(_dim_add(left_dim, right_dim))
+            out_dims.append(
+                _dim_add(
+                    _resolve_dim_alias(left_dim, helpers),
+                    _resolve_dim_alias(right_dim, helpers),
+                )
+            )
             continue
         if left_dim != right_dim:
             return None

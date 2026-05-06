@@ -25,7 +25,7 @@ from ..ast.nodes import (
     AxonExprString,
     AxonExprTernary,
     AxonExprTuple,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -41,7 +41,7 @@ def _stmt_path(path: tuple[int, ...]) -> str:
     return "root." + ".".join(str(i) for i in path)
 
 
-def _error(module: AxonModule, path: tuple[int, ...], message: str) -> ValueError:
+def _error(module: AxonDefinition, path: tuple[int, ...], message: str) -> ValueError:
     return ValueError(
         f"Axon AST validation failed in module '{module.name}' at {_stmt_path(path)}: {message}"
     )
@@ -82,6 +82,17 @@ def _is_qualified_identifier(value: str) -> bool:
     return all(_is_identifier(part) for part in parts)
 
 
+def _is_sugared_expression_name(value: str) -> bool:
+    if "::" in value:
+        return all(_is_qualified_identifier(part) for part in value.split("::"))
+    if "@" not in value:
+        return False
+    parts = value.split("@")
+    if not parts[0] or not _is_qualified_identifier(parts[0]):
+        return False
+    return all(part and _is_qualified_identifier(part) for part in parts[1:])
+
+
 def _expected_return_arity(return_type_expr: TypeExpr | None) -> int | None:
     if return_type_expr is None:
         return None
@@ -93,11 +104,15 @@ def _expected_return_arity(return_type_expr: TypeExpr | None) -> int | None:
     return 1
 
 
-def _validate_name(name: str, *, module: AxonModule, path: tuple[int, ...], field: str) -> None:
+def _validate_name(name: str, *, module: AxonDefinition, path: tuple[int, ...], field: str) -> None:
     if name == "_":
         return
-    validator = _is_qualified_identifier if field == "expression name" else _is_identifier
-    if not validator(name):
+    valid = (
+        _is_qualified_identifier(name) or _is_sugared_expression_name(name)
+        if field == "expression name"
+        else _is_identifier(name)
+    )
+    if not valid:
         raise _error(
             module,
             path,
@@ -148,7 +163,7 @@ def _expr_non_empty(expr: AxonExpr) -> bool:
     return False
 
 
-def _validate_expr(expr: AxonExpr, module: AxonModule, path: tuple[int, ...]) -> None:
+def _validate_expr(expr: AxonExpr, module: AxonDefinition, path: tuple[int, ...]) -> None:
     if isinstance(expr, AxonExprName):
         _validate_name(expr.name, module=module, path=path, field="expression name")
         return
@@ -259,7 +274,7 @@ def _validate_expr(expr: AxonExpr, module: AxonModule, path: tuple[int, ...]) ->
 
 
 def _validate_statement(
-    stmt: AxonStatement, module: AxonModule, path: tuple[int, ...], *, in_loop: bool = False
+    stmt: AxonStatement, module: AxonDefinition, path: tuple[int, ...], *, in_loop: bool = False
 ) -> None:
     if isinstance(stmt, AxonBind):
         if not stmt.targets:
@@ -386,7 +401,7 @@ def _validate_statement(
         if not stmt.body:
             raise _error(module, path, "scope bind body cannot be empty")
         for i, child in enumerate(stmt.body):
-            _validate_statement(child, module, (*path, i), in_loop=in_loop)
+            _validate_statement(child, module, (*path, i), in_loop=False)
         if not _has_compatible_return(stmt.body, len(stmt.targets)):
             raise _error(
                 module,
@@ -396,7 +411,7 @@ def _validate_statement(
         return
 
 
-def _validate_module(module: AxonModule) -> None:
+def _validate_module(module: AxonDefinition) -> None:
     if not module.name.strip():
         raise ValueError("Axon AST validation failed: module name cannot be empty")
 
@@ -453,7 +468,7 @@ def _validate_module(module: AxonModule) -> None:
 
 
 def validate_axon_program(
-    modules: tuple[AxonModule, ...], *, main_module: str | None = None
+    modules: tuple[AxonDefinition, ...], *, main_module: str | None = None
 ) -> None:
     if not modules:
         if main_module is None:

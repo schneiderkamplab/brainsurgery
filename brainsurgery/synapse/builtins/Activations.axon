@@ -13,34 +13,34 @@ export (
 )
 
 gelu :: Tensor[..S] -> Tensor[..S]
-gelu = _activations_gelu
+gelu x = _activations_gelu x
 
 gelu_new :: Tensor[..S] -> Tensor[..S]
-gelu_new = _activations_gelu_new
+gelu_new x = _activations_gelu_new x
 
 gelu_pytorch_tanh :: Tensor[..S] -> Tensor[..S]
-gelu_pytorch_tanh = _activations_gelu_pytorch_tanh
+gelu_pytorch_tanh x = _activations_gelu_pytorch_tanh x
 
 gegelu :: Tensor[..S] -> ?Float -> Tensor[..S]
 gegelu x ?limit=null = _activations_gegelu x limit
 
 relu :: Tensor[..S] -> Tensor[..S]
-relu = _activations_relu
+relu x = _activations_relu x
 
 relu2 :: Tensor[..S] -> Tensor[..S]
-relu2 = _activations_relu2
+relu2 x = _activations_relu2 x
 
 sigmoid :: Tensor[..S] -> Tensor[..S]
-sigmoid = _activations_sigmoid
+sigmoid x = _activations_sigmoid x
 
 tanh :: Tensor[..S] -> Tensor[..S]
-tanh = _activations_tanh
+tanh x = _activations_tanh x
 
 silu :: Tensor[..S] -> Tensor[..S]
-silu = _activations_silu
+silu x = _activations_silu x
 
 swiglu :: Tensor[..S] -> Tensor[..S]
-swiglu = _activations_swiglu
+swiglu x = _activations_swiglu x
 
 xielu :: Path -> Tensor[..S] -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor[..S]
 xielu@path x ?alpha_p_path=null ?alpha_n_path=null ?beta_path=null ?eps_path=null = do

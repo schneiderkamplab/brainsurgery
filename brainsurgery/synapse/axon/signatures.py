@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .ast import AxonFile, AxonModule, TypeExpr, TypeTuple
+from .ast import AxonFile, AxonDefinition, TypeExpr, TypeTuple
 
 
 @dataclass(frozen=True)
@@ -12,11 +12,11 @@ class ModuleSignature:
     returns: tuple[TypeExpr, ...]
 
 
-def _surface_modules_from_file(ast: AxonFile) -> tuple[AxonModule, ...]:
+def _surface_modules_from_file(ast: AxonFile) -> tuple[AxonDefinition, ...]:
     return ast.modules
 
 
-def _module_return_types(module: AxonModule) -> tuple[TypeExpr, ...]:
+def _module_return_types(module: AxonDefinition) -> tuple[TypeExpr, ...]:
     if module.return_type_expr is None:
         return ()
     if isinstance(module.return_type_expr, TypeTuple):
@@ -25,7 +25,7 @@ def _module_return_types(module: AxonModule) -> tuple[TypeExpr, ...]:
 
 
 def _build_module_signatures_for_closed_program(
-    modules: AxonFile | tuple[AxonModule, ...], *, main_module: str | None = None
+    modules: AxonFile | tuple[AxonDefinition, ...], *, main_module: str | None = None
 ) -> dict[str, ModuleSignature]:
     if isinstance(modules, AxonFile):
         modules = _surface_modules_from_file(modules)

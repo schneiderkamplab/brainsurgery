@@ -37,7 +37,7 @@ from .ast import (
     AxonExprTuple,
     AxonFile,
     AxonKwargValue,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -152,8 +152,8 @@ def _is_static_literal(value: Any) -> bool:
     return False
 
 
-def _surface_modules_from_file(ast: AxonFile) -> tuple[AxonModule, ...]:
-    modules: list[AxonModule] = []
+def _surface_modules_from_file(ast: AxonFile) -> tuple[AxonDefinition, ...]:
+    modules: list[AxonDefinition] = []
     for module in ast.modules:
         if isinstance(module.body_expr, AxonExprDo) and not module.body_expr.inline:
             statements = module.body_expr.body
@@ -162,7 +162,7 @@ def _surface_modules_from_file(ast: AxonFile) -> tuple[AxonModule, ...]:
         else:
             statements = module.statements
         modules.append(
-            AxonModule(
+            AxonDefinition(
                 name=module.name,
                 path_param=module.path_param,
                 path_params=module.path_params,
@@ -177,31 +177,26 @@ def _surface_modules_from_file(ast: AxonFile) -> tuple[AxonModule, ...]:
                 pragmas=module.pragmas,
                 type_aliases=dict(ast.type_aliases) or module.type_aliases,
                 return_type_expr=module.return_type_expr,
-                return_shape=module.return_shape,
                 constraints=module.constraints,
             )
         )
     return tuple(modules)
 
 
-def _wrap_modules_as_file(modules: tuple[AxonModule, ...]) -> AxonFile:
+def _wrap_modules_as_file(modules: tuple[AxonDefinition, ...]) -> AxonFile:
     return AxonFile(
         modules=modules,
         imports=(),
         imported_members={},
         exports=(),
         pragmas={},
-        constants={},
         type_aliases={},
     )
 
 
 def _lower_program_symbol_values(program: AxonFile) -> dict[str, Any]:
-    lowered: dict[str, Any] = {}
-    for key, value in program.constants.items():
-        if isinstance(key, str) and isinstance(value, AxonExpr):
-            lowered[key] = _expr_to_runtime_value(value)
-    return lowered
+    del program
+    return {}
 
 
 def _program_has_import_surface(program: AxonFile) -> bool:
@@ -276,14 +271,11 @@ def _stmt_has_inferred_metadata(stmt: AxonStatement) -> bool:
 
 
 def _program_has_inferred_metadata(program: AxonFile) -> bool:
-    for expr in program.constants.values():
-        if _expr_has_inferred_metadata(expr):
-            return True
     return any(_stmt_has_inferred_metadata(stmt) for module in program.modules for stmt in module.statements)
 
 
 def _prepare_program_for_lowering(
-    modules: AxonFile | tuple[AxonModule, ...],
+    modules: AxonFile | tuple[AxonDefinition, ...],
     *,
     main_module: str | None,
     optimize: bool = True,
@@ -291,10 +283,9 @@ def _prepare_program_for_lowering(
     def finish_typed(program: AxonFile) -> AxonFile:
         if optimize:
             program = optimize_flat_typed_axon_file(program, main_module=main_module)
-        else:
-            program = normalize_backend_required_flat_typed_axon_file(
-                program, main_module=main_module
-            )
+        program = normalize_backend_required_flat_typed_axon_file(
+            program, main_module=main_module
+        )
         validate_backend_required_flat_typed_axon_file(program, main_module=main_module)
         canonical = canonicalize_typed_axon_file(program, main_module=main_module)
         validate_lowerable_axon_file(canonical, main_module=main_module)
@@ -2543,7 +2534,7 @@ def _lower_expr(
     return _lower_alias_or_const(expr, out, ctx, guard=guard)
 
 
-def _module_return_names(module: AxonModule) -> tuple[str, ...]:
+def _module_return_names(module: AxonDefinition) -> tuple[str, ...]:
     if module.returns:
         return module.returns
     for stmt in reversed(module.statements):
@@ -2558,7 +2549,7 @@ def _module_return_names(module: AxonModule) -> tuple[str, ...]:
 
 
 def _module_output_names_from_declared_arity(
-    module: AxonModule, *, expected_arity: int
+    module: AxonDefinition, *, expected_arity: int
 ) -> tuple[str, ...]:
     inferred = _module_return_names(module)
     if len(inferred) == expected_arity:
@@ -2568,8 +2559,8 @@ def _module_output_names_from_declared_arity(
     return tuple(f"out_{idx}" for idx in range(expected_arity))
 
 
-def _module_return_last_dims(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
-    return_shape = _shape_from_type_expr(module.return_type_expr) or module.return_shape
+def _module_return_last_dims(module: AxonDefinition, returns: tuple[str, ...]) -> dict[str, Any]:
+    return_shape = _shape_from_type_expr(module.return_type_expr)
     if not returns or return_shape is None or len(return_shape) == 0:
         return {}
     if len(returns) != 1:
@@ -2606,20 +2597,20 @@ def _record_typed_shapes(
             record_shape(target, shape)
 
 
-def _module_param_last_dims(module: AxonModule) -> dict[str, Any]:
+def _module_param_last_dims(module: AxonDefinition) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for param in module.params:
-        shape = _shape_from_type_expr(param.type_expr) or param.shape
+        shape = _shape_from_type_expr(param.type_expr)
         if shape is None or len(shape) == 0:
             continue
         out[param.name] = shape[-1]
     return out
 
 
-def _module_param_shapes(module: AxonModule) -> dict[str, tuple[Any, ...]]:
+def _module_param_shapes(module: AxonDefinition) -> dict[str, tuple[Any, ...]]:
     out: dict[str, tuple[Any, ...]] = {}
     for param in module.params:
-        shape = _shape_from_type_expr(param.type_expr) or param.shape
+        shape = _shape_from_type_expr(param.type_expr)
         if shape is None:
             continue
         out[param.name] = tuple(shape)
@@ -2627,9 +2618,9 @@ def _module_param_shapes(module: AxonModule) -> dict[str, tuple[Any, ...]]:
 
 
 def _module_return_shapes(
-    module: AxonModule, returns: tuple[str, ...]
+    module: AxonDefinition, returns: tuple[str, ...]
 ) -> dict[str, tuple[Any, ...]]:
-    return_shape = _shape_from_type_expr(module.return_type_expr) or module.return_shape
+    return_shape = _shape_from_type_expr(module.return_type_expr)
     if not returns or return_shape is None:
         return {}
     if len(returns) != 1:
@@ -2637,8 +2628,8 @@ def _module_return_shapes(
     return {returns[0]: tuple(return_shape)}
 
 
-def _module_return_heads(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
-    return_shape = _shape_from_type_expr(module.return_type_expr) or module.return_shape
+def _module_return_heads(module: AxonDefinition, returns: tuple[str, ...]) -> dict[str, Any]:
+    return_shape = _shape_from_type_expr(module.return_type_expr)
     if not returns or return_shape is None or len(return_shape) < 2:
         return {}
     if len(returns) != 1:
@@ -2646,7 +2637,7 @@ def _module_return_heads(module: AxonModule, returns: tuple[str, ...]) -> dict[s
     return {returns[0]: return_shape[1]}
 
 
-def _module_inputs(module: AxonModule) -> dict[str, dict[str, bool]]:
+def _module_inputs(module: AxonDefinition) -> dict[str, dict[str, bool]]:
     inputs = {param.name: {"optional": param.optional} for param in module.params}
     for path_param in module.path_params:
         inputs[path_param] = {"optional": False}
@@ -2655,11 +2646,11 @@ def _module_inputs(module: AxonModule) -> dict[str, dict[str, bool]]:
     return inputs
 
 
-def _module_initial_dims(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
+def _module_initial_dims(module: AxonDefinition, returns: tuple[str, ...]) -> dict[str, Any]:
     initial_dims = {
         param.name: shape[-1]
         for param in module.params
-        for shape in (_shape_from_type_expr(param.type_expr) or param.shape,)
+        for shape in (_shape_from_type_expr(param.type_expr),)
         if shape is not None and len(shape) > 0
     }
     initial_dims.update(_module_return_last_dims(module, returns))
@@ -2667,30 +2658,30 @@ def _module_initial_dims(module: AxonModule, returns: tuple[str, ...]) -> dict[s
 
 
 def _module_initial_shapes(
-    module: AxonModule, returns: tuple[str, ...]
+    module: AxonDefinition, returns: tuple[str, ...]
 ) -> dict[str, tuple[Any, ...]]:
     initial_shapes = {
         param.name: tuple(shape)
         for param in module.params
-        for shape in (_shape_from_type_expr(param.type_expr) or param.shape,)
+        for shape in (_shape_from_type_expr(param.type_expr),)
         if shape is not None
     }
     initial_shapes.update(_module_return_shapes(module, returns))
     return initial_shapes
 
 
-def _module_initial_heads(module: AxonModule, returns: tuple[str, ...]) -> dict[str, Any]:
+def _module_initial_heads(module: AxonDefinition, returns: tuple[str, ...]) -> dict[str, Any]:
     initial_heads = {
         param.name: shape[1]
         for param in module.params
-        for shape in (_shape_from_type_expr(param.type_expr) or param.shape,)
+        for shape in (_shape_from_type_expr(param.type_expr),)
         if shape is not None and len(shape) >= 2
     }
     initial_heads.update(_module_return_heads(module, returns))
     return initial_heads
 
 
-def _module_path_param_names(module: AxonModule) -> set[str]:
+def _module_path_param_names(module: AxonDefinition) -> set[str]:
     names = {p for p in module.path_params if isinstance(p, str)}
     if not names and isinstance(module.path_param, str):
         names.add(module.path_param)
@@ -2732,15 +2723,15 @@ def _ensure_outputs_from_returns(outputs: dict[str, str], returns: tuple[str, ..
         outputs[name] = name
 
 
-def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple[str, int]]:
-    def _module_path_param_names(module: AxonModule) -> tuple[str, ...]:
+def _extract_primitive_aliases(modules: tuple[AxonDefinition, ...]) -> dict[str, tuple[str, int]]:
+    def _module_path_param_names(module: AxonDefinition) -> tuple[str, ...]:
         if module.path_params:
             return tuple(module.path_params)
         if module.path_param is not None:
             return (module.path_param,)
         return ()
 
-    def _is_identity_alias_call(module: AxonModule, value: AxonExprCall) -> bool:
+    def _is_identity_alias_call(module: AxonDefinition, value: AxonExprCall) -> bool:
         # Defaulted/optional wrapper params change call-surface semantics
         # (especially kwargs), so do not collapse those wrappers to primitives.
         if any(param.optional for param in module.params):
@@ -2761,7 +2752,7 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
                 return False
         return True
 
-    def _module_signature_fingerprint(module: AxonModule) -> tuple[Any, ...]:
+    def _module_signature_fingerprint(module: AxonDefinition) -> tuple[Any, ...]:
         path_params = (
             tuple(module.path_params)
             if module.path_params
@@ -2773,11 +2764,7 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
             tuple(param.type_expr for param in module.params),
             tuple(bool(param.optional) for param in module.params),
             tuple(param.default_expr for param in module.params),
-            tuple(
-                tuple(param.shape) if param.shape is not None else None for param in module.params
-            ),
             module.return_type_expr,
-            tuple(module.return_shape) if module.return_shape is not None else None,
         )
 
     allowed_namespaces = set(_BUILTIN_MODULE_NAMESPACES)
@@ -2878,7 +2865,7 @@ def _extract_primitive_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tup
     return aliases
 
 
-def _extract_prelude_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple[str, int]]:
+def _extract_prelude_aliases(modules: tuple[AxonDefinition, ...]) -> dict[str, tuple[str, int]]:
     aliases: dict[str, tuple[str, int]] = {}
     primitive_aliases = _extract_primitive_aliases(modules)
     for full_name, alias in primitive_aliases.items():
@@ -2892,8 +2879,8 @@ def _extract_prelude_aliases(modules: tuple[AxonModule, ...]) -> dict[str, tuple
 
 
 def _collect_imported_symbol_values(
-    module: AxonModule,
-    modules_by_name: dict[str, AxonModule] | None,
+    module: AxonDefinition,
+    modules_by_name: dict[str, AxonDefinition] | None,
 ) -> dict[str, Any]:
     if not module.imported_members or not modules_by_name:
         return {}
@@ -2912,7 +2899,7 @@ def _collect_imported_symbol_values(
 
 def _new_lower_ctx(
     *,
-    module: AxonModule,
+    module: AxonDefinition,
     returns: tuple[str, ...],
     signatures: dict[str, tuple[list[str], list[str]]] | None,
     block_path_params: dict[str, tuple[str, ...]] | None,
@@ -2982,7 +2969,7 @@ def _new_lower_ctx(
     )
 
 
-def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
+def lower_axon_module_to_synapse_block(module: AxonDefinition) -> dict[str, Any]:
     validate_typed_axon_file(_wrap_modules_as_file((module,)), main_module=module.name)
     typed_signatures = _build_module_signatures_for_closed_program(
         (module,), main_module=module.name
@@ -3024,7 +3011,7 @@ def lower_axon_module_to_synapse_block(module: AxonModule) -> dict[str, Any]:
     return {"inputs": inputs, "graph": graph, "outputs": outputs}
 
 
-def lower_axon_module_to_synapse_spec(module: AxonModule) -> dict[str, Any]:
+def lower_axon_module_to_synapse_spec(module: AxonDefinition) -> dict[str, Any]:
     block = lower_axon_module_to_synapse_block(module)
     model: dict[str, Any] = {
         "inputs": block["inputs"],
@@ -3360,7 +3347,7 @@ def _finalize_block_io_types_for_model(
 
 
 def lower_axon_program_to_synapse_spec(
-    modules: AxonFile | tuple[AxonModule, ...],
+    modules: AxonFile | tuple[AxonDefinition, ...],
     *,
     main_module: str | None = None,
     optimize: bool = True,

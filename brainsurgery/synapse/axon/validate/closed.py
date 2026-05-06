@@ -21,7 +21,7 @@ from ..ast.nodes import (
     AxonExprPipe,
     AxonExprTernary,
     AxonExprTuple,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -42,6 +42,7 @@ from ..ast.types import (
     TypeVar,
     dim_token_names,
 )
+from ..entrypoint import pragma_main_module
 from .ast import validate_axon_program
 from .diagnostics import ValidationDiagnostic
 
@@ -83,9 +84,9 @@ def _collect_type_dim_names(
         alias_def = _lookup_type_alias(root.name, type_aliases=type_aliases)
         if alias_def is None or root.name in stack:
             return direct_args
-        if len(root.args) != len(alias_def.params):
+        subst = _match_type_alias_dims(alias_def.params, root.args)
+        if subst is None:
             return direct_args
-        subst = {name: arg for name, arg in zip(alias_def.params, root.args, strict=True)}
         return direct_args | _collect_type_dim_names(
             _substitute_type_alias_dims(alias_def.value, subst=subst),
             type_aliases=type_aliases,
@@ -96,14 +97,27 @@ def _collect_type_dim_names(
     return set()
 
 
-def _substitute_type_alias_dims(tp: TypeExpr, *, subst: dict[str, DimToken]) -> TypeExpr:
-    def _sub_dim(dim: DimToken) -> DimToken:
+def _substitute_type_alias_dims(
+    tp: TypeExpr, *, subst: dict[str, DimToken | tuple[DimToken, ...]]
+) -> TypeExpr:
+    def _sub_dim(dim: DimToken) -> tuple[DimToken, ...]:
         if isinstance(dim, str):
-            return subst.get(dim, dim)
+            mapped = subst.get(dim)
+            if mapped is None:
+                return (dim,)
+            if isinstance(mapped, tuple):
+                return mapped
+            return (mapped,)
         if isinstance(dim, int):
-            return dim
+            return (dim,)
         if isinstance(dim, DimExprBinary):
-            return DimExprBinary(op=dim.op, left=_sub_dim(dim.left), right=_sub_dim(dim.right))
+            left = _sub_dim(dim.left)
+            right = _sub_dim(dim.right)
+            if len(left) == 1 and len(right) == 1:
+                return (DimExprBinary(op=dim.op, left=left[0], right=right[0]),)
+            raise ValueError(
+                "variadic type alias dimension cannot appear inside dimension arithmetic"
+            )
         raise TypeError(f"unsupported dim token {dim!r}")
 
     if isinstance(tp, TypeOptional):
@@ -115,12 +129,40 @@ def _substitute_type_alias_dims(tp: TypeExpr, *, subst: dict[str, DimToken]) -> 
             items=tuple(_substitute_type_alias_dims(item, subst=subst) for item in tp.items)
         )
     if isinstance(tp, TypeTensor):
-        return TypeTensor(base=tp.base, dims=tuple(_sub_dim(dim) for dim in tp.dims))
+        return TypeTensor(
+            base=tp.base,
+            dims=tuple(item for dim in tp.dims for item in _sub_dim(dim)),
+        )
     if isinstance(tp, TypeNamed):
-        return TypeNamed(name=tp.name, args=tuple(_sub_dim(dim) for dim in tp.args))
+        return TypeNamed(
+            name=tp.name,
+            args=tuple(item for dim in tp.args for item in _sub_dim(dim)),
+        )
     if isinstance(tp, TypeVar):
         return tp
     return tp
+
+
+def _match_type_alias_dims(
+    params: tuple[str, ...], args: tuple[DimToken, ...]
+) -> dict[str, DimToken | tuple[DimToken, ...]] | None:
+    variadic_idx = next((idx for idx, param in enumerate(params) if param.startswith("..")), None)
+    if variadic_idx is None:
+        if len(args) != len(params):
+            return None
+        return {name: dim for name, dim in zip(params, args, strict=True)}
+    fixed_after = len(params) - variadic_idx - 1
+    if len(args) < variadic_idx + fixed_after:
+        return None
+    subst: dict[str, DimToken | tuple[DimToken, ...]] = {}
+    for name, dim in zip(params[:variadic_idx], args[:variadic_idx], strict=True):
+        subst[name] = dim
+    variadic_end = len(args) - fixed_after
+    subst[params[variadic_idx]] = tuple(args[variadic_idx:variadic_end])
+    if fixed_after:
+        for name, dim in zip(params[variadic_idx + 1 :], args[variadic_end:], strict=True):
+            subst[name] = dim
+    return subst
 
 
 def _lookup_type_alias(name: str, *, type_aliases: dict[str, TypeAliasDef]) -> TypeAliasDef | None:
@@ -153,14 +195,12 @@ def _validate_type_expr(
     if isinstance(tp, TypeNamed):
         alias_def = _lookup_type_alias(tp.name, type_aliases=type_aliases)
         if alias_def is None:
-            if tp.name == "Tensor":
-                return
             if "." not in tp.name:
                 return
             raise ValueError(
                 f"Axon closed validation failed in {owner!r}: unknown type alias {tp.name!r}"
             )
-        if len(tp.args) != len(alias_def.params):
+        if _match_type_alias_dims(alias_def.params, tp.args) is None:
             raise ValueError(
                 f"Axon closed validation failed in {owner!r}: type alias {tp.name!r} "
                 f"expects {len(alias_def.params)} args, got {len(tp.args)}"
@@ -176,7 +216,10 @@ def _validate_type_aliases(type_aliases: dict[str, TypeAliasDef]) -> None:
 
 
 def _call_base_name(callee: str) -> str:
-    return callee.split("@", 1)[0].strip()
+    indexes = [idx for idx in (callee.find("@"), callee.find("::")) if idx >= 0]
+    if not indexes:
+        return callee.strip()
+    return callee[: min(indexes)].strip()
 
 
 def _validate_expr_closure(
@@ -184,21 +227,21 @@ def _validate_expr_closure(
     *,
     type_aliases: dict[str, TypeAliasDef],
     available_modules: set[str],
-    available_constants: set[str],
+    available_values: set[str],
     bound_names: set[str],
-    module: AxonModule,
+    module: AxonDefinition,
 ) -> None:
     def _check_name(name: str) -> None:
         if name.startswith("_"):
             return
-        if name in bound_names or name in available_modules or name in available_constants:
+        if name in bound_names or name in available_modules or name in available_values:
             return
         raise ValueError(
             f"Axon closed validation failed in module {module.name!r}: unresolved name {name!r}"
         )
 
     if isinstance(expr, AxonExprName):
-        _check_name(expr.name)
+        _check_name(_call_base_name(expr.name))
         return
     if isinstance(expr, AxonExprCall):
         _check_name(_call_base_name(expr.callee))
@@ -207,7 +250,7 @@ def _validate_expr_closure(
                 arg,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=bound_names,
                 module=module,
             )
@@ -217,7 +260,7 @@ def _validate_expr_closure(
                     value,
                     type_aliases=type_aliases,
                     available_modules=available_modules,
-                    available_constants=available_constants,
+                    available_values=available_values,
                     bound_names=bound_names,
                     module=module,
                 )
@@ -227,7 +270,7 @@ def _validate_expr_closure(
             expr.value,
             type_aliases=type_aliases,
             available_modules=available_modules,
-            available_constants=available_constants,
+            available_values=available_values,
             bound_names=bound_names,
             module=module,
         )
@@ -236,7 +279,7 @@ def _validate_expr_closure(
                 stage,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=bound_names,
                 module=module,
             )
@@ -246,7 +289,7 @@ def _validate_expr_closure(
             expr.value,
             type_aliases=type_aliases,
             available_modules=available_modules,
-            available_constants=available_constants,
+            available_values=available_values,
             bound_names=bound_names,
             module=module,
         )
@@ -256,7 +299,7 @@ def _validate_expr_closure(
             expr.body,
             type_aliases=type_aliases,
             available_modules=available_modules,
-            available_constants=available_constants,
+            available_values=available_values,
             bound_names=nested_bound,
             module=module,
         )
@@ -267,7 +310,7 @@ def _validate_expr_closure(
                 child,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=bound_names,
                 module=module,
             )
@@ -278,7 +321,7 @@ def _validate_expr_closure(
                 child,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=bound_names,
                 module=module,
             )
@@ -290,7 +333,7 @@ def _validate_expr_closure(
             expr.body,
             type_aliases=type_aliases,
             available_modules=available_modules,
-            available_constants=available_constants,
+            available_values=available_values,
             bound_names=nested_bound,
             module=module,
         )
@@ -305,7 +348,7 @@ def _validate_expr_closure(
             expr.expr,
             type_aliases=type_aliases,
             available_modules=available_modules,
-            available_constants=available_constants,
+            available_values=available_values,
             bound_names=bound_names,
             module=module,
         )
@@ -315,7 +358,7 @@ def _validate_expr_closure(
             expr.inner,
             type_aliases=type_aliases,
             available_modules=available_modules,
-            available_constants=available_constants,
+            available_values=available_values,
             bound_names=bound_names,
             module=module,
         )
@@ -326,7 +369,7 @@ def _validate_expr_closure(
                 item,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=bound_names,
                 module=module,
             )
@@ -336,7 +379,7 @@ def _validate_expr_closure(
             expr.body,
             type_aliases=type_aliases,
             available_modules=available_modules,
-            available_constants=available_constants,
+            available_values=available_values,
             bound_names=set(bound_names),
             module=module,
         )
@@ -352,9 +395,9 @@ def _validate_stmt_closure(
     *,
     type_aliases: dict[str, TypeAliasDef],
     available_modules: set[str],
-    available_constants: set[str],
+    available_values: set[str],
     bound_names: set[str],
-    module: AxonModule,
+    module: AxonDefinition,
 ) -> None:
     def _collect_bound_names_after(
         branch_stmts: tuple[AxonStatement, ...],
@@ -386,7 +429,7 @@ def _validate_stmt_closure(
                 stmt.expr,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=local_bound,
                 module=module,
             )
@@ -398,7 +441,7 @@ def _validate_stmt_closure(
                     value,
                     type_aliases=type_aliases,
                     available_modules=available_modules,
-                    available_constants=available_constants,
+                    available_values=available_values,
                     bound_names=local_bound,
                     module=module,
                 )
@@ -408,7 +451,7 @@ def _validate_stmt_closure(
                 stmt.cond,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=local_bound,
                 module=module,
             )
@@ -416,7 +459,7 @@ def _validate_stmt_closure(
                 stmt.true_body,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=set(local_bound),
                 module=module,
             )
@@ -424,7 +467,7 @@ def _validate_stmt_closure(
                 stmt.false_body,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=set(local_bound),
                 module=module,
             )
@@ -444,7 +487,7 @@ def _validate_stmt_closure(
                     expr,
                     type_aliases=type_aliases,
                     available_modules=available_modules,
-                    available_constants=available_constants,
+                    available_values=available_values,
                     bound_names=local_bound,
                     module=module,
                 )
@@ -452,7 +495,7 @@ def _validate_stmt_closure(
                 stmt.body,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=nested_bound,
                 module=module,
             )
@@ -466,14 +509,14 @@ def _validate_stmt_closure(
                         raw_value,
                         type_aliases=type_aliases,
                         available_modules=available_modules,
-                        available_constants=available_constants,
+                        available_values=available_values,
                         bound_names=local_bound,
                         module=module,
                     )
             for part in stmt.prefix.parts:
                 for match in _PATH_PLACEHOLDER_RE.finditer(part):
                     name = match.group(1)
-                    if name not in local_bound and name not in available_constants:
+                    if name not in local_bound and name not in available_values:
                         raise ValueError(
                             f"Axon closed validation failed in module {module.name!r}: "
                             f"unresolved scope placeholder {name!r}"
@@ -482,7 +525,7 @@ def _validate_stmt_closure(
                 stmt.body,
                 type_aliases=type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=nested_bound,
                 module=module,
             )
@@ -490,7 +533,13 @@ def _validate_stmt_closure(
 
 
 def validate_closed_axon_file(ast: AxonFile, *, main_module: str | None = None) -> None:
-    validate_axon_program(ast.modules, main_module=main_module)
+    pragma_main = pragma_main_module(ast)
+    if pragma_main is not None and pragma_main not in {module.name for module in ast.modules}:
+        raise ValueError(f"Axon closed validation failed: MAIN pragma references unknown definition {pragma_main!r}")
+    validate_axon_program(
+        ast.modules,
+        main_module=main_module if main_module is not None else pragma_main,
+    )
     if ast.imports:
         raise ValueError("Axon closed validation failed: closed AST must not carry file imports")
     if ast.imported_members:
@@ -514,7 +563,7 @@ def validate_closed_axon_file(ast: AxonFile, *, main_module: str | None = None) 
             )
     _validate_type_aliases(ast.type_aliases)
     available_modules = {module.name for module in ast.modules}
-    available_constants = set(ast.constants)
+    available_values = available_modules
     for module in ast.modules:
         for param in module.params:
             _validate_type_expr(param.type_expr, type_aliases=ast.type_aliases, owner=module.name)
@@ -537,7 +586,7 @@ def validate_closed_axon_file(ast: AxonFile, *, main_module: str | None = None) 
                 module.body_expr,
                 type_aliases=ast.type_aliases,
                 available_modules=available_modules,
-                available_constants=available_constants,
+                available_values=available_values,
                 bound_names=bound_names,
                 module=module,
             )
@@ -545,7 +594,7 @@ def validate_closed_axon_file(ast: AxonFile, *, main_module: str | None = None) 
             module.statements,
             type_aliases=ast.type_aliases,
             available_modules=available_modules,
-            available_constants=available_constants,
+            available_values=available_values,
             bound_names=bound_names,
             module=module,
         )
@@ -590,10 +639,10 @@ def warn_unused_definitions(
     all_module_names: tuple[str, ...],
     root_entrypoint: str | None,
     reachable_modules: set[str],
-    all_constant_names: set[str],
-    reachable_constants: set[str],
+    all_value_names: set[str],
+    reachable_values: set[str],
     module_sources: dict[str, Path],
-    constant_sources: dict[str, Path],
+    value_sources: dict[str, Path],
     builtins_dir: Path,
 ) -> list[ValidationDiagnostic]:
     out: list[ValidationDiagnostic] = []
@@ -611,15 +660,15 @@ def warn_unused_definitions(
                     file_path=source,
                 )
             )
-    for const_name in sorted(all_constant_names):
-        if const_name not in reachable_constants:
-            source = constant_sources.get(const_name)
+    for value_name in sorted(all_value_names):
+        if value_name not in reachable_values:
+            source = value_sources.get(value_name)
             if source is not None and builtins_dir in source.parents:
                 continue
             out.append(
                 ValidationDiagnostic(
                     level="warning",
-                    message=f"unused definition {const_name}",
+                    message=f"unused definition {value_name}",
                     file_path=source,
                 )
             )

@@ -23,7 +23,7 @@ from .nodes import (
     AxonExprString,
     AxonExprTernary,
     AxonExprTuple,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -237,13 +237,6 @@ def render_axon_file_to_dot(ast: AxonFile, *, show_types: bool = False) -> str:
         for name, alias_def in ast.type_aliases.items():
             params = f"[{', '.join(alias_def.params)}]" if alias_def.params else ""
             dot.edge(aliases, dot.node(f"{name}{params} = {render_type(alias_def.value)}"))
-    if ast.constants:
-        consts = dot.node("constants")
-        dot.edge(root, consts)
-        for name, expr in ast.constants.items():
-            item = dot.node(f"const\n{name}")
-            dot.edge(consts, item)
-            dot.edge(item, _emit_expr(dot, expr, show_types=show_types), "expr")
     modules = dot.node("modules")
     dot.edge(root, modules)
     for module in ast.modules:
@@ -251,7 +244,7 @@ def render_axon_file_to_dot(ast: AxonFile, *, show_types: bool = False) -> str:
     return dot.finish()
 
 
-def _emit_module(dot: _DotBuilder, module: AxonModule, *, show_types: bool = False) -> str:
+def _emit_module(dot: _DotBuilder, module: AxonDefinition, *, show_types: bool = False) -> str:
     root = dot.node(f"module\n{module.name}")
     if module.return_type_expr is not None:
         dot.edge(root, dot.node(f"returns\n{render_type(module.return_type_expr)}"), "type")

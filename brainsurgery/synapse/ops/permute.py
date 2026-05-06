@@ -177,13 +177,21 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "Any"),
+    "args": ("Tensor[..S]", "Any"),
     "kwargs": {},
-    "returns": ("Tensor",),
+    "returns": ("Tensor[..R]",),
 }
 
 
 def _permute_indices(expr: Any, *, rank: int, helpers: Any) -> tuple[int, ...] | None:
+    while True:
+        resolved = None
+        name = getattr(expr, "name", None)
+        if isinstance(name, str):
+            resolved = helpers.resolve_name_expr(name)
+        if resolved is None:
+            break
+        expr = resolved
     items = getattr(expr, "items", None)
     if not isinstance(items, tuple):
         return None

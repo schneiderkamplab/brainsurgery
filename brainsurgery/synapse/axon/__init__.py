@@ -1,6 +1,6 @@
 from .ast import (
     AxonBind,
-    AxonModule,
+    AxonDefinition,
     AxonParam,
     AxonRepeat,
     AxonReturn,
@@ -10,6 +10,7 @@ from .ast import (
 )
 from .canonicalize import canonicalize_typed_axon_file
 from .expression_codec import axon_expr_to_runtime_value, parse_expression_to_runtime_value
+from .entrypoint import pragma_main_module, resolve_main_module
 from .flatten import flatten_closed_axon_file
 from .load import LoadedAxonFile, LoadedAxonProgram, load_axon_files_from_path, resolve_import_path
 from .lowering import (
@@ -38,6 +39,8 @@ from .render import synapse_spec_to_axon_module_text
 from .resolve import (
     ResolveDiagnostic,
     ResolveReport,
+    prune_unreachable_definitions,
+    reachable_definitions,
     resolve_axon_program_from_path,
     resolve_axon_program_to_source,
     resolve_loaded_axon_files,
@@ -50,6 +53,8 @@ from .tokenization import (
     spec_padding_side,
     tokenize_prompts,
 )
+from .typecheck import typecheck_flat_axon_file
+from .typecheck2 import typecheck2_flat_axon_file
 from .validate import validate_axon_program, validate_closed_axon_file, validate_flat_axon_file
 
 __all__ = [
@@ -57,7 +62,7 @@ __all__ = [
     "LoadedAxonFile",
     "LoadedAxonProgram",
     "MaterializeContext",
-    "AxonModule",
+    "AxonDefinition",
     "AxonParam",
     "AxonRepeat",
     "AxonReturn",
@@ -73,6 +78,8 @@ __all__ = [
     "normalize_closed_axon_file",
     "normalize_backend_required_flat_typed_axon_file",
     "parse_expression_to_runtime_value",
+    "pragma_main_module",
+    "resolve_main_module",
     "ast_equal",
     "render_axon_file",
     "axon_expr_to_runtime_value",
@@ -82,11 +89,15 @@ __all__ = [
     "resolve_axon_program_to_source",
     "resolve_loaded_axon_files",
     "resolve_axon_program_from_path",
+    "prune_unreachable_definitions",
+    "reachable_definitions",
     "ResolveReport",
     "ResolveDiagnostic",
     "flatten_closed_axon_file",
     "canonicalize_typed_axon_file",
     "optimize_flat_typed_axon_file",
+    "typecheck_flat_axon_file",
+    "typecheck2_flat_axon_file",
     "validate_axon_program",
     "validate_closed_axon_file",
     "validate_flat_axon_file",

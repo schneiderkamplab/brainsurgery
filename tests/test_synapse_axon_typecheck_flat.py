@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from brainsurgery.synapse.axon.ast import (
     AxonBind,
     AxonExprCall,
     AxonExprInt,
     AxonExprName,
     AxonFile,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     Constraint,
@@ -95,7 +97,7 @@ main = do
   return x
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    bad = AxonModule(
+    bad = AxonDefinition(
         name="bad",
         path_param=None,
         params=(),
@@ -115,7 +117,6 @@ main = do
         imported_members=flat.imported_members,
         exports=flat.exports,
         pragmas=flat.pragmas,
-        constants=flat.constants,
         type_aliases=flat.type_aliases,
         origin_path=flat.origin_path,
     )
@@ -156,6 +157,16 @@ f x = D
     assert len(ret_stmt.values) == 1
     assert ret_stmt.values[0].inferred_type is not None
     assert isinstance(ret_stmt.values[0].inferred_type, TypeDim)
+
+
+def test_typecheck_flat_rejects_bare_tensor_type() -> None:
+    source = """
+main :: Tensor -> Tensor
+main x = x
+"""
+    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    with pytest.raises(ValueError, match="Tensor type requires shape dims"):
+        typecheck_flat_axon_file(flat, main_module="main")
 
 
 def test_typecheck_flat_records_symbolic_module_constraints() -> None:
@@ -295,19 +306,17 @@ def test_typecheck_attention_preserves_matmul_and_mask_broadcast_shapes(tmp_path
     )
 
 
-def test_typecheck_chunk_stays_list_typed_with_constant_parts() -> None:
+def test_typecheck_rejects_chunk_wrapper_that_claims_unchanged_shape() -> None:
     source = """
+bad_chunk :: Tensor[..S] -> List[Tensor[..S]]
+bad_chunk x = _chunk x -1 3
+
 main :: Tensor[B,S,D] -> List[Tensor[B,S,D]]
-main x = do
-  y <- _chunk x -1 3
-  return y
+main x = bad_chunk x
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
-    validate_typed_axon_file(typed, main_module="main")
-    text = render_axon_file(typed, show_types=True)
-    assert "_chunk" in text
-    assert "List[Tensor[B,S,D]]" in text
+    with pytest.raises(ValueError, match="cannot unify|type mismatch|return"):
+        typecheck_flat_axon_file(flat, main_module="main")
 
 
 def test_scoped_typevars_does_not_rescope_already_scoped_typevars() -> None:

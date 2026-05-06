@@ -23,3 +23,5 @@ Synapse policy: `../AGENTS.md`
 - Embedding HF/model quirks directly into compiler/runtime layers.
 - Compatibility hacks that bypass proper type/lowering invariants.
 - Model-family name checks (direct or indirect) in parser/typecheck/lowering/codegen paths.
+- Parallel shape metadata in AST nodes. Tensor dimensions must come from `TypeExpr` only.
+- Parser-side semantic rewrites such as point-free eta expansion or constant evaluation.

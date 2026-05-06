@@ -18,6 +18,10 @@ def _synapse_module() -> Any:
     return importlib.import_module("brainsurgery.synapse")
 
 
+def _axon_module() -> Any:
+    return importlib.import_module("brainsurgery.synapse.axon")
+
+
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     loaded = OmegaConf.load(path)
     data = OmegaConf.to_container(loaded, resolve=True)
@@ -64,6 +68,89 @@ def _render_resolved_axon_program(program: Any) -> str:
     module = _synapse_module()
     render_fn = getattr(module, "render_axon_file")
     return render_fn(program.ast)
+
+
+_AXON_DUMP_STAGES = {
+    "parse",
+    "resolve",
+    "normalize",
+    "flatten",
+    "typecheck",
+    "backend-required",
+    "optimize",
+    "canonicalize",
+    "final",
+}
+
+
+def _dump_axon_stage_to_text(
+    axon_path: Path,
+    *,
+    stage: str,
+    main_module: str | None,
+    strict: bool,
+    backend_required: bool,
+    optimize: bool,
+    canonicalize: bool,
+    show_types: bool,
+) -> str:
+    module = _axon_module()
+    parse_fn = getattr(module, "parse_axon_program_from_path")
+    resolve_fn = getattr(module, "resolve_axon_program_from_path")
+    normalize_fn = getattr(module, "normalize_closed_axon_file")
+    flatten_fn = getattr(module, "flatten_closed_axon_file")
+    typecheck_fn = getattr(module, "typecheck_flat_axon_file")
+    backend_required_fn = getattr(module, "normalize_backend_required_flat_typed_axon_file")
+    optimize_fn = getattr(module, "optimize_flat_typed_axon_file")
+    canonicalize_fn = getattr(module, "canonicalize_typed_axon_file")
+    render_fn = getattr(module, "render_axon_file")
+
+    if stage not in _AXON_DUMP_STAGES:
+        allowed = ", ".join(sorted(_AXON_DUMP_STAGES))
+        raise typer.BadParameter(f"Unknown stage {stage!r}. Expected one of: {allowed}")
+    if stage == "backend-required" and not backend_required:
+        raise typer.BadParameter("--stage backend-required requires --backend-required")
+    if stage == "optimize" and not optimize:
+        raise typer.BadParameter("--stage optimize requires --optimize")
+    if stage == "canonicalize" and not canonicalize:
+        raise typer.BadParameter("--stage canonicalize requires --canonicalize")
+
+    if stage == "parse":
+        return render_fn(parse_fn(axon_path), show_types=show_types)
+
+    report = resolve_fn(axon_path, strict=strict)
+    program = report.ast
+    if stage == "resolve":
+        return render_fn(program, show_types=show_types)
+
+    program = normalize_fn(program, main_module=main_module)
+    if stage == "normalize":
+        return render_fn(program, show_types=show_types)
+
+    program = flatten_fn(program, main_module=main_module)
+    if stage == "flatten":
+        return render_fn(program, show_types=show_types)
+
+    program = typecheck_fn(program, main_module=main_module)
+    if stage == "typecheck":
+        return render_fn(program, show_types=show_types)
+
+    if stage == "backend-required":
+        program = backend_required_fn(program, main_module=main_module)
+        return render_fn(program, show_types=show_types)
+
+    if stage == "optimize" or (stage == "final" and optimize):
+        program = optimize_fn(program, main_module=main_module)
+        if stage == "optimize":
+            return render_fn(program, show_types=show_types)
+
+    if stage == "final" and not optimize and backend_required:
+        program = backend_required_fn(program, main_module=main_module)
+
+    if stage == "canonicalize" or (stage == "final" and canonicalize):
+        program = canonicalize_fn(program, main_module=main_module)
+
+    return render_fn(program, show_types=show_types)
 
 
 def _build_pipeline_plan_for_axon(
@@ -276,6 +363,92 @@ def axon_resolve(
     typer.echo(f"Wrote resolved Axon source to {output_path}")
 
 
+@app.command("axon-stage-dump")
+def axon_stage_dump(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    output_path: Path = typer.Argument(
+        ...,
+        help="Destination Axon file for the selected pipeline stage.",
+    ),
+    stage: str = typer.Option(
+        "final",
+        "--stage",
+        "--target-stage",
+        help=(
+            "Stage to dump: parse, resolve, normalize, flatten, typecheck, "
+            "backend-required, optimize, canonicalize, or final."
+        ),
+    ),
+    main_module: str | None = typer.Option(
+        None,
+        "--main-module",
+        help="Main Axon module name (defaults to last module in file).",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Fail when the resolver emits warnings.",
+    ),
+    backend_required: bool = typer.Option(
+        True,
+        "--backend-required/--no-backend-required",
+        help="For --stage final --no-optimize, run backend-required rewrites after typecheck.",
+    ),
+    optimize: bool = typer.Option(
+        False,
+        "--optimize/--no-optimize",
+        help="For --stage final, run the optimizer after typecheck/backend-required.",
+    ),
+    canonicalize: bool = typer.Option(
+        False,
+        "--canonicalize/--no-canonicalize",
+        help="For --stage final, run canonicalization last.",
+    ),
+    show_types: bool = typer.Option(
+        False,
+        "--show-types/--no-show-types",
+        help="Render inferred type annotations when available.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite output file if it already exists.",
+    ),
+) -> None:
+    """Render the Axon program after a selected frontend/pipeline stage."""
+    _ensure_overwrite_allowed(output_path, force=force)
+    if output_path.suffix != ".axon":
+        raise typer.BadParameter("Output path must end with .axon")
+    if isinstance(main_module, OptionInfo):
+        main_module = None
+
+    try:
+        text = _dump_axon_stage_to_text(
+            axon_path,
+            stage=stage,
+            main_module=main_module,
+            strict=strict,
+            backend_required=backend_required,
+            optimize=optimize,
+            canonicalize=canonicalize,
+            show_types=show_types,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+    typer.echo(f"Wrote {stage} Axon source to {output_path}")
+
+
 @app.command("axon-test")
 def axon_test(
     axon_path: Path = typer.Argument(
@@ -319,11 +492,6 @@ def axon_test(
         "AxonGeneratedModel",
         "--class-name",
         help="Generated PyTorch class name.",
-    ),
-    main_module: str | None = typer.Option(
-        None,
-        "--main-module",
-        help="Main Axon module name (defaults to last module in file).",
     ),
     dtype: str = typer.Option(
         "float32",
@@ -411,9 +579,14 @@ def axon_test(
         help="On CUDA OOM, retry HF/Axon on CPU (disable to fail fast on OOM).",
     ),
     optimize: bool = typer.Option(
-        True,
+        False,
         "--optimize/--no-optimize",
         help="Enable the Axon optimizer before lowering.",
+    ),
+    canonicalize: bool = typer.Option(
+        False,
+        "--canonicalize/--no-canonicalize",
+        help="Enable Axon canonicalization before codegen2/runtime2 graph lowering.",
     ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
@@ -449,6 +622,7 @@ def axon_test(
             compile_dynamic=compile_dynamic,
             hf_strict_dtype=hf_strict_dtype,
             optimize=optimize,
+            canonicalize=canonicalize,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -601,11 +775,6 @@ def axon_benchmark(
         "--class-name",
         help="Generated PyTorch class name.",
     ),
-    main_module: str | None = typer.Option(
-        None,
-        "--main-module",
-        help="Main Axon module name (defaults to last module in file).",
-    ),
     dtype: str = typer.Option(
         "float32",
         "--dtype",
@@ -686,6 +855,11 @@ def axon_benchmark(
         "--axon-backend",
         help="Axon execution backend (codegen, codegen2, runtime, runtime2, or pipeline).",
     ),
+    axon_typechecker: str = typer.Option(
+        "typecheck2",
+        "--axon-typechecker",
+        help="Axon typechecker for codegen2/runtime2 graph lowering (typecheck or typecheck2).",
+    ),
     pipeline_parallel_size: int | None = typer.Option(
         None,
         "--pipeline-parallel-size",
@@ -696,9 +870,14 @@ def axon_benchmark(
         ),
     ),
     optimize: bool = typer.Option(
-        True,
+        False,
         "--optimize/--no-optimize",
         help="Enable the Axon optimizer before lowering.",
+    ),
+    canonicalize: bool = typer.Option(
+        False,
+        "--canonicalize/--no-canonicalize",
+        help="Enable Axon canonicalization before codegen2/runtime2 graph lowering.",
     ),
     skip_hf: bool = typer.Option(
         False,
@@ -760,7 +939,6 @@ def axon_benchmark(
             max_len=max_len,
             tokenizer=tokenizer,
             class_name=class_name,
-            main_module=main_module,
             dtype=dtype,
             model_task=model_task,
             trace_layers=trace_layers,
@@ -777,8 +955,10 @@ def axon_benchmark(
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
             axon_backend=axon_backend,
+            axon_typechecker=axon_typechecker,
             pipeline_parallel_size=pipeline_parallel_size,
             optimize=optimize,
+            canonicalize=canonicalize,
             skip_hf=skip_hf,
             hf_strict_dtype=hf_strict_dtype,
             oom_cpu_fallback=oom_cpu_fallback,

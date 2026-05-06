@@ -407,7 +407,7 @@ def type_rule(
     if dim_token is not None and input_dims:
         last = input_dims[-1]
         if last != dim_token:
-            if not (isinstance(last, str) and isinstance(dim_token, str)):
+            if isinstance(last, int) and isinstance(dim_token, int):
                 raise ValueError(
                     f"Axon typecheck failed: _layernorm dim {dim_token!r} mismatches input last dim {last!r}"
                 )

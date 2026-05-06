@@ -409,18 +409,20 @@ main input_ids past_kv = do
                 )
 
 
-def test_flatten_constants_inline_prelude_temps() -> None:
+def test_flatten_zero_arg_defs_inline_prelude_temps() -> None:
     source = """
 main :: Tensor[B,S,D] -> Tensor[B,S,D]
 main x = x
 
-A = Config.int @text_config.hidden_size default=(Config.int @hidden_size default=640)
+A = _config_int (@@text_config.hidden_size) default=(_config_int (@@hidden_size) default=640)
 """
     program = parse_axon_program(source)
     flat = flatten_closed_axon_file(program, main_module="main")
-    const_expr = flat.constants["A"]
+    const_module = next(module for module in flat.modules if module.name == "A")
+    assert len(const_module.statements) == 2
+    bind_stmt = const_module.statements[0]
+    assert isinstance(bind_stmt, AxonBind)
+    const_expr = bind_stmt.expr
     assert isinstance(const_expr, AxonExprCall)
     default_expr = const_expr.kwargs["default"]
     assert isinstance(default_expr, AxonExprCall)
-    rendered = render_axon_file(flat)
-    assert "__flat_" not in rendered

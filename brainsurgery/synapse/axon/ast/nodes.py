@@ -19,7 +19,6 @@ class AxonParam:
     name: str
     optional: bool = False
     type_expr: TypeExpr | None = None
-    shape: tuple[DimToken, ...] | None = None
     default_expr: "AxonExpr | None" = None
 
 
@@ -217,7 +216,7 @@ AxonStatement = AxonBind | AxonReturn | AxonRepeat | AxonYield | AxonCond | Axon
 
 
 @dataclass(frozen=True)
-class AxonModule:
+class AxonDefinition:
     name: str
     path_param: str | None
     params: tuple[AxonParam, ...]
@@ -232,7 +231,6 @@ class AxonModule:
     pragmas: dict[str, object] | None = None
     type_aliases: dict[str, TypeAliasDef] | None = None
     return_type_expr: TypeExpr | None = None
-    return_shape: tuple[DimToken, ...] | None = None
     constraints: tuple[Constraint, ...] | None = None
 
 
@@ -269,5 +267,5 @@ __all__ = [
     "AxonCond",
     "AxonScopeBind",
     "AxonStatement",
-    "AxonModule",
+    "AxonDefinition",
 ]

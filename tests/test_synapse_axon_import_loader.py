@@ -201,8 +201,8 @@ def test_import_loader_keeps_pipe_stage_name_valid_for_unqualified_import(tmp_pa
 
     modules = resolve_axon_program_from_path(root).modules
     main_module = next(module for module in modules if module.name == "main")
-    assert isinstance(main_module.body_expr, AxonExprDo)
-    stmt = main_module.body_expr.body[0]
+    assert main_module.body_expr is None
+    stmt = main_module.statements[0]
     assert isinstance(stmt, AxonBind)
     pipe = stmt.expr
     assert isinstance(pipe, AxonExprPipe)

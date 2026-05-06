@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from dataclasses import replace
 from typing import Iterator, cast
 
 from lark import Lark, Token, Transformer
@@ -63,7 +64,7 @@ from ._cst import (
     CstDefinition,
     CstDefParam,
     CstFunctionType,
-    CstModuleSource,
+    CstDefinitionSource,
     CstPathTypeParam,
     CstProgramSource,
     CstSignature,
@@ -83,7 +84,29 @@ _TYPE_EXPR_CLASSES = (
     TypeString,
     TypeTensor,
     TypeTuple,
+    TypeVar,
 )
+
+
+def _type_arity(type_expr: TypeExpr) -> int:
+    if isinstance(type_expr, TypeTuple):
+        return len(type_expr.items)
+    return 1
+
+
+def _type_dims(type_expr: TypeExpr) -> tuple[DimToken, ...] | None:
+    if isinstance(type_expr, TypeTensor):
+        return type_expr.dims
+    return None
+
+
+def _with_inferred_type(expr: AxonExpr, type_expr: TypeExpr) -> AxonExpr:
+    return replace(
+        expr,
+        inferred_type=type_expr,
+        inferred_arity=_type_arity(type_expr),
+        inferred_dims=_type_dims(type_expr),
+    )
 
 
 @dataclass(frozen=True)
@@ -217,14 +240,14 @@ _GRAMMAR = r"""
 
 program: _NL* top_item (_NL+ top_item)* _NL*
 
-top_item: module_decl
+top_item: definition_decl
     | import_decl
     | export_decl
     | pragma
-    | constant
     | type_alias_decl
 
-module_decl: signature _NL definition
+definition_decl: signature _NL definition
+    | definition
 signature: mod_decl TYPE_SEP signature_type
 signature_type: type_expr (LAMBDA_ARROW type_expr)*
 
@@ -270,9 +293,10 @@ pragma: "{-#" NAME pragma_value "#-}"
 ?pragma_value: tuple_expr
     | list_expr
     | literal
-constant: NAME "=" expr
 type_alias_decl: TYPE_KW NAME type_alias_params? "=" type_expr
-type_alias_params: LSQB NAME ("," NAME)* RSQB
+type_alias_params: LSQB type_alias_param ("," type_alias_param)* RSQB
+type_alias_param: NAME
+                | RANGE_DOTS NAME -> type_alias_param_rest
 
 ?statement: for_statement
     | for_bind_statement
@@ -468,9 +492,6 @@ _PARSER = Lark(
     postlex=_AxonIndenter(),
     start=["program", "expr"],
 )
-_ZERO_ARG_CALLS = {"list_init", "init", "Cache.init", "List.init", "_list_init"}
-
-
 def _plus_one(expr: AxonExpr) -> AxonExpr:
     return AxonExprBinary(op="+", left=AxonExprParen(inner=expr), right=AxonExprInt(value=1))
 
@@ -531,87 +552,6 @@ class _ProgramTransformer(Transformer[Token, object]):
         raise ValueError("pragma values must be literals, lists, or tuples of literals")
 
     @staticmethod
-    def _normalize_pragma_value(name: str, value: object) -> object:
-        if name == "padding_side":
-            side = str(value).strip().lower()
-            if side not in {"left", "right"}:
-                raise ValueError("PADDING_SIDE must be 'left' or 'right'")
-            return side
-        if name == "tokenizer":
-            if isinstance(value, str) and value:
-                return value
-            if isinstance(value, list | tuple) and len(value) == 2:
-                checkpoint, tokenizer = value
-                if (
-                    isinstance(checkpoint, str)
-                    and checkpoint
-                    and isinstance(tokenizer, str)
-                    and tokenizer
-                ):
-                    return (checkpoint, tokenizer)
-            raise ValueError(
-                "TOKENIZER must be a non-empty string or a [checkpoint, tokenizer] pair"
-            )
-        if name == "checkpoints":
-            if isinstance(value, str):
-                return (value,)
-            if isinstance(value, list | tuple):
-                items = tuple(str(item) for item in value)
-                if not all(isinstance(item, str) and item for item in items):
-                    raise ValueError("CHECKPOINTS entries must be strings")
-                return items
-            raise ValueError("CHECKPOINTS must be a string or a list/tuple of strings")
-        return value
-
-    @staticmethod
-    def _merge_tokenizer_pragma(prev_value: object | None, pragma_value: object) -> object:
-        def _entries(value: object | None) -> list[object]:
-            if value is None:
-                return []
-            if isinstance(value, str):
-                return [value]
-            if (
-                isinstance(value, tuple)
-                and len(value) == 2
-                and all(isinstance(item, str) for item in value)
-            ):
-                return [value]
-            if isinstance(value, list | tuple):
-                return list(value)
-            raise ValueError("invalid TOKENIZER pragma state")
-
-        entries = _entries(prev_value)
-        new_entry = pragma_value
-        if isinstance(new_entry, str):
-            for entry in entries:
-                if isinstance(entry, str):
-                    if entry != new_entry:
-                        raise ValueError(
-                            "conflicting TOKENIZER pragmas; expected a single consistent global tokenizer"
-                        )
-                    return prev_value if prev_value is not None else new_entry
-            entries.insert(0, new_entry)
-        else:
-            checkpoint, tokenizer = cast(tuple[str, str], new_entry)
-            for idx, entry in enumerate(entries):
-                if (
-                    isinstance(entry, tuple)
-                    and len(entry) == 2
-                    and all(isinstance(item, str) for item in entry)
-                    and entry[0] == checkpoint
-                ):
-                    if entry[1] != tokenizer:
-                        raise ValueError(
-                            "conflicting TOKENIZER pragmas; expected a single tokenizer per checkpoint"
-                        )
-                    return prev_value if prev_value is not None else new_entry
-            entries.append(new_entry)
-
-        if len(entries) == 1:
-            return entries[0]
-        return tuple(entries)
-
-    @staticmethod
     def _is_stmt(value: object) -> bool:
         return isinstance(
             value,
@@ -653,15 +593,14 @@ class _ProgramTransformer(Transformer[Token, object]):
         return cast(TypeExpr, value)
 
     def program(self, children: list[object]) -> CstProgramSource:
-        modules: list[CstModuleSource] = []
+        modules: list[CstDefinitionSource] = []
         imports: list[str] = []
         imported_members: dict[str, tuple[str, ...]] = {}
         exports: list[str] = []
         pragmas: dict[str, object] = {}
-        constants: dict[str, AxonExpr] = {}
         type_aliases: dict[str, TypeAliasDef] = {}
         for child in children:
-            if isinstance(child, CstModuleSource):
+            if isinstance(child, CstDefinitionSource):
                 modules.append(child)
                 continue
             if isinstance(child, tuple) and len(child) == 2 and child[0] == "import":
@@ -702,23 +641,12 @@ class _ProgramTransformer(Transformer[Token, object]):
                 pragma_name = cast(str, child[1])
                 pragma_value = child[2]
                 prev_value = pragmas.get(pragma_name)
-                if pragma_name == "tokenizer":
-                    pragmas[pragma_name] = self._merge_tokenizer_pragma(prev_value, pragma_value)
-                    continue
-                if (
-                    pragma_name in {"padding_side", "tokenizer"}
-                    and isinstance(prev_value, str)
-                    and prev_value != pragma_value
-                ):
-                    raise ValueError(
-                        f"conflicting {pragma_name.upper()} pragmas; expected a single consistent value"
-                    )
-                pragmas[pragma_name] = pragma_value
-                continue
-            if isinstance(child, tuple) and len(child) == 3 and child[0] == "constant":
-                name = cast(str, child[1])
-                constant_value = cast(AxonExpr, child[2])
-                constants[name] = constant_value
+                if isinstance(prev_value, dict) and "__pragma_occurrences__" in prev_value:
+                    cast(list[object], prev_value["__pragma_occurrences__"]).append(pragma_value)
+                elif pragma_name in pragmas:
+                    pragmas[pragma_name] = {"__pragma_occurrences__": [prev_value, pragma_value]}
+                else:
+                    pragmas[pragma_name] = pragma_value
                 continue
             if isinstance(child, tuple) and len(child) == 3 and child[0] == "type_alias":
                 name = cast(str, child[1])
@@ -729,14 +657,13 @@ class _ProgramTransformer(Transformer[Token, object]):
             imported_members=imported_members,
             exports=tuple(dict.fromkeys(exports)),
             pragmas=pragmas,
-            constants=constants,
             type_aliases=type_aliases,
         )
 
     def top_item(self, children: list[object]) -> object:
         return children[0]
 
-    def module_decl(self, children: list[object]) -> CstModuleSource:
+    def definition_decl(self, children: list[object]) -> CstDefinitionSource:
         signature: CstSignature | None = None
         definition: CstDefinition | None = None
         for child in children:
@@ -744,9 +671,9 @@ class _ProgramTransformer(Transformer[Token, object]):
                 signature = child
             elif isinstance(child, CstDefinition):
                 definition = child
-        if signature is None or definition is None:
+        if definition is None:
             raise ValueError("invalid module declaration syntax")
-        return CstModuleSource(
+        return CstDefinitionSource(
             signature=signature,
             definition=definition,
         )
@@ -793,7 +720,7 @@ class _ProgramTransformer(Transformer[Token, object]):
             return TypePath()
         if raw == "Dim":
             return TypeDim()
-        if re.fullmatch(r"_T[0-9]+", raw):
+        if re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_.]*::)?_T[0-9]*", raw):
             return TypeVar(name=raw)
         return TypeNamed(name=raw)
 
@@ -854,14 +781,29 @@ class _ProgramTransformer(Transformer[Token, object]):
                 continue
             if isinstance(child, int | str | DimExprBinary):
                 dims.append(child)
-        if base in {"Tensor", "IdxTensor"}:
+        if base == "Tensor":
             return TypeTensor(base=base, dims=tuple(dims))
         return TypeNamed(name=base, args=tuple(dims))
 
-    def type_alias_params(self, children: list[object]) -> tuple[str, ...]:
-        return tuple(
-            str(child) for child in children if isinstance(child, Token) and child.type == "NAME"
+    def type_alias_param_rest(self, children: list[object]) -> str:
+        name = next(
+            (str(child) for child in children if isinstance(child, Token) and child.type == "NAME"),
+            "",
         )
+        if not name:
+            raise ValueError("variadic type alias parameter requires a name")
+        return f"..{name}"
+
+    def type_alias_params(self, children: list[object]) -> tuple[str, ...]:
+        out: list[str] = []
+        for child in children:
+            if isinstance(child, Token):
+                if child.type == "NAME":
+                    out.append(str(child))
+                continue
+            if isinstance(child, str):
+                out.append(child)
+        return tuple(out)
 
     def signature_type(self, children: list[object]) -> CstFunctionType:
         segments: list[TypeExpr] = []
@@ -886,7 +828,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         )
         if not isinstance(signature_type, CstFunctionType):
             raise ValueError("signature type expression is required")
-        return CstSignature(module_decl=mod, type_signature=signature_type)
+        return CstSignature(definition_decl=mod, type_signature=signature_type)
 
     def definition(self, children: list[object]) -> CstDefinition:
         mod = cast(str, children[0])
@@ -900,7 +842,7 @@ class _ProgramTransformer(Transformer[Token, object]):
                 rhs = self._as_expr(child)
         if rhs is None:
             raise ValueError("definition rhs expression is required")
-        return CstDefinition(module_decl=mod, args=tuple(args), rhs=rhs)
+        return CstDefinition(definition_decl=mod, args=tuple(args), rhs=rhs)
 
     def def_param_positional(self, children: list[object]) -> CstDefParam:
         if len(children) != 1:
@@ -977,16 +919,8 @@ class _ProgramTransformer(Transformer[Token, object]):
         name_token = children[0]
         assert isinstance(name_token, Token)
         pragma_name = str(name_token).strip().lower()
-        pragma_value = self._normalize_pragma_value(
-            pragma_name,
-            self._pragma_literal_to_python(children[1]),
-        )
+        pragma_value = self._pragma_literal_to_python(children[1])
         return ("pragma", pragma_name, pragma_value)
-
-    def constant(self, children: list[object]) -> tuple[str, str, AxonExpr]:
-        name = str(cast(Token, children[0]))
-        value = self._as_expr(children[1])
-        return ("constant", name, value)
 
     def type_alias_decl(self, children: list[object]) -> tuple[str, str, TypeAliasDef]:
         name_token = next(
@@ -1325,10 +1259,7 @@ class _ProgramTransformer(Transformer[Token, object]):
     def name(self, children: list[object]) -> AxonExpr:
         token = children[0]
         assert isinstance(token, Token)
-        text = str(token)
-        if "@" in text or "::" in text or text in _ZERO_ARG_CALLS:
-            return AxonExprCall(callee=text, args=(), kwargs={})
-        return AxonExprName(name=text)
+        return AxonExprName(name=str(token))
 
     def callable(self, children: list[object]) -> object:
         return children[0]
@@ -1374,7 +1305,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         inner = next((self._as_expr(child) for child in children if self._is_expr(child)), None)
         if inner is None:
             raise ValueError("parenthesized expression requires an inner expression")
-        return AxonExprParen(inner=inner)
+        return inner
 
     def expr_ascribe(self, children: list[object]) -> AxonExpr:
         expr = next((self._as_expr(child) for child in children if self._is_expr(child)), None)
@@ -1383,7 +1314,14 @@ class _ProgramTransformer(Transformer[Token, object]):
         )
         if expr is None or type_expr is None:
             raise ValueError("typed ascription requires expression and type")
-        return AxonExprAscribe(expr=expr, type_expr=type_expr)
+        typed_expr = _with_inferred_type(expr, type_expr)
+        return AxonExprAscribe(
+            expr=typed_expr,
+            type_expr=type_expr,
+            inferred_type=type_expr,
+            inferred_arity=_type_arity(type_expr),
+            inferred_dims=_type_dims(type_expr),
+        )
 
     def bare_call(self, children: list[object]) -> AxonExpr:
         callee_token = children[0]
@@ -1530,7 +1468,7 @@ def parse_expression_source(source: str) -> AxonExpr:
 __all__ = [
     "CstDefinition",
     "CstFunctionType",
-    "CstModuleSource",
+    "CstDefinitionSource",
     "CstPathTypeParam",
     "CstProgramSource",
     "CstSignature",

@@ -57,7 +57,7 @@ mask_to_additive :: Tensor[B,H,Q,K] -> Tensor[B,1,Q,K] -> Tensor[B,H,Q,K]
 mask_to_additive ref keep = _where keep (Tensor.zeros_like ref) (Tensor.min_like ref)
 
 
-attention :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,HD]
+attention :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,HD]
 attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
   scale_eff <- (scale == null) ? (1.0 / sqrt HD) : scale
   scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)

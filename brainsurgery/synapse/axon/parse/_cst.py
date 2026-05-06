@@ -8,7 +8,7 @@ from ..ast.types import TypeAliasDef, TypeExpr
 
 @dataclass(frozen=True)
 class CstSignature:
-    module_decl: str
+    definition_decl: str
     type_signature: CstFunctionType
 
 
@@ -33,25 +33,24 @@ class CstDefParam:
 
 @dataclass(frozen=True)
 class CstDefinition:
-    module_decl: str
+    definition_decl: str
     args: tuple[CstDefParam, ...]
     rhs: AxonExpr
 
 
 @dataclass(frozen=True)
-class CstModuleSource:
-    signature: CstSignature
+class CstDefinitionSource:
+    signature: CstSignature | None
     definition: CstDefinition
 
 
 @dataclass(frozen=True)
 class CstProgramSource:
-    modules: tuple[CstModuleSource, ...]
+    modules: tuple[CstDefinitionSource, ...]
     imports: tuple[str, ...]
     imported_members: dict[str, tuple[str, ...]]
     exports: tuple[str, ...]
     pragmas: dict[str, object]
-    constants: dict[str, AxonExpr]
     type_aliases: dict[str, TypeAliasDef]
 
 
@@ -59,7 +58,7 @@ __all__ = [
     "CstDefParam",
     "CstDefinition",
     "CstFunctionType",
-    "CstModuleSource",
+    "CstDefinitionSource",
     "CstPathTypeParam",
     "CstProgramSource",
     "CstSignature",

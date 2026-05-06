@@ -69,34 +69,33 @@ Stage status as of now:
   - no lowering-time fallback inference
 - status: done
 
-6. `normalize-calls`
+6. `normalize`
 - input: validated closed Axon AST
-- output: closed Axon AST with explicit call surfaces
+- output: normalized closed Axon AST
 - responsibilities:
-  - desugar callee path suffixes such as `NN.linear@w` into ordinary `Path` arguments
-  - desugar pipe syntax before default expansion so positional order is unambiguous
-  - expand omitted kwargs / optional positional defaults according to callee signatures
+  - normalize raw pragma occurrences into semantic pragma values
+  - desugar call syntax only:
+    - callee path suffixes such as `NN.linear@w` become ordinary `Path` arguments
+    - pipe syntax becomes ordinary calls
+    - bare callable-name expressions that require call semantics become zero-arg calls
+  - normalize loop protocol:
+    - make implied loop `carry` explicit when assignment-target loop rules imply it
+    - make implied final `yield` explicit
+    - insert explicit null-yield for effect-only loops so flatten has one loop protocol
   - keep all rewrites structural in the AST; no render/parse roundtrips
 - invariants after this stage:
   - no callee path sugar remains
-  - omitted optional/default args are explicit at call sites
-  - certified by `validate.normalized`
-- status: implemented as mandatory pre-flatten normalization
-
-7. `normalize-loops`
-- input: closed Axon AST after call normalization
-- output: closed Axon AST with explicit loop result protocol
-- responsibilities:
-  - make implied loop `carry` explicit when assignment-target loop rules imply it
-  - make implied final `yield` explicit
-  - insert explicit null-yield for effect-only loops so flatten has one loop protocol
-- invariants after this stage:
+  - no pipe expressions remain
+  - no bare callable-name expression remains when it semantically means a call
   - every loop body has an explicit final `yield`
   - every value-producing loop has explicit `carry`
   - certified by `validate.normalized`
+- exclusions:
+  - does not expand omitted optional/default call arguments globally
+  - signature-changing optimizer passes must bind affected callsites against the old callee signature and re-emit them against the new signature
 - status: implemented as mandatory pre-flatten normalization
 
-8. `flatten`
+7. `flatten`
 - input: validated closed Axon AST
 - output: flat closed Axon AST
 - responsibilities:
@@ -116,7 +115,7 @@ Stage status as of now:
   - some path/template normalization is intentionally left for `optimize`
   - synthesized scope arguments are still introduced here because flatten owns scope elimination
 
-9. `typecheck`
+8. `typecheck`
 - input: flat closed Axon AST
 - output: fully typed flat closed Axon AST
 - responsibilities:
@@ -143,7 +142,7 @@ Stage status as of now:
   - richer future type/inference cases are still ahead
   - lowering-oriented typing concerns are intentionally deferred to later stages
 
-10. `optimize`
+9. `optimize`
 - input: flat fully typed closed Axon AST
 - output: optimized flat fully typed closed Axon AST
 - responsibilities:
@@ -183,7 +182,7 @@ Stage status as of now:
   - further cleanup of flattening artifact helpers where semantics permit
   - any more aggressive inlining/specialization only with careful semantic justification
 
-11. `backend-required-normalize`
+10. `backend-required-normalize`
 - input: flat fully typed closed Axon AST
 - output: flat fully typed closed Axon AST satisfying backend shape requirements
 - responsibilities:
@@ -196,7 +195,7 @@ Stage status as of now:
 - note:
   - `--optimize/--no-optimize` controls semantic optimization, not required canonical backend shape
 
-12. `lower`
+11. `lower`
 - input: flat fully typed closed Axon AST
 - output: Synapse graph
 - responsibilities:
@@ -218,7 +217,7 @@ Stage status as of now:
     - lowering should eventually have a typed-artifact loader mode that restores rendered annotations into `inferred_type` / `inferred_arity` / `inferred_dims` metadata and then consumes the flat typed AST directly, without re-running typecheck/optimize unless explicitly requested
     - until that exists, benchmark and lowering entrypoints should use original source Axon files rather than generated `tmp/*.typed.axon` inspection artifacts
 
-13. `runtime`
+12. `runtime`
 - input: Synapse graph
 - output: executed model outputs
 - status: active emitted-graph path partly aligned, but not final-form complete
@@ -230,7 +229,7 @@ Stage status as of now:
   - broader backend cleanup against the smaller emitted graph contract
   - separation from still-legacy pipeline/runtime consumers that build older graph forms manually
 
-14. `codegen`
+13. `codegen`
 - input: Synapse graph
 - output: generated PyTorch code
 - status: active emitted-graph path partly aligned, but not final-form complete
@@ -242,7 +241,7 @@ Stage status as of now:
   - further pruning of legacy helper/code paths not exercised by the new lowering output
   - separation from still-legacy pipeline/codegen consumers
 
-15. `pipeline`
+14. `pipeline`
 - input: either compiler metadata plus lowered graph, or analysis results over the closed/flat/typed AST
 - output: pipeline partitioning plan and stage-specific lowered graphs/specs
 - status: still legacy-backed

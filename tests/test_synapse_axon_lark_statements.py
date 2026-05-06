@@ -21,9 +21,11 @@ from brainsurgery.synapse.axon.parse import parse_axon_program
 def _parse_rhs_do(source: str) -> AxonExprDo:
     parsed = parse_axon_program(source)
     assert len(parsed.modules) == 1
-    rhs = parsed.modules[0].body_expr
-    assert isinstance(rhs, AxonExprDo)
-    return rhs
+    module = parsed.modules[0]
+    if module.body_expr is None:
+        return AxonExprDo(body=module.statements)
+    assert isinstance(module.body_expr, AxonExprDo)
+    return module.body_expr
 
 
 def test_parse_for_statement_with_step() -> None:

@@ -198,9 +198,9 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Tensor", "Int", "Int", "Int"),
+    "args": ("Tensor[..S]", "Int", "Dim", "Dim"),
     "kwargs": {},
-    "returns": ("Tensor",),
+    "returns": ("Tensor[..R]",),
 }
 
 
@@ -230,7 +230,16 @@ def type_rule(
     if start is None or end is None:
         return None
     out_dims = list(input_dims)
-    out_dims[dim] = _dim_sub(end, start)
+    axis_dim = out_dims[dim]
+    if (
+        end == axis_dim
+        and isinstance(start, DimExprBinary)
+        and start.op == "-"
+        and isinstance(start.left, str)
+    ):
+        out_dims[dim] = start.right
+    else:
+        out_dims[dim] = _dim_sub(end, start)
     return helpers.type_tensor(dims=tuple(out_dims))
 
 __all__ = [

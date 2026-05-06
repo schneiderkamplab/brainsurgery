@@ -136,9 +136,9 @@ def _coerce_int_literal(value: Any) -> int | None:
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "int"),
+    "args": ("Tensor[..S]", "Int"),
     "kwargs": {},
-    "returns": ("Tensor",),
+    "returns": ("Tensor[..R]",),
 }
 
 __all__ = [

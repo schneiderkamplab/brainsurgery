@@ -342,7 +342,6 @@ def test_materialize_workflow_written_file_roundtrips_to_expected_ast(tmp_path: 
                 imported_members=dict(expected.imported_members),
                 exports=expected.exports,
                 pragmas={"checkpoints": "org/toy"},
-                constants=dict(expected.constants),
                 type_aliases=dict(expected.type_aliases),
                 origin_path=expected.origin_path,
             )

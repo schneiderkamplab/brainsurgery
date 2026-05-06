@@ -20,7 +20,7 @@ from ..ast import (
     AxonExprTernary,
     AxonExprTuple,
     AxonFile,
-    AxonModule,
+    AxonDefinition,
     AxonParam,
     AxonReturn,
     Constraint,
@@ -29,10 +29,16 @@ from ..ast import (
     TypeDim,
     TypeExpr,
     TypeList,
+    TypeTensor,
     TypeTuple,
 )
+from ..entrypoint import resolve_main_module
 from ..ast.types import dim_token_names
-from ..lowering_core import _prepare_program_for_lowering
+from ..validate import (
+    validate_closed_axon_file,
+    validate_flat_axon_file,
+    validate_typed_axon_file,
+)
 
 
 @dataclass(frozen=True)
@@ -106,9 +112,7 @@ class GraphModule:
 class GraphProgram:
     modules: tuple[GraphModule, ...]
     main_module: str
-    constants: dict[str, GraphOperand]
     pragmas: dict[str, object]
-    constant_nodes: tuple[GraphNode, ...] = ()
 
 
 @dataclass
@@ -195,7 +199,9 @@ def _graph_ref(value: GraphValue) -> GraphValueRef:
 
 def _kwarg_to_attr(value: object, ctx: _GraphLowerCtx | None = None) -> GraphAttr:
     if isinstance(value, AxonExpr):
-        return _expr_to_operand(value, ctx)
+        if ctx is None:
+            return _expr_to_operand(value, ctx)
+        return _lower_expr_to_lazy_operand(value, ctx)
     if isinstance(value, bool):
         return GraphLiteral(value=value, type_expr=TypeAny())
     if isinstance(value, int):
@@ -217,7 +223,7 @@ def _param_to_value(param: AxonParam) -> GraphValue:
     return GraphValue(
         name=param.name,
         type_expr=param.type_expr,
-        dims=param.shape,
+        dims=tuple(param.type_expr.dims) if isinstance(param.type_expr, TypeTensor) else None,
         optional=param.optional or param.default_expr is not None,
     )
 
@@ -419,7 +425,7 @@ def _node_for_expr(
     )
 
 
-def _module_to_graph(module: AxonModule) -> GraphModule:
+def _module_to_graph(module: AxonDefinition) -> GraphModule:
     inputs = tuple(_param_to_value(param) for param in module.params)
     input_names = {value.name for value in inputs}
     ctx = _GraphLowerCtx(
@@ -460,58 +466,26 @@ def _module_to_graph(module: AxonModule) -> GraphModule:
     )
 
 
-def _constant_to_operand(expr: AxonExpr) -> GraphOperand:
-    return _expr_to_operand(expr)
-
-
-def _lower_constants(
-    constants: dict[str, AxonExpr],
-) -> tuple[dict[str, GraphOperand], tuple[GraphNode, ...]]:
-    lowered: dict[str, GraphOperand] = {}
-    ctx = _GraphLowerCtx(module_name="__constants__", nodes=[], env={}, used=set())
-    for name, expr in constants.items():
-        try:
-            lowered[name] = _constant_to_operand(expr)
-            continue
-        except ValueError:
-            pass
-        ctx.nodes.append(
-            _node_for_expr(
-                expr,
-                targets=(name,),
-                node_id=ctx.node_id(),
-                module_name="__constants__",
-                ctx=ctx,
-            )
-        )
-        lowered[name] = _graph_ref(ctx.nodes[-1].outputs[0])
-    return lowered, tuple(ctx.nodes)
-
-
 def lower_axon_program_to_graph_ir(
-    modules: AxonFile | tuple[AxonModule, ...],
+    program: AxonFile,
     *,
     main_module: str | None = None,
-    optimize: bool = True,
 ) -> GraphProgram:
-    program = _prepare_program_for_lowering(
-        modules, main_module=main_module, optimize=optimize
-    )
+    validate_closed_axon_file(program, main_module=main_module)
+    validate_flat_axon_file(program, main_module=main_module)
+    validate_typed_axon_file(program, main_module=main_module)
     if not program.modules:
         raise ValueError("Axon program must contain at least one module")
     by_name = {module.name: module for module in program.modules}
     if len(by_name) != len(program.modules):
         raise ValueError("Axon program contains duplicate module names")
-    resolved_main = program.modules[-1].name if main_module is None else main_module
+    resolved_main = resolve_main_module(program, main_module=main_module)
     if resolved_main not in by_name:
         raise ValueError(f"Unknown main module: {resolved_main!r}")
-    constants, constant_nodes = _lower_constants(program.constants)
     graph = GraphProgram(
         modules=tuple(_module_to_graph(module) for module in program.modules),
         main_module=resolved_main,
-        constants=constants,
         pragmas=dict(program.pragmas),
-        constant_nodes=constant_nodes,
     )
     validate_graph_program(graph)
     return graph
@@ -526,19 +500,19 @@ def _type_dim_names(type_expr: TypeExpr) -> set[str]:
             names.update(dim_token_names(dim))
         return names
     if isinstance(type_expr, TypeTuple):
-        names: set[str] = set()
+        tuple_names: set[str] = set()
         for item in type_expr.items:
-            names.update(_type_dim_names(item))
-        return names
+            tuple_names.update(_type_dim_names(item))
+        return tuple_names
     if isinstance(type_expr, TypeList):
         return _type_dim_names(type_expr.item)
     if isinstance(type_expr, TypeOptional):
         return _type_dim_names(type_expr.inner)
     if isinstance(type_expr, TypeNamed):
-        names: set[str] = set()
+        named_names: set[str] = set()
         for dim in type_expr.args:
-            names.update(dim_token_names(dim))
-        return names
+            named_names.update(dim_token_names(dim))
+        return named_names
     return set()
 
 
@@ -629,7 +603,11 @@ def validate_graph_program(program: GraphProgram) -> None:
         raise ValueError("graph IR program has duplicate module names")
     if program.main_module not in set(names):
         raise ValueError(f"graph IR main module {program.main_module!r} is missing")
-    global_names = set(program.constants)
+    global_names = {
+        module.name
+        for module in program.modules
+        if not module.inputs and len(module.outputs) == 1
+    }
     for module in program.modules:
         _validate_graph_module(module, global_names=global_names)
 

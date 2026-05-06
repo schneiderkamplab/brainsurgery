@@ -507,7 +507,7 @@ class _TypeExprParser:
             else:
                 dims = self._parse_dim_list()
             self._expect("]")
-            if name in {"Tensor", "IdxTensor"}:
+            if name == "Tensor":
                 return TypeTensor(base=name, dims=dims)
             return TypeNamed(name=name, args=dims)
 

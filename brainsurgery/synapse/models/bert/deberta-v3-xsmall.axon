@@ -1,70 +1,96 @@
 {-# CHECKPOINTS "microsoft/deberta-v3-xsmall" #-}
+
 {-# TASK "masked_lm" #-}
 
-import Activations
 import Activations (gelu)
-import Attention
+
 import Attention (attention, merge_heads, reshape_heads)
-import Masking
+
 import Masking (bidirectional_mask)
-import Params
+
 import Params (has_root)
-import Positions
+
 import Positions (position_ids, relative_bias_disentangled)
+
+import Config
+
 import NN
+
 import Tensor
 
-deberta_block :: Tensor -> ?Tensor -> Tensor
+MODEL_DIM = 384
+
+E = (false) ? (1536) : MODEL_DIM
+
+VOCAB_SIZE = 128100
+
+NUM_LAYERS = 12
+
+NUM_HEADS = 6
+
+FFN = 1536
+
+EPS = 1e-07
+
+POS_BUCKETS = 256
+
+MAX_REL = 512
+
+REL_Q_SCALE = 0.5773502691896257
+
+ATTN_SCALE = 0.125
+
+deberta_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 deberta_block x attn_mask = do
-  a <- scope@attention do
-    q0 <- NN.linear@self.query_proj x dim=384 bias=true |> reshape_heads heads=6
-    k <- NN.linear@self.key_proj x dim=384 bias=true |> reshape_heads heads=6
-    v <- NN.linear@self.value_proj x dim=384 bias=true |> reshape_heads heads=6
-    rel_bias <- relative_bias_disentangled@self q0 k position_buckets=256 max_relative_positions=512 rel_norm_eps=1e-07 weight_path=@@deberta.encoder.rel_embeddings.weight ln_weight_path=@@deberta.encoder.LayerNorm.weight ln_bias_path=@@deberta.encoder.LayerNorm.bias
-    q <- q0 * 0.5773502691896257
-    keep <- bidirectional_mask q0 k padding_mask=attn_mask
-    return attention q k v keep rel_bias=rel_bias scale=0.125 |> merge_heads |> NN.linear@output.dense dim=384 bias=true
-  x <- x + a
-  x <- NN.layernorm@attention.output.LayerNorm x eps=1e-07
-  m <- NN.linear@intermediate.dense x dim=1536 bias=true |> gelu
-  m <- NN.linear@output.dense m dim=384 bias=true
-  y <- x + m
-  y <- NN.layernorm@output.LayerNorm y eps=1e-07
-  return y
+      a <- scope@attention do
+        q0 <- NN.linear@self.query_proj x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+        k <- NN.linear@self.key_proj x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+        v <- NN.linear@self.value_proj x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+        rel_bias <- relative_bias_disentangled@self q0 k position_buckets=POS_BUCKETS max_relative_positions=MAX_REL rel_norm_eps=EPS weight_path=@@deberta.encoder.rel_embeddings.weight ln_weight_path=@@deberta.encoder.LayerNorm.weight ln_bias_path=@@deberta.encoder.LayerNorm.bias
+        q <- q0 * REL_Q_SCALE
+        keep <- bidirectional_mask q0 k padding_mask=attn_mask
+        return attention q k v keep rel_bias=rel_bias scale=ATTN_SCALE |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+      x <- x + a
+      x <- NN.layernorm@attention.output.LayerNorm x eps=EPS
+      m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+      m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+      y <- x + m
+      y <- NN.layernorm@output.LayerNorm y eps=EPS
+      return y
 
-deberta_legacy_head :: Tensor -> Tensor
+deberta_legacy_head :: Tensor[B,S,D] -> Tensor[B,S,V]
 deberta_legacy_head x = do
-  logits <- scope@cls.predictions do
-    x <- NN.linear@transform.dense x dim=384 bias=true |> gelu
-    x <- NN.layernorm@transform.LayerNorm x eps=1e-07
-    return NN.linear@decoder x dim=128100 bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
-  return logits
+      logits <- scope@cls.predictions do
+        x <- NN.linear@transform.dense x dim=E bias=true |> gelu
+        x <- NN.layernorm@transform.LayerNorm x eps=EPS
+        return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
+      return logits
 
-deberta_modern_head :: Tensor -> Tensor
+deberta_modern_head :: Tensor[B,S,D] -> Tensor[B,S,V]
 deberta_modern_head x = do
-  logits <- scope@lm_predictions.lm_head do
-    x <- NN.linear@dense x dim=384 bias=true |> gelu
-    x <- NN.layernorm@LayerNorm x eps=1e-07
-    return NN.linear@decoder x dim=128100 bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@lm_predictions.lm_head.bias
-  return logits
+      logits <- scope@lm_predictions.lm_head do
+        x <- NN.linear@dense x dim=MODEL_DIM bias=true |> gelu
+        x <- NN.layernorm@LayerNorm x eps=EPS
+        return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@lm_predictions.lm_head.bias
+      return logits
 
 deberta_v2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 deberta_v2 input_ids attn_mask = do
-  pos_ids <- position_ids input_ids
-  tok_type_ids <- input_ids - input_ids
-  tok <- NN.embedding@deberta.embeddings.word_embeddings input_ids dim=384
-  pos <- Tensor.zeros_like tok
-  has_typ <- has_root "deberta.embeddings.token_type_embeddings"
-  typ <- has_typ ? NN.embedding@deberta.embeddings.token_type_embeddings tok_type_ids dim=384 : Tensor.zeros_like tok
-  x <- tok + pos
-  x <- x + typ
-  has_proj <- has_root "deberta.embeddings.embed_proj"
-  x <- has_proj ? NN.linear@deberta.embeddings.embed_proj x dim=384 bias=false : x
-  x <- NN.layernorm@deberta.embeddings.LayerNorm x eps=1e-07
-  for@deberta.encoder.layer i <- [0..12) do
-    x <- deberta_block x attn_mask
-    yield x
-  modern_head <- has_root "lm_predictions.lm_head"
-  legacy_head <- has_root "cls.predictions"
-  logits <- modern_head ? deberta_modern_head x : (legacy_head ? deberta_legacy_head x : deberta_modern_head x)
-  return logits
+      pos_ids <- position_ids input_ids
+      tok_type_ids <- input_ids - input_ids
+      tok <- NN.embedding@deberta.embeddings.word_embeddings input_ids dim=E
+      pos <- Tensor.zeros_like tok
+      has_typ <- has_root "deberta.embeddings.token_type_embeddings"
+      typ <- has_typ ? NN.embedding@deberta.embeddings.token_type_embeddings tok_type_ids dim=E : Tensor.zeros_like tok
+      x <- tok + pos
+      x <- x + typ
+      has_proj <- has_root "deberta.embeddings.embed_proj"
+      x <- has_proj ? NN.linear@deberta.embeddings.embed_proj x dim=MODEL_DIM bias=false : x
+      x <- NN.layernorm@deberta.embeddings.LayerNorm x eps=EPS
+      x <- for@deberta.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+        x <- deberta_block x attn_mask
+        yield x
+      modern_head <- has_root "lm_predictions.lm_head"
+      legacy_head <- has_root "cls.predictions"
+      logits <- modern_head ? deberta_modern_head x : (legacy_head ? deberta_legacy_head x : deberta_modern_head x)
+      return logits

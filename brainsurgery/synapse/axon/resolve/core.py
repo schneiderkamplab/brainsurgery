@@ -21,7 +21,7 @@ from ..ast.nodes import (
     AxonExprTernary,
     AxonExprTuple,
     AxonKwargValue,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -47,12 +47,17 @@ from ..validate import (
     ValidationDiagnostic,
     validate_axon_program,
     validate_closed_axon_file,
-    warn_unused_definitions,
-    warn_unused_import_diagnostics,
 )
-from .usage import collect_import_usage
 
 _PATH_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _split_callable_surface_name(name: str) -> tuple[str, str]:
+    indexes = [idx for idx in (name.find("@"), name.find("::")) if idx >= 0]
+    if not indexes:
+        return name, ""
+    idx = min(indexes)
+    return name[:idx], name[idx:]
 
 
 def _build_surface_modules(
@@ -60,8 +65,8 @@ def _build_surface_modules(
     *,
     validate: bool = False,
     extra_imported_members: dict[str, tuple[str, ...]] | None = None,
-) -> tuple[AxonModule, ...]:
-    modules: list[AxonModule] = []
+) -> tuple[AxonDefinition, ...]:
+    modules: list[AxonDefinition] = []
     for module in ast.modules:
         if isinstance(module.body_expr, AxonExprDo) and not module.body_expr.inline:
             statements = module.body_expr.body
@@ -70,7 +75,7 @@ def _build_surface_modules(
         else:
             statements = module.statements
         modules.append(
-            AxonModule(
+            AxonDefinition(
                 name=module.name,
                 path_param=module.path_param,
                 path_params=module.path_params,
@@ -85,7 +90,6 @@ def _build_surface_modules(
                 pragmas=None,
                 type_aliases=dict(ast.type_aliases) or None,
                 return_type_expr=module.return_type_expr,
-                return_shape=module.return_shape,
             )
         )
     out = tuple(modules)
@@ -118,13 +122,6 @@ def _effective_imported_members(
 
 def _local_module_names(ast: AxonFile) -> tuple[str, ...]:
     return tuple(module.name for module in ast.modules)
-
-
-def _canonical_constant_name(namespace: str | None, name: str) -> str:
-    if namespace is None:
-        return name
-    prefix = namespace.replace(".", "__")
-    return f"__{prefix}__{name}"
 
 
 def _collect_type_dim_names(
@@ -193,19 +190,41 @@ def _substitute_alias_dims(tp: TypeExpr, *, subst: dict[str, DimToken]) -> TypeE
 
 
 def _module_bound_names(
-    module: AxonModule,
+    module: AxonDefinition,
     *,
-    constant_names: set[str] | None = None,
     type_aliases: dict[str, TypeAliasDef] | None = None,
+    include_type_dims: bool = True,
 ) -> set[str]:
     bound_names = {param.name for param in module.params}
     bound_names.update(name for name in module.path_params if isinstance(name, str))
     if isinstance(module.path_param, str):
         bound_names.add(module.path_param)
-    for param in module.params:
-        bound_names.update(_collect_type_dim_names(param.type_expr, type_aliases=type_aliases))
-    bound_names.update(_collect_type_dim_names(module.return_type_expr, type_aliases=type_aliases))
+    if include_type_dims:
+        for param in module.params:
+            bound_names.update(_collect_type_dim_names(param.type_expr, type_aliases=type_aliases))
+        bound_names.update(_collect_type_dim_names(module.return_type_expr, type_aliases=type_aliases))
     return bound_names
+
+
+def _module_type_definition_refs(
+    module: AxonDefinition,
+    *,
+    definition_names: set[str],
+    type_aliases: dict[str, TypeAliasDef] | None = None,
+) -> set[str]:
+    refs: set[str] = set()
+    for param in module.params:
+        refs.update(
+            name
+            for name in _collect_type_dim_names(param.type_expr, type_aliases=type_aliases)
+            if name in definition_names
+        )
+    refs.update(
+        name
+        for name in _collect_type_dim_names(module.return_type_expr, type_aliases=type_aliases)
+        if name in definition_names
+    )
+    return refs
 
 
 def _merge_type_aliases(
@@ -221,24 +240,10 @@ def _merge_type_aliases(
         existing.setdefault(name, value)
 
 
-def _merge_constants(
-    existing: dict[str, AxonExpr],
-    incoming: dict[str, AxonExpr],
-    *,
-    file_path: Path,
-) -> None:
-    for name, expr in incoming.items():
-        prev = existing.get(name)
-        if prev is not None and prev != expr:
-            raise ValueError(f"{file_path}: conflicting constant {name!r}")
-        existing.setdefault(name, expr)
-
-
 def _build_unqualified_target_map(
     *,
     loaded: _LoadedSyntaxFile,
     local_modules: tuple[str, ...],
-    constant_name_map: dict[tuple[str | None, str], str],
     namespace_to_loaded: dict[str, _LoadedSyntaxFile],
 ) -> dict[str, tuple[str, ...]]:
     targets: dict[str, list[str]] = {}
@@ -246,21 +251,16 @@ def _build_unqualified_target_map(
     for module_name in local_modules:
         canonical = f"{loaded.namespace}.{module_name}" if loaded.namespace else module_name
         targets.setdefault(module_name, []).append(canonical)
-    for const_name in loaded.ast.constants:
-        canonical = constant_name_map[(loaded.namespace, const_name)]
-        targets.setdefault(const_name, []).append(canonical)
 
     for namespace, members in loaded.effective_imported_members.items():
         dep = namespace_to_loaded[namespace]
         dep_modules = set(_local_module_names(dep.ast))
-        dep_constants = set(dep.ast.constants)
         dep_aliases = set(dep.ast.type_aliases)
         dep_namespaces = set(dep.ast.imports) | set(dep.effective_imported_members)
         for member in members:
             in_module = member in dep_modules
-            in_constant = member in dep_constants
             in_alias = member in dep_aliases
-            active_kinds = sum(int(flag) for flag in (in_module, in_constant, in_alias))
+            active_kinds = sum(int(flag) for flag in (in_module, in_alias))
             if active_kinds > 1:
                 raise ValueError(
                     f"{loaded.path}: imported member {namespace}.{member} resolves to multiple definition kinds"
@@ -274,8 +274,6 @@ def _build_unqualified_target_map(
                 )
             if in_module:
                 canonical = f"{namespace}.{member}"
-            elif in_constant:
-                canonical = constant_name_map[(dep.namespace, member)]
             else:
                 canonical = member
             targets.setdefault(member, []).append(canonical)
@@ -285,21 +283,18 @@ def _build_unqualified_target_map(
 def _build_qualified_target_map(
     *,
     loaded: _LoadedSyntaxFile,
-    constant_name_map: dict[tuple[str | None, str], str],
     namespace_to_loaded: dict[str, _LoadedSyntaxFile],
 ) -> dict[str, str]:
     targets: dict[str, str] = {}
     for namespace in loaded.ast.imports:
         dep = namespace_to_loaded[namespace]
         dep_modules = set(_local_module_names(dep.ast))
-        dep_constants = set(dep.ast.constants)
         dep_aliases = set(dep.ast.type_aliases)
         dep_namespaces = set(dep.ast.imports) | set(dep.effective_imported_members)
         for member in dep.ast.exports:
             in_module = member in dep_modules
-            in_constant = member in dep_constants
             in_alias = member in dep_aliases
-            active_kinds = sum(int(flag) for flag in (in_module, in_constant, in_alias))
+            active_kinds = sum(int(flag) for flag in (in_module, in_alias))
             if active_kinds > 1:
                 raise ValueError(
                     f"{loaded.path}: imported member {namespace}.{member} resolves to multiple definition kinds"
@@ -311,8 +306,6 @@ def _build_qualified_target_map(
                 continue
             if in_module:
                 canonical = f"{namespace}.{member}"
-            elif in_constant:
-                canonical = constant_name_map[(dep.namespace, member)]
             else:
                 canonical = member
             targets[f"{namespace}.{member}"] = canonical
@@ -346,6 +339,11 @@ def _rewrite_expr(
             return name
         return _resolve_unqualified(name)
 
+    def _resolve_callable_surface_name(name: str) -> str:
+        base, suffix = _split_callable_surface_name(name)
+        resolved_base = _resolve_name(base)
+        return f"{resolved_base}{suffix}"
+
     def _rewrite_kwarg_value(value: AxonKwargValue) -> AxonKwargValue:
         if isinstance(value, AxonExpr):
             return _rewrite_expr(
@@ -358,12 +356,10 @@ def _rewrite_expr(
         return value
 
     if isinstance(expr, AxonExprName):
-        resolved = _resolve_name(expr.name)
+        resolved = _resolve_callable_surface_name(expr.name)
         return expr if resolved == expr.name else AxonExprName(name=resolved)
     if isinstance(expr, AxonExprCall):
-        base, sep, suffix = expr.callee.partition("@")
-        resolved_base = _resolve_name(base)
-        callee = f"{resolved_base}{sep}{suffix}" if sep else resolved_base
+        callee = _resolve_callable_surface_name(expr.callee)
         return AxonExprCall(
             callee=callee,
             args=tuple(
@@ -689,54 +685,19 @@ def _rewrite_statements(
     return tuple(rewritten)
 
 
-def _rewrite_constants_for_loaded_file(
-    *,
-    loaded: _LoadedSyntaxFile,
-    constant_name_map: dict[tuple[str | None, str], str],
-    namespace_to_loaded: dict[str, _LoadedSyntaxFile],
-) -> dict[str, AxonExpr]:
-    local_modules = _local_module_names(loaded.ast)
-    unqualified_targets = _build_unqualified_target_map(
-        loaded=loaded,
-        local_modules=local_modules,
-        constant_name_map=constant_name_map,
-        namespace_to_loaded=namespace_to_loaded,
-    )
-    qualified_targets = _build_qualified_target_map(
-        loaded=loaded,
-        constant_name_map=constant_name_map,
-        namespace_to_loaded=namespace_to_loaded,
-    )
-    out: dict[str, AxonExpr] = {}
-    module_name = loaded.namespace or str(loaded.path)
-    for name, expr in loaded.ast.constants.items():
-        canonical = constant_name_map[(loaded.namespace, name)]
-        out[canonical] = _rewrite_expr(
-            expr,
-            unqualified_targets=unqualified_targets,
-            qualified_targets=qualified_targets,
-            bound_names=set(),
-            module_name=module_name,
-        )
-    return out
-
-
 def _rewrite_modules_for_loaded_file(
     *,
     loaded: _LoadedSyntaxFile,
-    constant_name_map: dict[tuple[str | None, str], str],
     namespace_to_loaded: dict[str, _LoadedSyntaxFile],
-) -> tuple[AxonModule, ...]:
+) -> tuple[AxonDefinition, ...]:
     local_modules = _local_module_names(loaded.ast)
     unqualified_targets = _build_unqualified_target_map(
         loaded=loaded,
         local_modules=local_modules,
-        constant_name_map=constant_name_map,
         namespace_to_loaded=namespace_to_loaded,
     )
     qualified_targets = _build_qualified_target_map(
         loaded=loaded,
-        constant_name_map=constant_name_map,
         namespace_to_loaded=namespace_to_loaded,
     )
     modules = _build_surface_modules(
@@ -746,21 +707,15 @@ def _rewrite_modules_for_loaded_file(
         if loaded.effective_imported_members
         else None,
     )
-    file_constant_names = {
-        constant_name_map[(loaded.namespace, name)]
-        for name in loaded.ast.constants
-        if (loaded.namespace, name) in constant_name_map
-    }
-    out: list[AxonModule] = []
+    out: list[AxonDefinition] = []
     for raw_module, module in zip(loaded.ast.modules, modules, strict=True):
         canonical_name = f"{loaded.namespace}.{module.name}" if loaded.namespace else module.name
         bound_names = _module_bound_names(
             module,
-            constant_names=file_constant_names,
             type_aliases=loaded.ast.type_aliases,
         )
         out.append(
-            AxonModule(
+            AxonDefinition(
                 name=canonical_name,
                 path_param=module.path_param,
                 path_params=module.path_params,
@@ -791,7 +746,6 @@ def _rewrite_modules_for_loaded_file(
                 pragmas=None,
                 type_aliases=None,
                 return_type_expr=module.return_type_expr,
-                return_shape=module.return_shape,
             )
         )
     return tuple(out)
@@ -802,28 +756,29 @@ def _collect_expr_refs(
     *,
     bound_names: set[str],
     module_names: set[str],
-    constant_names: set[str],
+    value_names: set[str],
 ) -> tuple[set[str], set[str]]:
     module_refs: set[str] = set()
-    constant_refs: set[str] = set()
+    value_refs: set[str] = set()
     if isinstance(expr, AxonExprName):
-        if expr.name not in bound_names:
-            if expr.name in module_names or "." in expr.name:
-                module_refs.add(expr.name)
-            elif expr.name in constant_names:
-                constant_refs.add(expr.name)
-        return module_refs, constant_refs
+        base, _ = _split_callable_surface_name(expr.name)
+        if base not in bound_names:
+            if base in module_names or "." in base:
+                module_refs.add(base)
+            elif base in value_names:
+                value_refs.add(base)
+        return module_refs, value_refs
     if isinstance(expr, AxonExprPath):
         for name in _collect_path_placeholders(expr):
-            if name not in bound_names and name in constant_names:
-                constant_refs.add(name)
-        return module_refs, constant_refs
+            if name not in bound_names and name in value_names:
+                value_refs.add(name)
+        return module_refs, value_refs
     if isinstance(expr, AxonExprParen):
         return _collect_expr_refs(
             expr.inner,
             bound_names=bound_names,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
         )
     if isinstance(expr, AxonExprList):
         for item in expr.items:
@@ -831,110 +786,110 @@ def _collect_expr_refs(
                 item,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
             )
             module_refs.update(m)
-            constant_refs.update(c)
-        return module_refs, constant_refs
+            value_refs.update(c)
+        return module_refs, value_refs
     if isinstance(expr, AxonExprTuple):
         for item in expr.items:
             m, c = _collect_expr_refs(
                 item,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
             )
             module_refs.update(m)
-            constant_refs.update(c)
-        return module_refs, constant_refs
+            value_refs.update(c)
+        return module_refs, value_refs
     if isinstance(expr, AxonExprPipe):
         m, c = _collect_expr_refs(
             expr.value,
             bound_names=bound_names,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
         )
         module_refs.update(m)
-        constant_refs.update(c)
+        value_refs.update(c)
         for stage in expr.stages:
             m, c = _collect_expr_refs(
                 stage,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
             )
             module_refs.update(m)
-            constant_refs.update(c)
-        return module_refs, constant_refs
+            value_refs.update(c)
+        return module_refs, value_refs
     if isinstance(expr, AxonExprBind):
         m, c = _collect_expr_refs(
             expr.value,
             bound_names=bound_names,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
         )
         module_refs.update(m)
-        constant_refs.update(c)
+        value_refs.update(c)
         nested_bound = set(bound_names)
         nested_bound.add(expr.var)
         m, c = _collect_expr_refs(
             expr.body,
             bound_names=nested_bound,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
         )
         module_refs.update(m)
-        constant_refs.update(c)
-        return module_refs, constant_refs
+        value_refs.update(c)
+        return module_refs, value_refs
     if isinstance(expr, AxonExprIf | AxonExprTernary):
         for subexpr in (expr.cond, expr.true_expr, expr.false_expr):
             m, c = _collect_expr_refs(
                 subexpr,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
             )
             module_refs.update(m)
-            constant_refs.update(c)
-        return module_refs, constant_refs
+            value_refs.update(c)
+        return module_refs, value_refs
     if isinstance(expr, AxonExprBinary):
         for subexpr in (expr.left, expr.right):
             m, c = _collect_expr_refs(
                 subexpr,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
             )
             module_refs.update(m)
-            constant_refs.update(c)
-        return module_refs, constant_refs
+            value_refs.update(c)
+        return module_refs, value_refs
     if isinstance(expr, AxonExprCall):
-        base = expr.callee.split("@", 1)[0]
+        base, _ = _split_callable_surface_name(expr.callee)
         if not base.startswith("_") and base not in bound_names:
             if base in module_names or "." in base:
                 module_refs.add(base)
-            elif base in constant_names:
-                constant_refs.add(base)
+            elif base in value_names:
+                value_refs.add(base)
         for arg in expr.args:
             m, c = _collect_expr_refs(
                 arg,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
             )
             module_refs.update(m)
-            constant_refs.update(c)
+            value_refs.update(c)
         for value in expr.kwargs.values():
             if isinstance(value, AxonExpr):
                 m, c = _collect_expr_refs(
                     value,
                     bound_names=bound_names,
                     module_names=module_names,
-                    constant_names=constant_names,
+                    value_names=value_names,
                 )
                 module_refs.update(m)
-                constant_refs.update(c)
-        return module_refs, constant_refs
+                value_refs.update(c)
+        return module_refs, value_refs
     if isinstance(expr, AxonExprLambda):
         nested_bound = set(bound_names)
         nested_bound.add(expr.var)
@@ -942,16 +897,16 @@ def _collect_expr_refs(
             expr.body,
             bound_names=nested_bound,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
         )
     if isinstance(expr, AxonExprDo):
         return _collect_statement_refs(
             expr.body,
             bound_names=set(bound_names),
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
         )
-    return module_refs, constant_refs
+    return module_refs, value_refs
 
 
 def _collect_statement_refs(
@@ -959,10 +914,10 @@ def _collect_statement_refs(
     *,
     bound_names: set[str],
     module_names: set[str],
-    constant_names: set[str],
+    value_names: set[str],
 ) -> tuple[set[str], set[str]]:
     module_refs: set[str] = set()
-    constant_refs: set[str] = set()
+    value_refs: set[str] = set()
     local_bound = set(bound_names)
     for stmt in statements:
         if isinstance(stmt, AxonBind):
@@ -970,10 +925,10 @@ def _collect_statement_refs(
                 stmt.expr,
                 bound_names=local_bound,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
             )
             module_refs.update(m)
-            constant_refs.update(c)
+            value_refs.update(c)
             for target in stmt.targets:
                 if target != "_":
                     local_bound.add(target)
@@ -984,10 +939,10 @@ def _collect_statement_refs(
                     value,
                     bound_names=local_bound,
                     module_names=module_names,
-                    constant_names=constant_names,
+                    value_names=value_names,
                 )
                 module_refs.update(m)
-                constant_refs.update(c)
+                value_refs.update(c)
             continue
         if isinstance(stmt, AxonRepeat):
             for subexpr in (stmt.from_expr, stmt.to_expr, stmt.step_expr):
@@ -995,10 +950,10 @@ def _collect_statement_refs(
                     subexpr,
                     bound_names=local_bound,
                     module_names=module_names,
-                    constant_names=constant_names,
+                    value_names=value_names,
                 )
                 module_refs.update(m)
-                constant_refs.update(c)
+                value_refs.update(c)
             loop_bound = set(local_bound)
             loop_bound.add(stmt.var)
             if stmt.carry:
@@ -1009,10 +964,10 @@ def _collect_statement_refs(
                 stmt.body,
                 bound_names=loop_bound,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
             )
             module_refs.update(m)
-            constant_refs.update(c)
+            value_refs.update(c)
             if stmt.targets:
                 for target in stmt.targets:
                     if target != "_":
@@ -1022,116 +977,109 @@ def _collect_statement_refs(
             for part in stmt.prefix.parts:
                 for match in _PATH_PLACEHOLDER_RE.finditer(part):
                     name = match.group(1)
-                    if name not in local_bound and name in constant_names:
-                        constant_refs.add(name)
+                    if name not in local_bound and name in value_names:
+                        value_refs.add(name)
             for kwarg_value in stmt.kwargs.values():
                 if isinstance(kwarg_value, AxonExpr):
                     m, c = _collect_expr_refs(
                         kwarg_value,
                         bound_names=local_bound,
                         module_names=module_names,
-                        constant_names=constant_names,
+                        value_names=value_names,
                     )
                     module_refs.update(m)
-                    constant_refs.update(c)
+                    value_refs.update(c)
             m, c = _collect_statement_refs(
                 stmt.body,
                 bound_names=set(local_bound),
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
             )
             module_refs.update(m)
-            constant_refs.update(c)
+            value_refs.update(c)
             for target in stmt.targets:
                 if target != "_":
                     local_bound.add(target)
-    return module_refs, constant_refs
+    return module_refs, value_refs
 
 
 def _build_module_dependency_graph(
-    modules: tuple[AxonModule, ...],
-    constants: dict[str, AxonExpr],
+    modules: tuple[AxonDefinition, ...],
     *,
     type_aliases: dict[str, TypeAliasDef],
-) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+) -> dict[str, set[str]]:
     module_deps: dict[str, set[str]] = {}
-    constant_deps: dict[str, set[str]] = {}
     module_names = {module.name for module in modules}
-    constant_names = set(constants)
     for module in modules:
         bound_names = _module_bound_names(
-            module, constant_names=constant_names, type_aliases=type_aliases
+            module,
+            type_aliases=type_aliases,
+            include_type_dims=False,
         )
-        mod_refs, const_refs = _collect_statement_refs(
+        mod_refs, value_refs = _collect_statement_refs(
             module.statements,
             bound_names=bound_names,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=module_names,
         )
-        module_deps[module.name] = mod_refs
-        constant_deps[module.name] = const_refs
-    return module_deps, constant_deps
-
-
-def _build_constant_dependency_graph(
-    constants: dict[str, AxonExpr],
-) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
-    constant_graph: dict[str, set[str]] = {}
-    module_graph: dict[str, set[str]] = {}
-    constant_names = set(constants)
-    module_names: set[str] = set()
-    for name, expr in constants.items():
-        module_refs, const_refs = _collect_expr_refs(
-            expr,
-            bound_names=set(),
-            module_names=module_names,
-            constant_names=constant_names,
+        value_refs.update(
+            _module_type_definition_refs(
+                module,
+                definition_names=module_names,
+                type_aliases=type_aliases,
+            )
         )
-        constant_graph[name] = const_refs
-        module_graph[name] = module_refs
-    return constant_graph, module_graph
+        module_deps[module.name] = mod_refs | value_refs
+    return module_deps
 
 
 def _reachable_definitions(
     *,
     entrypoint: str | None,
     module_graph: dict[str, set[str]],
-    module_constant_graph: dict[str, set[str]],
-    constant_graph: dict[str, set[str]],
-    constant_module_graph: dict[str, set[str]],
-) -> tuple[set[str], set[str]]:
+) -> set[str]:
     reachable_modules: set[str] = set()
-    reachable_constants: set[str] = set()
     module_stack: list[str] = [entrypoint] if entrypoint is not None else []
-    constant_stack: list[str] = []
-    while module_stack or constant_stack:
-        while module_stack:
-            current = module_stack.pop()
-            if current in reachable_modules:
-                continue
-            reachable_modules.add(current)
-            module_stack.extend(
-                dep for dep in module_graph.get(current, set()) if dep not in reachable_modules
-            )
-            constant_stack.extend(
-                dep
-                for dep in module_constant_graph.get(current, set())
-                if dep not in reachable_constants
-            )
-        while constant_stack:
-            current = constant_stack.pop()
-            if current in reachable_constants:
-                continue
-            reachable_constants.add(current)
-            constant_stack.extend(
-                dep for dep in constant_graph.get(current, set()) if dep not in reachable_constants
-            )
-            module_stack.extend(
-                dep
-                for dep in constant_module_graph.get(current, set())
-                if dep not in reachable_modules
-            )
-    return reachable_modules, reachable_constants
+    while module_stack:
+        current = module_stack.pop()
+        if current in reachable_modules:
+            continue
+        reachable_modules.add(current)
+        module_stack.extend(
+            dep for dep in module_graph.get(current, set()) if dep not in reachable_modules
+        )
+    return reachable_modules
+
+
+def reachable_definitions(program: AxonFile, *, entrypoint: str | None = None) -> set[str]:
+    """Return definition names reachable from an entrypoint in a closed program."""
+
+    root_entrypoint = entrypoint
+    if root_entrypoint is None and program.modules:
+        root_entrypoint = program.modules[-1].name
+    module_graph = _build_module_dependency_graph(
+        program.modules,
+        type_aliases=program.type_aliases,
+    )
+    return _reachable_definitions(
+        entrypoint=root_entrypoint,
+        module_graph=module_graph,
+    )
+
+
+def prune_unreachable_definitions(program: AxonFile, *, entrypoint: str | None = None) -> AxonFile:
+    """Drop closed-program definitions unreachable from the selected entrypoint."""
+
+    reachable_modules = reachable_definitions(program, entrypoint=entrypoint)
+    return AxonFile(
+        modules=tuple(module for module in program.modules if module.name in reachable_modules),
+        imports=program.imports,
+        imported_members=program.imported_members,
+        exports=program.exports,
+        pragmas=program.pragmas,
+        type_aliases=program.type_aliases,
+        origin_path=program.origin_path,
+    )
 
 
 def _collect_path_placeholders(expr: AxonExpr) -> set[str]:
@@ -1148,23 +1096,26 @@ def _validate_module_expr(
     *,
     bound_names: set[str],
     module_names: set[str],
-    constant_names: set[str],
+    value_names: set[str],
     current_module: str,
 ) -> None:
     if isinstance(expr, AxonExprName):
-        if expr.name in bound_names:
+        base, _ = _split_callable_surface_name(expr.name)
+        if base.startswith("_"):
             return
-        if expr.name in constant_names or expr.name in module_names:
+        if base in bound_names:
+            return
+        if base in value_names or base in module_names:
             return
         raise ValueError(
             f"resolver produced unresolved name {expr.name!r} in module {current_module!r}"
         )
     if isinstance(expr, AxonExprCall):
-        base = expr.callee.split("@", 1)[0]
+        base, _ = _split_callable_surface_name(expr.callee)
         if base not in bound_names and not base.startswith("_") and base not in module_names:
-            if base in constant_names:
+            if base in value_names:
                 raise ValueError(
-                    f"resolver produced callable constant {base!r} in module {current_module!r}"
+                    f"resolver produced invalid callable value definition {base!r} in module {current_module!r}"
                 )
             raise ValueError(
                 f"resolver produced unresolved callee {base!r} in module {current_module!r}"
@@ -1174,7 +1125,7 @@ def _validate_module_expr(
                 arg,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
                 current_module=current_module,
             )
         for value in expr.kwargs.values():
@@ -1183,7 +1134,7 @@ def _validate_module_expr(
                     value,
                     bound_names=bound_names,
                     module_names=module_names,
-                    constant_names=constant_names,
+                    value_names=value_names,
                     current_module=current_module,
                 )
         return
@@ -1192,7 +1143,7 @@ def _validate_module_expr(
             expr.value,
             bound_names=bound_names,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
             current_module=current_module,
         )
         for stage in expr.stages:
@@ -1200,7 +1151,7 @@ def _validate_module_expr(
                 stage,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
                 current_module=current_module,
             )
         return
@@ -1209,7 +1160,7 @@ def _validate_module_expr(
             expr.value,
             bound_names=bound_names,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
             current_module=current_module,
         )
         nested_bound = set(bound_names)
@@ -1218,7 +1169,7 @@ def _validate_module_expr(
             expr.body,
             bound_names=nested_bound,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
             current_module=current_module,
         )
         return
@@ -1228,7 +1179,7 @@ def _validate_module_expr(
                 subexpr,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
                 current_module=current_module,
             )
         return
@@ -1238,7 +1189,7 @@ def _validate_module_expr(
                 subexpr,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
                 current_module=current_module,
             )
         return
@@ -1249,7 +1200,7 @@ def _validate_module_expr(
             expr.body,
             bound_names=nested_bound,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
             current_module=current_module,
         )
         return
@@ -1258,7 +1209,7 @@ def _validate_module_expr(
             expr.inner,
             bound_names=bound_names,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
             current_module=current_module,
         )
         return
@@ -1268,7 +1219,7 @@ def _validate_module_expr(
                 item,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
                 current_module=current_module,
             )
         return
@@ -1278,7 +1229,7 @@ def _validate_module_expr(
                 item,
                 bound_names=bound_names,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
                 current_module=current_module,
             )
         return
@@ -1287,12 +1238,12 @@ def _validate_module_expr(
             expr.body,
             bound_names=set(bound_names),
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
             current_module=current_module,
         )
         return
     placeholders = _collect_path_placeholders(expr)
-    unresolved = placeholders.difference(bound_names | constant_names)
+    unresolved = placeholders.difference(bound_names | value_names)
     if unresolved:
         missing = ", ".join(sorted(unresolved))
         raise ValueError(
@@ -1305,7 +1256,7 @@ def _validate_module_statements(
     *,
     bound_names: set[str],
     module_names: set[str],
-    constant_names: set[str],
+    value_names: set[str],
     current_module: str,
 ) -> None:
     local_bound = set(bound_names)
@@ -1315,7 +1266,7 @@ def _validate_module_statements(
                 stmt.expr,
                 bound_names=local_bound,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
                 current_module=current_module,
             )
             for target in stmt.targets:
@@ -1328,7 +1279,7 @@ def _validate_module_statements(
                     value,
                     bound_names=local_bound,
                     module_names=module_names,
-                    constant_names=constant_names,
+                    value_names=value_names,
                     current_module=current_module,
                 )
             continue
@@ -1338,7 +1289,7 @@ def _validate_module_statements(
                     subexpr,
                     bound_names=local_bound,
                     module_names=module_names,
-                    constant_names=constant_names,
+                    value_names=value_names,
                     current_module=current_module,
                 )
             loop_bound = set(local_bound)
@@ -1351,7 +1302,7 @@ def _validate_module_statements(
                 stmt.body,
                 bound_names=loop_bound,
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
                 current_module=current_module,
             )
             if stmt.targets:
@@ -1365,7 +1316,7 @@ def _validate_module_statements(
                 for part in stmt.prefix.parts
                 for match in _PATH_PLACEHOLDER_RE.finditer(part)
             }
-            unresolved = placeholders.difference(local_bound | constant_names)
+            unresolved = placeholders.difference(local_bound | value_names)
             if unresolved:
                 missing = ", ".join(sorted(unresolved))
                 raise ValueError(
@@ -1377,14 +1328,14 @@ def _validate_module_statements(
                         kwarg_value,
                         bound_names=local_bound,
                         module_names=module_names,
-                        constant_names=constant_names,
+                        value_names=value_names,
                         current_module=current_module,
                     )
             _validate_module_statements(
                 stmt.body,
                 bound_names=set(local_bound),
                 module_names=module_names,
-                constant_names=constant_names,
+                value_names=value_names,
                 current_module=current_module,
             )
             for target in stmt.targets:
@@ -1394,37 +1345,24 @@ def _validate_module_statements(
 
 def _validate_resolved_program(
     *,
-    modules: tuple[AxonModule, ...],
+    modules: tuple[AxonDefinition, ...],
     type_aliases: dict[str, TypeAliasDef],
-    constants: dict[str, AxonExpr],
 ) -> None:
     names = [module.name for module in modules]
     if len(set(names)) != len(names):
         raise ValueError("resolver produced duplicate module names after canonicalization")
-    constant_names = set(constants)
-    if len(constant_names) != len(constants):
-        raise ValueError("resolver produced duplicate constant names after canonicalization")
+    value_names = set(names)
     for module in modules:
         if module.imports or module.imported_members:
             raise ValueError(f"resolver produced unresolved imports in module {module.name!r}")
     module_names = set(names)
-    for name, expr in constants.items():
-        _validate_module_expr(
-            expr,
-            bound_names=set(),
-            module_names=module_names,
-            constant_names=constant_names,
-            current_module=name,
-        )
     for module in modules:
-        bound_names = _module_bound_names(
-            module, constant_names=constant_names, type_aliases=type_aliases
-        )
+        bound_names = _module_bound_names(module, type_aliases=type_aliases)
         _validate_module_statements(
             module.statements,
             bound_names=bound_names,
             module_names=module_names,
-            constant_names=constant_names,
+            value_names=value_names,
             current_module=module.name,
         )
     validate_axon_program(modules)
@@ -1433,8 +1371,10 @@ def _validate_resolved_program(
 def resolve_loaded_axon_files(
     loaded_program: LoadedAxonProgram,
 ) -> tuple[AxonFile, tuple[ValidationDiagnostic, ...]]:
+    for loaded_file in loaded_program.files:
+        validate_axon_program(loaded_file.ast.modules)
+
     root = loaded_program.root_path
-    builtins_dir = loaded_program.builtins_dir
     by_namespace: dict[str, LoadedAxonFile] = {
         loaded.namespace: loaded for loaded in loaded_program.files if loaded.namespace is not None
     }
@@ -1450,130 +1390,36 @@ def resolve_loaded_axon_files(
     namespace_to_loaded: dict[str, _LoadedSyntaxFile] = {
         loaded.namespace: loaded for loaded in ordered_files if loaded.namespace is not None
     }
-    module_sources: dict[str, Path] = {}
-    constant_sources: dict[str, Path] = {}
-
-    diagnostics: list[ValidationDiagnostic] = []
     merged_type_aliases: dict[str, TypeAliasDef] = {}
     root_pragmas: dict[str, object] = {}
-    root_module_names: tuple[str, ...] = ()
-    root_entrypoint: str | None = None
-    root_constant_names: set[str] = set()
 
-    constant_name_map: dict[tuple[str | None, str], str] = {}
     for loaded in ordered_files:
-        namespace = loaded.namespace
         if loaded.path == root:
             root_pragmas = dict(loaded.ast.pragmas)
-            root_module_names = _local_module_names(loaded.ast)
-            root_entrypoint = root_module_names[-1] if root_module_names else None
-            root_constant_names = set(loaded.ast.constants)
-        for module_name in _local_module_names(loaded.ast):
-            canonical_module = f"{namespace}.{module_name}" if namespace else module_name
-            module_sources.setdefault(canonical_module, loaded.path)
         _merge_type_aliases(
             merged_type_aliases,
             loaded.ast.type_aliases,
             file_path=loaded.path,
         )
-        for const_name in loaded.ast.constants:
-            canonical = _canonical_constant_name(namespace, const_name)
-            key = (namespace, const_name)
-            if key in constant_name_map and constant_name_map[key] != canonical:
-                raise ValueError(
-                    f"{loaded.path}: conflicting canonical constant name for {const_name!r}"
-                )
-            constant_name_map[key] = canonical
-            constant_sources.setdefault(canonical, loaded.path)
 
-    resolved_constants: dict[str, AxonExpr] = {}
-    ordered_modules: list[AxonModule] = []
+    ordered_modules: list[AxonDefinition] = []
     for loaded in ordered_files:
-        usage_modules = _build_surface_modules(
-            loaded.ast,
-            validate=False,
-            extra_imported_members=loaded.effective_imported_members
-            if loaded.effective_imported_members
-            else None,
-        )
-        usage = collect_import_usage(usage_modules)
-        diagnostics.extend(
-            warn_unused_import_diagnostics(
-                file_path=loaded.path,
-                ast=loaded.ast,
-                usage=usage,
-                enabled=builtins_dir not in loaded.path.parents,
-            )
-        )
-        _merge_constants(
-            resolved_constants,
-            _rewrite_constants_for_loaded_file(
-                loaded=loaded,
-                constant_name_map=constant_name_map,
-                namespace_to_loaded=namespace_to_loaded,
-            ),
-            file_path=loaded.path,
-        )
         ordered_modules.extend(
             _rewrite_modules_for_loaded_file(
                 loaded=loaded,
-                constant_name_map=constant_name_map,
                 namespace_to_loaded=namespace_to_loaded,
             )
         )
+    ordered_modules_tuple = tuple(ordered_modules)
 
-    root_module_names = tuple(
-        f"{loaded.namespace}.{name}" if loaded.namespace else name
-        for loaded in ordered_files
-        if loaded.path == root
-        for name in _local_module_names(loaded.ast)
-    )
-    root_entrypoint = root_module_names[-1] if root_module_names else None
-    root_constant_names = {
-        constant_name_map[(None, name)]
-        for name in root_constant_names
-        if (None, name) in constant_name_map
-    }
-
-    module_graph, module_constant_graph = _build_module_dependency_graph(
-        tuple(ordered_modules),
-        resolved_constants,
-        type_aliases=merged_type_aliases,
-    )
-    constant_graph, constant_module_graph = _build_constant_dependency_graph(resolved_constants)
-    reachable_modules, reachable_constants = _reachable_definitions(
-        entrypoint=root_entrypoint,
-        module_graph=module_graph,
-        module_constant_graph=module_constant_graph,
-        constant_graph=constant_graph,
-        constant_module_graph=constant_module_graph,
-    )
-    diagnostics.extend(
-        warn_unused_definitions(
-            all_module_names=tuple(module.name for module in ordered_modules),
-            root_entrypoint=root_entrypoint,
-            reachable_modules=reachable_modules,
-            all_constant_names=set(resolved_constants),
-            reachable_constants=reachable_constants,
-            module_sources=module_sources,
-            constant_sources=constant_sources,
-            builtins_dir=builtins_dir,
-        )
-    )
-
-    pruned_modules = tuple(module for module in ordered_modules if module.name in reachable_modules)
-    pruned_constants = {
-        name: expr for name, expr in resolved_constants.items() if name in reachable_constants
-    }
     _validate_resolved_program(
-        modules=pruned_modules,
+        modules=ordered_modules_tuple,
         type_aliases=merged_type_aliases,
-        constants=pruned_constants,
     )
     canonical_modules = tuple(
         module
         if module.body_expr is None
-        else AxonModule(
+        else AxonDefinition(
             name=module.name,
             path_param=module.path_param,
             path_params=module.path_params,
@@ -1588,9 +1434,8 @@ def resolve_loaded_axon_files(
             pragmas=None,
             type_aliases=None,
             return_type_expr=module.return_type_expr,
-            return_shape=module.return_shape,
         )
-        for module in pruned_modules
+        for module in ordered_modules_tuple
     )
     out = AxonFile(
         modules=canonical_modules,
@@ -1598,15 +1443,19 @@ def resolve_loaded_axon_files(
         imported_members={},
         exports=(),
         pragmas=root_pragmas,
-        constants=pruned_constants,
         type_aliases=dict(merged_type_aliases),
         origin_path=root,
     )
     validate_closed_axon_file(out)
-    return (out, tuple(diagnostics))
+    return (out, ())
 
 
 ResolveDiagnostic = ValidationDiagnostic
 
 
-__all__ = ["ResolveDiagnostic", "resolve_loaded_axon_files"]
+__all__ = [
+    "ResolveDiagnostic",
+    "prune_unreachable_definitions",
+    "reachable_definitions",
+    "resolve_loaded_axon_files",
+]

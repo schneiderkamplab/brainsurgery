@@ -34,7 +34,7 @@ lin@path x dim = linear@path x dim=dim bias=true transpose=true
     parsed = parse_surface_program_source(source)
     assert len(parsed.modules) == 1
     signature = parsed.modules[0].signature
-    assert signature.module_decl == "lin"
+    assert signature.definition_decl == "lin"
     sig = signature.type_signature
     assert len(sig.path_params) == 0
     assert tuple(render_type(arg) for arg in sig.arg_types) == ("Path", "Tensor[B,S,Din]", "Int")
@@ -137,6 +137,28 @@ lin x = x
 """
     assert parse_surface_program_source(left).pragmas["padding_side"] == "left"
     assert parse_surface_program_source(right).pragmas["padding_side"] == "right"
+
+
+def test_parse_program_source_main_pragma_preserved() -> None:
+    source = """
+{-# MAIN "entry" #-}
+entry :: Tensor[B,S,D] -> Tensor[B,S,D]
+entry x = x
+"""
+    assert parse_surface_program_source(source).pragmas["main"] == "entry"
+
+
+def test_parse_axon_program_adds_implicit_main_pragma_to_ast_rendering() -> None:
+    source = """
+helper :: Tensor[B,S,D] -> Tensor[B,S,D]
+helper x = x
+
+entry :: Tensor[B,S,D] -> Tensor[B,S,D]
+entry x = helper x
+"""
+    program = parse_axon_program(source)
+    assert program.pragmas["main"] == "entry"
+    assert render_axon_file(program).startswith('{-# MAIN "entry" #-}\n\n')
 
 
 def test_parse_program_source_checkpoints_pragma_string_normalizes_to_tuple() -> None:

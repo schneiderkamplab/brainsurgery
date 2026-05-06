@@ -7,6 +7,7 @@ from ..ast import AxonFile, render_axon_file
 from ..load import load_axon_files_from_path
 from ..validate import ValidationDiagnostic, raise_on_warnings
 from .core import resolve_loaded_axon_files
+from .reporting import resolve_validation_diagnostics
 
 
 @dataclass(frozen=True)
@@ -19,10 +20,6 @@ class ResolveReport:
         return self.ast.modules
 
     @property
-    def constants(self):
-        return self.ast.constants
-
-    @property
     def type_aliases(self):
         return self.ast.type_aliases
 
@@ -33,7 +30,8 @@ class ResolveReport:
 
 def resolve_axon_program_from_path(path: Path, *, strict: bool = False) -> ResolveReport:
     loaded = load_axon_files_from_path(path)
-    ast, diagnostics = resolve_loaded_axon_files(loaded)
+    ast, _ = resolve_loaded_axon_files(loaded)
+    diagnostics = resolve_validation_diagnostics(loaded, ast)
     if strict:
         raise_on_warnings(stage_name="resolver", diagnostics=diagnostics)
     return ResolveReport(ast=ast, diagnostics=diagnostics)

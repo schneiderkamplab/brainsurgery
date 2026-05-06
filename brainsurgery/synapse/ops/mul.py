@@ -151,7 +151,11 @@ def type_rule(
         return helpers.type_tensor(dims=right_dims)
     if right_dims is None:
         return helpers.type_tensor(dims=left_dims)
-    out_dims = broadcast_shape(left_dims, right_dims)
+    out_dims = (
+        helpers.broadcast_tensor_dims(left_dims, right_dims)
+        if hasattr(helpers, "broadcast_tensor_dims")
+        else broadcast_shape(left_dims, right_dims)
+    )
     if out_dims is None:
         return None
     return helpers.type_tensor(dims=out_dims)

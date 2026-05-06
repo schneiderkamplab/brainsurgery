@@ -102,9 +102,9 @@ def compile(
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Any", "Any", "Any"),
+    "args": ("Tensor[..S]", "IdxTensor[..I]", "Any"),
     "kwargs": {},
-    "returns": ("Tensor",),
+    "returns": ("Tensor[..R]",),
 }
 
 __all__ = [

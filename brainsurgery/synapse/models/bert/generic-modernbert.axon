@@ -12,15 +12,15 @@ import Tensor
 
 
 
-MODEL_DIM          = Config.int@hidden_size default=768
-VOCAB_SIZE          = Config.int@vocab_size default=50368
-NUM_LAYERS          = Config.int@num_hidden_layers default=22
-NUM_HEADS          = Config.int@num_attention_heads default=12
-FFN        = Config.int@intermediate_size default=1152
-EPS        = Config.float@norm_eps default=1e-05
-FULL_EVERY = Config.int@global_attn_every_n_layers default=3
-LOCAL_ATTN = Config.int@local_attention default=128
-LOCAL_WIN  = Config.int@local_attention_window default=64
+MODEL_DIM          = Config.int @@hidden_size default=768
+VOCAB_SIZE          = Config.int @@vocab_size default=50368
+NUM_LAYERS          = Config.int @@num_hidden_layers default=22
+NUM_HEADS          = Config.int @@num_attention_heads default=12
+FFN        = Config.int @@intermediate_size default=1152
+EPS        = Config.float @@norm_eps default=1e-05
+FULL_EVERY = Config.int @@global_attn_every_n_layers default=3
+LOCAL_ATTN = Config.int @@local_attention default=128
+LOCAL_WIN  = Config.int @@local_attention_window default=64
 THETA_FULL = Config.float @'rope_parameters.full_attention.rope_theta' default=160000.0
 THETA_LOCAL = Config.float @'rope_parameters.sliding_attention.rope_theta' default=10000.0
 
@@ -36,7 +36,7 @@ modernbert_layer x i pos_ids attn_mask = do
     full <- (FULL_EVERY <= 0) or ((i % FULL_EVERY) == 0)
     theta <- full ? THETA_FULL : THETA_LOCAL
     q, k <- rope_pair_base q k pos_ids theta
-    mask <- if full then bidirectional_mask q k padding_mask=attn_mask else bidirectional_mask q k window=LOCAL_WIN padding_mask=attn_mask
+    mask <- full ? bidirectional_mask q k padding_mask=attn_mask : bidirectional_mask q k window=LOCAL_WIN padding_mask=attn_mask
     return attention q k v mask |> merge_heads |> NN.linear@Wo dim=MODEL_DIM bias=false
   x <- x + a
   xn <- NN.layernorm@mlp_norm x eps=EPS bias=false

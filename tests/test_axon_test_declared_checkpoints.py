@@ -216,7 +216,6 @@ def test_tokenizer_pragma_for_checkpoint_supports_global_and_override(tmp_path: 
     assert (
         axon_test_module._tokenizer_pragma_for_checkpoint(
             axon_file=axon,
-            main_module=None,
             checkpoint_id="mistralai/Mistral-7B-v0.1",
         )
         == "mistralai/Mistral-7B-v0.1"
@@ -224,7 +223,6 @@ def test_tokenizer_pragma_for_checkpoint_supports_global_and_override(tmp_path: 
     assert (
         axon_test_module._tokenizer_pragma_for_checkpoint(
             axon_file=axon,
-            main_module=None,
             checkpoint_id="mistralai/Devstral-Small-2507",
         )
         == "mistralai/Devstral-Small-2507"

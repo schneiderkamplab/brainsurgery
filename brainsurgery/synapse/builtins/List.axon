@@ -9,10 +9,10 @@ init :: List[_T]
 init = _list_init
 
 index :: List[_T] -> Int -> _T
-index = _list_index
+index values i = _list_index values i
 
 append :: List[_T] -> _T -> List[_T]
-append = _list_append
+append values value = _list_append values value
 
 length :: List[_T] -> Dim
-length = _list_length
+length values = _list_length values

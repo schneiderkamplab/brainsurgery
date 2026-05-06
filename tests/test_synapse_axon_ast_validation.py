@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from brainsurgery.synapse import (
-    AxonModule,
+    AxonDefinition,
     parse_axon_program,
     validate_axon_program,
 )
@@ -53,7 +53,7 @@ tiny x = do
 
 
 def test_ast_validation_rejects_unknown_main_module() -> None:
-    module = AxonModule(
+    module = AxonDefinition(
         name="tiny",
         path_param=None,
         path_params=(),
@@ -87,3 +87,17 @@ tiny x = do
 """
     with pytest.raises(ValueError, match="yield must be the final statement in a for-loop body"):
         parse_axon_program(source)
+
+
+def test_ast_validation_allows_scope_return_inside_for_body() -> None:
+    source = """
+tiny :: Tensor[B,S] -> Tensor[B,S]
+tiny x = do
+  y <- for i <- [0..2) carry (x) do
+    z <- scope@layer do
+      return x
+    x <- z
+    yield x
+  return y
+"""
+    parse_axon_program(source)

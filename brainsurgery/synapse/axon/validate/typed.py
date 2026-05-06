@@ -10,7 +10,7 @@ from ..ast import (
     AxonExprTernary,
     AxonExprTuple,
     AxonFile,
-    AxonModule,
+    AxonDefinition,
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
@@ -22,7 +22,7 @@ from ..ast import (
 from .flat import validate_flat_axon_file
 
 
-def _validate_expr_typed(expr: AxonExpr, *, module: AxonModule) -> None:
+def _validate_expr_typed(expr: AxonExpr, *, module: AxonDefinition) -> None:
     if expr.inferred_type is None:
         raise ValueError(
             f"Axon typed validation failed in module {module.name!r}: missing inferred type"
@@ -65,7 +65,7 @@ def _validate_expr_typed(expr: AxonExpr, *, module: AxonModule) -> None:
                     _validate_expr_typed(value, module=module)
 
 
-def _validate_statement_typed(stmt: AxonStatement, *, module: AxonModule) -> None:
+def _validate_statement_typed(stmt: AxonStatement, *, module: AxonDefinition) -> None:
     if isinstance(stmt, AxonBind):
         _validate_expr_typed(stmt.expr, module=module)
     elif isinstance(stmt, AxonReturn | AxonYield):

@@ -1,6 +1,6 @@
 from .axon import (
     AxonBind,
-    AxonModule,
+    AxonDefinition,
     AxonParam,
     AxonRepeat,
     AxonReturn,
@@ -127,7 +127,7 @@ def render_axon_test_log(*args, **kwargs):
 
 __all__ = [
     "AxonBind",
-    "AxonModule",
+    "AxonDefinition",
     "AxonParam",
     "AxonRepeat",
     "AxonReturn",

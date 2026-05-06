@@ -85,13 +85,17 @@ def validate_parsed_program_source(parsed_source: Any) -> None:
     modules = parsed_source.modules
     seen_module_decls: set[str] = set()
     for idx, module in enumerate(modules):
-        sig_decl = module.signature.module_decl.strip()
-        def_decl = module.definition.module_decl.strip()
-        if not sig_decl:
+        sig_decl = (
+            module.signature.definition_decl.strip()
+            if module.signature is not None
+            else module.definition.definition_decl.strip()
+        )
+        def_decl = module.definition.definition_decl.strip()
+        if module.signature is not None and not sig_decl:
             raise ValueError(
                 f"Axon syntax validation failed at module[{idx}]: empty module declaration in signature"
             )
-        if not _is_mod_decl(sig_decl):
+        if module.signature is not None and not _is_mod_decl(sig_decl):
             raise ValueError(
                 f"Axon syntax validation failed at module[{idx}]: invalid module declaration {sig_decl!r}"
             )
@@ -105,19 +109,20 @@ def validate_parsed_program_source(parsed_source: Any) -> None:
                 f"Axon syntax validation failed at module[{idx}]: invalid definition declaration {def_decl!r}"
             )
 
-        sig_base, sig_path_params = _split_module_path_params(sig_decl)
         def_base, def_path_params = _split_module_path_params(def_decl)
-        if sig_base != def_base:
-            raise ValueError(
-                "Axon syntax validation failed at module"
-                f"[{idx}]: signature/definition name mismatch: {sig_decl!r} != {def_decl!r}"
-            )
-        if sig_path_params and def_path_params and sig_path_params != def_path_params:
-            raise ValueError(
-                "Axon syntax validation failed at module"
-                f"[{idx}]: signature/definition path-parameter mismatch: "
-                f"{sig_decl!r} != {def_decl!r}"
-            )
+        if module.signature is not None:
+            sig_base, sig_path_params = _split_module_path_params(sig_decl)
+            if sig_base != def_base:
+                raise ValueError(
+                    "Axon syntax validation failed at module"
+                    f"[{idx}]: signature/definition name mismatch: {sig_decl!r} != {def_decl!r}"
+                )
+            if sig_path_params and def_path_params and sig_path_params != def_path_params:
+                raise ValueError(
+                    "Axon syntax validation failed at module"
+                    f"[{idx}]: signature/definition path-parameter mismatch: "
+                    f"{sig_decl!r} != {def_decl!r}"
+                )
 
         _do_expr_requires_return(module.definition.rhs, module_index=idx, module_name=sig_decl)
 

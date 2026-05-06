@@ -96,7 +96,6 @@ def _normalize(value: Any) -> Any:
             tuple((k, v) for k, v in value.imported_members.items()),
             value.exports,
             tuple((k, _normalize(v)) for k, v in value.pragmas.items()),
-            tuple((k, _normalize(v)) for k, v in value.constants.items()),
             tuple((k, _normalize(v)) for k, v in value.type_aliases.items()),
         )
     if is_dataclass(value):
