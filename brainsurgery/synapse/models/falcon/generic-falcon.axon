@@ -19,7 +19,7 @@ HAS_N_INNER = Config.has_value@n_inner
 FFN_INT = Config.int@n_inner default=0
 FFN = HAS_N_INNER ? ((FFN_INT == 0) ? (4 * MODEL_DIM) : FFN_INT) : (4 * MODEL_DIM)
 MAX_POSITIONS   = Config.int@max_position_embeddings default=2048
-falcon_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+falcon_block :: Tensor[B,S,D] -> Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
 falcon_block x attn_mask past_kv = do
   xn <- layernorm@input_layernorm x dim=MODEL_DIM
 
@@ -41,7 +41,7 @@ falcon_block x attn_mask past_kv = do
   x <- x + m
   return x, new_kv
 
-falcon :: TokenIds[B,S] -> Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+falcon :: TokenIds[B,S] -> Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,DH])
 falcon input_ids attn_mask past_kv use_cache = do
   x <- embedding@transformer.word_embeddings input_ids dim=MODEL_DIM
   new_kv <- use_cache ? Cache.init : null

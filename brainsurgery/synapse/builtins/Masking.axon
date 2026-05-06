@@ -19,7 +19,7 @@ export (
 
 
 -- === CAUSAL MASK ===
-causal_mask_keep :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Dim -> Tensor[B,1,Q,K]
+causal_mask_keep :: Tensor[B,HQ,Q,HDQ] -> Tensor[B,HK,K,HDK] -> ?Dim -> Tensor[B,1,Q,K]
 causal_mask_keep q k ?window=null = do
   row_ids <- arange q start=0 end=Q |> reshape shape=[Q, 1]
   col_ids <- arange k start=0 end=K |> reshape shape=[1, K]
@@ -30,14 +30,14 @@ causal_mask_keep q k ?window=null = do
   return expand keep shape=[B, 1, Q, K]
 
 
-causal_mask_masked :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,K] -> ?Dim -> Tensor[B,1,Q,K]
+causal_mask_masked :: Tensor[B,HQ,Q,HDQ] -> Tensor[B,HK,K,HDK] -> Tensor[B,K] -> ?Dim -> Tensor[B,1,Q,K]
 causal_mask_masked q k attn_mask ?window=null = do
   keep <- causal_mask_keep q k window=window
   pad_keep <- cast attn_mask dtype="bool" |> reshape shape=[B, 1, 1, K]
   return and keep pad_keep
 
 
-causal_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,K] -> ?Dim -> ?Bool -> Tensor[B,1,Q,K]
+causal_mask :: Tensor[B,HQ,Q,HDQ] -> Tensor[B,HK,K,HDK] -> ?Tensor[B,K] -> ?Dim -> ?Bool -> Tensor[B,1,Q,K]
 causal_mask q k ?padding_mask=null ?window=null ?early_exit=false = if padding_mask == null then
     causal_mask_keep q k window=window
   else
@@ -45,7 +45,7 @@ causal_mask q k ?padding_mask=null ?window=null ?early_exit=false = if padding_m
 
 
 -- === BIDIRECTIONAL MASK ===
-bidirectional_mask_keep :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Dim -> Tensor[B,1,Q,K]
+bidirectional_mask_keep :: Tensor[B,HQ,Q,HDQ] -> Tensor[B,HK,K,HDK] -> ?Dim -> Tensor[B,1,Q,K]
 bidirectional_mask_keep q k ?window=null = do
   row_ids <- arange q start=0 end=Q |> reshape shape=[Q, 1]
   col_ids <- arange k start=0 end=K |> reshape shape=[1, K]
@@ -62,7 +62,7 @@ bidirectional_mask_keep_window aligned col_ids window = do
   return and (le col_ids (aligned + window)) (le (aligned - window) col_ids)
 
 
-bidirectional_mask_masked :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,SM] -> ?Dim -> Tensor[B,1,Q,K]
+bidirectional_mask_masked :: Tensor[B,HQ,Q,HDQ] -> Tensor[B,HK,K,HDK] -> Tensor[B,SM] -> ?Dim -> Tensor[B,1,Q,K]
 bidirectional_mask_masked q k attn_mask ?window=null = do
   keep <- bidirectional_mask_keep q k window=window
   pad_keep <- slice attn_mask dim=-1 start=(SM - K) end=SM |>
@@ -71,7 +71,7 @@ bidirectional_mask_masked q k attn_mask ?window=null = do
   return and keep pad_keep
 
 
-bidirectional_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,SM] -> ?Dim -> Tensor[B,1,Q,K]
+bidirectional_mask :: Tensor[B,HQ,Q,HDQ] -> Tensor[B,HK,K,HDK] -> ?Tensor[B,SM] -> ?Dim -> Tensor[B,1,Q,K]
 bidirectional_mask q k ?padding_mask=null ?window=null = if padding_mask == null then
     bidirectional_mask_keep q k window=window
   else

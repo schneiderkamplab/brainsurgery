@@ -34,7 +34,7 @@ HAS_LM_HEAD = has_root "lm_head"
 cohere_ln :: Path -> Tensor -> Tensor
 cohere_ln@path x = NN.layernorm@path x eps=EPS bias=false
 
-cohere_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+cohere_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 cohere_block x pos_ids attn_mask past_kv = do
   xn <- cohere_ln@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -54,7 +54,7 @@ cohere_block x pos_ids attn_mask past_kv = do
     return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM bias=false
   return x + a + m, new_kv
 
-cohere :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+cohere :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 cohere input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do

@@ -11,13 +11,13 @@ import Tensor
 
 
 -- Mamba-2.8B architecture constants.
-MODEL_DIM = Config.int@hidden_size default=2560                          -- residual hidden size
-I = Config.int@intermediate_size default=5120                    -- mixer inner width
-N = Config.int@state_size default=16                             -- state-space width
-R = Config.int@time_step_rank default=160                        -- delta rank
-NUM_LAYERS = Config.int@n_layer default=64                                -- mixer block count
-VOCAB_SIZE = Config.int@vocab_size default=50280                          -- tokenizer vocabulary size
-EPS = Config.float@layer_norm_epsilon default=1e-5               -- RMSNorm epsilon
+MODEL_DIM = Config.int@@hidden_size default=2560                          -- residual hidden size
+I = Config.int@@intermediate_size default=5120                    -- mixer inner width
+N = Config.int@@state_size default=16                             -- state-space width
+R = Config.int@@time_step_rank default=160                        -- delta rank
+NUM_LAYERS = Config.int@@n_layer default=64                                -- mixer block count
+VOCAB_SIZE = Config.int@@vocab_size default=50280                          -- tokenizer vocabulary size
+EPS = Config.float@@layer_norm_epsilon default=1e-5               -- RMSNorm epsilon
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
@@ -26,11 +26,11 @@ mamba_mixer :: Tensor[B,S,D] -> Tensor[B,S,D]
 mamba_mixer x = do
   in_proj <- NN.linear@in_proj x dim=2*I
   u, gate <- Tensor.split in_proj sizes=[I, I]
-  u_conv <- causal_conv1d@conv1d u activation=silu weight_path=@conv1d.weight bias_path=@conv1d.bias
+  u_conv <- causal_conv1d@conv1d u activation="silu" weight_path=@conv1d.weight bias_path=@conv1d.bias
   params <- NN.linear@x_proj u_conv dim=R + 2*N
   dt, b, c <- Tensor.split params sizes=[R, N, N]
   delta <- NN.linear@dt_proj dt dim=I bias=true
-  y_scan <- mamba_scan u_conv delta b c A=@A_log MODEL_DIM=@MODEL_DIM a_is_log=true
+  y_scan <- mamba_scan u_conv delta b c A=@A_log D=@D a_is_log=true
   return y_scan |> mul (silu gate) |> NN.linear@out_proj dim=MODEL_DIM
 
 mamba_block :: Tensor[B,S,D] -> Tensor[B,S,D]

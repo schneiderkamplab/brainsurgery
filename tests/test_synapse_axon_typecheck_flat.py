@@ -23,10 +23,13 @@ from brainsurgery.synapse.axon.ast import (
 )
 from brainsurgery.synapse.axon.ast.render import render_axon_file
 from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
+from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
 from brainsurgery.synapse.axon.parse import parse_axon_program
 from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
 from brainsurgery.synapse.axon.typecheck.core import _TcCtx, _is_generic_named_type, _scoped_typevars
 from brainsurgery.synapse.axon.typecheck import typecheck_flat_axon_file
+from brainsurgery.synapse.axon.typecheck2 import typecheck2_flat_axon_file
+from brainsurgery.synapse.axon.lowering import lower_axon_program_to_graph_ir
 from brainsurgery.synapse.axon.validate import validate_typed_axon_file
 
 
@@ -317,6 +320,43 @@ main x = bad_chunk x
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
     with pytest.raises(ValueError, match="cannot unify|type mismatch|return"):
         typecheck_flat_axon_file(flat, main_module="main")
+
+
+def test_typecheck2_resolves_wrapper_list_args_for_split_type_rule(tmp_path: Path) -> None:
+    source = """
+import Tensor (split)
+
+main :: Tensor[B,S,D] -> (Tensor[B,S,A], Tensor[B,S,C])
+main x = do
+  a, c <- split x sizes=[A, C]
+  return a, c
+"""
+    path = tmp_path / "split_main.axon"
+    path.write_text(source)
+    resolved = resolve_axon_program_from_path(path).ast
+    flat = flatten_closed_axon_file(normalize_closed_axon_file(resolved), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    text = render_axon_file(typed, show_types=True)
+    split_line = next(line for line in text.splitlines() if "a, c <-" in line and "Tensor.split" in line)
+    assert "Tensor[B,S,A]" in split_line
+    assert "Tensor[B,S,C]" in split_line
+
+
+def test_typecheck2_lowers_generic_mamba_without_shape_growth() -> None:
+    resolved = resolve_axon_program_from_path(
+        Path("brainsurgery/synapse/models/mamba/generic-mamba.axon")
+    ).ast
+    flat = flatten_closed_axon_file(normalize_closed_axon_file(resolved), main_module="mamba_2_8b")
+    typed = typecheck2_flat_axon_file(flat, main_module="mamba_2_8b")
+    validate_typed_axon_file(typed, main_module="mamba_2_8b")
+    lower_axon_program_to_graph_ir(typed)
+    text = render_axon_file(typed, show_types=True)
+    assert "Tensor.concat" not in next(
+        module_text
+        for module_text in text.split("\n\n")
+        if module_text.startswith("SSM.mamba_scan ::")
+    )
 
 
 def test_scoped_typevars_does_not_rescope_already_scoped_typevars() -> None:

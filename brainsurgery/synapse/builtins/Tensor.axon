@@ -38,7 +38,7 @@ export (
   zeros_like,
 )
 
-split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..R]]
+split :: Tensor[..S] -> ?Int -> ?List[Dim] -> Any
 split x ?dim=-1 ?sizes=null = _split x dim sizes
 
 chunk :: Tensor[..S] -> ?Int -> ?Dim -> List[Tensor[..R]]
@@ -85,7 +85,7 @@ cast x ?dtype=null = _cast x dtype
 cast_like :: Tensor[..S] -> Tensor[..R] -> Tensor[..S]
 cast_like x ref = _cast_like x ref
 
-tensor_like :: Any -> Tensor[..S] -> ?String -> Tensor[..S]
+tensor_like :: Any -> Tensor[..S] -> ?String -> Tensor[..R]
 tensor_like value ref ?dtype=null = _tensor_like value ref dtype
 
 cumsum :: Tensor[..S] -> ?Int -> Tensor[..S]

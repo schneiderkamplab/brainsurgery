@@ -23,7 +23,7 @@ MAX_CTX = 2048
 POST_LN_RESID = false
 HAS_LM_HEAD = has_root "lm_head"
 
-bloom_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+bloom_block :: Tensor[B,S,D] -> Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 bloom_block x attn_mask past_kv = do
   xn <- NN.layernorm@input_layernorm x eps=EPS
   attn_res <- POST_LN_RESID ? xn : x
@@ -45,7 +45,7 @@ bloom_block x attn_mask past_kv = do
     return NN.linear@dense_4h_to_h h dim=MODEL_DIM bias=true
   return mlp_res + m, new_kv
 
-bloom :: TokenIds[B,S] -> Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+bloom :: TokenIds[B,S] -> Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 bloom input_ids attn_mask past_kv use_cache = do
   tok <- NN.embedding@word_embeddings input_ids dim=MODEL_DIM
   x <- NN.layernorm@word_embeddings_layernorm tok eps=EPS

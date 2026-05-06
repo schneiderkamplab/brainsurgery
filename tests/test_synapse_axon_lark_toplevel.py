@@ -294,6 +294,20 @@ def test_parse_render_parse_roundtrip_gpt2_ast_equal(tmp_path: Path) -> None:
     assert ast_equal(original, reparsed)
 
 
+def test_render_preserves_semantic_parentheses_in_binary_expression(tmp_path: Path) -> None:
+    source = """
+main :: Int -> Bool
+main i = ((i + 1) % PERIOD) == 0
+"""
+    original = parse_axon_program(source)
+    rendered_path = tmp_path / "binary-parens-roundtrip.axon"
+    rendered_path.write_text(render_axon_file(original), encoding="utf-8")
+    rendered = rendered_path.read_text(encoding="utf-8")
+    assert "((i + 1) % PERIOD) == 0" in rendered
+    reparsed = parse_axon_program_from_path(rendered_path)
+    assert ast_equal(original, reparsed)
+
+
 def test_render_axon_file_preserves_type_aliases(tmp_path: Path) -> None:
     source = """
 type Pair[B,S,D] = (Tensor[B,S,D], Tensor[B,S,D])

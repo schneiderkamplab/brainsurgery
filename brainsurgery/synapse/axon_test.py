@@ -212,9 +212,11 @@ def _resolve_model_task(name: str) -> str:
 
 
 def _task_pragma_from_axon(*, axon_file: Path) -> str | None:
-    modules = parse_axon_program_from_path(axon_file)
-    module = _select_main_axon_module(modules)
+    parsed = parse_axon_program_from_path(axon_file)
+    module = _select_main_axon_module(parsed)
     raw = (getattr(module, "pragmas", None) or {}).get("task")
+    if raw is None:
+        raw = (getattr(parsed, "pragmas", None) or {}).get("task")
     if raw is None:
         return None
     normalized = str(raw).strip().lower()
@@ -227,9 +229,11 @@ def _task_pragma_from_axon(*, axon_file: Path) -> str | None:
 
 
 def _tokenizer_pragma_from_axon(*, axon_file: Path) -> str | None:
-    modules = parse_axon_program_from_path(axon_file)
-    module = _select_main_axon_module(modules)
+    parsed = parse_axon_program_from_path(axon_file)
+    module = _select_main_axon_module(parsed)
     raw = (getattr(module, "pragmas", None) or {}).get("tokenizer")
+    if raw is None:
+        raw = (getattr(parsed, "pragmas", None) or {}).get("tokenizer")
     if raw is None:
         return None
     if isinstance(raw, str) and raw:

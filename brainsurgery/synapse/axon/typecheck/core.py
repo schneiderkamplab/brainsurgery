@@ -2584,6 +2584,17 @@ def _infer_primitive_call(
         result_tp = _type_expr_from_spec(returns_spec[0], ctx=ctx, module_name=f"_op::{op_name}")
         result_tp = _resolve_type_dim_aliases(result_tp, expr_defs)
         return _annotate_expr(typed_call, result_tp, arity=1, ctx=ctx), result_tp, 1
+    if isinstance(returns_spec, tuple) and all(isinstance(item, str) for item in returns_spec):
+        result_tp = TypeTuple(
+            items=tuple(
+                _resolve_type_dim_aliases(
+                    _type_expr_from_spec(item, ctx=ctx, module_name=f"_op::{op_name}"),
+                    expr_defs,
+                )
+                for item in returns_spec
+            )
+        )
+        return _annotate_expr(typed_call, result_tp, arity=len(result_tp.items), ctx=ctx), result_tp, len(result_tp.items)
     return None
 
 
@@ -3966,11 +3977,9 @@ def _normalize_expr(
             inferred_dims=inferred_dims,
         )
     if isinstance(expr, AxonExprParen):
+        inner = _normalize_expr(expr.inner, ctx, preferred_dim_roots=preferred_dim_roots)
         return _replace_expr_annotations(
-            replace(
-                expr,
-                inner=_normalize_expr(expr.inner, ctx, preferred_dim_roots=preferred_dim_roots),
-            ),
+            inner,
             inferred_type=inferred_type,
             inferred_arity=inferred_arity,
             inferred_dims=inferred_dims,

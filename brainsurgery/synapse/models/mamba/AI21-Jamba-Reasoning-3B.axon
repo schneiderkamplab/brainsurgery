@@ -42,7 +42,7 @@ mamba_core x = do
   x_norm <- rms@input_layernorm x
   in_proj <- NN.linear@mamba.in_proj x_norm dim=10240
   u, gate <- Tensor.split in_proj sizes=[5120, 5120]
-  u_conv <- causal_conv1d@mamba.conv1d u activation=silu weight_path=@mamba.conv1d.weight bias_path=@mamba.conv1d.bias
+  u_conv <- causal_conv1d@mamba.conv1d u activation="silu" weight_path=@mamba.conv1d.weight bias_path=@mamba.conv1d.bias
   params <- NN.linear@mamba.x_proj u_conv dim=192
   dt, b, c <- Tensor.split params sizes=[160, 16, 16]
   dt <- NN.rmsnorm@mamba.dt_layernorm dt eps=1e-06 cast_float=true

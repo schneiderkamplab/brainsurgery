@@ -45,7 +45,7 @@ mamba_mixer x = do
   y <- do
     in_proj <- NN.linear@mixer.in_proj x_norm dim=5888
     u, gate <- Tensor.split in_proj sizes=[2944, 2944]
-    u_conv <- causal_conv1d@mixer.conv1d u activation=silu weight_path=@mixer.conv1d.weight bias_path=@mixer.conv1d.bias
+    u_conv <- causal_conv1d@mixer.conv1d u activation="silu" weight_path=@mixer.conv1d.weight bias_path=@mixer.conv1d.bias
     params <- NN.linear@mixer.x_proj u_conv dim=124
     dt, b, c <- Tensor.split params sizes=[92, 16, 16]
     delta <- NN.linear@mixer.dt_proj dt dim=2944 bias=true

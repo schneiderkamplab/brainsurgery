@@ -20,7 +20,11 @@ reshape_heads x heads = do
 
 merge_heads :: Tensor[B,heads,S,HD] -> Tensor[B,S,heads * HD]
 merge_heads x = do
-  return Tensor.permute x dims=[0, 2, 1, 3] |> Tensor.reshape shape=[B, S, (heads * HD)]
+  y <- Tensor.permute x dims=[0, 2, 1, 3]
+  h <- Tensor.size y dim=2
+  hd <- Tensor.size y dim=3
+  d <- h * hd
+  return Tensor.reshape y shape=[B, S, d]
 
 
 split_qkv_heads :: Tensor[B,T,D] -> ?Dim -> ?String -> (Tensor[B,H,T,HD], Tensor[B,H,T,HD], Tensor[B,H,T,HD])

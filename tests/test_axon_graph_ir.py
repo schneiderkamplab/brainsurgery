@@ -11,7 +11,7 @@ from brainsurgery.synapse.axon import (
     typecheck_flat_axon_file,
 )
 from brainsurgery.synapse.axon.ast import TypeBool, TypeList, TypeOptional, TypeTensor, TypeTuple
-from brainsurgery.synapse.axon.codegen2 import emit_model_code_from_graph_ir
+from brainsurgery.synapse.axon.codegen2 import Codegen2GraphModel, emit_model_code_from_graph_ir
 from brainsurgery.synapse.axon.graph_ir import GraphModule, GraphProgram, GraphValue, GraphValueRef
 
 
@@ -158,3 +158,16 @@ def test_codegen2_generate_uses_encoder_decoder_contract_from_signature() -> Non
     assert "forward_kwargs['decoder_input_ids'] = decoder_input_ids" in code
     assert "result = self.forward(input_ids, **forward_kwargs)" in code
     assert "return decoder_input_ids" in code
+
+
+def test_codegen2_nested_config_lookup_uses_dotted_path() -> None:
+    found, value = Codegen2GraphModel._lookup_config(
+        {"decoder": {"hidden_size": 1152}}, "decoder.hidden_size"
+    )
+
+    assert found
+    assert value == 1152
+    assert Codegen2GraphModel._lookup_config({"decoder": {}}, "decoder.hidden_size") == (
+        False,
+        None,
+    )

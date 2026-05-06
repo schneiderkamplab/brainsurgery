@@ -35,7 +35,7 @@ expert_ffn x = do
   up <- NN.linear@up_proj x
   return gate |> silu |> mul up |> NN.linear@down_proj
 
-olmoe_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+olmoe_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
 olmoe_decoder_block x pos_ids attn_mask past_kv = do
   x_norm <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -62,7 +62,7 @@ olmoe_decoder_block x pos_ids attn_mask past_kv = do
     return m
   return x + m, new_kv
 
-olmoe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+olmoe :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,DH])
 olmoe input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do

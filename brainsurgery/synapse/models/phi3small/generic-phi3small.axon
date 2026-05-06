@@ -52,7 +52,7 @@ HAS_LM_HEAD = has_root "lm_head"
 phi3small_norm :: Path -> Tensor -> Tensor
 phi3small_norm@path x = NN.layernorm@path x eps=EPS
 
-phi3small_block :: Tensor -> Int -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
+phi3small_block :: Tensor[B,S,D] -> Int -> IdxTensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 phi3small_block x i pos_ids attn_mask past_kv = do
   xn <- phi3small_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -79,7 +79,7 @@ phi3small_block x i pos_ids attn_mask past_kv = do
     return u |> gegelu limit=GEGELU_LIMIT |> NN.linear@down_proj dim=MODEL_DIM bias=true
   return x + m, new_kv
 
-phi3small :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+phi3small :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 phi3small input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@'{PARAM_ROOT}.model' do

@@ -43,7 +43,7 @@ HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
-phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 phimoe_block x pos_ids attn_mask past_kv = do
   xn <- NN.layernorm@input_layernorm x eps=EPS bias=true
   a, new_kv <- scope@self_attn do
@@ -72,7 +72,7 @@ phimoe_block x pos_ids attn_mask past_kv = do
     return m
   return x + m, new_kv
 
-phimoe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+phimoe :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 phimoe input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do

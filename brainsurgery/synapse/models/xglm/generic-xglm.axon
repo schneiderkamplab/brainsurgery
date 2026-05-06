@@ -13,25 +13,25 @@ import NN
 
 
 
-MODEL_DIM = Config.int@d_model default=1024
-VOCAB_SIZE = Config.int@vocab_size default=256008
-NUM_LAYERS = Config.int@num_layers default=24
-NUM_HEADS = Config.int@attention_heads default=16
+MODEL_DIM = Config.int @@d_model default=1024
+VOCAB_SIZE = Config.int @@vocab_size default=256008
+NUM_LAYERS = Config.int @@num_layers default=24
+NUM_HEADS = Config.int @@attention_heads default=16
 MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
-FFN = Config.int@ffn_dim default=4096
-EPS = Config.float@layer_norm_eps default=1e-05
-MAX_POSITIONS = Config.int@max_position_embeddings default=2048
-ACT = Config.str@activation_function default="gelu"
-SCALE_EMB = Config.bool@scale_embedding default=true
+FFN = Config.int @@ffn_dim default=4096
+EPS = Config.float @@layer_norm_eps default=1e-05
+MAX_POSITIONS = Config.int @@max_position_embeddings default=2048
+ACT = Config.str @@activation_function default="gelu"
+SCALE_EMB = Config.bool @@scale_embedding default=true
 EMB_SCALE = SCALE_EMB ? (sqrt MODEL_DIM) : 1.0
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
 HAS_POS = has_root "model.embed_positions.weight"
 
-xglm_act :: Tensor -> Tensor
+xglm_act :: Tensor[..S] -> Tensor[..S]
 xglm_act x = (ACT == "relu") ? (relu x) : (gelu x)
 
-xglm_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+xglm_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 xglm_block x attn_mask past_kv = do
   xn <- NN.layernorm@self_attn_layer_norm x eps=EPS
   a, new_kv <- scope@self_attn do
@@ -48,7 +48,7 @@ xglm_block x attn_mask past_kv = do
   x <- x + m
   return x, new_kv
 
-xglm :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+xglm :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 xglm input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=(-1)
   pos_ids_rope <- pos_ids + 2

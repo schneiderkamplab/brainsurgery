@@ -18,7 +18,7 @@ mamba_mixer :: Tensor[B,S,D] -> Tensor[B,S,D]
 mamba_mixer x = do
   in_proj <- NN.linear@in_proj x dim=10240
   u, gate <- Tensor.split in_proj sizes=[5120, 5120]
-  u_conv <- causal_conv1d@conv1d u activation=silu weight_path=@conv1d.weight bias_path=@conv1d.bias
+  u_conv <- causal_conv1d@conv1d u activation="silu" weight_path=@conv1d.weight bias_path=@conv1d.bias
   params <- NN.linear@x_proj u_conv dim=192
   dt, b, c <- Tensor.split params sizes=[160, 16, 16]
   delta <- NN.linear@dt_proj dt dim=5120 bias=true

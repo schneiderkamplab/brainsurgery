@@ -70,7 +70,7 @@ qwen3_moe_expert_ffn x = do
   u <- NN.linear@up_proj x dim=MFFN
   return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM bias=false
 
-qwen3_moe_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> Int -> (Tensor[B,S,D], ?CacheLayer)
+qwen3_moe_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> Int -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 qwen3_moe_block x pos_ids attn_mask past_kv layer_idx = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -90,7 +90,7 @@ qwen3_moe_block x pos_ids attn_mask past_kv layer_idx = do
     return (((layer_idx + 1) % SPARSE_STEP) == 0) ? sparse_ffn xn : dense_ffn xn
   return x + m, new_kv
 
-qwen3_moe :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+qwen3_moe :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 qwen3_moe input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do

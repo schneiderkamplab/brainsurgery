@@ -13,20 +13,20 @@ import Tensor
 
 
 -- Jamba-3B architecture constants.
-MODEL_DIM = Config.int@hidden_size default=2560                          -- residual hidden size
-VOCAB_SIZE = Config.int@vocab_size default=65536                          -- tokenizer vocabulary size
-NUM_LAYERS = Config.int@num_hidden_layers default=28                      -- decoder depth
-NUM_HEADS = Config.int@num_attention_heads default=20                    -- query heads
-KVH = Config.int@num_key_value_heads default=1                   -- key/value heads
-MODEL_HEAD_DIM = Config.int@head_dim default=128                            -- per-head dimension
+MODEL_DIM = Config.int@@hidden_size default=2560                          -- residual hidden size
+VOCAB_SIZE = Config.int@@vocab_size default=65536                          -- tokenizer vocabulary size
+NUM_LAYERS = Config.int@@num_hidden_layers default=28                      -- decoder depth
+NUM_HEADS = Config.int@@num_attention_heads default=20                    -- query heads
+KVH = Config.int@@num_key_value_heads default=1                   -- key/value heads
+MODEL_HEAD_DIM = Config.int@@head_dim default=128                            -- per-head dimension
 SCALE = 1.0 / sqrt MODEL_HEAD_DIM                                              -- qk scaling
-FF = Config.int@intermediate_size default=8192                   -- FFN width
-I = MODEL_DIM * (Config.int@mamba_expand default=2)                      -- mamba inner width
-N = Config.int@mamba_d_state default=16                          -- state-space width
-R = Config.int@mamba_dt_rank default=160                         -- delta rank
-ATTN_PERIOD = Config.int@attn_layer_period default=14            -- attention cadence
-ATTN_OFFSET = Config.int@attn_layer_offset default=7             -- attention phase offset
-EPS = Config.float@rms_norm_eps default=1e-6                     -- RMSNorm epsilon
+FF = Config.int@@intermediate_size default=8192                   -- FFN width
+I = MODEL_DIM * (Config.int@@mamba_expand default=2)                      -- mamba inner width
+N = Config.int@@mamba_d_state default=16                          -- state-space width
+R = Config.int@@mamba_dt_rank default=160                         -- delta rank
+ATTN_PERIOD = Config.int@@attn_layer_period default=14            -- attention cadence
+ATTN_OFFSET = Config.int@@attn_layer_offset default=7             -- attention phase offset
+EPS = Config.float@@rms_norm_eps default=1e-6                     -- RMSNorm epsilon
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
@@ -55,14 +55,14 @@ mamba_core x = do
   x_norm <- rms@input_layernorm x
   in_proj <- NN.linear@mamba.in_proj x_norm dim=2*I
   u, gate <- Tensor.split in_proj sizes=[I, I]
-  u_conv <- causal_conv1d@mamba.conv1d u activation=silu weight_path=@mamba.conv1d.weight bias_path=@mamba.conv1d.bias
+  u_conv <- causal_conv1d@mamba.conv1d u activation="silu" weight_path=@mamba.conv1d.weight bias_path=@mamba.conv1d.bias
   params <- NN.linear@mamba.x_proj u_conv dim=R + 2*N
   dt, b, c <- Tensor.split params sizes=[R, N, N]
   dt <- NN.rmsnorm@mamba.dt_layernorm dt eps=EPS cast_float=true
   b <- NN.rmsnorm@mamba.b_layernorm b eps=EPS cast_float=true
   c <- NN.rmsnorm@mamba.c_layernorm c eps=EPS cast_float=true
   delta <- NN.linear@mamba.dt_proj dt dim=I bias=true
-  y_scan <- mamba_scan u_conv delta b c A=@mamba.A_log MODEL_DIM=@mamba.MODEL_DIM a_is_log=true
+  y_scan <- mamba_scan u_conv delta b c A=@mamba.A_log D=@mamba.D a_is_log=true
   y <- y_scan |> mul (silu gate) |> NN.linear@mamba.out_proj dim=MODEL_DIM
   return x + y
 

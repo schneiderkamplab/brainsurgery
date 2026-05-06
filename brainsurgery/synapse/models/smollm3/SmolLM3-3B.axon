@@ -1,57 +1,90 @@
 {-# CHECKPOINTS ["HuggingFaceTB/SmolLM3-3B", "HuggingFaceTB/SmolLM3-3B-Base"] #-}
+
 {-# TASK "causal_lm" #-}
 
-import Activations
+{-# MAIN "smollm3" #-}
+
 import Activations (silu)
-import Attention
+
 import Attention (attention, merge_heads, reshape_heads)
-import Masking
+
 import Masking (causal_mask)
-import Math
+
 import Math (mul)
-import Positions
+
+import Params (has_root)
+
 import Positions (position_ids, rope_pair_base)
+
 import Cache
+
+import Config
+
 import NN
+
 import Tensor
 
-rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = NN.rmsnorm@path x eps=1e-06
+MODEL_DIM = 2048
 
-smollm3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+VOCAB_SIZE = 128256
+
+NUM_LAYERS = 36
+
+NUM_HEADS = 16
+
+KVH = 4
+
+MODEL_HEAD_DIM = (false) ? 128 : (MODEL_DIM / NUM_HEADS)
+
+KVD = KVH * MODEL_HEAD_DIM
+
+FFN = 11008
+
+EPS = 1e-06
+
+THETA = 5000000.0
+
+MAX_POSITIONS = 65536
+
+NO_ROPE_LAYER_INTERVAL = 4
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS
+
+smollm3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 smollm3_block x i pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=2048 |> reshape_heads heads=16
-    k <- NN.linear@k_proj xn dim=512 |> reshape_heads heads=4
-    v <- NN.linear@v_proj xn dim=512 |> reshape_heads heads=4
-    use_rope <- false or (((i + 1) % 4) != 0)
-    q, k <- if use_rope then rope_pair_base q k pos_ids 5000000.0 else (q, k)
+    q <- NN.linear@q_proj xn dim=MODEL_DIM |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
+    use_rope <- (NO_ROPE_LAYER_INTERVAL <= 0) or (((i + 1) % NO_ROPE_LAYER_INTERVAL) != 0)
+    q, k <- if use_rope then rope_pair_base q k pos_ids THETA else (q, k)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=4
-    v <- Tensor.repeat v repeats=4
-    mask <- causal_mask q k window=65536 padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=2048
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
   m <- scope@mlp do
-    g <- NN.linear@gate_proj xn dim=11008
-    u <- NN.linear@up_proj xn dim=11008
-    return g |> silu |> mul u |> NN.linear@down_proj dim=2048
+    g <- NN.linear@gate_proj xn dim=FFN
+    u <- NN.linear@up_proj xn dim=FFN
+    return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
   return x + m, new_kv
 
-smollm3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+smollm3 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 smollm3 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=2048
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..36) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- smollm3_block x i pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
-    logits <- rms@norm x |> NN.linear@embed_tokens dim=128256
+    logits <- rms@norm x |> NN.linear@embed_tokens dim=VOCAB_SIZE
     return logits, new_kv
   return logits, new_kv

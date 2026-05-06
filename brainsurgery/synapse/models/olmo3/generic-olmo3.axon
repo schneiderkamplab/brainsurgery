@@ -31,7 +31,7 @@ ROPE_BETA_SLOW = Config.float @'rope_scaling.beta_slow' default=1.0
 ROPE_CONTEXT = Config.int @'rope_scaling.original_max_position_embeddings' default=8192
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
-olmo3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+olmo3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 olmo3_block x i pos_ids attn_mask past_kv = do
   a, new_kv <- scope@self_attn do
     q <- NN.linear@q_proj x dim=(NUM_HEADS * MODEL_HEAD_DIM) |> NN.rmsnorm@q_norm eps=EPS cast_float=true |> reshape_heads heads=NUM_HEADS
@@ -54,7 +54,7 @@ olmo3_block x i pos_ids attn_mask past_kv = do
   m <- NN.rmsnorm@post_feedforward_layernorm m eps=EPS cast_float=true
   return x + m, new_kv
 
-olmo3 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+olmo3 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 olmo3 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do

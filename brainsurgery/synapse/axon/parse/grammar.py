@@ -1305,7 +1305,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         inner = next((self._as_expr(child) for child in children if self._is_expr(child)), None)
         if inner is None:
             raise ValueError("parenthesized expression requires an inner expression")
-        return inner
+        return AxonExprParen(inner=inner)
 
     def expr_ascribe(self, children: list[object]) -> AxonExpr:
         expr = next((self._as_expr(child) for child in children if self._is_expr(child)), None)

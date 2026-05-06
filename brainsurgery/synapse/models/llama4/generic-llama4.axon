@@ -67,7 +67,7 @@ llama4_moe x = do
   routed <- grouped_swiglu_ffn_basic x topk_weights topk_indices E transpose=true pre_scale_input=true
   return shared + routed
 
-llama4_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+llama4_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 llama4_block x i pos_ids attn_mask past_kv = do
   use_rope <- ((i + 1) % NO_ROPE_INTERVAL) != 0
   xn <- llama4_norm@input_layernorm x
@@ -91,7 +91,7 @@ llama4_block x i pos_ids attn_mask past_kv = do
     return llama4_moe xn
   return x + m, new_kv
 
-llama4 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+llama4 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 llama4 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@language_model.model do

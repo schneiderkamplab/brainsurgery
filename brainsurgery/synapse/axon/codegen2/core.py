@@ -197,6 +197,11 @@ def _bind_dim_expr_runtime(dim: Any, actual: int, symbols: dict[str, Any]) -> No
             symbols.setdefault(left, actual // int(symbols[right]))
         if isinstance(right, str) and left in symbols and int(symbols[left]) != 0:
             symbols.setdefault(right, actual // int(symbols[left]))
+    if dim.op == "/":
+        if isinstance(left, str) and right in symbols:
+            symbols.setdefault(left, actual * int(symbols[right]))
+        if isinstance(right, str) and left in symbols and actual != 0:
+            symbols.setdefault(right, int(symbols[left]) // actual)
 
 
 def _bind_nested_shape_symbols_runtime(type_expr: Any, value: Any, symbols: dict[str, Any]) -> None:
@@ -266,6 +271,14 @@ def _emit_bind_dim_expr(
             local.add(left)
         if isinstance(right, str) and right.isidentifier() and right not in local and isinstance(left, str) and left in local:
             add(lines, indent, f"{right} = {actual_expr} // {left}")
+            local.add(right)
+        return
+    if dim.op == "/":
+        if isinstance(left, str) and left.isidentifier() and left not in local and isinstance(right, str) and right in local:
+            add(lines, indent, f"{left} = {actual_expr} * {right}")
+            local.add(left)
+        if isinstance(right, str) and right.isidentifier() and right not in local and isinstance(left, str) and left in local:
+            add(lines, indent, f"{right} = {left} // {actual_expr}")
             local.add(right)
 
 
@@ -591,6 +604,17 @@ class Codegen2GraphModel(SynapseProgramModel):
         key = resolve_path_expr_to_key(payload, {}, op_name="codegen2 config path")
         return key
 
+    @staticmethod
+    def _lookup_config(config: Any, key: str) -> tuple[bool, Any]:
+        if not isinstance(config, dict):
+            return False, None
+        current: Any = config
+        for part in str(key).split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False, None
+            current = current[part]
+        return True, current
+
     def _execute_primitive_node(
         self,
         primitive: str,
@@ -638,11 +662,11 @@ class Codegen2GraphModel(SynapseProgramModel):
                 raise ValueError(f"{primitive} expects one Path argument")
             _absolute, key = self._path_parts(args[0])
             config = self.spec.get("model", {}).get("config", {})
-            value = config.get(key) if isinstance(config, dict) else None
+            found, value = self._lookup_config(config, key)
             if primitive == "config_has_value":
-                out(isinstance(config, dict) and value is not None)
+                out(found and value is not None)
                 return True
-            if value is None:
+            if not found or value is None:
                 value = args[1] if len(args) > 1 else kwargs.get("default")
             if primitive in {"config_int", "config_dim"}:
                 out(int(value))
@@ -812,6 +836,10 @@ class Codegen2GraphModel(SynapseProgramModel):
         if primitive == "gather":
             dim = int(args[2]) if len(args) > 2 and not self._is_null(args[2]) else -1
             out(torch.gather(args[0], dim=dim, index=args[1]))
+            return True
+        if primitive == "index_add":
+            dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else 0
+            out(torch.index_add(args[0], dim=dim, index=args[1], source=args[2]))
             return True
         if primitive == "clamp":
             x = args[0]
@@ -1186,9 +1214,55 @@ class _DirectTorchEmitter:
         add(lines, 8, "key = str(path).lstrip('@')")
         add(lines, 8, "return self.state_dict_tensors.get(key)")
         add(lines, 4, "")
+        add(lines, 4, "def _linear(self, base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
+        add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
+        add(lines, 8, "if expert is not None:")
+        add(lines, 12, "weight = weight[int(expert)]")
+        add(lines, 8, "bias_value = self._optional_param(self._compose_path(base, bias_leaf)) if bias else None")
+        add(lines, 8, "weight_run = weight.to(dtype=x.dtype) if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype else weight")
+        add(lines, 8, "bias_run = bias_value.to(dtype=x.dtype) if bias_value is not None and x.is_floating_point() and bias_value.is_floating_point() and x.dtype != bias_value.dtype else bias_value")
+        add(lines, 8, "if transpose:")
+        add(lines, 12, "return torch.matmul(x, weight_run) + (bias_run if bias_run is not None else 0)")
+        add(lines, 8, "return F.linear(x, weight_run, bias_run)")
+        add(lines, 4, "")
         add(lines, 4, "def _config(self, path, default=None):")
         add(lines, 8, "key = str(path).lstrip('@')")
-        add(lines, 8, "return self.config.get(key, default)")
+        add(lines, 8, "value = self.config")
+        add(lines, 8, "for part in key.split('.'):")
+        add(lines, 12, "if not isinstance(value, dict) or part not in value:")
+        add(lines, 16, "return default")
+        add(lines, 12, "value = value[part]")
+        add(lines, 8, "return default if value is None else value")
+        add(lines, 4, "")
+        add(lines, 4, "def _has_config(self, path):")
+        add(lines, 8, "key = str(path).lstrip('@')")
+        add(lines, 8, "value = self.config")
+        add(lines, 8, "for part in key.split('.'):")
+        add(lines, 12, "if not isinstance(value, dict) or part not in value:")
+        add(lines, 16, "return False")
+        add(lines, 12, "value = value[part]")
+        add(lines, 8, "return value is not None")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _dtype_from_name(value):")
+        add(lines, 8, "if value is None:")
+        add(lines, 12, "return None")
+        add(lines, 8, "token = str(value).strip().lower()")
+        add(lines, 8, "if token in ('', 'none', 'null', 'default'):")
+        add(lines, 12, "return None")
+        add(lines, 8, "if token in ('float32', 'fp32', 'single'):")
+        add(lines, 12, "return torch.float32")
+        add(lines, 8, "if token in ('float16', 'fp16', 'half'):")
+        add(lines, 12, "return torch.float16")
+        add(lines, 8, "if token in ('bfloat16', 'bf16'):")
+        add(lines, 12, "return torch.bfloat16")
+        add(lines, 8, "if token in ('int64', 'long'):")
+        add(lines, 12, "return torch.int64")
+        add(lines, 8, "if token in ('int32', 'int'):")
+        add(lines, 12, "return torch.int32")
+        add(lines, 8, "if token in ('bool', 'boolean'):")
+        add(lines, 12, "return torch.bool")
+        add(lines, 8, "raise ValueError(f'unsupported dtype name {value!r}')")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _binary_add(left, right):")
@@ -1358,8 +1432,35 @@ class _DirectTorchEmitter:
         add(lines, 12, "return torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)")
         add(lines, 8, "def _ones_like_ids(ids):")
         add(lines, 12, "return torch.ones(ids.shape, dtype=torch.long, device=ids.device)")
+        add(lines, 8, "def _generation_limit(prompt_ids):")
+        add(lines, 12, "requested = kwargs.pop('max_new_tokens', None)")
+        add(lines, 12, "if requested is not None:")
+        add(lines, 16, "return int(requested)")
+        add(lines, 12, "max_len = kwargs.pop('max_len', None)")
+        add(lines, 12, "if max_len is None:")
+        add(lines, 16, "return int(max_new_tokens)")
+        add(lines, 12, "return max(1, int(max_len) - int(prompt_ids.shape[1]))")
+        add(lines, 8, "def _eos_state(batch_size, device):")
+        add(lines, 12, "eos_token_id = kwargs.pop('eos_token_id', self.config.get('eos_token_id', None))")
+        add(lines, 12, "pad_token_id = kwargs.pop('pad_token_id', eos_token_id)")
+        add(lines, 12, "if eos_token_id is None:")
+        add(lines, 16, "return None, None, None")
+        add(lines, 12, "eos = torch.as_tensor(eos_token_id, dtype=torch.long, device=device).reshape(-1)")
+        add(lines, 12, "pad = int(eos[0].item() if pad_token_id is None else pad_token_id)")
+        add(lines, 12, "finished = torch.zeros((batch_size, 1), dtype=torch.bool, device=device)")
+        add(lines, 12, "return eos, pad, finished")
+        add(lines, 8, "def _apply_eos(next_id, eos, pad, finished):")
+        add(lines, 12, "if eos is None:")
+        add(lines, 16, "return next_id, finished")
+        add(lines, 12, "raw_next = next_id")
+        add(lines, 12, "next_id = torch.where(finished, torch.full_like(next_id, pad), next_id)")
+        add(lines, 12, "hit = (raw_next == eos.view(1, -1)).any(dim=1, keepdim=True)")
+        add(lines, 12, "finished = finished | hit")
+        add(lines, 12, "return next_id, finished")
         if is_cached_decoder:
             add(lines, 8, "out = input_ids")
+            add(lines, 8, "limit = _generation_limit(out)")
+            add(lines, 8, "eos, pad, finished = _eos_state(out.shape[0], out.device)")
             add(lines, 8, f"cache = kwargs.pop({cache_name!r}, None)")
             if attention_name is not None:
                 other = "attention_mask" if attention_name == "attn_mask" else "attn_mask"
@@ -1368,7 +1469,7 @@ class _DirectTorchEmitter:
                 add(lines, 12, "attention_mask = _ones_like_ids(out)")
             if use_cache_name is not None:
                 add(lines, 8, f"kwargs.pop({use_cache_name!r}, None)")
-            add(lines, 8, "for _ in range(int(max_new_tokens)):")
+            add(lines, 8, "for _ in range(limit):")
             add(lines, 12, "step_input = out[:, -1:] if cache is not None else out")
             add(lines, 12, "forward_kwargs = dict(kwargs)")
             add(lines, 12, f"forward_kwargs[{cache_name!r}] = cache")
@@ -1381,33 +1482,43 @@ class _DirectTorchEmitter:
             add(lines, 12, "if isinstance(result, dict):")
             add(lines, 16, f"cache = result.get({cache_output_name!r}, cache)")
             add(lines, 12, "next_id = _next_id(logits)")
+            add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
             add(lines, 12, "out = torch.cat([out, next_id], dim=1)")
             if attention_name is not None:
                 add(lines, 12, "attention_mask = torch.cat([attention_mask, _ones_like_ids(next_id)], dim=1)")
+            add(lines, 12, "if finished is not None and bool(finished.all().item()):")
+            add(lines, 16, "break")
             add(lines, 8, "return out")
             return
         if is_decoder_only:
             add(lines, 8, "out = input_ids")
+            add(lines, 8, "limit = _generation_limit(out)")
+            add(lines, 8, "eos, pad, finished = _eos_state(out.shape[0], out.device)")
             if attention_name is not None:
                 other = "attention_mask" if attention_name == "attn_mask" else "attn_mask"
                 add(lines, 8, f"attention_mask = kwargs.pop({attention_name!r}, kwargs.pop({other!r}, None))")
                 add(lines, 8, "if attention_mask is None:")
                 add(lines, 12, "attention_mask = _ones_like_ids(out)")
-            add(lines, 8, "for _ in range(int(max_new_tokens)):")
+            add(lines, 8, "for _ in range(limit):")
             add(lines, 12, "forward_kwargs = dict(kwargs)")
             if attention_name is not None:
                 add(lines, 12, f"forward_kwargs[{attention_name!r}] = attention_mask")
             add(lines, 12, "result = self.forward(out, **forward_kwargs)")
             add(lines, 12, "next_id = _next_id(_logits(result))")
+            add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
             add(lines, 12, "out = torch.cat([out, next_id], dim=1)")
             if attention_name is not None:
                 add(lines, 12, "attention_mask = torch.cat([attention_mask, _ones_like_ids(next_id)], dim=1)")
+            add(lines, 12, "if finished is not None and bool(finished.all().item()):")
+            add(lines, 16, "break")
             add(lines, 8, "return out")
             return
         add(lines, 8, "decoder_input_ids = kwargs.pop('decoder_input_ids', None)")
         add(lines, 8, "if decoder_input_ids is None:")
         add(lines, 12, "start_id = kwargs.pop('decoder_start_token_id', self.config.get('decoder_start_token_id', self.config.get('pad_token_id', 0)))")
         add(lines, 12, "decoder_input_ids = torch.full((input_ids.shape[0], 1), int(start_id), dtype=input_ids.dtype, device=input_ids.device)")
+        add(lines, 8, "limit = _generation_limit(input_ids)")
+        add(lines, 8, "eos, pad, finished = _eos_state(decoder_input_ids.shape[0], decoder_input_ids.device)")
         if attention_name is not None:
             other = "attention_mask" if attention_name == "attn_mask" else "attn_mask"
             add(lines, 8, f"attention_mask = kwargs.pop({attention_name!r}, kwargs.pop({other!r}, None))")
@@ -1417,7 +1528,7 @@ class _DirectTorchEmitter:
             add(lines, 8, f"decoder_attention_mask = kwargs.pop({decoder_attention_name!r}, None)")
             add(lines, 8, "if decoder_attention_mask is None:")
             add(lines, 12, "decoder_attention_mask = _ones_like_ids(decoder_input_ids)")
-        add(lines, 8, "for _ in range(int(max_new_tokens)):")
+        add(lines, 8, "for _ in range(limit):")
         add(lines, 12, "forward_kwargs = dict(kwargs)")
         add(lines, 12, "forward_kwargs['decoder_input_ids'] = decoder_input_ids")
         if attention_name is not None:
@@ -1426,9 +1537,12 @@ class _DirectTorchEmitter:
             add(lines, 12, f"forward_kwargs[{decoder_attention_name!r}] = decoder_attention_mask")
         add(lines, 12, "result = self.forward(input_ids, **forward_kwargs)")
         add(lines, 12, "next_id = _next_id(_logits(result))")
+        add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
         add(lines, 12, "decoder_input_ids = torch.cat([decoder_input_ids, next_id], dim=1)")
         if decoder_attention_name is not None:
             add(lines, 12, "decoder_attention_mask = torch.cat([decoder_attention_mask, _ones_like_ids(next_id)], dim=1)")
+        add(lines, 12, "if finished is not None and bool(finished.all().item()):")
+        add(lines, 16, "break")
         add(lines, 8, "return decoder_input_ids")
 
     def _emit_node(self, lines: list[str], node: Any, *, indent: int, local: set[str], symbols_dict: str) -> None:
@@ -1483,7 +1597,7 @@ class _DirectTorchEmitter:
         if primitive.startswith("config_"):
             default = args[1] if len(args) > 1 else attrs.get("default", "None")
             if primitive == "config_has_value":
-                return f"({args[0]}.lstrip('@') in self.config and self.config.get({args[0]}.lstrip('@')) is not None)"
+                return f"self._has_config({args[0]})"
             value = f"self._config({args[0]}, {default})"
             if primitive in {"config_int", "config_dim"}:
                 return f"int({value})"
@@ -1501,9 +1615,10 @@ class _DirectTorchEmitter:
         if primitive == "linear":
             bias = args[3] if len(args) > 3 else "False"
             transpose = args[4] if len(args) > 4 else "False"
+            expert = args[5] if len(args) > 5 else "None"
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
-            return f"((torch.matmul({args[1]}, self._param(self._compose_path({args[0]}, {weight_leaf}))) + (self._optional_param(self._compose_path({args[0]}, {bias_leaf})) if {bias} else 0)) if {transpose} else F.linear({args[1]}, self._param(self._compose_path({args[0]}, {weight_leaf})), self._optional_param(self._compose_path({args[0]}, {bias_leaf})) if {bias} else None))"
+            return f"self._linear({args[0]}, {args[1]}, bias=bool({bias}), transpose=bool({transpose}), expert=({expert} if {expert} is not None else None), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
         if primitive == "layernorm":
             eps = args[2] if len(args) > 2 else "1e-5"
             weight_leaf = args[4] if len(args) > 4 else "'weight'"
@@ -1518,6 +1633,14 @@ class _DirectTorchEmitter:
             y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + float({eps})))"
             y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + float({eps})))"
             return f"({y_float}.to(dtype={x}.dtype) if {cast_float} else {y})"
+        if primitive == "tensor_like":
+            dtype = args[2] if len(args) > 2 else "None"
+            target_dtype = f"({args[1]}.dtype if self._dtype_from_name({dtype}) is None else self._dtype_from_name({dtype}))"
+            return f"({args[0]}.to(device={args[1]}.device, dtype={target_dtype}) if torch.is_tensor({args[0]}) else torch.tensor({args[0]}, device={args[1]}.device, dtype={target_dtype}))"
+        if primitive == "where_indices":
+            return f"torch.where({args[0]})"
+        if primitive == "topk":
+            return f"torch.topk({args[0]}, int({args[1]}), dim=int({args[2]}), largest=bool({args[3]}), sorted=bool({args[4]}))"
         if primitive == "concat":
             if "dim" in attrs:
                 return f"self._concat({', '.join(args)}, dim={attrs['dim']})"
@@ -1533,6 +1656,7 @@ class _DirectTorchEmitter:
             "arange": lambda: f"torch.arange(int({args[1]}), int(({args[0]}.shape[-2] if {args[2]} is None and {args[0]}.ndim >= 2 else ({args[0]}.shape[-1] if {args[2]} is None else {args[2]}))), device={args[0]}.device, dtype=torch.long)",
             "slice": lambda: f"torch.narrow({args[0]}, int({args[1]}), int({args[2]}), int({args[3]}) - int({args[2]}))",
             "chunk": lambda: f"torch.chunk({args[0]}, int({args[2] if len(args) > 2 else attrs.get('parts', '1')}), dim=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
+            "split": lambda: f"torch.split({args[0]}, [int(x) for x in {args[2] if len(args) > 2 else attrs.get('sizes', '[]')}], dim=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
             "expand": lambda: f"{args[0]}.expand(tuple(int(x) for x in {args[1]}))",
             "permute": lambda: f"torch.permute({args[0]}, tuple(int(x) for x in {args[1]}))",
             "transpose": lambda: f"torch.transpose({args[0]}, int({args[1]}), int({args[2]}))",
@@ -1542,6 +1666,7 @@ class _DirectTorchEmitter:
             "softmax": lambda: f"F.softmax({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}))",
             "where": lambda: f"torch.where({args[0]}, {args[1]}, {args[2]})",
             "gather": lambda: f"torch.gather({args[0]}, dim=int({args[2] if len(args) > 2 else '-1'}), index={args[1]})",
+            "index_add": lambda: f"torch.index_add({args[0]}, dim=int({args[3] if len(args) > 3 else '0'}), index={args[1]}, source={args[2]})",
             "le": lambda: f"({args[0]} <= {args[1]})",
             "eq": lambda: f"torch.eq({args[0]}, {args[1]})",
             "and": lambda: f"torch.logical_and({args[0]}, {args[1]})",

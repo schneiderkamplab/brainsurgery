@@ -14,16 +14,16 @@ import Tensor
 
 
 -- BlackMamba architectural constants.
-MODEL_DIM = Config.int@hidden_size default=1472                          -- residual hidden size
-VOCAB_SIZE = Config.int@vocab_size default=50304                          -- tokenizer vocabulary size
-NUM_LAYERS = Config.int@num_layers default=36                             -- number of decoder layers
-I = MODEL_DIM * (Config.int@expansion_factor default=2)                  -- mamba mixer inner width
-N = Config.int@state_size default=16                             -- state-space state dimension
-R = Config.int@time_step_rank default=92                         -- delta projection rank
-E = Config.int@num_experts default=8                             -- MoE expert count
-K = Config.int@num_experts_per_tok default=2                     -- routed experts per token
-FF = Config.int@ffn_hidden_size default=3872                     -- per-expert FFN width
-EPS = Config.float@rms_norm_eps default=1e-5                     -- RMSNorm epsilon
+MODEL_DIM = Config.int@@hidden_size default=1472                          -- residual hidden size
+VOCAB_SIZE = Config.int@@vocab_size default=50304                          -- tokenizer vocabulary size
+NUM_LAYERS = Config.int@@num_layers default=36                             -- number of decoder layers
+I = MODEL_DIM * (Config.int@@expansion_factor default=2)                  -- mamba mixer inner width
+N = Config.int@@state_size default=16                             -- state-space state dimension
+R = Config.int@@time_step_rank default=92                         -- delta projection rank
+E = Config.int@@num_experts default=8                             -- MoE expert count
+K = Config.int@@num_experts_per_tok default=2                     -- routed experts per token
+FF = Config.int@@ffn_hidden_size default=3872                     -- per-expert FFN width
+EPS = Config.float@@rms_norm_eps default=1e-5                     -- RMSNorm epsilon
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
@@ -56,11 +56,11 @@ mamba_mixer x = do
   y <- do
     in_proj <- NN.linear@mixer.in_proj x_norm dim=2*I
     u, gate <- Tensor.split in_proj sizes=[I, I]
-    u_conv <- causal_conv1d@mixer.conv1d u activation=silu weight_path=@mixer.conv1d.weight bias_path=@mixer.conv1d.bias
+    u_conv <- causal_conv1d@mixer.conv1d u activation="silu" weight_path=@mixer.conv1d.weight bias_path=@mixer.conv1d.bias
     params <- NN.linear@mixer.x_proj u_conv dim=R + 2*N
     dt, b, c <- Tensor.split params sizes=[R, N, N]
     delta <- NN.linear@mixer.dt_proj dt dim=I bias=true
-    y_scan <- mamba_scan u_conv delta b c A=@mixer.A_log MODEL_DIM=@mixer.MODEL_DIM a_is_log=true
+    y_scan <- mamba_scan u_conv delta b c A=@mixer.A_log D=@mixer.D a_is_log=true
     return y_scan |> mul (silu gate) |> NN.linear@mixer.out_proj dim=MODEL_DIM
   return x + y
 

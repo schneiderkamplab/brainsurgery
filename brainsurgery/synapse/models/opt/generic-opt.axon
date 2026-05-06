@@ -27,13 +27,13 @@ ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 HAS_LM_HEAD = has_root "lm_head"
 HAS_DECODER_ROOT = has_root "decoder.embed_tokens"
 
-opt_ln :: Path -> Tensor -> Tensor
+opt_ln :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 opt_ln@path x = NN.layernorm@path x eps=EPS
 
-opt_act :: Tensor -> Tensor
+opt_act :: Tensor[B,S,D] -> Tensor[B,S,D]
 opt_act x = (ACT == "relu") ? (relu x) : (relu x)
 
-opt_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+opt_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
 opt_block x attn_mask past_kv = do
   xn <- DO_PRE_LN ? (opt_ln@self_attn_layer_norm x) : x
   a, new_kv <- scope@self_attn do
@@ -54,7 +54,7 @@ opt_block x attn_mask past_kv = do
   x <- DO_PRE_LN ? x : (opt_ln@final_layer_norm x)
   return x, new_kv
 
-opt_decode_model :: TokenIds[B,S] -> Tensor[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,D], ?Cache)
+opt_decode_model :: TokenIds[B,S] -> Tensor[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH])
 opt_decode_model input_ids pos_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@model.decoder do
     tok <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
@@ -70,7 +70,7 @@ opt_decode_model input_ids pos_ids attn_mask past_kv use_cache = do
     return x, new_kv
   return x, new_kv
 
-opt_decode_decoder :: TokenIds[B,S] -> Tensor[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,D], ?Cache)
+opt_decode_decoder :: TokenIds[B,S] -> Tensor[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH])
 opt_decode_decoder input_ids pos_ids attn_mask past_kv use_cache = do
   x, new_kv <- scope@decoder do
     tok <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
@@ -86,7 +86,7 @@ opt_decode_decoder input_ids pos_ids attn_mask past_kv use_cache = do
     return x, new_kv
   return x, new_kv
 
-opt :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+opt :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,DH])
 opt input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=(-1)
   pos_ids <- pos_ids + 2

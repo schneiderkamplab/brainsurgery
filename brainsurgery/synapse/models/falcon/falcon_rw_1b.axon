@@ -1,46 +1,67 @@
 {-# CHECKPOINTS "falcon_rw_1b" #-}
+
 {-# TASK "causal_lm" #-}
 
-import Activations
+{-# MAIN "falcon" #-}
+
 import Activations (gelu)
-import Attention
+
 import Attention (attention, merge_heads, split_qkv_heads)
-import Masking
+
 import Masking (causal_mask)
-import NN
+
 import NN (embedding, layernorm, linear)
-import Positions
+
 import Positions (linear_position_bias)
+
 import Cache
 
-falcon_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+import Config
+
+MODEL_DIM = 2048
+
+VOCAB_SIZE = 50304
+
+NUM_LAYERS = 24
+
+NUM_HEADS = 32
+
+HAS_N_INNER = false
+
+FFN_INT = 0
+
+FFN = HAS_N_INNER ? ((FFN_INT == 0) ? (4 * MODEL_DIM) : FFN_INT) : (4 * MODEL_DIM)
+
+MAX_POSITIONS = 2048
+
+falcon_block :: Tensor[B,S,D] -> Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
 falcon_block x attn_mask past_kv = do
-  xn <- layernorm@input_layernorm x dim=2048
+  xn <- layernorm@input_layernorm x dim=MODEL_DIM
   a, new_kv <- scope@self_attention do
-    qkv <- linear@query_key_value xn dim=6144 bias=true
-    q, k, v <- split_qkv_heads qkv heads=32 layout="interleaved"
+    qkv <- linear@query_key_value xn dim=(3 * MODEL_DIM) bias=true
+    q, k, v <- split_qkv_heads qkv heads=NUM_HEADS layout="interleaved"
     k, v, new_kv <- Cache.update past_kv k v
-    keep <- causal_mask q k window=2048 padding_mask=attn_mask
-    pos_bias <- linear_position_bias attn_mask heads=32 scale=0.125
+    keep <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    pos_bias <- linear_position_bias attn_mask heads=NUM_HEADS scale=0.125
     a <- attention q k v keep=keep rel_bias=pos_bias scale=0.125 |> merge_heads
-    a <- linear@dense a dim=2048 bias=true
+    a <- linear@dense a dim=MODEL_DIM bias=true
     return a, new_kv
   x <- x + a
-  x_mlp <- layernorm@post_attention_layernorm x dim=2048
+  x_mlp <- layernorm@post_attention_layernorm x dim=MODEL_DIM
   m <- scope@mlp do
-    h <- linear@dense_h_to_4h x_mlp dim=8192 bias=true
-    return gelu h |> linear@dense_4h_to_h dim=2048 bias=true
+    h <- linear@dense_h_to_4h x_mlp dim=FFN bias=true
+    return gelu h |> linear@dense_4h_to_h dim=MODEL_DIM bias=true
   x <- x + m
   return x, new_kv
 
-falcon :: TokenIds[B,S] -> Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+falcon :: TokenIds[B,S] -> Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,DH])
 falcon input_ids attn_mask past_kv use_cache = do
-  x <- embedding@transformer.word_embeddings input_ids dim=2048
+  x <- embedding@transformer.word_embeddings input_ids dim=MODEL_DIM
   new_kv <- use_cache ? Cache.init : null
-  for@transformer.h i <- [0..24) do
+  x, new_kv <- for@transformer.h i <- [0..NUM_LAYERS) carry (x, new_kv) do
     past_i <- Cache.index past_kv i
     x, new_i <- falcon_block x attn_mask past_i
     new_kv <- Cache.append new_kv new_i
     yield x, new_kv
-  logits <- layernorm@transformer.ln_f x dim=2048 |> linear@lm_head dim=50304
+  logits <- layernorm@transformer.ln_f x dim=MODEL_DIM |> linear@lm_head dim=VOCAB_SIZE
   return logits, new_kv
