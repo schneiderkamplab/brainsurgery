@@ -1087,7 +1087,7 @@ def _rebuild_hf_phi3small_longrope_buffers(model: Any) -> int:
 
 
 def _checkpoint_has_explicit_output_head_weight(model_dir: Path) -> bool:
-    output_head_suffixes = ("lm_head.weight", "embed_out.weight")
+    output_head_suffixes = ("lm_head.weight", "embed_out.weight", "head.weight")
 
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():

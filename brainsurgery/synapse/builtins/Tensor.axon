@@ -15,7 +15,9 @@ export (
   deinterleave_last2,
   eq,
   expand,
+  empty,
   gather,
+  full,
   index_add,
   le,
   matmul,
@@ -29,12 +31,14 @@ export (
   slice,
   softmax,
   split,
+  sum,
   tensor_like,
   topk,
   transpose,
   unsqueeze,
   where,
   where_indices,
+  zeros,
   zeros_like,
 )
 
@@ -88,6 +92,15 @@ cast_like x ref = _cast_like x ref
 tensor_like :: Any -> Tensor[..S] -> ?String -> Tensor[..R]
 tensor_like value ref ?dtype=null = _tensor_like value ref dtype
 
+empty :: Tensor[..REF] -> List[Dim] -> ?String -> Tensor[..S]
+empty ref shape ?dtype=null = _empty ref shape dtype
+
+zeros :: Tensor[..REF] -> List[Dim] -> ?String -> Tensor[..S]
+zeros ref shape ?dtype=null = _zeros ref shape dtype
+
+full :: Tensor[..REF] -> List[Dim] -> Any -> ?String -> Tensor[..S]
+full ref shape value ?dtype=null = _full ref shape value dtype
+
 cumsum :: Tensor[..S] -> ?Int -> Tensor[..S]
 cumsum x ?dim=-1 = _cumsum x dim
 
@@ -139,6 +152,9 @@ slice x dim start end = _slice x dim start end
 
 softmax :: Tensor[..S] -> ?Int -> ?String -> Tensor[..S]
 softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype
+
+sum :: Tensor[..S] -> ?Int -> ?Bool -> Tensor[..R]
+sum x ?dim=-1 ?keepdim=false = _sum x dim keepdim
 
 topk :: Tensor[..S] -> Dim -> ?Int -> ?Bool -> ?Bool -> (Tensor[..R], IdxTensor[..I])
 topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted

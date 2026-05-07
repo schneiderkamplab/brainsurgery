@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import torch
 
 from brainsurgery.synapse.axon.ast import (
     AxonBind,
@@ -30,6 +31,7 @@ from brainsurgery.synapse.axon.typecheck.core import _TcCtx, _is_generic_named_t
 from brainsurgery.synapse.axon.typecheck import typecheck_flat_axon_file
 from brainsurgery.synapse.axon.typecheck2 import typecheck2_flat_axon_file
 from brainsurgery.synapse.axon.lowering import lower_axon_program_to_graph_ir
+from brainsurgery.synapse.axon.codegen2 import make_runtime2_model_class
 from brainsurgery.synapse.axon.validate import validate_typed_axon_file
 
 
@@ -341,6 +343,30 @@ main x = do
     split_line = next(line for line in text.splitlines() if "a, c <-" in line and "Tensor.split" in line)
     assert "Tensor[B,S,A]" in split_line
     assert "Tensor[B,S,C]" in split_line
+
+
+def test_tensor_shape_constructors_typecheck_and_run_with_runtime2(tmp_path: Path) -> None:
+    source = """
+import Tensor (full, sum, zeros)
+
+main :: Tensor[B,S,D] -> Tensor[B,2,D]
+main x = do
+  z <- zeros x shape=[B, 2, D]
+  y <- full x shape=[B, 2, D] value=1.0
+  s <- sum (z + y) dim=1 keepdim=true
+  return s + y
+"""
+    path = tmp_path / "tensor_create.axon"
+    path.write_text(source)
+    resolved = resolve_axon_program_from_path(path).ast
+    flat = flatten_closed_axon_file(normalize_closed_axon_file(resolved), main_module="main")
+    typed = typecheck_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    graph = lower_axon_program_to_graph_ir(typed)
+    model = make_runtime2_model_class(graph, model_config={}).from_state_dict({})
+    out = model.forward(x=torch.randn(3, 5, 7))
+    assert tuple(out.shape) == (3, 2, 7)
+    assert torch.equal(out, torch.full_like(out, 3.0))
 
 
 def test_typecheck2_lowers_generic_mamba_without_shape_growth() -> None:

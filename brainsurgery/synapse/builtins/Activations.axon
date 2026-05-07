@@ -1,4 +1,5 @@
 import Params (param)
+import Math (exp, log, pow)
 export (
   gegelu,
   gelu,
@@ -8,6 +9,8 @@ export (
   relu2,
   sigmoid,
   silu,
+  softplus,
+  sqrtsoftplus,
   tanh,
   xielu,
 )
@@ -38,6 +41,12 @@ tanh x = _activations_tanh x
 
 silu :: Tensor[..S] -> Tensor[..S]
 silu x = _activations_silu x
+
+softplus :: Tensor[..S] -> Tensor[..S]
+softplus x = log (1.0 + exp x)
+
+sqrtsoftplus :: Tensor[..S] -> Tensor[..S]
+sqrtsoftplus x = pow (softplus x) 0.5
 
 swiglu :: Tensor[..S] -> Tensor[..S]
 swiglu x = _activations_swiglu x

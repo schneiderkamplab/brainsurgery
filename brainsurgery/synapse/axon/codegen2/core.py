@@ -855,6 +855,12 @@ class Codegen2GraphModel(SynapseProgramModel):
             dtype = torch.float32 if len(args) > 2 and args[2] == "float32" else None
             out(F.softmax(x, dim=dim, dtype=dtype))
             return True
+        if primitive == "sum":
+            x = args[0]
+            dim = int(args[1]) if len(args) > 1 and not self._is_null(args[1]) else -1
+            keepdim = bool(args[2]) if len(args) > 2 and not self._is_null(args[2]) else False
+            out(torch.sum(x, dim=dim, keepdim=keepdim))
+            return True
         if primitive == "activations_gegelu":
             x = args[0]
             if x.shape[-1] % 2 != 0:
@@ -917,6 +923,9 @@ class Codegen2GraphModel(SynapseProgramModel):
         if primitive == "mul":
             out(args[0] * args[1])
             return True
+        if primitive == "pow":
+            out(torch.pow(args[0], args[1]) if torch.is_tensor(args[0]) else args[0] ** args[1])
+            return True
         if primitive == "div":
             out(args[0] / args[1])
             return True
@@ -964,6 +973,21 @@ class Codegen2GraphModel(SynapseProgramModel):
         if primitive == "fill":
             dtype = None if len(args) < 3 or self._is_null(args[2]) else self._dtype_from_name(args[2])
             out(torch.full_like(args[0], args[1], dtype=dtype if dtype is not None else args[0].dtype))
+            return True
+        if primitive == "empty":
+            ref, shape = args[:2]
+            dtype = None if len(args) < 3 or self._is_null(args[2]) else self._dtype_from_name(args[2])
+            out(torch.empty(tuple(int(v) for v in shape), device=ref.device, dtype=dtype or ref.dtype))
+            return True
+        if primitive == "zeros":
+            ref, shape = args[:2]
+            dtype = None if len(args) < 3 or self._is_null(args[2]) else self._dtype_from_name(args[2])
+            out(torch.zeros(tuple(int(v) for v in shape), device=ref.device, dtype=dtype or ref.dtype))
+            return True
+        if primitive == "full":
+            ref, shape, value = args[:3]
+            dtype = None if len(args) < 4 or self._is_null(args[3]) else self._dtype_from_name(args[3])
+            out(torch.full(tuple(int(v) for v in shape), value, device=ref.device, dtype=dtype or ref.dtype))
             return True
         if primitive == "zeros_like":
             out(torch.zeros_like(args[0]))
@@ -1891,6 +1915,7 @@ class _DirectTorchEmitter:
             "slice": lambda: f"torch.narrow({args[0]}, int({args[1]}), int({args[2]}), int({args[3]}) - int({args[2]}))",
             "chunk": lambda: f"torch.chunk({args[0]}, int({args[2] if len(args) > 2 else attrs.get('parts', '1')}), dim=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
             "split": lambda: f"torch.split({args[0]}, [int(x) for x in {args[2] if len(args) > 2 else attrs.get('sizes', '[]')}], dim=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
+            "sum": lambda: f"torch.sum({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}), keepdim=bool({args[2] if len(args) > 2 else 'False'}))",
             "expand": lambda: f"{args[0]}.expand(tuple(int(x) for x in {args[1]}))",
             "permute": lambda: f"torch.permute({args[0]}, tuple(int(x) for x in {args[1]}))",
             "transpose": lambda: f"torch.transpose({args[0]}, int({args[1]}), int({args[2]}))",
@@ -1909,6 +1934,7 @@ class _DirectTorchEmitter:
             "add": lambda: f"self._binary_add({args[0]}, {args[1]})",
             "mul": lambda: f"self._binary_op('*', {args[0]}, {args[1]})",
             "div": lambda: f"self._binary_op('/', {args[0]}, {args[1]})",
+            "pow": lambda: f"(torch.pow({args[0]}, {args[1]}) if torch.is_tensor({args[0]}) else ({args[0]} ** {args[1]}))",
             "floor": lambda: f"torch.floor({args[0]}) if torch.is_tensor({args[0]}) else int({args[0]} // 1)",
             "sqrt": lambda: f"torch.sqrt({args[0]}) if torch.is_tensor({args[0]}) else ({args[0]} ** 0.5)",
             "sin": lambda: f"torch.sin({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').sin(float({args[0]}))",
@@ -1921,6 +1947,9 @@ class _DirectTorchEmitter:
             "cumsum": lambda: f"torch.cumsum({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}))",
             "empty_like": lambda: f"torch.empty_like({args[0]})",
             "fill": lambda: f"torch.full_like({args[0]}, {args[1]}, dtype=({args[0]}.dtype if self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) is None else self._dtype_from_name({args[2] if len(args) > 2 else 'None'})))",
+            "empty": lambda: f"torch.empty(tuple(int(x) for x in {args[1]}), device={args[0]}.device, dtype=((self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) if {args[2] if len(args) > 2 else 'None'} is not None else None) or {args[0]}.dtype))",
+            "zeros": lambda: f"torch.zeros(tuple(int(x) for x in {args[1]}), device={args[0]}.device, dtype=((self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) if {args[2] if len(args) > 2 else 'None'} is not None else None) or {args[0]}.dtype))",
+            "full": lambda: f"torch.full(tuple(int(x) for x in {args[1]}), {args[2]}, device={args[0]}.device, dtype=((self._dtype_from_name({args[3] if len(args) > 3 else 'None'}) if {args[3] if len(args) > 3 else 'None'} is not None else None) or {args[0]}.dtype))",
             "zeros_like": lambda: f"torch.zeros_like({args[0]})",
             "activations_tanh": lambda: f"torch.tanh({args[0]})",
             "activations_silu": lambda: f"F.silu({args[0]})",
