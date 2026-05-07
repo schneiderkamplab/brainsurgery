@@ -10,7 +10,7 @@ import Attention (attention, merge_heads, reshape_heads)
 
 import Masking (causal_mask)
 
-import Math (mul, sqrt)
+import Math (mul)
 
 import Params (has_root)
 
@@ -70,8 +70,8 @@ llama3_block x pos_ids attn_mask past_kv = do
     k, v, new_kv <- Cache.update past_kv k v
     k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
     v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
-    keep <- causal_mask q k attn_mask
-    a <- attention q k v keep scale=(1.0 / sqrt (MODEL_DIM / NUM_HEADS)) |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
+    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
     return a, new_kv
   x <- x + a
   xn <- rms@post_attention_layernorm x
@@ -83,7 +83,7 @@ llama3_block x pos_ids attn_mask past_kv = do
 
 llama3 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 llama3 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=1
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null

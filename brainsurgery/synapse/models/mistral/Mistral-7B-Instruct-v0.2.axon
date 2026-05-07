@@ -2,7 +2,7 @@
 
 {-# TASK "causal_lm" #-}
 
-{-# TOKENIZER "mistralai/Mistral-7B-Instruct-v0.2" #-}
+{-# TOKENIZER ["mistralai/Mistral-7B-Instruct-v0.2", "mistralai/Mistral-7B-Instruct-v0.2"] #-}
 
 {-# MAIN "mistral" #-}
 

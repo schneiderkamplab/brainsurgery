@@ -1,53 +1,92 @@
 {-# CHECKPOINTS ["swiss-ai/Apertus-8B-2509", "swiss-ai/Apertus-8B-Instruct-2509"] #-}
+
 {-# TASK "causal_lm" #-}
 
-import Activations
+{-# MAIN "apertus" #-}
+
 import Activations (xielu)
-import Attention
+
 import Attention (attention, merge_heads, reshape_heads)
-import Masking
+
 import Masking (causal_mask)
-import Positions
+
 import Positions (position_ids, rope_pair_freq_scale)
+
 import Cache
+
+import Config
+
 import NN
+
 import Tensor
 
-rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = NN.rmsnorm@path x eps=1e-05 dim=4096 cast_float=true
+MODEL_DIM = 4096
 
-apertus_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,8,P,128] -> (Tensor[B,S,D], ?CacheLayer[B,8,K,128])
+VOCAB_SIZE = 131072
+
+NUM_LAYERS = 32
+
+NUM_HEADS = 32
+
+KVH = 8
+
+MODEL_HEAD_DIM = 128
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+FFN = 21504
+
+EPS = 1e-05
+
+THETA = 12000000.0
+
+MAX_POSITIONS = 65536
+
+ROPE_SCALE = 8.0
+
+ROPE_LOW_FREQ = 1.0
+
+ROPE_HIGH_FREQ = 4.0
+
+ROPE_CONTEXT = 8192
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS dim=MODEL_DIM cast_float=true
+
+apertus_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 apertus_block x pos_ids attn_mask past_kv = do
   xn <- rms@attention_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=4096 bias=false |> reshape_heads heads=32 |> NN.rmsnorm@q_norm eps=1e-05 dim=128 cast_float=true
-    k <- NN.linear@k_proj xn dim=1024 bias=false |> reshape_heads heads=8 |> NN.rmsnorm@k_norm eps=1e-05 dim=128 cast_float=true
-    v <- NN.linear@v_proj xn dim=1024 bias=false |> reshape_heads heads=8
-    q, k <- rope_pair_freq_scale q k pos_ids 12000000.0 8.0 1.0 4.0 8192
+    q <- NN.linear@q_proj xn dim=(NUM_HEADS * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=NUM_HEADS |> NN.rmsnorm@q_norm eps=EPS dim=MODEL_HEAD_DIM cast_float=true
+    k <- NN.linear@k_proj xn dim=(KVH * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=KVH |> NN.rmsnorm@k_norm eps=EPS dim=MODEL_HEAD_DIM cast_float=true
+    v <- NN.linear@v_proj xn dim=(KVH * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=KVH
+    q, k <- rope_pair_freq_scale q k pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=4
-    v <- Tensor.repeat v repeats=4
-    mask <- causal_mask q k window=65536 padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=4096 bias=false
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
     return a, new_kv
   x <- x + a
   xn <- rms@feedforward_layernorm x
   m <- scope@mlp do
-    return NN.linear@up_proj xn dim=21504 bias=false |> xielu@act_fn alpha_p_path=@act_fn.alpha_p alpha_n_path=@act_fn.alpha_n beta_path=@act_fn.beta eps_path=@act_fn.eps |> NN.linear@down_proj dim=4096 bias=false
+    return NN.linear@up_proj xn dim=FFN bias=false |> xielu@act_fn alpha_p_path=@act_fn.alpha_p alpha_n_path=@act_fn.alpha_n beta_path=@act_fn.beta eps_path=@act_fn.eps |> NN.linear@down_proj dim=MODEL_DIM bias=false
   return x + m, new_kv
 
-apertus :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,8,P,128] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,8,K,128])
+apertus :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 apertus input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=4096
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..32) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- apertus_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- rms@norm x
     return x, new_kv
-  logits <- NN.linear@lm_head x dim=131072 bias=false
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
   return logits, new_kv

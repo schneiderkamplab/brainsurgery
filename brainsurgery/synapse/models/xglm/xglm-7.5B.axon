@@ -1,57 +1,89 @@
 {-# CHECKPOINTS "facebook/xglm-7.5B" #-}
+
 {-# TASK "causal_lm" #-}
 
-import Activations
-import Activations (gelu)
-import Attention
+{-# MAIN "xglm" #-}
+
+import Activations (gelu, relu)
+
 import Attention (attention, merge_heads, reshape_heads)
-import Masking
+
 import Masking (causal_mask)
-import Params
+
+import Math (sqrt)
+
 import Params (has_root)
-import Positions
+
 import Positions (position_ids, sinusoidal_positions)
+
 import Cache
+
+import Config
+
 import NN
+
+MODEL_DIM = 4096
+
+VOCAB_SIZE = 256008
+
+NUM_LAYERS = 32
+
+NUM_HEADS = 32
+
+MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+FFN = 16384
+
+EPS = 1e-05
+
+MAX_POSITIONS = 2048
+
+ACT = "gelu"
+
+SCALE_EMB = true
+
+EMB_SCALE = SCALE_EMB ? (sqrt MODEL_DIM) : 1.0
+
+ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
 HAS_POS = has_root "model.embed_positions.weight"
 
 xglm_act :: Tensor[..S] -> Tensor[..S]
-xglm_act x = (gelu x)
+xglm_act x = (ACT == "relu") ? (relu x) : (gelu x)
 
 xglm_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 xglm_block x attn_mask past_kv = do
-  xn <- NN.layernorm@self_attn_layer_norm x eps=1e-05
+  xn <- NN.layernorm@self_attn_layer_norm x eps=EPS
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=4096 bias=true |> reshape_heads heads=32
-    k <- NN.linear@k_proj xn dim=4096 bias=true |> reshape_heads heads=32
-    v <- NN.linear@v_proj xn dim=4096 bias=true |> reshape_heads heads=32
+    q <- NN.linear@q_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@v_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
     k, v, new_kv <- Cache.update past_kv k v
-    mask <- causal_mask q k window=2048 padding_mask=attn_mask
-    a <- attention q k v mask scale=0.08838834764831843 |> merge_heads |> NN.linear@out_proj dim=4096 bias=true
+    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@out_proj dim=MODEL_DIM bias=true
     return a, new_kv
   x <- x + a
-  xn2 <- NN.layernorm@final_layer_norm x eps=1e-05
-  m <- NN.linear@fc1 xn2 dim=16384 bias=true |> xglm_act |> NN.linear@fc2 dim=4096 bias=true
+  xn2 <- NN.layernorm@final_layer_norm x eps=EPS
+  m <- NN.linear@fc1 xn2 dim=FFN bias=true |> xglm_act |> NN.linear@fc2 dim=MODEL_DIM bias=true
   x <- x + m
   return x, new_kv
 
 xglm :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 xglm input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=-1
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=(-1)
   pos_ids_rope <- pos_ids + 2
   x, new_kv <- scope@model do
-    tok <- NN.embedding@embed_tokens input_ids dim=4096
-    x <- tok * 64.0
-    pos <- HAS_POS ? (NN.embedding@embed_positions pos_ids_rope dim=4096) : (sinusoidal_positions x pos_ids_rope theta=10000.0 offset=0 padding_idx=null)
+    tok <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- tok * EMB_SCALE
+    pos <- HAS_POS ? (NN.embedding@embed_positions pos_ids_rope dim=MODEL_DIM) : (sinusoidal_positions x pos_ids_rope theta=10000.0 offset=0 padding_idx=null)
     x <- x + pos
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..32) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- xglm_block x attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
-    x <- NN.layernorm@layer_norm x eps=1e-05
+    x <- NN.layernorm@layer_norm x eps=EPS
     return x, new_kv
-  logits <- NN.linear@lm_head x dim=256008 bias=false
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
   return logits, new_kv

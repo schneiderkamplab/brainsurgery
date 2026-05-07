@@ -1,56 +1,87 @@
 {-# CHECKPOINTS "PleIAs/Pleias-Nano" #-}
+
 {-# TASK "causal_lm" #-}
 
-import Activations
+{-# MAIN "pleias" #-}
+
 import Activations (silu)
-import Attention
+
 import Attention (attention, merge_heads, reshape_heads)
-import Masking
+
 import Masking (causal_mask)
-import Math
+
 import Math (mul)
-import Positions
+
 import Positions (position_ids, rope_pair_base)
+
 import Cache
+
+import Config
+
 import NN
+
 import Tensor
 
+MODEL_DIM = 2048
+
+VOCAB_SIZE = 65536
+
+NUM_LAYERS = 22
+
+NUM_HEADS = 32
+
+KVH = 8
+
+HAS_HEAD_DIM = true
+
+MODEL_HEAD_DIM = HAS_HEAD_DIM ? (64) : (MODEL_DIM / NUM_HEADS)
+
+KVD = KVH * MODEL_HEAD_DIM
+
+FFN = 6144
+
+EPS = 1e-05
+
+THETA = 10000.0
+
+MAX_POSITIONS = 2048
+
 pleias_rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-pleias_rms@path x = NN.rmsnorm@path x eps=1e-05
+pleias_rms@path x = NN.rmsnorm@path x eps=EPS
 
 pleias_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 pleias_block x pos_ids attn_mask past_kv = do
   xn <- pleias_rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=2048 |> reshape_heads heads=32
-    k <- NN.linear@k_proj xn dim=512 |> reshape_heads heads=8
-    v <- NN.linear@v_proj xn dim=512 |> reshape_heads heads=8
-    q, k <- rope_pair_base q k pos_ids 10000.0
+    q <- NN.linear@q_proj xn dim=MODEL_DIM |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
+    q, k <- rope_pair_base q k pos_ids THETA
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=4
-    v <- Tensor.repeat v repeats=4
-    mask <- causal_mask q k window=2048 padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=2048
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
     return a, new_kv
   x <- x + a
   xn <- pleias_rms@post_attention_layernorm x
   m <- scope@mlp do
-    g <- NN.linear@gate_proj xn dim=6144
-    u <- NN.linear@up_proj xn dim=6144
-    return g |> silu |> mul u |> NN.linear@down_proj dim=2048
+    g <- NN.linear@gate_proj xn dim=FFN
+    u <- NN.linear@up_proj xn dim=FFN
+    return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
   return x + m, new_kv
 
 pleias :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 pleias input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   logits, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=2048
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..22) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- pleias_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
-    logits <- pleias_rms@norm x |> NN.linear@embed_tokens dim=65536
+    logits <- pleias_rms@norm x |> NN.linear@embed_tokens dim=VOCAB_SIZE
     return logits, new_kv
   return logits, new_kv

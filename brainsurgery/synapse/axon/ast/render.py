@@ -65,7 +65,7 @@ def _format_scalar(value: object) -> str:
 
 def _format_pragma_value(value: object) -> str:
     if isinstance(value, tuple | list):
-        return "[" + ", ".join(_format_scalar(item) for item in value) + "]"
+        return "[" + ", ".join(_format_pragma_value(item) for item in value) + "]"
     return _format_scalar(value)
 
 

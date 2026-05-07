@@ -1693,6 +1693,179 @@ def _collect_hf_param_names_for_device_map(
     return names
 
 
+def _collect_ordered_hf_param_names_for_device_map(
+    *,
+    model_task: str,
+    hf_config: Any | None,
+    trust_remote_code: bool,
+) -> list[str]:
+    if hf_config is None:
+        return []
+    _ensure_transformers_import_compat()
+    try:
+        from accelerate import init_empty_weights
+    except Exception:
+        return []
+
+    constructors: list[Any] = []
+    if model_task == "seq2seq_lm":
+        constructors.append(AutoModelForSeq2SeqLM)
+    elif model_task == "masked_lm":
+        constructors.append(AutoModelForMaskedLM)
+    elif model_task == "causal_lm":
+        constructors.append(AutoModelForCausalLM)
+        if str(getattr(hf_config, "model_type", "")).strip().lower() in {
+            "gemma4",
+            "mistral3",
+            "llama4",
+        }:
+            constructors.append(AutoModelForImageTextToText)
+    else:
+        return []
+
+    for ctor in constructors:
+        try:
+            with init_empty_weights():
+                model = ctor.from_config(hf_config, trust_remote_code=trust_remote_code)
+            names = [name for name, _ in model.named_parameters()]
+            names.extend(name for name, _ in model.named_buffers())
+            del model
+            if names:
+                seen: set[str] = set()
+                ordered: list[str] = []
+                for name in names:
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    ordered.append(name)
+                return ordered
+        except Exception:
+            continue
+    return []
+
+
+def _numeric_segment(name: str) -> tuple[int, int] | None:
+    for index, segment in enumerate(name.split(".")):
+        if segment.isdigit():
+            return index, int(segment)
+    return None
+
+
+def _module_prefix_for_param_name(name: str) -> str:
+    pieces = [piece for piece in name.split(".") if piece]
+    numeric = _numeric_segment(name)
+    if numeric is not None:
+        index, _ = numeric
+        return ".".join(pieces[: index + 1])
+    if len(pieces) <= 1:
+        return ""
+    return ".".join(pieces[:-1])
+
+
+def _build_generic_hf_device_map_from_param_names(
+    ordered_names: Sequence[str],
+    *,
+    devices: Sequence[str],
+) -> tuple[dict[str, str] | None, tuple[tuple[int, int, str], ...]]:
+    unique_devices = tuple(str(device) for device in devices if str(device).strip())
+    if len(unique_devices) <= 1:
+        return None, ()
+
+    names = tuple(str(name) for name in ordered_names if str(name).strip())
+    if not names:
+        return {"": unique_devices[0]}, ()
+
+    numeric_by_name: dict[str, tuple[int, int]] = {}
+    layer_indices: list[int] = []
+    for name in names:
+        numeric = _numeric_segment(name)
+        if numeric is None:
+            continue
+        numeric_by_name[name] = numeric
+        layer_indices.append(numeric[1])
+
+    distinct_layers = tuple(sorted(set(layer_indices)))
+    layer_position = {layer: index for index, layer in enumerate(distinct_layers)}
+    if distinct_layers:
+        first_layer_pos = min(index for index, name in enumerate(names) if name in numeric_by_name)
+        last_layer_pos = max(index for index, name in enumerate(names) if name in numeric_by_name)
+    else:
+        first_layer_pos = len(names)
+        last_layer_pos = -1
+
+    def _device_for_layer(layer_index: int) -> str:
+        if not distinct_layers:
+            return unique_devices[0]
+        ordinal = layer_position[layer_index]
+        device_index = min(
+            len(unique_devices) - 1,
+            (ordinal * len(unique_devices)) // len(distinct_layers),
+        )
+        return unique_devices[device_index]
+
+    device_map: dict[str, str] = {}
+    for ordinal, name in enumerate(names):
+        prefix = _module_prefix_for_param_name(name)
+        numeric = numeric_by_name.get(name)
+        if numeric is not None:
+            device = _device_for_layer(numeric[1])
+        elif ordinal < first_layer_pos:
+            device = unique_devices[0]
+        elif ordinal > last_layer_pos:
+            device = unique_devices[-1]
+        else:
+            # Non-layer parameters interleaved with layers are safest on the current stage-0
+            # fallback unless a more specific prefix is already assigned.
+            device = unique_devices[0]
+        device_map.setdefault(prefix, device)
+
+    spans: list[tuple[int, int, str]] = []
+    if distinct_layers:
+        for device_index, device in enumerate(unique_devices):
+            start_pos = (device_index * len(distinct_layers)) // len(unique_devices)
+            stop_pos = ((device_index + 1) * len(distinct_layers)) // len(unique_devices)
+            if start_pos >= stop_pos:
+                continue
+            spans.append(
+                (
+                    distinct_layers[start_pos],
+                    distinct_layers[stop_pos - 1] + 1,
+                    device,
+                )
+            )
+    return device_map, tuple(spans)
+
+
+def _colocate_tied_hf_output_embeddings(
+    device_map: dict[str, str],
+    *,
+    has_explicit_output_head_weight: bool,
+) -> None:
+    if has_explicit_output_head_weight:
+        return
+    embedding_device = next(
+        (
+            device
+            for prefix, device in device_map.items()
+            if prefix.endswith("embed_tokens")
+            or prefix.endswith("word_embeddings")
+            or prefix.endswith("wte")
+        ),
+        None,
+    )
+    if embedding_device is None:
+        return
+    for prefix in (
+        "lm_head",
+        "model.lm_head",
+        "language_model.lm_head",
+        "language_model.model.lm_head",
+        "transformer.lm_head",
+    ):
+        if prefix in device_map:
+            device_map[prefix] = embedding_device
+
+
 def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
     t0 = time.perf_counter()
     with timing(message=label):
@@ -2163,6 +2336,16 @@ def _run_axon_test_single(
                     hf_config, "num_local_experts"
                 ):
                     setattr(hf_config, "num_experts", int(getattr(hf_config, "num_local_experts")))
+        if (
+            hf_config is None
+            and axon_backend == "pipeline2"
+            and resolved_model_task in {"causal_lm", "seq2seq_lm"}
+            and not skip_hf
+        ):
+            hf_config = _load_auto_config_with_compat_fallback(
+                resolved_hf_model_dir,
+                trust_remote_code=effective_trust_remote_code,
+            )
         exec_device_str = str(resolved_device)
         tokenizer_obj, input_ids_cpu, attention_mask_cpu = tokenize_prompts(
             prompts=prompts,
@@ -2375,6 +2558,44 @@ def _run_axon_test_single(
                 return normalized
 
             hf_input_device = target_device
+            if axon_backend == "pipeline2" and resolved_model_task in {
+                "causal_lm",
+                "seq2seq_lm",
+            }:
+                visible_devices = [
+                    f"cuda:{idx}" for idx in range(max(1, torch.cuda.device_count()))
+                ]
+                ordered_hf_param_names = _collect_ordered_hf_param_names_for_device_map(
+                    model_task=resolved_model_task,
+                    hf_config=hf_config,
+                    trust_remote_code=effective_trust_remote_code,
+                )
+                hf_device_map, hf_stage_spans = _build_generic_hf_device_map_from_param_names(
+                    ordered_hf_param_names,
+                    devices=visible_devices,
+                )
+                if hf_device_map is not None:
+                    _colocate_tied_hf_output_embeddings(
+                        hf_device_map,
+                        has_explicit_output_head_weight=_checkpoint_has_explicit_output_head_weight(
+                            resolved_hf_model_dir
+                        ),
+                    )
+                    hf_input_device = torch.device(visible_devices[0])
+                    if hf_stage_spans:
+                        print(
+                            "HF device_map stages:",
+                            ", ".join(
+                                f"[{start},{stop})->{device}"
+                                for start, stop, device in hf_stage_spans
+                            ),
+                        )
+                    else:
+                        print(
+                            "HF device_map stages:",
+                            ", ".join(visible_devices),
+                            "(no numeric layer axis discovered)",
+                        )
             if axon_backend == "pipeline" and resolved_model_task == "causal_lm":
                 local_state_ref_cpu = _load_state_dict(
                     safetensors_files,

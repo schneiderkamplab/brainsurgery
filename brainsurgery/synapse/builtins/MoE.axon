@@ -128,7 +128,7 @@ grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts ?gate_up_weight
     x_in <- pre_scale_input ? (x_sel * sel_scale) : x_sel
     gate_up <- linear@w1 x_in dim=null bias=false transpose=transpose expert=e weight_path=gate_up_weight
     gate, up <- chunk gate_up parts=2
-    x_upd <- gate |> silu |> mul up |> linear@w2 dim=null bias=false transpose=transpose expert=e weight_path=out_weight
+    x_upd <- gate |> silu |> mul up |> linear@w2 dim=D bias=false transpose=transpose expert=e weight_path=out_weight
     out_scores <- pre_scale_input ? ((sel_scores * 0.0) + 1.0) : sel_scores
     routed <- scatter_add routed token_idx x_upd out_scores
     yield routed

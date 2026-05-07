@@ -2,7 +2,7 @@
 
 {-# TASK "causal_lm" #-}
 
-{-# TOKENIZER "mistralai/Devstral-Small-2507" #-}
+{-# TOKENIZER ["mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"] #-}
 
 {-# MAIN "mistral" #-}
 

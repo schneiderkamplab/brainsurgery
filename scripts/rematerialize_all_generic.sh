@@ -23,21 +23,28 @@ if [ "$COUNT" -eq 0 ]; then
   exit 0
 fi
 
-echo "Rematerializing $COUNT generic axon files with PARALLEL=$PARALLEL and MODELS_ROOT=$MODELS_ROOT"
+mapfile -d '' GENERIC_DIRS < <(
+  find "$SEARCH_ROOT" -type f -name 'generic-*.axon' -printf '%h\0' | sort -zu
+)
+
+echo "Rematerializing $COUNT generic axon files in ${#GENERIC_DIRS[@]} directories with PARALLEL=$PARALLEL and MODELS_ROOT=$MODELS_ROOT"
 
 export MODELS_ROOT
 
-find "$SEARCH_ROOT" -type f -name 'generic-*.axon' -print0 \
-  | sort -z \
+printf "%s\0" "${GENERIC_DIRS[@]}" \
   | xargs -0 -P "$PARALLEL" -I{} bash -lc '
       set -euo pipefail
-      file="$1"
-      if out="$(brainsurgery synapse axon-materialize "$file" --models-root "$MODELS_ROOT" 2>&1)"; then
-        printf "OK\t%s\n" "$file"
-      else
-        printf "FAIL\t%s\n%s\n" "$file" "$out" >&2
-        exit 17
-      fi
+      dir="$1"
+      find "$dir" -maxdepth 1 -type f -name "generic-*.axon" -print0 \
+        | sort -z \
+        | while IFS= read -r -d "" file; do
+            if out="$(brainsurgery synapse axon-materialize "$file" --models-root "$MODELS_ROOT" 2>&1)"; then
+              printf "OK\t%s\n" "$file"
+            else
+              printf "FAIL\t%s\n%s\n" "$file" "$out" >&2
+              exit 17
+            fi
+          done
     ' _ {}
 
 echo "Done."

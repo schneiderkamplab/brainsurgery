@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "meta-llama/Llama-4-Scout-17B-16E" #-}
+{-# CHECKPOINTS "meta-llama/Llama-4-Scout-17B-16E-Instruct" #-}
 
 {-# TASK "causal_lm" #-}
 
@@ -52,7 +52,7 @@ EPS = 1e-05
 
 THETA = 500000.0
 
-MAX_POSITIONS = 262144
+MAX_POSITIONS = 10485760
 
 ROPE_SCALE = 16.0
 

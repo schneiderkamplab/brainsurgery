@@ -1,52 +1,93 @@
 {-# CHECKPOINTS ["google/gemma-3-27b-pt", "google/gemma-3-27b-it"] #-}
 
+{-# MAIN "gemma3" #-}
+
 import Activations (gelu_pytorch_tanh)
+
 import Attention (attention, merge_heads, reshape_heads)
+
 import Masking (causal_mask)
-import Math (mul)
+
+import Math (mul, sqrt)
+
 import Params (has_root)
+
 import Positions (position_ids, rope_pair_base)
+
 import Cache (Cache, CacheLayer)
+
+import Config
+
 import NN
+
 import Tensor
 
+MODEL_DIM = 5376
+
+VOCAB_SIZE = 262208
+
+NUM_LAYERS = 62
+
+NUM_HEADS = 32
+
+KVH = 16
+
+MODEL_HEAD_DIM = 128
+
+FFN = 21504
+
+ROPE_PERIOD = 6
+
+THETA_BASE = 10000.0
+
+THETA_LONG = 1000000.0
+
+ROPE_LONG_SCALE = 8.0
+
+WIN_LOCAL = 1024
+
+WIN_LONG = 131072
+
 HAS_MODEL_LM_MODEL = has_root "model.language_model.model"
+
 HAS_LM_MODEL = has_root "language_model.model"
 
-gemma3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+gemma3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 gemma3_block x i pos_ids attn_mask past_kv = do
   xn <- NN.rmsnorm@input_layernorm x cast_float=true unit_offset=true
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=4096 |> reshape_heads heads=32 |> NN.rmsnorm@q_norm cast_float=true unit_offset=true
-    k <- NN.linear@k_proj xn dim=2048 |> reshape_heads heads=16 |> NN.rmsnorm@k_norm cast_float=true unit_offset=true
-    v <- NN.linear@v_proj xn dim=2048 |> reshape_heads heads=16
-    long <- ((i + 1) % 6) == 0
-    theta <- long ? 1000000.0 : 10000.0
-    rope_scale <- long ? 8.0 : 1.0
+    q <- NN.linear@q_proj xn dim=(NUM_HEADS * MODEL_HEAD_DIM) |> reshape_heads heads=NUM_HEADS |> NN.rmsnorm@q_norm cast_float=true unit_offset=true
+    k <- NN.linear@k_proj xn dim=(KVH * MODEL_HEAD_DIM) |> reshape_heads heads=KVH |> NN.rmsnorm@k_norm cast_float=true unit_offset=true
+    v <- NN.linear@v_proj xn dim=(KVH * MODEL_HEAD_DIM) |> reshape_heads heads=KVH
+    long <- ((i + 1) % ROPE_PERIOD) == 0
+    theta <- long ? THETA_LONG : THETA_BASE
+    rope_scale <- long ? ROPE_LONG_SCALE : 1.0
     q, k <- rope_pair_base q k pos_ids theta scale_factor=rope_scale
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=2
-    v <- Tensor.repeat v repeats=2
-    window <- ((i + 1) % 6) == 0 ? 131072 : 1024
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    window <- ((i + 1) % ROPE_PERIOD) == 0 ? WIN_LONG : WIN_LOCAL
+    attn_scale <- 1.0 / sqrt (168.0)
     mask <- causal_mask q k window=window padding_mask=attn_mask
-    a <- attention q k v mask scale=0.07715167498104596 |> merge_heads |> NN.linear@o_proj dim=5376
+    a <- attention q k v mask scale=attn_scale |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
     return a, new_kv
   a <- NN.rmsnorm@post_attention_layernorm a cast_float=true unit_offset=true
   x <- x + a
   xn <- NN.rmsnorm@pre_feedforward_layernorm x cast_float=true unit_offset=true
   m <- scope@mlp do
-    g <- NN.linear@gate_proj xn dim=21504
-    u <- NN.linear@up_proj xn dim=21504
-    return gelu_pytorch_tanh g |> mul u |> NN.linear@down_proj dim=5376
+    g <- NN.linear@gate_proj xn dim=FFN
+    u <- NN.linear@up_proj xn dim=FFN
+    return gelu_pytorch_tanh g |> mul u |> NN.linear@down_proj dim=MODEL_DIM
   m <- NN.rmsnorm@post_feedforward_layernorm m cast_float=true unit_offset=true
   return x + m, new_kv
 
-gemma3_body :: Path -> Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+gemma3_body :: Path -> Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 gemma3_body@__scope input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
-  x <- NN.embedding@embed_tokens input_ids dim=5376 scale=73.32121111929344
+  emb_scale <- sqrt (5376.0)
+  x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=emb_scale
   new_kv <- use_cache ? Cache.init : null
-  x, new_kv <- for@layers i <- [0..62) carry (x, new_kv) do
+  x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
     past_i <- Cache.index past_kv i
     x, new_i <- gemma3_block x i pos_ids attn_mask past_i
     new_kv <- Cache.append new_kv new_i
@@ -54,7 +95,7 @@ gemma3_body@__scope input_ids attn_mask past_kv use_cache = do
   logits <- NN.rmsnorm@norm x cast_float=true unit_offset=true |> NN.linear@embed_tokens
   return logits, new_kv
 
-gemma3 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+gemma3 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 gemma3 input_ids attn_mask past_kv use_cache = do
   logits, new_kv <- HAS_MODEL_LM_MODEL ? (gemma3_body@model.language_model.model input_ids attn_mask past_kv use_cache) : (HAS_LM_MODEL ? (gemma3_body@language_model.model input_ids attn_mask past_kv use_cache) : (gemma3_body@model input_ids attn_mask past_kv use_cache))
   return logits, new_kv
