@@ -663,6 +663,7 @@ class Codegen2GraphModel(SynapseProgramModel):
             "config_str",
             "config_value",
             "config_list",
+            "config_has",
             "config_has_value",
         }:
             if len(args) < 1:
@@ -670,6 +671,9 @@ class Codegen2GraphModel(SynapseProgramModel):
             _absolute, key = self._path_parts(args[0])
             config = self.spec.get("model", {}).get("config", {})
             found, value = self._lookup_config(config, key)
+            if primitive == "config_has":
+                out(found)
+                return True
             if primitive == "config_has_value":
                 out(found and value is not None)
                 return True
@@ -1238,15 +1242,105 @@ class _DirectTorchEmitter:
 
     def _emit_common(self, lines: list[str]) -> None:
         add = self._add
-        add(lines, 4, "def __init__(self, state_dict: dict[str, torch.Tensor], config: dict | None = None):")
+        add(lines, 4, "def __init__(self, state_dict: dict[str, torch.Tensor], config: dict | None = None, param_devices=None):")
         add(lines, 8, "super().__init__()")
-        add(lines, 8, "self.state_dict_tensors = dict(state_dict)")
+        add(lines, 8, "self.param_devices = self._normalize_param_devices(param_devices)")
+        add(lines, 8, "self.state_dict_tensors = self._place_state_dict(dict(state_dict), self.param_devices)")
         add(lines, 8, "self.config = dict(({} if _MODEL_CONFIG is None else _MODEL_CONFIG) if config is None else config)")
         add(lines, 8, "self._symbols = self._eval_symbols()")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
-        add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None):")
-        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config)")
+        add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None, param_devices=None):")
+        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config, param_devices=param_devices)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _normalize_param_devices(param_devices):")
+        add(lines, 8, "if param_devices is None:")
+        add(lines, 12, "return []")
+        add(lines, 8, "devices = [torch.device(item) for item in param_devices]")
+        add(lines, 8, "return devices")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _first_numeric_path_segment(key):")
+        add(lines, 8, "for part in str(key).split('.'):")
+        add(lines, 12, "if part.isdigit():")
+        add(lines, 16, "return int(part)")
+        add(lines, 8, "return None")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _param_placement_plan(cls, keys, devices):")
+        add(lines, 8, "if not devices:")
+        add(lines, 12, "return {}")
+        add(lines, 8, "layer_ids = sorted({idx for key in keys if (idx := cls._first_numeric_path_segment(key)) is not None})")
+        add(lines, 8, "if not layer_ids:")
+        add(lines, 12, "return {str(key): devices[0] for key in keys}")
+        add(lines, 8, "layer_to_device = {layer_id: devices[min(len(devices) - 1, pos * len(devices) // len(layer_ids))] for pos, layer_id in enumerate(layer_ids)}")
+        add(lines, 8, "plan = {}")
+        add(lines, 8, "for key in keys:")
+        add(lines, 12, "idx = cls._first_numeric_path_segment(key)")
+        add(lines, 12, "plan[str(key)] = layer_to_device[idx] if idx is not None else devices[0]")
+        add(lines, 8, "return plan")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _place_state_dict(cls, state_dict, devices):")
+        add(lines, 8, "plan = cls._param_placement_plan(state_dict.keys(), devices)")
+        add(lines, 8, "if not plan:")
+        add(lines, 12, "return state_dict")
+        add(lines, 8, "placed = {}")
+        add(lines, 8, "for key, value in state_dict.items():")
+        add(lines, 12, "device = plan[str(key)]")
+        add(lines, 12, "placed[key] = value.to(device=device) if torch.is_tensor(value) else value")
+        add(lines, 8, "return placed")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _move_to(cls, value, device):")
+        add(lines, 8, "if torch.is_tensor(value):")
+        add(lines, 12, "return value if value.device == device else value.to(device=device)")
+        add(lines, 8, "if isinstance(value, tuple):")
+        add(lines, 12, "return tuple(cls._move_to(item, device) for item in value)")
+        add(lines, 8, "if isinstance(value, list):")
+        add(lines, 12, "return [cls._move_to(item, device) for item in value]")
+        add(lines, 8, "return value")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _align_pair(cls, left, right, *, prefer='right'):")
+        add(lines, 8, "left_tensor = torch.is_tensor(left)")
+        add(lines, 8, "right_tensor = torch.is_tensor(right)")
+        add(lines, 8, "if not left_tensor or not right_tensor or left.device == right.device:")
+        add(lines, 12, "return left, right")
+        add(lines, 8, "device = right.device if prefer == 'right' else left.device")
+        add(lines, 8, "return cls._move_to(left, device), cls._move_to(right, device)")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _binary_op(cls, op, left, right, *, prefer='right'):")
+        add(lines, 8, "left, right = cls._align_pair(left, right, prefer=prefer)")
+        add(lines, 8, "if op == '+':")
+        add(lines, 12, "return left + right")
+        add(lines, 8, "if op == '-':")
+        add(lines, 12, "return left - right")
+        add(lines, 8, "if op == '*':")
+        add(lines, 12, "return left * right")
+        add(lines, 8, "if op == '/':")
+        add(lines, 12, "return left / right")
+        add(lines, 8, "if op == '%':")
+        add(lines, 12, "return left % right")
+        add(lines, 8, "if op == '<=':")
+        add(lines, 12, "return left <= right")
+        add(lines, 8, "if op == '<':")
+        add(lines, 12, "return left < right")
+        add(lines, 8, "if op == '>=':")
+        add(lines, 12, "return left >= right")
+        add(lines, 8, "if op == '>':")
+        add(lines, 12, "return left > right")
+        add(lines, 8, "if op == '==':")
+        add(lines, 12, "if left is None or right is None:")
+        add(lines, 16, "return left is right")
+        add(lines, 12, "return torch.eq(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left == right")
+        add(lines, 8, "if op == '!=':")
+        add(lines, 12, "if left is None or right is None:")
+        add(lines, 16, "return left is not right")
+        add(lines, 12, "return torch.ne(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left != right")
+        add(lines, 8, "raise NotImplementedError(f'unsupported binary op {op!r}')")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _compose_path(base, leaf):")
@@ -1257,6 +1351,18 @@ class _DirectTorchEmitter:
         add(lines, 8, "base = base.lstrip('@')")
         add(lines, 8, "leaf = leaf.lstrip('@')")
         add(lines, 8, "return base if not leaf else (leaf if not base else base + '.' + leaf)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _render_path(prefix, parts):")
+        add(lines, 8, "clean = []")
+        add(lines, 8, "for part in parts:")
+        add(lines, 12, "if part is None:")
+        add(lines, 16, "continue")
+        add(lines, 12, "text = str(part).strip()")
+        add(lines, 12, "if not text or text == 'None':")
+        add(lines, 16, "continue")
+        add(lines, 12, "clean.append(text.strip('@'))")
+        add(lines, 8, "return str(prefix) + '.'.join(clean)")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
         add(lines, 8, "key = str(path).lstrip('@')")
@@ -1279,9 +1385,12 @@ class _DirectTorchEmitter:
         add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
         add(lines, 8, "if expert is not None:")
         add(lines, 12, "weight = weight[int(expert)]")
+        add(lines, 8, "x = self._move_to(x, weight.device)")
         add(lines, 8, "bias_value = self._optional_param(self._compose_path(base, bias_leaf)) if bias else None")
         add(lines, 8, "if bias_value is not None and expert is not None and bias_value.ndim >= 2:")
         add(lines, 12, "bias_value = bias_value[int(expert)]")
+        add(lines, 8, "if bias_value is not None:")
+        add(lines, 12, "bias_value = self._move_to(bias_value, weight.device)")
         add(lines, 8, "weight_run = weight.to(dtype=x.dtype) if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype else weight")
         add(lines, 8, "bias_run = bias_value.to(dtype=x.dtype) if bias_value is not None and x.is_floating_point() and bias_value.is_floating_point() and x.dtype != bias_value.dtype else bias_value")
         add(lines, 8, "if x.numel() == 0:")
@@ -1353,23 +1462,33 @@ class _DirectTorchEmitter:
         add(lines, 12, "return torch.bool")
         add(lines, 8, "raise ValueError(f'unsupported dtype name {value!r}')")
         add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _binary_add(left, right):")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _binary_add(cls, left, right):")
         add(lines, 8, "if left is None:")
         add(lines, 12, "return right")
         add(lines, 8, "if right is None:")
         add(lines, 12, "return left")
-        add(lines, 8, "return left + right")
+        add(lines, 8, "return cls._binary_op('+', left, right)")
         add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _binary_sub(left, right):")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _binary_sub(cls, left, right):")
         add(lines, 8, "if right is None:")
         add(lines, 12, "return left")
-        add(lines, 8, "return left - right")
+        add(lines, 8, "return cls._binary_op('-', left, right)")
         add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _eq(left, right):")
-        add(lines, 8, "return torch.eq(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left == right")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _eq(cls, left, right):")
+        add(lines, 8, "return cls._binary_op('==', left, right)")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _where(cls, cond, yes, no):")
+        add(lines, 8, "if not torch.is_tensor(cond):")
+        add(lines, 12, "return yes if cond else no")
+        add(lines, 8, "device = yes.device if torch.is_tensor(yes) else (no.device if torch.is_tensor(no) else cond.device)")
+        add(lines, 8, "cond = cls._move_to(cond, device)")
+        add(lines, 8, "yes = cls._move_to(yes, device) if torch.is_tensor(yes) else yes")
+        add(lines, 8, "no = cls._move_to(no, device) if torch.is_tensor(no) else no")
+        add(lines, 8, "return torch.where(cond, yes, no)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _cache_past_length(cache):")
@@ -1378,14 +1497,17 @@ class _DirectTorchEmitter:
         add(lines, 8, "key, _ = cache[0]")
         add(lines, 8, "return int(key.shape[-2])")
         add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _concat(*args, dim=None):")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _concat(cls, *args, dim=None):")
         add(lines, 8, "if dim is None:")
         add(lines, 12, "*items, dim = args")
         add(lines, 8, "else:")
         add(lines, 12, "items = args")
         add(lines, 8, "if len(items) == 1 and isinstance(items[0], (list, tuple)):")
         add(lines, 12, "items = tuple(items[0])")
+        add(lines, 8, "device = next((item.device for item in items if torch.is_tensor(item)), None)")
+        add(lines, 8, "if device is not None:")
+        add(lines, 12, "items = tuple(cls._move_to(item, device) for item in items)")
         add(lines, 8, "return torch.cat(list(items), dim=int(dim))")
 
     def _emit_eval_symbols(self, lines: list[str]) -> None:
@@ -1676,6 +1798,8 @@ class _DirectTorchEmitter:
                 return f"self._binary_add({left}, {right})"
             if binop == "-":
                 return f"self._binary_sub({left}, {right})"
+            if binop in {"*", "/", "%", "<", "<=", ">", ">=", "==", "!="}:
+                return f"self._binary_op({binop!r}, {left}, {right})"
             pyop = {"and": "&", "or": "|"} .get(binop, binop)
             return f"({left} {pyop} {right})"
         if op in self.method_names:
@@ -1704,6 +1828,8 @@ class _DirectTorchEmitter:
             return f"any(k == {args[0]} or k.startswith(str({args[0]}) + '.') for k in self.state_dict_tensors)"
         if primitive.startswith("config_"):
             default = args[1] if len(args) > 1 else attrs.get("default", "None")
+            if primitive == "config_has":
+                return f"self._has_config({args[0]})"
             if primitive == "config_has_value":
                 return f"self._has_config({args[0]})"
             value = f"self._config({args[0]}, {default})"
@@ -1719,7 +1845,7 @@ class _DirectTorchEmitter:
                 return f"list({value})"
             return value
         if primitive == "embedding":
-            return f"F.embedding({args[1]}, self._param(self._compose_path({args[0]}, 'weight')).to(device={args[1]}.device))"
+            return f"(lambda _w: F.embedding(self._move_to({args[1]}, _w.device), _w))(self._param(self._compose_path({args[0]}, 'weight')))"
         if primitive == "linear":
             bias = args[3] if len(args) > 3 else "False"
             transpose = args[4] if len(args) > 4 else "False"
@@ -1732,7 +1858,7 @@ class _DirectTorchEmitter:
             weight_leaf = args[4] if len(args) > 4 else "'weight'"
             bias = args[5] if len(args) > 5 else "True"
             bias_leaf = args[6] if len(args) > 6 else "'bias'"
-            return f"F.layer_norm({args[1]}, ({args[1]}.shape[-1],), weight=self._param(self._compose_path({args[0]}, {weight_leaf})), bias=(self._optional_param(self._compose_path({args[0]}, {bias_leaf})) if {bias} else None), eps=float({eps}))"
+            return f"(lambda _w, _b: F.layer_norm(self._move_to({args[1]}, _w.device), ({args[1]}.shape[-1],), weight=_w, bias=(self._move_to(_b, _w.device) if _b is not None else None), eps=float({eps})))(self._param(self._compose_path({args[0]}, {weight_leaf})), (self._optional_param(self._compose_path({args[0]}, {bias_leaf})) if {bias} else None))"
         if primitive == "rmsnorm":
             x = args[0]
             eps = args[1] if len(args) > 1 else "1e-6"
@@ -1770,19 +1896,19 @@ class _DirectTorchEmitter:
             "transpose": lambda: f"torch.transpose({args[0]}, int({args[1]}), int({args[2]}))",
             "unsqueeze": lambda: f"torch.unsqueeze({args[0]}, int({args[1]}))",
             "repeat": lambda: f"({args[0]} if int({args[1]}) == 1 else torch.repeat_interleave({args[0]}, repeats=int({args[1]}), dim=(int({args[2]}) if int({args[2]}) >= 0 else int({args[2]}) + {args[0]}.dim())))",
-            "matmul": lambda: f"torch.matmul({args[0]}, {args[1]})",
+            "matmul": lambda: f"(lambda _a, _b: torch.matmul(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))",
             "softmax": lambda: f"F.softmax({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}))",
-            "where": lambda: f"(torch.where({args[0]}, {args[1]}, {args[2]}) if torch.is_tensor({args[0]}) else ({args[1]} if {args[0]} else {args[2]}))",
+            "where": lambda: f"self._where({args[0]}, {args[1]}, {args[2]})",
             "require": lambda: f"self._require_value({args[0]})",
-            "gather": lambda: f"torch.gather({args[0]}, dim=int({args[2] if len(args) > 2 else '-1'}), index={args[1]})",
-            "scatter": lambda: f"(torch.scatter({args[0]}, dim=int({args[3] if len(args) > 3 else '-1'}), index={args[1]}, src={args[2]}) if torch.is_tensor({args[2]}) else torch.scatter({args[0]}, dim=int({args[3] if len(args) > 3 else '-1'}), index={args[1]}, value={args[2]}))",
-            "index_add": lambda: f"torch.index_add({args[0]}, dim=int({args[3] if len(args) > 3 else '0'}), index={args[1]}, source={args[2]})",
-            "le": lambda: f"({args[0]} <= {args[1]})",
+            "gather": lambda: f"torch.gather({args[0]}, dim=int({args[2] if len(args) > 2 else '-1'}), index=self._move_to({args[1]}, {args[0]}.device))",
+            "scatter": lambda: f"(torch.scatter({args[0]}, dim=int({args[3] if len(args) > 3 else '-1'}), index=self._move_to({args[1]}, {args[0]}.device), src=self._move_to({args[2]}, {args[0]}.device)) if torch.is_tensor({args[2]}) else torch.scatter({args[0]}, dim=int({args[3] if len(args) > 3 else '-1'}), index=self._move_to({args[1]}, {args[0]}.device), value={args[2]}))",
+            "index_add": lambda: f"torch.index_add({args[0]}, dim=int({args[3] if len(args) > 3 else '0'}), index=self._move_to({args[1]}, {args[0]}.device), source=self._move_to({args[2]}, {args[0]}.device))",
+            "le": lambda: f"self._binary_op('<=', {args[0]}, {args[1]})",
             "eq": lambda: f"self._eq({args[0]}, {args[1]})",
-            "and": lambda: f"torch.logical_and({args[0]}, {args[1]})",
-            "add": lambda: f"({args[0]} + {args[1]})",
-            "mul": lambda: f"({args[0]} * {args[1]})",
-            "div": lambda: f"({args[0]} / {args[1]})",
+            "and": lambda: f"(lambda _a, _b: torch.logical_and(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))",
+            "add": lambda: f"self._binary_add({args[0]}, {args[1]})",
+            "mul": lambda: f"self._binary_op('*', {args[0]}, {args[1]})",
+            "div": lambda: f"self._binary_op('/', {args[0]}, {args[1]})",
             "floor": lambda: f"torch.floor({args[0]}) if torch.is_tensor({args[0]}) else int({args[0]} // 1)",
             "sqrt": lambda: f"torch.sqrt({args[0]}) if torch.is_tensor({args[0]}) else ({args[0]} ** 0.5)",
             "sin": lambda: f"torch.sin({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').sin(float({args[0]}))",
@@ -1790,7 +1916,7 @@ class _DirectTorchEmitter:
             "exp": lambda: f"torch.exp({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').exp(float({args[0]}))",
             "log": lambda: f"torch.log({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').log(float({args[0]}))",
             "cast": lambda: f"{args[0]}.to(dtype=getattr(torch, str({args[1]})))",
-            "cast_like": lambda: f"{args[0]}.to(dtype={args[1]}.dtype)",
+            "cast_like": lambda: f"{args[0]}.to(device={args[1]}.device, dtype={args[1]}.dtype)",
             "dtype_value": lambda: f"{{'min': torch.finfo({args[0]}.dtype).min, 'max': torch.finfo({args[0]}.dtype).max, 'eps': torch.finfo({args[0]}.dtype).eps, 'tiny': torch.finfo({args[0]}.dtype).tiny, 'inf': float('inf'), '-inf': float('-inf')}}[str({args[1]})]",
             "cumsum": lambda: f"torch.cumsum({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}))",
             "empty_like": lambda: f"torch.empty_like({args[0]})",
@@ -1852,20 +1978,27 @@ class _DirectTorchEmitter:
         raise TypeError(f"unsupported graph operand: {operand!r}")
 
     def _path_expr(self, path: GraphPath, *, local: set[str], symbols_dict: str) -> str:
-        text = ".".join(path.parts)
         prefix = "@@" if path.absolute else "@"
-        names = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", text)
-        if not names:
-            return repr(prefix + text)
-        pieces = []
-        cursor = 0
-        for match in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", text):
-            pieces.append(text[cursor:match.start()].replace("{", "{{").replace("}", "}}"))
-            name = match.group(1)
-            pieces.append("{" + (_py_ident(name) if name in local else f"{symbols_dict}[{name!r}]") + "}")
-            cursor = match.end()
-        pieces.append(text[cursor:].replace("{", "{{").replace("}", "}}"))
-        return "f" + repr(prefix + "".join(pieces))
+        part_exprs: list[str] = []
+        has_dynamic = False
+        for part in path.parts:
+            names = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", part)
+            if not names:
+                part_exprs.append(repr(part))
+                continue
+            has_dynamic = True
+            pieces = []
+            cursor = 0
+            for match in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", part):
+                pieces.append(part[cursor:match.start()].replace("{", "{{").replace("}", "}}"))
+                name = match.group(1)
+                pieces.append("{" + (_py_ident(name) if name in local else f"{symbols_dict}[{name!r}]") + "}")
+                cursor = match.end()
+            pieces.append(part[cursor:].replace("{", "{{").replace("}", "}}"))
+            part_exprs.append("f" + repr("".join(pieces)))
+        if not has_dynamic:
+            return repr(prefix + ".".join(path.parts))
+        return f"self._render_path({prefix!r}, [{', '.join(part_exprs)}])"
 
 
 def emit_model_code_from_graph_ir(

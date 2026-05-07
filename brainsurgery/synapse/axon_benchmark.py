@@ -82,6 +82,7 @@ _MAX_BENCHMARK_WORKER_RETRIES = 1
 
 def _resolve_pipeline_worker_specs(
     *,
+    backend: str,
     device: str,
     processes: int,
     pipeline_parallel_size: int | None,
@@ -89,7 +90,7 @@ def _resolve_pipeline_worker_specs(
     normalized = str(device).strip().lower()
     if not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
         raise ValueError(
-            "axon_backend='pipeline' requires a CUDA device target "
+            f"axon_backend={backend!r} requires a CUDA device target "
             "(use --device cuda or --device cuda:<index>)"
         )
     if processes <= 0:
@@ -102,10 +103,10 @@ def _resolve_pipeline_worker_specs(
     except Exception as exc:
         raise ValueError("torch is required for pipeline worker device resolution") from exc
     if not torch.cuda.is_available():
-        raise ValueError("axon_backend='pipeline' requires CUDA, but CUDA is unavailable")
+        raise ValueError(f"axon_backend={backend!r} requires CUDA, but CUDA is unavailable")
     device_count = int(torch.cuda.device_count())
     if device_count <= 0:
-        raise ValueError("axon_backend='pipeline' requires at least one CUDA device")
+        raise ValueError(f"axon_backend={backend!r} requires at least one CUDA device")
 
     if normalized == "auto":
         start_index = 0
@@ -1060,19 +1061,32 @@ def run_axon_benchmark(
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
         backend_token = "codegen"
-    if backend_token not in {"codegen", "codegen2", "runtime", "runtime2", "pipeline"}:
+    valid_backends = {"codegen", "codegen2", "runtime", "runtime2", "pipeline", "pipeline2"}
+    if backend_token not in valid_backends:
         raise ValueError(
-            "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', or 'pipeline'"
+            "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', "
+            "'pipeline', or 'pipeline2'"
         )
     axon_backend = backend_token
+    if axon_backend == "pipeline":
+        raise RuntimeError(
+            "The synapse YAML/pipeline backend is deprecated and disabled. "
+            "Use --axon-backend pipeline2."
+        )
     typechecker_token = str(axon_typechecker).strip().lower()
     if typechecker_token not in {"typecheck", "typecheck2"}:
         raise ValueError("axon_typechecker must be 'typecheck' or 'typecheck2'")
     axon_typechecker = typechecker_token
-    if axon_typechecker == "typecheck" and axon_backend not in {"codegen2", "runtime2"}:
-        raise ValueError("--axon-typechecker typecheck is only supported with codegen2/runtime2")
-    if axon_backend != "pipeline" and pipeline_parallel_size is not None:
-        raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline")
+    if axon_typechecker == "typecheck" and axon_backend not in {
+        "codegen2",
+        "runtime2",
+        "pipeline2",
+    }:
+        raise ValueError(
+            "--axon-typechecker typecheck is only supported with codegen2/runtime2/pipeline2"
+        )
+    if axon_backend != "pipeline2" and pipeline_parallel_size is not None:
+        raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2")
     repo_root = _repo_root()
     checkpoint_filter = {str(item).strip() for item in (checkpoints or ()) if str(item).strip()}
     exclude_filter = {str(item).strip() for item in (exclude or ()) if str(item).strip()}
@@ -1151,8 +1165,9 @@ def run_axon_benchmark(
     serial_cuda_visible_devices: str | None = None
     pipeline_worker_specs: list[_WorkerSpec] | None = None
     effective_device = device
-    if axon_backend == "pipeline":
+    if axon_backend == "pipeline2":
         pipeline_worker_specs = _resolve_pipeline_worker_specs(
+            backend=axon_backend,
             device=device,
             processes=max(1, int(processes)),
             pipeline_parallel_size=pipeline_parallel_size,

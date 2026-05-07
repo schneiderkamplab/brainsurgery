@@ -1932,9 +1932,11 @@ def _run_axon_test_single(
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
         backend_token = "codegen"
-    if backend_token not in {"codegen", "codegen2", "runtime", "runtime2", "pipeline"}:
+    valid_backends = {"codegen", "codegen2", "runtime", "runtime2", "pipeline", "pipeline2"}
+    if backend_token not in valid_backends:
         raise ValueError(
-            "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', or 'pipeline'"
+            "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', "
+            "'pipeline', or 'pipeline2'"
         )
     axon_backend = backend_token
     if axon_backend == "codegen":
@@ -1942,24 +1944,35 @@ def _run_axon_test_single(
             "The synapse YAML/codegen backend is deprecated and disabled. "
             "Use --axon-backend codegen2."
         )
+    if axon_backend == "pipeline":
+        raise RuntimeError(
+            "The synapse YAML/pipeline backend is deprecated and disabled. "
+            "Use --axon-backend pipeline2."
+        )
     typechecker_token = str(axon_typechecker).strip().lower()
     if typechecker_token not in {"typecheck", "typecheck2"}:
         raise ValueError("axon_typechecker must be 'typecheck' or 'typecheck2'")
     axon_typechecker = typechecker_token
-    if axon_typechecker == "typecheck" and axon_backend not in {"codegen2", "runtime2"}:
-        raise ValueError("axon_typechecker='typecheck' is only supported with codegen2/runtime2")
-    if axon_backend == "pipeline":
+    if axon_typechecker == "typecheck" and axon_backend not in {
+        "codegen2",
+        "runtime2",
+        "pipeline2",
+    }:
+        raise ValueError(
+            "axon_typechecker='typecheck' is only supported with codegen2/runtime2/pipeline2"
+        )
+    if axon_backend == "pipeline2":
         if resolved_model_task not in {"causal_lm", "masked_lm", "seq2seq_lm"}:
             raise ValueError(
-                "axon_backend='pipeline' currently supports only "
+                "axon_backend='pipeline2' currently supports only "
                 "causal_lm, masked_lm, and seq2seq_lm models"
             )
         if not str(device).startswith("cuda"):
-            raise ValueError("axon_backend='pipeline' currently requires a CUDA device target")
+            raise ValueError("axon_backend='pipeline2' currently requires a CUDA device target")
         if compile_axon:
-            raise ValueError("compile_axon is not supported with axon_backend='pipeline'")
+            raise ValueError("compile_axon is not supported with axon_backend='pipeline2'")
         if trace_layers:
-            raise ValueError("trace_layers is not supported with axon_backend='pipeline'")
+            raise ValueError("trace_layers is not supported with axon_backend='pipeline2'")
     if axon_backend in {"runtime", "runtime2"} and trace_layers:
         raise ValueError(f"trace_layers is not supported with axon_backend={axon_backend!r}")
 
@@ -2025,7 +2038,7 @@ def _run_axon_test_single(
                 transformers_hub.HF_MODULES_CACHE = str(modules_cache)
 
         lowered_spec: dict[str, Any]
-        if axon_backend in {"codegen2", "runtime2"}:
+        if axon_backend in {"codegen2", "runtime2", "pipeline2"}:
             resolved_axon = resolve_axon_program_from_path(axon_file).ast
             normalized_axon = normalize_closed_axon_file(resolved_axon)
             flat_axon = flatten_closed_axon_file(normalized_axon)
@@ -2828,7 +2841,11 @@ def _run_axon_test_single(
             target_device = _resolve_device(target_device_str)
             io = _build_io_for_device(target_device)
             local_state_dict = state_ref_cpu
-            state_load_device = torch.device("cpu") if axon_backend == "pipeline" else target_device
+            state_load_device = (
+                torch.device("cpu")
+                if axon_backend in {"pipeline", "pipeline2"}
+                else target_device
+            )
             if local_state_dict is None:
                 local_state_dict = _load_state_dict(
                     safetensors_files,
@@ -2854,6 +2871,14 @@ def _run_axon_test_single(
                     .to(target_device)
                     .eval()
                 )
+            elif axon_backend == "pipeline2":
+                param_devices = [
+                    f"cuda:{idx}" for idx in range(max(1, torch.cuda.device_count()))
+                ]
+                syn = model_cls.from_state_dict(
+                    local_state_dict,
+                    param_devices=param_devices,
+                ).eval()
             else:
                 syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
             if local_state_dict is not state_ref_cpu:
@@ -3006,7 +3031,7 @@ def _run_axon_test_single(
         except Exception as exc:
             if not _is_cuda_oom(exc, device=exec_device_str):
                 raise
-            if axon_backend == "pipeline":
+            if axon_backend in {"pipeline", "pipeline2"}:
                 raise
             if not oom_cpu_fallback:
                 raise

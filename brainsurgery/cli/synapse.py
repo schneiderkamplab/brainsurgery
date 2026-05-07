@@ -853,7 +853,10 @@ def axon_benchmark(
     axon_backend: str = typer.Option(
         "codegen",
         "--axon-backend",
-        help="Axon execution backend (codegen, codegen2, runtime, runtime2, or pipeline).",
+        help=(
+            "Axon execution backend (codegen, codegen2, runtime, runtime2, pipeline, "
+            "or pipeline2). The legacy pipeline backend is disabled."
+        ),
     ),
     axon_typechecker: str = typer.Option(
         "typecheck2",
@@ -865,7 +868,7 @@ def axon_benchmark(
         "--pipeline-parallel-size",
         "--pp",
         help=(
-            "Pipeline stages per worker when --axon-backend pipeline is used. "
+            "Pipeline stages per worker when --axon-backend pipeline2 is used. "
             "With --processes > 1, each worker gets pp GPUs via CUDA_VISIBLE_DEVICES partitioning."
         ),
     ),
