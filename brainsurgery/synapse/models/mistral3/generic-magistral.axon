@@ -16,18 +16,18 @@ import Tensor
 
 CFG = "text_config"
 
-MODEL_DIM = Config.int @'{CFG}.hidden_size' default=5120
-VOCAB_SIZE = Config.int @'{CFG}.vocab_size' default=131072
-NUM_LAYERS = Config.int @'{CFG}.num_hidden_layers' default=40
-NUM_HEADS = Config.int @'{CFG}.num_attention_heads' default=32
-KVH = Config.int @'{CFG}.num_key_value_heads' default=8
-MODEL_HEAD_DIM = Config.int @'{CFG}.head_dim' default=(MODEL_DIM / NUM_HEADS)
+MODEL_DIM = Config.int @@'{CFG}.hidden_size' default=5120
+VOCAB_SIZE = Config.int @@'{CFG}.vocab_size' default=131072
+NUM_LAYERS = Config.int @@'{CFG}.num_hidden_layers' default=40
+NUM_HEADS = Config.int @@'{CFG}.num_attention_heads' default=32
+KVH = Config.int @@'{CFG}.num_key_value_heads' default=8
+MODEL_HEAD_DIM = Config.int @@'{CFG}.head_dim' default=(MODEL_DIM / NUM_HEADS)
 KVD = KVH * MODEL_HEAD_DIM
-FFN = Config.int @'{CFG}.intermediate_size' default=32768
-EPS = Config.float @'{CFG}.rms_norm_eps' default=1e-05
-THETA = Config.float @'{CFG}.rope_theta' default=1000000000.0
-HAS_WINDOW = Config.has_value @'{CFG}.sliding_window'
-MAX_POSITIONS = HAS_WINDOW ? (Config.int @'{CFG}.sliding_window' default=4096) : 0
+FFN = Config.int @@'{CFG}.intermediate_size' default=32768
+EPS = Config.float @@'{CFG}.rms_norm_eps' default=1e-05
+THETA = Config.float @@'{CFG}.rope_theta' default=1000000000.0
+HAS_WINDOW = Config.has_value @@'{CFG}.sliding_window'
+MAX_POSITIONS = HAS_WINDOW ? (Config.int @@'{CFG}.sliding_window' default=4096) : 0
 
 magistral_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 magistral_norm@path x = NN.rmsnorm@path x eps=EPS

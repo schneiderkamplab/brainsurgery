@@ -431,9 +431,9 @@ class Codegen2GraphModel(SynapseProgramModel):
         names = self.modules_by_name[self.graph.main_module].output_names
         if not names:
             names = _fallback_output_names(self.modules_by_name[self.graph.main_module])
+        if len(result) == 1:
+            return result[0]
         outputs = {name: value for name, value in zip(names, result, strict=False)}
-        if "logits" in outputs and len(outputs) == 1:
-            return outputs["logits"]
         return outputs
 
     def _evaluate_global_symbols(self, env: dict[str, Any]) -> dict[str, Any]:
@@ -544,6 +544,13 @@ class Codegen2GraphModel(SynapseProgramModel):
     @staticmethod
     def _is_null(value: Any) -> bool:
         return value is None or (isinstance(value, str) and value.strip().lower() == "null")
+
+    @staticmethod
+    def _cache_past_length(cache: Any) -> int:
+        if cache is None:
+            return 0
+        key, _ = cache[0]
+        return int(key.shape[-2])
 
     @staticmethod
     def _path_parts(value: Any) -> tuple[bool, str]:
@@ -711,6 +718,8 @@ class Codegen2GraphModel(SynapseProgramModel):
             bias = None
             if bias_flag:
                 bias = self._optional_param(self._compose_path(base, bias_leaf))
+                if bias is not None and expert is not None and bias.ndim >= 2:
+                    bias = bias[expert]
             weight_run = weight.to(dtype=x.dtype) if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype else weight
             bias_run = (
                 bias.to(dtype=x.dtype)
@@ -765,6 +774,18 @@ class Codegen2GraphModel(SynapseProgramModel):
             return True
         if primitive == "activations_sigmoid":
             out(torch.sigmoid(args[0]))
+            return True
+        if primitive == "l2norm":
+            x = args[0]
+            eps = float(args[1]) if len(args) > 1 and not self._is_null(args[1]) else 1e-6
+            x_float = x.float() if x.is_floating_point() else x
+            mean_squared = torch.mean(x_float * x_float, dim=-1, keepdim=True) + eps
+            out((x_float * torch.pow(mean_squared, -0.5)).to(dtype=x.dtype))
+            return True
+        if primitive == "activations_xielu":
+            if len(args) != 5:
+                raise ValueError("activations_xielu expects exactly 5 positional args")
+            out(self._xielu(args[0], args[1], args[2], args[3], args[4]))
             return True
 
         if primitive == "reshape":
@@ -830,12 +851,39 @@ class Codegen2GraphModel(SynapseProgramModel):
             dtype = torch.float32 if len(args) > 2 and args[2] == "float32" else None
             out(F.softmax(x, dim=dim, dtype=dtype))
             return True
+        if primitive == "activations_gegelu":
+            x = args[0]
+            if x.shape[-1] % 2 != 0:
+                raise ValueError("gegelu requires even last dimension")
+            x_gelu = x[..., ::2]
+            x_linear = x[..., 1::2]
+            limit = args[1] if len(args) > 1 and not self._is_null(args[1]) else None
+            if limit is not None:
+                limit = float(limit)
+                x_gelu = torch.where(torch.isinf(x_gelu), x_gelu, x_gelu.clamp(max=limit))
+                x_linear = torch.where(
+                    torch.isinf(x_linear), x_linear, x_linear.clamp(min=-limit, max=limit)
+                )
+            out(x_gelu * torch.sigmoid(1.702 * x_gelu) * (x_linear + 1.0))
+            return True
         if primitive == "where":
-            out(torch.where(args[0], args[1], args[2]))
+            out(torch.where(args[0], args[1], args[2]) if torch.is_tensor(args[0]) else (args[1] if args[0] else args[2]))
+            return True
+        if primitive == "require":
+            if args[0] is None:
+                raise ValueError("require expected non-null value")
+            out(args[0])
             return True
         if primitive == "gather":
             dim = int(args[2]) if len(args) > 2 and not self._is_null(args[2]) else -1
             out(torch.gather(args[0], dim=dim, index=args[1]))
+            return True
+        if primitive == "scatter":
+            dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else -1
+            if torch.is_tensor(args[2]):
+                out(torch.scatter(args[0], dim=dim, index=args[1], src=args[2]))
+            else:
+                out(torch.scatter(args[0], dim=dim, index=args[1], value=args[2]))
             return True
         if primitive == "index_add":
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else 0
@@ -853,7 +901,8 @@ class Codegen2GraphModel(SynapseProgramModel):
             out(args[0] <= args[1])
             return True
         if primitive == "eq":
-            out(torch.eq(args[0], args[1]))
+            left, right = args[0], args[1]
+            out(torch.eq(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left == right)
             return True
         if primitive == "and":
             out(torch.logical_and(args[0], args[1]))
@@ -1043,6 +1092,12 @@ class Codegen2GraphModel(SynapseProgramModel):
             right = self._eval_graph_operand(node.inputs[1], env=env, symbols=symbols)
             self._assign_outputs(out_names, self._eval_binary(operator, left, right), env)
             return
+        if op in {"Cache.past_length", "Cache.past_length_kv"}:
+            if len(node.inputs) != 1:
+                raise ValueError(f"{op} expects one argument")
+            cache = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
+            self._assign_outputs(out_names, self._cache_past_length(cache), env)
+            return
         if op in self.modules_by_name:
             args = [
                 self._eval_graph_operand(operand, env=env, symbols=symbols)
@@ -1214,16 +1269,50 @@ class _DirectTorchEmitter:
         add(lines, 8, "key = str(path).lstrip('@')")
         add(lines, 8, "return self.state_dict_tensors.get(key)")
         add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _require_value(value):")
+        add(lines, 8, "if value is None:")
+        add(lines, 12, "raise ValueError('require expected non-null value')")
+        add(lines, 8, "return value")
+        add(lines, 4, "")
         add(lines, 4, "def _linear(self, base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
         add(lines, 8, "if expert is not None:")
         add(lines, 12, "weight = weight[int(expert)]")
         add(lines, 8, "bias_value = self._optional_param(self._compose_path(base, bias_leaf)) if bias else None")
+        add(lines, 8, "if bias_value is not None and expert is not None and bias_value.ndim >= 2:")
+        add(lines, 12, "bias_value = bias_value[int(expert)]")
         add(lines, 8, "weight_run = weight.to(dtype=x.dtype) if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype else weight")
         add(lines, 8, "bias_run = bias_value.to(dtype=x.dtype) if bias_value is not None and x.is_floating_point() and bias_value.is_floating_point() and x.dtype != bias_value.dtype else bias_value")
+        add(lines, 8, "if x.numel() == 0:")
+        add(lines, 12, "out_dim = int(weight_run.shape[-1] if transpose else weight_run.shape[-2])")
+        add(lines, 12, "return x.new_empty((*x.shape[:-1], out_dim))")
         add(lines, 8, "if transpose:")
         add(lines, 12, "return torch.matmul(x, weight_run) + (bias_run if bias_run is not None else 0)")
         add(lines, 8, "return F.linear(x, weight_run, bias_run)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _gegelu(x, limit=None):")
+        add(lines, 8, "if x.shape[-1] % 2 != 0:")
+        add(lines, 12, "raise ValueError('gegelu requires even last dimension')")
+        add(lines, 8, "x_gelu = x[..., ::2]")
+        add(lines, 8, "x_linear = x[..., 1::2]")
+        add(lines, 8, "if limit is not None:")
+        add(lines, 12, "limit = float(limit)")
+        add(lines, 12, "x_gelu = torch.where(torch.isinf(x_gelu), x_gelu, x_gelu.clamp(max=limit))")
+        add(lines, 12, "x_linear = torch.where(torch.isinf(x_linear), x_linear, x_linear.clamp(min=-limit, max=limit))")
+        add(lines, 8, "return x_gelu * torch.sigmoid(1.702 * x_gelu) * (x_linear + 1.0)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _xielu(x, alpha_p_raw, alpha_n_raw, beta_raw, eps_raw):")
+        add(lines, 8, "target_dtype = x.dtype if x.is_floating_point() else torch.float32")
+        add(lines, 8, "def value(raw):")
+        add(lines, 12, "return raw.to(device=x.device, dtype=target_dtype) if torch.is_tensor(raw) else torch.tensor(raw, device=x.device, dtype=target_dtype)")
+        add(lines, 8, "beta = value(beta_raw)")
+        add(lines, 8, "alpha_p = F.softplus(value(alpha_p_raw))")
+        add(lines, 8, "alpha_n = beta + F.softplus(value(alpha_n_raw))")
+        add(lines, 8, "eps = value(eps_raw)")
+        add(lines, 8, "return torch.where(x > 0, alpha_p * x * x + beta * x, (torch.expm1(torch.minimum(x, eps)) - x) * alpha_n + beta * x)")
         add(lines, 4, "")
         add(lines, 4, "def _config(self, path, default=None):")
         add(lines, 8, "key = str(path).lstrip('@')")
@@ -1277,6 +1366,17 @@ class _DirectTorchEmitter:
         add(lines, 8, "if right is None:")
         add(lines, 12, "return left")
         add(lines, 8, "return left - right")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _eq(left, right):")
+        add(lines, 8, "return torch.eq(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left == right")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _cache_past_length(cache):")
+        add(lines, 8, "if cache is None:")
+        add(lines, 12, "return 0")
+        add(lines, 8, "key, _ = cache[0]")
+        add(lines, 8, "return int(key.shape[-2])")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _concat(*args, dim=None):")
@@ -1392,7 +1492,7 @@ class _DirectTorchEmitter:
                 args.append(value.name)
         add(lines, 8, f"result = self.{self.method_names[main.name]}({', '.join(args)})")
         names = main.output_names or _fallback_output_names(main)
-        if len(names) == 1 and names[0] == "logits":
+        if len(names) == 1:
             add(lines, 8, "return result[0]")
         else:
             add(lines, 8, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
@@ -1579,6 +1679,14 @@ class _DirectTorchEmitter:
             pyop = {"and": "&", "or": "|"} .get(binop, binop)
             return f"({left} {pyop} {right})"
         if op in self.method_names:
+            if op in {"Cache.past_length", "Cache.past_length_kv"}:
+                args = [
+                    self._operand_expr(x, local=local, symbols_dict=symbols_dict)
+                    for x in node.inputs
+                ]
+                if len(args) != 1:
+                    raise ValueError(f"{op} expects one argument")
+                return f"self._cache_past_length({args[0]})"
             args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
             args.extend(f"{key}={self._operand_expr(value, local=local, symbols_dict=symbols_dict)}" for key, value in node.attrs.items())
             call = f"self.{self.method_names[op]}({', '.join(args)})"
@@ -1664,11 +1772,13 @@ class _DirectTorchEmitter:
             "repeat": lambda: f"({args[0]} if int({args[1]}) == 1 else torch.repeat_interleave({args[0]}, repeats=int({args[1]}), dim=(int({args[2]}) if int({args[2]}) >= 0 else int({args[2]}) + {args[0]}.dim())))",
             "matmul": lambda: f"torch.matmul({args[0]}, {args[1]})",
             "softmax": lambda: f"F.softmax({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}))",
-            "where": lambda: f"torch.where({args[0]}, {args[1]}, {args[2]})",
+            "where": lambda: f"(torch.where({args[0]}, {args[1]}, {args[2]}) if torch.is_tensor({args[0]}) else ({args[1]} if {args[0]} else {args[2]}))",
+            "require": lambda: f"self._require_value({args[0]})",
             "gather": lambda: f"torch.gather({args[0]}, dim=int({args[2] if len(args) > 2 else '-1'}), index={args[1]})",
+            "scatter": lambda: f"(torch.scatter({args[0]}, dim=int({args[3] if len(args) > 3 else '-1'}), index={args[1]}, src={args[2]}) if torch.is_tensor({args[2]}) else torch.scatter({args[0]}, dim=int({args[3] if len(args) > 3 else '-1'}), index={args[1]}, value={args[2]}))",
             "index_add": lambda: f"torch.index_add({args[0]}, dim=int({args[3] if len(args) > 3 else '0'}), index={args[1]}, source={args[2]})",
             "le": lambda: f"({args[0]} <= {args[1]})",
-            "eq": lambda: f"torch.eq({args[0]}, {args[1]})",
+            "eq": lambda: f"self._eq({args[0]}, {args[1]})",
             "and": lambda: f"torch.logical_and({args[0]}, {args[1]})",
             "add": lambda: f"({args[0]} + {args[1]})",
             "mul": lambda: f"({args[0]} * {args[1]})",
@@ -1684,15 +1794,19 @@ class _DirectTorchEmitter:
             "dtype_value": lambda: f"{{'min': torch.finfo({args[0]}.dtype).min, 'max': torch.finfo({args[0]}.dtype).max, 'eps': torch.finfo({args[0]}.dtype).eps, 'tiny': torch.finfo({args[0]}.dtype).tiny, 'inf': float('inf'), '-inf': float('-inf')}}[str({args[1]})]",
             "cumsum": lambda: f"torch.cumsum({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}))",
             "empty_like": lambda: f"torch.empty_like({args[0]})",
-            "fill": lambda: f"torch.full_like({args[0]}, {args[1]})",
+            "fill": lambda: f"torch.full_like({args[0]}, {args[1]}, dtype=({args[0]}.dtype if self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) is None else self._dtype_from_name({args[2] if len(args) > 2 else 'None'})))",
             "zeros_like": lambda: f"torch.zeros_like({args[0]})",
             "activations_tanh": lambda: f"torch.tanh({args[0]})",
             "activations_silu": lambda: f"F.silu({args[0]})",
             "activations_sigmoid": lambda: f"torch.sigmoid({args[0]})",
+            "l2norm": lambda: f"(({args[0]}.float() * torch.pow(torch.mean({args[0]}.float() * {args[0]}.float(), dim=-1, keepdim=True) + float({args[1] if len(args) > 1 else '1e-6'}), -0.5)).to(dtype={args[0]}.dtype))",
             "activations_relu": lambda: f"F.relu({args[0]})",
+            "activations_relu2": lambda: f"(F.relu({args[0]}) * F.relu({args[0]}))",
             "activations_gelu": lambda: f"F.gelu({args[0]})",
             "activations_gelu_new": lambda: f"(0.5 * {args[0]} * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]} + 0.044715 * {args[0]} * {args[0]} * {args[0]}))))",
             "activations_gelu_pytorch_tanh": lambda: f"(0.5 * {args[0]} * (1.0 + torch.tanh(0.7978845608028654 * ({args[0]} + 0.044715 * {args[0]} * {args[0]} * {args[0]}))))",
+            "activations_gegelu": lambda: f"self._gegelu({args[0]}, {args[1] if len(args) > 1 else 'None'})",
+            "activations_xielu": lambda: f"self._xielu({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "list_init": lambda: "[]",
             "list_append": lambda: f"([*({args[0]} or []), {args[1]}])",
             "list_index": lambda: f"{args[0]}[int({args[1]})]",
@@ -1711,6 +1825,14 @@ class _DirectTorchEmitter:
         if isinstance(operand, GraphPath):
             return self._path_expr(operand, local=local, symbols_dict=symbols_dict)
         if isinstance(operand, GraphExpr):
+            if operand.op.name in {"Cache.past_length", "Cache.past_length_kv"}:
+                args = [
+                    self._operand_expr(item, local=local, symbols_dict=symbols_dict)
+                    for item in operand.inputs
+                ]
+                if len(args) != 1:
+                    raise ValueError(f"{operand.op.name} expects one argument")
+                return f"self._cache_past_length({args[0]})"
             if operand.op.name in self.method_names:
                 args = [
                     self._operand_expr(item, local=local, symbols_dict=symbols_dict)

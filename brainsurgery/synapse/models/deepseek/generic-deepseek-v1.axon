@@ -1,6 +1,6 @@
 {-# CHECKPOINTS ["deepseek-ai/deepseek-moe-16b-base", "deepseek-ai/deepseek-moe-16b-chat"] #-}
 {-# TASK "causal_lm" #-}
-{-# padding_side "right" #-}
+{-# PADDING_SIDE "left" #-}
 
 import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)

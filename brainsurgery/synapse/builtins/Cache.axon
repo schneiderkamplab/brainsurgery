@@ -2,14 +2,26 @@ import List
 import Tensor
 export (
   append,
+  append_any,
+  append_kv,
   index,
+  index_any,
+  index_kv,
   init,
+  init_any,
+  init_kv,
   past_length,
+  past_length_any,
+  past_length_kv,
   update,
+  update_kv,
 )
 
 type CacheLayer[B,H,T,DH] = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
 type Cache[B,H,T,DH] = List[CacheLayer[B,H,T,DH]]
+type CacheLayerKV[B,H,T,DK,DV] = (Tensor[B,H,T,DK], Tensor[B,H,T,DV])
+type CacheKV[B,H,T,DK,DV] = List[CacheLayerKV[B,H,T,DK,DV]]
+type CacheAny = List[(Any, Any)]
 
 update :: ?CacheLayer[B,H,P,DH] -> Tensor[B,H,S,DH] -> Tensor[B,H,S,DH] -> (Tensor[B,H,K,DH], Tensor[B,H,K,DH], ?CacheLayer[B,H,K,DH])
 update past k v = (past == null)
@@ -21,14 +33,54 @@ update past k v = (past == null)
     v_all <- _concat v_past v dim=-2
     return k_all, v_all, (k_all, v_all)
 
+update_kv :: ?CacheLayerKV[B,H,P,DK,DV] -> Tensor[B,H,S,DK] -> Tensor[B,H,S,DV] -> (Tensor[B,H,K,DK], Tensor[B,H,K,DV], ?CacheLayerKV[B,H,K,DK,DV])
+update_kv past k v = (past == null)
+  ? do
+    return k, v, (k, v)
+  : do
+    k_past, v_past <- past
+    k_all <- _concat k_past k dim=-2
+    v_all <- _concat v_past v dim=-2
+    return k_all, v_all, (k_all, v_all)
+
 init :: Cache[B,H,T,DH]
 init = List.init
+
+init_any :: CacheAny
+init_any = List.init
+
+init_kv :: CacheKV[B,H,T,DK,DV]
+init_kv = List.init
 
 index :: ?Cache[B,H,T,DH] -> Int -> ?CacheLayer[B,H,T,DH]
 index values i = (values == null) ? null : List.index values i
 
+index_any :: ?CacheAny -> Int -> ?(Any, Any)
+index_any values i = (values == null) ? null : List.index values i
+
+index_kv :: ?CacheKV[B,H,T,DK,DV] -> Int -> ?CacheLayerKV[B,H,T,DK,DV]
+index_kv values i = (values == null) ? null : List.index values i
+
 append :: ?Cache[B,H,T,DH] -> ?CacheLayer[B,H,T,DH] -> ?Cache[B,H,T,DH]
 append values value = (values == null) ? null : ((value == null) ? values : List.append values value)
 
+append_any :: ?CacheAny -> ?(Any, Any) -> ?CacheAny
+append_any values value = (values == null) ? null : ((value == null) ? values : List.append values value)
+
+append_kv :: ?CacheKV[B,H,T,DK,DV] -> ?CacheLayerKV[B,H,T,DK,DV] -> ?CacheKV[B,H,T,DK,DV]
+append_kv values value = (values == null) ? null : ((value == null) ? values : List.append values value)
+
 past_length :: ?Cache[B,H,T,DH] -> Dim
-past_length cache = (cache == null) ? 0 : T
+past_length cache = (cache == null) ? 0 : do
+  k, _ <- List.index cache 0
+  return Tensor.size k -2
+
+past_length_any :: ?CacheAny -> Dim
+past_length_any cache = (cache == null) ? 0 : do
+  k, _ <- List.index cache 0
+  return Tensor.size k -2
+
+past_length_kv :: ?CacheKV[B,H,T,DK,DV] -> Dim
+past_length_kv cache = (cache == null) ? 0 : do
+  k, _ <- List.index cache 0
+  return Tensor.size k -2

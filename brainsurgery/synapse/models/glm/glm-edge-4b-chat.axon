@@ -22,7 +22,7 @@ HAS_LM_HEAD = has_root "lm_head"
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-05
 
-glm_edge_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+glm_edge_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,6,P,128] -> (Tensor[B,S,D], ?CacheLayer[B,6,K,128])
 glm_edge_attn x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -47,7 +47,7 @@ glm_edge_ffn x = do
   g, u <- Tensor.split gu sizes=[8192, 8192]
   return g |> silu |> mul u |> NN.linear@down_proj dim=3072 bias=false
 
-glm_edge_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+glm_edge_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,6,P,128] -> (Tensor[B,S,D], ?CacheLayer[B,6,K,128])
 glm_edge_block x pos_ids attn_mask past_kv = do
   x, new_kv <- glm_edge_attn x pos_ids attn_mask past_kv
   residual <- x
@@ -57,7 +57,7 @@ glm_edge_block x pos_ids attn_mask past_kv = do
   x <- residual + m
   return x, new_kv
 
-glm_edge :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+glm_edge :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,6,P,128] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,6,K,128])
 glm_edge input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do

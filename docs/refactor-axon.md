@@ -140,6 +140,15 @@ Stage status as of now:
 - still open:
   - constraint recording is broader than constraint reasoning
   - richer future type/inference cases are still ahead
+  - Axon lacks a first-class way to write dependent return types for value-indexed
+    sequence outputs such as `Tensor.split x sizes=[A, B]`
+    - current surface wrapper therefore uses an intentionally broad declared
+      return and relies on the primitive `_split` type rule to infer the precise
+      tuple/list result from the `sizes` value
+    - example desired inferred return:
+      `(Tensor[..prefix,A,..suffix], Tensor[..prefix,B,..suffix])`
+    - replace the broad wrapper signature once the type language can express
+      size-indexed tuple/list outputs directly
   - lowering-oriented typing concerns are intentionally deferred to later stages
 
 9. `optimize`

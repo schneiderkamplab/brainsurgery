@@ -24,25 +24,25 @@ dense_ffn x = do
   up <- NN.linear@feed_forward.up_proj x dim=8192
   return gate |> silu |> mul up |> NN.linear@feed_forward.down_proj dim=2560
 
-attn_core :: Tensor[B,S,D] -> Tensor[B,S,D]
-attn_core x = do
+attn_core :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+attn_core x attn_mask = do
   x_norm <- rms@input_layernorm x
   q <- NN.linear@self_attn.q_proj x_norm dim=2560 |> reshape_heads heads=20
   k <- NN.linear@self_attn.k_proj x_norm dim=128 |> reshape_heads heads=1
   k <- Tensor.repeat k repeats=20
   v <- NN.linear@self_attn.v_proj x_norm dim=128 |> reshape_heads heads=1
   v <- Tensor.repeat v repeats=20
-  keep <- causal_mask q k
+  keep <- causal_mask q k padding_mask=attn_mask
   a <- attention q k v keep scale=0.08838834764831843 |> merge_heads
   a <- NN.linear@self_attn.o_proj a dim=2560
   return x + a
 
-mamba_core :: Tensor[B,S,D] -> Tensor[B,S,D]
-mamba_core x = do
+mamba_core :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+mamba_core x attn_mask = do
   x_norm <- rms@input_layernorm x
   in_proj <- NN.linear@mamba.in_proj x_norm dim=10240
   u, gate <- Tensor.split in_proj sizes=[5120, 5120]
-  u_conv <- causal_conv1d@mamba.conv1d u activation="silu" weight_path=@mamba.conv1d.weight bias_path=@mamba.conv1d.bias
+  u_conv <- causal_conv1d@mamba.conv1d u activation="silu" weight_path=@mamba.conv1d.weight bias_path=@mamba.conv1d.bias attention_mask=attn_mask
   params <- NN.linear@mamba.x_proj u_conv dim=192
   dt, b, c <- Tensor.split params sizes=[160, 16, 16]
   dt <- NN.rmsnorm@mamba.dt_layernorm dt eps=1e-06 cast_float=true
@@ -53,11 +53,11 @@ mamba_core x = do
   y <- y_scan |> mul (silu gate) |> NN.linear@mamba.out_proj dim=2560
   return x + y
 
-jamba_3b :: TokenIds[B,S] -> Tensor[B,S,V]
-jamba_3b input_ids = do
+jamba_3b :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+jamba_3b input_ids attn_mask = do
   x <- NN.embedding@model.embed_tokens input_ids dim=2560
   for@model.layers i <- [0..28) do
-    x <- ((i % 14) == 7) ? attn_core x : mamba_core x
+    x <- ((i % 14) == 7) ? attn_core x attn_mask : mamba_core x attn_mask
     x_ff <- rms@pre_ff_layernorm x
     m <- dense_ffn x_ff
     x <- x + m

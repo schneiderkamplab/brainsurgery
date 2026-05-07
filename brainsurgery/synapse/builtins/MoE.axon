@@ -7,6 +7,7 @@ import Tensor (
   cast_like,
   chunk,
   concat,
+  cumsum,
   deinterleave_last2,
   dtype_value,
   eq,
@@ -17,6 +18,7 @@ import Tensor (
   reshape,
   scatter,
   size,
+  slice,
   softmax,
   topk,
   transpose,
@@ -36,7 +38,7 @@ export (
 )
 
 grouped_sigmoid_router :: Path -> Tensor[B,S,D] -> Dim -> ?Dim -> ?Dim -> ?Bool -> ?Float -> ?Path -> ?Path -> (Tensor[B,S,TOPK], IdxTensor[B,S,TOPK])
-grouped_sigmoid_router@path x top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 ?weight=@weight ?e_score_correction_bias=@gate.e_score_correction_bias = do
+grouped_sigmoid_router@path x top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 ?weight=@weight ?e_score_correction_bias=@e_score_correction_bias = do
   x32 <- cast x dtype="float32"
   logits <- linear@path x32 dim=null bias=false weight_path=weight
   probs <- sigmoid logits
@@ -102,8 +104,10 @@ softmax_topk_router :: Path -> Tensor[B,S,D] -> Dim -> ?Float -> ?Path -> (Tenso
 softmax_topk_router@path x top_k ?routed_scaling_factor=1.0 ?weight=@weight = do
   x32 <- cast x dtype="float32"
   logits <- linear@path x32 dim=null bias=false weight_path=weight
-  topk_logits, topk_indices <- topk logits top_k -1 true false
-  topk_weights <- softmax topk_logits -1 "float32"
+  probs <- softmax logits -1 "float32"
+  topk_weights, topk_indices <- topk probs top_k -1 true false
+  denom <- cumsum topk_weights dim=-1 |> slice dim=-1 start=(top_k - 1) end=top_k
+  topk_weights <- topk_weights / denom
   topk_weights <- cast_like topk_weights x
   return (topk_weights * routed_scaling_factor), topk_indices
 

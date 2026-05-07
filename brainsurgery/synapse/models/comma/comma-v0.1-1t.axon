@@ -18,7 +18,7 @@ import Tensor
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-05 cast_float=true
 
-comma_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+comma_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,32,P,128] -> (Tensor[B,S,D], ?CacheLayer[B,32,K,128])
 comma_block x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -40,7 +40,7 @@ comma_block x pos_ids attn_mask past_kv = do
     return g |> silu |> mul u |> NN.linear@down_proj dim=4096
   return x + m, new_kv
 
-comma :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+comma :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,32,P,128] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,32,K,128])
 comma input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do

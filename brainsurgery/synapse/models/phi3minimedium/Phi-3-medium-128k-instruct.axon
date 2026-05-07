@@ -1,59 +1,108 @@
 {-# CHECKPOINTS "microsoft/Phi-3-medium-128k-instruct" #-}
+
 {-# TASK "causal_lm" #-}
 
-import Activations
+{-# MAIN "phi3minimedium" #-}
+
 import Activations (silu)
-import Attention
+
 import Attention (attention, merge_heads, reshape_heads)
-import Masking
+
 import Masking (causal_mask)
-import Math
+
 import Math (mul)
-import Positions
-import Positions (position_ids, rope_pair_longrope)
+
+import Params (has_root)
+
+import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+
 import Cache
+
+import Config
+
 import NN
+
 import Tensor
 
-phi3minimedium_norm :: Path -> Tensor -> Tensor
-phi3minimedium_norm@path x = NN.rmsnorm@path x eps=1e-05
+MODEL_DIM = 5120
 
-phi3minimedium_block :: Tensor -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
+VOCAB_SIZE = 32064
+
+NUM_LAYERS = 40
+
+NUM_HEADS = 40
+
+KVH = 10
+
+MODEL_HEAD_DIM = (false) ? (128) : ((MODEL_DIM == 5120) ? 128 : 96)
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+FFN = 17920
+
+EPS = 1e-05
+
+THETA = 10000.0
+
+ROPE_MODE = "su"
+
+ROPE_ORIGINAL_CONTEXT = 4096
+
+ROPE_MAX_CONTEXT = 131072
+
+ROPE_LONG_FACTOR = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.25, 1.25, 1.5, 2.0, 2.75, 5.75, 5.75, 6.5, 9.25, 11.0, 13.25, 19.25, 19.75, 19.75, 21.25, 21.5, 26.5, 30.0, 33.75, 35.25, 38.5, 42.0, 42.25, 46.0, 47.0, 50.0, 50.5, 51.0, 52.0, 52.75, 53.75, 54.75, 57.0, 57.25, 58.5, 59.25, 59.5, 62.0, 62.5, 62.75, 63.25, 63.25, 63.25, 63.75, 64.0, 64.0, 64.25, 64.5, 64.5, 65.0, 65.0]
+
+ROPE_SHORT_FACTOR = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.01, 1.02, 1.02, 1.04, 1.04, 1.07, 1.07, 1.1, 1.3000000000000003, 1.3000000000000003, 1.5000000000000004, 1.5700000000000005, 1.9000000000000008, 2.3100000000000014, 2.759999999999992, 3.3899999999999784, 3.9399999999999666, 4.009999999999965, 4.289999999999959, 4.349999999999958, 5.349999999999937, 6.659999999999909, 7.029999999999901, 7.51999999999989, 8.00999999999988, 8.249999999999876, 8.279999999999875, 9.629999999999846, 9.89999999999984, 10.589999999999826, 11.049999999999816, 11.7899999999998, 12.189999999999792, 12.889999999999777, 13.129999999999772, 13.16999999999977, 13.20999999999977, 13.479999999999764, 13.539999999999763, 13.779999999999758, 13.929999999999755, 14.429999999999744, 14.759999999999737, 15.149999999999729, 15.419999999999723, 15.53999999999972, 15.659999999999718, 15.749999999999716, 15.759999999999716, 15.799999999999715, 16.05999999999971, 16.079999999999714, 16.11999999999972, 16.11999999999972, 16.18999999999973, 16.31999999999975, 16.539999999999786, 16.799999999999827]
+
+HAS_LONGROPE = true
+
+ROPE_ATTENTION_FACTOR = (ROPE_MAX_CONTEXT > ROPE_ORIGINAL_CONTEXT) ? 1.1902380714238083 : 1.0
+
+WINDOW_LOCAL = 131072
+
+HAS_LM_HEAD = has_root "lm_head"
+
+phi3minimedium_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+phi3minimedium_norm@path x = NN.rmsnorm@path x eps=EPS
+
+phi3minimedium_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 phi3minimedium_block x pos_ids attn_mask past_kv = do
   xn <- phi3minimedium_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
-    qkv <- NN.linear@qkv_proj xn dim=7680 bias=false
-    q, k, v <- Tensor.split qkv sizes=[5120, 1280, 1280]
-    q <- reshape_heads q heads=40
-    k <- reshape_heads k heads=10
-    v <- reshape_heads v heads=10
-    q, k <- (rope_pair_longrope q k pos_ids 10000.0 4096 131072 [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.25, 1.25, 1.5, 2.0, 2.75, 5.75, 5.75, 6.5, 9.25, 11.0, 13.25, 19.25, 19.75, 19.75, 21.25, 21.5, 26.5, 30.0, 33.75, 35.25, 38.5, 42.0, 42.25, 46.0, 47.0, 50.0, 50.5, 51.0, 52.0, 52.75, 53.75, 54.75, 57.0, 57.25, 58.5, 59.25, 59.5, 62.0, 62.5, 62.75, 63.25, 63.25, 63.25, 63.75, 64.0, 64.0, 64.25, 64.5, 64.5, 65.0, 65.0] [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.01, 1.02, 1.02, 1.04, 1.04, 1.07, 1.07, 1.1, 1.3000000000000003, 1.3000000000000003, 1.5000000000000004, 1.5700000000000005, 1.9000000000000008, 2.3100000000000014, 2.759999999999992, 3.3899999999999784, 3.9399999999999666, 4.009999999999965, 4.289999999999959, 4.349999999999958, 5.349999999999937, 6.659999999999909, 7.029999999999901, 7.51999999999989, 8.00999999999988, 8.249999999999876, 8.279999999999875, 9.629999999999846, 9.89999999999984, 10.589999999999826, 11.049999999999816, 11.7899999999998, 12.189999999999792, 12.889999999999777, 13.129999999999772, 13.16999999999977, 13.20999999999977, 13.479999999999764, 13.539999999999763, 13.779999999999758, 13.929999999999755, 14.429999999999744, 14.759999999999737, 15.149999999999729, 15.419999999999723, 15.53999999999972, 15.659999999999718, 15.749999999999716, 15.759999999999716, 15.799999999999715, 16.05999999999971, 16.079999999999714, 16.11999999999972, 16.11999999999972, 16.18999999999973, 16.31999999999975, 16.539999999999786, 16.799999999999827] attention_factor=1.1902380714238083)
+    qkv <- NN.linear@qkv_proj xn dim=(QD + KVD + KVD) bias=false
+    q, k, v <- Tensor.split qkv sizes=[QD, KVD, KVD]
+    q <- reshape_heads q heads=NUM_HEADS
+    k <- reshape_heads k heads=KVH
+    v <- reshape_heads v heads=KVH
+    q, k <- HAS_LONGROPE ? (rope_pair_longrope q k pos_ids THETA ROPE_ORIGINAL_CONTEXT ROPE_MAX_CONTEXT ROPE_LONG_FACTOR ROPE_SHORT_FACTOR attention_factor=ROPE_ATTENTION_FACTOR) : (rope_pair_base q k pos_ids theta=THETA)
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=4
-    v <- Tensor.repeat v repeats=4
-    mask <- causal_mask q k window=131072 padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=5120 bias=false
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    mask <- causal_mask q k window=WINDOW_LOCAL padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
     return a, new_kv
   x <- x + a
   xn <- phi3minimedium_norm@post_attention_layernorm x
   m <- scope@mlp do
-    gate_up <- NN.linear@gate_up_proj xn dim=35840
-    g, u <- Tensor.split gate_up sizes=[17920, 17920]
-    return g |> silu |> mul u |> NN.linear@down_proj dim=5120
+    gate_up <- NN.linear@gate_up_proj xn dim=(2 * FFN)
+    g, u <- Tensor.split gate_up sizes=[FFN, FFN]
+    return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
   return x + m, new_kv
 
-phi3minimedium :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+phi3minimedium :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 phi3minimedium input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=5120
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..40) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- phi3minimedium_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- phi3minimedium_norm@norm x
     return x, new_kv
-  logits <- (NN.linear@lm_head x dim=32064)
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
   return logits, new_kv

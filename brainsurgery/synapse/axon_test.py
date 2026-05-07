@@ -253,6 +253,8 @@ def _tokenizer_pragma_for_checkpoint(
     module = _select_main_axon_module(modules)
     raw = (getattr(module, "pragmas", None) or {}).get("tokenizer")
     if raw is None:
+        raw = (getattr(modules, "pragmas", None) or {}).get("tokenizer")
+    if raw is None:
         return None
 
     global_tokenizer: str | None = None
@@ -270,11 +272,11 @@ def _tokenizer_pragma_for_checkpoint(
             global_tokenizer = entry
             return
         if (
-            isinstance(entry, tuple)
+            isinstance(entry, list | tuple)
             and len(entry) == 2
             and all(isinstance(item, str) and item for item in entry)
         ):
-            checkpoint, tokenizer = cast(tuple[str, str], entry)
+            checkpoint, tokenizer = cast(tuple[str, str], tuple(entry))
             prev = by_checkpoint.get(checkpoint)
             if prev is not None and prev != tokenizer:
                 raise ValueError(
@@ -287,11 +289,18 @@ def _tokenizer_pragma_for_checkpoint(
     if isinstance(raw, str):
         _consume(raw)
     elif (
-        isinstance(raw, tuple)
+        isinstance(raw, list | tuple)
         and len(raw) == 2
         and all(isinstance(item, str) and item for item in raw)
     ):
         _consume(raw)
+    elif (
+        isinstance(raw, dict)
+        and set(raw) == {"__pragma_occurrences__"}
+        and isinstance(raw["__pragma_occurrences__"], list | tuple)
+    ):
+        for entry in raw["__pragma_occurrences__"]:
+            _consume(entry)
     elif isinstance(raw, list | tuple):
         for entry in raw:
             _consume(entry)
@@ -2054,6 +2063,7 @@ def _run_axon_test_single(
                     "graph": [],
                     "blocks": {},
                     "config": model_config or {},
+                    "meta": dict(graph_program.pragmas),
                 },
             }
             if axon_backend == "runtime2":
@@ -2704,30 +2714,54 @@ def _run_axon_test_single(
                             hf_logits = _run_hf_forward(hf)
                             hf_forward_time = time.perf_counter() - hf_t0
 
-                if resolved_model_type == "deepseek":
-                    hf_gen = io["input_ids"]
-                    hf_time = hf_forward_time
-                else:
+                def _run_hf_generate(model: Any) -> torch.Tensor:
+                    if resolved_model_type == "deepseek":
+                        pad_id = tokenizer_obj.eos_token_id
+                        generated: list[torch.Tensor] = []
+                        batch_size = int(io["input_ids"].shape[0])
+                        for batch_idx in range(batch_size):
+                            sample_inputs: dict[str, Any] = {}
+                            for key, value in io["hf_inputs"].items():
+                                if (
+                                    torch.is_tensor(value)
+                                    and value.ndim > 0
+                                    and int(value.shape[0]) == batch_size
+                                ):
+                                    sample_value = value[batch_idx : batch_idx + 1]
+                                    if key in {"input_ids", "attention_mask"}:
+                                        mask = io["attention_mask"][batch_idx : batch_idx + 1]
+                                        keep = mask.to(dtype=torch.bool)[0]
+                                        sample_value = sample_value[:, keep]
+                                    sample_inputs[key] = sample_value
+                                else:
+                                    sample_inputs[key] = value
+                            generated.append(
+                                model.generate(
+                                    **sample_inputs,
+                                    max_new_tokens=max(1, max_len - int(io["input_ids"].shape[1])),
+                                    eos_token_id=tokenizer_obj.eos_token_id,
+                                    pad_token_id=pad_id,
+                                    use_cache=False,
+                                )[0]
+                            )
+                        max_out = max(int(item.shape[0]) for item in generated)
+                        padded = [
+                            torch.nn.functional.pad(
+                                item,
+                                (0, max_out - int(item.shape[0])),
+                                value=int(pad_id if pad_id is not None else 0),
+                            )
+                            for item in generated
+                        ]
+                        return torch.stack(padded, dim=0)
+                    return model.generate(
+                        **io["hf_inputs"],
+                        max_new_tokens=max(1, max_len - int(io["input_ids"].shape[1])),
+                        eos_token_id=tokenizer_obj.eos_token_id,
+                        pad_token_id=tokenizer_obj.eos_token_id,
+                    )
 
-                    def _run_hf_generate(model: Any) -> torch.Tensor:
-                        return model.generate(
-                            **io["hf_inputs"],
-                            max_new_tokens=max(1, max_len - int(io["input_ids"].shape[1])),
-                            eos_token_id=tokenizer_obj.eos_token_id,
-                            pad_token_id=tokenizer_obj.eos_token_id,
-                        )
-
-                    try:
-                        hf_gen, hf_time = _time_generate(
-                            "HF", lambda model=hf: _run_hf_generate(model)
-                        )
-                    except Exception as exc:
-                        print(
-                            "HF generate failed; falling back to prompt-only decode:",
-                            f"{type(exc).__name__}: {exc}",
-                        )
-                        hf_gen = io["input_ids"]
-                        hf_time = 0.0
+                hf_gen, hf_time = _time_generate("HF", lambda model=hf: _run_hf_generate(model))
             hf_logits_cpu = hf_logits.detach().cpu()
             hf_gen_cpu = None if hf_gen is None else hf_gen.detach().cpu()
             dummy_mask = _build_phi3small_dummy_vocab_mask(
@@ -2946,15 +2980,7 @@ def _run_axon_test_single(
                             generate_kwargs["attention_mask"] = attention_mask
                     return model.generate(io["input_ids"], **generate_kwargs)
 
-                try:
-                    syn_gen, syn_time = _time_generate("AxonDerived", _run_syn_generate)
-                except Exception as exc:
-                    print(
-                        "Axon generate failed; falling back to prompt-only decode:",
-                        f"{type(exc).__name__}: {exc}",
-                    )
-                    syn_gen = io["input_ids"]
-                    syn_time = 0.0
+                syn_gen, syn_time = _time_generate("AxonDerived", _run_syn_generate)
             if (
                 trace_layers
                 and callable(original_block_call)

@@ -8,6 +8,7 @@ import Tensor (
   expand,
   le,
   reshape,
+  size,
   slice,
   where,
 )
@@ -81,10 +82,14 @@ bidirectional_mask q k ?padding_mask=null ?window=null = if padding_mask == null
 -- === BLOCKSPARSE MASK ===
 blocksparse_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Tensor[B,K] -> ?Dim -> ?Dim -> ?Dim -> ?Bool -> Tensor[B,H,Q,K]
 blocksparse_mask q k ?padding_mask=null ?block_size=64 ?local_blocks=16 ?vert_stride=8 ?homo_head=false = do
-  shift <- ((K - Q) > 0) ? (K - Q) : 0
-  q_pos <- arange q start=0 end=Q |> reshape shape=[Q, 1]
+  b <- size q dim=0
+  h <- size q dim=1
+  q_len <- size q dim=2
+  k_len <- size k dim=2
+  shift <- ((k_len - q_len) > 0) ? (k_len - q_len) : 0
+  q_pos <- arange q start=0 end=q_len |> reshape shape=[q_len, 1]
   q_pos <- q_pos + shift
-  k_pos <- arange k start=0 end=K |> reshape shape=[1, K]
+  k_pos <- arange k start=0 end=k_len |> reshape shape=[1, k_len]
   q_block <- floor (q_pos / block_size)
   k_block <- floor (k_pos / block_size)
   causal_token <- le k_pos q_pos
@@ -92,26 +97,26 @@ blocksparse_mask q k ?padding_mask=null ?block_size=64 ?local_blocks=16 ?vert_st
   local_block <- le (q_block - (local_blocks - 1)) k_block
   keep <- homo_head
     ? do
-      strided <- eq ((k_block + 1) % vert_stride) 0 |> expand shape=[Q, K]
+      strided <- eq ((k_block + 1) % vert_stride) 0 |> expand shape=[q_len, k_len]
       local_or <- where local_block true strided
       keep_homo <- and causal_block local_or
-      return reshape keep_homo shape=[1, 1, Q, K]
+      return reshape keep_homo shape=[1, 1, q_len, k_len]
     : do
-      head_step_raw <- floor (vert_stride / (((H > 0) ? H : 1)))
+      head_step_raw <- floor (vert_stride / (((h > 0) ? h : 1)))
       head_step <- (head_step_raw > 0) ? head_step_raw : 1
-      head_idx <- arange q start=0 end=H |> reshape shape=[H, 1, 1]
-      k_block_h <- reshape k_block shape=[1, 1, K]
-      strided <- eq ((k_block_h + (head_idx * head_step) + 1) % vert_stride) 0 |> expand shape=[H, Q, K]
-      local_h <- reshape local_block shape=[1, Q, K] |> expand shape=[H, Q, K]
-      causal_h <- reshape causal_block shape=[1, Q, K] |> expand shape=[H, Q, K]
+      head_idx <- arange q start=0 end=h |> reshape shape=[h, 1, 1]
+      k_block_h <- reshape k_block shape=[1, 1, k_len]
+      strided <- eq ((k_block_h + (head_idx * head_step) + 1) % vert_stride) 0 |> expand shape=[h, q_len, k_len]
+      local_h <- reshape local_block shape=[1, q_len, k_len] |> expand shape=[h, q_len, k_len]
+      causal_h <- reshape causal_block shape=[1, q_len, k_len] |> expand shape=[h, q_len, k_len]
       local_or <- where local_h true strided
       keep_h <- and causal_h local_or
-      return reshape keep_h shape=[1, H, Q, K]
-  keep <- and keep (reshape causal_token shape=[1, 1, Q, K])
-  keep <- expand keep shape=[B, H, Q, K]
+      return reshape keep_h shape=[1, h, q_len, k_len]
+  keep <- and keep (reshape causal_token shape=[1, 1, q_len, k_len])
+  keep <- expand keep shape=[b, h, q_len, k_len]
   keep <- (padding_mask == null)
     ? keep
     : do
-      pad_keep <- cast padding_mask dtype="bool" |> reshape shape=[B, 1, 1, K]
+      pad_keep <- cast padding_mask dtype="bool" |> reshape shape=[b, 1, 1, k_len]
       return and keep pad_keep
   return where keep 0.0 (dtype_value q "min")

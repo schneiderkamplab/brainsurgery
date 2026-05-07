@@ -14,30 +14,30 @@ import Tensor
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-05 cast_float=true
 
-mamba_mixer :: Tensor[B,S,D] -> Tensor[B,S,D]
-mamba_mixer x = do
+mamba_mixer :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+mamba_mixer x attn_mask = do
   in_proj <- NN.linear@in_proj x dim=10240
   u, gate <- Tensor.split in_proj sizes=[5120, 5120]
-  u_conv <- causal_conv1d@conv1d u activation="silu" weight_path=@conv1d.weight bias_path=@conv1d.bias
+  u_conv <- causal_conv1d@conv1d u activation="silu" weight_path=@conv1d.weight bias_path=@conv1d.bias attention_mask=attn_mask
   params <- NN.linear@x_proj u_conv dim=192
   dt, b, c <- Tensor.split params sizes=[160, 16, 16]
   delta <- NN.linear@dt_proj dt dim=5120 bias=true
   y_scan <- mamba_scan u_conv delta b c A=@A_log D=@D a_is_log=true
   return y_scan |> mul (silu gate) |> NN.linear@out_proj dim=2560
 
-mamba_block :: Tensor[B,S,D] -> Tensor[B,S,D]
-mamba_block x = do
+mamba_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+mamba_block x attn_mask = do
   x_norm <- rms@norm x
   y <- scope@mixer do
-    return mamba_mixer x_norm
+    return mamba_mixer x_norm attn_mask
   return x + y
 
-mamba_2_8b :: TokenIds[B,S] -> Tensor[B,S,V]
-mamba_2_8b input_ids = do
+mamba_2_8b :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+mamba_2_8b input_ids attn_mask = do
   logits <- scope@backbone do
     x <- NN.embedding@embeddings input_ids dim=2560
     for@layers i <- [0..64) do
-      x <- mamba_block x
+      x <- mamba_block x attn_mask
       yield x
     x <- rms@norm_f x
     return NN.linear@embeddings x dim=50280

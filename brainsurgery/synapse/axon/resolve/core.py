@@ -7,6 +7,7 @@ from pathlib import Path
 from ..ast.nodes import (
     AxonBind,
     AxonExpr,
+    AxonExprAscribe,
     AxonExprBinary,
     AxonExprBind,
     AxonExprCall,
@@ -58,6 +59,23 @@ def _split_callable_surface_name(name: str) -> tuple[str, str]:
         return name, ""
     idx = min(indexes)
     return name[:idx], name[idx:]
+
+
+def _path_placeholder_names(text: str) -> set[str]:
+    return {match.group(1) for match in _PATH_PLACEHOLDER_RE.finditer(text)}
+
+
+def _collect_surface_placeholder_refs(
+    surface: str,
+    *,
+    bound_names: set[str],
+    value_names: set[str],
+) -> set[str]:
+    return {
+        name
+        for name in _path_placeholder_names(surface)
+        if name not in bound_names and name in value_names
+    }
 
 
 def _build_surface_modules(
@@ -501,6 +519,17 @@ def _rewrite_expr(
                 module_name=module_name,
             )
         )
+    if isinstance(expr, AxonExprAscribe):
+        return AxonExprAscribe(
+            expr=_rewrite_expr(
+                expr.expr,
+                unqualified_targets=unqualified_targets,
+                qualified_targets=qualified_targets,
+                bound_names=bound_names,
+                module_name=module_name,
+            ),
+            type_expr=expr.type_expr,
+        )
     if isinstance(expr, AxonExprList):
         return AxonExprList(
             items=tuple(
@@ -761,12 +790,19 @@ def _collect_expr_refs(
     module_refs: set[str] = set()
     value_refs: set[str] = set()
     if isinstance(expr, AxonExprName):
-        base, _ = _split_callable_surface_name(expr.name)
+        base, surface = _split_callable_surface_name(expr.name)
         if base not in bound_names:
             if base in module_names or "." in base:
                 module_refs.add(base)
             elif base in value_names:
                 value_refs.add(base)
+        value_refs.update(
+            _collect_surface_placeholder_refs(
+                surface,
+                bound_names=bound_names,
+                value_names=value_names,
+            )
+        )
         return module_refs, value_refs
     if isinstance(expr, AxonExprPath):
         for name in _collect_path_placeholders(expr):
@@ -776,6 +812,13 @@ def _collect_expr_refs(
     if isinstance(expr, AxonExprParen):
         return _collect_expr_refs(
             expr.inner,
+            bound_names=bound_names,
+            module_names=module_names,
+            value_names=value_names,
+        )
+    if isinstance(expr, AxonExprAscribe):
+        return _collect_expr_refs(
+            expr.expr,
             bound_names=bound_names,
             module_names=module_names,
             value_names=value_names,
@@ -864,12 +907,19 @@ def _collect_expr_refs(
             value_refs.update(c)
         return module_refs, value_refs
     if isinstance(expr, AxonExprCall):
-        base, _ = _split_callable_surface_name(expr.callee)
+        base, surface = _split_callable_surface_name(expr.callee)
         if not base.startswith("_") and base not in bound_names:
             if base in module_names or "." in base:
                 module_refs.add(base)
             elif base in value_names:
                 value_refs.add(base)
+        value_refs.update(
+            _collect_surface_placeholder_refs(
+                surface,
+                bound_names=bound_names,
+                value_names=value_names,
+            )
+        )
         for arg in expr.args:
             m, c = _collect_expr_refs(
                 arg,
@@ -1029,6 +1079,15 @@ def _build_module_dependency_graph(
                 type_aliases=type_aliases,
             )
         )
+        if module.body_expr is not None:
+            body_mod_refs, body_value_refs = _collect_expr_refs(
+                module.body_expr,
+                bound_names=bound_names,
+                module_names=module_names,
+                value_names=module_names,
+            )
+            mod_refs.update(body_mod_refs)
+            value_refs.update(body_value_refs)
         module_deps[module.name] = mod_refs | value_refs
     return module_deps
 
@@ -1091,6 +1150,21 @@ def _collect_path_placeholders(expr: AxonExpr) -> set[str]:
     return placeholders
 
 
+def _validate_surface_placeholders(
+    surface: str,
+    *,
+    bound_names: set[str],
+    value_names: set[str],
+    current_module: str,
+) -> None:
+    unresolved = _path_placeholder_names(surface).difference(bound_names | value_names)
+    if unresolved:
+        missing = ", ".join(sorted(unresolved))
+        raise ValueError(
+            f"resolver produced unresolved path placeholders [{missing}] in module {current_module!r}"
+        )
+
+
 def _validate_module_expr(
     expr: AxonExpr,
     *,
@@ -1100,7 +1174,13 @@ def _validate_module_expr(
     current_module: str,
 ) -> None:
     if isinstance(expr, AxonExprName):
-        base, _ = _split_callable_surface_name(expr.name)
+        base, surface = _split_callable_surface_name(expr.name)
+        _validate_surface_placeholders(
+            surface,
+            bound_names=bound_names,
+            value_names=value_names,
+            current_module=current_module,
+        )
         if base.startswith("_"):
             return
         if base in bound_names:
@@ -1111,7 +1191,13 @@ def _validate_module_expr(
             f"resolver produced unresolved name {expr.name!r} in module {current_module!r}"
         )
     if isinstance(expr, AxonExprCall):
-        base, _ = _split_callable_surface_name(expr.callee)
+        base, surface = _split_callable_surface_name(expr.callee)
+        _validate_surface_placeholders(
+            surface,
+            bound_names=bound_names,
+            value_names=value_names,
+            current_module=current_module,
+        )
         if base not in bound_names and not base.startswith("_") and base not in module_names:
             if base in value_names:
                 raise ValueError(

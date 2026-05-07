@@ -1,6 +1,15 @@
 {-# CHECKPOINTS ["mistralai/Mistral-7B-v0.1", "mistralai/Mistral-7B-Instruct-v0.1", "mistralai/Mistral-7B-Instruct-v0.2", "mistralai/Mistral-7B-v0.3", "mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Mistral-Nemo-Base-2407", "mistralai/Codestral-22B-v0.1", "mistralai/Mathstral-7B-v0.1", "mistralai/Devstral-Small-2507", "mistralai/Ministral-8B-Instruct-2410"] #-}
 {-# TASK "causal_lm" #-}
+{-# TOKENIZER ["mistralai/Mistral-7B-v0.1", "mistralai/Mistral-7B-v0.1"] #-}
+{-# TOKENIZER ["mistralai/Mistral-7B-Instruct-v0.1", "mistralai/Mistral-7B-Instruct-v0.1"] #-}
+{-# TOKENIZER ["mistralai/Mistral-7B-Instruct-v0.2", "mistralai/Mistral-7B-Instruct-v0.2"] #-}
+{-# TOKENIZER ["mistralai/Mistral-7B-v0.3", "mistralai/Mistral-7B-v0.3"] #-}
+{-# TOKENIZER ["mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Mistral-7B-Instruct-v0.3"] #-}
+{-# TOKENIZER ["mistralai/Mistral-Nemo-Base-2407", "mistralai/Mistral-Nemo-Base-2407"] #-}
+{-# TOKENIZER ["mistralai/Codestral-22B-v0.1", "mistralai/Codestral-22B-v0.1"] #-}
+{-# TOKENIZER ["mistralai/Mathstral-7B-v0.1", "mistralai/Mathstral-7B-v0.1"] #-}
 {-# TOKENIZER ["mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"] #-}
+{-# TOKENIZER ["mistralai/Ministral-8B-Instruct-2410", "mistralai/Ministral-8B-Instruct-2410"] #-}
 
 import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)
@@ -14,19 +23,19 @@ import Tensor
 
 
 
-MODEL_DIM    = Config.int@hidden_size default=4096
-VOCAB_SIZE    = Config.int@vocab_size default=32000
-NUM_LAYERS    = Config.int@num_hidden_layers default=32
-NUM_HEADS    = Config.int@num_attention_heads default=32
-KVH  = Config.int@num_key_value_heads default=8
-HAS_HEAD_DIM = Config.has_value@head_dim
-MODEL_HEAD_DIM   = HAS_HEAD_DIM ? (Config.int@head_dim default=128) : (MODEL_DIM / NUM_HEADS)
+MODEL_DIM    = Config.int @@hidden_size default=4096
+VOCAB_SIZE    = Config.int @@vocab_size default=32000
+NUM_LAYERS    = Config.int @@num_hidden_layers default=32
+NUM_HEADS    = Config.int @@num_attention_heads default=32
+KVH  = Config.int @@num_key_value_heads default=8
+HAS_HEAD_DIM = Config.has_value @@head_dim
+MODEL_HEAD_DIM   = HAS_HEAD_DIM ? (Config.int @@head_dim default=128) : (MODEL_DIM / NUM_HEADS)
 KVD  = KVH * MODEL_HEAD_DIM
-FFN  = Config.int@intermediate_size default=14336
-EPS  = Config.float@rms_norm_eps default=1e-05
-THETA = Config.float@rope_theta default=10000.0
-HAS_SLIDING_WINDOW = Config.has_value@sliding_window
-MAX_POSITIONS    = HAS_SLIDING_WINDOW ? (Config.int@sliding_window default=4096) : 4096
+FFN  = Config.int @@intermediate_size default=14336
+EPS  = Config.float @@rms_norm_eps default=1e-05
+THETA = Config.float @@rope_theta default=10000.0
+HAS_SLIDING_WINDOW = Config.has_value @@sliding_window
+MAX_POSITIONS    = HAS_SLIDING_WINDOW ? (Config.int @@sliding_window default=4096) : 4096
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS

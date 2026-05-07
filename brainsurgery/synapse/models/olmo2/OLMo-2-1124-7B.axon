@@ -18,7 +18,7 @@ import Tensor
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=1e-06
 
-olmo2_block :: Tensor -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
+olmo2_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,32,P,128] -> (Tensor[B,S,D], ?CacheLayer[B,32,K,128])
 olmo2_block x pos_ids attn_mask past_kv = do
   a, new_kv <- scope@self_attn do
     q <- NN.linear@q_proj x dim=4096 |> rms@q_norm |> reshape_heads heads=32
@@ -40,7 +40,7 @@ olmo2_block x pos_ids attn_mask past_kv = do
   m <- rms@post_feedforward_layernorm m
   return x + m, new_kv
 
-olmo2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+olmo2 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,32,P,128] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,32,K,128])
 olmo2 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do

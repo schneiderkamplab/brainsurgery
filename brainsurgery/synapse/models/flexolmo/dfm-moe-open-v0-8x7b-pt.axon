@@ -26,7 +26,7 @@ expert_ffn x = do
   up <- NN.linear@up_proj x dim=11008
   return gate |> silu |> mul up |> NN.linear@down_proj dim=4096
 
-flexolmo_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+flexolmo_decoder_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,32,P,4096 / 32] -> (Tensor[B,S,D], ?CacheLayer[B,32,K,4096 / 32])
 flexolmo_decoder_block x pos_ids attn_mask past_kv = do
   a, new_kv <- scope@self_attn do
     q <- x |> NN.linear@q_proj dim=4096 |> rms@q_norm |> reshape_heads heads=32
@@ -52,13 +52,13 @@ flexolmo_decoder_block x pos_ids attn_mask past_kv = do
   m_norm <- rms@post_feedforward_layernorm m
   return x + m_norm, new_kv
 
-flexolmo :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+flexolmo :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,32,P,4096 / 32] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,32,K,4096 / 32])
 flexolmo input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=4096
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..32) do
+    x, new_kv <- for@layers i <- [0..32) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- flexolmo_decoder_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i

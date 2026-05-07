@@ -9,7 +9,7 @@ import Masking (causal_mask)
 import Math
 import Math (mul)
 import Params
-import Params (param_scale)
+import Params (param)
 import Positions
 import Positions (position_ids, rope_pair_proportional)
 import Cache (Cache, CacheLayer)
@@ -19,7 +19,7 @@ import Tensor
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x cast_float=true
 
-gemma4_per_layer_inputs :: Tensor.TokenIds[B,S] -> Tensor -> ?Int -> ?Int -> ?Float -> ?Float -> ?Float -> ?Float -> Tensor[B,S,NL,PD]
+gemma4_per_layer_inputs :: Tensor.TokenIds[B,S] -> Tensor[B,S,D] -> ?Int -> ?Int -> ?Float -> ?Float -> ?Float -> ?Float -> Tensor[B,S,NL,PD]
 gemma4_per_layer_inputs input_ids hidden ?num_layers=null ?per_layer_dim=null ?embed_scale=1.0 ?projection_scale=1.0 ?combine_scale=1.0 ?rms_eps=1e-6 = do
   model_layers <- (num_layers == null) ? 1 : num_layers
   layer_dim <- (per_layer_dim == null) ? 1 : per_layer_dim
@@ -68,13 +68,13 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
   xn <- rms@input_layernorm x
   a, new_kv, shared_k, shared_v <- scope@self_attn do
     q <- NN.linear@q_proj xn dim=q_dim bias=false |> reshape_heads heads=8 |> NN.rmsnorm@q_norm dim=hd cast_float=true
-    k, v <- if shared_layer then (full ? (Tensor.require shared_full_k, Tensor.require shared_full_v) : (Tensor.require shared_sliding_k, Tensor.require shared_sliding_v)) else gemma4_kv xn kv_dim hd
-    q, k <- shared_layer ? (gemma4_shared_qk q k pos_ids full) : (rope_pair_proportional q k pos_ids theta=theta scale_factor=(full ? 1.0 : 1.0) partial_rotary_factor=(full ? 0.25 : 1.0))
-    k, v, new_kv <- if shared_layer then (k, v, (k, v)) else Cache.update past_kv k v
-    shared_k <- k
-    shared_v <- v
-    k <- _repeat k 8 1
-    v <- _repeat v 8 1
+    k_step, v_step <- if shared_layer then (full ? (Tensor.require shared_full_k, Tensor.require shared_full_v) : (Tensor.require shared_sliding_k, Tensor.require shared_sliding_v)) else gemma4_kv xn kv_dim hd
+    q, k_step <- shared_layer ? (gemma4_shared_qk q k_step pos_ids full) : (rope_pair_proportional q k_step pos_ids theta=theta scale_factor=(full ? 1.0 : 1.0) partial_rotary_factor=(full ? 0.25 : 1.0))
+    k, v, new_kv <- Cache.update past_kv k_step v_step
+    shared_k <- k_step
+    shared_v <- v_step
+    k <- Tensor.repeat k repeats=8
+    v <- Tensor.repeat v repeats=8
     mask <- causal_mask q k window=window padding_mask=attn_mask early_exit=full
     a <- attention_scaled q k v mask 1.0 |> merge_heads |> NN.linear@o_proj dim=1536 bias=false
     return a, new_kv, shared_k, shared_v
@@ -88,7 +88,7 @@ gemma4_e_block x per_layer_inputs i pos_ids attn_mask past_kv shared_full_k shar
   m <- rms@post_feedforward_layernorm m
   x <- x + m
   x <- gemma4_apply_per_layer_input x per_layer_inputs i
-  x <- param_scale x
+  x <- x * (param@layer_scalar)
   shared_full_k <- ((shared_layer == false) and full) ? shared_k : shared_full_k
   shared_full_v <- ((shared_layer == false) and full) ? shared_v : shared_full_v
   shared_sliding_k <- ((shared_layer == false) and (full == false)) ? shared_k : shared_sliding_k

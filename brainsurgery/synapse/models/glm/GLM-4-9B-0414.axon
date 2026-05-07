@@ -1,50 +1,85 @@
 {-# CHECKPOINTS ["zai-org/GLM-4-9B-0414", "zai-org/GLM-Z1-9B-0414"] #-}
+
 {-# TASK "causal_lm" #-}
 
-import Activations
+{-# MAIN "glm4_dense" #-}
+
 import Activations (silu)
-import Attention
+
 import Attention (attention, merge_heads, reshape_heads)
-import Masking
+
 import Masking (causal_mask)
-import Math
+
 import Math (mul)
-import Positions
+
 import Positions (position_ids, rope_pair_base)
+
 import Cache
+
+import Config
+
 import NN
+
 import Tensor
 
-rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
-rms@path x = NN.rmsnorm@path x eps=1e-05
+MODEL_DIM = 4096
 
-glm4_dense_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+VOCAB_SIZE = 151552
+
+NUM_LAYERS = 40
+
+NUM_HEADS = 32
+
+KVH = 2
+
+MODEL_HEAD_DIM = 128
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+FFN = 13696
+
+EPS = 1e-05
+
+THETA = 10000.0
+
+MAX_POSITIONS = 32768
+
+PROPE = 0.5
+
+ATTN_BIAS = true
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS
+
+glm4_dense_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 glm4_dense_attn x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- (NN.linear@q_proj xn dim=4096 bias=true)
-    q <- reshape_heads q heads=32
-    k <- (NN.linear@k_proj xn dim=256 bias=true)
-    k <- reshape_heads k heads=2
-    v <- (NN.linear@v_proj xn dim=256 bias=true)
-    v <- reshape_heads v heads=2
-    q, k <- rope_pair_base q k pos_ids theta=10000.0 partial_rotary_factor=0.5 interleaved=true
+    q <- ATTN_BIAS ? (NN.linear@q_proj xn dim=QD bias=true) : (NN.linear@q_proj xn dim=QD bias=false)
+    q <- reshape_heads q heads=NUM_HEADS
+    k <- ATTN_BIAS ? (NN.linear@k_proj xn dim=KVD bias=true) : (NN.linear@k_proj xn dim=KVD bias=false)
+    k <- reshape_heads k heads=KVH
+    v <- ATTN_BIAS ? (NN.linear@v_proj xn dim=KVD bias=true) : (NN.linear@v_proj xn dim=KVD bias=false)
+    v <- reshape_heads v heads=KVH
+    q, k <- rope_pair_base q k pos_ids theta=THETA partial_rotary_factor=PROPE interleaved=true
     k, v, new_kv <- Cache.update past_kv k v
-    k <- Tensor.repeat k repeats=16
-    v <- Tensor.repeat v repeats=16
-    mask <- causal_mask q k window=32768 padding_mask=attn_mask
-    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=4096 bias=false
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
     return a, new_kv
   a <- rms@post_self_attn_layernorm a
   return x + a, new_kv
 
 glm4_dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 glm4_dense_ffn x = do
-  gu <- NN.linear@gate_up_proj x dim=27392 bias=false
-  g, u <- Tensor.split gu sizes=[13696, 13696]
-  return g |> silu |> mul u |> NN.linear@down_proj dim=4096 bias=false
+  gu <- NN.linear@gate_up_proj x dim=(2 * FFN) bias=false
+  g, u <- Tensor.split gu sizes=[FFN, FFN]
+  return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM bias=false
 
-glm4_dense_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+glm4_dense_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 glm4_dense_block x pos_ids attn_mask past_kv = do
   x, new_kv <- glm4_dense_attn x pos_ids attn_mask past_kv
   residual <- x
@@ -55,18 +90,18 @@ glm4_dense_block x pos_ids attn_mask past_kv = do
   x <- residual + m
   return x, new_kv
 
-glm4_dense :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+glm4_dense :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 glm4_dense input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=4096
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
-    for@layers i <- [0..40) do
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
       x, new_i <- glm4_dense_block x pos_ids attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- rms@norm x
     return x, new_kv
-  logits <- NN.linear@lm_head x dim=151552 bias=false
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
   return logits, new_kv

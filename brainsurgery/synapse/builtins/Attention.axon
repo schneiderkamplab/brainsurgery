@@ -57,11 +57,11 @@ split_qkv_grouped x ?heads=1 ?kv_heads=1 ?head_dim=null = do
 
 
 -- === ATTENTION ===
-mask_to_additive :: Tensor[B,H,Q,K] -> Tensor[B,1,Q,K] -> Tensor[B,H,Q,K]
+mask_to_additive :: Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> Tensor[B,H,Q,K]
 mask_to_additive ref keep = _where keep (Tensor.zeros_like ref) (Tensor.min_like ref)
 
 
-attention :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,HD]
+attention :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,VD] -> Tensor[B,HM,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,VD]
 attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
   scale_eff <- (scale == null) ? (1.0 / sqrt HD) : scale
   scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
@@ -84,7 +84,7 @@ attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null 
   return fp32_compute ? (Tensor.cast out dtype="float32") : out
 
 
-attention_scaled :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> Float -> Tensor[B,H,Q,HD]
+attention_scaled :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,VD] -> Tensor[B,HM,Q,K] -> Float -> Tensor[B,H,Q,VD]
 attention_scaled q k v keep scale = do
   scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
   scores <- scores * scale
@@ -95,7 +95,7 @@ attention_scaled q k v keep scale = do
   return Tensor.matmul probs v
 
 
-attention_softcap :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> Float -> Float -> Tensor[B,H,Q,HD]
+attention_softcap :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,VD] -> Tensor[B,HM,Q,K] -> Float -> Float -> Tensor[B,H,Q,VD]
 attention_softcap q k v keep softcap scale = do
   scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
   scores <- scores * scale

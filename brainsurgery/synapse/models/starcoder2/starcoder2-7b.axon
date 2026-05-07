@@ -24,7 +24,7 @@ starcoder2_ln@path x = NN.layernorm@path x eps=1e-05
 starcoder2_mlp_act :: Tensor[B,S,FFN] -> Tensor[B,S,FFN]
 starcoder2_mlp_act x = (gelu_pytorch_tanh x)
 
-starcoder2_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+starcoder2_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,4,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,4,K,DH])
 starcoder2_block x pos_ids attn_mask past_kv = do
   xn <- starcoder2_ln@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -45,7 +45,7 @@ starcoder2_block x pos_ids attn_mask past_kv = do
     return starcoder2_mlp_act h |> NN.linear@c_proj dim=4608 bias=true
   return x + m, new_kv
 
-starcoder2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+starcoder2 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,4,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,4,K,DH])
 starcoder2 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do

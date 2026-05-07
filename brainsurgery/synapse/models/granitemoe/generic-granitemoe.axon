@@ -40,9 +40,9 @@ granitemoe_moe hidden topk_scores topk_indices = do
   routed <- hidden * 0.0
   routed <- for e <- [0..E) carry (routed) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
-    gate_up <- NN.linear@w1 x_sel dim=null bias=false transpose=false expert=e weight_path=@input_linear.weight
+    gate_up <- NN.linear@w1 x_sel dim=(2 * FFN) bias=false transpose=false expert=e weight_path=@input_linear.weight
     gate, up <- Tensor.chunk gate_up parts=2
-    x_upd <- gate |> silu |> mul up |> NN.linear@w2 dim=null bias=false transpose=false expert=e weight_path=@output_linear.weight
+    x_upd <- gate |> silu |> mul up |> NN.linear@w2 dim=D bias=false transpose=false expert=e weight_path=@output_linear.weight
     routed <- scatter_add routed token_idx x_upd sel_scores
     yield routed
   return routed

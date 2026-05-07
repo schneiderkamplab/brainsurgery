@@ -112,7 +112,8 @@ def interpret(
     cond = _resolve_value(model, inputs[0], env, symbols)
     true_value = _resolve_value(model, inputs[1], env, symbols)
     false_value = _resolve_value(model, inputs[2], env, symbols)
-    env[out] = __import__("torch").where(cond, true_value, false_value)
+    torch = __import__("torch")
+    env[out] = torch.where(cond, true_value, false_value) if torch.is_tensor(cond) else (true_value if cond else false_value)
 
 
 def compile(
@@ -138,7 +139,9 @@ def compile(
     true_value = render(inputs[1])
     false_value = render(inputs[2])
     out_var = emitter._assign_out_var(env, str(node_spec.get("_bind")))
-    return [f"{indent}{out_var} = torch.where({cond}, {true_value}, {false_value})"]
+    return [
+        f"{indent}{out_var} = torch.where({cond}, {true_value}, {false_value}) if torch.is_tensor({cond}) else ({true_value} if {cond} else {false_value})"
+    ]
 
 
 LOWERING_TYPE_SIGNATURE = {

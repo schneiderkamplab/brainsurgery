@@ -56,7 +56,7 @@ shared_ffn x = do
 
 shared_relu2_moe :: Tensor[B,S,D] -> Int -> Int -> Int -> Float -> Bool -> Tensor[B,S,D]
 shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob = do
-  topk_weights, topk_indices <- grouped_sigmoid_router@gate hidden top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor weight=@weight e_score_correction_bias=@gate.e_score_correction_bias
+  topk_weights, topk_indices <- grouped_sigmoid_router@gate hidden top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor weight=@weight e_score_correction_bias=@e_score_correction_bias
   gate_w <- scope@gate do
     return Params.param path=@weight
   experts <- Tensor.size gate_w 0
@@ -88,7 +88,7 @@ nemotron_h_mamba :: Tensor[B,S,D] -> Tensor[B,S,D]
 nemotron_h_mamba xn = do
   proj <- NN.linear@in_proj xn dim=(M_I + M_CONV + M_H) bias=false
   gate, conv_in, dt <- Tensor.split proj sizes=[M_I, M_CONV, M_H]
-  conv_all <- causal_conv1d@conv1d conv_in activation=silu weight_path=@conv1d.weight bias_path=@conv1d.bias
+  conv_all <- causal_conv1d@conv1d conv_in activation="silu" weight_path=@conv1d.weight bias_path=@conv1d.bias
   u, b, c <- Tensor.split conv_all sizes=[M_I, M_G * M_N, M_G * M_N]
   scan <- mamba2_scan u gate dt b c a_path=@A_log d_path=@D dt_bias_path=@dt_bias norm_weight_path=@norm.weight n_groups=M_G head_dim=M_HD time_step_min=0.0 time_step_max=1e30
   return NN.linear@out_proj scan dim=MODEL_D bias=false

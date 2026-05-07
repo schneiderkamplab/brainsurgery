@@ -41,10 +41,15 @@ causal_conv1d_step x_t w b t activation = do
   return unsqueeze y_t dim=1 |> activate activation
 
 
-causal_conv1d :: Path -> Tensor[B,S,C] -> ?Any -> ?Path -> ?Path -> Tensor[B,S,C]
-causal_conv1d@path x ?activation="silu" ?weight_path=null ?bias_path=null = do
-  w <- (weight_path == null) ? (param @weight) : (param weight_path)
-  b <- (bias_path == null) ? (param @bias) : (param bias_path)
+sequence_mask :: Tensor[B,S,C] -> ?Tensor[B,S] -> Tensor[B,S,C]
+sequence_mask x mask = (mask == null) ? x : (x * (unsqueeze mask dim=-1))
+
+
+causal_conv1d :: Path -> Tensor[B,S,C] -> ?Any -> ?Path -> ?Path -> ?Tensor[B,S] -> Tensor[B,S,C]
+causal_conv1d@path x ?activation="silu" ?weight_path=null ?bias_path=null ?attention_mask=null = do
+  w <- (weight_path == null) ? ((param @weight) :: Tensor[C,1,K]) : ((param weight_path) :: Tensor[C,1,K])
+  b <- (bias_path == null) ? ((param @bias) :: Tensor[C]) : ((param bias_path) :: Tensor[C])
+  x <- sequence_mask x attention_mask
   x_t <- transpose x dim1=1 dim2=2
   s <- size x 1
   y_all <- zeros_like x
@@ -56,7 +61,7 @@ causal_conv1d@path x ?activation="silu" ?weight_path=null ?bias_path=null = do
     idx <- fill y_step t dtype="long"
     y_all <- scatter y_all idx y_step dim=1
     yield y_all
-  return y_all
+  return sequence_mask y_all attention_mask
 
 
 mamba_scan_step :: Tensor[B,D,N] -> Tensor[B,D] -> Tensor[B,D] -> Tensor[B,N] -> Tensor[B,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,D,N], Tensor[B,D])
@@ -142,33 +147,34 @@ mamba2_scan u gate dt b c a_path d_path dt_bias_path norm_weight_path n_groups h
   dt_b <- param dt_bias_path
   norm_w <- param norm_weight_path
   s <- size u 1
+  heads <- size dt -1
   b_last_dim <- size b -1
   state_dim <- b_last_dim / n_groups
-  u_t0 <- slice u dim=1 start=0 end=1 |> reshape shape=[B, H, head_dim]
+  u_t0 <- slice u dim=1 start=0 end=1 |> reshape shape=[B, heads, head_dim]
   b_tg0 <- slice b dim=1 start=0 end=1 |> reshape shape=[B, n_groups, state_dim]
-  b_t0 <- mamba2_expand_groups b_tg0 H n_groups
+  b_t0 <- mamba2_expand_groups b_tg0 heads n_groups
   state <- ((unsqueeze u_t0 dim=-1) * (unsqueeze b_t0 dim=2)) * 0.0
-  dt_t0 <- slice dt dim=1 start=0 end=1 |> reshape shape=[B, H]
+  dt_t0 <- slice dt dim=1 start=0 end=1 |> reshape shape=[B, heads]
   dt_t0 <- dt_t0 + (unsqueeze dt_b dim=0)
   dt_t0 <- exp dt_t0
   dt_t0 <- log (dt_t0 + 1.0) |> clamp min=time_step_min max=time_step_max
   c_tg0 <- slice c dim=1 start=0 end=1 |> reshape shape=[B, n_groups, state_dim]
-  c_t0 <- mamba2_expand_groups c_tg0 H n_groups
+  c_t0 <- mamba2_expand_groups c_tg0 heads n_groups
   state, y_t0 <- mamba2_scan_step state u_t0 dt_t0 b_t0 c_t0 a d
   y_all <- zeros_like u
   y_step <- reshape y_t0 shape=[B, 1, D]
   idx <- fill y_step 0 dtype="long"
   y_all <- scatter y_all idx y_step dim=1
   state, y_all <- for t <- [1..s) carry (state, y_all) do
-    u_t <- slice u dim=1 start=t end=(t + 1) |> reshape shape=[B, H, head_dim]
-    dt_t <- slice dt dim=1 start=t end=(t + 1) |> reshape shape=[B, H]
+    u_t <- slice u dim=1 start=t end=(t + 1) |> reshape shape=[B, heads, head_dim]
+    dt_t <- slice dt dim=1 start=t end=(t + 1) |> reshape shape=[B, heads]
     dt_t <- dt_t + (unsqueeze dt_b dim=0)
     dt_t <- exp dt_t
     dt_t <- log (dt_t + 1.0) |> clamp min=time_step_min max=time_step_max
     b_tg <- slice b dim=1 start=t end=(t + 1) |> reshape shape=[B, n_groups, state_dim]
     c_tg <- slice c dim=1 start=t end=(t + 1) |> reshape shape=[B, n_groups, state_dim]
-    b_t <- mamba2_expand_groups b_tg H n_groups
-    c_t <- mamba2_expand_groups c_tg H n_groups
+    b_t <- mamba2_expand_groups b_tg heads n_groups
+    c_t <- mamba2_expand_groups c_tg heads n_groups
     state, y_t <- mamba2_scan_step state u_t dt_t b_t c_t a d
     y_step <- reshape y_t shape=[B, 1, D]
     idx <- fill y_step t dtype="long"

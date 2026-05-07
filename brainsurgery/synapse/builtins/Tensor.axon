@@ -112,7 +112,7 @@ le x y = _le x y
 and :: Tensor[..S] -> Tensor[..T] -> Tensor[..R]
 and x y = _and x y
 
-where :: Tensor[..S] -> Any -> Any -> Tensor[..R]
+where :: Any -> Any -> Any -> Tensor[..R]
 where cond x y = _where cond x y
 
 where_indices :: Tensor[..S] -> (IdxTensor[..I], IdxTensor[..J])

@@ -922,12 +922,13 @@ def _absolutize_call_relative_paths(
     if path_slot_count <= 0 and callee in program_ctx.scoped_modules and args:
         path_slot_count = 1
     if path_slot_count <= 0 or not args:
-        return
-    base_path = next(
-        (arg for arg in args[:path_slot_count] if isinstance(arg, AxonExprPath) and arg.absolute),
-        None,
-    )
-    if base_path is None:
+        base_path = None
+    else:
+        base_path = next(
+            (arg for arg in args[:path_slot_count] if isinstance(arg, AxonExprPath) and arg.absolute),
+            None,
+        )
+    if base_path is None and not path_prefix:
         return
     params_by_name = {param.name: param for param in module.params}
     for key, raw_value in list(kwargs.items()):
@@ -939,6 +940,7 @@ def _absolutize_call_relative_paths(
                 param is not None
                 and isinstance(param.default_expr, AxonExprPath)
                 and raw_value == param.default_expr
+                and base_path is not None
             ):
                 kwargs[key] = absolutize_path_expr(raw_value, prefix=base_path.parts)
             else:

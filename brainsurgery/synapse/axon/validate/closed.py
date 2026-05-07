@@ -222,6 +222,13 @@ def _call_base_name(callee: str) -> str:
     return callee[: min(indexes)].strip()
 
 
+def _call_surface(callee: str) -> str:
+    indexes = [idx for idx in (callee.find("@"), callee.find("::")) if idx >= 0]
+    if not indexes:
+        return ""
+    return callee[min(indexes) :]
+
+
 def _validate_expr_closure(
     expr: AxonExpr,
     *,
@@ -240,11 +247,17 @@ def _validate_expr_closure(
             f"Axon closed validation failed in module {module.name!r}: unresolved name {name!r}"
         )
 
+    def _check_path_placeholders(text: str) -> None:
+        for match in _PATH_PLACEHOLDER_RE.finditer(text):
+            _check_name(match.group(1))
+
     if isinstance(expr, AxonExprName):
         _check_name(_call_base_name(expr.name))
+        _check_path_placeholders(_call_surface(expr.name))
         return
     if isinstance(expr, AxonExprCall):
         _check_name(_call_base_name(expr.callee))
+        _check_path_placeholders(_call_surface(expr.callee))
         for arg in expr.args:
             _validate_expr_closure(
                 arg,

@@ -17,7 +17,7 @@ import NN
 HAS_LM_HEAD = has_root "lm_head"
 HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
-gptj_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
+gptj_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,16,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,16,K,DH])
 gptj_block x pos_ids attn_mask past_kv = do
   xn <- NN.layernorm@ln_1 x eps=1e-05
   a, new_kv <- scope@attn do
@@ -34,7 +34,7 @@ gptj_block x pos_ids attn_mask past_kv = do
   x <- x + a + m
   return x, new_kv
 
-gpt_j :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+gpt_j :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,16,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,16,K,DH])
 gpt_j input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@transformer do

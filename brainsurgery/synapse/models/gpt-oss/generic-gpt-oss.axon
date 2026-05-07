@@ -42,7 +42,7 @@ SWIGLU_ALPHA = Config.float@swiglu_alpha default=1.702           -- SwiGLU slope
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-grouped_ffn_gated :: Tensor -> Float -> Float -> Tensor
+grouped_ffn_gated :: Tensor[..S] -> Float -> Float -> Tensor[..S]
 grouped_ffn_gated gate_up alpha limit = do
   gate, up <- Tensor.deinterleave_last2 gate_up
   gate <- clamp gate max=limit

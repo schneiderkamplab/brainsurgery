@@ -10,18 +10,18 @@ import NN
 
 
 
-MODEL_DIM = Config.int@hidden_size default=6144
-VOCAB_SIZE = Config.int@vocab_size default=50432
-NUM_LAYERS = Config.int@num_hidden_layers default=44
-NUM_HEADS = Config.int@num_attention_heads default=64
+MODEL_DIM = Config.int @@hidden_size default=6144
+VOCAB_SIZE = Config.int @@vocab_size default=50432
+NUM_LAYERS = Config.int @@num_hidden_layers default=44
+NUM_HEADS = Config.int @@num_attention_heads default=64
 MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
-FFN = Config.int@intermediate_size default=24576
-EPS = Config.float@layer_norm_eps default=1e-05
-THETA = Config.float@rope_theta default=10000.0
-ROTARY_PCT = Config.float@rotary_pct default=0.25
-MAX_POSITIONS = Config.int@max_position_embeddings default=2048
-PAR = Config.bool@use_parallel_residual default=true
-ACT = Config.str@hidden_act default="gelu"
+FFN = Config.int @@intermediate_size default=24576
+EPS = Config.float @@layer_norm_eps default=1e-05
+THETA = Config.float @@rope_theta default=10000.0
+ROTARY_PCT = Config.float @@rotary_pct default=0.25
+MAX_POSITIONS = Config.int @@max_position_embeddings default=2048
+PAR = Config.bool @@use_parallel_residual default=true
+ACT = Config.str @@hidden_act default="gelu"
 
 neox_ln :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 neox_ln@path x = NN.layernorm@path x eps=EPS

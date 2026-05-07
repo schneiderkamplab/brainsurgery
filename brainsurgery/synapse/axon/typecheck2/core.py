@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Any
@@ -86,6 +87,23 @@ from ..typecheck.core import (
 from ..entrypoint import resolve_main_module
 from ..validate import validate_flat_axon_file, validate_typed_axon_file
 
+_PATH_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _call_base_and_surface(callee: str) -> tuple[str, str]:
+    indexes = [idx for idx in (callee.find("@"), callee.find("::")) if idx >= 0]
+    if not indexes:
+        return callee, ""
+    idx = min(indexes)
+    return callee[:idx], callee[idx:]
+
+
+def _add_path_placeholder_refs(text: str, out: set[str], names: set[str]) -> None:
+    for match in _PATH_PLACEHOLDER_RE.finditer(text):
+        name = match.group(1)
+        if name in names:
+            out.add(name)
+
 
 @dataclass
 class _CallBinding:
@@ -137,9 +155,21 @@ def _module_graph(program: AxonFile) -> dict[str, set[str]]:
     graph = {module.name: set[str]() for module in program.modules}
 
     def visit_expr(expr: AxonExpr, out: set[str]) -> None:
+        if isinstance(expr, AxonExprName):
+            base, surface = _call_base_and_surface(expr.name)
+            if base in names:
+                out.add(base)
+            _add_path_placeholder_refs(surface, out, names)
+            return
+        if isinstance(expr, AxonExprPath):
+            for part in expr.parts:
+                _add_path_placeholder_refs(part, out, names)
+            return
         if isinstance(expr, AxonExprCall):
-            if expr.callee in names:
-                out.add(expr.callee)
+            base, surface = _call_base_and_surface(expr.callee)
+            if base in names:
+                out.add(base)
+            _add_path_placeholder_refs(surface, out, names)
             for arg in expr.args:
                 visit_expr(arg, out)
             for value in expr.kwargs.values():
@@ -554,6 +584,58 @@ def _collect_dim_replacements_from_types(
                     out[original_dim] = expr
 
 
+def _preserve_compound_dim_binders(
+    original: TypeExpr | None,
+    specialized: TypeExpr | None,
+) -> TypeExpr | None:
+    if original is None or specialized is None:
+        return specialized
+    if isinstance(original, TypeOptional) and isinstance(specialized, TypeOptional):
+        return replace(
+            specialized,
+            inner=_preserve_compound_dim_binders(original.inner, specialized.inner)
+            or specialized.inner,
+        )
+    if isinstance(original, TypeList) and isinstance(specialized, TypeList):
+        return replace(
+            specialized,
+            item=_preserve_compound_dim_binders(original.item, specialized.item)
+            or specialized.item,
+        )
+    if isinstance(original, TypeTuple) and isinstance(specialized, TypeTuple):
+        return replace(
+            specialized,
+            items=tuple(
+                _preserve_compound_dim_binders(original_item, specialized_item)
+                or specialized_item
+                for original_item, specialized_item in zip(
+                    original.items, specialized.items, strict=False
+                )
+            ),
+        )
+    if isinstance(original, TypeTensor) and isinstance(specialized, TypeTensor):
+        dims: list[DimToken] = []
+        for original_dim, specialized_dim in zip(
+            original.dims, specialized.dims, strict=False
+        ):
+            if isinstance(original_dim, str) and not original_dim.startswith(".."):
+                dims.append(original_dim)
+            else:
+                dims.append(specialized_dim)
+        return replace(specialized, dims=tuple(dims))
+    if isinstance(original, TypeNamed) and isinstance(specialized, TypeNamed):
+        args: list[DimToken] = []
+        for original_dim, specialized_dim in zip(
+            original.args, specialized.args, strict=False
+        ):
+            if isinstance(original_dim, str) and not original_dim.startswith(".."):
+                args.append(original_dim)
+            else:
+                args.append(specialized_dim)
+        return replace(specialized, args=tuple(args))
+    return specialized
+
+
 def _is_atomic_expr_for_flat(expr: AxonExpr) -> bool:
     if isinstance(
         expr,
@@ -892,13 +974,29 @@ def _store_typed_module(state: _Tc2, module: AxonDefinition) -> None:
 
 
 def _normalize_typed_module(module: AxonDefinition, ctx: _TcCtx) -> AxonDefinition:
+    normalized_params = tuple(
+        replace(param, type_expr=_normalize_type_expr_for_module(param.type_expr, ctx))
+        for param in module.params
+    )
+    normalized_params = tuple(
+        replace(
+            normalized_param,
+            type_expr=_preserve_compound_dim_binders(
+                original_param.type_expr, normalized_param.type_expr
+            ),
+        )
+        for original_param, normalized_param in zip(
+            module.params, normalized_params, strict=True
+        )
+    )
+    normalized_return_type = _preserve_compound_dim_binders(
+        module.return_type_expr,
+        _normalize_type_expr_for_module(module.return_type_expr, ctx),
+    )
     normalized = replace(
         module,
-        params=tuple(
-            replace(param, type_expr=_normalize_type_expr_for_module(param.type_expr, ctx))
-            for param in module.params
-        ),
-        return_type_expr=_normalize_type_expr_for_module(module.return_type_expr, ctx),
+        params=normalized_params,
+        return_type_expr=normalized_return_type,
         body_expr=_normalize_expr(module.body_expr, ctx) if module.body_expr is not None else None,
         statements=tuple(_normalize_statement(stmt, ctx) for stmt in module.statements),
     )
@@ -919,6 +1017,7 @@ def _normalize_typed_module(module: AxonDefinition, ctx: _TcCtx) -> AxonDefiniti
             and isinstance(mapped, str)
             and mapped not in bound
             and not mapped.startswith("..")
+            and mapped not in protected_dim_names
         ):
             replacements[mapped] = _annotate_dim_expr(AxonExprName(name=name), ctx)
             continue
@@ -951,6 +1050,13 @@ def _normalize_typed_module(module: AxonDefinition, ctx: _TcCtx) -> AxonDefiniti
 
 
 def _canonicalize_fresh_dim_token(dim: DimToken, state: _Tc2) -> DimToken:
+    if (
+        isinstance(dim, str)
+        and not dim.startswith("..")
+        and not _is_fresh_dim_name(dim, state)
+        and not dim.startswith("__d")
+    ):
+        return dim
     dim = _normalize_dim_token(dim, state.ctx)
     if isinstance(dim, int):
         return dim
@@ -1155,13 +1261,29 @@ def _canonicalize_fresh_module(module: AxonDefinition, state: _Tc2) -> AxonDefin
     }
     if module.path_param is not None:
         bound.add(module.path_param)
+    canonical_params = tuple(
+        replace(param, type_expr=_canonicalize_fresh_type(param.type_expr, state))
+        for param in module.params
+    )
+    canonical_params = tuple(
+        replace(
+            canonical_param,
+            type_expr=_preserve_compound_dim_binders(
+                original_param.type_expr, canonical_param.type_expr
+            ),
+        )
+        for original_param, canonical_param in zip(
+            module.params, canonical_params, strict=True
+        )
+    )
+    canonical_return_type = _preserve_compound_dim_binders(
+        module.return_type_expr,
+        _canonicalize_fresh_type(module.return_type_expr, state),
+    )
     return replace(
         module,
-        params=tuple(
-            replace(param, type_expr=_canonicalize_fresh_type(param.type_expr, state))
-            for param in module.params
-        ),
-        return_type_expr=_canonicalize_fresh_type(module.return_type_expr, state),
+        params=canonical_params,
+        return_type_expr=canonical_return_type,
         body_expr=_canonicalize_fresh_expr(module.body_expr, state, bound=bound)
         if module.body_expr is not None
         else None,
@@ -1756,6 +1878,16 @@ def _static_bool(expr: AxonExpr, expr_defs: dict[str, AxonExpr]) -> bool | None:
         right = right.expr if isinstance(right, AxonExprAscribe) else right.inner
         right = _resolved_expr_def(right, expr_defs)
     if isinstance(left, AxonExprNull) or isinstance(right, AxonExprNull):
+        if not isinstance(left, AxonExprNull) and not isinstance(
+            left,
+            AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprString | AxonExprPath,
+        ):
+            return None
+        if not isinstance(right, AxonExprNull) and not isinstance(
+            right,
+            AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprString | AxonExprPath,
+        ):
+            return None
         equal = isinstance(left, AxonExprNull) and isinstance(right, AxonExprNull)
         return equal if expr.op == "==" else not equal
     if isinstance(left, AxonExprBool) and isinstance(right, AxonExprBool):
@@ -1787,7 +1919,9 @@ def _branch_envs(
 ) -> tuple[dict[str, TypeExpr], dict[str, TypeExpr]]:
     true_env = dict(env)
     false_env = dict(env)
-    checked = _null_checked_name(_resolved_expr_def(cond_expr, expr_defs))
+    checked = _null_checked_name(cond_expr)
+    if checked is None:
+        checked = _null_checked_name(_resolved_expr_def(cond_expr, expr_defs))
     if checked is None:
         return true_env, false_env
     name, true_when_null = checked
@@ -2039,17 +2173,18 @@ def _tc_expr(
         return _annotate(state.ctx, replace(expr, left=left, right=right), binary_result), binary_result
     if isinstance(expr, AxonExprTernary | AxonExprIf):
         cond, _ = _tc_expr(state, expr.cond, env, expr_defs)
-        true_env, false_env = _branch_envs(expr.cond, env, expr_defs)
-        true_expr, true_tp = _tc_expr(state, expr.true_expr, true_env, dict(expr_defs))
-        false_expr, false_tp = _tc_expr(state, expr.false_expr, false_env, dict(expr_defs))
         static_cond = _static_bool(expr.cond, expr_defs)
-        branch_result: TypeExpr = (
-            true_tp
-            if static_cond is True
-            else false_tp
-            if static_cond is False
-            else _join_expr_branch_types(true_tp, false_tp, state.ctx)
-        )
+        true_env, false_env = _branch_envs(expr.cond, env, expr_defs)
+        if static_cond is True:
+            true_expr, true_tp = _tc_expr(state, expr.true_expr, true_env, dict(expr_defs))
+            return true_expr, true_tp
+        elif static_cond is False:
+            false_expr, false_tp = _tc_expr(state, expr.false_expr, false_env, dict(expr_defs))
+            return false_expr, false_tp
+        else:
+            true_expr, true_tp = _tc_expr(state, expr.true_expr, true_env, dict(expr_defs))
+            false_expr, false_tp = _tc_expr(state, expr.false_expr, false_env, dict(expr_defs))
+            branch_result = _join_expr_branch_types(true_tp, false_tp, state.ctx)
         return _annotate(
             state.ctx,
             replace(expr, cond=cond, true_expr=true_expr, false_expr=false_expr),
@@ -2273,30 +2408,41 @@ def _tc_definition(
             )
             if param.optional and isinstance(param_tp, TypeOptional):
                 param_tp = param_tp.inner
+            param_type_expr = (
+                param.type_expr
+                if param.type_expr is not None and not specialize_signature
+                else _apply_subst(param_tp, state.ctx)
+                if param_tp is not None
+                else None
+            )
+            if specialize_signature:
+                param_type_expr = _preserve_compound_dim_binders(
+                    param.type_expr, param_type_expr
+                )
             refined_params.append(
                 replace(
                     param,
-                    type_expr=(
-                        param.type_expr
-                        if param.type_expr is not None and not specialize_signature
-                        else _apply_subst(param_tp, state.ctx)
-                        if param_tp is not None
-                        else None
-                    ),
+                    type_expr=param_type_expr,
                 )
             )
         signature_return_tp = return_tp
+        if specialize_signature:
+            signature_return_tp = _preserve_compound_dim_binders(
+                module.return_type_expr,
+                _apply_subst(signature_return_tp, state.ctx)
+                if signature_return_tp is not None
+                else None,
+            )
+        return_type_expr = (
+            module.return_type_expr
+            if module.return_type_expr is not None and not specialize_signature
+            else signature_return_tp
+        )
         typed_module = replace(
             module,
             params=tuple(refined_params),
             statements=tuple(_normalize_statement(stmt, state.ctx) for stmt in typed_statements),
-            return_type_expr=(
-                module.return_type_expr
-                if module.return_type_expr is not None and not specialize_signature
-                else _apply_subst(signature_return_tp, state.ctx)
-                if signature_return_tp is not None
-                else None
-            ),
+            return_type_expr=return_type_expr,
         )
         if specialize_signature:
             typed_module = _specialize_definition_body_dim_names(
@@ -2339,19 +2485,30 @@ def typecheck2_flat_axon_file(program: AxonFile, *, main_module: str | None = No
         module = modules_by_name[root]
         _tc_definition(demand_state, module)
     typed_by_name: dict[str, AxonDefinition] = {}
+    state_by_name: dict[str, _Tc2] = {}
     for module in program.modules:
         typed = demand_state.typed_modules.get(module.name)
-        if typed is None or (
+        should_emit_generic = (
+            module.name not in roots
+            and not _is_loop_generated_definition_name(module.name)
+        )
+        if should_emit_generic or typed is None or (
             module.name in demand_state.specialization_conflicts
             and not _is_loop_generated_definition_name(module.name)
         ):
             generic_state = new_state()
             typed, _ = _tc_definition(generic_state, module)
+            state_by_name[module.name] = generic_state
+        else:
+            state_by_name[module.name] = demand_state
         typed_by_name[module.name] = typed
     _prefer_closed_constant_dim_names(demand_state)
     typed_by_name = _align_loop_continue_signatures(typed_by_name)
     typed_by_name = {
-        name: _canonicalize_fresh_module(_normalize_typed_module(module, demand_state.ctx), demand_state)
+        name: _canonicalize_fresh_module(
+            _normalize_typed_module(module, state_by_name[name].ctx),
+            state_by_name[name],
+        )
         for name, module in typed_by_name.items()
     }
     for root in roots:

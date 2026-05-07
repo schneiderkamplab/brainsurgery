@@ -37,25 +37,25 @@ dense_ffn x = do
   up <- NN.linear@feed_forward.up_proj x dim=FF
   return gate |> silu |> mul up |> NN.linear@feed_forward.down_proj dim=MODEL_DIM
 
-attn_core :: Tensor[B,S,D] -> Tensor[B,S,D]
-attn_core x = do
+attn_core :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+attn_core x attn_mask = do
   x_norm <- rms@input_layernorm x
   q <- NN.linear@self_attn.q_proj x_norm dim=(NUM_HEADS * MODEL_HEAD_DIM) |> reshape_heads heads=NUM_HEADS
   k <- NN.linear@self_attn.k_proj x_norm dim=(KVH * MODEL_HEAD_DIM) |> reshape_heads heads=KVH
   k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
   v <- NN.linear@self_attn.v_proj x_norm dim=(KVH * MODEL_HEAD_DIM) |> reshape_heads heads=KVH
   v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
-  keep <- causal_mask q k
+  keep <- causal_mask q k padding_mask=attn_mask
   a <- attention q k v keep scale=SCALE |> merge_heads
   a <- NN.linear@self_attn.o_proj a dim=MODEL_DIM
   return x + a
 
-mamba_core :: Tensor[B,S,D] -> Tensor[B,S,D]
-mamba_core x = do
+mamba_core :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+mamba_core x attn_mask = do
   x_norm <- rms@input_layernorm x
   in_proj <- NN.linear@mamba.in_proj x_norm dim=2*I
   u, gate <- Tensor.split in_proj sizes=[I, I]
-  u_conv <- causal_conv1d@mamba.conv1d u activation="silu" weight_path=@mamba.conv1d.weight bias_path=@mamba.conv1d.bias
+  u_conv <- causal_conv1d@mamba.conv1d u activation="silu" weight_path=@mamba.conv1d.weight bias_path=@mamba.conv1d.bias attention_mask=attn_mask
   params <- NN.linear@mamba.x_proj u_conv dim=R + 2*N
   dt, b, c <- Tensor.split params sizes=[R, N, N]
   dt <- NN.rmsnorm@mamba.dt_layernorm dt eps=EPS cast_float=true
@@ -66,11 +66,11 @@ mamba_core x = do
   y <- y_scan |> mul (silu gate) |> NN.linear@mamba.out_proj dim=MODEL_DIM
   return x + y
 
-jamba_3b :: TokenIds[B,S] -> Tensor[B,S,V]
-jamba_3b input_ids = do
+jamba_3b :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+jamba_3b input_ids attn_mask = do
   x <- NN.embedding@model.embed_tokens input_ids dim=MODEL_DIM
   x <- for@model.layers i <- [0..NUM_LAYERS) carry (x) do
-    x <- ((i % ATTN_PERIOD) == ATTN_OFFSET) ? attn_core x : mamba_core x
+    x <- ((i % ATTN_PERIOD) == ATTN_OFFSET) ? attn_core x attn_mask : mamba_core x attn_mask
     x_ff <- rms@pre_ff_layernorm x
     m <- dense_ffn x_ff
     x <- x + m

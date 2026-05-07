@@ -13,10 +13,10 @@ import Cache
 import NN
 import Tensor
 
-phi3small_norm :: Path -> Tensor -> Tensor
+phi3small_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 phi3small_norm@path x = NN.layernorm@path x eps=1e-05
 
-phi3small_block :: Tensor -> Int -> IdxTensor -> ?Tensor -> ?CacheLayer -> (Tensor, ?CacheLayer)
+phi3small_block :: Tensor[B,S,D] -> Int -> IdxTensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,8,P,128] -> (Tensor[B,S,D], ?CacheLayer[B,8,K,128])
 phi3small_block x i pos_ids attn_mask past_kv = do
   xn <- phi3small_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -43,7 +43,7 @@ phi3small_block x i pos_ids attn_mask past_kv = do
     return u |> gegelu limit=20.0 |> NN.linear@down_proj dim=4096 bias=true
   return x + m, new_kv
 
-phi3small :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Cache -> ?Bool -> (Tensor[B,S,V], ?Cache)
+phi3small :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,8,P,128] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,8,K,128])
 phi3small input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
