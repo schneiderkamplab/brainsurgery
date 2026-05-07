@@ -89,7 +89,7 @@ ATTN_SCALE = 1.0 / sqrt QHD
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-deepseek_v3_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
+deepseek_v3_attn :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,QHD] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,QHD])
 deepseek_v3_attn x pos_ids attn_mask past_kv = do
   a, new_kv <- scope@self_attn do
     q <- NN.linear@q_a_proj x dim=QLR bias=false |> rms@q_a_layernorm |> NN.linear@q_b_proj dim=(NUM_HEADS * QHD) bias=false |> reshape_heads heads=NUM_HEADS
@@ -110,7 +110,7 @@ deepseek_v3_attn x pos_ids attn_mask past_kv = do
     return a, new_kv
   return a, new_kv
 
-deepseek_v3_dense_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
+deepseek_v3_dense_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,QHD] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,QHD])
 deepseek_v3_dense_block x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- deepseek_v3_attn xn pos_ids attn_mask past_kv
@@ -122,7 +122,7 @@ deepseek_v3_dense_block x pos_ids attn_mask past_kv = do
     return gate |> silu |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
   return x + m, new_kv
 
-deepseek_v3_moe_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
+deepseek_v3_moe_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,QHD] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,QHD])
 deepseek_v3_moe_block x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- deepseek_v3_attn xn pos_ids attn_mask past_kv
@@ -145,7 +145,7 @@ deepseek_v3_moe_block x pos_ids attn_mask past_kv = do
     return shared + routed
   return x + m, new_kv
 
-deepseek_v3 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,DH])
+deepseek_v3 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,QHD] -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?Cache[B,NUM_HEADS,K,QHD])
 deepseek_v3 input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
   x, new_kv <- scope@model do
