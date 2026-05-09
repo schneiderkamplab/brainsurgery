@@ -81,7 +81,7 @@ grouped_ffn_gated gate_up alpha limit = do
   return (up + 1.0) * (gate * sigmoid (gate * alpha))
 
 grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> ?Path -> ?Path -> ?Path -> ?Path -> ?Float -> ?Float -> ?Bool -> ?Bool -> ?Bool -> Tensor[B,T,D]
-grouped_ffn hidden topk_scores topk_indices ?gate_up_weight=@experts.gate_up_proj.weight ?gate_up_bias=@experts.gate_up_proj.bias ?out_weight=@experts.down_proj.weight ?out_bias=@experts.down_proj.bias ?alpha=1.702 ?limit=7.0 ?has_bias=true ?has_gate=true ?transpose=true = do
+grouped_ffn hidden topk_scores topk_indices ?gate_up_weight=@experts.gate_up_proj ?gate_up_bias=@experts.gate_up_proj_bias ?out_weight=@experts.down_proj ?out_bias=@experts.down_proj_bias ?alpha=1.702 ?limit=7.0 ?has_bias=true ?has_gate=true ?transpose=true = do
   alpha <- (alpha == null) ? 1.702 : alpha
   limit <- (limit == null) ? 7.0 : limit
   has_bias <- (has_bias == null) ? true : has_bias

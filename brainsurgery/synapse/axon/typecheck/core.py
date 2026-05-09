@@ -63,6 +63,7 @@ from ..ast import (
     parse_type_expr,
 )
 from ..entrypoint import resolve_main_module
+from ..resolve import reachable_definitions
 from ..validate import (
     validate_flat_axon_file,
     validate_normalized_axon_file,
@@ -489,6 +490,26 @@ def _unify_dim_sequence(
     actual: tuple[DimToken, ...],
     ctx: _TcCtx,
 ) -> tuple[DimToken, ...]:
+    def _unify_fixed_pairs(pairs: list[tuple[DimToken, DimToken]]) -> tuple[DimToken, ...]:
+        out: list[DimToken | None] = []
+        deferred: list[tuple[int, DimToken, DimToken, ValueError]] = []
+        for left, right in pairs:
+            try:
+                out.append(_unify_dim_token(left, right, ctx))
+            except ValueError as exc:
+                if "recursive dim variable" not in str(exc):
+                    raise
+                deferred.append((len(out), left, right, exc))
+                out.append(None)
+        for idx, left, right, original_exc in deferred:
+            try:
+                out[idx] = _unify_dim_token(left, right, ctx)
+            except ValueError as exc:
+                if "recursive dim variable" in str(exc):
+                    raise original_exc
+                raise
+        return tuple(cast(DimToken, item) for item in out)
+
     left_var = next(
         (idx for idx, dim in enumerate(expected) if isinstance(dim, str) and dim.startswith("..")),
         None,
@@ -500,9 +521,7 @@ def _unify_dim_sequence(
     if left_var is None and right_var is None:
         if len(expected) != len(actual):
             raise ValueError("Axon typecheck failed: tensor rank mismatch")
-        return tuple(
-            _unify_dim_token(left, right, ctx) for left, right in zip(expected, actual, strict=True)
-        )
+        return _unify_fixed_pairs(list(zip(expected, actual, strict=True)))
     if left_var is not None and right_var is None:
         prefix = expected[:left_var]
         suffix = expected[left_var + 1 :]
@@ -2914,11 +2933,35 @@ def _infer_expr(
         )
         if expr.op in _COMPARE_OPS | _BOOL_OPS:
             if expr.op in _COMPARE_OPS:
-                _unify(left_tp, right_tp, ctx)
+                left_expanded = _expand_alias(_apply_subst(left_tp, ctx), ctx)
+                right_expanded = _expand_alias(_apply_subst(right_tp, ctx), ctx)
+                if isinstance(left_expanded, TypeTensor) and isinstance(
+                    right_expanded, TypeTensor
+                ):
+                    dims = _unify_broadcast_tensor_dims(
+                        tuple(_normalize_dim_token(dim, ctx) for dim in left_expanded.dims),
+                        tuple(_normalize_dim_token(dim, ctx) for dim in right_expanded.dims),
+                        ctx,
+                    )
+                    tp = TypeTensor(
+                        base="Tensor",
+                        dims=tuple(_normalize_dim_token(dim, ctx) for dim in dims),
+                    ) if dims is not None else _unify(left_tp, right_tp, ctx)
+                elif isinstance(left_expanded, TypeTensor) and _is_scalar_numeric_type(
+                    right_expanded
+                ):
+                    tp = _apply_subst(left_tp, ctx)
+                elif isinstance(right_expanded, TypeTensor) and _is_scalar_numeric_type(
+                    left_expanded
+                ):
+                    tp = _apply_subst(right_tp, ctx)
+                else:
+                    _unify(left_tp, right_tp, ctx)
+                    tp = TypeBool()
             else:
                 _unify(left_tp, TypeBool(), ctx)
                 _unify(right_tp, TypeBool(), ctx)
-            tp = TypeBool()
+                tp = TypeBool()
         elif expr.op in _ARITH_OPS:
             left_expanded = _expand_alias(_apply_subst(left_tp, ctx), ctx)
             right_expanded = _expand_alias(_apply_subst(right_tp, ctx), ctx)
@@ -4664,18 +4707,10 @@ def _module_call_graph(program: AxonFile) -> dict[str, set[str]]:
 
 def _reachable_modules(program: AxonFile, *, main_module: str | None) -> frozenset[str]:
     main_module = resolve_main_module(program, main_module=main_module)
-    graph = _module_call_graph(program)
-    if main_module not in graph:
+    module_names = {module.name for module in program.modules}
+    if main_module not in module_names:
         return frozenset()
-    seen: set[str] = set()
-    stack = [main_module]
-    while stack:
-        current = stack.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        stack.extend(sorted(graph.get(current, ())))
-    return frozenset(seen)
+    return frozenset(reachable_definitions(program, entrypoint=main_module))
 
 
 def _prune_to_main(program: AxonFile, *, main_module: str | None) -> AxonFile:
@@ -5312,6 +5347,12 @@ def _typecheck_recursive_component(
         )
         previous_group = final_group
         final_group = normalized_group
+        if all(new_signatures[name] == old_signatures[name] for name in component):
+            for name in component:
+                recursive_env.signatures[name] = _clone_signature(
+                    _signature_from_module_header(normalized_group[name])
+                )
+            return final_group
         if forced_changed:
             if previous_group and all(
                 ast_equal(normalized_group[name], previous_group[name]) for name in component
@@ -5326,12 +5367,6 @@ def _typecheck_recursive_component(
                 for name in component
             }
             continue
-        if all(new_signatures[name] == old_signatures[name] for name in component):
-            for name in component:
-                recursive_env.signatures[name] = _clone_signature(
-                    _signature_from_module_header(normalized_group[name])
-                )
-            return final_group
         component_signatures = {
             name: _clone_signature(_signature_from_module_header(normalized_group[name]))
             for name in component

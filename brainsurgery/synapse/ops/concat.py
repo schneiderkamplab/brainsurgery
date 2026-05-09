@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 
-from ..axon.ast import AxonExprAscribe, AxonExprInt, AxonExprParen, DimExprBinary
+from ..axon.ast import AxonExprAscribe, AxonExprInt, AxonExprParen, DimExprBinary, TypeTensor
 
 OP_NAME = "concat"
 LOWERING_ARITY = (2, 2)
@@ -141,11 +141,18 @@ def type_rule(
     right_dims = helpers.type_dims(arg_types[1])
     if left_dims is None or right_dims is None:
         return None
+    output_base = "Tensor"
+    if (
+        isinstance(arg_types[0], TypeTensor)
+        and isinstance(arg_types[1], TypeTensor)
+        and arg_types[0].base == arg_types[1].base
+    ):
+        output_base = arg_types[0].base
     if len(left_dims) != len(right_dims):
         if any(isinstance(dim, str) and dim.startswith("..") for dim in left_dims):
-            return helpers.type_tensor(dims=left_dims)
+            return TypeTensor(base=output_base, dims=tuple(left_dims))
         if any(isinstance(dim, str) and dim.startswith("..") for dim in right_dims):
-            return helpers.type_tensor(dims=right_dims)
+            return TypeTensor(base=output_base, dims=tuple(right_dims))
         return None
     raw_dim = kwargs.get("dim", -1)
     while isinstance(raw_dim, AxonExprAscribe | AxonExprParen):
@@ -175,7 +182,7 @@ def type_rule(
         if left_dim != right_dim:
             return None
         out_dims.append(left_dim)
-    return helpers.type_tensor(dims=tuple(out_dims))
+    return TypeTensor(base=output_base, dims=tuple(out_dims))
 
 
 __all__ = [

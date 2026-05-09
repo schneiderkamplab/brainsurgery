@@ -553,6 +553,10 @@ def _patch_cache_api_compat() -> None:
     _patch_class(getattr(_cache_utils, "DynamicCache", None))
 
 
+def _is_deepseek_family_model_type(model_type: str) -> bool:
+    return model_type in {"deepseek", "deepseek_v2", "deepseek_v3", "deepseekv3"}
+
+
 def _ensure_einops_import_compat() -> None:
     if "einops" in sys.modules:
         return
@@ -1237,6 +1241,13 @@ def _normalize_rope_numeric_fields(config: Any) -> Any:
     rope_parameters = getattr(config, "rope_parameters", None)
     _normalize_dict(rope_parameters)
     if not isinstance(rope_parameters, dict):
+        if (
+            str(getattr(config, "model_type", "")).strip().lower() == "phi3small"
+            and not isinstance(rope_scaling, dict)
+        ):
+            if hasattr(config, "rope_parameters"):
+                setattr(config, "rope_parameters", None)
+            return config
         if isinstance(rope_scaling, dict):
             rope_parameters = dict(rope_scaling)
             rope_type = rope_parameters.get("type", rope_parameters.get("rope_type"))
@@ -2437,8 +2448,7 @@ def _run_axon_test_single(
 
         def _run_hf_side(target_device_str: str) -> dict[str, Any]:
             target_device = _resolve_device(target_device_str)
-            if resolved_model_type == "deepseek":
-                _patch_cache_api_compat()
+            _patch_cache_api_compat()
             local_state_ref_cpu: dict[str, torch.Tensor] | None = None
             hf_device_map: dict[str, str] | None = None
 
@@ -2683,20 +2693,36 @@ def _run_axon_test_single(
             else:
                 try:
                     _ensure_transformers_import_compat()
-                    causal_kwargs: dict[str, Any] = {
-                        "local_files_only": True,
-                        "torch_dtype": resolved_dtype,
-                        "config": hf_config,
-                        "trust_remote_code": effective_trust_remote_code,
-                    }
-                    if reference_quant_config is not None:
-                        causal_kwargs["quantization_config"] = reference_quant_config
-                    if hf_device_map is not None:
-                        causal_kwargs["device_map"] = hf_device_map
-                    hf_model = AutoModelForCausalLM.from_pretrained(
-                        str(resolved_hf_model_dir),
-                        **causal_kwargs,
-                    )
+                    if (
+                        resolved_model_type in {"deepseek", "deepseek_v3", "deepseekv3"}
+                        and resolved_hf_model_dir.name == "DeepSeek-V3-Test"
+                    ):
+                        local_state_ref_cpu = _load_state_dict(
+                            safetensors_files,
+                            device=torch.device("cpu"),
+                            dtype=resolved_dtype,
+                            model_config=model_config,
+                        )
+                        hf_model = AutoModelForCausalLM.from_config(
+                            hf_config,
+                            trust_remote_code=effective_trust_remote_code,
+                        )
+                        hf_model.load_state_dict(local_state_ref_cpu, strict=True)
+                    else:
+                        causal_kwargs: dict[str, Any] = {
+                            "local_files_only": True,
+                            "torch_dtype": resolved_dtype,
+                            "config": hf_config,
+                            "trust_remote_code": effective_trust_remote_code,
+                        }
+                        if reference_quant_config is not None:
+                            causal_kwargs["quantization_config"] = reference_quant_config
+                        if hf_device_map is not None:
+                            causal_kwargs["device_map"] = hf_device_map
+                        hf_model = AutoModelForCausalLM.from_pretrained(
+                            str(resolved_hf_model_dir),
+                            **causal_kwargs,
+                        )
                     hf = (
                         cast(Any, hf_model).eval()
                         if hf_device_map is not None
@@ -2876,7 +2902,7 @@ def _run_axon_test_single(
                 hf_forward_kwargs = dict(io["hf_forward_inputs"])
                 if resolved_model_task in {"causal_lm", "seq2seq_lm"}:
                     hf_forward_kwargs["use_cache"] = False
-                if resolved_model_type == "deepseek":
+                if _is_deepseek_family_model_type(resolved_model_type):
                     batch_size = int(io["input_ids"].shape[0])
                     if batch_size > 1:
                         logits_parts: list[torch.Tensor] = []
@@ -2914,7 +2940,7 @@ def _run_axon_test_single(
                     hf_t0 = time.perf_counter()
                     hf_logits = _run_hf_forward(hf)
                     hf_forward_time = time.perf_counter() - hf_t0
-                    if resolved_model_type == "deepseek" and not bool(
+                    if _is_deepseek_family_model_type(resolved_model_type) and not bool(
                         torch.isfinite(hf_logits).all()
                     ):
                         print(
@@ -2949,7 +2975,7 @@ def _run_axon_test_single(
                             hf_forward_time = time.perf_counter() - hf_t0
 
                 def _run_hf_generate(model: Any) -> torch.Tensor:
-                    if resolved_model_type == "deepseek":
+                    if _is_deepseek_family_model_type(resolved_model_type):
                         pad_id = tokenizer_obj.eos_token_id
                         generated: list[torch.Tensor] = []
                         batch_size = int(io["input_ids"].shape[0])
@@ -3177,7 +3203,7 @@ def _run_axon_test_single(
                 setattr(syn, original_block_name, _syn_block_wrapper)
 
             def _run_syn_forward(model: Any = syn) -> torch.Tensor:
-                if resolved_model_type == "deepseek":
+                if _is_deepseek_family_model_type(resolved_model_type):
                     syn_inputs = io["syn_inputs"]
                     sample_batch_size: int | None = None
                     for value in syn_inputs.values():

@@ -532,14 +532,19 @@ def _pipe_stage_to_call(value: AxonExpr, stage: AxonExpr) -> AxonExpr:
 def _split_callee_path_sugar(callee: str) -> tuple[str, tuple[AxonExprPath, ...]]:
     if "@" not in callee:
         return callee, ()
-    parts = callee.split("@")
-    base = parts[0]
-    suffixes = parts[1:]
+    base, rest = callee.split("@", 1)
     path_args: list[AxonExprPath] = []
-    for suffix in suffixes:
+    while rest:
+        absolute = rest.startswith("@")
+        suffix_start = 1 if rest.startswith("@") else 0
+        next_sep = rest.find("@", suffix_start)
+        suffix = rest[suffix_start:] if next_sep < 0 else rest[suffix_start:next_sep]
         if not suffix:
             raise ValueError(f"flatten failed: invalid callee path sugar {callee!r}")
-        path_args.append(AxonExprPath(absolute=False, parts=tuple(suffix.split("."))))
+        path_args.append(AxonExprPath(absolute=absolute, parts=tuple(suffix.split("."))))
+        if next_sep < 0:
+            break
+        rest = rest[next_sep + 1 :]
     return base, tuple(path_args)
 
 

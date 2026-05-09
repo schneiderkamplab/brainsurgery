@@ -87,10 +87,19 @@ def _is_sugared_expression_name(value: str) -> bool:
         return all(_is_qualified_identifier(part) for part in value.split("::"))
     if "@" not in value:
         return False
-    parts = value.split("@")
-    if not parts[0] or not _is_qualified_identifier(parts[0]):
+    base, rest = value.split("@", 1)
+    if not base or not _is_qualified_identifier(base):
         return False
-    return all(part and _is_qualified_identifier(part) for part in parts[1:])
+    while rest:
+        suffix_start = 1 if rest.startswith("@") else 0
+        next_sep = rest.find("@", suffix_start)
+        suffix = rest[suffix_start:] if next_sep < 0 else rest[suffix_start:next_sep]
+        if not suffix or not _is_qualified_identifier(suffix):
+            return False
+        if next_sep < 0:
+            return True
+        rest = rest[next_sep + 1 :]
+    return True
 
 
 def _expected_return_arity(return_type_expr: TypeExpr | None) -> int | None:

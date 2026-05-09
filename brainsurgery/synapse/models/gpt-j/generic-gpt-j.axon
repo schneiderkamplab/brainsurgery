@@ -12,17 +12,17 @@ import NN
 
 
 
-MODEL_DIM = Config.int@n_embd default=4096
-VOCAB_SIZE = Config.int@vocab_size default=50400
-NUM_LAYERS = Config.int@n_layer default=28
-NUM_HEADS = Config.int@n_head default=16
+MODEL_DIM = Config.int@@n_embd default=4096
+VOCAB_SIZE = Config.int@@vocab_size default=50400
+NUM_LAYERS = Config.int@@n_layer default=28
+NUM_HEADS = Config.int@@n_head default=16
 MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
 FFN = 4 * MODEL_DIM
-EPS = Config.float@layer_norm_epsilon default=1e-05
-MAX_POSITIONS = Config.int@n_positions default=2048
-ROTARY_DIM = Config.int@rotary_dim default=64
+EPS = Config.float@@layer_norm_epsilon default=1e-05
+MAX_POSITIONS = Config.int@@n_positions default=2048
+ROTARY_DIM = Config.int@@rotary_dim default=64
 ROTARY_FACTOR = ROTARY_DIM / MODEL_HEAD_DIM
-THETA = Config.float@rotary_emb_base default=10000.0
+THETA = Config.float@@rotary_emb_base default=10000.0
 HAS_LM_HEAD = has_root "lm_head"
 HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 

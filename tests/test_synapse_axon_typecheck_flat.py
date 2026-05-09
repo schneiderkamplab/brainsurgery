@@ -253,9 +253,27 @@ main x = do
     typed = typecheck_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     text = render_axon_file(typed, show_types=True)
-    reshape_line = next(line for line in text.splitlines() if "y <- (_reshape" in line)
+    reshape_line = next(line for line in text.splitlines() if "y <-" in line and "_reshape" in line)
     assert "Tensor[B,S,H * DH]" in reshape_line
     assert "__d" not in reshape_line
+
+
+def test_typecheck_flat_resolves_expand_shape_alias_name() -> None:
+    source = """
+main :: Tensor[B,S,D] -> Tensor[B,S,H,DH]
+main x = do
+  h <- _reshape x [B, S, 1, DH]
+  shape <- [B, S, H, DH]
+  y <- _expand h shape
+  return y
+"""
+    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    typed = typecheck_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    text = render_axon_file(typed, show_types=True)
+    expand_line = next(line for line in text.splitlines() if "y <-" in line and "_expand" in line)
+    assert "Tensor[B,S,H,DH]" in expand_line
+    assert "__d" not in expand_line
 
 
 def test_typecheck_flat_preserves_cache_update_shape_information() -> None:

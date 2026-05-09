@@ -233,6 +233,15 @@ def test_parse_program_source_rejects_definition_without_signature() -> None:
         parse_surface_program_source(source)
 
 
+def test_parse_absolute_callee_path_sugar_without_space() -> None:
+    source = "HAS_HEAD_DIM = Config.has_value@@head_dim\n"
+    ast = parse_axon_program(source)
+    module = ast.modules[0]
+    assert module.name == "HAS_HEAD_DIM"
+    assert isinstance(module.body_expr, AxonExprName)
+    assert module.body_expr.name == "Config.has_value@@head_dim"
+
+
 def test_parse_program_source_supports_variadic_tensor_dims() -> None:
     source = """
 split_like :: Tensor[..S] -> List[Tensor[..S]]

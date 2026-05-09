@@ -85,6 +85,7 @@ from ..typecheck.core import (
     _unify_broadcast_tensor_dims,
 )
 from ..entrypoint import resolve_main_module
+from ..resolve import reachable_definitions
 from ..validate import validate_flat_axon_file, validate_typed_axon_file
 
 _PATH_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -250,18 +251,10 @@ def _module_graph(program: AxonFile) -> dict[str, set[str]]:
 
 def _reachable(program: AxonFile, main_module: str | None) -> set[str]:
     main_module = resolve_main_module(program, main_module=main_module)
-    graph = _module_graph(program)
-    if main_module not in graph:
+    module_names = {module.name for module in program.modules}
+    if main_module not in module_names:
         raise ValueError(f"Axon typecheck2 failed: main definition {main_module!r} not found")
-    seen: set[str] = set()
-    stack = [main_module]
-    while stack:
-        name = stack.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        stack.extend(sorted(graph.get(name, ())))
-    return seen
+    return set(reachable_definitions(program, entrypoint=main_module))
 
 
 def _prune_to_main(program: AxonFile, main_module: str | None) -> AxonFile:

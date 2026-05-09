@@ -32,11 +32,13 @@ export (
   relative_bias_disentangled,
   relative_position_bias,
   rope_pair_base,
+  rope_pair_base_split_interleaved,
   rope_pair_freq_scale,
   rope_pair_hf_yarn,
   rope_pair_longrope,
   rope_pair_proportional,
   rope_pair_yarn,
+  rope_pair_yarn_split_interleaved,
   rope_apply_trailing_inverse,
   rope_apply_trailing,
   sinusoidal_positions,
@@ -166,6 +168,12 @@ rope_rotate_half x ?interleaved=false = interleaved
   : (rope_rotate_half_noninterleaved x)
 
 
+rope_split_interleaved_to_half :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
+rope_split_interleaved_to_half x = do
+  pair <- reshape x shape=[B, H, S, (R / 2), 2]
+  return transpose pair dim1=3 dim2=4 |> reshape shape=[B, H, S, R]
+
+
 rope_expand_half :: Tensor[B,HM,S,RH] -> Tensor[B,HM,S,R]
 rope_expand_half x = do
   xx <- concat x x dim=-1
@@ -263,6 +271,13 @@ rope_pair_base q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotar
   q_rot <- rope_apply q position_ids_eff theta partial_rotary_factor=partial_rotary_factor interleaved=interleaved
   k_rot <- rope_apply k position_ids_eff theta partial_rotary_factor=partial_rotary_factor interleaved=interleaved
   return q_rot, k_rot
+
+
+rope_pair_base_split_interleaved :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
+rope_pair_base_split_interleaved q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null = do
+  q <- rope_split_interleaved_to_half q
+  k <- rope_split_interleaved_to_half k
+  return rope_pair_base q k position_ids theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=false
 
 
 rope_pair_proportional :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
@@ -445,6 +460,13 @@ rope_pair_yarn q k pos_ids theta scale_factor beta_fast beta_slow original_conte
   q_rot <- rope_apply_inv_freq q pos_ids inv_freq q rope_attention_factor interleaved=interleaved
   k_rot <- rope_apply_inv_freq k pos_ids inv_freq q rope_attention_factor interleaved=interleaved
   return q_rot, k_rot
+
+
+rope_pair_yarn_split_interleaved :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Dim -> ?Float -> ?Float -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
+rope_pair_yarn_split_interleaved q k pos_ids theta scale_factor beta_fast beta_slow original_context ?mscale=null ?mscale_all_dim=null = do
+  q <- rope_split_interleaved_to_half q
+  k <- rope_split_interleaved_to_half k
+  return rope_pair_yarn q k pos_ids theta scale_factor beta_fast beta_slow original_context mscale=mscale mscale_all_dim=mscale_all_dim interleaved=false
 
 
 rope_inv_freq_hf_yarn :: Tensor[B,H,S,HD] -> Float -> Float -> Float -> Float -> Dim -> ?Bool -> Tensor[HD2]

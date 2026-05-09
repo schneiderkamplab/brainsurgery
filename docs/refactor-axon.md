@@ -521,3 +521,10 @@ Backend package targets:
 6. Add `flatten`.
 7. Add `optimize`.
 8. Make `lower` consume only fully typed flat AST.
+
+## Benchmark Follow-Ups
+
+- Rerun large members of every changed model family on larger GPU capacity before finalizing the current model/builtin edits.
+- Include MoE families that use `MoE.grouped_sigmoid_router`, because the masked-score branch now uses a large negative value rather than zero for excluded experts.
+- Include DeepSeek-V3 and Mistral4, because their cache types were migrated to `CacheKV` for distinct K/V head dimensions.
+- Include GPT-OSS 20B and 120B, because expert weight paths were normalized to the real checkpoint key layout (`experts.gate_up_proj`, `experts.gate_up_proj_bias`, `experts.down_proj`, `experts.down_proj_bias`).

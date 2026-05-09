@@ -1,5 +1,5 @@
-{-# CHECKPOINTS ["deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Pro", "random/DeepSeek-V4-Random", "random/DeepSeek-V4-Random2"] #-}
-{-# TOKENIZER ["random/DeepSeek-V4-Random", "openai-community/gpt2"] #-}
+{-# CHECKPOINTS ["deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Pro", "test/DeepSeek-V4-Test"] #-}
+{-# TOKENIZER ["test/DeepSeek-V4-Test", "openai-community/gpt2"] #-}
 {-# TASK "causal_lm" #-}
 
 import Config

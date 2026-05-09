@@ -8,7 +8,7 @@ from brainsurgery.synapse.axon.ast import AxonExprName, AxonFile, AxonDefinition
 from brainsurgery.synapse.axon.entrypoint import resolve_main_module
 from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
 from brainsurgery.synapse.axon.parse import parse_axon_program, parse_axon_program_from_path
-from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
+from brainsurgery.synapse.axon.resolve import prune_unreachable_definitions, resolve_axon_program_from_path
 from brainsurgery.synapse.axon.validate import validate_closed_axon_file
 
 
@@ -97,6 +97,26 @@ main x = Math.exp x
     program = parse_axon_program_from_path(axon_path)
     with pytest.raises(ValueError, match="closed AST must not carry file imports"):
         validate_closed_axon_file(program, main_module="main")
+
+
+def test_prune_keeps_value_referenced_only_by_path_template(tmp_path: Path) -> None:
+    source = """
+{-# MAIN "main" #-}
+import Config
+
+CFG = Config.has_key @@text_config ? "text_config." : ""
+MODEL_DIM = Config.int @@'{CFG}hidden_size' default=128
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  _ <- MODEL_DIM
+  return x
+"""
+    program = _resolved_from_tmp_source(tmp_path, source)
+    pruned = prune_unreachable_definitions(program)
+    names = {module.name for module in pruned.modules}
+    assert "CFG" in names
+    assert "MODEL_DIM" in names
 
 
 def test_validate_closed_rejects_unresolved_name_in_body() -> None:

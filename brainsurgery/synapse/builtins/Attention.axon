@@ -45,7 +45,7 @@ split_qkv_heads x ?heads=1 ?layout="packed" = do
       return q, k, v
 
 
-split_qkv_grouped :: Tensor[B,T,D] -> ?Dim -> ?Dim -> ?Dim -> (Tensor[B,H,T,HD], Tensor[B,KVH,T,HD], Tensor[B,KVH,T,HD])
+split_qkv_grouped :: Tensor[B,T,D] -> ?Dim -> ?Dim -> ?Dim -> (Tensor[B,heads,T,HD], Tensor[B,kv_heads,T,HD], Tensor[B,kv_heads,T,HD])
 split_qkv_grouped x ?heads=1 ?kv_heads=1 ?head_dim=null = do
   q_per_kv <- heads / kv_heads
   hd <- (head_dim == null) ? (D / (kv_heads * (q_per_kv + 2))) : head_dim
