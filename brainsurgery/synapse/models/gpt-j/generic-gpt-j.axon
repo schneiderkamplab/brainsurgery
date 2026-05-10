@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["EleutherAI/gpt-j-6b"] #-}
+{-# CHECKPOINTS ["EleutherAI/gpt-j-6b", "test/GPT-J-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (gelu_new)

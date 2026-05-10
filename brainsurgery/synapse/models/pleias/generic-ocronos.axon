@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "PleIAs/OCRonos" #-}
+{-# CHECKPOINTS ["PleIAs/OCRonos", "test/OCRonos-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

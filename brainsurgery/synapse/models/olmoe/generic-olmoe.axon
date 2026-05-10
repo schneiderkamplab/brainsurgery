@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "allenai/OLMoE-1B-7B-0924" #-}
+{-# CHECKPOINTS ["allenai/OLMoE-1B-7B-0924", "test/OLMoE-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

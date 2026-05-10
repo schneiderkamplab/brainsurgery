@@ -37,7 +37,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["build", "mypy", "pre-commit", "ruff", "twine"]
+dev = ["build", "mypy", "pre-commit", "pytest-xdist", "ruff", "twine"]
 
 [project.urls]
 "Homepage" = "https://github.com/schneiderkamplab/brainsurgery"

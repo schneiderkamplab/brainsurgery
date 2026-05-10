@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["meta-llama/Llama-4-Scout-17B-16E", "meta-llama/Llama-4-Scout-17B-16E-Instruct"] #-}
+{-# CHECKPOINTS ["meta-llama/Llama-4-Scout-17B-16E", "meta-llama/Llama-4-Scout-17B-16E-Instruct", "test/Llama4-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

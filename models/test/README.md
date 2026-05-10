@@ -7,3 +7,41 @@ The current min4B-only generic Axon inventory needs 31 test checkpoints if cover
 `Phi-MoE-Test` is generated via the native Transformers `phimoe` implementation when local remote-code files are absent, then its packed native expert tensors are rewritten to the real Phi-MoE checkpoint key layout expected by the Axon model. `DeepSeek-V2-Test` intentionally keeps `q_lora_rank=null` so its weights use the same `q_proj` structure as the real DeepSeek-V2-Lite checkpoints, and it uses native Transformers DeepSeek-V2 loading rather than stale copied remote code.
 
 These checkpoints are randomly initialized and are not trained models.
+
+## Source Checkpoints
+
+Parameter counts are whole billions, rounded from the same `._param_count.json` cache files used by `axon-benchmark`.
+
+| Family | Minimal real checkpoint | Params (B) |
+|---|---|---:|
+| Apertus-Test | `swiss-ai/Apertus-8B-2509` | 8 |
+| Cohere-Test | `CohereLabs/aya-expanse-8b` | 8 |
+| Comma-Test | `danish-foundation-models/dfm-decoder-open-v0-7b-pt` | 7 |
+| DeepSeek-V1-Test | `deepseek-ai/deepseek-moe-16b-base` | 16 |
+| DeepSeek-V2-Test | `deepseek-ai/DeepSeek-V2-Lite` | 16 |
+| DeepSeek-V3-Test | `deepseek-ai/DeepSeek-V3-Base` | 685 |
+| DeepSeek-V4-Test | `deepseek-ai/DeepSeek-V4-Flash` | 158 |
+| FlexOlmo-Test | `allenai/Flex-math-2x7B-1T` | 12 |
+| Gemma4-Dense-Test | `google/gemma-4-31B` | 31 |
+| Gemma4-E-Test | `google/gemma-4-E2B` | 5 |
+| Gemma4-MoE-Test | `google/gemma-4-26B-A4B` | 26 |
+| GLM4-Dense-Test | `zai-org/GLM-4-9B-0414` | 9 |
+| GLM4-MoE-Test | `glm_4_5_air` | 110 |
+| GPT-J-Test | `EleutherAI/gpt-j-6b` | 6 |
+| GPT-NeoX-Test | `EleutherAI/pythia-6.9b` | 7 |
+| GPT-OSS-Test | `openai/gpt-oss-20b` | 20 |
+| Llama2-Test | `meta-llama/Llama-2-7b-hf` | 7 |
+| Llama4-Test | `meta-llama/Llama-4-Scout-17B-16E` | 109 |
+| Mistral-Test | `mistralai/Mistral-7B-v0.1` | 7 |
+| Magistral-Test | `mistralai/Magistral-Small-2509` | 24 |
+| Mistral3-Test | `mistralai/Ministral-3-8B-Base-2512` | 9 |
+| Mistral4-Test | `mistralai/Mistral-Small-4-119B-2603` | 119 |
+| Mixtral-Test | `mistralai/Mixtral-8x7B-v0.1` | 47 |
+| Nemotron-H-Test | `nemotron3` | 32 |
+| Olmo3-Test | `allenai/Olmo-3-1025-7B` | 7 |
+| OLMoE-Test | `allenai/OLMoE-1B-7B-0924` | 7 |
+| Phi3-Small-Test | `microsoft/Phi-3-small-8k-instruct` | 7 |
+| Phi-MoE-Test | `microsoft/Phi-3.5-MoE-instruct` | 42 |
+| OCRonos-Test | `PleIAs/OCRonos` | 8 |
+| Qwen3-Test | `Qwen/Qwen3-14B` | 15 |
+| Qwen3-MoE-Test | `Qwen/Qwen3-30B-A3B` | 31 |

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["deepseek-ai/DeepSeek-V2-Lite", "deepseek-ai/DeepSeek-V2-Lite-Chat", "deepseek-ai/DeepSeek-Coder-V2-Lite-Base", "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"] #-}
+{-# CHECKPOINTS ["deepseek-ai/DeepSeek-V2-Lite", "deepseek-ai/DeepSeek-V2-Lite-Chat", "deepseek-ai/DeepSeek-Coder-V2-Lite-Base", "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct", "test/DeepSeek-V2-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

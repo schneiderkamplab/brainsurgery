@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import torch
+
 from brainsurgery.synapse import lower_axon_program_to_graph_ir, parse_axon_program
 from brainsurgery.synapse.axon import (
     flatten_closed_axon_file,
@@ -170,4 +172,27 @@ def test_codegen2_nested_config_lookup_uses_dotted_path() -> None:
     assert Codegen2GraphModel._lookup_config({"decoder": {}}, "decoder.hidden_size") == (
         False,
         None,
+    )
+
+
+def test_codegen2_generated_state_placement_preserves_tensor_aliases() -> None:
+    code = emit_model_code_from_graph_ir(
+        _toy_program((GraphValue("input_ids", _tensor("B", "S")),), ("logits",))
+    )
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+
+    tensor = torch.ones(2, 2)
+    model = model_cls.from_state_dict(
+        {
+            "model.layers.0.mlp.experts.gate_up_proj.weight": tensor,
+            "model.layers.0.mlp.experts.0.gate_up_proj.weight": tensor,
+        },
+        param_devices=["cpu"],
+    )
+
+    assert (
+        model.state_dict_tensors["model.layers.0.mlp.experts.gate_up_proj.weight"]
+        is model.state_dict_tensors["model.layers.0.mlp.experts.0.gate_up_proj.weight"]
     )

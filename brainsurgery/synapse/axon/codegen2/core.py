@@ -18,6 +18,7 @@ from ..ast import (
     TypeList,
     TypeNamed,
     TypeOptional,
+    TypePath,
     TypeTensor,
     TypeTuple,
     render_type,
@@ -1311,9 +1312,18 @@ class _DirectTorchEmitter:
         add(lines, 8, "if not plan:")
         add(lines, 12, "return state_dict")
         add(lines, 8, "placed = {}")
+        add(lines, 8, "placement_cache = {}")
         add(lines, 8, "for key, value in state_dict.items():")
         add(lines, 12, "device = plan[str(key)]")
-        add(lines, 12, "placed[key] = value.to(device=device) if torch.is_tensor(value) else value")
+        add(lines, 12, "if not torch.is_tensor(value):")
+        add(lines, 16, "placed[key] = value")
+        add(lines, 16, "continue")
+        add(lines, 12, "cache_key = (id(value), str(device))")
+        add(lines, 12, "cached = placement_cache.get(cache_key)")
+        add(lines, 12, "if cached is None:")
+        add(lines, 16, "cached = value if value.device == device else value.to(device=device)")
+        add(lines, 16, "placement_cache[cache_key] = cached")
+        add(lines, 12, "placed[key] = cached")
         add(lines, 8, "return placed")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
@@ -1574,6 +1584,21 @@ class _DirectTorchEmitter:
             params = ", " + params
         add(lines, 4, f"def {self.method_names[module.name]}(self{params}):")
         local = {value.name for value in module.inputs}
+        path_inputs: list[str] = []
+        for value in module.inputs:
+            if isinstance(value.type_expr, TypePath):
+                path_inputs.append(value.name)
+            if value.default is None:
+                continue
+            default_expr = self._operand_expr(value.default, local=local, symbols_dict="self._symbols")
+            if (
+                isinstance(value.default, GraphPath)
+                and not value.default.absolute
+                and path_inputs
+            ):
+                default_expr = f"'@@' + self._compose_path({path_inputs[0]}, {default_expr})"
+            add(lines, 8, f"if {value.name} is None:")
+            add(lines, 12, f"{value.name} = {default_expr}")
         for value in module.inputs:
             _emit_bind_nested_shape_symbols(
                 lines,

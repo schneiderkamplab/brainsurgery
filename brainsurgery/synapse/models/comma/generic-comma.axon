@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["common-pile/comma-v0.1-1t", "danish-foundation-models/dfm-decoder-open-v0-7b-pt"] #-}
+{-# CHECKPOINTS ["common-pile/comma-v0.1-1t", "danish-foundation-models/dfm-decoder-open-v0-7b-pt", "test/Comma-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

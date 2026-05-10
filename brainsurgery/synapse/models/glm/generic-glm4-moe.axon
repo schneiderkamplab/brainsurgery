@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["glm_4_5_air"] #-}
+{-# CHECKPOINTS ["glm_4_5_air", "test/GLM4-MoE-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["EleutherAI/gpt-neox-20b", "EleutherAI/pythia-6.9b", "EleutherAI/pythia-12b"] #-}
+{-# CHECKPOINTS ["EleutherAI/gpt-neox-20b", "EleutherAI/pythia-6.9b", "EleutherAI/pythia-12b", "test/GPT-NeoX-Test"] #-}
 {-# TASK "causal_lm" #-}
 import Activations (gelu, gelu_new)
 import Attention (attention, merge_heads, split_qkv_heads)

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["CohereLabs/aya-expanse-8b", "CohereLabs/aya-expanse-32b"] #-}
+{-# CHECKPOINTS ["CohereLabs/aya-expanse-8b", "CohereLabs/aya-expanse-32b", "test/Cohere-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

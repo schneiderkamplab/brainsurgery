@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["openai/gpt-oss-20b", "openai/gpt-oss-120b"] #-}
+{-# CHECKPOINTS ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "test/GPT-OSS-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Attention (attention, merge_heads, reshape_heads)

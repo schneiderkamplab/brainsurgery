@@ -26,9 +26,14 @@ from ..ast import (
     Constraint,
     DimToken,
     TypeAny,
+    TypeBool,
     TypeDim,
     TypeExpr,
+    TypeFloat,
+    TypeInt,
     TypeList,
+    TypeNull,
+    TypeString,
     TypeTensor,
     TypeTuple,
 )
@@ -59,6 +64,7 @@ class GraphValue:
     type_expr: TypeExpr
     dims: tuple[DimToken, ...] | None = None
     optional: bool = False
+    default: "GraphOperand | None" = None
 
 
 @dataclass(frozen=True)
@@ -157,16 +163,20 @@ def _expr_type(expr: AxonExpr) -> TypeExpr:
 
 
 def _literal_expr(expr: AxonExpr) -> GraphLiteral | None:
-    type_expr = _expr_type(expr)
     if isinstance(expr, AxonExprInt):
+        type_expr = expr.inferred_type or TypeInt()
         return GraphLiteral(value=expr.value, type_expr=type_expr)
     if isinstance(expr, AxonExprFloat):
+        type_expr = expr.inferred_type or TypeFloat()
         return GraphLiteral(value=expr.value, type_expr=type_expr)
     if isinstance(expr, AxonExprBool):
+        type_expr = expr.inferred_type or TypeBool()
         return GraphLiteral(value=expr.value, type_expr=type_expr)
     if isinstance(expr, AxonExprNull):
+        type_expr = expr.inferred_type or TypeNull()
         return GraphLiteral(value=None, type_expr=type_expr)
     if isinstance(expr, AxonExprString):
+        type_expr = expr.inferred_type or TypeString()
         return GraphLiteral(value=expr.value, type_expr=type_expr)
     return None
 
@@ -225,6 +235,7 @@ def _param_to_value(param: AxonParam) -> GraphValue:
         type_expr=param.type_expr,
         dims=tuple(param.type_expr.dims) if isinstance(param.type_expr, TypeTensor) else None,
         optional=param.optional or param.default_expr is not None,
+        default=_expr_to_operand(param.default_expr) if param.default_expr is not None else None,
     )
 
 

@@ -425,6 +425,18 @@ def _summary_row_from_result(row: dict[str, Any]) -> dict[str, object]:
     }
 
 
+def _summary_row_from_pair(pair: _BenchmarkPair, *, fallback: str) -> dict[str, object]:
+    return {
+        "axon": str(pair.axon_file),
+        "checkpoint": pair.checkpoint_id,
+        "model_dir": str(pair.model_dir),
+        "fallback": fallback,
+        "masked_top1_eq": fallback,
+        "masked_max_abs_diff": fallback,
+        "masked_max_rel_diff": fallback,
+    }
+
+
 def _sanitize_benchmark_result(row: dict[str, Any]) -> dict[str, Any]:
     sanitized: dict[str, Any] = {
         "axon_file": row["axon_file"],
@@ -1057,6 +1069,7 @@ def run_axon_benchmark(
     debug_errors: bool = False,
     min_billion_parameters: float | None = None,
     max_billion_parameters: float | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
@@ -1094,13 +1107,16 @@ def run_axon_benchmark(
     for resolved_axon_file in _expand_axon_inputs(axon_files):
         if _matches_any_selector(resolved_axon_file, exclude_filter):
             continue
-        declared_checkpoints: tuple[str, ...] | None = None
+        declared_checkpoints = _declared_checkpoints_from_axon(
+            axon_file=resolved_axon_file,
+        )
         if checkpoint_filter:
-            checkpoints_to_run = tuple(sorted(checkpoint_filter))
-        else:
-            declared_checkpoints = _declared_checkpoints_from_axon(
-                axon_file=resolved_axon_file,
+            checkpoints_to_run = tuple(
+                checkpoint_id
+                for checkpoint_id in declared_checkpoints
+                if checkpoint_id in checkpoint_filter
             )
+        else:
             checkpoints_to_run = declared_checkpoints
         for checkpoint_id in checkpoints_to_run:
             pairs.append(
@@ -1127,6 +1143,27 @@ def run_axon_benchmark(
     )
     if not pairs:
         raise ValueError("No benchmark pairs remain after parameter-range filtering")
+
+    if dry_run:
+        summary_rows = [_summary_row_from_pair(pair, fallback="DRY-RUN") for pair in pairs]
+        if stream_csv is not None:
+            _initialize_stream_csv(stream_csv)
+            for row in summary_rows:
+                _append_stream_csv_row(stream_csv, row)
+        print()
+        print(_format_checkpoint_summary_table(summary_rows, table_format=table_format))
+        return {
+            "dry_run": True,
+            "pairs": [
+                {
+                    "axon_file": pair.axon_file,
+                    "checkpoint_id": pair.checkpoint_id,
+                    "model_dir": pair.model_dir,
+                }
+                for pair in pairs
+            ],
+            "results": [],
+        }
 
     common_kwargs = {
         "repo_root": repo_root,

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["deepseek-ai/deepseek-moe-16b-base", "deepseek-ai/deepseek-moe-16b-chat"] #-}
+{-# CHECKPOINTS ["deepseek-ai/deepseek-moe-16b-base", "deepseek-ai/deepseek-moe-16b-chat", "test/DeepSeek-V1-Test"] #-}
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "left" #-}
 

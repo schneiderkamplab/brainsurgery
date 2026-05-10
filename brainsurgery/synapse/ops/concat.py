@@ -179,7 +179,10 @@ def type_rule(
                 )
             )
             continue
-        if left_dim != right_dim:
+        dim_equivalent = getattr(helpers, "dim_equivalent", None)
+        if left_dim != right_dim and not (
+            callable(dim_equivalent) and dim_equivalent(left_dim, right_dim)
+        ):
             return None
         out_dims.append(left_dim)
     return TypeTensor(base=output_base, dims=tuple(out_dims))

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["mistralai/Mistral-7B-v0.1", "mistralai/Mistral-7B-Instruct-v0.1", "mistralai/Mistral-7B-Instruct-v0.2", "mistralai/Mistral-7B-v0.3", "mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Mistral-Nemo-Base-2407", "mistralai/Codestral-22B-v0.1", "mistralai/Mathstral-7B-v0.1", "mistralai/Devstral-Small-2507", "mistralai/Ministral-8B-Instruct-2410"] #-}
+{-# CHECKPOINTS ["mistralai/Mistral-7B-v0.1", "mistralai/Mistral-7B-Instruct-v0.1", "mistralai/Mistral-7B-Instruct-v0.2", "mistralai/Mistral-7B-v0.3", "mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Mistral-Nemo-Base-2407", "mistralai/Codestral-22B-v0.1", "mistralai/Mathstral-7B-v0.1", "mistralai/Devstral-Small-2507", "mistralai/Ministral-8B-Instruct-2410", "test/Mistral-Test"] #-}
 {-# TASK "causal_lm" #-}
 {-# TOKENIZER ["mistralai/Mistral-7B-v0.1", "mistralai/Mistral-7B-v0.1"] #-}
 {-# TOKENIZER ["mistralai/Mistral-7B-Instruct-v0.1", "mistralai/Mistral-7B-Instruct-v0.1"] #-}

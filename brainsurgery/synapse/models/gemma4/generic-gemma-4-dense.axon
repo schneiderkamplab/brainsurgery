@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["google/gemma-4-31B", "google/gemma-4-31B-it"] #-}
+{-# CHECKPOINTS ["google/gemma-4-31B", "google/gemma-4-31B-it", "test/Gemma4-Dense-Test"] #-}
 
 import Activations (gelu_pytorch_tanh, tanh)
 import Attention (attention_scaled, merge_heads, reshape_heads)

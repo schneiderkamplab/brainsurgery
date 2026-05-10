@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["allenai/Olmo-3-1025-7B", "allenai/Olmo-3-7B-Instruct", "allenai/Olmo-3-7B-Think", "allenai/Olmo-3-1125-32B"] #-}
+{-# CHECKPOINTS ["allenai/Olmo-3-1025-7B", "allenai/Olmo-3-7B-Instruct", "allenai/Olmo-3-7B-Think", "allenai/Olmo-3-1125-32B", "test/Olmo3-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

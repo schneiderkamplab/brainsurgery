@@ -48,6 +48,7 @@ from ..validate import (
     ValidationDiagnostic,
     validate_axon_program,
     validate_closed_axon_file,
+    warn_unused_definitions,
 )
 
 _PATH_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -1141,6 +1142,40 @@ def prune_unreachable_definitions(program: AxonFile, *, entrypoint: str | None =
     )
 
 
+def _resolved_unused_definition_diagnostics(
+    program: AxonFile,
+    *,
+    loaded_files: tuple[_LoadedSyntaxFile, ...],
+    root: Path,
+    builtins_dir: Path,
+) -> tuple[ValidationDiagnostic, ...]:
+    module_sources: dict[str, Path] = {}
+    root_module_names: tuple[str, ...] = ()
+    for loaded in loaded_files:
+        if loaded.path == root:
+            root_module_names = tuple(module.name for module in loaded.ast.modules)
+        for module in loaded.ast.modules:
+            canonical = f"{loaded.namespace}.{module.name}" if loaded.namespace else module.name
+            module_sources.setdefault(canonical, loaded.path)
+
+    root_entrypoint = program.pragmas.get("main")
+    if not isinstance(root_entrypoint, str) or not root_entrypoint:
+        root_entrypoint = root_module_names[-1] if root_module_names else None
+    reachable_modules = reachable_definitions(program, entrypoint=root_entrypoint)
+    return tuple(
+        warn_unused_definitions(
+            all_module_names=tuple(module.name for module in program.modules),
+            root_entrypoint=root_entrypoint,
+            reachable_modules=reachable_modules,
+            all_value_names=set(),
+            reachable_values=set(),
+            module_sources=module_sources,
+            value_sources={},
+            builtins_dir=builtins_dir,
+        )
+    )
+
+
 def _collect_path_placeholders(expr: AxonExpr) -> set[str]:
     placeholders: set[str] = set()
     if isinstance(expr, AxonExprPath):
@@ -1533,7 +1568,15 @@ def resolve_loaded_axon_files(
         origin_path=root,
     )
     validate_closed_axon_file(out)
-    return (out, ())
+    diagnostics = _resolved_unused_definition_diagnostics(
+        out,
+        loaded_files=ordered_files,
+        root=root,
+        builtins_dir=loaded_program.builtins_dir,
+    )
+    pruned = prune_unreachable_definitions(out)
+    validate_closed_axon_file(pruned)
+    return (pruned, diagnostics)
 
 
 ResolveDiagnostic = ValidationDiagnostic

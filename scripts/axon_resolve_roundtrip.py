@@ -2,53 +2,66 @@
 from __future__ import annotations
 
 import argparse
-import re
-import shutil
-import sys
 from pathlib import Path
 
 from brainsurgery.synapse.axon import render_axon_file, resolve_axon_program_from_path
 from brainsurgery.synapse.axon.validate import validate_closed_axon_file
 
-
-_BARE_CACHE_RE = re.compile(r"\??CacheLayer(?!\[)|\??Cache(?!\[|Layer)\b")
-
-
-def _default_paths() -> list[Path]:
-    roots = [Path("brainsurgery/synapse/builtins"), Path("brainsurgery/synapse/models")]
-    return [path for root in roots for path in sorted(root.rglob("*.axon"))]
-
-
-def _selected_paths(inputs: list[Path]) -> list[Path]:
-    if not inputs:
-        return _default_paths()
-    out: list[Path] = []
-    for item in inputs:
-        if item.is_dir():
-            out.extend(sorted(item.rglob("*.axon")))
-        elif item.suffix == ".axon":
-            out.append(item)
-    return out
+from scripts.axon_roundtrip_common import (
+    RoundtripResult,
+    print_result,
+    run_path_roundtrips,
+    write_generation,
+)
 
 
-def _has_stale_cache_signature(path: Path) -> bool:
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if "::" in line and _BARE_CACHE_RE.search(line):
-            return True
-    return False
+def resolve_roundtrip_path(
+    path: Path,
+    output_dir: Path,
+    *,
+    validate_closed: bool = True,
+) -> bool:
+    first_ast = resolve_axon_program_from_path(path).ast
+    if validate_closed:
+        validate_closed_axon_file(first_ast)
+    first = render_axon_file(first_ast)
+    first_path = write_generation(output_dir, "render1", path, first)
+
+    second_ast = resolve_axon_program_from_path(first_path).ast
+    if validate_closed:
+        validate_closed_axon_file(second_ast)
+    second = render_axon_file(second_ast)
+    second_path = write_generation(output_dir, "render2", path, second)
+
+    third_ast = resolve_axon_program_from_path(second_path).ast
+    if validate_closed:
+        validate_closed_axon_file(third_ast)
+    third = render_axon_file(third_ast)
+    write_generation(output_dir, "render3", path, third)
+
+    return first == second == third
 
 
-def _iter_progress(paths: list[Path], label: str):
-    try:
-        from tqdm import tqdm
-    except Exception:
-        total = len(paths)
-        for idx, path in enumerate(paths, start=1):
-            if idx == 1 or idx % 10 == 0 or idx == total:
-                print(f"{label}: {idx}/{total} {path}", file=sys.stderr, flush=True)
-            yield path
-        return
-    yield from tqdm(paths, desc=label, unit="file")
+def run_resolve_roundtrip(
+    paths: list[Path],
+    *,
+    output_dir: Path = Path("tmp/axon-stage-roundtrip-resolve"),
+    keep_existing: bool = False,
+    include_stale_cache: bool = False,
+    validate_closed: bool = True,
+) -> RoundtripResult:
+    return run_path_roundtrips(
+        paths=paths,
+        output_dir=output_dir,
+        keep_existing=keep_existing,
+        include_stale_cache=include_stale_cache,
+        label="resolve",
+        roundtrip_path=lambda path, out: resolve_roundtrip_path(
+            path,
+            out,
+            validate_closed=validate_closed,
+        ),
+    )
 
 
 def main() -> int:
@@ -79,59 +92,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    all_paths = _selected_paths(args.paths)
-    paths = [
-        path
-        for path in all_paths
-        if args.include_stale_cache or not _has_stale_cache_signature(path)
-    ]
-    skipped_stale_cache = len(all_paths) - len(paths)
-    if args.output_dir.exists() and not args.keep_existing:
-        shutil.rmtree(args.output_dir)
-
-    failed: list[tuple[Path, str]] = []
-    unstable: list[Path] = []
-    for path in _iter_progress(paths, "resolve"):
-        try:
-            first_ast = resolve_axon_program_from_path(path).ast
-            first = render_axon_file(first_ast)
-
-            first_path = args.output_dir / "render1" / path
-            first_path.parent.mkdir(parents=True, exist_ok=True)
-            first_path.write_text(first, encoding="utf-8")
-
-            second_ast = resolve_axon_program_from_path(first_path).ast
-            if not args.no_validate_closed:
-                validate_closed_axon_file(second_ast)
-            second = render_axon_file(second_ast)
-
-            second_path = args.output_dir / "render2" / path
-            second_path.parent.mkdir(parents=True, exist_ok=True)
-            second_path.write_text(second, encoding="utf-8")
-
-            third_ast = resolve_axon_program_from_path(second_path).ast
-            if not args.no_validate_closed:
-                validate_closed_axon_file(third_ast)
-            third = render_axon_file(third_ast)
-
-            third_path = args.output_dir / "render3" / path
-            third_path.parent.mkdir(parents=True, exist_ok=True)
-            third_path.write_text(third, encoding="utf-8")
-
-            if first != second or second != third:
-                unstable.append(path)
-        except Exception as exc:
-            failed.append((path, f"{type(exc).__name__}: {exc}"))
-
-    print(
-        f"total={len(all_paths)} checked={len(paths)} skipped_stale_cache={skipped_stale_cache} "
-        f"failed={len(failed)} unstable={len(unstable)} output={args.output_dir}"
+    result = run_resolve_roundtrip(
+        args.paths,
+        output_dir=args.output_dir,
+        keep_existing=args.keep_existing,
+        include_stale_cache=args.include_stale_cache,
+        validate_closed=not args.no_validate_closed,
     )
-    for path, error in failed[:40]:
-        print(f"FAIL {path}: {error}")
-    for path in unstable[:40]:
-        print(f"UNSTABLE {path}")
-    return 1 if failed or unstable else 0
+    print_result(result)
+    return 0 if result.ok else 1
 
 
 if __name__ == "__main__":

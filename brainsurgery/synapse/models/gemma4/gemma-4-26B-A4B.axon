@@ -92,7 +92,7 @@ gemma4_router x top_k ?scalar_root_size=null ?rms_eps=null = do
   topk_weights, topk_indices <- scope@router do
     h <- NN.l2norm x eps=eps
     h <- h * (Params.param path=@scale) * scalar
-    w, i <- softmax_topk_router@proj h top_k routed_scaling_factor=1.0 weight=@weight
+    w, i <- softmax_topk_router@proj h top_k routed_scaling_factor=1.0
     per_expert_scale <- Params.param path=@per_expert_scale
     b <- Tensor.size i 0
     s <- Tensor.size i 1

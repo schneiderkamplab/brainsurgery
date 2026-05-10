@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["mistralai/Mixtral-8x7B-v0.1", "mistralai/Mixtral-8x7B-Instruct-v0.1", "mistralai/Mixtral-8x22B-v0.1", "mistralai/Mixtral-8x22B-Instruct-v0.1"] #-}
+{-# CHECKPOINTS ["mistralai/Mixtral-8x7B-v0.1", "mistralai/Mixtral-8x7B-Instruct-v0.1", "mistralai/Mixtral-8x22B-v0.1", "mistralai/Mixtral-8x22B-Instruct-v0.1", "test/Mixtral-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

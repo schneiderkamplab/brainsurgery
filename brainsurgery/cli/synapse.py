@@ -927,6 +927,11 @@ def axon_benchmark(
         "--debug-errors/--no-debug-errors",
         help="Print full traceback details for benchmark pair failures.",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run/--no-dry-run",
+        help="Resolve and print benchmark pairs without launching HF/Axon workers.",
+    ),
 ) -> None:
     """Run benchmark across declared CHECKPOINTS for one or more Axon files."""
     module = _synapse_module()
@@ -971,6 +976,7 @@ def axon_benchmark(
             debug_errors=debug_errors,
             min_billion_parameters=min_billion_parameters,
             max_billion_parameters=max_billion_parameters,
+            dry_run=dry_run,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

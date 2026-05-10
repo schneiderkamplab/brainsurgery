@@ -34,9 +34,15 @@ from brainsurgery.synapse.axon.ast import (
     render_axon_file,
 )
 from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
+from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
 from brainsurgery.synapse.axon.parse import parse_axon_program
 from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
 from brainsurgery.synapse.axon.validate import validate_flat_axon_file
+
+
+def _flatten(program, *, main_module: str):
+    normalized = normalize_closed_axon_file(program, main_module=main_module)
+    return flatten_closed_axon_file(normalized, main_module=main_module)
 
 
 def _walk_expr(expr: AxonExpr):
@@ -113,7 +119,7 @@ main :: Tensor[B,S,D] -> Tensor[B,S,D]
 main x = g x |> h
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="main")
+    flat = _flatten(program, main_module="main")
     validate_flat_axon_file(flat, main_module="main")
     module = next(module for module in flat.modules if module.name == "main")
     assert module.body_expr is None
@@ -140,7 +146,7 @@ main x = do
   return y
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="main")
+    flat = _flatten(program, main_module="main")
     validate_flat_axon_file(flat, main_module="main")
     module = next(module for module in flat.modules if module.name == "main")
     binds = [stmt for stmt in module.statements if isinstance(stmt, AxonBind)]
@@ -168,10 +174,10 @@ main x = do
   return y
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="main")
+    flat = _flatten(program, main_module="main")
     rendered = render_axon_file(flat)
     reparsed = parse_axon_program(rendered)
-    reflattened = flatten_closed_axon_file(reparsed, main_module="main")
+    reflattened = _flatten(reparsed, main_module="main")
     assert ast_equal(flat, reflattened)
 
 
@@ -183,7 +189,7 @@ main x = do
   return y
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="main")
+    flat = _flatten(program, main_module="main")
     validate_flat_axon_file(flat, main_module="main")
     module = next(module for module in flat.modules if module.name == "main")
     assert not any(isinstance(stmt, AxonCond) for stmt in module.statements)
@@ -216,7 +222,7 @@ main x = do
   return y
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="main")
+    flat = _flatten(program, main_module="main")
     validate_flat_axon_file(flat, main_module="main")
     module = next(module for module in flat.modules if module.name == "main")
     assert not any(isinstance(stmt, AxonScopeBind) for stmt in module.statements)
@@ -229,7 +235,7 @@ main x = do
     assert AxonExprPath(absolute=True, parts=("outer", "attn", "q_proj")) in path_exprs
 
 
-def test_flatten_expands_callee_path_sugar_and_optional_defaults() -> None:
+def test_flatten_expands_callee_path_sugar_without_default_expansion() -> None:
     source = """
 use :: Path -> Tensor[B,S,D] -> ?Bool -> ?Int -> Tensor[B,S,D]
 use@path x ?flag=false limit = x
@@ -238,7 +244,7 @@ main :: Tensor[B,S,D] -> Tensor[B,S,D]
 main x = use@proj x
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="main")
+    flat = _flatten(program, main_module="main")
     validate_flat_axon_file(flat, main_module="main")
     module = next(module for module in flat.modules if module.name == "main")
     call_bind = next(stmt for stmt in module.statements if isinstance(stmt, AxonBind))
@@ -246,8 +252,8 @@ main x = use@proj x
     assert isinstance(call_expr, AxonExprCall)
     assert call_expr.callee == "use"
     assert call_expr.args[0] == AxonExprPath(absolute=True, parts=("proj",))
-    assert call_expr.kwargs["flag"] == AxonExprBool(value=False)
-    assert call_expr.kwargs["limit"] == AxonExprNull()
+    assert "flag" not in call_expr.kwargs
+    assert "limit" not in call_expr.kwargs
 
 
 def test_flatten_tail_recurses_repeat_without_step_helper() -> None:
@@ -264,11 +270,17 @@ main x = do
   return x
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="main")
+    flat = _flatten(program, main_module="main")
     validate_flat_axon_file(flat, main_module="main")
     main_module = next(module for module in flat.modules if module.name == "main")
     assert not any(isinstance(stmt, AxonRepeat) for stmt in main_module.statements)
-    recur_bind = next(stmt for stmt in main_module.statements if isinstance(stmt, AxonBind))
+    recur_bind = next(
+        stmt
+        for stmt in main_module.statements
+        if isinstance(stmt, AxonBind)
+        and isinstance(stmt.expr, AxonExprCall)
+        and stmt.expr.callee.startswith("main__loop_h_recur")
+    )
     recur_call = recur_bind.expr
     assert isinstance(recur_call, AxonExprCall)
     recur_module = next(module for module in flat.modules if module.name == recur_call.callee)
@@ -284,7 +296,7 @@ def test_flatten_threads_loop_scope_into_called_module_paths() -> None:
     resolved = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
     ).ast
-    flat = flatten_closed_axon_file(resolved, main_module="gpt2")
+    flat = _flatten(resolved, main_module="gpt2")
     validate_flat_axon_file(flat, main_module="gpt2")
     gpt2_block = next(module for module in flat.modules if module.name == "gpt2_block")
     assert gpt2_block.path_param is None
@@ -309,11 +321,11 @@ wrap@__scope x = do
   return y
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="wrap")
+    flat = _flatten(program, main_module="wrap")
     validate_flat_axon_file(flat, main_module="wrap")
     rendered = render_axon_file(flat)
     assert "@@'{__scope}.proj'" in rendered
-    assert "@@'{__scope}.proj.weight'" in rendered
+    assert "@@'{__scope}.proj.weight'" not in rendered
 
 
 def test_flatten_preserves_explicit_relative_path_kwarg() -> None:
@@ -327,7 +339,7 @@ wrap@__scope x = do
   return y
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="wrap")
+    flat = _flatten(program, main_module="wrap")
     validate_flat_axon_file(flat, main_module="wrap")
     rendered = render_axon_file(flat)
     assert "@@'{__scope}.proj'" in rendered
@@ -346,10 +358,11 @@ wrap@__scope x = do
   return y
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="wrap")
+    flat = _flatten(program, main_module="wrap")
     validate_flat_axon_file(flat, main_module="wrap")
     rendered = render_axon_file(flat)
-    assert "scale @@'{__scope}' x scale_path=@@'{__scope}.layer_scalar'" in rendered
+    assert "scale x" in rendered
+    assert "scale_path=@@'{__scope}.layer_scalar'" not in rendered
 
 
 def test_flatten_preserves_forwarded_path_kwarg_for_synthesized_scope_args() -> None:
@@ -363,10 +376,10 @@ norm@path x ?scale_path=@weight = do
   return y
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="norm")
+    flat = _flatten(program, main_module="norm")
     validate_flat_axon_file(flat, main_module="norm")
     rendered = render_axon_file(flat)
-    assert "scale @@'{path}' x scale_path=scale_path" in rendered
+    assert "scale x scale_path=scale_path" in rendered
     assert "scale_path=@@'{path}.layer_scalar'" not in rendered
 
 
@@ -381,7 +394,7 @@ main input_ids past_kv = do
   return x
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="main")
+    flat = _flatten(program, main_module="main")
     validate_flat_axon_file(flat, main_module="main")
     assert flat.type_aliases == {}
     module = next(module for module in flat.modules if module.name == "main")
@@ -417,12 +430,15 @@ main x = x
 A = _config_int (@@text_config.hidden_size) default=(_config_int (@@hidden_size) default=640)
 """
     program = parse_axon_program(source)
-    flat = flatten_closed_axon_file(program, main_module="main")
+    flat = _flatten(program, main_module="main")
     const_module = next(module for module in flat.modules if module.name == "A")
-    assert len(const_module.statements) == 2
-    bind_stmt = const_module.statements[0]
+    assert len(const_module.statements) == 3
+    default_bind = const_module.statements[0]
+    bind_stmt = const_module.statements[1]
+    assert isinstance(default_bind, AxonBind)
     assert isinstance(bind_stmt, AxonBind)
+    assert isinstance(default_bind.expr, AxonExprCall)
     const_expr = bind_stmt.expr
     assert isinstance(const_expr, AxonExprCall)
     default_expr = const_expr.kwargs["default"]
-    assert isinstance(default_expr, AxonExprCall)
+    assert default_expr == AxonExprName(default_bind.targets[0])

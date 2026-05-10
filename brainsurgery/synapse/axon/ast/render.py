@@ -69,6 +69,14 @@ def _format_pragma_value(value: object) -> str:
     return _format_scalar(value)
 
 
+def _iter_pragma_values(value: object) -> tuple[object, ...]:
+    if isinstance(value, dict) and set(value) == {"__pragma_occurrences__"}:
+        occurrences = value["__pragma_occurrences__"]
+        if isinstance(occurrences, list | tuple):
+            return tuple(occurrences)
+    return (value,)
+
+
 def _emit_inferred_expr_types(show_types: bool, show_inferred_expr_types: bool | None) -> bool:
     return show_types if show_inferred_expr_types is None else show_inferred_expr_types
 
@@ -105,6 +113,26 @@ def _render_call_arg(expr: AxonExpr, *, bound_names: set[str], show_types: bool 
     ):
         return f"({rendered})"
     return rendered
+
+
+def _render_ternary_cond(
+    expr: AxonExpr, *, bound_names: set[str], show_types: bool = False, show_inferred_expr_types: bool | None = None
+) -> str:
+    if isinstance(expr, AxonExprCall):
+        if not expr.args and not expr.kwargs:
+            return expr.callee
+        return _render_call_arg(
+            expr,
+            bound_names=bound_names,
+            show_types=show_types,
+            show_inferred_expr_types=show_inferred_expr_types,
+        )
+    return render_axon_expr(
+        expr,
+        bound_names=bound_names,
+        show_types=show_types,
+        show_inferred_expr_types=show_inferred_expr_types,
+    )
 
 
 def _render_axon_expr_base(
@@ -172,7 +200,7 @@ def _render_axon_expr_base(
         )
     if isinstance(expr, AxonExprTernary):
         return (
-            f"{render_axon_expr(expr.cond, bound_names=names, show_types=show_types, show_inferred_expr_types=show_inferred_expr_types)} ? "
+            f"{_render_ternary_cond(expr.cond, bound_names=names, show_types=show_types, show_inferred_expr_types=show_inferred_expr_types)} ? "
             f"{render_axon_expr(expr.true_expr, bound_names=names, show_types=show_types, show_inferred_expr_types=show_inferred_expr_types)} : "
             f"{render_axon_expr(expr.false_expr, bound_names=names, show_types=show_types, show_inferred_expr_types=show_inferred_expr_types)}"
         )
@@ -480,7 +508,8 @@ def render_axon_file(ast: AxonFile, *, show_types: bool = False, show_inferred_e
     blocks: list[str] = []
     for key, value in ast.pragmas.items():
         name = key.upper()
-        blocks.append(f"{{-# {name} {_format_pragma_value(value)} #-}}")
+        for occurrence in _iter_pragma_values(value):
+            blocks.append(f"{{-# {name} {_format_pragma_value(occurrence)} #-}}")
     for namespace in ast.imports:
         members = ast.imported_members.get(namespace, ())
         if members:

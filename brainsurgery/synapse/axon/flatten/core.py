@@ -346,6 +346,18 @@ def _is_atomic_expr(expr: AxonExpr) -> bool:
     return False
 
 
+def _bind_if_non_atomic(
+    prelude: list[AxonStatement],
+    expr: AxonExpr,
+    ctx: _FlattenCtx,
+) -> AxonExpr:
+    if _is_atomic_expr(expr):
+        return expr
+    temp = ctx.fresh()
+    prelude.append(AxonBind(targets=(temp,), expr=expr))
+    return AxonExprName(name=temp)
+
+
 def _wrap_inline_do(prelude: list[AxonStatement], expr: AxonExpr) -> AxonExpr:
     if not prelude:
         return expr
@@ -605,7 +617,7 @@ def _expand_call_surface(
 def _loop_scope_parts(stmt: AxonRepeat) -> tuple[str, ...]:
     if not stmt.name:
         return ()
-    return (stmt.name, f"{{{stmt.var}}}")
+    return (*tuple(part for part in stmt.name.split(".") if part), f"{{{stmt.var}}}")
 
 
 def _normalize_path_expr(
@@ -1246,8 +1258,9 @@ def _extract_repeat_recursive_helper(
             AxonReturn(values=tuple(AxonExprName(name=name) for name in carry_names))
         )
     else:
-        helper_body.append(AxonBind(targets=("_",), expr=helper_result_expr))
-        helper_body.append(AxonReturn(values=(AxonExprName(name="_"),)))
+        helper_result_name = ctx.fresh(prefix="__loop_result")
+        helper_body.append(AxonBind(targets=(helper_result_name,), expr=helper_result_expr))
+        helper_body.append(AxonReturn(values=(AxonExprName(name=helper_result_name),)))
 
     helper_module = AxonDefinition(
         name=helper_name,
@@ -1963,7 +1976,7 @@ def _flatten_expr(
                 program_ctx=program_ctx,
             )
             call_prelude.extend(arg_pre)
-            args.append(arg_expr)
+            args.append(_bind_if_non_atomic(call_prelude, arg_expr, ctx))
         kwargs: dict[str, AxonKwargValue] = {}
         for key, raw_value in call_expr.kwargs.items():
             if isinstance(raw_value, AxonExprPath):
@@ -1977,7 +1990,7 @@ def _flatten_expr(
                     program_ctx=program_ctx,
                 )
                 call_prelude.extend(kw_pre)
-                kwargs[key] = kw_expr
+                kwargs[key] = _bind_if_non_atomic(call_prelude, kw_expr, ctx)
             else:
                 kwargs[key] = raw_value
         _absolutize_call_relative_paths(
@@ -2302,7 +2315,7 @@ def _flatten_statements(
 
 
 def _is_inlineable_flat_temp_expr(expr: AxonExpr) -> bool:
-    return isinstance(expr, AxonExprCall) and not expr.args and not expr.kwargs
+    return False
 
 
 def _inline_trivial_temp_binds(stmts: tuple[AxonStatement, ...]) -> tuple[AxonStatement, ...]:
@@ -2407,7 +2420,6 @@ def _flatten_module(
         ctx=ctx,
         globals_by_name=globals_by_name,
     )
-    statements = _inline_trivial_temp_binds(statements)
     seen_path_param_names: set[str] = set()
     ordered_path_param_names: list[str] = []
     for name in (

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["microsoft/Phi-3-small-8k-instruct", "microsoft/Phi-3-small-128k-instruct"] #-}
+{-# CHECKPOINTS ["microsoft/Phi-3-small-8k-instruct", "microsoft/Phi-3-small-128k-instruct", "test/Phi3-Small-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (gegelu)

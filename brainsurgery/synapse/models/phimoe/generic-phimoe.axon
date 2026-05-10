@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["microsoft/Phi-3.5-MoE-instruct"] #-}
+{-# CHECKPOINTS ["microsoft/Phi-3.5-MoE-instruct", "test/Phi-MoE-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

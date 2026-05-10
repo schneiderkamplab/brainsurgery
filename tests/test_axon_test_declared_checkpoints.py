@@ -196,6 +196,78 @@ main x = do
     }
 
 
+def test_run_axon_benchmark_explicit_checkpoints_are_file_local(
+    tmp_path: Path, monkeypatch
+) -> None:
+    axon_path_1 = tmp_path / "gemma3.axon"
+    axon_path_1.write_text(
+        """
+{-# CHECKPOINTS ["google/gemma-3-270m", "google/gemma-3-270m-it"] #-}
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    axon_path_2 = tmp_path / "t5.axon"
+    axon_path_2.write_text(
+        """
+{-# CHECKPOINTS "google-t5/t5-small" #-}
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    single_runs: list[tuple[Path, Path]] = []
+
+    def _fake_repo_root() -> Path:
+        return tmp_path
+
+    def _fake_ensure_checkpoint_model_dir(*, repo_root: Path, checkpoint_id: str) -> Path:
+        return repo_root / "models" / checkpoint_id
+
+    def _fake_run_single(**kwargs):
+        single_runs.append((kwargs["axon_file"], kwargs["weights"]))
+        return {"masked_top1_eq": True, "max_diff": 0.0}
+
+    monkeypatch.setattr(axon_benchmark_module, "_repo_root", _fake_repo_root)
+    monkeypatch.setattr(
+        axon_benchmark_module,
+        "_ensure_checkpoint_model_dir",
+        _fake_ensure_checkpoint_model_dir,
+    )
+    monkeypatch.setattr(axon_benchmark_module, "_run_axon_test_single", _fake_run_single)
+
+    result = axon_benchmark_module.run_axon_benchmark(
+        axon_files=[axon_path_1, axon_path_2],
+        checkpoints=["google/gemma-3-270m-it", "google-t5/t5-small"],
+        device="cpu",
+        dtype="float32",
+        text="hi",
+        max_len=4,
+        table_format="plain",
+    )
+
+    assert single_runs == [
+        (
+            axon_path_1.resolve(),
+            tmp_path / "models" / "google/gemma-3-270m-it",
+        ),
+        (
+            axon_path_2.resolve(),
+            tmp_path / "models" / "google-t5" / "t5-small",
+        ),
+    ]
+    assert [row["checkpoint_id"] for row in result["results"]] == [
+        "google/gemma-3-270m-it",
+        "google-t5/t5-small",
+    ]
+
+
 @KNOWN_DECLARED_PRAGMA_REGRESSION
 def test_tokenizer_pragma_for_checkpoint_supports_global_and_override(tmp_path: Path) -> None:
     axon = tmp_path / "toy.axon"
@@ -864,6 +936,60 @@ main x = do
     )
     assert "google/gemma-a" in csv_text
     assert "google/gemma-b" in csv_text
+
+
+def test_run_axon_benchmark_dry_run_lists_pairs_without_workers(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    axon_path = tmp_path / "gemma.axon"
+    axon_path.write_text(
+        """
+{-# CHECKPOINTS ["google/gemma-a", "google/gemma-b"] #-}
+main :: Tensor[B,T,D] -> Tensor[B,T,D]
+main x = do
+  return x
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    csv_path = tmp_path / "dry" / "benchmark.csv"
+
+    def _fake_repo_root() -> Path:
+        return tmp_path
+
+    def _fake_run_single(**kwargs):
+        raise AssertionError("dry-run must not launch benchmark workers")
+
+    monkeypatch.setattr(axon_benchmark_module, "_repo_root", _fake_repo_root)
+    monkeypatch.setattr(axon_benchmark_module, "_run_axon_test_single", _fake_run_single)
+
+    result = axon_benchmark_module.run_axon_benchmark(
+        axon_files=[axon_path],
+        checkpoints=["google/gemma-b"],
+        device="cpu",
+        dtype="float32",
+        text="hi",
+        max_len=4,
+        table_format="plain",
+        stream_csv=csv_path,
+        dry_run=True,
+    )
+
+    assert result["dry_run"] is True
+    assert result["pairs"] == [
+        {
+            "axon_file": axon_path.resolve(),
+            "checkpoint_id": "google/gemma-b",
+            "model_dir": tmp_path / "models" / "google/gemma-b",
+        }
+    ]
+    assert result["results"] == []
+    output = capsys.readouterr().out
+    assert "google/gemma-b" in output
+    assert "DRY-RUN" in output
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert "google/gemma-b" in csv_text
+    assert "DRY-RUN" in csv_text
 
 
 def test_render_axon_benchmark_csv_sorts_rows(tmp_path: Path) -> None:

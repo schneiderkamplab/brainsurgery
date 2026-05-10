@@ -75,23 +75,23 @@ deepseek_v4_hc_head x = do
   weighted <- pre * x
   return Tensor.sum weighted dim=2 keepdim=false
 
-deepseek_v4_hyper_connection :: Path -> Tensor[B,S,2,MODEL_DIM] -> (Any, Any, Any)
+deepseek_v4_hyper_connection :: Path -> Tensor[B,S,HC_MULT,MODEL_DIM] -> (Any, Any, Any)
 deepseek_v4_hyper_connection@path hidden_streams = do
-  flat <- Tensor.reshape hidden_streams shape=[B, S, (2 * MODEL_DIM)]
-  flat <- NN.rmsnorm_noscale flat eps=EPS dim=(2 * MODEL_DIM) cast_float=true
-  mix_dim <- (2 + 2) * 2
+  flat <- Tensor.reshape hidden_streams shape=[B, S, (HC_MULT * MODEL_DIM)]
+  flat <- NN.rmsnorm_noscale flat eps=EPS dim=(HC_MULT * MODEL_DIM) cast_float=true
+  mix_dim <- (2 + HC_MULT) * HC_MULT
   mix <- NN.linear@path flat dim=mix_dim bias=false weight_path=@fn
   scale <- param @scale
   base <- param @base
   pre_scale <- Tensor.slice scale dim=0 start=0 end=1 |> Tensor.reshape shape=[1, 1, 1]
   post_scale <- Tensor.slice scale dim=0 start=1 end=2 |> Tensor.reshape shape=[1, 1, 1]
   comb_scale <- Tensor.slice scale dim=0 start=2 end=3 |> Tensor.reshape shape=[1, 1, 1, 1]
-  pre_base <- Tensor.slice base dim=0 start=0 end=2 |> Tensor.reshape shape=[1, 1, 2]
-  post_base <- Tensor.slice base dim=0 start=2 end=(2 * 2) |> Tensor.reshape shape=[1, 1, 2]
-  comb_base <- Tensor.slice base dim=0 start=(2 * 2) end=mix_dim |> Tensor.reshape shape=[1, 1, 2, 2]
-  pre_logits <- Tensor.slice mix dim=-1 start=0 end=2
-  post_logits <- Tensor.slice mix dim=-1 start=2 end=(2 * 2)
-  comb_logits <- Tensor.slice mix dim=-1 start=(2 * 2) end=mix_dim |> Tensor.reshape shape=[B, S, 2, 2]
+  pre_base <- Tensor.slice base dim=0 start=0 end=HC_MULT |> Tensor.reshape shape=[1, 1, HC_MULT]
+  post_base <- Tensor.slice base dim=0 start=HC_MULT end=(2 * HC_MULT) |> Tensor.reshape shape=[1, 1, HC_MULT]
+  comb_base <- Tensor.slice base dim=0 start=(2 * HC_MULT) end=mix_dim |> Tensor.reshape shape=[1, 1, HC_MULT, HC_MULT]
+  pre_logits <- Tensor.slice mix dim=-1 start=0 end=HC_MULT
+  post_logits <- Tensor.slice mix dim=-1 start=HC_MULT end=(2 * HC_MULT)
+  comb_logits <- Tensor.slice mix dim=-1 start=(2 * HC_MULT) end=mix_dim |> Tensor.reshape shape=[B, S, HC_MULT, HC_MULT]
   pre <- sigmoid ((pre_logits * pre_scale) + pre_base)
   pre <- pre + EPS
   post <- sigmoid ((post_logits * post_scale) + post_base)
@@ -202,7 +202,7 @@ deepseek_v4_csa_compress@path hidden_states q_res pos_ids layer_type = do
   prev_kv <- Tensor.slice kv dim=-1 start=0 end=HEAD_DIM
   prev_gate <- Tensor.slice gate dim=-1 start=0 end=HEAD_DIM
   zero_kv <- Tensor.zeros cur_kv shape=[B, 1, 4, HEAD_DIM]
-  neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, HEAD_DIM] value=-3.4028234663852886e38
+  neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, HEAD_DIM] value=(Tensor.dtype_value cur_gate "min")
   prev_kv_shift <- (nwin == 0) ? zero_kv : Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
   prev_gate_shift <- (nwin == 0) ? neg_gate : Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
   new_kv <- Tensor.concat prev_kv_shift cur_kv dim=2
@@ -238,7 +238,7 @@ deepseek_v4_csa_index@path hidden_states q_res pos_ids = do
   prev_kv <- Tensor.slice kv dim=-1 start=0 end=INDEX_HEAD_DIM
   prev_gate <- Tensor.slice gate dim=-1 start=0 end=INDEX_HEAD_DIM
   zero_kv <- Tensor.zeros cur_kv shape=[B, 1, 4, INDEX_HEAD_DIM]
-  neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, INDEX_HEAD_DIM] value=-3.4028234663852886e38
+  neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, INDEX_HEAD_DIM] value=(Tensor.dtype_value cur_gate "min")
   prev_kv_shift <- (nwin == 0) ? zero_kv : Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
   prev_gate_shift <- (nwin == 0) ? neg_gate : Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
   new_kv <- Tensor.concat prev_kv_shift cur_kv dim=2
@@ -321,7 +321,7 @@ deepseek_v4_mlp@path x input_ids mlp_type = do
   shared <- Tensor.reshape x shape=[B * S, MODEL_DIM] |> deepseek_v4_swiglu@shared_experts |> Tensor.reshape shape=[B, S, MODEL_DIM]
   return routed + shared
 
-deepseek_v4_block :: Path -> Tensor[B,S,2,MODEL_DIM] -> Tensor.TokenIds[B,S] -> Tensor[B,S] -> ?Tensor[B,K] -> String -> String -> Tensor[B,S,2,MODEL_DIM]
+deepseek_v4_block :: Path -> Tensor[B,S,HC_MULT,MODEL_DIM] -> Tensor.TokenIds[B,S] -> Tensor[B,S] -> ?Tensor[B,K] -> String -> String -> Tensor[B,S,HC_MULT,MODEL_DIM]
 deepseek_v4_block@path hidden_states input_ids pos_ids attn_mask layer_type mlp_type = do
   post, comb, collapsed <- deepseek_v4_hyper_connection@attn_hc hidden_states
   attn_in <- NN.rmsnorm@input_layernorm collapsed eps=EPS dim=MODEL_DIM cast_float=true

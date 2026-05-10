@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "mistralai/Mistral-Small-4-119B-2603" #-}
+{-# CHECKPOINTS ["mistralai/Mistral-Small-4-119B-2603", "test/Mistral4-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

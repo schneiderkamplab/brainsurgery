@@ -85,8 +85,25 @@ def _normalize_single_pragma_value(name: str, value: object) -> object:
                 and checkpoint
                 and isinstance(tokenizer, str)
                 and tokenizer
-            ):
-                return (checkpoint, tokenizer)
+                ):
+                    return (checkpoint, tokenizer)
+        if isinstance(value, list | tuple):
+            entries: list[tuple[str, str]] = []
+            for item in value:
+                if not isinstance(item, list | tuple) or len(item) != 2:
+                    break
+                checkpoint, tokenizer = item
+                if not (
+                    isinstance(checkpoint, str)
+                    and checkpoint
+                    and isinstance(tokenizer, str)
+                    and tokenizer
+                ):
+                    break
+                entries.append((checkpoint, tokenizer))
+            else:
+                if entries:
+                    return tuple(entries)
         raise ValueError("TOKENIZER must be a non-empty string or a [checkpoint, tokenizer] pair")
     if name == "checkpoints":
         if isinstance(value, str):
@@ -117,17 +134,19 @@ def _merge_tokenizer_pragma(prev_value: object | None, pragma_value: object) -> 
         raise ValueError("invalid TOKENIZER pragma state")
 
     entries = _entries(prev_value)
-    new_entry = pragma_value
-    if isinstance(new_entry, str):
-        for entry in entries:
-            if isinstance(entry, str):
-                if entry != new_entry:
-                    raise ValueError(
-                        "conflicting TOKENIZER pragmas; expected a single consistent global tokenizer"
-                    )
-                return prev_value if prev_value is not None else new_entry
-        entries.insert(0, new_entry)
-    else:
+    new_entries = _entries(pragma_value)
+    for new_entry in new_entries:
+        if isinstance(new_entry, str):
+            for entry in entries:
+                if isinstance(entry, str):
+                    if entry != new_entry:
+                        raise ValueError(
+                            "conflicting TOKENIZER pragmas; expected a single consistent global tokenizer"
+                        )
+                    break
+            else:
+                entries.insert(0, new_entry)
+            continue
         checkpoint, tokenizer = cast(tuple[str, str], new_entry)
         for entry in entries:
             if (
@@ -140,8 +159,9 @@ def _merge_tokenizer_pragma(prev_value: object | None, pragma_value: object) -> 
                     raise ValueError(
                         "conflicting TOKENIZER pragmas; expected a single tokenizer per checkpoint"
                     )
-                return prev_value if prev_value is not None else new_entry
-        entries.append(new_entry)
+                break
+        else:
+            entries.append(new_entry)
 
     if len(entries) == 1:
         return entries[0]
@@ -242,13 +262,6 @@ def _expand_call_surface(
         )
 
     covered_param_count = max(0, len(explicit_args) - path_slot_count)
-    for idx, param in enumerate(module.params):
-        if idx < covered_param_count or param.name in original_kwargs:
-            continue
-        if not param.optional or param.default_expr is None:
-            continue
-        original_kwargs[param.name] = deepcopy(param.default_expr)
-
     return AxonExprCall(callee=base_callee, args=tuple(explicit_args), kwargs=original_kwargs)
 
 
@@ -266,6 +279,13 @@ def _is_zero_arg_definition(module: AxonDefinition) -> bool:
         and module.path_param is None
         and not module.params
     )
+
+
+def _canonical_path_expr(expr: AxonExprPath) -> AxonExprPath:
+    parts: list[str] = []
+    for part in expr.parts:
+        parts.extend(piece for piece in part.split(".") if piece)
+    return replace(expr, parts=tuple(parts))
 
 
 def _pipe_stage_to_call(value: AxonExpr, stage: AxonExpr) -> AxonExpr:
@@ -315,6 +335,8 @@ def _normalize_expr(
         ):
             return AxonExprCall(callee=expr.name, args=(), kwargs={})
         return expr
+    if isinstance(expr, AxonExprPath):
+        return _canonical_path_expr(expr)
     if isinstance(expr, AxonExprCall):
         args = tuple(
             _normalize_expr(
@@ -373,14 +395,21 @@ def _normalize_expr(
             ),
         )
     if isinstance(expr, AxonExprIf | AxonExprTernary):
+        cond = _normalize_expr(
+            expr.cond,
+            modules_by_name=modules_by_name,
+            value_names=value_names,
+            bound_names=bound_names,
+        )
+        if (
+            isinstance(expr, AxonExprTernary)
+            and isinstance(cond, AxonExprParen)
+            and isinstance(cond.inner, AxonExprCall)
+        ):
+            cond = cond.inner
         return replace(
             expr,
-            cond=_normalize_expr(
-                expr.cond,
-                modules_by_name=modules_by_name,
-                value_names=value_names,
-                bound_names=bound_names,
-            ),
+            cond=cond,
             true_expr=_normalize_expr(
                 expr.true_expr,
                 modules_by_name=modules_by_name,
@@ -423,24 +452,27 @@ def _normalize_expr(
             ),
         )
     if isinstance(expr, AxonExprParen):
-        return replace(
-            expr,
-            inner=_normalize_expr(
-                expr.inner,
-                modules_by_name=modules_by_name,
-                value_names=value_names,
-                bound_names=bound_names,
-            ),
+        inner = _normalize_expr(
+            expr.inner,
+            modules_by_name=modules_by_name,
+            value_names=value_names,
+            bound_names=bound_names,
         )
+        if isinstance(inner, AxonExprAscribe):
+            return inner
+        return replace(expr, inner=inner)
     if isinstance(expr, AxonExprAscribe):
+        inner = _normalize_expr(
+            expr.expr,
+            modules_by_name=modules_by_name,
+            value_names=value_names,
+            bound_names=bound_names,
+        )
+        if isinstance(inner, AxonExprParen):
+            inner = inner.inner
         return replace(
             expr,
-            expr=_normalize_expr(
-                expr.expr,
-                modules_by_name=modules_by_name,
-                value_names=value_names,
-                bound_names=bound_names,
-            ),
+            expr=inner,
         )
     if isinstance(expr, AxonExprList | AxonExprTuple):
         return replace(
@@ -586,6 +618,7 @@ def _normalize_statement(
     if isinstance(stmt, AxonScopeBind):
         return replace(
             stmt,
+            prefix=_canonical_path_expr(stmt.prefix),
             kwargs={
                 key: _normalize_expr(
                     value,

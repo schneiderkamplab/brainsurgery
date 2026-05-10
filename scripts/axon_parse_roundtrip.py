@@ -2,42 +2,56 @@
 from __future__ import annotations
 
 import argparse
-import shutil
-import sys
 from pathlib import Path
 
 from brainsurgery.synapse.axon import ast_equal, parse_axon_program, parse_axon_program_from_path
 from brainsurgery.synapse.axon import render_axon_file
 
-
-def _default_paths() -> list[Path]:
-    roots = [Path("brainsurgery/synapse/builtins"), Path("brainsurgery/synapse/models")]
-    return [path for root in roots for path in sorted(root.rglob("*.axon"))]
-
-
-def _selected_paths(inputs: list[Path]) -> list[Path]:
-    if not inputs:
-        return _default_paths()
-    out: list[Path] = []
-    for item in inputs:
-        if item.is_dir():
-            out.extend(sorted(item.rglob("*.axon")))
-        elif item.suffix == ".axon":
-            out.append(item)
-    return out
+from scripts.axon_roundtrip_common import (
+    RoundtripResult,
+    iter_progress,
+    prepare_output_dir,
+    print_result,
+    selected_axon_paths,
+)
 
 
-def _iter_progress(paths: list[Path], label: str):
-    try:
-        from tqdm import tqdm
-    except Exception:
-        total = len(paths)
-        for idx, path in enumerate(paths, start=1):
-            if idx == 1 or idx % 10 == 0 or idx == total:
-                print(f"{label}: {idx}/{total} {path}", file=sys.stderr, flush=True)
-            yield path
-        return
-    yield from tqdm(paths, desc=label, unit="file")
+def parse_roundtrip_path(path: Path, output_dir: Path) -> bool:
+    parsed = parse_axon_program_from_path(path)
+    rendered = render_axon_file(parsed)
+    reparsed = parse_axon_program(rendered)
+    rerendered = render_axon_file(reparsed)
+
+    output_path = output_dir / path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(rendered, encoding="utf-8")
+    return rerendered == rendered and ast_equal(parsed, reparsed)
+
+
+def run_parse_roundtrip(
+    paths: list[Path],
+    *,
+    output_dir: Path = Path("tmp/axon-stage-roundtrip-parse"),
+    keep_existing: bool = False,
+) -> RoundtripResult:
+    selected = selected_axon_paths(paths)
+    prepare_output_dir(output_dir, keep_existing=keep_existing)
+    failed: list[tuple[Path, str]] = []
+    unstable: list[Path] = []
+    for path in iter_progress(selected, "parse"):
+        try:
+            if not parse_roundtrip_path(path, output_dir):
+                unstable.append(path)
+        except Exception as exc:
+            failed.append((path, f"{type(exc).__name__}: {exc}"))
+    return RoundtripResult(
+        total=len(selected),
+        checked=len(selected),
+        skipped_stale_cache=0,
+        failed=tuple(failed),
+        unstable=tuple(unstable),
+        output_dir=output_dir,
+    )
 
 
 def main() -> int:
@@ -58,34 +72,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    paths = _selected_paths(args.paths)
-    if args.output_dir.exists() and not args.keep_existing:
-        shutil.rmtree(args.output_dir)
-
-    failed: list[tuple[Path, str]] = []
-    unstable: list[Path] = []
-    for path in _iter_progress(paths, "parse"):
-        try:
-            parsed = parse_axon_program_from_path(path)
-            rendered = render_axon_file(parsed)
-            reparsed = parse_axon_program(rendered)
-            if not ast_equal(parsed, reparsed):
-                unstable.append(path)
-            output_path = args.output_dir / path
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(rendered, encoding="utf-8")
-        except Exception as exc:
-            failed.append((path, f"{type(exc).__name__}: {exc}"))
-
-    print(
-        f"checked={len(paths)} failed={len(failed)} unstable={len(unstable)} "
-        f"output={args.output_dir}"
+    result = run_parse_roundtrip(
+        args.paths,
+        output_dir=args.output_dir,
+        keep_existing=args.keep_existing,
     )
-    for path, error in failed[:40]:
-        print(f"FAIL {path}: {error}")
-    for path in unstable[:40]:
-        print(f"UNSTABLE {path}")
-    return 1 if failed or unstable else 0
+    print_result(result)
+    return 0 if result.ok else 1
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["Qwen/Qwen3-30B-A3B"] #-}
+{-# CHECKPOINTS ["Qwen/Qwen3-30B-A3B", "test/Qwen3-MoE-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

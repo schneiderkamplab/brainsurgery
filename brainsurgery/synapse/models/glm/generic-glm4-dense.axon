@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["zai-org/GLM-4-9B-0414", "zai-org/GLM-Z1-9B-0414"] #-}
+{-# CHECKPOINTS ["zai-org/GLM-4-9B-0414", "zai-org/GLM-Z1-9B-0414", "test/GLM4-Dense-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

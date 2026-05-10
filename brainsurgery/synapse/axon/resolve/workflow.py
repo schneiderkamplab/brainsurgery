@@ -30,8 +30,8 @@ class ResolveReport:
 
 def resolve_axon_program_from_path(path: Path, *, strict: bool = False) -> ResolveReport:
     loaded = load_axon_files_from_path(path)
-    ast, _ = resolve_loaded_axon_files(loaded)
-    diagnostics = resolve_validation_diagnostics(loaded, ast)
+    ast, resolve_diagnostics = resolve_loaded_axon_files(loaded)
+    diagnostics = (*resolve_diagnostics, *resolve_validation_diagnostics(loaded, ast))
     if strict:
         raise_on_warnings(stage_name="resolver", diagnostics=diagnostics)
     return ResolveReport(ast=ast, diagnostics=diagnostics)

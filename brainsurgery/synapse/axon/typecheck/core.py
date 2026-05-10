@@ -2506,6 +2506,7 @@ class _PrimitiveTypeHelpers:
     type_tensor: Any
     resolve_name_expr: Any
     broadcast_tensor_dims: Any
+    dim_equivalent: Any
 
 
 def _is_type_expr_instance(value: object) -> bool:
@@ -2588,6 +2589,7 @@ def _infer_primitive_call(
                 broadcast_tensor_dims=lambda left, right: _unify_broadcast_tensor_dims(
                     tuple(left), tuple(right), ctx
                 ),
+                dim_equivalent=lambda left, right: _dim_equivalent(left, right, ctx),
             ),
         )
         if _is_type_expr_instance(inferred):

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from brainsurgery.synapse.axon import (
     flatten_closed_axon_file,
+    elaborate_closed_axon_file,
     normalize_closed_axon_file,
     render_axon_file,
     resolve_axon_program_from_path,
@@ -56,7 +57,8 @@ def _resolve_normalize_flatten_typecheck_render(
 ) -> str:
     resolved = resolve_axon_program_from_path(path).ast
     normalized = normalize_closed_axon_file(resolved, main_module=main_module)
-    flattened = flatten_closed_axon_file(normalized, main_module=main_module)
+    elaborated = elaborate_closed_axon_file(normalized, main_module=main_module)
+    flattened = flatten_closed_axon_file(elaborated, main_module=main_module)
     if typechecker == "typecheck2":
         typed = typecheck2_flat_axon_file(flattened, main_module=main_module)
     else:

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["meta-llama/Llama-2-7b-hf", "meta-llama/Llama-2-7b-chat-hf", "meta-llama/Llama-2-13b-hf", "meta-llama/Llama-2-13b-chat-hf", "meta-llama/Llama-2-70b-hf", "meta-llama/Llama-2-70b-chat-hf"] #-}
+{-# CHECKPOINTS ["meta-llama/Llama-2-7b-hf", "meta-llama/Llama-2-7b-chat-hf", "meta-llama/Llama-2-13b-hf", "meta-llama/Llama-2-13b-chat-hf", "meta-llama/Llama-2-70b-hf", "meta-llama/Llama-2-70b-chat-hf", "test/Llama2-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

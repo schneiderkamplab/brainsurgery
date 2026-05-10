@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "mistralai/Magistral-Small-2509" #-}
+{-# CHECKPOINTS ["mistralai/Magistral-Small-2509", "test/Magistral-Test"] #-}
 {-# TASK "causal_lm" #-}
 {-# TOKENIZER "mistralai/Magistral-Small-2509" #-}
 

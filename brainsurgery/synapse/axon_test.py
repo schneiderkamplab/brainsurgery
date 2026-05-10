@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import time
+from copy import deepcopy
 from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,6 +21,8 @@ from typing import Any, cast
 
 import safetensors
 import torch
+from accelerate import dispatch_model, init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
 from mltiming import timing
 from omegaconf import OmegaConf
 from transformers import (
@@ -36,6 +39,7 @@ from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Co
 from .axon import (
     canonicalize_typed_axon_file,
     candidate_tokenizer_dirs,
+    elaborate_closed_axon_file,
     flatten_closed_axon_file,
     looks_like_tokenizer_dir,
     lower_axon_program_to_graph_ir,
@@ -194,6 +198,19 @@ def _resolve_dtype(name: str) -> torch.dtype:
     if name == "float16":
         return torch.float16
     raise ValueError(f"Unsupported dtype: {name}")
+
+
+def _resolve_optional_torch_dtype_name(name: object) -> torch.dtype | None:
+    if not isinstance(name, str):
+        return None
+    normalized = name.strip().lower()
+    if normalized in {"float32", "torch.float32", "fp32"}:
+        return torch.float32
+    if normalized in {"bfloat16", "torch.bfloat16", "bf16"}:
+        return torch.bfloat16
+    if normalized in {"float16", "torch.float16", "fp16"}:
+        return torch.float16
+    return None
 
 
 def _resolve_model_task(name: str) -> str:
@@ -713,7 +730,24 @@ def _load_state_dict(
     device: torch.device,
     dtype: torch.dtype,
     model_config: dict[str, Any] | None = None,
+    param_devices: Sequence[str] | None = None,
+    storage_dtype: torch.dtype | None = None,
 ) -> dict[str, torch.Tensor]:
+    if (
+        isinstance(model_config, dict)
+        and str(model_config.get("model_type", "")).strip().lower() == "deepseek_v4"
+        and isinstance(model_config.get("quantization_config"), dict)
+        and str(model_config["quantization_config"].get("quant_method", "")).strip().lower()
+        == "fp8"
+    ):
+        return _load_dequantized_deepseek_v4_fp8_state_dict(
+            paths,
+            device=device,
+            dtype=dtype,
+            storage_dtype=storage_dtype or dtype,
+            param_devices=param_devices,
+        )
+
     out: dict[str, torch.Tensor] = {}
     for path in paths:
         st = safetensors.safe_open(str(path), framework="pt")
@@ -897,6 +931,38 @@ def _augment_model_config_from_checkpoint(
     safetensors_files: Sequence[Path],
     model_config: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    if isinstance(model_config, dict) and str(model_config.get("model_type", "")).strip().lower() == "deepseek_v4":
+        enriched = dict(model_config)
+        n_layers = int(enriched.get("num_hidden_layers", 0) or 0)
+        if n_layers > 0 and not isinstance(enriched.get("layer_types"), list):
+            compress_ratios = enriched.get("compress_ratios")
+            ratio_to_layer = {
+                0: "sliding_attention",
+                4: "compressed_sparse_attention",
+                128: "heavily_compressed_attention",
+            }
+            if isinstance(compress_ratios, list):
+                enriched["layer_types"] = [
+                    ratio_to_layer[int(item)] for item in compress_ratios[:n_layers]
+                ]
+            else:
+                interleave = [
+                    "compressed_sparse_attention" if i % 2 else "heavily_compressed_attention"
+                    for i in range(max(n_layers - 2, 0))
+                ]
+                enriched["layer_types"] = [
+                    *(["heavily_compressed_attention"] * min(n_layers, 2)),
+                    *interleave,
+                ][:n_layers]
+        if n_layers > 0 and not isinstance(enriched.get("mlp_layer_types"), list):
+            n_hash_raw = enriched.get("num_hash_layers", 3)
+            n_hash = int(n_hash_raw) if isinstance(n_hash_raw, int) and not isinstance(n_hash_raw, bool) else 3
+            enriched["mlp_layer_types"] = [
+                *(["hash_moe"] * min(n_layers, n_hash)),
+                *(["moe"] * max(0, n_layers - n_hash)),
+            ]
+        return enriched
+
     if not is_black_mamba_config_dir(model_dir):
         return model_config
     enriched = dict(model_config or {})
@@ -1577,6 +1643,586 @@ def _build_reference_quantization_config(config: Any) -> Any | None:
     )
 
 
+_HF_MXFP4_EXPERT_ALIAS_RE = re.compile(r"\.mlp\.experts\.\d+\.")
+
+
+_DEEPSEEK_V4_EXPERT_RE = re.compile(
+    r"^layers\.(?P<layer>\d+)\.ffn\.experts\.(?P<expert>\d+)\.(?P<proj>w[123])\.weight$"
+)
+_DEEPSEEK_V4_FP4_E2M1_LUT = (
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
+)
+
+
+def _hf_dequantized_mxfp4_state_key(key: str) -> str | None:
+    if _HF_MXFP4_EXPERT_ALIAS_RE.search(key):
+        return None
+    suffix_map = {
+        ".mlp.experts.gate_up_proj.weight": ".mlp.experts.gate_up_proj",
+        ".mlp.experts.down_proj.weight": ".mlp.experts.down_proj",
+        ".mlp.experts.gate_up_proj.bias": ".mlp.experts.gate_up_proj_bias",
+        ".mlp.experts.down_proj.bias": ".mlp.experts.down_proj_bias",
+    }
+    for suffix, replacement in suffix_map.items():
+        if key.endswith(suffix):
+            return f"{key[: -len(suffix)]}{replacement}"
+    return key
+
+
+def _load_dequantized_mxfp4_hf_state_dict(
+    paths: list[Path],
+    *,
+    dtype: torch.dtype,
+    model_config: dict[str, Any] | None,
+) -> dict[str, torch.Tensor]:
+    raw = _load_state_dict(
+        paths,
+        device=torch.device("cpu"),
+        dtype=dtype,
+        model_config=model_config,
+    )
+    remapped: dict[str, torch.Tensor] = {}
+    for key, value in raw.items():
+        mapped = _hf_dequantized_mxfp4_state_key(key)
+        if mapped is None:
+            continue
+        remapped.setdefault(mapped, value)
+    raw.clear()
+    return remapped
+
+
+def _device_for_hf_tensor_name(
+    name: str,
+    *,
+    device_map: dict[str, str] | None,
+    default_device: torch.device,
+) -> torch.device:
+    if not device_map:
+        return default_device
+    best_prefix: str | None = None
+    best_device: str | None = None
+    for prefix, device in device_map.items():
+        if name == prefix or name.startswith(prefix + "."):
+            if best_prefix is None or len(prefix) > len(best_prefix):
+                best_prefix = prefix
+                best_device = device
+    if best_device is None:
+        return default_device
+    return torch.device(best_device)
+
+
+def _load_hf_causal_lm_from_dequantized_mxfp4_state(
+    *,
+    safetensors_files: list[Path],
+    dtype: torch.dtype,
+    hf_config: Any,
+    trust_remote_code: bool,
+    device_map: dict[str, str] | None,
+    target_device: torch.device,
+    model_config: dict[str, Any] | None,
+) -> Any:
+    plain_config = deepcopy(hf_config)
+    if hasattr(plain_config, "quantization_config"):
+        try:
+            delattr(plain_config, "quantization_config")
+        except Exception:
+            setattr(plain_config, "quantization_config", None)
+
+    state = _load_dequantized_mxfp4_hf_state_dict(
+        safetensors_files,
+        dtype=dtype,
+        model_config=model_config,
+    )
+    with init_empty_weights(include_buffers=False):
+        model = AutoModelForCausalLM.from_config(
+            plain_config,
+            trust_remote_code=trust_remote_code,
+        )
+
+    expected = set(dict(model.named_parameters()).keys())
+    expected.update(dict(model.named_buffers()).keys())
+    loaded: set[str] = set()
+    for name, value in state.items():
+        if name not in expected:
+            continue
+        device = _device_for_hf_tensor_name(
+            name,
+            device_map=device_map,
+            default_device=target_device,
+        )
+        set_module_tensor_to_device(model, name, device, value=value)
+        loaded.add(name)
+    state.clear()
+
+    missing = sorted(
+        name
+        for name, parameter in model.named_parameters()
+        if name not in loaded and getattr(parameter, "device", None).type == "meta"
+    )
+    if missing:
+        has_explicit_lm_head = any(name == "lm_head.weight" for name in loaded)
+        if not has_explicit_lm_head and missing == ["lm_head.weight"]:
+            input_weight = model.get_input_embeddings().weight
+            model.get_output_embeddings().weight = input_weight
+        else:
+            preview = ", ".join(missing[:8])
+            suffix = "" if len(missing) <= 8 else f", ... ({len(missing)} total)"
+            raise RuntimeError(f"dequantized MXFP4 HF load left meta parameters: {preview}{suffix}")
+
+    if device_map is not None:
+        model = dispatch_model(model, device_map=device_map)
+
+    return model.eval()
+
+
+def _deepseek_v4_hf_base_key(raw_key: str) -> str:
+    key = raw_key
+    replacements = [
+        (r"^embed\.weight$", "embed_tokens.weight"),
+        (r"^head\.weight$", "lm_head.weight"),
+        (r"^norm\.weight$", "norm.weight"),
+        (r"^hc_head_fn$", "hc_head.hc_fn"),
+        (r"^hc_head_base$", "hc_head.hc_base"),
+        (r"^hc_head_scale$", "hc_head.hc_scale"),
+        (r"^layers\.(\d+)\.attn_norm\.", r"layers.\1.input_layernorm."),
+        (r"^layers\.(\d+)\.ffn_norm\.", r"layers.\1.post_attention_layernorm."),
+        (r"^layers\.(\d+)\.hc_attn_fn$", r"layers.\1.attn_hc.fn"),
+        (r"^layers\.(\d+)\.hc_attn_base$", r"layers.\1.attn_hc.base"),
+        (r"^layers\.(\d+)\.hc_attn_scale$", r"layers.\1.attn_hc.scale"),
+        (r"^layers\.(\d+)\.hc_ffn_fn$", r"layers.\1.ffn_hc.fn"),
+        (r"^layers\.(\d+)\.hc_ffn_base$", r"layers.\1.ffn_hc.base"),
+        (r"^layers\.(\d+)\.hc_ffn_scale$", r"layers.\1.ffn_hc.scale"),
+        (r"^layers\.(\d+)\.attn\.", r"layers.\1.self_attn."),
+        (r"^layers\.(\d+)\.ffn\.", r"layers.\1.mlp."),
+        (r"^layers\.(\d+)\.self_attn\.attn_sink$", r"layers.\1.self_attn.sinks"),
+        (
+            r"^layers\.(\d+)\.self_attn\.indexer\.compressor\.norm\.",
+            r"layers.\1.self_attn.compressor.indexer.kv_norm.",
+        ),
+        (
+            r"^layers\.(\d+)\.self_attn\.indexer\.compressor\.ape$",
+            r"layers.\1.self_attn.compressor.indexer.position_bias",
+        ),
+        (
+            r"^layers\.(\d+)\.self_attn\.indexer\.compressor\.",
+            r"layers.\1.self_attn.compressor.indexer.",
+        ),
+        (r"^layers\.(\d+)\.self_attn\.indexer\.", r"layers.\1.self_attn.compressor.indexer."),
+        (
+            r"^layers\.(\d+)\.self_attn\.compressor\.norm\.",
+            r"layers.\1.self_attn.compressor.kv_norm.",
+        ),
+        (
+            r"^layers\.(\d+)\.self_attn\.compressor\.ape$",
+            r"layers.\1.self_attn.compressor.position_bias",
+        ),
+        (
+            r"^layers\.(\d+)\.self_attn\.(.*?)\.wq_a\.",
+            r"layers.\1.self_attn.\2.q_a_proj.",
+        ),
+        (
+            r"^layers\.(\d+)\.self_attn\.(.*?)\.wq_b\.",
+            r"layers.\1.self_attn.\2.q_b_proj.",
+        ),
+        (
+            r"^layers\.(\d+)\.self_attn\.(.*?)\.wkv\.",
+            r"layers.\1.self_attn.\2.kv_proj.",
+        ),
+        (
+            r"^layers\.(\d+)\.self_attn\.(.*?)\.wgate\.",
+            r"layers.\1.self_attn.\2.gate_proj.",
+        ),
+        (
+            r"^layers\.(\d+)\.self_attn\.(.*?)\.wo_a\.",
+            r"layers.\1.self_attn.\2.o_a_proj.",
+        ),
+        (
+            r"^layers\.(\d+)\.self_attn\.(.*?)\.wo_b\.",
+            r"layers.\1.self_attn.\2.o_b_proj.",
+        ),
+        (r"^layers\.(\d+)\.self_attn\.wq_a\.", r"layers.\1.self_attn.q_a_proj."),
+        (r"^layers\.(\d+)\.self_attn\.wq_b\.", r"layers.\1.self_attn.q_b_proj."),
+        (r"^layers\.(\d+)\.self_attn\.wkv\.", r"layers.\1.self_attn.kv_proj."),
+        (r"^layers\.(\d+)\.self_attn\.wo_a\.", r"layers.\1.self_attn.o_a_proj."),
+        (r"^layers\.(\d+)\.self_attn\.wo_b\.", r"layers.\1.self_attn.o_b_proj."),
+        (r"^layers\.(\d+)\.self_attn\.q_norm\.", r"layers.\1.self_attn.q_a_norm."),
+        (r"^layers\.(\d+)\.mlp\.gate\.bias$", r"layers.\1.mlp.gate.e_score_correction_bias"),
+        (
+            r"^layers\.(\d+)\.mlp\.shared_experts\.w1\.",
+            r"layers.\1.mlp.shared_experts.gate_proj.",
+        ),
+        (
+            r"^layers\.(\d+)\.mlp\.shared_experts\.w2\.",
+            r"layers.\1.mlp.shared_experts.down_proj.",
+        ),
+        (
+            r"^layers\.(\d+)\.mlp\.shared_experts\.w3\.",
+            r"layers.\1.mlp.shared_experts.up_proj.",
+        ),
+    ]
+    for pattern, replacement in replacements:
+        key = re.sub(pattern, replacement, key)
+    key = key.replace("..", ".")
+    if (
+        key.startswith("layers.")
+        or key.startswith("embed_tokens.")
+        or key.startswith("norm.")
+        or key.startswith("hc_head.")
+    ):
+        return f"model.{key}"
+    return key
+
+
+def _deepseek_v4_unpack_fp4(packed: torch.Tensor) -> torch.Tensor:
+    lut = torch.tensor(_DEEPSEEK_V4_FP4_E2M1_LUT, dtype=torch.float32, device=packed.device)
+    u8 = packed.contiguous().view(torch.uint8)
+    low = (u8 & 0xF).long()
+    high = ((u8 >> 4) & 0xF).long()
+    unpacked = torch.stack([lut[low], lut[high]], dim=-1)
+    return unpacked.reshape(*packed.shape[:-1], 2 * packed.shape[-1])
+
+
+def _deepseek_v4_dequantize_fp8_weight(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+    if weight.dtype == torch.int8 or (fp4_dtype is not None and weight.dtype == fp4_dtype):
+        weight_fp32 = _deepseek_v4_unpack_fp4(weight)
+    else:
+        weight_fp32 = weight.to(torch.float32)
+    rows, cols = weight_fp32.shape[-2:]
+    scale_rows, scale_cols = scale.shape[-2:]
+    if rows % scale_rows != 0 or cols % scale_cols != 0:
+        raise ValueError(
+            f"DeepSeek-V4 FP8 weight shape ({rows}, {cols}) is not divisible by scale grid "
+            f"({scale_rows}, {scale_cols})"
+        )
+    block_m = rows // scale_rows
+    block_n = cols // scale_cols
+    original_shape = weight_fp32.shape
+    q = weight_fp32.reshape(-1, scale_rows, block_m, scale_cols, block_n)
+    s = scale.to(torch.float32).reshape(-1, scale_rows, scale_cols).unsqueeze(-1).unsqueeze(2)
+    return (q * s).reshape(original_shape).to(dtype=dtype)
+
+
+def _safetensors_key_index(paths: list[Path]) -> dict[str, Path]:
+    out: dict[str, Path] = {}
+    for path in paths:
+        st = safetensors.safe_open(str(path), framework="pt")
+        for key in st.keys():
+            if key in out:
+                raise ValueError(f"Duplicate tensor key while indexing safetensors shards: {key}")
+            out[key] = path
+    return out
+
+
+def _read_safetensor_indexed(index: dict[str, Path], key: str) -> torch.Tensor:
+    st = safetensors.safe_open(str(index[key]), framework="pt")
+    return st.get_tensor(key)
+
+
+def _set_hf_tensor_from_value(
+    model: Any,
+    name: str,
+    value: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    device_map: dict[str, str] | None,
+    target_device: torch.device,
+) -> None:
+    device = _device_for_hf_tensor_name(name, device_map=device_map, default_device=target_device)
+    if value.is_floating_point():
+        value = value.to(device=device, dtype=dtype)
+    else:
+        value = value.to(device=device)
+    set_module_tensor_to_device(model, name, device, value=value)
+
+
+def _first_numeric_path_segment(key: str) -> int | None:
+    for part in str(key).split("."):
+        if part.isdigit():
+            return int(part)
+    return None
+
+
+def _axon_param_placement_plan(keys: Sequence[str], devices: Sequence[torch.device]) -> dict[str, torch.device]:
+    if not devices:
+        return {}
+    layer_ids = sorted(
+        idx for key in keys if (idx := _first_numeric_path_segment(str(key))) is not None
+    )
+    if not layer_ids:
+        return {str(key): devices[0] for key in keys}
+    layer_to_device = {
+        layer_id: devices[min(len(devices) - 1, pos * len(devices) // len(layer_ids))]
+        for pos, layer_id in enumerate(layer_ids)
+    }
+    out: dict[str, torch.device] = {}
+    for key in keys:
+        idx = _first_numeric_path_segment(str(key))
+        out[str(key)] = layer_to_device[idx] if idx is not None else devices[0]
+    return out
+
+
+def _load_dequantized_deepseek_v4_fp8_state_dict(
+    paths: list[Path],
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    storage_dtype: torch.dtype,
+    param_devices: Sequence[str] | None,
+) -> dict[str, torch.Tensor]:
+    index = _safetensors_key_index(paths)
+    expert_groups: dict[tuple[int, int], dict[str, str]] = {}
+    output_keys: list[str] = []
+
+    for raw_key in sorted(index):
+        expert_match = _DEEPSEEK_V4_EXPERT_RE.match(raw_key)
+        if expert_match is not None:
+            expert_groups.setdefault(
+                (int(expert_match.group("layer")), int(expert_match.group("expert"))), {}
+            )[expert_match.group("proj")] = raw_key
+            continue
+        if raw_key.endswith(".scale") and raw_key[: -len(".scale")] + ".weight" in index:
+            continue
+        output_keys.append(_deepseek_v4_hf_base_key(raw_key))
+
+    by_layer: dict[int, dict[int, dict[str, str]]] = {}
+    for (layer, expert), proj_keys in expert_groups.items():
+        by_layer.setdefault(layer, {})[expert] = proj_keys
+    for layer in by_layer:
+        output_keys.append(f"model.layers.{layer}.mlp.experts.gate_up_proj")
+        output_keys.append(f"model.layers.{layer}.mlp.experts.down_proj")
+
+    placement_devices = [torch.device(item) for item in (param_devices or [])]
+    plan = _axon_param_placement_plan(output_keys, placement_devices)
+
+    def target_device(key: str) -> torch.device:
+        return plan.get(key, device)
+
+    out: dict[str, torch.Tensor] = {}
+    for raw_key in sorted(index):
+        if _DEEPSEEK_V4_EXPERT_RE.match(raw_key) is not None:
+            continue
+        if raw_key.endswith(".scale") and raw_key[: -len(".scale")] + ".weight" in index:
+            continue
+        mapped = _deepseek_v4_hf_base_key(raw_key)
+        value = _read_safetensor_indexed(index, raw_key)
+        scale_key = raw_key[: -len(".weight")] + ".scale" if raw_key.endswith(".weight") else ""
+        if scale_key in index:
+            value = _deepseek_v4_dequantize_fp8_weight(
+                value,
+                _read_safetensor_indexed(index, scale_key),
+                dtype=storage_dtype,
+            )
+        if value.is_floating_point():
+            value = value.to(device=target_device(mapped), dtype=storage_dtype)
+        else:
+            value = value.to(device=target_device(mapped))
+        out[mapped] = value
+
+    for layer, experts in sorted(by_layer.items()):
+        if not experts:
+            continue
+        first_expert = experts[min(experts)]
+        if not {"w1", "w2", "w3"}.issubset(first_expert):
+            raise KeyError(f"DeepSeek-V4 missing FP8 expert tensors for layer={layer}")
+        first_gate = _deepseek_v4_dequantize_fp8_weight(
+            _read_safetensor_indexed(index, first_expert["w1"]),
+            _read_safetensor_indexed(index, first_expert["w1"][: -len(".weight")] + ".scale"),
+            dtype=storage_dtype,
+        )
+        first_up = _deepseek_v4_dequantize_fp8_weight(
+            _read_safetensor_indexed(index, first_expert["w3"]),
+            _read_safetensor_indexed(index, first_expert["w3"][: -len(".weight")] + ".scale"),
+            dtype=storage_dtype,
+        )
+        first_down = _deepseek_v4_dequantize_fp8_weight(
+            _read_safetensor_indexed(index, first_expert["w2"]),
+            _read_safetensor_indexed(index, first_expert["w2"][: -len(".weight")] + ".scale"),
+            dtype=storage_dtype,
+        )
+        num_experts = max(experts) + 1
+        gate_name = f"model.layers.{layer}.mlp.experts.gate_up_proj"
+        down_name = f"model.layers.{layer}.mlp.experts.down_proj"
+        gate_device = target_device(gate_name)
+        down_device = target_device(down_name)
+        gate_up = torch.empty(
+            (num_experts, first_gate.shape[0] + first_up.shape[0], first_gate.shape[1]),
+            device=gate_device,
+            dtype=storage_dtype,
+        )
+        down = torch.empty((num_experts, *first_down.shape), device=down_device, dtype=storage_dtype)
+
+        def fill_expert(expert: int, proj_keys: dict[str, str]) -> None:
+            if not {"w1", "w2", "w3"}.issubset(proj_keys):
+                raise KeyError(
+                    f"DeepSeek-V4 missing FP8 expert tensors for layer={layer} expert={expert}"
+                )
+            w1_key = proj_keys["w1"]
+            w2_key = proj_keys["w2"]
+            w3_key = proj_keys["w3"]
+            gate = _deepseek_v4_dequantize_fp8_weight(
+                _read_safetensor_indexed(index, w1_key),
+                _read_safetensor_indexed(index, w1_key[: -len(".weight")] + ".scale"),
+                dtype=storage_dtype,
+            )
+            up = _deepseek_v4_dequantize_fp8_weight(
+                _read_safetensor_indexed(index, w3_key),
+                _read_safetensor_indexed(index, w3_key[: -len(".weight")] + ".scale"),
+                dtype=storage_dtype,
+            )
+            down_weight = _deepseek_v4_dequantize_fp8_weight(
+                _read_safetensor_indexed(index, w2_key),
+                _read_safetensor_indexed(index, w2_key[: -len(".weight")] + ".scale"),
+                dtype=storage_dtype,
+            )
+            gate_up[expert].copy_(torch.cat([gate, up], dim=0).to(device=gate_device, dtype=storage_dtype))
+            down[expert].copy_(down_weight.to(device=down_device, dtype=storage_dtype))
+
+        for expert, proj_keys in sorted(experts.items()):
+            fill_expert(expert, proj_keys)
+        out[gate_name] = gate_up
+        out[down_name] = down
+
+    return out
+
+
+def _load_hf_causal_lm_from_dequantized_deepseek_v4_fp8_state(
+    *,
+    safetensors_files: list[Path],
+    dtype: torch.dtype,
+    hf_config: Any,
+    trust_remote_code: bool,
+    device_map: dict[str, str] | None,
+    target_device: torch.device,
+) -> Any:
+    plain_config = deepcopy(hf_config)
+    if hasattr(plain_config, "quantization_config"):
+        try:
+            delattr(plain_config, "quantization_config")
+        except Exception:
+            setattr(plain_config, "quantization_config", None)
+
+    with init_empty_weights():
+        model = AutoModelForCausalLM.from_config(
+            plain_config,
+            trust_remote_code=trust_remote_code,
+        )
+
+    expected = set(model.state_dict().keys())
+    loaded: set[str] = set()
+    index = _safetensors_key_index(safetensors_files)
+    expert_groups: dict[tuple[int, int], dict[str, str]] = {}
+
+    for raw_key in sorted(index):
+        expert_match = _DEEPSEEK_V4_EXPERT_RE.match(raw_key)
+        if expert_match is not None:
+            expert_groups.setdefault(
+                (int(expert_match.group("layer")), int(expert_match.group("expert"))), {}
+            )[expert_match.group("proj")] = raw_key
+            continue
+        if raw_key.endswith(".scale") and raw_key[: -len(".scale")] + ".weight" in index:
+            continue
+
+        value = _read_safetensor_indexed(index, raw_key)
+        scale_key = raw_key[: -len(".weight")] + ".scale" if raw_key.endswith(".weight") else ""
+        if scale_key in index:
+            value = _deepseek_v4_dequantize_fp8_weight(value, _read_safetensor_indexed(index, scale_key), dtype=dtype)
+
+        mapped = _deepseek_v4_hf_base_key(raw_key)
+        if mapped not in expected:
+            continue
+        _set_hf_tensor_from_value(
+            model,
+            mapped,
+            value,
+            dtype=dtype,
+            device_map=device_map,
+            target_device=target_device,
+        )
+        loaded.add(mapped)
+
+    by_layer: dict[int, dict[int, dict[str, str]]] = {}
+    for (layer, expert), proj_keys in expert_groups.items():
+        by_layer.setdefault(layer, {})[expert] = proj_keys
+
+    state_shapes = {name: tuple(tensor.shape) for name, tensor in model.state_dict().items()}
+    for layer, experts in sorted(by_layer.items()):
+        gate_name = f"model.layers.{layer}.mlp.experts.gate_up_proj"
+        down_name = f"model.layers.{layer}.mlp.experts.down_proj"
+        if gate_name not in expected or down_name not in expected:
+            continue
+        gate_device = _device_for_hf_tensor_name(gate_name, device_map=device_map, default_device=target_device)
+        down_device = _device_for_hf_tensor_name(down_name, device_map=device_map, default_device=target_device)
+        gate_up = torch.empty(state_shapes[gate_name], device=gate_device, dtype=dtype)
+        down = torch.empty(state_shapes[down_name], device=down_device, dtype=dtype)
+        for expert in range(gate_up.shape[0]):
+            proj_keys = experts.get(expert)
+            if proj_keys is None or not {"w1", "w2", "w3"}.issubset(proj_keys):
+                raise KeyError(f"DeepSeek-V4 missing FP8 expert tensors for layer={layer} expert={expert}")
+            w1_key = proj_keys["w1"]
+            w2_key = proj_keys["w2"]
+            w3_key = proj_keys["w3"]
+            gate = _deepseek_v4_dequantize_fp8_weight(
+                _read_safetensor_indexed(index, w1_key),
+                _read_safetensor_indexed(index, w1_key[: -len(".weight")] + ".scale"),
+                dtype=dtype,
+            )
+            up = _deepseek_v4_dequantize_fp8_weight(
+                _read_safetensor_indexed(index, w3_key),
+                _read_safetensor_indexed(index, w3_key[: -len(".weight")] + ".scale"),
+                dtype=dtype,
+            )
+            gate_up[expert].copy_(torch.cat([gate, up], dim=0).to(device=gate_device, dtype=dtype))
+            down[expert].copy_(
+                _deepseek_v4_dequantize_fp8_weight(
+                    _read_safetensor_indexed(index, w2_key),
+                    _read_safetensor_indexed(index, w2_key[: -len(".weight")] + ".scale"),
+                    dtype=dtype,
+                ).to(device=down_device, dtype=dtype)
+            )
+        set_module_tensor_to_device(model, gate_name, gate_device, value=gate_up)
+        set_module_tensor_to_device(model, down_name, down_device, value=down)
+        loaded.add(gate_name)
+        loaded.add(down_name)
+
+    missing = sorted(
+        name
+        for name, parameter in model.named_parameters()
+        if name not in loaded and getattr(parameter, "device", None).type == "meta"
+    )
+    if missing == ["lm_head.weight"] and "model.embed_tokens.weight" in loaded:
+        model.get_output_embeddings().weight = model.get_input_embeddings().weight
+        missing = []
+    if missing:
+        preview = ", ".join(missing[:8])
+        suffix = "" if len(missing) <= 8 else f", ... ({len(missing)} total)"
+        raise RuntimeError(f"dequantized DeepSeek-V4 FP8 HF load left meta parameters: {preview}{suffix}")
+
+    if device_map is not None:
+        model = dispatch_model(model, device_map=device_map)
+    return model.eval()
+
+
 def _refresh_hf_rotary_caches_if_needed(model: Any, *, dtype: torch.dtype) -> int:
     refreshed = 0
     for module in model.modules():
@@ -2173,6 +2819,16 @@ def _run_axon_test_single(
         if isinstance(model_config, dict)
         else ""
     )
+    adapter_storage_dtype = (
+        resolved_dtype
+        if hf_strict_dtype
+        else (
+            _resolve_optional_torch_dtype_name(model_config.get("torch_dtype"))
+            if isinstance(model_config, dict)
+            else None
+        )
+        or resolved_dtype
+    )
     effective_trust_remote_code = bool(
         trust_remote_code
         or _should_trust_remote_code(
@@ -2225,7 +2881,8 @@ def _run_axon_test_single(
         if axon_backend in {"codegen2", "runtime2", "pipeline2"}:
             resolved_axon = resolve_axon_program_from_path(axon_file).ast
             normalized_axon = normalize_closed_axon_file(resolved_axon)
-            flat_axon = flatten_closed_axon_file(normalized_axon)
+            elaborated_axon = elaborate_closed_axon_file(normalized_axon)
+            flat_axon = flatten_closed_axon_file(elaborated_axon)
             typecheck_fn = (
                 typecheck_flat_axon_file
                 if axon_typechecker == "typecheck"
@@ -2311,8 +2968,10 @@ def _run_axon_test_single(
             "deepseek_v2",
             "deepseek_v3",
             "deepseekv3",
+            "deepseek_v4",
             "gemma3",
             "gemma4",
+            "gpt_oss",
             "mistral4",
             "mistral3",
             "llama4",
@@ -2612,6 +3271,7 @@ def _run_axon_test_single(
                     device=torch.device("cpu"),
                     dtype=resolved_dtype,
                     model_config=model_config,
+                    storage_dtype=adapter_storage_dtype,
                 )
                 hf_param_names = _collect_hf_param_names_for_device_map(
                     model_task=resolved_model_task,
@@ -2702,12 +3362,46 @@ def _run_axon_test_single(
                             device=torch.device("cpu"),
                             dtype=resolved_dtype,
                             model_config=model_config,
+                            storage_dtype=adapter_storage_dtype,
                         )
                         hf_model = AutoModelForCausalLM.from_config(
                             hf_config,
                             trust_remote_code=effective_trust_remote_code,
                         )
                         hf_model.load_state_dict(local_state_ref_cpu, strict=True)
+                    elif (
+                        _read_quant_method(hf_config) == "mxfp4"
+                        and reference_quant_config is not None
+                        and bool(getattr(reference_quant_config, "dequantize", False))
+                    ):
+                        print("HF: loading dequantized MXFP4 checkpoint via explicit state-dict path")
+                        hf_model = _load_hf_causal_lm_from_dequantized_mxfp4_state(
+                            safetensors_files=safetensors_files,
+                            dtype=resolved_dtype,
+                            hf_config=hf_config,
+                            trust_remote_code=effective_trust_remote_code,
+                            device_map=hf_device_map,
+                            target_device=target_device,
+                            model_config=model_config,
+                        )
+                    elif (
+                        str(getattr(hf_config, "model_type", "")).strip().lower()
+                        == "deepseek_v4"
+                        and _read_quant_method(hf_config) == "fp8"
+                        and reference_quant_config is not None
+                        and bool(getattr(reference_quant_config, "dequantize", False))
+                    ):
+                        print(
+                            "HF: loading dequantized DeepSeek-V4 FP8 checkpoint via explicit state-dict path"
+                        )
+                        hf_model = _load_hf_causal_lm_from_dequantized_deepseek_v4_fp8_state(
+                            safetensors_files=safetensors_files,
+                            dtype=resolved_dtype,
+                            hf_config=hf_config,
+                            trust_remote_code=effective_trust_remote_code,
+                            device_map=hf_device_map,
+                            target_device=target_device,
+                        )
                     else:
                         causal_kwargs: dict[str, Any] = {
                             "local_files_only": True,
@@ -2794,6 +3488,7 @@ def _run_axon_test_single(
                             device=target_device,
                             dtype=resolved_dtype,
                             model_config=model_config,
+                            storage_dtype=adapter_storage_dtype,
                         )
                         hf = (
                             BlackMambaReferenceModel.from_state_dict(
@@ -3088,6 +3783,11 @@ def _run_axon_test_single(
             target_device = _resolve_device(target_device_str)
             io = _build_io_for_device(target_device)
             local_state_dict = state_ref_cpu
+            param_devices = (
+                [f"cuda:{idx}" for idx in range(max(1, torch.cuda.device_count()))]
+                if axon_backend == "pipeline2"
+                else None
+            )
             state_load_device = (
                 torch.device("cpu")
                 if axon_backend in {"pipeline", "pipeline2"}
@@ -3099,6 +3799,8 @@ def _run_axon_test_single(
                     device=state_load_device,
                     dtype=resolved_dtype,
                     model_config=model_config,
+                    storage_dtype=adapter_storage_dtype,
+                    param_devices=param_devices,
                 )
             elif resolved_model_type == "phi3small" and axon_backend != "pipeline":
                 local_state_dict = {
@@ -3119,9 +3821,6 @@ def _run_axon_test_single(
                     .eval()
                 )
             elif axon_backend == "pipeline2":
-                param_devices = [
-                    f"cuda:{idx}" for idx in range(max(1, torch.cuda.device_count()))
-                ]
                 syn = model_cls.from_state_dict(
                     local_state_dict,
                     param_devices=param_devices,

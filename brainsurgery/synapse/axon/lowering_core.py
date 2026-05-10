@@ -56,6 +56,7 @@ from .ast import (
 from .expression_codec import axon_expr_to_runtime_value as _expr_to_runtime_value
 from .ast.path import parse_path_token, path_expr_to_runtime_value
 from .canonicalize import canonicalize_typed_axon_file
+from .elaborate import elaborate_closed_axon_file
 from .flatten import flatten_closed_axon_file
 from .normalize import normalize_closed_axon_file
 from .optimize import (
@@ -308,7 +309,8 @@ def _prepare_program_for_lowering(
 
     validate_closed_axon_file(program, main_module=main_module)
     normalized = normalize_closed_axon_file(program, main_module=main_module)
-    flat = flatten_closed_axon_file(normalized, main_module=main_module)
+    elaborated = elaborate_closed_axon_file(normalized, main_module=main_module)
+    flat = flatten_closed_axon_file(elaborated, main_module=main_module)
     typed = typecheck_flat_axon_file(flat, main_module=main_module)
     return finish_typed(typed)
 

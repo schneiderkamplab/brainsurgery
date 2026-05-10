@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["allenai/Flex-math-2x7B-1T", "allenai/Flex-news-2x7B-1T", "allenai/Flex-pes2o-2x7B-1T", "allenai/Flex-code-2x7B-1T", "allenai/Flex-creative-2x7B-1T", "allenai/Flex-reddit-2x7B-1T", "danish-foundation-models/dfm-moe-open-v0-8x7b-pt", "allenai/FlexOlmo-7x7B-1T"] #-}
+{-# CHECKPOINTS ["allenai/Flex-math-2x7B-1T", "allenai/Flex-news-2x7B-1T", "allenai/Flex-pes2o-2x7B-1T", "allenai/Flex-code-2x7B-1T", "allenai/Flex-creative-2x7B-1T", "allenai/Flex-reddit-2x7B-1T", "danish-foundation-models/dfm-moe-open-v0-8x7b-pt", "allenai/FlexOlmo-7x7B-1T", "test/FlexOlmo-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)

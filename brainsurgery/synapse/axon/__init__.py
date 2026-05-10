@@ -11,6 +11,7 @@ from .ast import (
 from .canonicalize import canonicalize_typed_axon_file
 from .expression_codec import axon_expr_to_runtime_value, parse_expression_to_runtime_value
 from .entrypoint import pragma_main_module, resolve_main_module
+from .elaborate import elaborate_closed_axon_file
 from .flatten import flatten_closed_axon_file
 from .load import LoadedAxonFile, LoadedAxonProgram, load_axon_files_from_path, resolve_import_path
 from .lowering import (
@@ -76,6 +77,7 @@ __all__ = [
     "materialize_axon_file",
     "normalize_checkpoint_name",
     "normalize_closed_axon_file",
+    "elaborate_closed_axon_file",
     "normalize_backend_required_flat_typed_axon_file",
     "parse_expression_to_runtime_value",
     "pragma_main_module",

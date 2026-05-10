@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["nemotron3"] #-}
+{-# CHECKPOINTS ["nemotron3", "test/Nemotron-H-Test"] #-}
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
 
@@ -56,7 +56,7 @@ shared_ffn x = do
 
 shared_relu2_moe :: Tensor[B,S,D] -> Int -> Int -> Int -> Float -> Bool -> Tensor[B,S,D]
 shared_relu2_moe hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob = do
-  topk_weights, topk_indices <- grouped_sigmoid_router@gate hidden top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor weight=@weight e_score_correction_bias=@e_score_correction_bias
+  topk_weights, topk_indices <- grouped_sigmoid_router@gate hidden top_k=top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor
   gate_w <- scope@gate do
     return Params.param path=@weight
   experts <- Tensor.size gate_w 0

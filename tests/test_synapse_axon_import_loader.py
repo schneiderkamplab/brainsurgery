@@ -392,9 +392,9 @@ def test_resolve_keeps_constant_definitions_without_folding(tmp_path: Path) -> N
     )
 
     resolved = resolve_axon_program_to_source(root)
-    assert "__Foo__P = 1 + 2" in resolved
-    assert "POS = __Foo__P + 1" in resolved
-    assert "__Foo__P = 3" not in resolved
+    assert "Foo.P = 1 + 2" in resolved
+    assert "POS = Foo.P + 1" in resolved
+    assert "Foo.P = 3" not in resolved
     assert "POS = 4" not in resolved
     out = tmp_path / "resolved.axon"
     out.write_text(resolved, encoding="utf-8")

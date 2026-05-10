@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["mistralai/Ministral-3-8B-Base-2512", "mistralai/Ministral-3-14B-Base-2512"] #-}
+{-# CHECKPOINTS ["mistralai/Ministral-3-8B-Base-2512", "mistralai/Ministral-3-14B-Base-2512", "test/Mistral3-Test"] #-}
 {-# TASK "causal_lm" #-}
 
 import Activations (silu)
