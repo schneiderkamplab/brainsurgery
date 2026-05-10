@@ -1055,7 +1055,7 @@ def run_axon_benchmark(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
-    axon_backend: str = "codegen2",
+    axon_backend: str = "codegen2-torch",
     axon_typechecker: str = "typecheck2",
     pipeline_parallel_size: int | None = None,
     optimize: bool = False,
@@ -1073,17 +1073,20 @@ def run_axon_benchmark(
 ) -> dict[str, Any]:
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
-        backend_token = "codegen2"
-    valid_backends = {"codegen2", "runtime2", "pipeline2"}
+        backend_token = "codegen2-torch"
+    valid_backends = {"codegen2-torch", "codegen2-tinygrad", "runtime2-torch", "pipeline2-torch"}
     if backend_token not in valid_backends:
-        raise ValueError("axon_backend must be 'codegen2', 'runtime2', or 'pipeline2'")
+        raise ValueError(
+            "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
+            "'runtime2-torch', or 'pipeline2-torch'"
+        )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
     if typechecker_token != "typecheck2":
         raise ValueError("axon_typechecker must be 'typecheck2'")
     axon_typechecker = typechecker_token
-    if axon_backend != "pipeline2" and pipeline_parallel_size is not None:
-        raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2")
+    if axon_backend != "pipeline2-torch" and pipeline_parallel_size is not None:
+        raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2-torch")
     repo_root = _repo_root()
     checkpoint_filter = {str(item).strip() for item in (checkpoints or ()) if str(item).strip()}
     exclude_filter = {str(item).strip() for item in (exclude or ()) if str(item).strip()}
@@ -1186,7 +1189,7 @@ def run_axon_benchmark(
     serial_cuda_visible_devices: str | None = None
     pipeline_worker_specs: list[_WorkerSpec] | None = None
     effective_device = device
-    if axon_backend == "pipeline2":
+    if axon_backend == "pipeline2-torch":
         pipeline_worker_specs = _resolve_pipeline_worker_specs(
             backend=axon_backend,
             device=device,

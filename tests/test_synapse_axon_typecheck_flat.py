@@ -31,7 +31,7 @@ from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
 from brainsurgery.synapse.axon.typecheck_shared import _TcCtx, _is_generic_named_type, _scoped_typevars
 from brainsurgery.synapse.axon.typecheck2 import typecheck2_flat_axon_file
 from brainsurgery.synapse.axon.lowering import lower_axon_program_to_graph_ir
-from brainsurgery.synapse.axon.codegen2 import make_runtime2_model_class
+from brainsurgery.synapse.axon.codegen2_torch import make_runtime2_model_class
 from brainsurgery.synapse.axon.validate import validate_typed_axon_file
 
 

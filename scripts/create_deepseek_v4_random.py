@@ -117,7 +117,7 @@ def create_deepseek_v4_test_checkpoint(
         max_shard_size=max_shard_size,
     )
     # DeepSeek V4's save hooks may serialize expert tensors in a transformed
-    # raw layout. Axon/codegen2 intentionally consumes the checkpoint
+    # raw layout. Axon/codegen2-torch intentionally consumes the checkpoint
     # state_dict keys directly, so store the canonical HF state_dict layout that
     # the loaded module exposes.
     for path in output.glob("*.safetensors"):

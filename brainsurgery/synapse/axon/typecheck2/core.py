@@ -87,7 +87,7 @@ from ..typecheck_shared import (
     _unify_dim_token,
 )
 from ..entrypoint import resolve_main_module
-from ..resolve import reachable_definitions
+from ..resolve import prune_unreachable_definitions, reachable_definitions
 from ..validate import validate_flat_axon_file, validate_typed_axon_file
 
 _PATH_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -387,13 +387,6 @@ def _reachable(program: AxonFile, main_module: str | None) -> set[str]:
     if main_module not in module_names:
         raise ValueError(f"Axon typecheck2 failed: main definition {main_module!r} not found")
     return set(reachable_definitions(program, entrypoint=main_module))
-
-
-def _prune_to_main(program: AxonFile, main_module: str | None) -> AxonFile:
-    keep = _reachable(program, main_module)
-    if len(keep) == len(program.modules):
-        return program
-    return replace(program, modules=tuple(module for module in program.modules if module.name in keep))
 
 
 def _annotate(ctx: _TcCtx, expr: AxonExpr, tp: TypeExpr, *, arity: int = 1) -> AxonExpr:
@@ -2907,8 +2900,9 @@ def _tc_definition(
 
 def _typecheck2_flat_axon_file_once(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
     main_module = resolve_main_module(program, main_module=main_module)
+    _reachable(program, main_module)
+    program = prune_unreachable_definitions(program, entrypoint=main_module)
     validate_flat_axon_file(program, main_module=main_module)
-    program = _prune_to_main(program, main_module)
     modules_by_name = {module.name: module for module in program.modules}
     constant_expr_defs = _zero_arg_constant_expr_defs(program.modules)
 

@@ -21,7 +21,8 @@ from brainsurgery.synapse.axon.ast import (
     TypeTuple,
     render_axon_file,
 )
-from brainsurgery.synapse.axon.codegen2 import Codegen2GraphModel, emit_model_code_from_graph_ir
+from brainsurgery.synapse.axon.codegen2_torch import Codegen2GraphModel, emit_model_code_from_graph_ir
+from brainsurgery.synapse.axon.codegen2_tinygrad import tinygrad_op_table_markdown
 from brainsurgery.synapse.axon.graph_ir import (
     GraphModule,
     GraphProgram,
@@ -160,6 +161,20 @@ def test_graph_ir_lowers_generic_gpt2_kv_as_alternative_lowering_target() -> Non
     assert len(graph.modules) > 1
     assert graph.modules[-1].name == "gpt2"
     assert all(node.outputs for module in graph.modules for node in module.nodes)
+
+
+def test_codegen2_tinygrad_reports_non_obvious_ops_before_emitting() -> None:
+    program = resolve_axon_program_from_path(
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
+    ).ast
+
+    graph = lower_axon_program_to_graph_ir(_typed(program, main_module="gpt2"), main_module="gpt2")
+    table = tinygrad_op_table_markdown(graph)
+
+    assert "| Op | Count | Reason |" in table
+    assert "`embedding`" in table
+    assert "`linear`" in table
+    assert "`layernorm`" in table
 
 
 def test_graph_ir_preserves_list_destructuring_outputs() -> None:

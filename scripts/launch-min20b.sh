@@ -7,7 +7,7 @@ brainsurgery synapse axon-benchmark \
   brainsurgery/synapse/models \
   --device cuda \
   --processes 1 \
-  --axon-backend pipeline \
+  --axon-backend pipeline2-torch \
   --pipeline-parallel-size 4 \
   --min-billion-parameters 20 \
   --max-billion-parameters 150 \

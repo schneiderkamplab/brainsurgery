@@ -52,7 +52,11 @@ from .axon import (
     typecheck2_flat_axon_file,
 )
 from .axon.ast import AxonFile, TypeOptional
-from .axon.codegen2 import emit_model_code_from_graph_ir, make_runtime2_model_class
+from .axon.codegen2_tinygrad import emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir
+from .axon.codegen2_torch import (
+    emit_model_code_from_graph_ir as emit_torch_model_code_from_graph_ir,
+    make_runtime2_model_class as make_runtime2_torch_model_class,
+)
 from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
 from .axon_runner_common import is_cuda_oom as _is_cuda_oom
 from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
@@ -2729,7 +2733,7 @@ def _run_axon_test_single(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
-    axon_backend: str = "codegen2",
+    axon_backend: str = "codegen2-torch",
     axon_typechecker: str = "typecheck2",
     optimize: bool = False,
     canonicalize: bool = False,
@@ -2756,28 +2760,31 @@ def _run_axon_test_single(
         resolved_model_task = _infer_model_task(axon_file=axon_file, weights=weights_path)
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
-        backend_token = "codegen2"
-    valid_backends = {"codegen2", "runtime2", "pipeline2"}
+        backend_token = "codegen2-torch"
+    valid_backends = {"codegen2-torch", "codegen2-tinygrad", "runtime2-torch", "pipeline2-torch"}
     if backend_token not in valid_backends:
-        raise ValueError("axon_backend must be 'codegen2', 'runtime2', or 'pipeline2'")
+        raise ValueError(
+            "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
+            "'runtime2-torch', or 'pipeline2-torch'"
+        )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
     if typechecker_token != "typecheck2":
         raise ValueError("axon_typechecker must be 'typecheck2'")
     axon_typechecker = typechecker_token
-    if axon_backend == "pipeline2":
+    if axon_backend == "pipeline2-torch":
         if resolved_model_task not in {"causal_lm", "masked_lm", "seq2seq_lm"}:
             raise ValueError(
-                "axon_backend='pipeline2' currently supports only "
+                "axon_backend='pipeline2-torch' currently supports only "
                 "causal_lm, masked_lm, and seq2seq_lm models"
             )
         if not str(device).startswith("cuda"):
-            raise ValueError("axon_backend='pipeline2' currently requires a CUDA device target")
+            raise ValueError("axon_backend='pipeline2-torch' currently requires a CUDA device target")
         if compile_axon:
-            raise ValueError("compile_axon is not supported with axon_backend='pipeline2'")
+            raise ValueError("compile_axon is not supported with axon_backend='pipeline2-torch'")
         if trace_layers:
-            raise ValueError("trace_layers is not supported with axon_backend='pipeline2'")
-    if axon_backend == "runtime2" and trace_layers:
+            raise ValueError("trace_layers is not supported with axon_backend='pipeline2-torch'")
+    if axon_backend == "runtime2-torch" and trace_layers:
         raise ValueError(f"trace_layers is not supported with axon_backend={axon_backend!r}")
 
     safetensors_files = _resolve_safetensors_paths(weights_path)
@@ -2885,14 +2892,21 @@ def _run_axon_test_single(
                 "meta": dict(graph_program.pragmas),
             },
         }
-        if axon_backend == "runtime2":
-            model_cls = make_runtime2_model_class(graph_program, model_config=model_config)
+        if axon_backend == "runtime2-torch":
+            model_cls = make_runtime2_torch_model_class(graph_program, model_config=model_config)
         else:
-            code = emit_model_code_from_graph_ir(
-                graph_program,
-                class_name=class_name,
-                model_config=model_config,
-            )
+            if axon_backend == "codegen2-tinygrad":
+                code = emit_tinygrad_model_code_from_graph_ir(
+                    graph_program,
+                    class_name=class_name,
+                    model_config=model_config,
+                )
+            else:
+                code = emit_torch_model_code_from_graph_ir(
+                    graph_program,
+                    class_name=class_name,
+                    model_config=model_config,
+                )
             generated_py_path.write_text(code, encoding="utf-8")
             model_cls = _load_generated_class(generated_py_path, class_name)
 
@@ -2945,7 +2959,7 @@ def _run_axon_test_single(
                     setattr(hf_config, "num_experts", int(getattr(hf_config, "num_local_experts")))
         if (
             hf_config is None
-            and axon_backend == "pipeline2"
+            and axon_backend == "pipeline2-torch"
             and resolved_model_task in {"causal_lm", "seq2seq_lm"}
             and not skip_hf
         ):
@@ -3164,7 +3178,7 @@ def _run_axon_test_single(
                 return normalized
 
             hf_input_device = target_device
-            if axon_backend == "pipeline2" and resolved_model_task in {
+            if axon_backend == "pipeline2-torch" and resolved_model_task in {
                 "causal_lm",
                 "seq2seq_lm",
             }:
@@ -3672,10 +3686,10 @@ def _run_axon_test_single(
             local_state_dict = state_ref_cpu
             param_devices = (
                 [f"cuda:{idx}" for idx in range(max(1, torch.cuda.device_count()))]
-                if axon_backend == "pipeline2"
+                if axon_backend == "pipeline2-torch"
                 else None
             )
-            state_load_device = torch.device("cpu") if axon_backend == "pipeline2" else target_device
+            state_load_device = torch.device("cpu") if axon_backend == "pipeline2-torch" else target_device
             if local_state_dict is None:
                 local_state_dict = _load_state_dict(
                     safetensors_files,
@@ -3691,7 +3705,7 @@ def _run_axon_test_single(
                     for key, value in local_state_dict.items()
                 }
             syn: Any
-            if axon_backend == "pipeline2":
+            if axon_backend == "pipeline2-torch":
                 syn = model_cls.from_state_dict(
                     local_state_dict,
                     param_devices=param_devices,
@@ -3848,7 +3862,7 @@ def _run_axon_test_single(
         except Exception as exc:
             if not _is_cuda_oom(exc, device=exec_device_str):
                 raise
-            if axon_backend == "pipeline2":
+            if axon_backend == "pipeline2-torch":
                 raise
             if not oom_cpu_fallback:
                 raise
@@ -4240,7 +4254,7 @@ def run_axon_test(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
-    axon_backend: str = "codegen2",
+    axon_backend: str = "codegen2-torch",
     axon_typechecker: str = "typecheck2",
     optimize: bool = False,
     canonicalize: bool = False,

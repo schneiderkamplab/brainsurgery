@@ -76,7 +76,7 @@ transforms:
   - reshape: { from: demo.prompt_ids, to: demo.prompt_ids_batched, shape: [1, -1] }
   - generate:
       model: model
-      runtime: runtime2
+      runtime: runtime2-torch
       input_ids: demo.prompt_ids_batched
       max_new_tokens: 16
       output: demo.generated_ids
@@ -87,16 +87,16 @@ transforms:
       tokenizer: models/gpt2
   - reshape: { from: demo.expected_generated_ids, to: demo.expected_generated_ids_batched, shape: [1, -1] }
   - assert: { equal: { left: demo.generated_ids, right: demo.expected_generated_ids_batched } }
-  # Compare infer outputs across runtime2, codegen2, and HF runtime.
+  # Compare infer outputs across runtime2-torch, codegen2-torch, and HF runtime.
   - load: { path: models/gpt2, alias: model_hf }
   - infer:
       model: model
-      runtime: runtime2
+      runtime: runtime2-torch
       input_ids: model::demo.prompt_ids_batched
       output: demo.logits_runtime2
   - infer:
       model: model
-      runtime: codegen2
+      runtime: codegen2-torch
       input_ids: model::demo.prompt_ids_batched
       output: demo.logits_codegen
   - infer:

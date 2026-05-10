@@ -24,6 +24,15 @@ from ..ast import (
 )
 from ..ast.types import dim_token_names
 from ..ast.path import path_expr_to_runtime_value, resolve_path_expr_to_key
+from ..codegen2_common import (
+    cache_past_length,
+    compose_path,
+    execute_common_primitive,
+    is_null,
+    lookup_config,
+    normalize_primitive_op,
+    path_parts,
+)
 from ..graph_ir import (
     GraphLiteral,
     GraphExpr,
@@ -63,11 +72,7 @@ def _operand_payload(operand: GraphOperand) -> Any:
 
 
 def _normalize_primitive_op(name: str) -> str:
-    if name.startswith("_activations_"):
-        return name[1:]
-    if name.startswith("_"):
-        return name[1:]
-    return name
+    return normalize_primitive_op(name)
 
 
 def _module_inputs_spec(module: GraphModule) -> dict[str, Any]:
@@ -712,38 +717,18 @@ class Codegen2GraphModel(nn.Module):
 
     @staticmethod
     def _is_null(value: Any) -> bool:
-        return value is None or (isinstance(value, str) and value.strip().lower() == "null")
+        return is_null(value)
 
     @staticmethod
     def _cache_past_length(cache: Any) -> int:
-        if cache is None:
-            return 0
-        key, _ = cache[0]
-        return int(key.shape[-2])
+        return cache_past_length(cache)
 
     @staticmethod
     def _path_parts(value: Any) -> tuple[bool, str]:
-        if not isinstance(value, str):
-            raise ValueError(f"expected Path value, got {type(value).__name__}")
-        token = value.strip()
-        if token.startswith("@@"):
-            return True, token.lstrip("@")
-        if token.startswith("@"):
-            return False, token.lstrip("@")
-        return True, token
+        return path_parts(value)
 
     def _compose_path(self, base: Any, leaf: Any) -> str:
-        base_abs, base_key = self._path_parts(base)
-        leaf_abs, leaf_key = self._path_parts(leaf)
-        if leaf_abs:
-            return leaf_key
-        if not base_abs:
-            raise ValueError(f"cannot compose relative base path {base!r} with {leaf!r}")
-        if not base_key:
-            return leaf_key
-        if not leaf_key:
-            return base_key
-        return f"{base_key}.{leaf_key}"
+        return compose_path(base, leaf)
 
     def _required_param(self, path: str, *, field: str) -> torch.Tensor:
         return self._state_tensor_from_resolved_path(path, field=field)
@@ -777,19 +762,12 @@ class Codegen2GraphModel(nn.Module):
         else:
             value = self._eval_graph_operand(path, env=env, symbols=symbols)
             payload = value
-        key = resolve_path_expr_to_key(payload, {}, op_name="codegen2 config path")
+        key = resolve_path_expr_to_key(payload, {}, op_name="codegen2-torch config path")
         return key
 
     @staticmethod
     def _lookup_config(config: Any, key: str) -> tuple[bool, Any]:
-        if not isinstance(config, dict):
-            return False, None
-        current: Any = config
-        for part in str(key).split("."):
-            if not isinstance(current, dict) or part not in current:
-                return False, None
-            current = current[part]
-        return True, current
+        return lookup_config(config, key)
 
     def _execute_primitive_node(
         self,
@@ -809,60 +787,16 @@ class Codegen2GraphModel(nn.Module):
         def out(value: Any) -> None:
             self._assign_outputs(out_names, value, env)
 
-        if primitive == "params_param":
-            if len(args) != 1:
-                raise ValueError("params_param expects one Path argument")
-            _absolute, key = self._path_parts(args[0])
-            out(self._required_param(key, field="params_param"))
-            return True
-
-        if primitive == "params_has_root":
-            if len(args) != 1:
-                raise ValueError("params_has_root expects one root argument")
-            root = str(args[0])
-            prefix = f"{root}." if root else ""
-            out(root == "" or any(key == root or key.startswith(prefix) for key in self._state))
-            return True
-
-        if primitive in {
-            "config_int",
-            "config_dim",
-            "config_float",
-            "config_bool",
-            "config_str",
-            "config_value",
-            "config_list",
-            "config_has",
-            "config_has_value",
-        }:
-            if len(args) < 1:
-                raise ValueError(f"{primitive} expects one Path argument")
-            _absolute, key = self._path_parts(args[0])
-            config = self.spec.get("model", {}).get("config", {})
-            found, value = self._lookup_config(config, key)
-            if primitive == "config_has":
-                out(found)
-                return True
-            if primitive == "config_has_value":
-                out(found and value is not None)
-                return True
-            if not found or value is None:
-                value = args[1] if len(args) > 1 else kwargs.get("default")
-            if primitive in {"config_int", "config_dim"}:
-                out(int(value))
-            elif primitive == "config_float":
-                out(float(value))
-            elif primitive == "config_bool":
-                if isinstance(value, str):
-                    out(value.strip().lower() in {"1", "true", "yes"})
-                else:
-                    out(bool(value))
-            elif primitive == "config_str":
-                out(str(value))
-            elif primitive == "config_list":
-                out(list(value))
-            else:
-                out(value)
+        handled, value = execute_common_primitive(
+            primitive=primitive,
+            args=args,
+            kwargs=kwargs,
+            config=self.spec.get("model", {}).get("config", {}),
+            state_keys=lambda: self._state.keys(),
+            require_param=lambda key: self._required_param(key, field=primitive),
+        )
+        if handled:
+            out(value)
             return True
 
         if primitive == "embedding":
@@ -1048,11 +982,6 @@ class Codegen2GraphModel(nn.Module):
         if primitive == "where":
             out(torch.where(args[0], args[1], args[2]) if torch.is_tensor(args[0]) else (args[1] if args[0] else args[2]))
             return True
-        if primitive == "require":
-            if args[0] is None:
-                raise ValueError("require expected non-null value")
-            out(args[0])
-            return True
         if primitive == "gather":
             dim = int(args[2]) if len(args) > 2 and not self._is_null(args[2]) else -1
             out(torch.gather(args[0], dim=dim, index=args[1]))
@@ -1161,19 +1090,6 @@ class Codegen2GraphModel(nn.Module):
         if primitive == "zeros_like":
             out(torch.zeros_like(args[0]))
             return True
-        if primitive == "shape":
-            out(list(args[0].shape))
-            return True
-        if primitive == "list_init":
-            out([])
-            return True
-        if primitive == "list_append":
-            values = [] if args[0] is None else list(args[0])
-            out([*values, args[1]])
-            return True
-        if primitive == "list_index":
-            out(None if args[0] is None else args[0][int(args[1])])
-            return True
         return False
 
     def _execute_module(
@@ -1229,7 +1145,7 @@ class Codegen2GraphModel(nn.Module):
                 self._execute_node(node, env=local_env, symbols=local_symbols)
             except Exception as exc:
                 raise RuntimeError(
-                    f"runtime2 graph node {node.id} ({node.op.name}) failed in {module_name}"
+                    f"runtime2-torch graph node {node.id} ({node.op.name}) failed in {module_name}"
                 ) from exc
         return tuple(
             self._eval_graph_operand(operand, env=local_env, symbols=local_symbols)
@@ -1356,7 +1272,7 @@ class Codegen2GraphModel(nn.Module):
         primitive = _normalize_primitive_op(op)
         if self._execute_primitive_node(primitive, node, env=env, symbols=symbols):
             return
-        raise NotImplementedError(f"codegen2 unsupported graph op {op!r}")
+        raise NotImplementedError(f"codegen2-torch unsupported graph op {op!r}")
 
     def _assign_outputs(
         self,
@@ -1406,7 +1322,7 @@ class Codegen2GraphModel(nn.Module):
             return bool(left) and bool(right)
         if op == "or":
             return bool(left) or bool(right)
-        raise NotImplementedError(f"unsupported codegen2 binary op {op!r}")
+        raise NotImplementedError(f"unsupported codegen2-torch binary op {op!r}")
 
 
 def _py_ident(name: str) -> str:
@@ -1553,44 +1469,15 @@ class _DirectTorchEmitter:
         add(lines, 12, "return torch.ne(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left != right")
         add(lines, 8, "raise NotImplementedError(f'unsupported binary op {op!r}')")
         add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _compose_path(base, leaf):")
-        add(lines, 8, "base = '' if base is None else str(base)")
-        add(lines, 8, "leaf = '' if leaf is None else str(leaf)")
-        add(lines, 8, "if leaf.startswith('@@'):")
-        add(lines, 12, "return leaf.lstrip('@')")
-        add(lines, 8, "base = base.lstrip('@')")
-        add(lines, 8, "leaf = leaf.lstrip('@')")
-        add(lines, 8, "return base if not leaf else (leaf if not base else base + '.' + leaf)")
-        add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _render_path(prefix, parts):")
-        add(lines, 8, "clean = []")
-        add(lines, 8, "for part in parts:")
-        add(lines, 12, "if part is None:")
-        add(lines, 16, "continue")
-        add(lines, 12, "text = str(part).strip()")
-        add(lines, 12, "if not text or text == 'None':")
-        add(lines, 16, "continue")
-        add(lines, 12, "clean.append(text.strip('@'))")
-        add(lines, 8, "return str(prefix) + '.'.join(clean)")
+        add(lines, 4, "_compose_path = staticmethod(_common_compose_path)")
+        add(lines, 4, "_render_path = staticmethod(_common_render_path)")
+        add(lines, 4, "_require_value = staticmethod(_common_require_value)")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
-        add(lines, 8, "key = str(path).lstrip('@')")
-        add(lines, 8, "try:")
-        add(lines, 12, "return self.state_dict_tensors[key]")
-        add(lines, 8, "except KeyError as exc:")
-        add(lines, 12, "raise KeyError(f'missing parameter {key!r}') from exc")
+        add(lines, 8, "return _common_required_state_value(self.state_dict_tensors, path)")
         add(lines, 4, "")
         add(lines, 4, "def _optional_param(self, path):")
-        add(lines, 8, "key = str(path).lstrip('@')")
-        add(lines, 8, "return self.state_dict_tensors.get(key)")
-        add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _require_value(value):")
-        add(lines, 8, "if value is None:")
-        add(lines, 12, "raise ValueError('require expected non-null value')")
-        add(lines, 8, "return value")
+        add(lines, 8, "return _common_optional_state_value(self.state_dict_tensors, path)")
         add(lines, 4, "")
         add(lines, 4, "def _linear(self, base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
@@ -1635,22 +1522,10 @@ class _DirectTorchEmitter:
         add(lines, 8, "return torch.where(x > 0, alpha_p * x * x + beta * x, (torch.expm1(torch.minimum(x, eps)) - x) * alpha_n + beta * x)")
         add(lines, 4, "")
         add(lines, 4, "def _config(self, path, default=None):")
-        add(lines, 8, "key = str(path).lstrip('@')")
-        add(lines, 8, "value = self.config")
-        add(lines, 8, "for part in key.split('.'):")
-        add(lines, 12, "if not isinstance(value, dict) or part not in value:")
-        add(lines, 16, "return default")
-        add(lines, 12, "value = value[part]")
-        add(lines, 8, "return default if value is None else value")
+        add(lines, 8, "return _common_config_value(self.config, path, default)")
         add(lines, 4, "")
         add(lines, 4, "def _has_config(self, path):")
-        add(lines, 8, "key = str(path).lstrip('@')")
-        add(lines, 8, "value = self.config")
-        add(lines, 8, "for part in key.split('.'):")
-        add(lines, 12, "if not isinstance(value, dict) or part not in value:")
-        add(lines, 16, "return False")
-        add(lines, 12, "value = value[part]")
-        add(lines, 8, "return value is not None")
+        add(lines, 8, "return _common_has_config_value(self.config, path)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _dtype_from_name(value):")
@@ -1701,12 +1576,7 @@ class _DirectTorchEmitter:
         add(lines, 8, "no = cls._move_to(no, device) if torch.is_tensor(no) else no")
         add(lines, 8, "return torch.where(cond, yes, no)")
         add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _cache_past_length(cache):")
-        add(lines, 8, "if cache is None:")
-        add(lines, 12, "return 0")
-        add(lines, 8, "key, _ = cache[0]")
-        add(lines, 8, "return int(key.shape[-2])")
+        add(lines, 4, "_cache_past_length = staticmethod(_common_cache_past_length)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _concat(cls, *args, dim=None):")
@@ -2168,7 +2038,7 @@ class _DirectTorchEmitter:
         }
         if primitive in simple:
             return simple[primitive]()
-        raise NotImplementedError(f"direct codegen2 unsupported graph op {primitive!r}")
+        raise NotImplementedError(f"direct codegen2-torch unsupported graph op {primitive!r}")
 
     def _operand_expr(self, operand: GraphOperand, *, local: set[str], symbols_dict: str) -> str:
         if isinstance(operand, GraphValueRef):
@@ -2246,6 +2116,16 @@ def emit_model_code_from_graph_ir(
             "import torch",
             "from torch import nn",
             "from torch.nn import functional as F",
+            "from brainsurgery.synapse.axon.codegen2_common import (",
+            "    cache_past_length as _common_cache_past_length,",
+            "    compose_path as _common_compose_path,",
+            "    config_value as _common_config_value,",
+            "    has_config_value as _common_has_config_value,",
+            "    optional_state_value as _common_optional_state_value,",
+            "    render_path as _common_render_path,",
+            "    required_state_value as _common_required_state_value,",
+            "    require_value as _common_require_value,",
+            ")",
             "",
             f"_MODEL_CONFIG = {model_config!r}",
             "",

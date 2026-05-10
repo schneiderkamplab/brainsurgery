@@ -536,7 +536,7 @@ def axon_test(
     canonicalize: bool = typer.Option(
         False,
         "--canonicalize/--no-canonicalize",
-        help="Enable Axon canonicalization before codegen2/runtime2 graph lowering.",
+        help="Enable Axon canonicalization before codegen2-torch/runtime2-torch graph lowering.",
     ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
@@ -707,9 +707,12 @@ def axon_benchmark(
         help="Set torch.compile(dynamic=True).",
     ),
     axon_backend: str = typer.Option(
-        "codegen2",
+        "codegen2-torch",
         "--axon-backend",
-        help="Axon execution backend (codegen2, runtime2, or pipeline2).",
+        help=(
+            "Axon execution backend (codegen2-torch, codegen2-tinygrad, "
+            "runtime2-torch, or pipeline2-torch)."
+        ),
     ),
     axon_typechecker: str = typer.Option(
         "typecheck2",
@@ -721,7 +724,7 @@ def axon_benchmark(
         "--pipeline-parallel-size",
         "--pp",
         help=(
-            "Pipeline stages per worker when --axon-backend pipeline2 is used. "
+            "Pipeline stages per worker when --axon-backend pipeline2-torch is used. "
             "With --processes > 1, each worker gets pp GPUs via CUDA_VISIBLE_DEVICES partitioning."
         ),
     ),
@@ -733,7 +736,7 @@ def axon_benchmark(
     canonicalize: bool = typer.Option(
         False,
         "--canonicalize/--no-canonicalize",
-        help="Enable Axon canonicalization before codegen2/runtime2 graph lowering.",
+        help="Enable Axon canonicalization before codegen2-torch/runtime2-torch graph lowering.",
     ),
     skip_hf: bool = typer.Option(
         False,
