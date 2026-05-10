@@ -5,11 +5,6 @@ from typing import Any, Mapping
 from ._config_common import _resolve_scalar_ref
 
 
-def _uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
-    del emitter, node_spec
-    return False
-
-
 def _resolve_root_arg(
     *,
     op_name: str,
@@ -52,20 +47,8 @@ def _param_root_exists(state: Mapping[str, Any], root: str) -> bool:
     return False
 
 
-def _compile_value_expr(*, emitter: Any, value: Any, env: dict[str, str]) -> str:
-    if isinstance(value, str):
-        if value in env:
-            return env[value]
-        symbols = getattr(emitter, "symbols", {})
-        if isinstance(symbols, dict) and value in symbols:
-            return repr(symbols[value])
-    return repr(value)
-
-
 __all__ = [
-    "_compile_value_expr",
     "_param_root_exists",
     "_resolve_default",
     "_resolve_root_arg",
-    "_uses_node_path",
 ]

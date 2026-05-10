@@ -19,11 +19,6 @@ def _raw_args(node_spec: dict[str, Any]) -> list[Any]:
     return [raw]
 
 
-def _uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
-    del emitter, node_spec
-    return False
-
-
 def _resolve_scalar_ref(
     value: Any, env: dict[str, Any], symbols: Mapping[str, int | float | bool]
 ) -> Any:
@@ -188,155 +183,10 @@ def _resolve_config_value(
     raise KeyError(f"{op_name} missing required config key: {key}")
 
 
-def _compile_value_expr(*, emitter: Any, value: Any, env: dict[str, str]) -> str:
-    return emitter._expr_code(value, env)
-
-
-def _compile_lookup_lines(
-    *,
-    op_name: str,
-    emitter: Any,
-    node_spec: dict[str, Any],
-    env: dict[str, str],
-    indent: str,
-) -> tuple[list[str], str, str, str]:
-    lines: list[str] = []
-    root_var = emitter._fresh("cfg_root")
-    key_raw_var = emitter._fresh("cfg_key_raw")
-    template_env_var = emitter._fresh("cfg_template_env")
-    key_var = emitter._fresh("cfg_key")
-    found_var = emitter._fresh("cfg_found")
-    value_var = emitter._fresh("cfg_value")
-    part_var = emitter._fresh("cfg_part")
-    args = _raw_args(node_spec)
-    if not args:
-        raise ValueError(f"{op_name} requires key positional arg")
-    key_expr = _compile_value_expr(emitter=emitter, value=args[0], env=env)
-
-    spec = getattr(emitter, "spec", {})
-    model = spec.get("model", {}) if isinstance(spec, dict) else {}
-    model_config = model.get("config") if isinstance(model, dict) else None
-    config_literal = model_config if isinstance(model_config, dict) else {}
-    symbols = getattr(emitter, "symbols", {})
-
-    raw_template = args[0]
-    template_text: str | None = None
-    if isinstance(raw_template, str):
-        if raw_template in env:
-            template_text = None
-        else:
-            template_text = path_expr_template_text(
-                runtime_value_to_path_expr(raw_template, op_name=op_name)
-            )
-    elif isinstance(raw_template, dict):
-        kind = raw_template.get("_expr")
-        if kind == "path":
-            template_text = path_expr_template_text(
-                runtime_value_to_path_expr(raw_template, op_name=op_name)
-            )
-        elif kind == "string" and isinstance(raw_template.get("value"), str):
-            template_text = raw_template["value"]
-    needed_names: set[str] = set()
-    if isinstance(template_text, str):
-        needed_names = {
-            name.strip() for name in re.findall(r"\{([^{}]+)\}", template_text) if name.strip()
-        }
-
-    template_bindings = ", ".join(
-        f"{name!r}: {py_name}" for name, py_name in env.items() if name in needed_names
-    )
-    symbol_bindings = ""
-    if isinstance(symbols, dict) and symbols:
-        symbol_bindings = ", ".join(
-            f"{name!r}: {value!r}" for name, value in symbols.items() if name in needed_names
-        )
-
-    lines.append(f"{indent}{root_var} = {repr(config_literal)}")
-    lines.append(f"{indent}if not isinstance({root_var}, dict):")
-    lines.append(f"{indent}    {root_var} = {{}}")
-    lines.append(f"{indent}{key_raw_var} = {key_expr}")
-    if template_bindings and symbol_bindings:
-        lines.append(f"{indent}{template_env_var} = {{{template_bindings}, {symbol_bindings}}}")
-    elif template_bindings:
-        lines.append(f"{indent}{template_env_var} = {{{template_bindings}}}")
-    elif symbol_bindings:
-        lines.append(f"{indent}{template_env_var} = {{{symbol_bindings}}}")
-    else:
-        lines.append(f"{indent}{template_env_var} = {{}}")
-    lines.append(
-        f"{indent}{key_var} = self._resolve_config_path_key({key_raw_var}, {template_env_var}, {op_name!r})"
-    )
-    lines.append(f"{indent}{found_var} = True")
-    lines.append(f"{indent}{value_var} = {root_var}")
-    lines.append(f"{indent}if {found_var}:")
-    lines.append(f"{indent}    for {part_var} in {key_var}.split('.'):")
-    lines.append(f"{indent}        if isinstance({value_var}, dict) and {part_var} in {value_var}:")
-    lines.append(f"{indent}            {value_var} = {value_var}[{part_var}]")
-    lines.append(f"{indent}        else:")
-    lines.append(f"{indent}            {found_var} = False")
-    lines.append(f"{indent}            break")
-    return lines, key_var, found_var, value_var
-
-
-def _compile_default_lines(
-    *,
-    op_name: str,
-    emitter: Any,
-    node_spec: dict[str, Any],
-    env: dict[str, str],
-    indent: str,
-    found_var: str,
-    key_var: str,
-    value_var: str,
-) -> list[str]:
-    lines: list[str] = []
-    args = _raw_args(node_spec)
-    if len(args) >= 2:
-        default_expr = _compile_value_expr(emitter=emitter, value=args[1], env=env)
-        lines.append(f"{indent}if not {found_var}:")
-        lines.append(f"{indent}    {value_var} = {default_expr}")
-        return lines
-    lines.append(f"{indent}if not {found_var}:")
-    lines.append(
-        f"{indent}    raise KeyError({op_name!r} + ' missing required config key: ' + {key_var})"
-    )
-    return lines
-
-
-def _unsupported_interpret(
-    *,
-    op_name: str,
-    model: Any,
-    node_spec: dict[str, Any],
-    env: dict[str, Any],
-    node_path: str,
-    scope: str,
-    symbols: Mapping[str, int | float | bool],
-) -> None:
-    del model, node_spec, env, node_path, scope, symbols
-    raise NotImplementedError(f"{op_name} interpret() is not implemented")
-
-
-def _unsupported_compile(
-    *,
-    op_name: str,
-    emitter: Any,
-    node_spec: dict[str, Any],
-    env: dict[str, str],
-    node_path_var: str,
-    scope_var: str,
-    indent: str,
-) -> list[str]:
-    del emitter, node_spec, env, node_path_var, scope_var, indent
-    raise NotImplementedError(f"{op_name} compile() is not implemented")
-
-
 __all__ = [
     "_coerce_float",
     "_coerce_int",
     "_coerce_str",
-    "_compile_default_lines",
-    "_compile_lookup_lines",
     "_config_lookup",
     "_config_root",
     "_resolve_config_value",
@@ -344,7 +194,4 @@ __all__ = [
     "_resolve_key",
     "_resolve_key_template",
     "_resolve_scalar_ref",
-    "_unsupported_compile",
-    "_unsupported_interpret",
-    "_uses_node_path",
 ]

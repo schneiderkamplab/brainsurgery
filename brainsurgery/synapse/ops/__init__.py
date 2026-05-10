@@ -7,8 +7,6 @@ from types import ModuleType
 from typing import Any
 
 _REQUIRED_EXPORTS: tuple[str, ...] = (
-    "OP_NAME",
-    "LOWERING_TYPE_SIGNATURE",
 )
 
 
@@ -22,14 +20,14 @@ def _discovered_module_names() -> list[str]:
     duplicates = sorted(name for name, count in Counter(module_names).items() if count > 1)
     if duplicates:
         names = ", ".join(duplicates)
-        raise RuntimeError(f"Duplicate synapse op module names discovered in {__name__}: {names}")
+        raise RuntimeError(f"Duplicate Axon primitive op module names discovered in {__name__}: {names}")
     return module_names
 
 
 def _require_module_export(module: ModuleType, name: str) -> Any:
     if not hasattr(module, name):
         raise RuntimeError(
-            f"Synapse op module {module.__name__!r} is missing required export {name!r}"
+            f"Axon primitive op module {module.__name__!r} is missing required export {name!r}"
         )
     return getattr(module, name)
 
@@ -42,7 +40,7 @@ def _load_discovered_op_modules() -> dict[str, Any]:
             module = import_module(qualified_name)
         except Exception as exc:
             raise RuntimeError(
-                f"Failed to import discovered synapse op module: {qualified_name}"
+                f"Failed to import discovered Axon primitive op module: {qualified_name}"
             ) from exc
 
         for export_name in _REQUIRED_EXPORTS:
@@ -51,24 +49,24 @@ def _load_discovered_op_modules() -> dict[str, Any]:
         type_signature = _require_module_export(module, "LOWERING_TYPE_SIGNATURE")
         if not isinstance(type_signature, dict):
             raise RuntimeError(
-                f"Synapse op module {qualified_name!r} export 'LOWERING_TYPE_SIGNATURE' must be a dict"
+                f"Axon primitive op module {qualified_name!r} export 'LOWERING_TYPE_SIGNATURE' must be a dict"
             )
         for key in ("args", "kwargs", "returns"):
             if key not in type_signature:
                 raise RuntimeError(
-                    f"Synapse op module {qualified_name!r} LOWERING_TYPE_SIGNATURE must contain key {key!r}"
+                    f"Axon primitive op module {qualified_name!r} LOWERING_TYPE_SIGNATURE must contain key {key!r}"
                 )
 
         op_name = _require_module_export(module, "OP_NAME")
         if not isinstance(op_name, str) or not op_name:
             raise RuntimeError(
-                f"Synapse op module {qualified_name!r} has invalid OP_NAME: {op_name!r}"
+                f"Axon primitive op module {qualified_name!r} has invalid OP_NAME: {op_name!r}"
             )
 
         existing = loaded_modules.get(op_name)
         if existing is not None:
             raise RuntimeError(
-                f"Duplicate synapse OP_NAME registered: {op_name!r} in "
+                f"Duplicate Axon primitive OP_NAME registered: {op_name!r} in "
                 f"{existing.__name__!r} and {qualified_name!r}"
             )
         loaded_modules[op_name] = module

@@ -76,7 +76,7 @@ transforms:
   - reshape: { from: demo.prompt_ids, to: demo.prompt_ids_batched, shape: [1, -1] }
   - generate:
       model: model
-      runtime: synapse
+      runtime: runtime2
       input_ids: demo.prompt_ids_batched
       max_new_tokens: 16
       output: demo.generated_ids
@@ -87,16 +87,16 @@ transforms:
       tokenizer: models/gpt2
   - reshape: { from: demo.expected_generated_ids, to: demo.expected_generated_ids_batched, shape: [1, -1] }
   - assert: { equal: { left: demo.generated_ids, right: demo.expected_generated_ids_batched } }
-  # Compare infer outputs across synapse runtime, codegen runtime, and HF runtime.
+  # Compare infer outputs across runtime2, codegen2, and HF runtime.
   - load: { path: models/gpt2, alias: model_hf }
   - infer:
       model: model
-      runtime: synapse
+      runtime: runtime2
       input_ids: model::demo.prompt_ids_batched
-      output: demo.logits_synapse
+      output: demo.logits_runtime2
   - infer:
       model: model
-      runtime: codegen
+      runtime: codegen2
       input_ids: model::demo.prompt_ids_batched
       output: demo.logits_codegen
   - infer:
@@ -104,8 +104,8 @@ transforms:
       runtime: hf
       input_ids: model::demo.prompt_ids_batched
       output: demo.logits_hf
-  - assert: { equal: { left: model::demo.logits_synapse, right: model::demo.logits_codegen, eps: 0.0005 } }
-  - assert: { equal: { left: model::demo.logits_synapse, right: model_hf::demo.logits_hf, eps: 0.0005 } }
+  - assert: { equal: { left: model::demo.logits_runtime2, right: model::demo.logits_codegen, eps: 0.0005 } }
+  - assert: { equal: { left: model::demo.logits_runtime2, right: model_hf::demo.logits_hf, eps: 0.0005 } }
   - assert: { equal: { left: model::demo.logits_codegen, right: model_hf::demo.logits_hf, eps: 0.0005 } }
   - cast_: { target: ln_f_copy.weight, to: int64 }
   - delete: { target: ln_f_copy.weight }
@@ -141,7 +141,7 @@ transforms:
   - delete: { target: demo.generated_ids }
   - delete: { target: demo.expected_generated_ids }
   - delete: { target: demo.expected_generated_ids_batched }
-  - delete: { target: model::demo.logits_synapse }
+  - delete: { target: model::demo.logits_runtime2 }
   - delete: { target: model::demo.logits_codegen }
   - delete: { target: 'model_hf::(.+)' }
   - load: { path: models/gpt2/model.safetensors, alias: orig }

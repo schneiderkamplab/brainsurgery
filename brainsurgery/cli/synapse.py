@@ -130,6 +130,50 @@ def _dump_axon_stage_to_text(
     return render_fn(program, show_types=show_types)
 
 
+def _axon_graph_ir_to_dot(
+    axon_path: Path,
+    *,
+    main_module: str | None,
+    strict: bool,
+    backend_required: bool,
+    optimize: bool,
+    canonicalize: bool,
+    direction: str,
+    show_data_labels: bool,
+    show_control_flow: bool,
+) -> str:
+    module = _axon_module()
+    resolve_fn = getattr(module, "resolve_axon_program_from_path")
+    normalize_fn = getattr(module, "normalize_closed_axon_file")
+    elaborate_fn = getattr(module, "elaborate_closed_axon_file")
+    flatten_fn = getattr(module, "flatten_closed_axon_file")
+    typecheck_fn = getattr(module, "typecheck2_flat_axon_file")
+    backend_required_fn = getattr(module, "normalize_backend_required_flat_typed_axon_file")
+    optimize_fn = getattr(module, "optimize_flat_typed_axon_file")
+    canonicalize_fn = getattr(module, "canonicalize_typed_axon_file")
+    lower_graph_fn = getattr(module, "lower_axon_program_to_graph_ir")
+    render_dot_fn = getattr(module, "render_graph_program_to_dot")
+
+    program = resolve_fn(axon_path, strict=strict).ast
+    program = normalize_fn(program, main_module=main_module)
+    program = elaborate_fn(program, main_module=main_module)
+    program = flatten_fn(program, main_module=main_module)
+    program = typecheck_fn(program, main_module=main_module)
+    if backend_required:
+        program = backend_required_fn(program, main_module=main_module)
+    if optimize:
+        program = optimize_fn(program, main_module=main_module)
+    if canonicalize:
+        program = canonicalize_fn(program, main_module=main_module)
+    graph = lower_graph_fn(program, main_module=main_module)
+    return render_dot_fn(
+        graph,
+        direction=direction,
+        show_data_labels=show_data_labels,
+        show_control_flow=show_control_flow,
+    )
+
+
 def _ensure_overwrite_allowed(path: Path, *, force: bool) -> None:
     if path.exists() and not force:
         raise typer.BadParameter(
@@ -267,6 +311,92 @@ def axon_stage_dump(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
     typer.echo(f"Wrote {stage} Axon source to {output_path}")
+
+
+@app.command("axon-graph-ir-dot")
+def axon_graph_ir_dot(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    output_path: Path = typer.Argument(
+        ...,
+        help="Destination Graphviz .dot file.",
+    ),
+    main_module: str | None = typer.Option(
+        None,
+        "--main-module",
+        help="Main Axon module name (defaults to MAIN pragma or last module).",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Fail when the resolver emits warnings.",
+    ),
+    backend_required: bool = typer.Option(
+        True,
+        "--backend-required/--no-backend-required",
+        help="Run backend-required rewrites before Graph IR lowering.",
+    ),
+    optimize: bool = typer.Option(
+        False,
+        "--optimize/--no-optimize",
+        help="Run the optimizer before Graph IR lowering.",
+    ),
+    canonicalize: bool = typer.Option(
+        False,
+        "--canonicalize/--no-canonicalize",
+        help="Run canonicalization before Graph IR lowering.",
+    ),
+    direction: str = typer.Option(
+        "top-down",
+        "--direction",
+        help="DOT layout direction: top-down, bottom-up, left-right, or right-left.",
+    ),
+    show_data_labels: bool = typer.Option(
+        True,
+        "--data-labels/--no-data-labels",
+        help="Show data-flow edge labels.",
+    ),
+    show_control_flow: bool = typer.Option(
+        True,
+        "--control-flow/--no-control-flow",
+        help="Show dashed statement-order edges.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite output file if it already exists.",
+    ),
+) -> None:
+    """Render typed Graph IR directly to Graphviz DOT."""
+    _ensure_overwrite_allowed(output_path, force=force)
+    if output_path.suffix != ".dot":
+        raise typer.BadParameter("Output path must end with .dot")
+    if isinstance(main_module, OptionInfo):
+        main_module = None
+    try:
+        dot = _axon_graph_ir_to_dot(
+            axon_path,
+            main_module=main_module,
+            strict=strict,
+            backend_required=backend_required,
+            optimize=optimize,
+            canonicalize=canonicalize,
+            direction=direction,
+            show_data_labels=show_data_labels,
+            show_control_flow=show_control_flow,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(dot, encoding="utf-8")
+    typer.echo(f"Wrote Graph IR DOT to {output_path}")
 
 
 @app.command("axon-test")

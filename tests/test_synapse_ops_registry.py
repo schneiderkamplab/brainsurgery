@@ -10,14 +10,16 @@ def test_synapse_ops_registry_discovery_has_expected_core_ops() -> None:
 
 
 def test_synapse_ops_registry_exports_required_interface() -> None:
-    required = ("OP_NAME", "interpret", "compile", "uses_node_path")
+    required = ("OP_NAME", "LOWERING_TYPE_SIGNATURE")
     for op_name, module in OP_MODULES.items():
         assert op_name == module.OP_NAME
         for attr in required:
             assert hasattr(module, attr)
-        assert callable(module.interpret)
-        assert callable(module.compile)
-        assert callable(module.uses_node_path)
+        signature = module.LOWERING_TYPE_SIGNATURE
+        assert isinstance(signature, dict)
+        assert {"args", "kwargs", "returns"} <= set(signature)
+        type_rule = getattr(module, "type_rule", None)
+        assert type_rule is None or callable(type_rule)
 
 
 def test_get_op_module_returns_none_for_unknown_op() -> None:

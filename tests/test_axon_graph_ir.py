@@ -28,6 +28,7 @@ from brainsurgery.synapse.axon.graph_ir import (
     GraphValue,
     GraphValueRef,
     graph_program_to_axon_file,
+    render_graph_program_to_dot,
 )
 
 
@@ -87,6 +88,65 @@ main x = do
     assert "main :: Int -> Int" in rendered
     assert "y <- x + 1" in rendered
     assert "return y" in rendered
+
+
+def test_graph_ir_renders_rich_dot_directly() -> None:
+    program = parse_axon_program(
+        """
+{-# MAIN "main" #-}
+
+helper :: Tensor[B,S] -> Tensor[B,S]
+helper x = do
+  y <- x + x
+  return y
+
+main :: Tensor[B,S] -> Tensor[B,S]
+main x = do
+  y <- helper x
+  z <- y + x
+  return z
+"""
+    )
+
+    graph = lower_axon_program_to_graph_ir(_typed(program, main_module="main"), main_module="main")
+    rendered = render_graph_program_to_dot(graph, direction="left-right")
+
+    assert rendered.startswith("digraph GraphIR")
+    assert "rankdir=LR" in rendered
+    assert "subgraph cluster_helper" in rendered
+    assert "subgraph cluster_main" in rendered
+    assert "helper" in rendered
+    assert "Tensor[B,S]" in rendered
+    assert "style=\"dotted\"" in rendered
+    assert "lhead=cluster_helper" in rendered
+    assert "core.binary.+" in rendered
+
+
+def test_graph_ir_dot_shows_nested_expression_calls_and_real_label_newlines() -> None:
+    program = parse_axon_program(
+        """
+{-# MAIN "main" #-}
+
+helper :: Tensor[B,S] -> Tensor[B,S]
+helper x = do
+  y <- x + x
+  return y
+
+main :: Bool -> Tensor[B,S] -> Tensor[B,S]
+main cond x = do
+  y <- cond ? (helper x) : x
+  return y
+"""
+    )
+
+    graph = lower_axon_program_to_graph_ir(_typed(program, main_module="main"), main_module="main")
+    rendered = render_graph_program_to_dot(graph)
+
+    assert 'label="module helper\\nreturns Tensor[B,S]"' in rendered
+    assert 'label="module helper\\\\nreturns Tensor[B,S]"' not in rendered
+    assert "style=\"dotted\"" in rendered
+    assert "lhead=cluster_helper" in rendered
+    assert 'label="arg1"' in rendered
 
 
 def test_graph_ir_lowers_generic_gpt2_kv_as_alternative_lowering_target() -> None:

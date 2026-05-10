@@ -187,14 +187,16 @@ gpt2_block x past_kv use_cache = do
   return y, present_kv
 ```
 
-## 8) Lowering to Synapse
+## 8) Lowering to Graph IR
 
 Lowering is mechanical:
 
 - `<-` bindings map to graph node outputs,
-- `op@path(...)` maps to Synapse op + inferred parameter path,
-- `for@...` maps to Synapse `op: repeat`,
-- `if/then/else` and ternary shorthand map to lazy `select` value nodes,
+- primitive calls map to typed Graph IR nodes,
+- path operands remain structured `Path` values, including absolute templates,
+- flattened loop helpers remain ordinary graph-call nodes,
+- ternary shorthand maps to typed data-flow, not control-flow blocks,
 - annotations map to planner metadata.
 
-Synapse YAML remains the canonical machine-readable format. Axon is the readable authoring/rendering format.
+Graph IR is the canonical machine-readable lowering target. Axon remains the readable
+authoring/rendering format and the source of stage roundtrip tests.

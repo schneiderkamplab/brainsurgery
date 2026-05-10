@@ -260,11 +260,12 @@ Stage status as of now:
 - note:
   - this should be treated as a separate design problem from the active lowering/runtime/codegen cleanup
 
-## Next IR Direction
+## Graph IR Direction
 
-The current Synapse YAML-shaped graph should be replaced by an in-memory graph IR before runtime/codegen.
+The old serialized graph contract has been replaced by an in-memory graph IR before
+runtime/codegen.
 
-Initial implementation status:
+Implementation status:
 
 - `brainsurgery/synapse/axon/graph_ir/` defines a typed in-memory graph IR.
 - `lower_axon_program_to_graph_ir(...)` is available as an alternative lowering target.
@@ -489,6 +490,18 @@ For typed ASTs, rendering may use explicit type ascriptions where needed, for ex
 ```
 
 The AST package should also expose Graphviz export so each AST stage can be inspected visually.
+
+Graph IR has a separate DOT renderer because its inspection target is lower-level than
+the Axon AST. The renderer consumes typed `GraphProgram` directly and must not route
+through serialized compatibility formats. The CLI entrypoint is:
+
+```bash
+brainsurgery synapse axon-graph-ir-dot path/to/model.axon tmp/model.graph-ir.dot --main-module model --force
+```
+
+The emitted graph shows module clusters, input/output gateways, typed op ports,
+attribute/path operands, data-flow edges, statement-order edges, and dotted module-call
+edges, including calls nested inside expression operands such as `core.select` branches.
 
 ## Packaging Targets
 
