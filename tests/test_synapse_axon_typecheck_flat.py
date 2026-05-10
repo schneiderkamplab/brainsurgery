@@ -23,16 +23,22 @@ from brainsurgery.synapse.axon.ast import (
     TypeVar,
 )
 from brainsurgery.synapse.axon.ast.render import render_axon_file
+from brainsurgery.synapse.axon.elaborate import elaborate_closed_axon_file
 from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
 from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
 from brainsurgery.synapse.axon.parse import parse_axon_program
 from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
-from brainsurgery.synapse.axon.typecheck.core import _TcCtx, _is_generic_named_type, _scoped_typevars
-from brainsurgery.synapse.axon.typecheck import typecheck_flat_axon_file
+from brainsurgery.synapse.axon.typecheck_shared import _TcCtx, _is_generic_named_type, _scoped_typevars
 from brainsurgery.synapse.axon.typecheck2 import typecheck2_flat_axon_file
 from brainsurgery.synapse.axon.lowering import lower_axon_program_to_graph_ir
 from brainsurgery.synapse.axon.codegen2 import make_runtime2_model_class
 from brainsurgery.synapse.axon.validate import validate_typed_axon_file
+
+
+def _flat(program, *, main_module: str):
+    normalized = normalize_closed_axon_file(program, main_module=main_module)
+    elaborated = elaborate_closed_axon_file(normalized, main_module=main_module)
+    return flatten_closed_axon_file(elaborated, main_module=main_module)
 
 
 def _resolve_attention_wrapper(tmp_path: Path):
@@ -60,8 +66,8 @@ main x = do
     x <- step x i
   return x
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    flat = _flat(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     helper = next(
         module
@@ -83,8 +89,8 @@ main x = do
   y <- f x
   return y
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    flat = _flat(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     module = next(module for module in typed.modules if module.name == "main")
     bind_stmt = next(stmt for stmt in module.statements if isinstance(stmt, AxonBind))
@@ -101,7 +107,7 @@ main = do
   x <- 1
   return x
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    flat = _flat(parse_axon_program(source), main_module="main")
     bad = AxonDefinition(
         name="bad",
         path_param=None,
@@ -125,7 +131,7 @@ main = do
         type_aliases=flat.type_aliases,
         origin_path=flat.origin_path,
     )
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     assert [module.name for module in typed.modules] == ["main"]
 
@@ -134,8 +140,8 @@ def test_typecheck_flat_unifies_embedding_dim_from_add() -> None:
     resolved = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
     ).ast
-    flat = flatten_closed_axon_file(resolved, main_module="gpt2")
-    typed = typecheck_flat_axon_file(flat, main_module="gpt2")
+    flat = _flat(resolved, main_module="gpt2")
+    typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
     validate_typed_axon_file(typed, main_module="gpt2")
     text = render_axon_file(typed, show_types=True)
     pos_line = next(
@@ -152,8 +158,8 @@ def test_typecheck_flat_exposes_signature_dim_as_term_dim() -> None:
 f :: Tensor[B,S,D] -> Int
 f x = D
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="f")
-    typed = typecheck_flat_axon_file(flat, main_module="f")
+    flat = _flat(parse_axon_program(source), main_module="f")
+    typed = typecheck2_flat_axon_file(flat, main_module="f")
     validate_typed_axon_file(typed, main_module="f")
     module = next(module for module in typed.modules if module.name == "f")
     assert isinstance(module.return_type_expr, TypeInt)
@@ -169,9 +175,9 @@ def test_typecheck_flat_rejects_bare_tensor_type() -> None:
 main :: Tensor -> Tensor
 main x = x
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    flat = _flat(parse_axon_program(source), main_module="main")
     with pytest.raises(ValueError, match="Tensor type requires shape dims"):
-        typecheck_flat_axon_file(flat, main_module="main")
+        typecheck2_flat_axon_file(flat, main_module="main")
 
 
 def test_typecheck_flat_records_symbolic_module_constraints() -> None:
@@ -182,8 +188,8 @@ main x flag = do
   z <- (x == null) ? 0 : y
   return z
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    flat = _flat(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     module = next(module for module in typed.modules if module.name == "main")
     assert module.constraints is not None
@@ -217,8 +223,8 @@ main x = do
   y <- (x == null) ? (callee x) : 2
   return y
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    flat = _flat(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     callee = next(module for module in typed.modules if module.name == "callee")
     assert callee.constraints is not None
@@ -249,8 +255,8 @@ main x = do
   y <- _reshape x shape
   return y
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    flat = _flat(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     text = render_axon_file(typed, show_types=True)
     reshape_line = next(line for line in text.splitlines() if "y <-" in line and "_reshape" in line)
@@ -267,8 +273,8 @@ main x = do
   y <- _expand h shape
   return y
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    flat = _flat(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     text = render_axon_file(typed, show_types=True)
     expand_line = next(line for line in text.splitlines() if "y <-" in line and "_expand" in line)
@@ -280,8 +286,8 @@ def test_typecheck_flat_preserves_cache_update_shape_information() -> None:
     resolved = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
     ).ast
-    flat = flatten_closed_axon_file(resolved, main_module="gpt2")
-    typed = typecheck_flat_axon_file(flat, main_module="gpt2")
+    flat = _flat(resolved, main_module="gpt2")
+    typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
     validate_typed_axon_file(typed, main_module="gpt2")
     text = render_axon_file(typed, show_types=True)
     block_sig = next(line for line in text.splitlines() if line.startswith("gpt2_block ::"))
@@ -301,8 +307,8 @@ def test_typecheck_flat_preserves_cache_update_shape_information() -> None:
 
 def test_typecheck_attention_mask_helper_does_not_force_equal_shapes(tmp_path: Path) -> None:
     resolved = _resolve_attention_wrapper(tmp_path)
-    flat = flatten_closed_axon_file(resolved, main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    flat = _flat(resolved, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     text = render_axon_file(typed, show_types=True)
     mask_sig = next(
@@ -313,8 +319,8 @@ def test_typecheck_attention_mask_helper_does_not_force_equal_shapes(tmp_path: P
 
 def test_typecheck_attention_preserves_matmul_and_mask_broadcast_shapes(tmp_path: Path) -> None:
     resolved = _resolve_attention_wrapper(tmp_path)
-    flat = flatten_closed_axon_file(resolved, main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    flat = _flat(resolved, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     text = render_axon_file(typed, show_types=True)
     assert "Tensor[B,H,1,1]" not in text
@@ -337,9 +343,9 @@ bad_chunk x = _chunk x -1 3
 main :: Tensor[B,S,D] -> List[Tensor[B,S,D]]
 main x = bad_chunk x
 """
-    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    flat = _flat(parse_axon_program(source), main_module="main")
     with pytest.raises(ValueError, match="cannot unify|type mismatch|return"):
-        typecheck_flat_axon_file(flat, main_module="main")
+        typecheck2_flat_axon_file(flat, main_module="main")
 
 
 def test_typecheck2_resolves_wrapper_list_args_for_split_type_rule(tmp_path: Path) -> None:
@@ -354,7 +360,7 @@ main x = do
     path = tmp_path / "split_main.axon"
     path.write_text(source)
     resolved = resolve_axon_program_from_path(path).ast
-    flat = flatten_closed_axon_file(normalize_closed_axon_file(resolved), main_module="main")
+    flat = _flat(resolved, main_module="main")
     typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     text = render_axon_file(typed, show_types=True)
@@ -377,8 +383,8 @@ main x = do
     path = tmp_path / "tensor_create.axon"
     path.write_text(source)
     resolved = resolve_axon_program_from_path(path).ast
-    flat = flatten_closed_axon_file(normalize_closed_axon_file(resolved), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    flat = _flat(resolved, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
     graph = lower_axon_program_to_graph_ir(typed)
     model = make_runtime2_model_class(graph, model_config={}).from_state_dict({})
@@ -391,7 +397,7 @@ def test_typecheck2_lowers_generic_mamba_without_shape_growth() -> None:
     resolved = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/mamba/generic-mamba.axon")
     ).ast
-    flat = flatten_closed_axon_file(normalize_closed_axon_file(resolved), main_module="mamba_2_8b")
+    flat = _flat(resolved, main_module="mamba_2_8b")
     typed = typecheck2_flat_axon_file(flat, main_module="mamba_2_8b")
     validate_typed_axon_file(typed, main_module="mamba_2_8b")
     lower_axon_program_to_graph_ir(typed)

@@ -247,19 +247,18 @@ Stage status as of now:
   - no active-path generated `_param_root` / root-stack machinery
   - generated parameter-path inference simplified to `_abs_path`, `_params`, and `param_base`
 - still open:
-  - further pruning of legacy helper/code paths not exercised by the new lowering output
-  - separation from still-legacy pipeline/codegen consumers
+  - further pruning of helper/code paths not exercised by the graph IR output
+  - keeping pipeline2/codegen2 consumers separate from deleted Synapse-spec compatibility
 
-14. `pipeline`
-- input: either compiler metadata plus lowered graph, or analysis results over the closed/flat/typed AST
-- output: pipeline partitioning plan and stage-specific lowered graphs/specs
-- status: still legacy-backed
+14. `pipeline2`
+- input: either compiler metadata plus lowered graph IR, or analysis results over the closed/flat/typed AST
+- output: pipeline partitioning plan and stage-specific graph IR partitions
+- status: active graph-IR-backed path
 - open design choice:
   - either collect the same loop-bound / layer-range information from the original higher-level Axon AST and preserve it as compiler metadata for later pipeline use
   - or analyze the closed, flat, typed AST directly and recover the same partitioning facts there
 - note:
   - this should be treated as a separate design problem from the active lowering/runtime/codegen cleanup
-  - the current pipeline backend still assumes older `for`-based graph structure
 
 ## Next IR Direction
 
@@ -271,8 +270,8 @@ Initial implementation status:
 - `lower_axon_program_to_graph_ir(...)` is available as an alternative lowering target.
 - The graph IR lowering reuses the existing canonical flat typed Axon preparation pipeline.
 - Graph nodes carry typed positional operands, typed kwarg operands, SSA-style outputs, structured paths, constraints, constants, and inferred type metadata.
-- `brainsurgery/synapse/axon/codegen2/` exists as the separate future backend entry point and consumes graph IR, not Synapse spec dictionaries.
-- Existing Synapse-spec lowering/codegen remains unchanged while codegen2 is filled in incrementally.
+- `brainsurgery/synapse/axon/codegen2/` consumes graph IR directly, not Synapse spec dictionaries.
+- The old Synapse-spec lowering/codegen/runtime/pipeline path has been removed.
 
 Reasons:
 
@@ -307,11 +306,10 @@ So the target should be:
 canonical flat typed Axon AST -> typed Graph IR -> runtime/codegen/pipeline
 ```
 
-Active transition shape:
+Active shape:
 
 ```text
-canonical flat typed Axon AST -> Synapse graph -> runtime/codegen
-canonical flat typed Axon AST -> typed Graph IR -> codegen2
+canonical flat typed Axon AST -> typed Graph IR -> codegen2/runtime2/pipeline2
 ```
 
 ## Canonical AST

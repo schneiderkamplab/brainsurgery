@@ -578,6 +578,16 @@ def _module_declares_path_inputs(module: AxonDefinition) -> bool:
     )
 
 
+def _ensure_elaborated_input(program: AxonFile) -> None:
+    for module in program.modules:
+        for param in module.params:
+            if param.default_expr is not None:
+                raise ValueError(
+                    "flatten requires elaborated Axon input; "
+                    f"parameter {module.name}.{param.name} still has a default"
+                )
+
+
 def _make_path_param(name: str) -> AxonParam:
     return AxonParam(name=name, type_expr=TypePath())
 
@@ -947,21 +957,11 @@ def _absolutize_call_relative_paths(
         )
     if base_path is None and not path_prefix:
         return
-    params_by_name = {param.name: param for param in module.params}
     for key, raw_value in list(kwargs.items()):
-        param = params_by_name.get(key)
         if isinstance(raw_value, AxonExprPath):
             if raw_value.absolute:
                 continue
-            if (
-                param is not None
-                and isinstance(param.default_expr, AxonExprPath)
-                and raw_value == param.default_expr
-                and base_path is not None
-            ):
-                kwargs[key] = absolutize_path_expr(raw_value, prefix=base_path.parts)
-            else:
-                kwargs[key] = absolutize_path_expr(raw_value, prefix=path_prefix)
+            kwargs[key] = absolutize_path_expr(raw_value, prefix=path_prefix)
             continue
 
 
@@ -2384,11 +2384,7 @@ def _flatten_module(
             name=param.name,
             optional=param.optional,
             type_expr=_expand_type_aliases(param.type_expr, type_aliases=program_ctx.type_aliases),
-            default_expr=(
-                _expand_expr_aliases(param.default_expr, type_aliases=program_ctx.type_aliases)
-                if param.default_expr is not None
-                else None
-            ),
+            default_expr=None,
         )
         for param in module.params
     )
@@ -2457,6 +2453,7 @@ def _flatten_module(
 
 def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
     validate_normalized_axon_file(program, main_module=main_module)
+    _ensure_elaborated_input(program)
     scoped_modules: frozenset[str] = frozenset()
     globals_by_name = {module.name for module in program.modules}
     source_path_dependent_modules = _lexically_path_dependent_modules(program.modules)

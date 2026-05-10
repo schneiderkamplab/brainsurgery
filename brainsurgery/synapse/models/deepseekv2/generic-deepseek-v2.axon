@@ -4,9 +4,9 @@
 import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
-import Math (log, mul, sqrt)
+import Math (mul, sqrt)
 import MoE (scatter_add, select)
-import Positions (position_ids, rope_pair_base_split_interleaved, rope_pair_yarn_split_interleaved)
+import Positions (position_ids, rope_pair_yarn)
 import Cache
 import Config
 import NN
@@ -33,15 +33,13 @@ EPS   = Config.float @@rms_norm_eps default=1e-06
 THETA = Config.float @@rope_theta default=10000.0
 MAX_POSITIONS     = Config.int @@max_position_embeddings default=163840
 FIRST_DENSE = Config.int @@first_k_dense_replace default=1
-HAS_ROPE_SCALING = (Config.has_key @@'rope_scaling.factor') or (Config.has_key @@'rope_parameters.factor')
 ROPE_SCALE = Config.float @@'rope_scaling.factor' default=(Config.float @@'rope_parameters.factor' default=40.0)
 ROPE_BETA_FAST = Config.float @@'rope_scaling.beta_fast' default=(Config.float @@'rope_parameters.beta_fast' default=32.0)
 ROPE_BETA_SLOW = Config.float @@'rope_scaling.beta_slow' default=(Config.float @@'rope_parameters.beta_slow' default=1.0)
 ROPE_MSCALE = Config.float @@'rope_scaling.mscale' default=(Config.float @@'rope_parameters.mscale' default=0.707)
 ROPE_MSCALE_ALL_DIM = Config.float @@'rope_scaling.mscale_all_dim' default=(Config.float @@'rope_parameters.mscale_all_dim' default=0.707)
 ROPE_CONTEXT = Config.int @@'rope_scaling.original_max_position_embeddings' default=(Config.int @@'rope_parameters.original_max_position_embeddings' default=4096)
-YARN_SOFTMAX_SCALE = (ROPE_SCALE <= 1.0) ? 1.0 : ((0.1 * ROPE_MSCALE_ALL_DIM * log ROPE_SCALE) + 1.0)
-ATTN_SCALE = (1.0 / sqrt QHD) * (HAS_ROPE_SCALING ? (YARN_SOFTMAX_SCALE * YARN_SOFTMAX_SCALE) : 1.0)
+ATTN_SCALE = 1.0 / sqrt QHD
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
@@ -59,7 +57,7 @@ deepseek_v2_attn x pos_ids attn_mask past_kv = do
     k_nope, v <- Tensor.split kv sizes=[QKNOPE, VHD]
 
     k_pe <- reshape_heads k_pe_base heads=1 |> Tensor.repeat repeats=NUM_HEADS
-    q_pe, k_pe <- HAS_ROPE_SCALING ? (rope_pair_yarn_split_interleaved q_pe k_pe pos_ids THETA ROPE_SCALE ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM) : (rope_pair_base_split_interleaved q_pe k_pe pos_ids theta=THETA)
+    q_pe, k_pe <- rope_pair_yarn q_pe k_pe pos_ids THETA ROPE_SCALE ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM interleaved=true
     q_full <- Tensor.concat q_nope q_pe dim=-1
     k_full <- Tensor.concat k_nope k_pe dim=-1
 

@@ -6,7 +6,7 @@ from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
 from brainsurgery.synapse.axon.optimize import optimize_flat_typed_axon_file
 from brainsurgery.synapse.axon.parse import parse_axon_program
 from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
-from brainsurgery.synapse.axon.typecheck import typecheck_flat_axon_file
+from brainsurgery.synapse.axon.typecheck2 import typecheck2_flat_axon_file
 from brainsurgery.synapse.axon.validate import validate_typed_axon_file
 
 
@@ -21,7 +21,7 @@ main x = do
   return y
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     main = next(module for module in optimized.modules if module.name == "main")
@@ -39,7 +39,7 @@ main = do
   return y
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     main = next(module for module in optimized.modules if module.name == "main")
@@ -66,7 +66,7 @@ main = do
   return c
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     text = "\n".join(str(stmt) for module in optimized.modules for stmt in module.statements)
@@ -92,7 +92,7 @@ main :: Int -> Int
 main acc = loop_recur 0 10 1 acc
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     recur = next(module for module in optimized.modules if module.name == "loop_recur")
@@ -125,7 +125,7 @@ main :: Int
 main = loop_recur 0 0
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     recur = next(module for module in optimized.modules if module.name == "loop_recur")
@@ -144,7 +144,7 @@ main :: Int -> Int
 main x = helper @@w x 7
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     assert all(module.name != "helper" for module in optimized.modules)
@@ -169,7 +169,7 @@ main :: Int -> Int
 main x = outer @@w x
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     assert all(module.name != "inner" for module in optimized.modules)
@@ -185,7 +185,7 @@ main flag = do
   return y
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     main = next(module for module in optimized.modules if module.name == "main")
@@ -208,7 +208,7 @@ main i x = do
   return y
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     assert all(module.name != "helper" for module in optimized.modules)
@@ -231,7 +231,7 @@ main flag x = do
   return y
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     main = next(module for module in optimized.modules if module.name == "main")
@@ -249,7 +249,7 @@ main = do
   return a
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     main = next(module for module in optimized.modules if module.name == "main")
@@ -268,7 +268,7 @@ main = do
   return x
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     main = next(module for module in optimized.modules if module.name == "main")
@@ -286,7 +286,7 @@ main flag keep x = do
   return z
 """
     flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
-    typed = typecheck_flat_axon_file(flat, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
     optimized = optimize_flat_typed_axon_file(typed, main_module="main")
     validate_typed_axon_file(optimized, main_module="main")
     main = next(module for module in optimized.modules if module.name == "main")
@@ -299,7 +299,7 @@ def test_optimize_rewrites_list_destructuring_to_index_binds() -> None:
         Path("brainsurgery/synapse/models/gpt2/gpt2.axon")
     ).ast
     flat = flatten_closed_axon_file(resolved, main_module="gpt2")
-    typed = typecheck_flat_axon_file(flat, main_module="gpt2")
+    typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
     optimized = optimize_flat_typed_axon_file(typed, main_module="gpt2")
     validate_typed_axon_file(optimized, main_module="gpt2")
     text = "\n".join(str(stmt) for module in optimized.modules for stmt in module.statements)
@@ -311,7 +311,7 @@ def test_optimize_reapplies_structural_passes_until_fixpoint_on_generic_gpt2() -
         Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
     ).ast
     flat = flatten_closed_axon_file(resolved, main_module="gpt2")
-    typed = typecheck_flat_axon_file(flat, main_module="gpt2")
+    typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
     optimized = optimize_flat_typed_axon_file(typed, main_module="gpt2")
     validate_typed_axon_file(optimized, main_module="gpt2")
     assert {module.name for module in optimized.modules} == {

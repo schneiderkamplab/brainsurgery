@@ -58,7 +58,7 @@ from ..ast import (
     TypeVar,
     dim_token_names,
 )
-from ..typecheck.core import (
+from ..typecheck_shared import (
     _PrimitiveTypeHelpers,
     _TcCtx,
     _annotate_expr,
@@ -460,12 +460,9 @@ def _module_header_env(module: AxonDefinition, ctx: _TcCtx) -> dict[str, TypeExp
             ctx=ctx,
             freshen_generics=False,
         )
-        has_non_null_default = param.default_expr is not None and not isinstance(
-            param.default_expr, AxonExprNull
-        )
         env[param.name] = (
             TypeOptional(tp)
-            if param.optional and not has_non_null_default and not isinstance(tp, TypeOptional)
+            if param.optional and not isinstance(tp, TypeOptional)
             else tp
         )
     for param in module.params:
@@ -2067,29 +2064,10 @@ def _bind_call_args(
             elif raw_kwarg is not None:
                 actual_expr = _scalar_to_expr(raw_kwarg)
         if actual_expr is None:
-            if param.default_expr is not None:
-                default_env = {**caller_env, **param_types, **path_types}
-                typed_default, actual_tp = _tc_expr(state, param.default_expr, default_env, expr_defs)
-                try:
-                    bound_tp = _unify_call_arg_type(actual_tp, formal_env_type, state)
-                except Exception as exc:
-                    raise ValueError(
-                        f"Axon typecheck2 failed: argument {param.name!r} for {module.name!r} "
-                        f"has type {actual_tp!r} but expected {formal_env_type!r}"
-                    ) from exc
-                bound_expr_defs[param.name] = _resolved_expr_def_deep(typed_default, expr_defs)
-                bind_fresh_dims_from_actual(param.name, typed_default)
-            elif param.optional:
-                actual_tp = TypeNull()
-                try:
-                    bound_tp = _unify_call_arg_type(actual_tp, formal_env_type, state)
-                except Exception as exc:
-                    raise ValueError(
-                        f"Axon typecheck2 failed: argument {param.name!r} for {module.name!r} "
-                        f"has type {actual_tp!r} but expected {formal_env_type!r}"
-                    ) from exc
-            else:
-                raise ValueError(f"Axon typecheck2 failed: missing argument {param.name!r} for {module.name}")
+            raise ValueError(
+                f"Axon typecheck2 failed: missing argument {param.name!r} for {module.name}; "
+                "run elaborate before flatten/typecheck2"
+            )
         else:
             typed_actual, actual_tp = _tc_expr(state, actual_expr, caller_env, expr_defs)
             try:

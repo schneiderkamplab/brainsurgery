@@ -13,6 +13,7 @@ from .core import (
     lower_axon_program_to_graph_ir,
     validate_graph_program,
 )
+from .render import graph_module_to_axon_definition, graph_program_to_axon_file
 
 __all__ = [
     "GraphAttr",
@@ -28,4 +29,6 @@ __all__ = [
     "GraphValueRef",
     "lower_axon_program_to_graph_ir",
     "validate_graph_program",
+    "graph_module_to_axon_definition",
+    "graph_program_to_axon_file",
 ]

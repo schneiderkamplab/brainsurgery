@@ -43,7 +43,6 @@ from .axon import (
     flatten_closed_axon_file,
     looks_like_tokenizer_dir,
     lower_axon_program_to_graph_ir,
-    lower_axon_program_to_synapse_spec,
     normalize_closed_axon_file,
     optimize_flat_typed_axon_file,
     parse_axon_program_from_path,
@@ -51,18 +50,14 @@ from .axon import (
     resolve_main_module,
     tokenize_prompts,
     typecheck2_flat_axon_file,
-    typecheck_flat_axon_file,
 )
 from .axon.ast import AxonFile, TypeOptional
 from .axon.codegen2 import emit_model_code_from_graph_ir, make_runtime2_model_class
 from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
 from .axon_runner_common import is_cuda_oom as _is_cuda_oom
 from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
-from .codegen import emit_model_code_from_synapse_spec
 from .matrix_models import ModelDownloadSpec, ensure_model_downloaded
 from .mxfp4 import materialize_mxfp4_aliases
-from .pipeline_runtime import SynapsePipelineModel, build_hf_device_map_from_pipeline_usage
-from .runtime import SynapseProgramModel
 
 
 def _format_metric_value(value: object) -> str:
@@ -2734,7 +2729,7 @@ def _run_axon_test_single(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
-    axon_backend: str = "codegen",
+    axon_backend: str = "codegen2",
     axon_typechecker: str = "typecheck2",
     optimize: bool = False,
     canonicalize: bool = False,
@@ -2761,36 +2756,15 @@ def _run_axon_test_single(
         resolved_model_task = _infer_model_task(axon_file=axon_file, weights=weights_path)
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
-        backend_token = "codegen"
-    valid_backends = {"codegen", "codegen2", "runtime", "runtime2", "pipeline", "pipeline2"}
+        backend_token = "codegen2"
+    valid_backends = {"codegen2", "runtime2", "pipeline2"}
     if backend_token not in valid_backends:
-        raise ValueError(
-            "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', "
-            "'pipeline', or 'pipeline2'"
-        )
+        raise ValueError("axon_backend must be 'codegen2', 'runtime2', or 'pipeline2'")
     axon_backend = backend_token
-    if axon_backend == "codegen":
-        raise RuntimeError(
-            "The synapse YAML/codegen backend is deprecated and disabled. "
-            "Use --axon-backend codegen2."
-        )
-    if axon_backend == "pipeline":
-        raise RuntimeError(
-            "The synapse YAML/pipeline backend is deprecated and disabled. "
-            "Use --axon-backend pipeline2."
-        )
     typechecker_token = str(axon_typechecker).strip().lower()
-    if typechecker_token not in {"typecheck", "typecheck2"}:
-        raise ValueError("axon_typechecker must be 'typecheck' or 'typecheck2'")
+    if typechecker_token != "typecheck2":
+        raise ValueError("axon_typechecker must be 'typecheck2'")
     axon_typechecker = typechecker_token
-    if axon_typechecker == "typecheck" and axon_backend not in {
-        "codegen2",
-        "runtime2",
-        "pipeline2",
-    }:
-        raise ValueError(
-            "axon_typechecker='typecheck' is only supported with codegen2/runtime2/pipeline2"
-        )
     if axon_backend == "pipeline2":
         if resolved_model_task not in {"causal_lm", "masked_lm", "seq2seq_lm"}:
             raise ValueError(
@@ -2803,7 +2777,7 @@ def _run_axon_test_single(
             raise ValueError("compile_axon is not supported with axon_backend='pipeline2'")
         if trace_layers:
             raise ValueError("trace_layers is not supported with axon_backend='pipeline2'")
-    if axon_backend in {"runtime", "runtime2"} and trace_layers:
+    if axon_backend == "runtime2" and trace_layers:
         raise ValueError(f"trace_layers is not supported with axon_backend={axon_backend!r}")
 
     safetensors_files = _resolve_safetensors_paths(weights_path)
@@ -2878,85 +2852,48 @@ def _run_axon_test_single(
                 transformers_hub.HF_MODULES_CACHE = str(modules_cache)
 
         lowered_spec: dict[str, Any]
-        if axon_backend in {"codegen2", "runtime2", "pipeline2"}:
-            resolved_axon = resolve_axon_program_from_path(axon_file).ast
-            normalized_axon = normalize_closed_axon_file(resolved_axon)
-            elaborated_axon = elaborate_closed_axon_file(normalized_axon)
-            flat_axon = flatten_closed_axon_file(elaborated_axon)
-            typecheck_fn = (
-                typecheck_flat_axon_file
-                if axon_typechecker == "typecheck"
-                else typecheck2_flat_axon_file
-            )
-            typed_axon = typecheck_fn(flat_axon)
-            if optimize:
-                typed_axon = optimize_flat_typed_axon_file(typed_axon)
-            if canonicalize:
-                typed_axon = canonicalize_typed_axon_file(typed_axon)
-            graph_program = lower_axon_program_to_graph_ir(typed_axon)
-            main_graph_module = next(
-                module
-                for module in graph_program.modules
-                if module.name == graph_program.main_module
-            )
-            output_names = main_graph_module.output_names or tuple(
-                getattr(operand, "name", f"out{idx}")
-                for idx, operand in enumerate(main_graph_module.outputs)
-            )
-            lowered_spec = {
-                "synapse": 1,
-                "model": {
-                    "inputs": {
-                        value.name: {
-                            "optional": value.optional
-                            or isinstance(value.type_expr, TypeOptional)
-                        }
-                        for value in main_graph_module.inputs
-                    },
-                    "outputs": {name: name for name in output_names},
-                    "graph": [],
-                    "blocks": {},
-                    "config": model_config or {},
-                    "meta": dict(graph_program.pragmas),
+        resolved_axon = resolve_axon_program_from_path(axon_file).ast
+        normalized_axon = normalize_closed_axon_file(resolved_axon)
+        elaborated_axon = elaborate_closed_axon_file(normalized_axon)
+        flat_axon = flatten_closed_axon_file(elaborated_axon)
+        typed_axon = typecheck2_flat_axon_file(flat_axon)
+        if optimize:
+            typed_axon = optimize_flat_typed_axon_file(typed_axon)
+        if canonicalize:
+            typed_axon = canonicalize_typed_axon_file(typed_axon)
+        graph_program = lower_axon_program_to_graph_ir(typed_axon)
+        main_graph_module = next(
+            module for module in graph_program.modules if module.name == graph_program.main_module
+        )
+        output_names = main_graph_module.output_names or tuple(
+            getattr(operand, "name", f"out{idx}")
+            for idx, operand in enumerate(main_graph_module.outputs)
+        )
+        lowered_spec = {
+            "synapse": 1,
+            "model": {
+                "inputs": {
+                    value.name: {
+                        "optional": value.optional or isinstance(value.type_expr, TypeOptional)
+                    }
+                    for value in main_graph_module.inputs
                 },
-            }
-            if axon_backend == "runtime2":
-                model_cls = make_runtime2_model_class(graph_program, model_config=model_config)
-            else:
-                code = emit_model_code_from_graph_ir(
-                    graph_program,
-                    class_name=class_name,
-                    model_config=model_config,
-                )
-                generated_py_path.write_text(code, encoding="utf-8")
-                model_cls = _load_generated_class(generated_py_path, class_name)
+                "outputs": {name: name for name in output_names},
+                "graph": [],
+                "blocks": {},
+                "config": model_config or {},
+                "meta": dict(graph_program.pragmas),
+            },
+        }
+        if axon_backend == "runtime2":
+            model_cls = make_runtime2_model_class(graph_program, model_config=model_config)
         else:
-            modules = parse_axon_program_from_path(axon_file)
-            synapse_spec = lower_axon_program_to_synapse_spec(
-                modules, optimize=optimize
+            code = emit_model_code_from_graph_ir(
+                graph_program,
+                class_name=class_name,
+                model_config=model_config,
             )
-            if model_config is not None:
-                model_section = synapse_spec.get("model")
-                if not isinstance(model_section, dict):
-                    raise ValueError("Lowered synapse spec has invalid model section")
-                model_section["config"] = model_config
-
-            synapse_yaml_path.write_text(
-                OmegaConf.to_yaml(synapse_spec, resolve=True), encoding="utf-8"
-            )
-            loaded = OmegaConf.load(synapse_yaml_path)
-            loaded_dict = OmegaConf.to_container(loaded, resolve=True)
-            if not isinstance(loaded_dict, dict):
-                raise ValueError("Lowered synapse YAML did not produce a mapping")
-            lowered_spec = {str(key): value for key, value in loaded_dict.items()}
-            if model_config is not None:
-                lowered_model = lowered_spec.get("model")
-                if isinstance(lowered_model, dict):
-                    lowered_model["config"] = model_config
-
-            code = emit_model_code_from_synapse_spec(lowered_spec, class_name=class_name)
             generated_py_path.write_text(code, encoding="utf-8")
-
             model_cls = _load_generated_class(generated_py_path, class_name)
 
         hf_config: Any | None = None
@@ -3265,56 +3202,6 @@ def _run_axon_test_single(
                             ", ".join(visible_devices),
                             "(no numeric layer axis discovered)",
                         )
-            if axon_backend == "pipeline" and resolved_model_task == "causal_lm":
-                local_state_ref_cpu = _load_state_dict(
-                    safetensors_files,
-                    device=torch.device("cpu"),
-                    dtype=resolved_dtype,
-                    model_config=model_config,
-                    storage_dtype=adapter_storage_dtype,
-                )
-                hf_param_names = _collect_hf_param_names_for_device_map(
-                    model_task=resolved_model_task,
-                    hf_config=hf_config,
-                    trust_remote_code=effective_trust_remote_code,
-                )
-                hf_plan, hf_device_map = build_hf_device_map_from_pipeline_usage(
-                    lowered_spec,
-                    state_dict=local_state_ref_cpu,
-                    input_ids=input_ids_cpu,
-                    attention_mask=attention_mask_cpu,
-                    requested_device=target_device_str,
-                )
-                print(
-                    "HF device_map stages:",
-                    ", ".join(
-                        f"[{stage.layer_start},{stage.layer_stop})->{stage.device}"
-                        for stage in hf_plan.stages
-                    ),
-                )
-                if hf_plan.stages:
-                    hf_device_map = _normalize_hf_device_map_for_loading(
-                        hf_device_map,
-                        hf_param_names=hf_param_names,
-                        state_dict=local_state_ref_cpu,
-                        first_device=hf_plan.stages[0].device,
-                        last_device=hf_plan.stages[-1].device,
-                    )
-                if hf_plan.stages:
-                    hf_input_device = torch.device(hf_plan.stages[0].device)
-
-                # Keep HF inputs on the same device as embeddings/stage-0 to avoid
-                # index-select mismatches when using device_map.
-                for embed_key in (
-                    "model.embed_tokens",
-                    "language_model.model.embed_tokens",
-                    "language_model.embed_tokens",
-                    "embed_tokens",
-                ):
-                    mapped = hf_device_map.get(embed_key)
-                    if isinstance(mapped, str) and mapped:
-                        hf_input_device = torch.device(mapped)
-                        break
             hf_io_device = hf_input_device
             io = _build_io_for_device(hf_io_device)
             hf: Any
@@ -3788,11 +3675,7 @@ def _run_axon_test_single(
                 if axon_backend == "pipeline2"
                 else None
             )
-            state_load_device = (
-                torch.device("cpu")
-                if axon_backend in {"pipeline", "pipeline2"}
-                else target_device
-            )
+            state_load_device = torch.device("cpu") if axon_backend == "pipeline2" else target_device
             if local_state_dict is None:
                 local_state_dict = _load_state_dict(
                     safetensors_files,
@@ -3802,25 +3685,13 @@ def _run_axon_test_single(
                     storage_dtype=adapter_storage_dtype,
                     param_devices=param_devices,
                 )
-            elif resolved_model_type == "phi3small" and axon_backend != "pipeline":
+            elif resolved_model_type == "phi3small":
                 local_state_dict = {
                     key: value.to(device=target_device, dtype=resolved_dtype)
                     for key, value in local_state_dict.items()
                 }
             syn: Any
-            if axon_backend == "pipeline":
-                syn = SynapsePipelineModel.from_spec(
-                    lowered_spec,
-                    state_dict=local_state_dict,
-                    requested_device=target_device_str,
-                ).eval()
-            elif axon_backend == "runtime":
-                syn = (
-                    SynapseProgramModel.from_spec(lowered_spec, state_dict=local_state_dict)
-                    .to(target_device)
-                    .eval()
-                )
-            elif axon_backend == "pipeline2":
+            if axon_backend == "pipeline2":
                 syn = model_cls.from_state_dict(
                     local_state_dict,
                     param_devices=param_devices,
@@ -3977,7 +3848,7 @@ def _run_axon_test_single(
         except Exception as exc:
             if not _is_cuda_oom(exc, device=exec_device_str):
                 raise
-            if axon_backend in {"pipeline", "pipeline2"}:
+            if axon_backend == "pipeline2":
                 raise
             if not oom_cpu_fallback:
                 raise
@@ -4369,7 +4240,7 @@ def run_axon_test(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
-    axon_backend: str = "codegen",
+    axon_backend: str = "codegen2",
     axon_typechecker: str = "typecheck2",
     optimize: bool = False,
     canonicalize: bool = False,

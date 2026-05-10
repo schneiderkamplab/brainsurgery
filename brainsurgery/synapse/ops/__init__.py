@@ -8,9 +8,6 @@ from typing import Any
 
 _REQUIRED_EXPORTS: tuple[str, ...] = (
     "OP_NAME",
-    "interpret",
-    "compile",
-    "uses_node_path",
     "LOWERING_TYPE_SIGNATURE",
 )
 
@@ -68,13 +65,6 @@ def _load_discovered_op_modules() -> dict[str, Any]:
                 f"Synapse op module {qualified_name!r} has invalid OP_NAME: {op_name!r}"
             )
 
-        for callable_name in ("interpret", "compile", "uses_node_path"):
-            exported = _require_module_export(module, callable_name)
-            if not callable(exported):
-                raise RuntimeError(
-                    f"Synapse op module {qualified_name!r} export {callable_name!r} must be callable"
-                )
-
         existing = loaded_modules.get(op_name)
         if existing is not None:
             raise RuntimeError(
@@ -100,22 +90,6 @@ def get_op_module(op_name: str) -> Any | None:
     return None
 
 
-def get_op_lowering_signature(op_name: str) -> dict[str, Any] | None:
-    module = get_op_module(op_name)
-    if module is None:
-        return None
-    signature: dict[str, Any] = {}
-    if hasattr(module, "LOWERING_ARITY"):
-        signature["arity"] = getattr(module, "LOWERING_ARITY")
-    if hasattr(module, "LOWERING_ALLOWED_KWARGS"):
-        signature["allowed_kwargs"] = getattr(module, "LOWERING_ALLOWED_KWARGS")
-    if hasattr(module, "LOWERING_REQUIRED_KWARGS"):
-        signature["required_kwargs"] = getattr(module, "LOWERING_REQUIRED_KWARGS")
-    if hasattr(module, "LOWERING_KWARG_KINDS"):
-        signature["kwarg_kinds"] = getattr(module, "LOWERING_KWARG_KINDS")
-    return signature or None
-
-
 def get_op_lowering_type_signature(op_name: str) -> dict[str, Any] | None:
     module = get_op_module(op_name)
     if module is None:
@@ -124,47 +98,6 @@ def get_op_lowering_type_signature(op_name: str) -> dict[str, Any] | None:
     if isinstance(signature, dict):
         return signature
     return None
-
-
-def get_op_lowering_normalizer(op_name: str) -> Any | None:
-    module = get_op_module(op_name)
-    if module is None:
-        return None
-    normalize = getattr(module, "lowering_normalize_kwargs", None)
-    if callable(normalize):
-        return normalize
-    return None
-
-
-def get_op_lowering_infer_metadata(op_name: str) -> Any | None:
-    module = get_op_module(op_name)
-    if module is None:
-        return None
-    infer = getattr(module, "lowering_infer_metadata", None)
-    if callable(infer):
-        return infer
-    return None
-
-
-def get_op_lowering_known_output_arity(op_name: str) -> Any | None:
-    module = get_op_module(op_name)
-    if module is None:
-        return None
-    arity = getattr(module, "lowering_known_output_arity", None)
-    if callable(arity):
-        return arity
-    return None
-
-
-def get_op_lowering_validator(op_name: str) -> Any | None:
-    module = get_op_module(op_name)
-    if module is None:
-        return None
-    validate = getattr(module, "lowering_validate_signature", None)
-    if callable(validate):
-        return validate
-    return None
-
 
 def get_op_type_rule(op_name: str) -> Any | None:
     module = get_op_module(op_name)
@@ -179,11 +112,6 @@ def get_op_type_rule(op_name: str) -> Any | None:
 __all__ = [
     "OP_MODULES",
     "get_op_module",
-    "get_op_lowering_signature",
     "get_op_lowering_type_signature",
-    "get_op_lowering_normalizer",
-    "get_op_lowering_infer_metadata",
-    "get_op_lowering_known_output_arity",
-    "get_op_lowering_validator",
     "get_op_type_rule",
 ]

@@ -7,10 +7,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = REPO_ROOT / "brainsurgery" / "synapse" / "models"
 BUILTINS_DIR = REPO_ROOT / "brainsurgery" / "synapse" / "builtins"
-ALLOWED_REPEATED_PRIMITIVES = {
-    "_concat",
-    "_config_int",
-}
 
 
 def _model_family_names() -> set[str]:
@@ -25,14 +21,6 @@ def _restricted_files() -> list[Path]:
     out: list[Path] = []
     out.extend((REPO_ROOT / "brainsurgery" / "synapse" / "axon").rglob("*.py"))
     out.extend((REPO_ROOT / "brainsurgery" / "synapse" / "ops").glob("*.py"))
-    out.extend(
-        [
-            REPO_ROOT / "brainsurgery" / "synapse" / "runtime.py",
-            REPO_ROOT / "brainsurgery" / "synapse" / "pipeline_runtime.py",
-            REPO_ROOT / "brainsurgery" / "synapse" / "pipeline_backend.py",
-            REPO_ROOT / "brainsurgery" / "synapse" / "codegen.py",
-        ]
-    )
     return out
 
 
@@ -86,11 +74,7 @@ def test_each_builtin_primitive_reference_is_single_source() -> None:
                     f"{file_path.relative_to(REPO_ROOT)}:{lineno}"
                 )
 
-    repeated = {
-        name: locs
-        for name, locs in locations.items()
-        if counts[name] > 1 and name not in ALLOWED_REPEATED_PRIMITIVES
-    }
+    repeated = {name: locs for name, locs in locations.items() if counts[name] > 1}
     assert not repeated, (
         "Primitive _xyz references must have a single canonical builtin definition:\n"
         + "\n".join(f"{name}: {', '.join(locs)}" for name, locs in sorted(repeated.items()))

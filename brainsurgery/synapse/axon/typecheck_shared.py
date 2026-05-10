@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, cast
 
-from ...ops import get_op_lowering_type_signature, get_op_type_rule
-from ...ops._broadcast import broadcast_shape
-from ..ast import (
+from ..ops import get_op_lowering_type_signature, get_op_type_rule
+from ..ops._broadcast import broadcast_shape
+from .ast import (
     AxonBind,
     AxonCond,
     AxonExpr,
@@ -62,9 +62,9 @@ from ..ast import (
     dim_token_names,
     parse_type_expr,
 )
-from ..entrypoint import resolve_main_module
-from ..resolve import reachable_definitions
-from ..validate import (
+from .entrypoint import resolve_main_module
+from .resolve import reachable_definitions
+from .validate import (
     validate_flat_axon_file,
     validate_normalized_axon_file,
     validate_typed_axon_file,
@@ -5727,15 +5727,4 @@ def _reject_bare_tensor_types(program: AxonFile) -> None:
         _reject_bare_tensor_type(module.return_type_expr, owner=f"module {module.name!r} return")
 
 
-def typecheck_flat_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
-    main_module = resolve_main_module(program, main_module=main_module)
-    program = _prune_to_main(program, main_module=main_module)
-    _reject_bare_tensor_types(program)
-    validate_normalized_axon_file(program, main_module=main_module)
-    validate_flat_axon_file(program, main_module=main_module)
-    typed = _typecheck_flat_fixpoint(program)
-    validate_typed_axon_file(typed, main_module=main_module)
-    return typed
-
-
-__all__ = ["typecheck_flat_axon_file"]
+__all__: list[str] = []

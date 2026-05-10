@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import importlib
-import json
 from pathlib import Path
 from typing import Any
 
 import typer
-from omegaconf import OmegaConf
 from typer.models import OptionInfo
 
 from .synapse_materialize import run_axon_materialize_workflow
@@ -20,36 +18,6 @@ def _synapse_module() -> Any:
 
 def _axon_module() -> Any:
     return importlib.import_module("brainsurgery.synapse.axon")
-
-
-def _load_yaml_mapping(path: Path) -> dict[str, Any]:
-    loaded = OmegaConf.load(path)
-    data = OmegaConf.to_container(loaded, resolve=True)
-    if not isinstance(data, dict):
-        raise typer.BadParameter(f"Expected YAML mapping at {path}, got {type(data).__name__}")
-    return {str(key): value for key, value in data.items()}
-
-
-def _emit_model_code(spec: dict[str, Any], class_name: str) -> str:
-    module = _synapse_module()
-    emit_fn = getattr(module, "emit_model_code_from_synapse_spec")
-    return emit_fn(spec, class_name=class_name)
-
-
-def _parse_axon_to_synapse_spec(
-    axon_path: Path, *, main_module: str | None = None
-) -> dict[str, Any]:
-    module = _synapse_module()
-    parse_fn = getattr(module, "parse_axon_program_from_path")
-    lower_fn = getattr(module, "lower_axon_program_to_synapse_spec")
-    parsed = parse_fn(axon_path)
-    return lower_fn(parsed, main_module=main_module)
-
-
-def _render_synapse_to_axon_text(spec: dict[str, Any], *, module_name: str) -> str:
-    module = _synapse_module()
-    render_fn = getattr(module, "synapse_spec_to_axon_module_text")
-    return render_fn(spec, module_name=module_name)
 
 
 def _resolve_axon_to_text(axon_path: Path, *, strict: bool = False) -> str:
@@ -76,6 +44,7 @@ _AXON_DUMP_STAGES = {
     "normalize",
     "flatten",
     "typecheck",
+    "graph-ir",
     "backend-required",
     "optimize",
     "canonicalize",
@@ -98,8 +67,11 @@ def _dump_axon_stage_to_text(
     parse_fn = getattr(module, "parse_axon_program_from_path")
     resolve_fn = getattr(module, "resolve_axon_program_from_path")
     normalize_fn = getattr(module, "normalize_closed_axon_file")
+    elaborate_fn = getattr(module, "elaborate_closed_axon_file")
     flatten_fn = getattr(module, "flatten_closed_axon_file")
-    typecheck_fn = getattr(module, "typecheck_flat_axon_file")
+    typecheck_fn = getattr(module, "typecheck2_flat_axon_file")
+    lower_graph_fn = getattr(module, "lower_axon_program_to_graph_ir")
+    graph_to_axon_fn = getattr(module, "graph_program_to_axon_file")
     backend_required_fn = getattr(module, "normalize_backend_required_flat_typed_axon_file")
     optimize_fn = getattr(module, "optimize_flat_typed_axon_file")
     canonicalize_fn = getattr(module, "canonicalize_typed_axon_file")
@@ -127,6 +99,7 @@ def _dump_axon_stage_to_text(
     if stage == "normalize":
         return render_fn(program, show_types=show_types)
 
+    program = elaborate_fn(program, main_module=main_module)
     program = flatten_fn(program, main_module=main_module)
     if stage == "flatten":
         return render_fn(program, show_types=show_types)
@@ -134,6 +107,10 @@ def _dump_axon_stage_to_text(
     program = typecheck_fn(program, main_module=main_module)
     if stage == "typecheck":
         return render_fn(program, show_types=show_types)
+    if stage == "graph-ir":
+        graph_program = lower_graph_fn(program, main_module=main_module)
+        graph_axon = graph_to_axon_fn(graph_program)
+        return render_fn(graph_axon, show_types=show_types)
 
     if stage == "backend-required":
         program = backend_required_fn(program, main_module=main_module)
@@ -153,168 +130,11 @@ def _dump_axon_stage_to_text(
     return render_fn(program, show_types=show_types)
 
 
-def _build_pipeline_plan_for_axon(
-    axon_path: Path, *, device: str = "cuda", main_module: str | None = None
-) -> Any:
-    module = _synapse_module()
-    parse_fn = getattr(module, "parse_axon_program_from_path")
-    lower_fn = getattr(module, "lower_axon_program_to_synapse_spec")
-    plan_fn = getattr(module, "build_pipeline_plan")
-    parsed = parse_fn(axon_path)
-    spec = lower_fn(parsed, main_module=main_module)
-    return plan_fn(spec, requested_device=device)
-
-
-def _emit_pipeline_stage_codes_for_axon(
-    axon_path: Path,
-    *,
-    device: str = "cuda",
-    main_module: str | None = None,
-    class_name_prefix: str = "GeneratedPipelineStage",
-) -> tuple[Any, tuple[str, ...]]:
-    module = _synapse_module()
-    parse_fn = getattr(module, "parse_axon_program_from_path")
-    lower_fn = getattr(module, "lower_axon_program_to_synapse_spec")
-    emit_fn = getattr(module, "emit_pipeline_stage_codes_from_synapse_spec")
-    parsed = parse_fn(axon_path)
-    spec = lower_fn(parsed, main_module=main_module)
-    return emit_fn(spec, requested_device=device, class_name_prefix=class_name_prefix)
-
-
 def _ensure_overwrite_allowed(path: Path, *, force: bool) -> None:
     if path.exists() and not force:
         raise typer.BadParameter(
             f"Refusing to overwrite existing file: {path}. Use --force to overwrite."
         )
-
-
-@app.command("emit")
-def emit_generic(
-    spec_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Path to a Synapse YAML spec.",
-    ),
-    output_path: Path = typer.Argument(
-        ...,
-        help="Destination Python file for generated model code.",
-    ),
-    class_name: str = typer.Option(
-        "GeneratedSynapseModel",
-        "--class-name",
-        help="Name of the generated model class.",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Overwrite output file if it already exists.",
-    ),
-) -> None:
-    """Generate standalone PyTorch model code from any Synapse YAML spec."""
-    _ensure_overwrite_allowed(output_path, force=force)
-    if output_path.suffix != ".py":
-        raise typer.BadParameter("Output path must end with .py")
-
-    spec = _load_yaml_mapping(spec_path)
-    try:
-        source = _emit_model_code(spec, class_name)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(source, encoding="utf-8")
-    typer.echo(f"Wrote generated model code to {output_path}")
-
-
-@app.command("axon-to-synapse")
-def axon_to_synapse(
-    axon_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Path to an Axon source file.",
-    ),
-    output_path: Path = typer.Argument(
-        ...,
-        help="Destination YAML file for lowered Synapse spec.",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Overwrite output file if it already exists.",
-    ),
-    main_module: str | None = typer.Option(
-        None,
-        "--main-module",
-        help="Main model module name when Axon file contains multiple modules (defaults to last).",
-    ),
-) -> None:
-    """Lower an Axon module into a Synapse YAML spec."""
-    _ensure_overwrite_allowed(output_path, force=force)
-    if output_path.suffix not in {".yaml", ".yml"}:
-        raise typer.BadParameter("Output path must end with .yaml or .yml")
-
-    if isinstance(main_module, OptionInfo):
-        main_module = None
-    try:
-        spec = _parse_axon_to_synapse_spec(axon_path, main_module=main_module)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(OmegaConf.to_yaml(spec, resolve=True), encoding="utf-8")
-    typer.echo(f"Wrote Synapse YAML to {output_path}")
-
-
-@app.command("synapse-to-axon")
-def synapse_to_axon(
-    spec_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Path to a Synapse YAML spec.",
-    ),
-    output_path: Path = typer.Argument(
-        ...,
-        help="Destination Axon file.",
-    ),
-    module_name: str = typer.Option(
-        "main",
-        "--module-name",
-        help="Module name to use in emitted Axon source.",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Overwrite output file if it already exists.",
-    ),
-) -> None:
-    """Render an Axon source file from a Synapse YAML spec."""
-    _ensure_overwrite_allowed(output_path, force=force)
-    if output_path.suffix != ".axon":
-        raise typer.BadParameter("Output path must end with .axon")
-    if not module_name.isidentifier():
-        raise typer.BadParameter(f"Invalid module name: {module_name!r}")
-
-    spec = _load_yaml_mapping(spec_path)
-    try:
-        text = _render_synapse_to_axon_text(spec, module_name=module_name)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(text, encoding="utf-8")
-    typer.echo(f"Wrote Axon source to {output_path}")
 
 
 @app.command("axon-resolve")
@@ -383,7 +203,7 @@ def axon_stage_dump(
         "--target-stage",
         help=(
             "Stage to dump: parse, resolve, normalize, flatten, typecheck, "
-            "backend-required, optimize, canonicalize, or final."
+            "graph-ir, backend-required, optimize, canonicalize, or final."
         ),
     ),
     main_module: str | None = typer.Option(
@@ -628,100 +448,6 @@ def axon_test(
         raise typer.BadParameter(str(exc)) from exc
 
 
-@app.command("axon-pipeline-plan")
-def axon_pipeline_plan(
-    axon_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Path to an Axon source file.",
-    ),
-    device: str = typer.Option(
-        "cuda",
-        "--device",
-        help="Pipeline device target (cuda or explicit like cuda:0).",
-    ),
-    main_module: str | None = typer.Option(
-        None,
-        "--main-module",
-        help="Main Axon module name (defaults to last module in file).",
-    ),
-) -> None:
-    """Show the inferred pipeline layer split for an Axon model."""
-    if isinstance(main_module, OptionInfo):
-        main_module = None
-    try:
-        plan = _build_pipeline_plan_for_axon(axon_path, device=device, main_module=main_module)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    typer.echo(f"layers_var={plan.layers_var}")
-    typer.echo(f"total_layers={plan.total_layers}")
-    for stage in plan.stages:
-        typer.echo(
-            f"stage={stage.index} device={stage.device} layers=[{stage.layer_start},{stage.layer_stop})"
-        )
-
-
-@app.command("axon-pipeline-emit")
-def axon_pipeline_emit(
-    axon_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Path to an Axon source file.",
-    ),
-    output_dir: Path = typer.Argument(
-        ...,
-        help="Destination directory for emitted per-stage Python files.",
-    ),
-    device: str = typer.Option(
-        "cuda",
-        "--device",
-        help="Pipeline device target (cuda or explicit like cuda:0).",
-    ),
-    class_name_prefix: str = typer.Option(
-        "GeneratedPipelineStage",
-        "--class-name-prefix",
-        help="Python class-name prefix for emitted stages.",
-    ),
-    main_module: str | None = typer.Option(
-        None,
-        "--main-module",
-        help="Main Axon module name (defaults to last module in file).",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Overwrite output files if they already exist.",
-    ),
-) -> None:
-    """Emit separate Python modules for each inferred pipeline stage."""
-    if isinstance(main_module, OptionInfo):
-        main_module = None
-    try:
-        plan, codes = _emit_pipeline_stage_codes_for_axon(
-            axon_path,
-            device=device,
-            main_module=main_module,
-            class_name_prefix=class_name_prefix,
-        )
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for stage, code in zip(plan.stages, codes, strict=True):
-        output_path = output_dir / f"stage_{stage.index}.py"
-        _ensure_overwrite_allowed(output_path, force=force)
-        output_path.write_text(code, encoding="utf-8")
-        typer.echo(
-            f"wrote {output_path} for {stage.device} layers=[{stage.layer_start},{stage.layer_stop})"
-        )
-
-
 @app.command("axon-benchmark")
 def axon_benchmark(
     axon_paths: list[Path] = typer.Argument(
@@ -851,17 +577,14 @@ def axon_benchmark(
         help="Set torch.compile(dynamic=True).",
     ),
     axon_backend: str = typer.Option(
-        "codegen",
+        "codegen2",
         "--axon-backend",
-        help=(
-            "Axon execution backend (codegen, codegen2, runtime, runtime2, pipeline, "
-            "or pipeline2). The legacy pipeline backend is disabled."
-        ),
+        help="Axon execution backend (codegen2, runtime2, or pipeline2).",
     ),
     axon_typechecker: str = typer.Option(
         "typecheck2",
         "--axon-typechecker",
-        help="Axon typechecker for codegen2/runtime2 graph lowering (typecheck or typecheck2).",
+        help="Axon typechecker for graph lowering. Only typecheck2 is supported.",
     ),
     pipeline_parallel_size: int | None = typer.Option(
         None,
@@ -1004,163 +727,6 @@ def axon_benchmark_render(
     try:
         typer.echo(render_fn(csv_path=csv_path, table_format=table_format))
     except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-
-@app.command("axon-op-parity")
-def axon_op_parity(
-    axon_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Path to an Axon source file.",
-    ),
-    weights: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=True,
-        readable=True,
-        help="Path to a .safetensors file or a model directory containing safetensors.",
-    ),
-    hf_model_dir: Path | None = typer.Option(
-        None,
-        "--hf-model-dir",
-        help="HF model directory for AutoModel (defaults to weights directory).",
-    ),
-    tokenizer: str | None = typer.Option(
-        None,
-        "--tokenizer",
-        help="Tokenizer source override (local path or HF repo id).",
-    ),
-    text: list[str] = typer.Option(
-        ["The future of AI is", "Hello world"],
-        "--text",
-        help="Prompt text for forward-pass parity. Repeat --text for batched prompts.",
-    ),
-    device: str = typer.Option(
-        "cpu",
-        "--device",
-        help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
-    ),
-    dtypes: list[str] = typer.Option(
-        ["float32", "bfloat16", "float16"],
-        "--dtype",
-        help="Dtypes to sweep (repeat --dtype): float32/bfloat16/float16.",
-    ),
-    output_json: Path | None = typer.Option(
-        None,
-        "--output-json",
-        help="Optional path to write a full JSON report.",
-    ),
-) -> None:
-    """Run per-op HF-internals vs Synapse parity harness across requested dtypes."""
-    module = _synapse_module()
-    run_fn = getattr(module, "run_axon_op_parity")
-    try:
-        run_fn(
-            axon_file=axon_path,
-            weights=weights,
-            hf_model_dir=hf_model_dir,
-            tokenizer=tokenizer,
-            text=text,
-            device=device,
-            dtypes=dtypes,
-            output_json=output_json,
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-
-@app.command("axon-layer-op-parity")
-def axon_layer_op_parity(
-    axon_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Path to an Axon source file.",
-    ),
-    weights: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=True,
-        readable=True,
-        help="Path to a .safetensors file or a model directory containing safetensors.",
-    ),
-    layer_index: int = typer.Option(
-        ...,
-        "--layer-index",
-        min=0,
-        help="Layer index to compare.",
-    ),
-    hf_model_dir: Path | None = typer.Option(
-        None,
-        "--hf-model-dir",
-        help="HF model directory for AutoModel (defaults to weights directory).",
-    ),
-    tokenizer: str | None = typer.Option(
-        None,
-        "--tokenizer",
-        help="Tokenizer source override (local path or HF repo id).",
-    ),
-    text: list[str] = typer.Option(
-        ["Hello world"],
-        "--text",
-        help="Prompt text for forward-pass parity. Repeat --text for batched prompts.",
-    ),
-    device: str = typer.Option(
-        "cpu",
-        "--device",
-        help="Torch device (cpu/auto/cuda/mps or explicit like cuda:0).",
-    ),
-    dtype: str = typer.Option(
-        "float32",
-        "--dtype",
-        help="Dtype to run (float32/bfloat16/float16).",
-    ),
-    max_len: int = typer.Option(
-        32,
-        "--max-len",
-        help="Total sequence length target.",
-    ),
-    output_json: Path | None = typer.Option(
-        None,
-        "--output-json",
-        help="Optional path to write the full JSON report.",
-    ),
-) -> None:
-    """Run layer-scoped HF-internals vs Synapse parity harness."""
-    module = _synapse_module()
-    run_fn = getattr(module, "run_axon_layer_op_parity")
-    try:
-        result = run_fn(
-            axon_file=axon_path,
-            weights=weights,
-            layer_index=layer_index,
-            hf_model_dir=hf_model_dir,
-            tokenizer=tokenizer,
-            text=text,
-            device=device,
-            dtype=dtype,
-            max_len=max_len,
-        )
-        if output_json is not None:
-            output_json.parent.mkdir(parents=True, exist_ok=True)
-            output_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
-            typer.echo(f"[axon-layer-op-parity] wrote report: {output_json}")
-        by_op = result.get("by_op", {})
-        for kind in sorted(by_op):
-            stats = by_op[kind]
-            typer.echo(
-                f"[axon-layer-op-parity] {kind} max_abs={stats.get('max_abs')} "
-                f"mean_abs={stats.get('mean_abs')} matched={stats.get('matched')}"
-            )
-    except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
 
@@ -1424,75 +990,8 @@ def axon_materialize(
         typer.echo(path)
 
 
-@app.command("axon-visualize")
-def axon_visualize(
-    axon_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        help="Path to an Axon source file.",
-    ),
-    output_path: Path = typer.Argument(
-        ...,
-        help="Destination Graphviz DOT file.",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Overwrite output file if it already exists.",
-    ),
-    main_module: str | None = typer.Option(
-        None,
-        "--main-module",
-        help="Main model module name when Axon file contains multiple modules (defaults to last).",
-    ),
-    control_flow: bool = typer.Option(
-        True,
-        "--control-flow/--no-control-flow",
-        help="Show dashed gray control-flow edges between ops.",
-    ),
-    direction: str = typer.Option(
-        "top-down",
-        "--direction",
-        help="Graph layout direction: top-down, bottom-up, left-right, or right-left.",
-    ),
-) -> None:
-    """Lower an Axon program and write a DOT graph of blocks + ops + variable-flow edges."""
-    _ensure_overwrite_allowed(output_path, force=force)
-    if output_path.suffix != ".dot":
-        raise typer.BadParameter("Output path must end with .dot")
-    if isinstance(main_module, OptionInfo):
-        main_module = None
-    if isinstance(control_flow, OptionInfo):
-        control_flow = True
-    if isinstance(direction, OptionInfo):
-        direction = "top-down"
-
-    module = _synapse_module()
-    run_fn = getattr(module, "run_axon_visualize")
-    try:
-        written = run_fn(
-            axon_file=axon_path,
-            output_path=output_path,
-            main_module=main_module,
-            show_control_flow=control_flow,
-            direction=direction,
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    typer.echo(f"Wrote Axon graph visualization to {written}")
-
-
 __all__ = [
     "app",
-    "emit_generic",
-    "axon_to_synapse",
-    "synapse_to_axon",
     "axon_test",
-    "axon_op_parity",
     "axon_test_matrix",
-    "axon_visualize",
 ]

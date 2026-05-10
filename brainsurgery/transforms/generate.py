@@ -80,7 +80,7 @@ class GenerateTransform(TypedTransform[GenerateSpec]):
         "\n"
         "Examples:\n"
         "  generate: { model: gpt2, input_ids: work::input_ids, max_new_tokens: 16, output: work::generated_ids }\n"
-        "  generate: { model: gpt2, runtime: codegen, input_ids: work::input_ids, max_new_tokens: 8, eos_token_id: 50256 }"
+        "  generate: { model: gpt2, runtime: hf, input_ids: work::input_ids, max_new_tokens: 8, eos_token_id: 50256 }"
     )
 
     def payload_schema(self) -> TransformPayloadSchema:
@@ -101,8 +101,6 @@ class GenerateTransform(TypedTransform[GenerateSpec]):
             },
             mode_allowed_extra={
                 "auto": set(),
-                "synapse": set(),
-                "codegen": set(),
                 "hf": set(),
             },
         )
@@ -121,7 +119,7 @@ class GenerateTransform(TypedTransform[GenerateSpec]):
         if value_key == "runtime":
             return [
                 item
-                for item in ("auto", "synapse", "codegen", "hf")
+                for item in ("auto", "hf")
                 if item.startswith(prefix_text)
             ]
         return None

@@ -7,7 +7,7 @@ from brainsurgery.synapse.axon.canonicalize import canonicalize_typed_axon_file
 from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
 from brainsurgery.synapse.axon.optimize import optimize_flat_typed_axon_file
 from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
-from brainsurgery.synapse.axon.typecheck import typecheck_flat_axon_file
+from brainsurgery.synapse.axon.typecheck2 import typecheck2_flat_axon_file
 
 
 def test_canonicalize_renames_generated_helper_dims_from_callsites() -> None:
@@ -15,7 +15,7 @@ def test_canonicalize_renames_generated_helper_dims_from_callsites() -> None:
         Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
     ).ast
     flat = flatten_closed_axon_file(resolved, main_module="gpt2")
-    typed = typecheck_flat_axon_file(flat, main_module="gpt2")
+    typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
     optimized = optimize_flat_typed_axon_file(typed, main_module="gpt2")
     canonical = canonicalize_typed_axon_file(optimized, main_module="gpt2")
     rendered = render_axon_file(canonical, show_types=True)

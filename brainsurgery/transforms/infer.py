@@ -28,8 +28,8 @@ class InferTransformError(TransformError):
     pass
 
 
-_InferRuntime = Literal["auto", "synapse", "codegen", "hf"]
-ResolvedInferRuntime = Literal["synapse", "codegen", "hf"]
+_InferRuntime = Literal["auto", "hf"]
+ResolvedInferRuntime = Literal["hf"]
 
 
 @dataclass(frozen=True)
@@ -73,13 +73,12 @@ class InferTransform(TypedTransform[InferSpec]):
         "Runs model inference from tensor inputs already loaded in aliases.\n"
         "\n"
         "Infer runtime/program from metadata attached during load.\n"
-        "Optionally override runtime (auto|synapse|codegen|hf).\n"
+        "Optionally override runtime (auto|hf).\n"
         "Optionally mirror runtime intermediate tensors into tmp_alias.\n"
         "Output logits are written to 'output' (default: model::logits).\n"
         "\n"
         "Examples:\n"
         "  infer: { model: gpt2, input_ids: gpt2::input_ids }\n"
-        "  infer: { model: gpt2, runtime: codegen, input_ids: work::ids, attn_mask: work::mask, output: work::logits }\n"
         "  infer: { model: gpt2, runtime: hf, input_ids: work::ids, attention_mask: work::mask }"
     )
 
@@ -99,8 +98,6 @@ class InferTransform(TypedTransform[InferSpec]):
             },
             mode_allowed_extra={
                 "auto": set(),
-                "synapse": set(),
-                "codegen": set(),
                 "hf": set(),
             },
         )
@@ -119,7 +116,7 @@ class InferTransform(TypedTransform[InferSpec]):
         if value_key == "runtime":
             return [
                 item
-                for item in ("auto", "synapse", "codegen", "hf")
+                for item in ("auto", "hf")
                 if item.startswith(prefix_text)
             ]
         return None
@@ -330,9 +327,9 @@ def _resolve_runtime_and_program(
     metadata_runtime = metadata.get("runtime")
     resolved_runtime: ResolvedInferRuntime
     if spec.runtime == "auto":
-        if metadata_runtime not in {"synapse", "codegen", "hf"}:
+        if metadata_runtime != "hf":
             raise InferTransformError(
-                "infer runtime=auto requires model metadata runtime in {synapse, codegen, hf}"
+                "infer runtime=auto requires model metadata runtime 'hf'"
             )
         resolved_runtime = cast(ResolvedInferRuntime, metadata_runtime)
     else:

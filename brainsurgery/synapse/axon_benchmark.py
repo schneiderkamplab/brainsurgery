@@ -1055,7 +1055,7 @@ def run_axon_benchmark(
     compile_fullgraph: bool = False,
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
-    axon_backend: str = "codegen",
+    axon_backend: str = "codegen2",
     axon_typechecker: str = "typecheck2",
     pipeline_parallel_size: int | None = None,
     optimize: bool = False,
@@ -1073,31 +1073,15 @@ def run_axon_benchmark(
 ) -> dict[str, Any]:
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
-        backend_token = "codegen"
-    valid_backends = {"codegen", "codegen2", "runtime", "runtime2", "pipeline", "pipeline2"}
+        backend_token = "codegen2"
+    valid_backends = {"codegen2", "runtime2", "pipeline2"}
     if backend_token not in valid_backends:
-        raise ValueError(
-            "axon_backend must be 'codegen', 'codegen2', 'runtime', 'runtime2', "
-            "'pipeline', or 'pipeline2'"
-        )
+        raise ValueError("axon_backend must be 'codegen2', 'runtime2', or 'pipeline2'")
     axon_backend = backend_token
-    if axon_backend == "pipeline":
-        raise RuntimeError(
-            "The synapse YAML/pipeline backend is deprecated and disabled. "
-            "Use --axon-backend pipeline2."
-        )
     typechecker_token = str(axon_typechecker).strip().lower()
-    if typechecker_token not in {"typecheck", "typecheck2"}:
-        raise ValueError("axon_typechecker must be 'typecheck' or 'typecheck2'")
+    if typechecker_token != "typecheck2":
+        raise ValueError("axon_typechecker must be 'typecheck2'")
     axon_typechecker = typechecker_token
-    if axon_typechecker == "typecheck" and axon_backend not in {
-        "codegen2",
-        "runtime2",
-        "pipeline2",
-    }:
-        raise ValueError(
-            "--axon-typechecker typecheck is only supported with codegen2/runtime2/pipeline2"
-        )
     if axon_backend != "pipeline2" and pipeline_parallel_size is not None:
         raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2")
     repo_root = _repo_root()

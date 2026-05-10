@@ -14,7 +14,6 @@ from brainsurgery.synapse.axon import (
     render_axon_file,
     resolve_axon_program_from_path,
     typecheck2_flat_axon_file,
-    typecheck_flat_axon_file,
 )
 from brainsurgery.synapse.axon.validate import validate_typed_axon_file
 
@@ -53,16 +52,12 @@ def _resolve_normalize_flatten_typecheck_render(
     validate: bool,
     show_types: bool,
     show_inferred_expression_types: bool,
-    typechecker: str,
 ) -> str:
     resolved = resolve_axon_program_from_path(path).ast
     normalized = normalize_closed_axon_file(resolved, main_module=main_module)
     elaborated = elaborate_closed_axon_file(normalized, main_module=main_module)
     flattened = flatten_closed_axon_file(elaborated, main_module=main_module)
-    if typechecker == "typecheck2":
-        typed = typecheck2_flat_axon_file(flattened, main_module=main_module)
-    else:
-        typed = typecheck_flat_axon_file(flattened, main_module=main_module)
+    typed = typecheck2_flat_axon_file(flattened, main_module=main_module)
     if validate:
         validate_typed_axon_file(typed, main_module=main_module)
     return render_axon_file(
@@ -127,9 +122,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--typechecker",
-        choices=("typecheck", "typecheck2"),
-        default="typecheck",
-        help="Typechecker implementation to use. Defaults to the existing typecheck.",
+        choices=("typecheck2",),
+        default="typecheck2",
+        help="Typechecker implementation to use. Only typecheck2 is supported.",
     )
     args = parser.parse_args()
 
@@ -154,7 +149,6 @@ def main() -> int:
                 validate=should_validate,
                 show_types=args.show_types,
                 show_inferred_expression_types=args.show_inferred_expression_types,
-                typechecker=args.typechecker,
             )
 
             first_path = args.output_dir / "render1" / path
@@ -167,7 +161,6 @@ def main() -> int:
                 validate=should_validate,
                 show_types=args.show_types,
                 show_inferred_expression_types=args.show_inferred_expression_types,
-                typechecker=args.typechecker,
             )
 
             second_path = args.output_dir / "render2" / path
@@ -180,7 +173,6 @@ def main() -> int:
                 validate=should_validate,
                 show_types=args.show_types,
                 show_inferred_expression_types=args.show_inferred_expression_types,
-                typechecker=args.typechecker,
             )
 
             third_path = args.output_dir / "render3" / path

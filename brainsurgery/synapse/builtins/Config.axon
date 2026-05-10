@@ -21,7 +21,7 @@ int :: Path -> ?Int -> Int
 int key ?default=null = _config_int key default
 
 dim :: Path -> ?Dim -> Dim
-dim key ?default=null = _config_int key default
+dim key ?default=null = _config_dim key default
 
 float :: Path -> ?Float -> Float
 float key ?default=null = _config_float key default

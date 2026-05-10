@@ -33,6 +33,7 @@ from brainsurgery.synapse.axon.ast import (
     ast_equal,
     render_axon_file,
 )
+from brainsurgery.synapse.axon.elaborate import elaborate_closed_axon_file
 from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
 from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
 from brainsurgery.synapse.axon.parse import parse_axon_program
@@ -42,7 +43,8 @@ from brainsurgery.synapse.axon.validate import validate_flat_axon_file
 
 def _flatten(program, *, main_module: str):
     normalized = normalize_closed_axon_file(program, main_module=main_module)
-    return flatten_closed_axon_file(normalized, main_module=main_module)
+    elaborated = elaborate_closed_axon_file(normalized, main_module=main_module)
+    return flatten_closed_axon_file(elaborated, main_module=main_module)
 
 
 def _walk_expr(expr: AxonExpr):
@@ -235,7 +237,7 @@ main x = do
     assert AxonExprPath(absolute=True, parts=("outer", "attn", "q_proj")) in path_exprs
 
 
-def test_flatten_expands_callee_path_sugar_without_default_expansion() -> None:
+def test_flatten_expands_callee_path_sugar_after_elaboration() -> None:
     source = """
 use :: Path -> Tensor[B,S,D] -> ?Bool -> ?Int -> Tensor[B,S,D]
 use@path x ?flag=false limit = x
@@ -252,8 +254,8 @@ main x = use@proj x
     assert isinstance(call_expr, AxonExprCall)
     assert call_expr.callee == "use"
     assert call_expr.args[0] == AxonExprPath(absolute=True, parts=("proj",))
-    assert "flag" not in call_expr.kwargs
-    assert "limit" not in call_expr.kwargs
+    assert "flag" in call_expr.kwargs
+    assert "limit" in call_expr.kwargs
 
 
 def test_flatten_tail_recurses_repeat_without_step_helper() -> None:
@@ -325,7 +327,7 @@ wrap@__scope x = do
     validate_flat_axon_file(flat, main_module="wrap")
     rendered = render_axon_file(flat)
     assert "@@'{__scope}.proj'" in rendered
-    assert "@@'{__scope}.proj.weight'" not in rendered
+    assert "@@'{__scope}.proj.weight'" in rendered
 
 
 def test_flatten_preserves_explicit_relative_path_kwarg() -> None:
@@ -362,7 +364,7 @@ wrap@__scope x = do
     validate_flat_axon_file(flat, main_module="wrap")
     rendered = render_axon_file(flat)
     assert "scale x" in rendered
-    assert "scale_path=@@'{__scope}.layer_scalar'" not in rendered
+    assert "scale_path=@@'{__scope}.layer_scalar'" in rendered
 
 
 def test_flatten_preserves_forwarded_path_kwarg_for_synthesized_scope_args() -> None:

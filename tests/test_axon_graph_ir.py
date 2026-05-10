@@ -6,21 +6,36 @@ import torch
 
 from brainsurgery.synapse import lower_axon_program_to_graph_ir, parse_axon_program
 from brainsurgery.synapse.axon import (
+    elaborate_closed_axon_file,
     flatten_closed_axon_file,
     normalize_closed_axon_file,
-    optimize_flat_typed_axon_file,
     resolve_axon_program_from_path,
-    typecheck_flat_axon_file,
+    typecheck2_flat_axon_file,
 )
-from brainsurgery.synapse.axon.ast import TypeBool, TypeList, TypeOptional, TypeTensor, TypeTuple
+from brainsurgery.synapse.axon.ast import (
+    TypeBool,
+    TypeInt,
+    TypeList,
+    TypeOptional,
+    TypeTensor,
+    TypeTuple,
+    render_axon_file,
+)
 from brainsurgery.synapse.axon.codegen2 import Codegen2GraphModel, emit_model_code_from_graph_ir
-from brainsurgery.synapse.axon.graph_ir import GraphModule, GraphProgram, GraphValue, GraphValueRef
+from brainsurgery.synapse.axon.graph_ir import (
+    GraphModule,
+    GraphProgram,
+    GraphValue,
+    GraphValueRef,
+    graph_program_to_axon_file,
+)
 
 
 def _typed(program, *, main_module: str):
     normalized = normalize_closed_axon_file(program, main_module=main_module)
-    flat = flatten_closed_axon_file(normalized, main_module=main_module)
-    return typecheck_flat_axon_file(flat, main_module=main_module)
+    elaborated = elaborate_closed_axon_file(normalized, main_module=main_module)
+    flat = flatten_closed_axon_file(elaborated, main_module=main_module)
+    return typecheck2_flat_axon_file(flat, main_module=main_module)
 
 
 def test_graph_ir_lowers_flat_typed_axon_without_synapse_spec() -> None:
@@ -46,6 +61,34 @@ main x = do
     assert module.outputs[0].name == module.nodes[1].outputs[0].name
 
 
+def test_graph_ir_renders_back_to_flat_typed_axon() -> None:
+    program = parse_axon_program(
+        """
+{-# MAIN "main" #-}
+
+main :: Int -> Int
+main x = do
+  y <- x + 1
+  return y
+"""
+    )
+
+    typed = _typed(program, main_module="main")
+    graph = lower_axon_program_to_graph_ir(typed, main_module="main")
+    assert graph.modules[-1].nodes[0].type_expr == TypeInt()
+    assert graph.modules[-1].return_type_expr == TypeInt()
+    rendered_axon = graph_program_to_axon_file(graph)
+    rendered = render_axon_file(
+        rendered_axon,
+        show_types=True,
+        show_inferred_expr_types=False,
+    )
+
+    assert "main :: Int -> Int" in rendered
+    assert "y <- x + 1" in rendered
+    assert "return y" in rendered
+
+
 def test_graph_ir_lowers_generic_gpt2_kv_as_alternative_lowering_target() -> None:
     program = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
@@ -59,19 +102,18 @@ def test_graph_ir_lowers_generic_gpt2_kv_as_alternative_lowering_target() -> Non
     assert all(node.outputs for module in graph.modules for node in module.nodes)
 
 
-def test_graph_ir_preserves_list_destructuring_outputs_after_optimize() -> None:
+def test_graph_ir_preserves_list_destructuring_outputs() -> None:
     program = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/gpt2/gpt2-kv.axon")
     ).ast
     typed = _typed(program, main_module="gpt2")
-    optimized = optimize_flat_typed_axon_file(typed, main_module="gpt2")
 
-    graph = lower_axon_program_to_graph_ir(optimized, main_module="gpt2")
+    graph = lower_axon_program_to_graph_ir(typed, main_module="gpt2")
     chunk_nodes = [
         node
         for module in graph.modules
         for node in module.nodes
-        if node.op.name == "_chunk"
+        if node.op.name in {"Tensor.chunk", "_chunk"}
     ]
 
     assert chunk_nodes

@@ -55,7 +55,7 @@ from ..ast import (
     ast_equal,
 )
 from ..ast.render import render_axon_file
-from ..typecheck import typecheck_flat_axon_file
+from ..typecheck2 import typecheck2_flat_axon_file
 from ..validate import (
     validate_backend_required_flat_typed_axon_file,
     validate_flat_axon_file,
@@ -3632,7 +3632,7 @@ def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None 
         )
         _opt_debug_end_pass(modules=len(optimized.modules))
         with _opt_debug_time("pass_retype"):
-            retyped = typecheck_flat_axon_file(optimized, main_module=main_module)
+            retyped = typecheck2_flat_axon_file(optimized, main_module=main_module)
         with _opt_debug_time("pass_validate_typed"):
             validate_typed_axon_file(retyped, main_module=main_module)
         if ast_equal(current, retyped):
@@ -3660,7 +3660,7 @@ def normalize_backend_required_flat_typed_axon_file(
             for module in program.modules
         ),
     )
-    normalized = typecheck_flat_axon_file(normalized, main_module=main_module)
+    normalized = typecheck2_flat_axon_file(normalized, main_module=main_module)
     validate_backend_required_flat_typed_axon_file(normalized, main_module=main_module)
     return normalized
 

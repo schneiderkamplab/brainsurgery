@@ -10,7 +10,6 @@ from torch import nn
 from torch.nn import functional as F
 
 from ...mxfp4 import materialize_mxfp4_aliases
-from ...runtime import SynapseProgramModel
 from ..ast import (
     AxonExprPath,
     DimExprBinary,
@@ -18,9 +17,9 @@ from ..ast import (
     TypeList,
     TypeNamed,
     TypeOptional,
-    TypePath,
     TypeTensor,
     TypeTuple,
+    parse_type_expr,
     render_type,
 )
 from ..ast.types import dim_token_names
@@ -364,7 +363,7 @@ def _emit_bind_nested_shape_symbols_inner(
             )
 
 
-class Codegen2GraphModel(SynapseProgramModel):
+class Codegen2GraphModel(nn.Module):
     """Execute the typed Axon graph IR without Synapse graph specs."""
 
     GRAPH: GraphProgram
@@ -384,7 +383,8 @@ class Codegen2GraphModel(SynapseProgramModel):
         main = self.modules_by_name[graph.main_module]
         self.main_inputs_spec = _module_inputs_spec(main)
         self.main_outputs_spec = _module_outputs_spec(main)
-        spec = {
+        super().__init__()
+        self.spec = {
             "synapse": 1,
             "model": {
                 "inputs": self.main_inputs_spec,
@@ -395,7 +395,10 @@ class Codegen2GraphModel(SynapseProgramModel):
                 "config": model_config or {},
             },
         }
-        super().__init__(spec=spec, state_dict=state_dict)
+        self._state: dict[str, torch.Tensor] = {}
+        self._symbols: dict[str, Any] = {}
+        if state_dict is not None:
+            self.load_state_dict_tensors(state_dict)
 
     @classmethod
     def from_state_dict(
@@ -411,6 +414,93 @@ class Codegen2GraphModel(SynapseProgramModel):
         loaded = dict(state_dict)
         materialize_mxfp4_aliases(loaded, drop_packed=True)
         self._state = loaded
+
+    def _prepare_env(
+        self,
+        *,
+        input_ids: torch.Tensor | None,
+        inputs: dict[str, Any],
+        input_specs: dict[str, Any],
+    ) -> dict[str, Any]:
+        env = {"input_ids": input_ids, **inputs} if input_ids is not None else dict(inputs)
+        for input_name, input_spec in input_specs.items():
+            optional = isinstance(input_spec, dict) and bool(input_spec.get("optional", False))
+            if input_name in env:
+                continue
+            if optional:
+                env[input_name] = None
+                continue
+            raise ValueError(f"Missing required input: {input_name}")
+        return env
+
+    def _path_template_env(
+        self, env: Mapping[str, Any], *, symbols: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        out = dict(symbols or {})
+        out.update(env)
+        return out
+
+    def _state_key_alternatives(self, key: str, *, limit: int = 8) -> list[str]:
+        if not isinstance(key, str) or not key:
+            return []
+        keys = [item for item in self._state.keys() if isinstance(item, str)]
+        leaf = key.split(".")[-1]
+        out: list[str] = []
+        for existing in keys:
+            if existing == leaf or existing.endswith(f".{leaf}"):
+                out.append(existing)
+                if len(out) >= limit:
+                    return out
+        return out
+
+    def _state_tensor_from_resolved_path(self, path: str, *, field: str) -> torch.Tensor:
+        resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
+        if resolved not in self._state:
+            alternatives = self._state_key_alternatives(resolved, limit=8)
+            alt_text = ", ".join(alternatives) if alternatives else "<none>"
+            raise ValueError(
+                f"{field} tensor not found at path: {resolved}. Alternatives: {alt_text}"
+            )
+        return self._state[resolved]
+
+    def _bind_shape_symbols_from_types(
+        self,
+        *,
+        env: dict[str, Any],
+        input_types: dict[str, str],
+        symbols: dict[str, Any],
+    ) -> None:
+        def bind_value(type_expr: Any, value: Any) -> None:
+            if isinstance(type_expr, TypeOptional):
+                if value is not None:
+                    bind_value(type_expr.inner, value)
+                return
+            if isinstance(type_expr, TypeList):
+                if isinstance(value, (list, tuple)) and value:
+                    bind_value(type_expr.item, value[0])
+                return
+            if isinstance(type_expr, TypeTuple):
+                if isinstance(value, (list, tuple)):
+                    for item_type, item_value in zip(type_expr.items, value, strict=False):
+                        bind_value(item_type, item_value)
+                return
+            if not isinstance(type_expr, TypeTensor) or not torch.is_tensor(value):
+                return
+            for axis, dim in enumerate(type_expr.dims):
+                if not isinstance(dim, str) or axis >= value.ndim:
+                    continue
+                actual = int(value.shape[axis])
+                current = symbols.get(dim)
+                if isinstance(current, int) and current != actual:
+                    continue
+                symbols[dim] = actual
+
+        for input_name, type_text in input_types.items():
+            try:
+                type_expr = parse_type_expr(type_text)
+            except Exception:
+                continue
+            bind_value(type_expr, env.get(input_name))
 
     def forward(self, input_ids: torch.Tensor | None = None, **inputs: Any) -> Any:
         env = self._prepare_env(
@@ -527,7 +617,85 @@ class Codegen2GraphModel(SynapseProgramModel):
         return scratch[out_name]
 
     def _eval_expr(self, expr: Any, env: dict[str, Any], symbols: dict[str, Any]) -> Any:
-        value = super()._eval_expr(expr, env, symbols)
+        if expr is None or isinstance(expr, (int, float, bool)):
+            value = expr
+        elif isinstance(expr, list):
+            value = [self._eval_expr(item, env, symbols) for item in expr]
+        elif isinstance(expr, tuple):
+            value = tuple(self._eval_expr(item, env, symbols) for item in expr)
+        elif isinstance(expr, dict):
+            kind = expr.get("_expr")
+            if kind == "name":
+                ident = expr.get("id", expr.get("value"))
+                if not isinstance(ident, str) or not ident:
+                    raise ValueError(f"Invalid name expression payload: {expr!r}")
+                if ident in env:
+                    value = env[ident]
+                elif ident in symbols:
+                    value = self._eval_expr(symbols[ident], env, symbols)
+                else:
+                    raise ValueError(f"Unknown symbol in expression: {ident}")
+            elif kind == "tuple":
+                items = expr.get("items")
+                if not isinstance(items, list):
+                    raise ValueError(f"Invalid tuple expression payload: {expr!r}")
+                value = tuple(self._eval_expr(item, env, symbols) for item in items)
+            elif kind == "binary":
+                op = expr.get("op")
+                left = self._eval_expr(expr.get("left"), env, symbols)
+                right = self._eval_expr(expr.get("right"), env, symbols)
+                if op == "+":
+                    value = left + right
+                elif op == "-":
+                    value = left - right
+                elif op == "*":
+                    value = left * right
+                elif op == "/":
+                    value = left / right
+                elif op == "%":
+                    value = left % right
+                elif op == "==":
+                    value = left == right
+                elif op == "!=":
+                    value = left != right
+                elif op == "<":
+                    value = left < right
+                elif op == "<=":
+                    value = left <= right
+                elif op == ">":
+                    value = left > right
+                elif op == ">=":
+                    value = left >= right
+                elif op == "and":
+                    value = bool(left) and bool(right)
+                elif op == "or":
+                    value = bool(left) or bool(right)
+                else:
+                    raise ValueError(f"Unsupported binary operator in expression: {op!r}")
+            else:
+                value = {key: self._eval_expr(item, env, symbols) for key, item in expr.items()}
+        elif isinstance(expr, str):
+            token = expr.strip()
+            if token in env:
+                value = env[token]
+            elif token in symbols:
+                value = self._eval_expr(symbols[token], env, symbols)
+            elif token.lower() == "null":
+                value = None
+            elif token.lower() == "true":
+                value = True
+            elif token.lower() == "false":
+                value = False
+            else:
+                try:
+                    value = int(token)
+                except ValueError:
+                    try:
+                        value = float(token)
+                    except ValueError:
+                        value = token
+        else:
+            value = expr
         if isinstance(expr, str) and isinstance(value, list | tuple) and value:
             return value[-1]
         if (
@@ -1104,6 +1272,15 @@ class Codegen2GraphModel(SynapseProgramModel):
                 env,
             )
             return
+        if op == "core.ascribe":
+            if len(node.inputs) != 1:
+                raise ValueError("core.ascribe expects one input")
+            self._assign_outputs(
+                out_names,
+                self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols),
+                env,
+            )
+            return
         if op == "core.select":
             cond, true_value, false_value = node.inputs
             selected = true_value if bool(
@@ -1584,21 +1761,6 @@ class _DirectTorchEmitter:
             params = ", " + params
         add(lines, 4, f"def {self.method_names[module.name]}(self{params}):")
         local = {value.name for value in module.inputs}
-        path_inputs: list[str] = []
-        for value in module.inputs:
-            if isinstance(value.type_expr, TypePath):
-                path_inputs.append(value.name)
-            if value.default is None:
-                continue
-            default_expr = self._operand_expr(value.default, local=local, symbols_dict="self._symbols")
-            if (
-                isinstance(value.default, GraphPath)
-                and not value.default.absolute
-                and path_inputs
-            ):
-                default_expr = f"'@@' + self._compose_path({path_inputs[0]}, {default_expr})"
-            add(lines, 8, f"if {value.name} is None:")
-            add(lines, 12, f"{value.name} = {default_expr}")
         for value in module.inputs:
             _emit_bind_nested_shape_symbols(
                 lines,
@@ -1844,6 +2006,8 @@ class _DirectTorchEmitter:
             return "(" + ", ".join(self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs) + ")"
         if op == "core.list":
             return "[" + ", ".join(self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs) + "]"
+        if op == "core.ascribe":
+            return self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
         if op == "core.select":
             cond = self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
             yes = self._operand_expr(node.inputs[1], local=local, symbols_dict=symbols_dict)
@@ -2099,6 +2263,8 @@ def _graph_expr_payload(expr: GraphExpr) -> Any:
             "_expr": "tuple",
             "items": [_operand_payload(item) for item in expr.inputs],
         }
+    if op == "core.ascribe":
+        return _operand_payload(expr.inputs[0])
     if op == "core.select":
         return {
             "_expr": "if",

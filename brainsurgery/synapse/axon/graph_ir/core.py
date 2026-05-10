@@ -64,7 +64,6 @@ class GraphValue:
     type_expr: TypeExpr
     dims: tuple[DimToken, ...] | None = None
     optional: bool = False
-    default: "GraphOperand | None" = None
 
 
 @dataclass(frozen=True)
@@ -88,9 +87,7 @@ class GraphExpr:
     dims: tuple[DimToken, ...] | None = None
 
 
-GraphOperand: TypeAlias = (
-    GraphValueRef | GraphLiteral | GraphPath | GraphExpr | tuple["GraphOperand", ...]
-)
+GraphOperand: TypeAlias = GraphValueRef | GraphLiteral | GraphPath | GraphExpr
 GraphAttr: TypeAlias = GraphOperand
 
 
@@ -102,6 +99,8 @@ class GraphNode:
     attrs: dict[str, GraphAttr]
     outputs: tuple[GraphValue, ...]
     source_module: str
+    type_expr: TypeExpr
+    dims: tuple[DimToken, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +110,7 @@ class GraphModule:
     outputs: tuple[GraphOperand, ...]
     output_names: tuple[str, ...]
     nodes: tuple[GraphNode, ...]
+    return_type_expr: TypeExpr | None = None
     constraints: tuple[Constraint, ...] = ()
 
 
@@ -183,7 +183,13 @@ def _literal_expr(expr: AxonExpr) -> GraphLiteral | None:
 
 def _expr_to_operand(expr: AxonExpr, ctx: _GraphLowerCtx | None = None) -> GraphOperand:
     if isinstance(expr, AxonExprAscribe):
-        return _expr_to_operand(expr.expr, ctx)
+        return GraphExpr(
+            op=GraphOp("core.ascribe"),
+            inputs=(_expr_to_operand(expr.expr, ctx),),
+            attrs={},
+            type_expr=_expr_type(expr),
+            dims=expr.inferred_dims,
+        )
     literal = _literal_expr(expr)
     if literal is not None:
         return literal
@@ -197,7 +203,13 @@ def _expr_to_operand(expr: AxonExpr, ctx: _GraphLowerCtx | None = None) -> Graph
     if isinstance(expr, AxonExprPath):
         return GraphPath(absolute=expr.absolute, parts=expr.parts)
     if isinstance(expr, AxonExprList | AxonExprTuple):
-        return tuple(_expr_to_operand(item, ctx) for item in expr.items)
+        return GraphExpr(
+            op=GraphOp("core.list" if isinstance(expr, AxonExprList) else "core.tuple"),
+            inputs=tuple(_expr_to_operand(item, ctx) for item in expr.items),
+            attrs={},
+            type_expr=_expr_type(expr),
+            dims=expr.inferred_dims,
+        )
     raise ValueError(
         f"graph IR lowering requires flat atomic operands, got {type(expr).__name__}"
     )
@@ -223,19 +235,28 @@ def _kwarg_to_attr(value: object, ctx: _GraphLowerCtx | None = None) -> GraphAtt
     if value is None:
         return GraphLiteral(value=None, type_expr=TypeAny())
     if isinstance(value, list):
-        return tuple(_kwarg_to_attr(item, ctx) for item in value)
+        return GraphExpr(
+            op=GraphOp("core.list"),
+            inputs=tuple(_kwarg_to_attr(item, ctx) for item in value),
+            attrs={},
+            type_expr=TypeList(TypeAny()),
+        )
     raise ValueError(f"unsupported graph IR attr value {value!r}")
 
 
 def _param_to_value(param: AxonParam) -> GraphValue:
     if param.type_expr is None:
         raise ValueError(f"graph IR lowering requires typed parameter {param.name!r}")
+    if param.default_expr is not None:
+        raise ValueError(
+            "graph IR lowering requires elaborated Axon input; "
+            f"parameter {param.name!r} still has a default"
+        )
     return GraphValue(
         name=param.name,
         type_expr=param.type_expr,
         dims=tuple(param.type_expr.dims) if isinstance(param.type_expr, TypeTensor) else None,
-        optional=param.optional or param.default_expr is not None,
-        default=_expr_to_operand(param.default_expr) if param.default_expr is not None else None,
+        optional=param.optional,
     )
 
 
@@ -263,7 +284,13 @@ def _target_dims(expr: AxonExpr, target_count: int) -> tuple[tuple[DimToken, ...
 
 def _lower_expr_to_operand(expr: AxonExpr, ctx: _GraphLowerCtx) -> GraphOperand:
     if isinstance(expr, AxonExprAscribe):
-        return _lower_expr_to_operand(expr.expr, ctx)
+        return GraphExpr(
+            op=GraphOp("core.ascribe"),
+            inputs=(_lower_expr_to_operand(expr.expr, ctx),),
+            attrs={},
+            type_expr=_expr_type(expr),
+            dims=expr.inferred_dims,
+        )
     if isinstance(
         expr,
         (
@@ -278,7 +305,13 @@ def _lower_expr_to_operand(expr: AxonExpr, ctx: _GraphLowerCtx) -> GraphOperand:
     ):
         return _expr_to_operand(expr, ctx)
     if isinstance(expr, AxonExprList | AxonExprTuple):
-        return tuple(_lower_expr_to_operand(item, ctx) for item in expr.items)
+        return GraphExpr(
+            op=GraphOp("core.list" if isinstance(expr, AxonExprList) else "core.tuple"),
+            inputs=tuple(_lower_expr_to_operand(item, ctx) for item in expr.items),
+            attrs={},
+            type_expr=_expr_type(expr),
+            dims=expr.inferred_dims,
+        )
     target = ctx.temp()
     node = _node_for_expr(
         expr,
@@ -295,7 +328,13 @@ def _lower_expr_to_operand(expr: AxonExpr, ctx: _GraphLowerCtx) -> GraphOperand:
 
 def _lower_expr_to_lazy_operand(expr: AxonExpr, ctx: _GraphLowerCtx) -> GraphOperand:
     if isinstance(expr, AxonExprAscribe):
-        return _lower_expr_to_lazy_operand(expr.expr, ctx)
+        return GraphExpr(
+            op=GraphOp("core.ascribe"),
+            inputs=(_lower_expr_to_lazy_operand(expr.expr, ctx),),
+            attrs={},
+            type_expr=_expr_type(expr),
+            dims=expr.inferred_dims,
+        )
     if isinstance(
         expr,
         (
@@ -359,16 +398,9 @@ def _node_for_expr(
     module_name: str,
     ctx: _GraphLowerCtx,
 ) -> GraphNode:
-    if isinstance(expr, AxonExprAscribe):
-        return _node_for_expr(
-            expr.expr,
-            targets=targets,
-            node_id=node_id,
-            module_name=module_name,
-            ctx=ctx,
-        )
     types = _target_types(expr, len(targets))
     dims = _target_dims(expr, len(targets))
+    core_expr = expr.expr if isinstance(expr, AxonExprAscribe) else expr
 
     def _outputs() -> tuple[GraphValue, ...]:
         graph_targets = tuple(ctx.define_target(target) for target in targets)
@@ -377,35 +409,39 @@ def _node_for_expr(
             for target, type_expr, dim in zip(graph_targets, types, dims, strict=True)
         )
 
-    if isinstance(expr, AxonExprCall):
-        inputs = tuple(_lower_expr_to_operand(arg, ctx) for arg in expr.args)
-        attrs = {key: _kwarg_to_attr(value, ctx) for key, value in expr.kwargs.items()}
+    if isinstance(core_expr, AxonExprCall):
+        inputs = tuple(_lower_expr_to_operand(arg, ctx) for arg in core_expr.args)
+        attrs = {key: _kwarg_to_attr(value, ctx) for key, value in core_expr.kwargs.items()}
         return GraphNode(
             id=node_id,
-            op=GraphOp(expr.callee),
+            op=GraphOp(core_expr.callee),
             inputs=inputs,
             attrs=attrs,
             outputs=_outputs(),
             source_module=module_name,
+            type_expr=_expr_type(expr),
+            dims=expr.inferred_dims,
         )
-    if isinstance(expr, AxonExprBinary):
+    if isinstance(core_expr, AxonExprBinary):
         inputs = (
-            _lower_expr_to_operand(expr.left, ctx),
-            _lower_expr_to_operand(expr.right, ctx),
+            _lower_expr_to_operand(core_expr.left, ctx),
+            _lower_expr_to_operand(core_expr.right, ctx),
         )
         return GraphNode(
             id=node_id,
-            op=GraphOp(f"core.binary.{expr.op}"),
+            op=GraphOp(f"core.binary.{core_expr.op}"),
             inputs=inputs,
             attrs={},
             outputs=_outputs(),
             source_module=module_name,
+            type_expr=_expr_type(expr),
+            dims=expr.inferred_dims,
         )
-    if isinstance(expr, AxonExprTernary):
+    if isinstance(core_expr, AxonExprTernary):
         inputs = (
-            _lower_expr_to_operand(expr.cond, ctx),
-            _lower_expr_to_lazy_operand(expr.true_expr, ctx),
-            _lower_expr_to_lazy_operand(expr.false_expr, ctx),
+            _lower_expr_to_operand(core_expr.cond, ctx),
+            _lower_expr_to_lazy_operand(core_expr.true_expr, ctx),
+            _lower_expr_to_lazy_operand(core_expr.false_expr, ctx),
         )
         return GraphNode(
             id=node_id,
@@ -414,18 +450,22 @@ def _node_for_expr(
             attrs={},
             outputs=_outputs(),
             source_module=module_name,
+            type_expr=_expr_type(expr),
+            dims=expr.inferred_dims,
         )
-    if isinstance(expr, AxonExprList | AxonExprTuple):
-        inputs = tuple(_lower_expr_to_operand(item, ctx) for item in expr.items)
+    if isinstance(core_expr, AxonExprList | AxonExprTuple):
+        inputs = tuple(_lower_expr_to_operand(item, ctx) for item in core_expr.items)
         return GraphNode(
             id=node_id,
-            op=GraphOp("core.list" if isinstance(expr, AxonExprList) else "core.tuple"),
+            op=GraphOp("core.list" if isinstance(core_expr, AxonExprList) else "core.tuple"),
             inputs=inputs,
             attrs={},
             outputs=_outputs(),
             source_module=module_name,
+            type_expr=_expr_type(expr),
+            dims=expr.inferred_dims,
         )
-    inputs = (_lower_expr_to_operand(expr, ctx),)
+    inputs = (_lower_expr_to_operand(core_expr, ctx),)
     return GraphNode(
         id=node_id,
         op=GraphOp("core.alias"),
@@ -433,6 +473,8 @@ def _node_for_expr(
         attrs={},
         outputs=_outputs(),
         source_module=module_name,
+        type_expr=_expr_type(expr),
+        dims=expr.inferred_dims,
     )
 
 
@@ -473,6 +515,7 @@ def _module_to_graph(module: AxonDefinition) -> GraphModule:
         outputs=outputs,
         output_names=module.returns,
         nodes=tuple(ctx.nodes),
+        return_type_expr=module.return_type_expr,
         constraints=module.constraints or (),
     )
 
@@ -556,11 +599,6 @@ def _validate_operand_defined(
         if isinstance(operand.type_expr, TypeDim) and operand.name in dim_symbols:
             return
         raise ValueError(f"{context} uses undefined value {operand.name!r}")
-    if isinstance(operand, tuple):
-        for item in operand:
-            _validate_operand_defined(
-                item, defined=defined, dim_symbols=dim_symbols, context=context
-            )
     if isinstance(operand, GraphExpr):
         for item in operand.inputs:
             _validate_operand_defined(

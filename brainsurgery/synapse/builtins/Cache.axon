@@ -29,8 +29,8 @@ update past k v = (past == null)
     return k, v, (k, v)
   : do
     k_past, v_past <- past
-    k_all <- _concat k_past k dim=-2
-    v_all <- _concat v_past v dim=-2
+    k_all <- Tensor.concat k_past k dim=-2
+    v_all <- Tensor.concat v_past v dim=-2
     return k_all, v_all, (k_all, v_all)
 
 update_kv :: ?CacheLayerKV[B,H,P,DK,DV] -> Tensor[B,H,S,DK] -> Tensor[B,H,S,DV] -> (Tensor[B,H,K,DK], Tensor[B,H,K,DV], ?CacheLayerKV[B,H,K,DK,DV])
@@ -39,8 +39,8 @@ update_kv past k v = (past == null)
     return k, v, (k, v)
   : do
     k_past, v_past <- past
-    k_all <- _concat k_past k dim=-2
-    v_all <- _concat v_past v dim=-2
+    k_all <- Tensor.concat k_past k dim=-2
+    v_all <- Tensor.concat v_past v dim=-2
     return k_all, v_all, (k_all, v_all)
 
 init :: Cache[B,H,T,DH]

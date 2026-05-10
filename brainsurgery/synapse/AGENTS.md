@@ -29,4 +29,4 @@ Global policy: `../../AGENTS.md`
 
 - Silent fallbacks that hide path/type errors.
 - Duplicating logic across builtins when a shared definition is possible.
-- HF/model-family string routing logic in `axon/*`, `runtime.py`, `pipeline_*`, or `builtins/*.axon`.
+- HF/model-family string routing logic in `axon/*`, runtime2/pipeline2/codegen2 paths, or `builtins/*.axon`.

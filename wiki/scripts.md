@@ -24,6 +24,26 @@ This file tracks maintained scripts in `../scripts/`.
 - `example`: `conda run --no-capture-output -n brainsurgery python scripts/create_min4_family_test_models.py --only Qwen3-MoE-Test`
 - `failure-modes`: requires local source checkpoints under `models/`; families backed by remote-code may need source-specific config/key rewrites in this script to make the tiny checkpoint match the real checkpoint layout. `DeepSeek-V2-Test` removes stale `auto_map` remote-code hooks so HF and Axon both consume the same native DeepSeek-V2 safetensors.
 
+- `path`: `scripts/axon_graph_ir_weak_roundtrip.py`
+- `purpose`: Verify Graph IR can render back to canonical typed flat Axon after the initial full frontend pipeline.
+- `owner`: agents
+- `inputs`: Axon files or directories; optional `--main-module`.
+- `outputs`: render generations under `tmp/axon-stage-roundtrip-graph-ir-weak` by default.
+- `env`: run through the `brainsurgery` conda env.
+- `example`: `conda run --no-capture-output -n brainsurgery python scripts/axon_graph_ir_weak_roundtrip.py brainsurgery/synapse/models/gpt2/gpt2-kv.axon`
+- `notes`: defaults to signature/type-header rendering only; pass `--show-inferred-expression-types` to also render inferred body expression ascriptions.
+- `failure-modes`: weak mode reparses/renormalizes/retypechecks rendered flat Axon without reresolving or reflattening, so failures usually point at graph-rendered Axon not satisfying the flat typed frontend contract.
+
+- `path`: `scripts/axon_graph_ir_strong_roundtrip.py`
+- `purpose`: Verify Graph IR rendered Axon is stable when every generation reruns resolve, normalize, elaborate, flatten, typecheck2, lower-to-graph, and graph-render.
+- `owner`: agents
+- `inputs`: Axon files or directories; optional `--main-module`.
+- `outputs`: render generations under `tmp/axon-stage-roundtrip-graph-ir-strong` by default.
+- `env`: run through the `brainsurgery` conda env.
+- `example`: `conda run --no-capture-output -n brainsurgery python scripts/axon_graph_ir_strong_roundtrip.py brainsurgery/synapse/models/gpt2/gpt2-kv.axon`
+- `notes`: defaults to signature/type-header rendering only; pass `--show-inferred-expression-types` to also render inferred body expression ascriptions.
+- `failure-modes`: strong mode exposes resolver/frontend instability as well as graph-render instability; inspect `render1`, `render2`, and `render3` artifacts in the output directory.
+
 ## Entry Template
 
 - `path`:
