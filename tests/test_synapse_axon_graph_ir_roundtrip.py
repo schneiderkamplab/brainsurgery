@@ -76,6 +76,36 @@ def test_graph_optimize_weak_roundtrip_is_canonical(axon_path: Path, tmp_path: P
     )
 
 
+@pytest.mark.parametrize("axon_path", _graph_ir_roundtrip_paths(), ids=lambda path: path.as_posix())
+def test_graph_optimized_graph_ir_weak_roundtrip_is_canonical(
+    axon_path: Path, tmp_path: Path
+) -> None:
+    assert graph_ir_weak_roundtrip_path(
+        axon_path,
+        tmp_path / "weak-opt-graph",
+        optimize_ast=False,
+        optimize_graph=True,
+    ), (
+        f"Graph-optimized Graph IR weak roundtrip changed rendered output for {axon_path}; "
+        f"artifacts: {tmp_path}"
+    )
+
+
+@pytest.mark.parametrize("axon_path", _graph_ir_roundtrip_paths(), ids=lambda path: path.as_posix())
+def test_graph_optimized_graph_ir_strong_roundtrip_is_canonical(
+    axon_path: Path, tmp_path: Path
+) -> None:
+    assert graph_ir_strong_roundtrip_path(
+        axon_path,
+        tmp_path / "strong-opt-graph",
+        optimize_ast=False,
+        optimize_graph=True,
+    ), (
+        f"Graph-optimized Graph IR strong roundtrip changed rendered output for {axon_path}; "
+        f"artifacts: {tmp_path}"
+    )
+
+
 @pytest.mark.xfail(
     reason=(
         "all-file optimized Graph IR weak roundtrip is intentionally broad and "

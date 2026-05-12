@@ -32,3 +32,19 @@ but whose actual operand is annotated as \code{Float}, graph validation fails
 before torch or tinygrad code is generated.  Similarly, if a node references a
 value not produced by module inputs or earlier nodes, validation reports an
 undefined operand.
+
+\paragraph{Checks performed.}
+For each graph module, validation constructs an environment from module inputs
+and then walks nodes in order.  Each node must use only values that are already
+defined, global zero-argument module values, or known dimension symbols.  Node
+outputs must not redefine existing values.  Return operands must be defined and
+must match the declared module return arity.
+
+For calls to graph modules, validation binds positional and attribute operands
+to formal inputs, rejects unknown or duplicate keyword arguments, rejects
+missing arguments, and checks actual types against formal types.  For core
+ops, validation enforces local contracts: \code{core.select} has a boolean
+condition and three operands, \code{core.alias} and \code{core.ascribe} have
+one operand, and \code{core.tuple}/\code{core.list} items are compatible with
+the declared aggregate type.  Path templates are also checked: every template
+placeholder must be available as a graph value or symbolic dimension.

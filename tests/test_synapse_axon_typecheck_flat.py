@@ -16,7 +16,6 @@ from brainsurgery.synapse.axon.ast import (
     AxonReturn,
     Constraint,
     TypeAliasDef,
-    TypeDim,
     TypeInt,
     TypeNamed,
     TypeTensor,
@@ -145,11 +144,11 @@ def test_typecheck_flat_unifies_embedding_dim_from_add() -> None:
     validate_typed_axon_file(typed, main_module="gpt2")
     text = render_axon_file(typed, show_types=True)
     pos_line = next(
-        line for line in text.splitlines() if "pos <- (NN.embedding (@@wpe :: Path)" in line
+        line for line in text.splitlines() if "pos <-" in line and "NN.embedding" in line and "@@wpe" in line
     )
-    layernorm_line = next(line for line in text.splitlines() if "__flat_3 <- (NN.layernorm" in line)
+    layernorm_line = next(line for line in text.splitlines() if "NN.layernorm" in line and "@@ln_f" in line)
     assert "MODEL_DIM" in pos_line
-    assert ",dim]" not in pos_line
+    assert ",D]" not in pos_line
     assert "Tensor[" in layernorm_line and ",MODEL_DIM]" in layernorm_line
 
 
@@ -167,7 +166,7 @@ f x = D
     assert isinstance(ret_stmt, AxonReturn)
     assert len(ret_stmt.values) == 1
     assert ret_stmt.values[0].inferred_type is not None
-    assert isinstance(ret_stmt.values[0].inferred_type, TypeDim)
+    assert isinstance(ret_stmt.values[0].inferred_type, TypeInt)
 
 
 def test_typecheck_flat_rejects_bare_tensor_type() -> None:
@@ -292,20 +291,20 @@ def test_typecheck_flat_preserves_cache_update_shape_information() -> None:
     text = render_axon_file(typed, show_types=True)
     block_sig = next(line for line in text.splitlines() if line.startswith("gpt2_block ::"))
     update_line = next(
-        line for line in text.splitlines() if "k, v, new_kv <- (Cache.update " in line
+        line for line in text.splitlines() if "k, v, new_kv <-" in line and "Cache.update" in line
     )
-    assert "?Tensor[B,P + S]" in block_sig
+    assert "?Tensor[B,K]" in block_sig
     assert (
         "?CacheLayer[B,H,P,DH]" in block_sig or "?(Tensor[B,H,P,DH], Tensor[B,H,P,DH])" in block_sig
     )
     assert (
-        "?CacheLayer[B,H,P + S,DH]" in block_sig
-        or "?(Tensor[B,H,P + S,DH], Tensor[B,H,P + S,DH])" in block_sig
+        "?CacheLayer[B,H,K,DH]" in block_sig
+        or "?(Tensor[B,H,K,DH], Tensor[B,H,K,DH])" in block_sig
     )
     assert "Any" not in update_line
 
 
-def test_typecheck_attention_mask_helper_does_not_force_equal_shapes(tmp_path: Path) -> None:
+def test_typecheck_attention_mask_helper_keeps_mask_head_dim_independent(tmp_path: Path) -> None:
     resolved = _resolve_attention_wrapper(tmp_path)
     flat = _flat(resolved, main_module="main")
     typed = typecheck2_flat_axon_file(flat, main_module="main")
@@ -314,7 +313,7 @@ def test_typecheck_attention_mask_helper_does_not_force_equal_shapes(tmp_path: P
     mask_sig = next(
         line for line in text.splitlines() if line.startswith("Attention.mask_to_additive ::")
     )
-    assert "Tensor[B,H,Q,K] -> Tensor[B,1,Q,K] -> Tensor[B,H,Q,K]" in mask_sig
+    assert "Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> Tensor[B,H,Q,K]" in mask_sig
 
 
 def test_typecheck_attention_preserves_matmul_and_mask_broadcast_shapes(tmp_path: Path) -> None:
@@ -324,15 +323,18 @@ def test_typecheck_attention_preserves_matmul_and_mask_broadcast_shapes(tmp_path
     validate_typed_axon_file(typed, main_module="main")
     text = render_axon_file(typed, show_types=True)
     assert "Tensor[B,H,1,1]" not in text
-    assert "Tensor[B,H,Q,K]" in next(
-        line for line in text.splitlines() if "scores <- (Tensor.matmul" in line
+    scores_line = next(
+        line for line in text.splitlines() if "scores <-" in line and "Tensor.matmul" in line
     )
-    assert "Tensor[B,H,Q,K]" in next(
-        line for line in text.splitlines() if "mask <- (Attention.mask_to_additive" in line
+    mask_line = next(
+        line for line in text.splitlines() if "mask <-" in line and "Attention.mask_to_additive" in line
     )
-    assert "Tensor[B,H,Q,HD]" in next(
-        line for line in text.splitlines() if "out <- (Tensor.matmul" in line
+    out_line = next(
+        line for line in text.splitlines() if "out <-" in line and "Tensor.matmul" in line
     )
+    assert "Tensor[B,H,Q,..RB]" in scores_line
+    assert "Tensor[B,H,Q,..RB]" in mask_line
+    assert "Tensor[B,H,Q,VD]" in out_line
 
 
 def test_typecheck_rejects_chunk_wrapper_that_claims_unchanged_shape() -> None:

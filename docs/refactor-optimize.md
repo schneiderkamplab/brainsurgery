@@ -40,6 +40,18 @@ Implementation status:
   currently performs graph pruning, atomic alias cleanup, dead temp elimination for
   total `core.*` nodes, literal-only constant folding, conservative single-callsite
   specialization, and constrained safe inlining of total-pure helper modules.
+- Graph IR pruning is metadata-aware: type annotations, dim metadata, constraints,
+  and path-template symbols are treated as dependencies. This prevents pruning
+  constants such as `CFG`/shape names that only appear in templates or typed
+  metadata.
+- Safe inlining no longer treats zero-arg atomic constants as ordinary
+  single-callsite helpers. Atomic constants stay as constants by default; they are
+  only substituted by the explicit, opt-in constant-dim substitution pass.
+- Optional graph constant-dim substitution exists behind
+  `GraphOptimizeConfig.constant_dim_substitution=False`. It is local,
+  constraint-gated, and validates each candidate rewrite. A module must both
+  reference the constant in dim/type metadata and carry a local equality
+  constraint such as `VOCAB_SIZE = 151936` before the substitution can apply.
 - Graph IR validation now includes a conservative type/arity verifier for typed
   operands, module calls, core ops, stale value references, and node/module output
   contracts. It intentionally accepts current Axon polymorphism such as `Any`,
@@ -56,6 +68,11 @@ Implementation status:
   `log/smoke-llama4-graph-validate-20260511c`.
 - Both are off by default. CLI switches are `--optimize-ast` and
   `--optimize-graph`.
+- Broad graph-optimized weak and strong roundtrip coverage currently passes:
+  `tests/test_synapse_axon_graph_ir_roundtrip.py::{test_graph_optimized_graph_ir_weak_roundtrip_is_canonical,test_graph_optimized_graph_ir_strong_roundtrip_is_canonical}`
+  produced `512 passed` on 2026-05-12 after fixing the graph closure,
+  path-template substitution, atomic-constant inlining, and loop-helper return
+  type propagation clusters.
 - The old broad AST optimizer implementation remains as internal experimental
   code, but the user-facing `--optimize` flag has been removed.
 - There is still no full Graph IR inference engine. Graph optimization relies on

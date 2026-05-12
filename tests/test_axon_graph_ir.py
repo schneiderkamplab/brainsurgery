@@ -542,6 +542,96 @@ def test_graph_ir_optimizer_inlines_multi_output_total_helper() -> None:
     )
 
 
+def test_graph_ir_optimizer_does_not_inline_atomic_constant_by_default() -> None:
+    dim_t = TypeDim()
+    const = GraphModule(
+        name="VOCAB_SIZE",
+        inputs=(),
+        outputs=(GraphLiteral(151936, dim_t),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=dim_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(),
+        outputs=(GraphValueRef("vocab", dim_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("VOCAB_SIZE"),
+                inputs=(),
+                attrs={},
+                outputs=(GraphValue("vocab", dim_t),),
+                source_module="main",
+                type_expr=dim_t,
+            ),
+        ),
+        return_type_expr=dim_t,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(const, main), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(specialize_definitions="off"),
+    )
+
+    assert {module.name for module in optimized.modules} == {"VOCAB_SIZE", "main"}
+    optimized_main = next(module for module in optimized.modules if module.name == "main")
+    assert optimized_main.nodes[0].op.name == "VOCAB_SIZE"
+
+
+def test_graph_ir_optimizer_constant_dim_substitution_requires_local_constraint() -> None:
+    dim_t = TypeDim()
+    tensor_with_symbol = TypeTensor(base="Tensor", dims=("B", "VOCAB_SIZE"))
+    tensor_with_literal = TypeTensor(base="Tensor", dims=("B", 151936))
+    const = GraphModule(
+        name="VOCAB_SIZE",
+        inputs=(),
+        outputs=(GraphLiteral(151936, dim_t),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=dim_t,
+    )
+    unconstrained = GraphModule(
+        name="unconstrained",
+        inputs=(GraphValue("x", tensor_with_symbol),),
+        outputs=(GraphValueRef("x", tensor_with_symbol),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=tensor_with_symbol,
+    )
+    constrained = GraphModule(
+        name="constrained",
+        inputs=(GraphValue("x", tensor_with_symbol),),
+        outputs=(GraphValueRef("x", tensor_with_symbol),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=tensor_with_symbol,
+        constraints=(Constraint("=", "VOCAB_SIZE", 151936),),
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(
+            modules=(const, unconstrained, constrained),
+            main_module="constrained",
+            pragmas={},
+        ),
+        config=GraphOptimizeConfig(
+            constant_dim_substitution=True,
+            specialize_definitions="off",
+            inline_safe=False,
+            prune_to_main=False,
+        ),
+    )
+
+    unchanged = next(module for module in optimized.modules if module.name == "unconstrained")
+    changed = next(module for module in optimized.modules if module.name == "constrained")
+    assert unchanged.inputs[0].type_expr == tensor_with_symbol
+    assert changed.inputs[0].type_expr == tensor_with_literal
+    assert changed.return_type_expr == tensor_with_literal
+
+
 def test_graph_ir_optimizer_inlines_path_operand_helper() -> None:
     path_t = TypePath()
     helper = GraphModule(
@@ -812,7 +902,8 @@ main cond x = do
     graph = lower_axon_program_to_graph_ir(_typed(program, main_module="main"), main_module="main")
     rendered = render_graph_program_to_dot(graph)
 
-    assert 'label="module helper\\nreturns Tensor[B,S]"' in rendered
+    assert 'label="module helper\\nreturns Tensor[B,S]' in rendered
+    assert "\\nconstraints " in rendered
     assert 'label="module helper\\\\nreturns Tensor[B,S]"' not in rendered
     assert "style=\"dotted\"" in rendered
     assert "lhead=cluster_helper" in rendered

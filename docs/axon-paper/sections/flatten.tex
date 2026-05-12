@@ -8,16 +8,21 @@ The flat program has no statement-level \code{if}, no \code{for}, no
 \code{scope}, no relative paths, and no hidden callee path sugar.  Complex
 expressions are lowered into explicit bind statements, loop constructs are
 converted into helper definitions, and returns/yields are restricted to atomic
-variables or tuples of variables.
+variables or tuples of variables.  Flatten expects elaboration to have resolved
+the defaultable call surface; it should not add compatibility defaults while
+constructing the flat core.
 
 \paragraph{Path semantics.}
 Flatten resolves lexical scopes into explicit absolute or templated absolute
 paths.  Scoped callees receive ordinary \code{Path}-typed parameters rather
-than syntactic path-sugar parameters.
+than syntactic path-sugar parameters.  A scoped helper therefore has a normal
+leading path argument in its rendered signature, and call sites pass concrete
+or templated path values explicitly.
 
 \paragraph{Rationale.}
 Flatten produces the small core language expected by typecheck2 and Graph IR
-lowering.  Backends should not implement surface Axon control constructs.
+lowering.  Backends should not implement surface Axon control constructs,
+path-sugar semantics, or default-argument repair.
 
 \paragraph{Formal view.}
 Flatten maps elaborated closed ASTs to flat closed ASTs:
@@ -51,3 +56,18 @@ x <- for@h i <- [0..NUM_LAYERS) carry (x) do
 is converted into helper definitions and calls with ordinary path parameters.
 The resulting paths are absolute templates such as
 \code{@@'h.\{i\}.attn.c\_proj'} rather than dynamic scope statements.
+
+\paragraph{Round-trip implication.}
+A rendered flat program is still Axon source, but it is already in the flat
+core.  Reprocessing it must preserve the explicit call surface.  For example,
+if flatten emits
+\begin{verbatim}
+x, new_i <- gpt2_block @@'h.{i}' x attn_mask past_i
+\end{verbatim}
+then a subsequent parse--normalize--elaborate--flatten cycle should keep the
+same argument structure.  Adding
+\begin{verbatim}
+past_kv=null
+\end{verbatim}
+would indicate that elaboration counted the leading \code{Path} argument
+incorrectly when deciding which optional parameters were already supplied.

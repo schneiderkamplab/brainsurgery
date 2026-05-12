@@ -65,6 +65,7 @@ from ..typecheck_shared import (
     _apply_subst,
     _bind_dim_name,
     _broadcast_tensor_branch_types,
+    _collect_module_constraints,
     _destructure_type,
     _expr_to_dim_token,
     _expand_alias,
@@ -77,8 +78,10 @@ from ..typecheck_shared import (
     _normalize_type_expr_for_module,
     _primitive_op_name,
     _resolve_type_dim_aliases,
+    _reject_bare_tensor_types,
     _scoped_typevars,
     _simplify_dim_expr,
+    _thread_interprocedural_call_guards,
     _type_dims,
     _type_expr_from_spec,
     _unify,
@@ -154,11 +157,30 @@ def _unify_tc2(left: TypeExpr, right: TypeExpr, ctx: _TcCtx) -> TypeExpr:
     return _unify(left_expanded, right_expanded, ctx)
 
 
+def _resolve_tc2_dim_token(dim: DimToken, state: _Tc2) -> DimToken:
+    dim = _normalize_dim_token(dim, state.ctx)
+    if isinstance(dim, str):
+        source = state.fresh_dim_sources.get(dim)
+        if source in state.constant_expr_defs:
+            return _resolve_return_dim_token(source, state.constant_expr_defs, state.ctx)
+        return _resolve_return_dim_token(dim, state.constant_expr_defs, state.ctx)
+    if isinstance(dim, DimExprBinary):
+        return _normalize_dim_token(
+            DimExprBinary(
+                op=dim.op,
+                left=_resolve_tc2_dim_token(dim.left, state),
+                right=_resolve_tc2_dim_token(dim.right, state),
+            ),
+            state.ctx,
+        )
+    return dim
+
+
 def _dim_equivalent_tc2(left: DimToken, right: DimToken, state: _Tc2) -> bool:
     if _dim_equivalent(left, right, state.ctx):
         return True
-    resolved_left = _resolve_return_dim_token(left, state.constant_expr_defs, state.ctx)
-    resolved_right = _resolve_return_dim_token(right, state.constant_expr_defs, state.ctx)
+    resolved_left = _resolve_tc2_dim_token(left, state)
+    resolved_right = _resolve_tc2_dim_token(right, state)
     return _dim_equivalent(resolved_left, resolved_right, state.ctx)
 
 
@@ -224,6 +246,16 @@ def _unify_call_arg_type(
                 if rebound is not None:
                     out_dims.append(rebound)
                     continue
+                if (
+                    isinstance(formal_dim, str)
+                    and not formal_dim.startswith("..")
+                    and _is_fresh_dim_name(formal_dim, state)
+                    and (local_fresh_dims is None or formal_dim in local_fresh_dims)
+                    and formal_dim not in ctx.dim_substitutions
+                ):
+                    _bind_dim_name(formal_dim, actual_dim, ctx)
+                    out_dims.append(_normalize_dim_token(actual_dim, ctx))
+                    continue
                 if _is_refinable_dim_name(actual_dim, state) and _is_concrete_dim_token(
                     formal_dim, state
                 ):
@@ -231,9 +263,16 @@ def _unify_call_arg_type(
                         _bind_dim_name(actual_dim, formal_dim, ctx)
                     out_dims.append(formal_dim)
                     continue
+                if isinstance(actual_dim, str) and actual_dim in dim_token_names(formal_dim):
+                    out_dims.append(actual_dim)
+                    continue
                 try:
                     out_dims.append(_unify_dim_token(actual_dim, formal_dim, ctx))
                 except ValueError:
+                    solved = _bind_single_fresh_dim_equation(actual_dim, formal_dim, state)
+                    if solved is not None:
+                        out_dims.append(solved)
+                        continue
                     if isinstance(formal_dim, str) and formal_dim in dim_token_names(actual_dim):
                         out_dims.append(actual_dim)
                         continue
@@ -312,6 +351,30 @@ def _rebind_fresh_dim_substitution(
             state.ctx.dim_substitutions[fresh_name] = actual_dim
             return _normalize_dim_token(actual_dim, state.ctx)
     return None
+
+
+def _bind_single_fresh_dim_equation(
+    actual_dim: DimToken,
+    formal_dim: DimToken,
+    state: _Tc2,
+) -> DimToken | None:
+    difference = _dim_affine(
+        DimExprBinary(op="-", left=formal_dim, right=actual_dim),
+        state.ctx,
+    )
+    if difference is None:
+        return None
+    coeffs, const = difference
+    if len(coeffs) != 1:
+        return None
+    name, coeff = next(iter(coeffs.items()))
+    if name in state.constant_expr_defs or name.startswith("..") or coeff == 0:
+        return None
+    solved = -const / coeff
+    if solved.denominator != 1:
+        return None
+    _bind_dim_name(name, int(solved), state.ctx)
+    return _normalize_dim_token(formal_dim, state.ctx)
 
 
 def _module_graph(program: AxonFile) -> dict[str, set[str]]:
@@ -543,6 +606,8 @@ def _instantiate_call_signature(
 
     def rewrite_dim(dim: DimToken) -> DimToken:
         if isinstance(dim, str):
+            if dim in state.constant_expr_defs:
+                return dim
             return fresh_dim(dim)
         if isinstance(dim, int):
             return dim
@@ -839,6 +904,9 @@ def _binary_arithmetic_type(left: TypeExpr, right: TypeExpr, ctx: _TcCtx) -> Typ
             return _apply_subst(left, ctx)
         if any(isinstance(dim, str) and dim.startswith("..") for dim in right_expanded.dims):
             return _apply_subst(left, ctx)
+        dims = _unify_broadcast_tensor_dims(left_expanded.dims, right_expanded.dims, ctx)
+        if dims is not None:
+            return TypeTensor(base="Tensor", dims=dims)
         return _broadcast_tensor_branch_types(left, right, ctx)
     if isinstance(left_expanded, TypeTensor) and _is_scalar_numeric_type(right_expanded):
         return _apply_subst(left, ctx)
@@ -1934,6 +2002,8 @@ def _unify_return_type(
     if isinstance(actual, TypeNull) and isinstance(expected, TypeOptional):
         _unify_tc2(actual, expected, ctx)
         return _apply_subst(expected, ctx)
+    if isinstance(expected, TypeOptional):
+        return TypeOptional(_unify_return_type(actual, expected.inner, state, protected_dim_names))
     if isinstance(actual, TypeList) and isinstance(expected, TypeList):
         return TypeList(_unify_return_type(actual.item, expected.item, state, protected_dim_names))
     _unify_tc2(actual, expected, ctx)
@@ -2854,6 +2924,8 @@ def _tc_definition(
         if specialize_signature
         else _return_types(module, state.ctx)
     )
+    if specialize_signature and _is_loop_generated_definition_name(module.name):
+        expected_returns = None
     protected_dim_names = _env_dim_names(base_env)
     signature_expr_defs = dict(call_expr_defs or {})
     signature_env = {
@@ -2885,6 +2957,9 @@ def _tc_definition(
             typed_module = replace(
                 module,
                 body_expr=typed_expr,
+                constraints=_collect_module_constraints(
+                    module, statements=(), ctx=state.ctx
+                ),
                 return_type_expr=(
                     module.return_type_expr
                     if module.return_type_expr is not None and not specialize_signature
@@ -2949,6 +3024,9 @@ def _tc_definition(
             module,
             params=tuple(refined_params),
             statements=tuple(_normalize_statement(stmt, state.ctx) for stmt in typed_statements),
+            constraints=_collect_module_constraints(
+                module, statements=tuple(typed_statements), ctx=state.ctx
+            ),
             return_type_expr=return_type_expr,
         )
         if specialize_signature:
@@ -2966,6 +3044,7 @@ def _typecheck2_flat_axon_file_once(program: AxonFile, *, main_module: str | Non
     _reachable(program, main_module)
     program = prune_unreachable_definitions(program, entrypoint=main_module)
     validate_flat_axon_file(program, main_module=main_module)
+    _reject_bare_tensor_types(program)
     modules_by_name = {module.name: module for module in program.modules}
     constant_expr_defs = _zero_arg_constant_expr_defs(program.modules)
 
@@ -3042,6 +3121,7 @@ def _typecheck2_flat_axon_file_once(program: AxonFile, *, main_module: str | Non
         typed_program,
         modules=tuple(module for module in typed_program.modules if module.name in reachable),
     )
+    typed_program = _thread_interprocedural_call_guards(typed_program)
     validate_typed_axon_file(typed_program, main_module=main_module)
     return typed_program
 

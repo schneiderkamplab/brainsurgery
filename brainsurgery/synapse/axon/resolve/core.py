@@ -1115,6 +1115,10 @@ def reachable_definitions(program: AxonFile, *, entrypoint: str | None = None) -
     """Return definition names reachable from an entrypoint in a closed program."""
 
     root_entrypoint = entrypoint
+    if root_entrypoint is None:
+        pragma_main = program.pragmas.get("main")
+        if isinstance(pragma_main, str) and pragma_main:
+            root_entrypoint = pragma_main
     if root_entrypoint is None and program.modules:
         root_entrypoint = program.modules[-1].name
     module_graph = _build_module_dependency_graph(

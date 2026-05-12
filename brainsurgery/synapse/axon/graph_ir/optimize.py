@@ -11,13 +11,16 @@ from ..ast import (
     DimExprBinary,
     DimToken,
     TypeAny,
+    TypeDim,
     TypeExpr,
+    TypeInt,
     TypeList,
     TypeNamed,
     TypeOptional,
     TypePath,
     TypeTensor,
     TypeTuple,
+    dim_token_names,
 )
 from .core import (
     GraphExpr,
@@ -44,6 +47,7 @@ class GraphOptimizeConfig:
     atomic_alias_cleanup: bool = True
     dead_temp_elimination: bool = True
     constant_folding: bool = True
+    constant_dim_substitution: bool = False
     specialize_definitions: str = "single-callsite"
     inline_safe: bool = True
     max_iterations: int = 8
@@ -264,16 +268,41 @@ def _module_output_types_for_arity(module: GraphModule, output_count: int) -> tu
     return tuple(TypeAny() for _ in range(output_count))
 
 
+def _bind_dim_sequence_map(
+    formal_dims: tuple[DimToken, ...],
+    actual_dims: tuple[DimToken, ...],
+    dim_map: dict[str, DimToken],
+) -> None:
+    variadic_indexes = [
+        index
+        for index, dim in enumerate(formal_dims)
+        if isinstance(dim, str) and dim.startswith("..")
+    ]
+    if len(variadic_indexes) > 1:
+        return
+    pairs: list[tuple[DimToken, DimToken]] = []
+    if not variadic_indexes:
+        pairs = list(zip(formal_dims, actual_dims, strict=False))
+    else:
+        variadic_index = variadic_indexes[0]
+        prefix = formal_dims[:variadic_index]
+        suffix = formal_dims[variadic_index + 1 :]
+        if len(actual_dims) < len(prefix) + len(suffix):
+            return
+        pairs.extend(zip(prefix, actual_dims[: len(prefix)], strict=False))
+        if suffix:
+            pairs.extend(zip(suffix, actual_dims[-len(suffix) :], strict=False))
+    for formal_dim, actual_dim in pairs:
+        if isinstance(formal_dim, str) and not formal_dim.startswith(".."):
+            dim_map.setdefault(formal_dim, actual_dim)
+
+
 def _bind_type_dim_map(formal: TypeExpr, actual: TypeExpr, dim_map: dict[str, DimToken]) -> None:
     if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor):
-        for formal_dim, actual_dim in zip(formal.dims, actual.dims, strict=False):
-            if isinstance(formal_dim, str) and not formal_dim.startswith(".."):
-                dim_map.setdefault(formal_dim, actual_dim)
+        _bind_dim_sequence_map(formal.dims, actual.dims, dim_map)
         return
     if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed):
-        for formal_dim, actual_dim in zip(formal.args, actual.args, strict=False):
-            if isinstance(formal_dim, str) and not formal_dim.startswith(".."):
-                dim_map.setdefault(formal_dim, actual_dim)
+        _bind_dim_sequence_map(formal.args, actual.args, dim_map)
         return
     if isinstance(formal, TypeOptional) and isinstance(actual, TypeOptional):
         _bind_type_dim_map(formal.inner, actual.inner, dim_map)
@@ -284,6 +313,36 @@ def _bind_type_dim_map(formal: TypeExpr, actual: TypeExpr, dim_map: dict[str, Di
     if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple):
         for formal_item, actual_item in zip(formal.items, actual.items, strict=False):
             _bind_type_dim_map(formal_item, actual_item, dim_map)
+
+
+def _operand_dim_token(
+    operand: GraphOperand,
+    dim_values: Mapping[str, DimToken] | None = None,
+) -> DimToken | None:
+    if isinstance(operand, GraphLiteral) and type(operand.value) is int:
+        return operand.value
+    if isinstance(operand, GraphValueRef):
+        if dim_values is not None and operand.name in dim_values:
+            return dim_values[operand.name]
+        return operand.name
+    return None
+
+
+def _bind_value_dim_map(
+    formal: GraphValue,
+    actual: GraphOperand,
+    dim_map: dict[str, DimToken],
+    *,
+    dim_values: Mapping[str, DimToken] | None = None,
+) -> None:
+    formal_type = formal.type_expr
+    if isinstance(formal_type, TypeOptional):
+        formal_type = formal_type.inner
+    if not isinstance(formal_type, TypeDim):
+        return
+    actual_dim = _operand_dim_token(actual, dim_values)
+    if actual_dim is not None:
+        dim_map.setdefault(formal.name, actual_dim)
 
 
 def _call_actuals(
@@ -308,6 +367,7 @@ def _refresh_graph_operand_types(
     env: Mapping[str, GraphValue],
     globals_env: Mapping[str, GraphValue],
     modules_by_name: Mapping[str, GraphModule],
+    dim_values: Mapping[str, DimToken] | None = None,
 ) -> GraphOperand:
     if isinstance(operand, GraphValueRef):
         value = env.get(operand.name) or globals_env.get(operand.name)
@@ -322,6 +382,7 @@ def _refresh_graph_operand_types(
             env=env,
             globals_env=globals_env,
             modules_by_name=modules_by_name,
+            dim_values=dim_values,
         )
         for item in operand.inputs
     )
@@ -331,6 +392,7 @@ def _refresh_graph_operand_types(
             env=env,
             globals_env=globals_env,
             modules_by_name=modules_by_name,
+            dim_values=dim_values,
         )
         for key, value in operand.attrs.items()
     }
@@ -341,6 +403,7 @@ def _refresh_graph_operand_types(
     call = replace(operand, inputs=inputs, attrs=attrs)
     for formal, actual in zip(callee.inputs, _call_actuals(call, callee), strict=False):
         _bind_type_dim_map(formal.type_expr, graph_operand_type(actual), dim_map)
+        _bind_value_dim_map(formal, actual, dim_map, dim_values=dim_values)
     result_types = tuple(
         _substitute_type_expr(tp, dim_map)
         for tp in _module_output_types_for_arity(callee, 1)
@@ -359,6 +422,7 @@ def _refresh_graph_module_types(
     modules_by_name: Mapping[str, GraphModule],
 ) -> GraphModule:
     env = {value.name: value for value in module.inputs}
+    dim_values: dict[str, DimToken] = {}
     nodes: list[GraphNode] = []
     for node in module.nodes:
         inputs = tuple(
@@ -367,6 +431,7 @@ def _refresh_graph_module_types(
                 env=env,
                 globals_env=globals_env,
                 modules_by_name=modules_by_name,
+                dim_values=dim_values,
             )
             for item in node.inputs
         )
@@ -376,6 +441,7 @@ def _refresh_graph_module_types(
                 env=env,
                 globals_env=globals_env,
                 modules_by_name=modules_by_name,
+                dim_values=dim_values,
             )
             for key, value in node.attrs.items()
         }
@@ -387,6 +453,7 @@ def _refresh_graph_module_types(
             call = replace(node, inputs=inputs, attrs=attrs)
             for formal, actual in zip(callee.inputs, _call_actuals(call, callee), strict=False):
                 _bind_type_dim_map(formal.type_expr, graph_operand_type(actual), dim_map)
+                _bind_value_dim_map(formal, actual, dim_map, dim_values=dim_values)
             output_types = tuple(
                 _substitute_type_expr(tp, dim_map)
                 for tp in _module_output_types_for_arity(callee, len(node.outputs))
@@ -396,8 +463,9 @@ def _refresh_graph_module_types(
             output_types = tuple(graph_operand_type(item) for item in inputs)
             type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
         elif node.op.name in {"core.alias", "core.ascribe"} and len(inputs) == 1:
-            type_expr = graph_operand_type(inputs[0])
-            output_types = (type_expr,)
+            input_type = graph_operand_type(inputs[0])
+            output_types = _result_types(input_type, len(node.outputs))
+            type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
         outputs = tuple(
             replace(
                 output,
@@ -420,12 +488,29 @@ def _refresh_graph_module_types(
         )
         nodes.append(rewritten)
         env.update({output.name: output for output in outputs})
+        if len(outputs) == 1:
+            output = outputs[0]
+            if node.op.name in globals_env and isinstance(globals_env[node.op.name].type_expr, TypeDim | TypeInt):
+                dim_values[output.name] = node.op.name
+            elif node.op.name in {"core.alias", "core.ascribe"} and len(inputs) == 1:
+                dim = _operand_dim_token(inputs[0], dim_values)
+                if dim is not None:
+                    dim_values[output.name] = dim
+                elif (
+                    isinstance(inputs[0], GraphExpr)
+                    and not inputs[0].inputs
+                    and not inputs[0].attrs
+                    and inputs[0].op.name in globals_env
+                    and isinstance(globals_env[inputs[0].op.name].type_expr, TypeDim | TypeInt)
+                ):
+                    dim_values[output.name] = inputs[0].op.name
     outputs = tuple(
         _refresh_graph_operand_types(
             output,
             env=env,
             globals_env=globals_env,
             modules_by_name=modules_by_name,
+            dim_values=dim_values,
         )
         for output in module.outputs
     )
@@ -542,17 +627,102 @@ def _atomic_int_constant_dims(graph: GraphProgram) -> dict[str, DimToken]:
     return {name: value for name, value in memo.items() if type(value) is int}
 
 
-def _substitute_atomic_constant_dims(graph: GraphProgram) -> GraphProgram:
-    subst = _atomic_int_constant_dims(graph)
-    if not subst:
-        return graph
-    rewritten = replace(
-        graph,
-        modules=tuple(_substitute_graph_module_dims(module, subst) for module in graph.modules),
+def _module_dim_refs(module: GraphModule) -> set[str]:
+    refs: set[str] = set()
+    _module_metadata_refs(module, set(), refs)
+
+    def collect_type(tp: TypeExpr | None) -> None:
+        if tp is None:
+            return
+        if isinstance(tp, TypeTensor):
+            for dim in tp.dims:
+                refs.update(dim_token_names(dim))
+            return
+        if isinstance(tp, TypeNamed):
+            for dim in tp.args:
+                refs.update(dim_token_names(dim))
+            return
+        if isinstance(tp, TypeOptional):
+            collect_type(tp.inner)
+            return
+        if isinstance(tp, TypeList):
+            collect_type(tp.item)
+            return
+        if isinstance(tp, TypeTuple):
+            for item in tp.items:
+                collect_type(item)
+
+    for value in module.inputs:
+        collect_type(value.type_expr)
+        if value.dims is not None:
+            for dim in value.dims:
+                refs.update(dim_token_names(dim))
+    for node in module.nodes:
+        collect_type(node.type_expr)
+        if node.dims is not None:
+            for dim in node.dims:
+                refs.update(dim_token_names(dim))
+        for value in node.outputs:
+            collect_type(value.type_expr)
+            if value.dims is not None:
+                for dim in value.dims:
+                    refs.update(dim_token_names(dim))
+        for operand in (*node.inputs, *node.attrs.values()):
+            collect_type(graph_operand_type(operand))
+    for output in module.outputs:
+        collect_type(graph_operand_type(output))
+    collect_type(module.return_type_expr)
+    return refs
+
+
+def _is_dim_equality_to_constant(constraint: Constraint, name: str, value: int) -> bool:
+    if constraint.relation != "=":
+        return False
+    return (constraint.left == name and constraint.right == value) or (
+        constraint.left == value and constraint.right == name
     )
-    rewritten = _refresh_graph_program_types(rewritten)
-    validate_graph_program(rewritten)
-    return rewritten
+
+
+def _module_allows_constant_dim_substitution(
+    module: GraphModule,
+    *,
+    name: str,
+    value: int,
+) -> bool:
+    if name not in _module_dim_refs(module):
+        return False
+    if any(_is_dim_equality_to_constant(constraint, name, value) for constraint in module.constraints):
+        return True
+    return False
+
+
+def _substitute_atomic_constant_dims_local(graph: GraphProgram) -> GraphProgram:
+    constants = _atomic_int_constant_dims(graph)
+    if not constants:
+        return graph
+    modules = list(graph.modules)
+    changed = False
+    for index, module in enumerate(tuple(modules)):
+        allowed = {
+            name: value
+            for name, value in constants.items()
+            if _module_allows_constant_dim_substitution(module, name=name, value=value)
+        }
+        if not allowed:
+            continue
+        candidate_module = _substitute_graph_module_dims(module, allowed)
+        candidate_modules = list(modules)
+        candidate_modules[index] = candidate_module
+        candidate = replace(graph, modules=tuple(candidate_modules))
+        candidate = _refresh_graph_program_types(candidate)
+        validate_graph_program(candidate)
+        modules = list(candidate.modules)
+        graph = candidate
+        changed = True
+    if not changed:
+        return graph
+    validate_graph_program(graph)
+    return graph
 
 
 def _fold_graph_binary(op_name: str, left: GraphLiteral, right: GraphLiteral, template: GraphExpr | GraphNode) -> GraphLiteral | None:
@@ -634,6 +804,94 @@ def _operand_module_calls(operand: GraphOperand, module_names: set[str], out: se
         _operand_module_calls(item, module_names, out)
 
 
+def _type_module_refs(type_expr: TypeExpr | None, module_names: set[str], out: set[str]) -> None:
+    if type_expr is None:
+        return
+    if isinstance(type_expr, TypeTensor):
+        for dim in type_expr.dims:
+            out.update(name for name in dim_token_names(dim) if name in module_names)
+        return
+    if isinstance(type_expr, TypeNamed):
+        for dim in type_expr.args:
+            out.update(name for name in dim_token_names(dim) if name in module_names)
+        return
+    if isinstance(type_expr, TypeOptional):
+        _type_module_refs(type_expr.inner, module_names, out)
+        return
+    if isinstance(type_expr, TypeList):
+        _type_module_refs(type_expr.item, module_names, out)
+        return
+    if isinstance(type_expr, TypeTuple):
+        for item in type_expr.items:
+            _type_module_refs(item, module_names, out)
+
+
+def _dim_module_refs(dim: DimToken, module_names: set[str], out: set[str]) -> None:
+    out.update(name for name in dim_token_names(dim) if name in module_names)
+
+
+def _constraint_atom_module_refs(
+    atom: ConstraintAtom,
+    module_names: set[str],
+    out: set[str],
+) -> None:
+    if isinstance(atom, str):
+        if atom in module_names:
+            out.add(atom)
+        return
+    if isinstance(atom, DimExprBinary):
+        _dim_module_refs(atom, module_names, out)
+
+
+def _constraint_operand_module_refs(
+    operand: ConstraintOperand,
+    module_names: set[str],
+    out: set[str],
+) -> None:
+    if isinstance(operand, tuple):
+        for item in operand:
+            _constraint_atom_module_refs(item, module_names, out)
+        return
+    _constraint_atom_module_refs(operand, module_names, out)
+
+
+def _constraint_module_refs(
+    constraint: Constraint,
+    module_names: set[str],
+    out: set[str],
+) -> None:
+    _constraint_operand_module_refs(constraint.left, module_names, out)
+    if constraint.right is not None:
+        _constraint_operand_module_refs(constraint.right, module_names, out)
+    for guard in constraint.guards:
+        _constraint_module_refs(guard, module_names, out)
+
+
+def _module_metadata_refs(module: GraphModule, module_names: set[str], out: set[str]) -> None:
+    for value in module.inputs:
+        _type_module_refs(value.type_expr, module_names, out)
+        if value.dims is not None:
+            for dim in value.dims:
+                _dim_module_refs(dim, module_names, out)
+    for node in module.nodes:
+        _type_module_refs(node.type_expr, module_names, out)
+        if node.dims is not None:
+            for dim in node.dims:
+                _dim_module_refs(dim, module_names, out)
+        for value in node.outputs:
+            _type_module_refs(value.type_expr, module_names, out)
+            if value.dims is not None:
+                for dim in value.dims:
+                    _dim_module_refs(dim, module_names, out)
+        for operand in (*node.inputs, *node.attrs.values()):
+            _type_module_refs(graph_operand_type(operand), module_names, out)
+    for output in module.outputs:
+        _type_module_refs(graph_operand_type(output), module_names, out)
+    _type_module_refs(module.return_type_expr, module_names, out)
+    for constraint in module.constraints:
+        _constraint_module_refs(constraint, module_names, out)
+
+
 def _count_operand_module_calls(
     operand: GraphOperand,
     module_names: set[str],
@@ -658,6 +916,8 @@ def _replace_operand_refs(
 ) -> GraphOperand:
     if isinstance(operand, GraphValueRef):
         return subst.get(operand.name, operand)
+    if isinstance(operand, GraphPath):
+        return _replace_path_template_refs(operand, subst)
     if isinstance(operand, GraphExpr):
         rewritten = replace(
             operand,
@@ -682,6 +942,50 @@ def _replace_operand_refs(
         )
         return _fold_operand(rewritten, module_effects=module_effects) if fold else rewritten
     return operand
+
+
+def _operand_path_fragment(operand: GraphOperand) -> tuple[bool, tuple[str, ...]] | None:
+    if isinstance(operand, GraphPath):
+        return operand.absolute, operand.parts
+    if isinstance(operand, GraphValueRef):
+        return False, (operand.name,)
+    if isinstance(operand, GraphLiteral) and isinstance(operand.value, str | int):
+        return False, (str(operand.value),)
+    return None
+
+
+def _replace_path_template_refs(path: GraphPath, subst: Mapping[str, GraphOperand]) -> GraphPath:
+    absolute = path.absolute
+    parts: list[str] = []
+    changed = False
+    for part in path.parts:
+        names = graph_path_template_names(GraphPath(absolute=path.absolute, parts=(part,)))
+        if not names:
+            parts.append(part)
+            continue
+        if part.startswith("{") and part.endswith("}") and part[1:-1] in subst:
+            replacement = _operand_path_fragment(subst[part[1:-1]])
+            if replacement is not None:
+                repl_absolute, repl_parts = replacement
+                absolute = absolute or repl_absolute
+                parts.extend(repl_parts)
+                changed = True
+                continue
+        rewritten = part
+        for name in sorted(names, key=len, reverse=True):
+            if name not in subst:
+                continue
+            replacement = _operand_path_fragment(subst[name])
+            if replacement is None:
+                continue
+            repl_absolute, repl_parts = replacement
+            absolute = absolute or repl_absolute
+            rewritten = rewritten.replace("{" + name + "}", ".".join(repl_parts))
+            changed = True
+        parts.append(rewritten)
+    if not changed:
+        return path
+    return GraphPath(absolute=absolute, parts=tuple(part for part in parts if part))
 
 
 def _fold_operand(
@@ -796,6 +1100,7 @@ def _optimize_module_local(
     config: GraphOptimizeConfig,
     module_effects: Mapping[str, GraphEffect],
 ) -> GraphModule:
+    before_outputs = module.outputs
     subst: dict[str, GraphOperand] = {}
     nodes: list[GraphNode] = []
     for node in module.nodes:
@@ -824,6 +1129,7 @@ def _optimize_module_local(
         for item in module.outputs
     )
     module = replace(module, nodes=tuple(nodes), outputs=outputs)
+    module = _returned_name_preserving_module(module, before_outputs)
     if not config.dead_temp_elimination:
         return module
     return _dead_temp_eliminate_module(module, module_effects=module_effects)
@@ -854,6 +1160,40 @@ def _dead_temp_eliminate_module(
     return replace(module, nodes=tuple(reversed(kept_rev)))
 
 
+def _returned_name_preserving_module(module: GraphModule, before_outputs: tuple[GraphOperand, ...]) -> GraphModule:
+    renames: dict[str, str] = {}
+    defined_names = {value.name for value in module.inputs}
+    for node in module.nodes:
+        defined_names.update(value.name for value in node.outputs)
+    for before, after in zip(before_outputs, module.outputs, strict=False):
+        if not isinstance(before, GraphValueRef) or not isinstance(after, GraphValueRef):
+            continue
+        if before.name == after.name:
+            continue
+        if before.name in defined_names:
+            continue
+        renames[after.name] = before.name
+        defined_names.add(before.name)
+    if not renames:
+        return module
+    return replace(
+        module,
+        nodes=tuple(
+            replace(
+                node,
+                inputs=tuple(_rename_operand(item, renames) for item in node.inputs),
+                attrs={key: _rename_operand(value, renames) for key, value in node.attrs.items()},
+                outputs=tuple(
+                    replace(output, name=renames.get(output.name, output.name))
+                    for output in node.outputs
+                ),
+            )
+            for node in module.nodes
+        ),
+        outputs=tuple(_rename_operand(output, renames) for output in module.outputs),
+    )
+
+
 def _graph_call_graph(graph: GraphProgram) -> dict[str, set[str]]:
     module_names = {module.name for module in graph.modules}
     calls: dict[str, set[str]] = {module.name: set() for module in graph.modules}
@@ -867,6 +1207,7 @@ def _graph_call_graph(graph: GraphProgram) -> dict[str, set[str]]:
                 _operand_module_calls(operand, module_names, calls[module.name])
         for operand in module.outputs:
             _operand_module_calls(operand, module_names, calls[module.name])
+        _module_metadata_refs(module, module_names, calls[module.name])
     return calls
 
 
@@ -1169,6 +1510,13 @@ def _can_inline_call_expr(expr: GraphExpr, callee: GraphModule) -> bool:
 def _rename_operand(operand: GraphOperand, renames: Mapping[str, str]) -> GraphOperand:
     if isinstance(operand, GraphValueRef):
         return replace(operand, name=renames.get(operand.name, operand.name))
+    if isinstance(operand, GraphPath):
+        subst = {
+            old: GraphValueRef(name=new, type_expr=TypePath())
+            for old, new in renames.items()
+            if old != new
+        }
+        return _replace_path_template_refs(operand, subst)
     if isinstance(operand, GraphExpr):
         return replace(
             operand,
@@ -1188,8 +1536,15 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
         module.name: module
         for module in graph.modules
         if (
-            (counts[module.name] == 1 and top_level_counts[module.name] == 1)
-            or _is_atomic_constant_module(module)
+            (
+                counts[module.name] == 1
+                and top_level_counts[module.name] == 1
+                and not _is_atomic_constant_module(module)
+            )
+            or (
+                _is_atomic_constant_module(module)
+                and config.constant_dim_substitution
+            )
         )
         and _can_inline_module(
             module,
@@ -1376,7 +1731,8 @@ def optimize_graph_program(
     validate_graph_program(graph)
     current = prune_graph_to_main(graph) if config.prune_to_main else graph
     for _ in range(config.max_iterations):
-        current = _substitute_atomic_constant_dims(current)
+        if config.constant_dim_substitution:
+            current = _substitute_atomic_constant_dims_local(current)
         before = current
         module_effects = infer_graph_module_effects(current.modules)
         current = replace(

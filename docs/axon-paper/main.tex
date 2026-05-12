@@ -16,10 +16,12 @@
 \usepackage{array}
 \usepackage{hyperref}
 \usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
 \IfFileExists{natbib.sty}{\usepackage{natbib}}{}
 \providecommand{\citep}[1]{\cite{#1}}
 
-\title{Axon: A Typed, Stage-Validated Model Compiler for Neural Network Programs}
+\title{Axon: A Tensors-First Functional Programming Language for Machine Learning Models}
 
 \author{Brainsurgery contributors}
 
@@ -157,10 +159,12 @@ architecture-level control.
 
 \paragraph{Semantic core.}
 The compiler treats the surface language as notation for a smaller core.  The
-core contains explicit calls, explicit optional/default arguments, explicit
-path arguments, flat bindings, helper definitions for loops, and typed
-primitive calls.  Backend implementations consume Graph IR derived from this
-core; they do not implement surface Axon syntax.
+core contains explicit calls, explicit path arguments, flat bindings, helper
+definitions for loops, and typed primitive calls.  Optional and default
+parameters are represented through ordinary call arguments and keyword
+arguments according to the elaboration contract, rather than through backend
+fallbacks.  Backend implementations consume Graph IR derived from this core;
+they do not implement surface Axon syntax.
 
 \section{Type System, Checking, and Inference}
 
@@ -336,6 +340,52 @@ the correctness-critical path in this paper.}
 \label{fig:pipeline}
 \end{figure}
 
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  stagebox/.style={draw, rounded corners, fill=blue!6, align=center, minimum width=2.6cm, minimum height=0.9cm},
+  repbox/.style={draw, rounded corners, fill=gray!8, align=center, minimum width=2.4cm, minimum height=0.7cm},
+  edge/.style={-{Latex[length=2mm]}, thick},
+  note/.style={align=center, font=\small}
+]
+\node[repbox] (src) {source\\Axon};
+\node[stagebox, right=1.2cm of src] (parse) {parse\\load\\materialize};
+\node[repbox, right=1.2cm of parse] (onefile) {one-file\\ASTs};
+\node[stagebox, below=1.0cm of onefile] (resolve) {resolve\\validate};
+\node[repbox, left=1.2cm of resolve] (closed) {closed\\AST};
+\node[stagebox, left=1.2cm of closed] (norm) {normalize\\elaborate};
+\node[repbox, below=1.0cm of norm] (normast) {normalized\\AST};
+\node[stagebox, right=1.2cm of normast] (flatten) {flatten};
+\node[repbox, right=1.2cm of flatten] (flat) {flat\\AST};
+\node[stagebox, below=1.0cm of flat] (tc) {typecheck2};
+\node[repbox, left=1.2cm of tc] (typed) {typed flat\\AST};
+\node[stagebox, left=1.2cm of typed] (lower) {Graph IR\\lowering};
+\node[repbox, below=1.0cm of lower] (graph) {typed\\Graph IR};
+\node[stagebox, right=1.2cm of graph] (backend) {torch / runtime\\pipeline / tinygrad};
+\node[repbox, right=1.2cm of backend] (exec) {executable\\model};
+
+\draw[edge] (src) -- (parse);
+\draw[edge] (parse) -- (onefile);
+\draw[edge] (onefile) -- (resolve);
+\draw[edge] (resolve) -- (closed);
+\draw[edge] (closed) -- (norm);
+\draw[edge] (norm) -- (normast);
+\draw[edge] (normast) -- (flatten);
+\draw[edge] (flatten) -- (flat);
+\draw[edge] (flat) -- (tc);
+\draw[edge] (tc) -- (typed);
+\draw[edge] (typed) -- (lower);
+\draw[edge] (lower) -- (graph);
+\draw[edge] (graph) -- (backend);
+\draw[edge] (backend) -- (exec);
+
+\node[note, below=0.35cm of graph] {optimization is optional and outside\\the correctness-critical path};
+\end{tikzpicture}
+\caption{Staged Axon pipeline.  Blue boxes are transformations; gray boxes are
+representations with stronger invariants than the previous representation.}
+\label{fig:pipeline-tikz}
+\end{figure}
+
 \begin{center}
 \begin{tabular}{lll}
 \toprule
@@ -343,7 +393,7 @@ Phase & Representation & Primary invariant \\
 \midrule
 Parse/load/materialize & one-file ASTs & syntactic structure and checkpoint defaults \\
 Resolve/validate & closed AST & no unresolved imports or names \\
-Normalize/elaborate & normalized AST & explicit call and default structure \\
+Normalize/elaborate & normalized AST & explicit call and default/defaultable structure \\
 Flatten & flat AST & no statement-level control or relative paths \\
 Typecheck2 & typed flat AST & expression types, arities, and dimensions \\
 Graph lowering & Graph IR & typed SSA-like graph modules \\
@@ -353,6 +403,122 @@ Backend & generated/runtime code & executable tensor program \\
 \end{center}
 
 The following sections describe the stages in order.
+
+\section{Running Example}
+
+This section follows a small Axon fragment through the main representations.
+The example is intentionally smaller than a full transformer block, but it
+uses the same mechanisms: path sugar, a defaulted keyword argument, tensor
+shapes, nested calls, and typed graph lowering.
+
+\paragraph{Surface Axon.}
+A model author can write a reusable projection with a concise functional form:
+\begin{verbatim}
+project :: Tensor[B,S,D] -> Tensor[B,S,O]
+project x = do
+  y <- Tensor.reshape x shape=[B, S, D]
+       |> NN.linear@proj dim=O
+  return y
+\end{verbatim}
+The surface program contains a pipe, callee-attached path sugar
+\code{@proj}, a shape expression, and an omitted default argument such as
+\code{bias=true} from the library definition of \code{NN.linear}.
+
+\paragraph{Normalize and elaborate.}
+Normalization removes pipe syntax and path sugar by turning them into ordinary
+call structure.  Elaboration then accounts for defaultable parameters declared
+by the callee signature:
+\begin{verbatim}
+project x = do
+  y <- NN.linear @proj
+         (Tensor.reshape x shape=[B, S, D])
+         dim=O bias=true
+  return y
+\end{verbatim}
+The point is not that all defaults must always be textually present in user
+source.  The invariant is that downstream stages see a call surface whose
+provided positional, keyword, and path arguments are unambiguous.
+
+\paragraph{Flatten.}
+Flatten preserves eager evaluation order by introducing explicit binds and by
+making paths absolute or templated absolute values:
+\begin{verbatim}
+project :: Tensor[B,S,D] -> Tensor[B,S,O]
+project x = do
+  _v1 <- Tensor.reshape x shape=[B, S, D]
+  y <- NN.linear @@proj _v1 dim=O bias=true
+  return y
+\end{verbatim}
+The flat program has no pipe expression, no nested call used as an argument,
+and no callee path sugar.  It is still Axon source, but it is now in the core
+form expected by typecheck2 and Graph IR lowering.
+
+\paragraph{Typecheck2.}
+Typecheck2 annotates every expression with type, arity, and tensor-dimension
+metadata.  The same flat program can be read as:
+\begin{verbatim}
+_v1 <- (Tensor.reshape (x :: Tensor[B,S,D])
+          shape=([B, S, D] :: List[Dim]) :: Tensor[B,S,D])
+y <- (NN.linear (@@proj :: Path) (_v1 :: Tensor[B,S,D])
+        dim=(O :: Dim) bias=(true :: Bool) :: Tensor[B,S,O])
+\end{verbatim}
+The important information is not the exact rendered punctuation, but the fact
+that the tensor shape relation \(x : \code{Tensor[B,S,D]}\) and
+\(y : \code{Tensor[B,S,O]}\) is explicit before lowering.
+
+\paragraph{Graph IR.}
+Lowering turns each flat bind into a typed graph node.  A schematic graph
+module is:
+\begin{verbatim}
+module project(x: Tensor[B,S,D]) -> Tensor[B,S,O]
+  n1 = call Tensor.reshape(
+         x, shape=[B,S,D]) -> Tensor[B,S,D]
+  n2 = call NN.linear(
+         path=@@proj, x=n1, dim=O, bias=true)
+       -> Tensor[B,S,O]
+  return n2
+\end{verbatim}
+Backends receive this structured graph object, not a string-rendered Axon
+program.  Torch, pipeline, runtime, and tinygrad implementations therefore
+share the same typed operands, path values, and output types.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  value/.style={draw, rounded corners, fill=blue!6, align=center, minimum width=2.7cm, minimum height=0.8cm},
+  nodeop/.style={draw, rounded corners, fill=orange!10, align=center, minimum width=3.3cm, minimum height=1.0cm},
+  attr/.style={draw, rounded corners, fill=green!8, align=center, minimum width=2.4cm, minimum height=0.7cm},
+  edge/.style={-{Latex[length=2mm]}, thick}
+]
+\node[value] (x) {\code{x}\\\code{Tensor[B,S,D]}};
+\node[nodeop, right=2.2cm of x] (reshape) {\code{n1: Tensor.reshape}\\out: \code{\_v1}\\\code{Tensor[B,S,D]}};
+\node[nodeop, right=2.4cm of reshape] (linear) {\code{n2: NN.linear}\\out: \code{y}\\\code{Tensor[B,S,O]}};
+\node[value, right=2.2cm of linear] (ret) {\code{return y}\\\code{Tensor[B,S,O]}};
+
+\node[attr, above=0.9cm of reshape] (shape) {\code{shape=[B,S,D]}};
+\node[attr, above=0.9cm of linear] (path) {\code{path=@@proj}};
+\node[attr, below=0.9cm of linear] (attrs) {\code{dim=O, bias=true}};
+
+\draw[edge] (x) -- (reshape);
+\draw[edge] (reshape) -- (linear);
+\draw[edge] (linear) -- (ret);
+\draw[edge] (shape) -- (reshape);
+\draw[edge] (path) -- (linear);
+\draw[edge] (attrs) -- (linear);
+\end{tikzpicture}
+\caption{Graph IR view of the running example.  Rectangles denote typed graph
+values and operation nodes.  Paths, literals, and shape lists are structured
+operands or attributes, not strings that backends must parse.}
+\label{fig:running-graph-ir}
+\end{figure}
+
+\paragraph{Why the stages matter.}
+The example illustrates the intended division of labor.  Normalize removes
+surface notation; elaborate resolves the defaultable call surface; flatten
+exposes evaluation order; typecheck2 attaches shape and arity metadata; Graph
+IR lowering produces backend-neutral typed dataflow.  No backend has to know
+how \code{|>}, \code{@proj}, lexical scopes, or omitted defaults were written
+in the source program.
 
 \input{sections/parse.tex}
 \input{sections/load.tex}
