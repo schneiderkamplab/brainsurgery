@@ -10,6 +10,8 @@ from brainsurgery.synapse.axon import (
     graph_program_to_axon_file,
     lower_axon_program_to_graph_ir,
     normalize_closed_axon_file,
+    optimize_graph_program,
+    optimize_safe_flat_typed_axon_file,
     parse_axon_program,
     render_axon_file,
     resolve_axon_program_from_path,
@@ -29,11 +31,15 @@ def _graph_render(
     typed,
     *,
     main_module: str | None,
+    optimize_ast: bool = False,
+    optimize_graph: bool = False,
     validate: bool,
     show_types: bool,
     show_inferred_expression_types: bool,
 ) -> str:
     graph = lower_axon_program_to_graph_ir(typed, main_module=main_module)
+    if optimize_graph:
+        graph = optimize_graph_program(graph)
     axon = graph_program_to_axon_file(graph)
     axon = typecheck2_flat_axon_file(axon, main_module=graph.main_module)
     if validate:
@@ -49,6 +55,8 @@ def _full_graph_render(
     path: Path,
     *,
     main_module: str | None,
+    optimize_ast: bool = False,
+    optimize_graph: bool = False,
     validate: bool,
     show_types: bool,
     show_inferred_expression_types: bool,
@@ -59,9 +67,12 @@ def _full_graph_render(
     elaborated = elaborate_closed_axon_file(normalized, main_module=main_module)
     flattened = flatten_closed_axon_file(elaborated, main_module=main_module)
     typed = typecheck2_flat_axon_file(flattened, main_module=main_module)
+    if optimize_ast:
+        typed = optimize_safe_flat_typed_axon_file(typed, main_module=main_module)
     return _graph_render(
         typed,
         main_module=main_module,
+        optimize_graph=optimize_graph,
         validate=validate,
         show_types=show_types,
         show_inferred_expression_types=show_inferred_expression_types,
@@ -72,6 +83,8 @@ def _weak_graph_render(
     source: str,
     *,
     main_module: str | None,
+    optimize_ast: bool = False,
+    optimize_graph: bool = False,
     validate: bool,
     show_types: bool,
     show_inferred_expression_types: bool,
@@ -79,9 +92,12 @@ def _weak_graph_render(
     normalized = normalize_closed_axon_file(parse_axon_program(source), main_module=main_module)
     elaborated = elaborate_closed_axon_file(normalized, main_module=main_module)
     typed = typecheck2_flat_axon_file(elaborated, main_module=main_module)
+    if optimize_ast:
+        typed = optimize_safe_flat_typed_axon_file(typed, main_module=main_module)
     return _graph_render(
         typed,
         main_module=main_module,
+        optimize_graph=optimize_graph,
         validate=validate,
         show_types=show_types,
         show_inferred_expression_types=show_inferred_expression_types,
@@ -93,6 +109,8 @@ def graph_ir_weak_roundtrip_path(
     output_dir: Path,
     *,
     main_module: str | None = None,
+    optimize_ast: bool = False,
+    optimize_graph: bool = False,
     validate_typed: bool = True,
     show_types: bool = True,
     show_inferred_expression_types: bool = False,
@@ -100,6 +118,8 @@ def graph_ir_weak_roundtrip_path(
     first = _full_graph_render(
         path,
         main_module=main_module,
+        optimize_ast=optimize_ast,
+        optimize_graph=optimize_graph,
         validate=validate_typed,
         show_types=show_types,
         show_inferred_expression_types=show_inferred_expression_types,
@@ -109,6 +129,8 @@ def graph_ir_weak_roundtrip_path(
     second = _weak_graph_render(
         first,
         main_module=main_module,
+        optimize_ast=optimize_ast,
+        optimize_graph=optimize_graph,
         validate=validate_typed,
         show_types=show_types,
         show_inferred_expression_types=show_inferred_expression_types,
@@ -118,6 +140,8 @@ def graph_ir_weak_roundtrip_path(
     third = _weak_graph_render(
         second,
         main_module=main_module,
+        optimize_ast=optimize_ast,
+        optimize_graph=optimize_graph,
         validate=validate_typed,
         show_types=show_types,
         show_inferred_expression_types=show_inferred_expression_types,
@@ -132,6 +156,8 @@ def run_graph_ir_weak_roundtrip(
     *,
     main_module: str | None = None,
     output_dir: Path = Path("tmp/axon-stage-roundtrip-graph-ir-weak"),
+    optimize_ast: bool = False,
+    optimize_graph: bool = False,
     keep_existing: bool = False,
     include_stale_cache: bool = False,
     validate_typed: bool = True,
@@ -148,6 +174,8 @@ def run_graph_ir_weak_roundtrip(
             path,
             out,
             main_module=main_module,
+            optimize_ast=optimize_ast,
+            optimize_graph=optimize_graph,
             validate_typed=validate_typed,
             show_types=show_types,
             show_inferred_expression_types=show_inferred_expression_types,
@@ -162,6 +190,8 @@ def main() -> int:
     parser.add_argument("paths", nargs="*", type=Path, help="Axon files or directories.")
     parser.add_argument("--main-module")
     parser.add_argument("--output-dir", type=Path, default=Path("tmp/axon-stage-roundtrip-graph-ir-weak"))
+    parser.add_argument("--optimize-ast", action="store_true")
+    parser.add_argument("--optimize-graph", action="store_true")
     parser.add_argument("--keep-existing", action="store_true")
     parser.add_argument("--include-stale-cache", action="store_true")
     parser.add_argument("--no-validate-typed", action="store_true")
@@ -175,6 +205,8 @@ def main() -> int:
         args.paths,
         main_module=args.main_module,
         output_dir=args.output_dir,
+        optimize_ast=args.optimize_ast,
+        optimize_graph=args.optimize_graph,
         keep_existing=args.keep_existing,
         include_stale_cache=args.include_stale_cache,
         validate_typed=not args.no_validate_typed,

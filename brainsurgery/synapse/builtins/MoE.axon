@@ -1,6 +1,6 @@
 import Activations (sigmoid, silu)
 import Math (clamp, log, mul)
-import NN linear
+import NN (expert_linear, linear)
 import Params param
 import Tensor (
   cast,
@@ -20,6 +20,7 @@ import Tensor (
   size,
   slice,
   softmax,
+  sum,
   topk,
   transpose,
   unsqueeze,
@@ -120,20 +121,16 @@ sigmoid_topk_router@path x top_k ?weight=@weight = do
   topk_weights <- sigmoid topk_logits |> cast_like x
   return topk_weights, topk_indices
 
-grouped_swiglu_ffn_basic :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> Dim -> ?Path -> ?Path -> ?Bool -> ?Bool -> Tensor[B,T,D]
+grouped_swiglu_ffn_basic :: Tensor[B,T,D] -> Tensor[B,T,K] -> IdxTensor[B,T,K] -> Dim -> ?Path -> ?Path -> ?Bool -> ?Bool -> Tensor[B,T,D]
 grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts ?gate_up_weight=@experts.gate_up_proj ?out_weight=@experts.down_proj ?transpose=false ?pre_scale_input=false = do
-  routed <- hidden * 0.0
-  routed <- for e <- [0..experts) carry (routed) do
-    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
-    sel_scale <- unsqueeze sel_scores 1
-    x_in <- pre_scale_input ? (x_sel * sel_scale) : x_sel
-    gate_up <- linear@w1 x_in dim=null bias=false transpose=transpose expert=e weight_path=gate_up_weight
-    gate, up <- chunk gate_up parts=2
-    x_upd <- gate |> silu |> mul up |> linear@w2 dim=D bias=false transpose=transpose expert=e weight_path=out_weight
-    out_scores <- pre_scale_input ? ((sel_scores * 0.0) + 1.0) : sel_scores
-    routed <- scatter_add routed token_idx x_upd out_scores
-    yield routed
-  return routed
+  x_sel <- unsqueeze hidden 2 |> expand shape=[B, T, K, D]
+  scale <- unsqueeze topk_scores -1
+  x_in <- pre_scale_input ? (x_sel * scale) : x_sel
+  gate_up <- expert_linear@w1 x_in topk_indices dim=null bias=false transpose=transpose weight_path=gate_up_weight
+  gate, up <- chunk gate_up parts=2
+  x_upd <- gate |> silu |> mul up |> expert_linear@w2 topk_indices dim=D bias=false transpose=transpose weight_path=out_weight
+  x_weighted <- pre_scale_input ? x_upd : (x_upd * scale)
+  return sum x_weighted dim=2 keepdim=false
 
 sparsemixer_router :: Tensor[B,S,D] -> Dim -> ?Float -> (Tensor[B,S,2], IdxTensor[B,S,2])
 sparsemixer_router x experts ?jitter_eps=0.01 = do

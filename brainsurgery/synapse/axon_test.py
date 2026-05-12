@@ -44,7 +44,8 @@ from .axon import (
     looks_like_tokenizer_dir,
     lower_axon_program_to_graph_ir,
     normalize_closed_axon_file,
-    optimize_flat_typed_axon_file,
+    optimize_graph_program,
+    optimize_safe_flat_typed_axon_file,
     parse_axon_program_from_path,
     resolve_axon_program_from_path,
     resolve_main_module,
@@ -2735,7 +2736,8 @@ def _run_axon_test_single(
     trust_remote_code: bool = False,
     axon_backend: str = "codegen2-torch",
     axon_typechecker: str = "typecheck2",
-    optimize: bool = False,
+    optimize_ast: bool = False,
+    optimize_graph: bool = False,
     canonicalize: bool = False,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
@@ -2864,11 +2866,13 @@ def _run_axon_test_single(
         elaborated_axon = elaborate_closed_axon_file(normalized_axon)
         flat_axon = flatten_closed_axon_file(elaborated_axon)
         typed_axon = typecheck2_flat_axon_file(flat_axon)
-        if optimize:
-            typed_axon = optimize_flat_typed_axon_file(typed_axon)
+        if optimize_ast:
+            typed_axon = optimize_safe_flat_typed_axon_file(typed_axon)
         if canonicalize:
             typed_axon = canonicalize_typed_axon_file(typed_axon)
         graph_program = lower_axon_program_to_graph_ir(typed_axon)
+        if optimize_graph:
+            graph_program = optimize_graph_program(graph_program)
         main_graph_module = next(
             module for module in graph_program.modules if module.name == graph_program.main_module
         )
@@ -3690,7 +3694,14 @@ def _run_axon_test_single(
                 else None
             )
             state_load_device = torch.device("cpu") if axon_backend == "pipeline2-torch" else target_device
-            if local_state_dict is None:
+            if axon_backend == "codegen2-tinygrad":
+                syn = model_cls.from_safetensors(
+                    safetensors_files,
+                    model_config=model_config,
+                    dtype=str(resolved_dtype).removeprefix("torch."),
+                ).to(target_device).eval()
+                local_state_dict = None
+            elif local_state_dict is None:
                 local_state_dict = _load_state_dict(
                     safetensors_files,
                     device=state_load_device,
@@ -3704,17 +3715,17 @@ def _run_axon_test_single(
                     key: value.to(device=target_device, dtype=resolved_dtype)
                     for key, value in local_state_dict.items()
                 }
-            syn: Any
             if axon_backend == "pipeline2-torch":
                 syn = model_cls.from_state_dict(
                     local_state_dict,
                     param_devices=param_devices,
                 ).eval()
-            else:
+            elif axon_backend != "codegen2-tinygrad":
                 syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
-            if local_state_dict is not state_ref_cpu:
+            if local_state_dict is not None and local_state_dict is not state_ref_cpu:
                 local_state_dict.clear()
-            del local_state_dict
+            if local_state_dict is not None:
+                del local_state_dict
             _cleanup(target_device)
             align_targets = [syn]
             stage_models = getattr(syn, "stages", None)
@@ -4256,7 +4267,8 @@ def run_axon_test(
     trust_remote_code: bool = False,
     axon_backend: str = "codegen2-torch",
     axon_typechecker: str = "typecheck2",
-    optimize: bool = False,
+    optimize_ast: bool = False,
+    optimize_graph: bool = False,
     canonicalize: bool = False,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
@@ -4288,7 +4300,8 @@ def run_axon_test(
         trust_remote_code=trust_remote_code,
         axon_backend=axon_backend,
         axon_typechecker=axon_typechecker,
-        optimize=optimize,
+        optimize_ast=optimize_ast,
+        optimize_graph=optimize_graph,
         canonicalize=canonicalize,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,

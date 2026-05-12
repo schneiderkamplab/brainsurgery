@@ -1,6 +1,7 @@
 import Params param_scale
 export (
   embedding,
+  expert_linear,
   l2norm,
   layernorm,
   linear,
@@ -10,6 +11,9 @@ export (
 
 linear :: Path -> Tensor[..S,Din] -> ?Dim -> ?Bool -> ?Bool -> ?Int -> ?Path -> ?Path -> Tensor[..S,dim]
 linear@path x ?dim=null ?bias=false ?transpose=false ?expert=null ?weight_path=@weight ?bias_path=@bias = _linear@path x dim bias transpose expert weight_path bias_path
+
+expert_linear :: Path -> Tensor[..S,Din] -> IdxTensor[..S] -> ?Dim -> ?Bool -> ?Bool -> ?Path -> ?Path -> Tensor[..S,dim]
+expert_linear@path x expert_idx ?dim=null ?bias=false ?transpose=false ?weight_path=@weight ?bias_path=@bias = _expert_linear@path x expert_idx dim bias transpose weight_path bias_path
 
 embedding :: Path -> Tensor[..S] -> ?Dim -> ?Float -> Tensor[..S,dim]
 embedding@path x ?dim=null ?scale=null = do

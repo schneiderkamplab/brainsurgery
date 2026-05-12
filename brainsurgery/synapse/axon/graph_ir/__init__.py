@@ -10,14 +10,21 @@ from .core import (
     GraphProgram,
     GraphValue,
     GraphValueRef,
+    graph_operand_type,
+    graph_path_template_names,
+    graph_type_compatible,
     lower_axon_program_to_graph_ir,
     validate_graph_program,
 )
 from .dot import render_graph_program_to_dot
+from .effects import GraphEffect, graph_module_effect, graph_op_effect, infer_graph_module_effects
+from .optimize import GraphOptimizeConfig, optimize_graph_program, prune_graph_to_main
 from .render import graph_module_to_axon_definition, graph_program_to_axon_file
 
 __all__ = [
+    "GraphOptimizeConfig",
     "GraphAttr",
+    "GraphEffect",
     "GraphLiteral",
     "GraphExpr",
     "GraphModule",
@@ -28,9 +35,17 @@ __all__ = [
     "GraphProgram",
     "GraphValue",
     "GraphValueRef",
+    "graph_operand_type",
+    "graph_path_template_names",
+    "graph_type_compatible",
     "lower_axon_program_to_graph_ir",
+    "optimize_graph_program",
+    "prune_graph_to_main",
     "render_graph_program_to_dot",
     "validate_graph_program",
     "graph_module_to_axon_definition",
+    "graph_module_effect",
+    "graph_op_effect",
     "graph_program_to_axon_file",
+    "infer_graph_module_effects",
 ]

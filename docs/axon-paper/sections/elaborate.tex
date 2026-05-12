@@ -1,0 +1,44 @@
+\section{Elaborate}
+
+\paragraph{Input and output.}
+Elaboration consumes a normalized closed AST and produces a closed AST with
+implicit call structure made explicit where the language contract requires it.
+
+\paragraph{Contract.}
+The current elaboration stage focuses on default and optional argument
+structure needed by downstream stages.  It preserves user-visible type
+ascriptions and does not erase inferred metadata.  It is mandatory in the
+default pipeline because later stages should not need to guess whether an
+omitted optional argument was intentional or simply absent from the surface
+syntax.
+
+\paragraph{Rationale.}
+Elaboration sits after normalization because normalization first determines
+which expressions are calls.  Once calls are explicit, elaboration can apply
+signature-aware rules without reinterpreting syntax.
+
+\paragraph{Formal view.}
+For normalized AST \(A_n\), elaboration produces \(A_e\):
+\[
+  \mathsf{elaborate}: A_n \rightarrow A_e .
+\]
+The transformation is signature-aware but not type-inferential: it uses
+declared defaults and optional parameters to make call structure explicit, but
+it does not solve tensor shapes.
+
+\paragraph{Example.}
+If a library function has the signature
+\begin{verbatim}
+linear :: Path -> Tensor[B,S,D] -> ?Dim -> ?Bool -> Tensor[B,S,O]
+linear path x ?dim=null ?bias=true = ...
+\end{verbatim}
+then a call such as
+\begin{verbatim}
+y <- NN.linear @w x
+\end{verbatim}
+can be elaborated to an equivalent call with explicit defaulted arguments:
+\begin{verbatim}
+y <- NN.linear @w x dim=null bias=true
+\end{verbatim}
+This prevents flattening and lowering from needing to reason about omitted
+arguments.

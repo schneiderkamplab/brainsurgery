@@ -11,7 +11,7 @@ OP_NAME = "topk"
 LOWERING_TYPE_SIGNATURE = {
     "args": ("Tensor[..S]", "Any", "Any", "Any", "Any"),
     "kwargs": {},
-    "returns": ("Tensor[..S]", "IdxTensor[..S]"),
+    "returns": ("Tensor[..S]", "Tensor[..S]"),
 }
 
 
@@ -35,6 +35,8 @@ def type_rule(
     input_dims = helpers.type_dims(arg_types[0])
     if input_dims is None:
         return None
+    if any(isinstance(dim, str) and dim.startswith("..") for dim in input_dims):
+        return None
     k_dim = helpers.expr_to_dim_token(args[1])
     if k_dim is None:
         return None
@@ -55,7 +57,7 @@ def type_rule(
     return TypeTuple(
         items=(
             TypeTensor(base="Tensor", dims=dims),
-            TypeTensor(base="IdxTensor", dims=dims),
+            TypeTensor(base="Tensor", dims=dims),
         )
     )
 

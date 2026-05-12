@@ -1,0 +1,34 @@
+\section{Graph Validation}
+
+\paragraph{Input and output.}
+Graph validation consumes a Graph IR program and either certifies it or reports
+a structural error.
+
+\paragraph{Contract.}
+The validator checks module inputs and outputs, operand availability,
+definition reachability, type compatibility between actual operands and formal
+parameters, graph path structure, and backend-relevant invariants such as the
+absence of unsupported surface constructs.
+
+\paragraph{Rationale.}
+Graph validation is the last generic compiler guard before backend-specific
+execution.  It should catch lowering bugs before they become silent numerical
+divergences in generated code.
+
+\paragraph{Formal view.}
+Graph validation checks a graph program \(G=(M,E)\) against a collection of
+well-formedness predicates:
+\[
+  \mathsf{validateGraph}(G) =
+  \mathsf{defs}(G) \land \mathsf{types}(G) \land \mathsf{uses}(G)
+  \land \mathsf{paths}(G).
+\]
+The validator is intentionally stricter than backend code generation: a graph
+that fails validation should not be emitted for any backend.
+
+\paragraph{Example.}
+If lowering emits a node whose formal parameter expects \code{Tensor[B,S,D]}
+but whose actual operand is annotated as \code{Float}, graph validation fails
+before torch or tinygrad code is generated.  Similarly, if a node references a
+value not produced by module inputs or earlier nodes, validation reports an
+undefined operand.

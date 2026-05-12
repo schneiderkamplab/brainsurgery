@@ -15,7 +15,12 @@ from .elaborate import elaborate_closed_axon_file
 from .flatten import flatten_closed_axon_file
 from .load import LoadedAxonFile, LoadedAxonProgram, load_axon_files_from_path, resolve_import_path
 from .lowering import lower_axon_program_to_graph_ir
-from .graph_ir import graph_program_to_axon_file, render_graph_program_to_dot
+from .graph_ir import (
+    graph_program_to_axon_file,
+    optimize_graph_program,
+    prune_graph_to_main,
+    render_graph_program_to_dot,
+)
 from .materialize import (
     MaterializeContext,
     checkpoint_pragma_entries,
@@ -25,7 +30,11 @@ from .materialize import (
     normalize_checkpoint_name,
 )
 from .normalize import normalize_closed_axon_file
-from .optimize import normalize_backend_required_flat_typed_axon_file, optimize_flat_typed_axon_file
+from .optimize import (
+    normalize_backend_required_flat_typed_axon_file,
+    optimize_flat_typed_axon_file,
+    optimize_safe_flat_typed_axon_file,
+)
 from .parse import (
     parse_axon_module,
     parse_axon_program,
@@ -92,12 +101,15 @@ __all__ = [
     "flatten_closed_axon_file",
     "canonicalize_typed_axon_file",
     "optimize_flat_typed_axon_file",
+    "optimize_safe_flat_typed_axon_file",
     "typecheck2_flat_axon_file",
     "validate_axon_program",
     "validate_closed_axon_file",
     "validate_flat_axon_file",
     "lower_axon_program_to_graph_ir",
     "graph_program_to_axon_file",
+    "optimize_graph_program",
+    "prune_graph_to_main",
     "render_graph_program_to_dot",
     "load_tokenizer",
     "looks_like_tokenizer_dir",

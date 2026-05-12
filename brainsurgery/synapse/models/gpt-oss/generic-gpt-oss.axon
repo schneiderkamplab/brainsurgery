@@ -5,7 +5,6 @@ import Attention (attention, merge_heads, reshape_heads)
 import Activations (sigmoid, silu)
 import Masking (causal_mask)
 import Math (clamp, sqrt)
-import MoE (scatter_add, select)
 import Params (param)
 import Positions (position_ids, rope_pair_hf_yarn)
 import Cache
@@ -42,30 +41,33 @@ SWIGLU_ALPHA = Config.float@@swiglu_alpha default=1.702           -- SwiGLU slop
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-grouped_ffn_gated :: Tensor[..S] -> Float -> Float -> Tensor[..S]
+grouped_ffn_gated :: Tensor[B,T,K,W] -> Float -> Float -> Tensor[B,T,K,H]
 grouped_ffn_gated gate_up alpha limit = do
-  gate, up <- Tensor.deinterleave_last2 gate_up
+  b <- Tensor.size gate_up 0
+  t <- Tensor.size gate_up 1
+  k <- Tensor.size gate_up 2
+  w <- Tensor.size gate_up -1
+  h <- w / 2
+  pair <- Tensor.reshape gate_up shape=[b, t, k, h, 2]
+  gate <- Tensor.slice pair dim=-1 start=0 end=1 |> Tensor.reshape shape=[b, t, k, h]
+  up <- Tensor.slice pair dim=-1 start=1 end=2 |> Tensor.reshape shape=[b, t, k, h]
   gate <- clamp gate max=limit
   up <- clamp up min=(0.0 - limit) max=limit
   return (up + 1.0) * (gate * sigmoid (gate * alpha))
 
-grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> Tensor[B,T,K] -> ?Path -> ?Path -> ?Path -> ?Path -> ?Float -> ?Float -> ?Bool -> ?Bool -> ?Bool -> Tensor[B,T,D]
+grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> IdxTensor[B,T,K] -> ?Path -> ?Path -> ?Path -> ?Path -> ?Float -> ?Float -> ?Bool -> ?Bool -> ?Bool -> Tensor[B,T,D]
 grouped_ffn hidden topk_scores topk_indices ?gate_up_weight=@experts.gate_up_proj ?gate_up_bias=@experts.gate_up_proj_bias ?out_weight=@experts.down_proj ?out_bias=@experts.down_proj_bias ?alpha=1.702 ?limit=7.0 ?has_bias=true ?has_gate=true ?transpose=true = do
   alpha <- (alpha == null) ? 1.702 : alpha
   limit <- (limit == null) ? 7.0 : limit
   has_bias <- (has_bias == null) ? true : has_bias
   has_gate <- (has_gate == null) ? true : has_gate
   transpose <- (transpose == null) ? true : transpose
-  routed <- hidden * 0.0
-  experts <- param path=gate_up_weight |> Tensor.size 0
-  routed <- for e <- [0..experts) carry (routed) do
-    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
-    gate_up <- NN.linear@w1 x_sel dim=null bias=has_bias transpose=transpose expert=e weight_path=gate_up_weight bias_path=gate_up_bias
-    ff <- has_gate ? (grouped_ffn_gated gate_up alpha limit) : (gate_up |> silu)
-    x_upd <- NN.linear@w2 ff dim=null bias=has_bias transpose=transpose expert=e weight_path=out_weight bias_path=out_bias
-    routed <- scatter_add routed token_idx x_upd sel_scores
-    yield routed
-  return routed
+  x_sel <- Tensor.unsqueeze hidden 2 |> Tensor.expand shape=[B, T, K, D]
+  scale <- Tensor.unsqueeze topk_scores -1
+  gate_up <- NN.expert_linear@w1 x_sel topk_indices dim=null bias=has_bias transpose=transpose weight_path=gate_up_weight bias_path=gate_up_bias
+  ff <- has_gate ? (grouped_ffn_gated gate_up alpha limit) : (gate_up |> silu)
+  x_upd <- NN.expert_linear@w2 ff topk_indices dim=null bias=has_bias transpose=transpose weight_path=out_weight bias_path=out_bias
+  return Tensor.sum (x_upd * scale) dim=2 keepdim=false
 
 gpt_oss_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 gpt_oss_block x i pos_ids attn_mask past_kv = do

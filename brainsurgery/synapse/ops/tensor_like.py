@@ -22,12 +22,12 @@ def type_rule(
     helpers: Any,
 ) -> Any | None:
     del kwarg_types, args, kwargs
-    if not arg_types:
+    if len(arg_types) < 2:
         return None
-    value_dims = helpers.type_dims(arg_types[0])
-    if value_dims is not None:
-        return helpers.type_tensor(dims=value_dims)
-    return helpers.type_tensor(dims=())
+    ref_dims = helpers.type_dims(arg_types[1])
+    if ref_dims is None:
+        return None
+    return helpers.type_tensor(dims=ref_dims)
 
 
 __all__ = [

@@ -55,6 +55,8 @@ from ..ast import (
     ast_equal,
 )
 from ..ast.render import render_axon_file
+from ..entrypoint import resolve_main_module
+from ..resolve import prune_unreachable_definitions
 from ..typecheck2 import typecheck2_flat_axon_file
 from ..validate import (
     validate_backend_required_flat_typed_axon_file,
@@ -1227,6 +1229,177 @@ def _fold_binary(expr: AxonExprBinary) -> AxonExpr:
         if expr.op == "!=":
             return _literal_from_template(False, expr)
     return expr
+
+
+def _safe_fold_binary(expr: AxonExprBinary) -> AxonExpr:
+    left = _unwrap_expr(expr.left)
+    right = _unwrap_expr(expr.right)
+    if isinstance(left, AxonExprInt) and isinstance(right, AxonExprInt):
+        if expr.op == "+":
+            return _literal_from_template(left.value + right.value, expr)
+        if expr.op == "-":
+            return _literal_from_template(left.value - right.value, expr)
+        if expr.op == "*":
+            return _literal_from_template(left.value * right.value, expr)
+        if expr.op == "/" and right.value != 0 and left.value % right.value == 0:
+            return _literal_from_template(left.value // right.value, expr)
+        if expr.op == "==":
+            return _literal_from_template(left.value == right.value, expr)
+        if expr.op == "!=":
+            return _literal_from_template(left.value != right.value, expr)
+        if expr.op == "<":
+            return _literal_from_template(left.value < right.value, expr)
+        if expr.op == "<=":
+            return _literal_from_template(left.value <= right.value, expr)
+        if expr.op == ">":
+            return _literal_from_template(left.value > right.value, expr)
+        if expr.op == ">=":
+            return _literal_from_template(left.value >= right.value, expr)
+    if isinstance(left, AxonExprFloat) and isinstance(right, AxonExprFloat):
+        if expr.op == "+":
+            return _literal_from_template(left.value + right.value, expr)
+        if expr.op == "-":
+            return _literal_from_template(left.value - right.value, expr)
+        if expr.op == "*":
+            return _literal_from_template(left.value * right.value, expr)
+        if expr.op == "/" and right.value != 0.0:
+            return _literal_from_template(left.value / right.value, expr)
+    if isinstance(left, AxonExprBool) and isinstance(right, AxonExprBool):
+        if expr.op == "and":
+            return _literal_from_template(left.value and right.value, expr)
+        if expr.op == "or":
+            return _literal_from_template(left.value or right.value, expr)
+        if expr.op == "==":
+            return _literal_from_template(left.value == right.value, expr)
+        if expr.op == "!=":
+            return _literal_from_template(left.value != right.value, expr)
+    if isinstance(left, AxonExprNull) and isinstance(right, AxonExprNull):
+        if expr.op == "==":
+            return _literal_from_template(True, expr)
+        if expr.op == "!=":
+            return _literal_from_template(False, expr)
+    if expr.op == "or":
+        if isinstance(left, AxonExprBool) and left.value and _is_atomic_expr(expr.right):
+            return _literal_from_template(True, expr)
+        if isinstance(left, AxonExprBool) and not left.value and _is_atomic_expr(expr.right):
+            return expr.right
+        if isinstance(right, AxonExprBool) and right.value and _is_atomic_expr(expr.left):
+            return _literal_from_template(True, expr)
+        if isinstance(right, AxonExprBool) and not right.value and _is_atomic_expr(expr.left):
+            return expr.left
+        if _is_atomic_expr(expr.left) and _folded_expr_eq(expr.left, expr.right):
+            return expr.left
+    if expr.op == "and":
+        if isinstance(left, AxonExprBool) and left.value and _is_atomic_expr(expr.right):
+            return expr.right
+        if isinstance(left, AxonExprBool) and not left.value and _is_atomic_expr(expr.right):
+            return _literal_from_template(False, expr)
+        if isinstance(right, AxonExprBool) and right.value and _is_atomic_expr(expr.left):
+            return expr.left
+        if isinstance(right, AxonExprBool) and not right.value and _is_atomic_expr(expr.left):
+            return _literal_from_template(False, expr)
+        if _is_atomic_expr(expr.left) and _folded_expr_eq(expr.left, expr.right):
+            return expr.left
+    if expr.op == "==" and _is_atomic_expr(expr.left) and _folded_expr_eq(expr.left, expr.right):
+        return _literal_from_template(True, expr)
+    if expr.op == "!=" and _is_atomic_expr(expr.left) and _folded_expr_eq(expr.left, expr.right):
+        return _literal_from_template(False, expr)
+    return expr
+
+
+def _safe_fold_expr(expr: AxonExpr) -> AxonExpr:
+    if isinstance(expr, AxonExprAscribe):
+        return replace(expr, expr=_safe_fold_expr(expr.expr))
+    if isinstance(expr, AxonExprParen):
+        return replace(expr, inner=_safe_fold_expr(expr.inner))
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        return replace(expr, items=tuple(_safe_fold_expr(item) for item in expr.items))
+    if isinstance(expr, AxonExprCall):
+        return replace(
+            expr,
+            args=tuple(_safe_fold_expr(arg) for arg in expr.args),
+            kwargs={
+                key: _safe_fold_expr(value) if isinstance(value, AxonExpr) else value
+                for key, value in expr.kwargs.items()
+            },
+        )
+    if isinstance(expr, AxonExprBinary):
+        return _safe_fold_binary(
+            replace(expr, left=_safe_fold_expr(expr.left), right=_safe_fold_expr(expr.right))
+        )
+    if isinstance(expr, AxonExprTernary | AxonExprIf):
+        folded = replace(
+            expr,
+            cond=_safe_fold_expr(expr.cond),
+            true_expr=_safe_fold_expr(expr.true_expr),
+            false_expr=_safe_fold_expr(expr.false_expr),
+        )
+        cond = _unwrap_expr(folded.cond)
+        if isinstance(cond, AxonExprBool):
+            selected = folded.true_expr if cond.value else folded.false_expr
+            if _is_atomic_expr(selected):
+                return selected
+        return folded
+    if isinstance(expr, AxonExprBind):
+        return replace(expr, value=_safe_fold_expr(expr.value), body=_safe_fold_expr(expr.body))
+    if isinstance(expr, AxonExprLambda):
+        return replace(expr, body=_safe_fold_expr(expr.body))
+    if isinstance(expr, AxonExprDo):
+        return replace(expr, body=_safe_fold_statements(expr.body))
+    if isinstance(expr, AxonExprPipe):
+        return replace(
+            expr,
+            value=_safe_fold_expr(expr.value),
+            stages=tuple(_safe_fold_expr(stage) for stage in expr.stages),
+        )
+    return expr
+
+
+def _safe_fold_statements(statements: tuple[AxonStatement, ...]) -> tuple[AxonStatement, ...]:
+    folded: list[AxonStatement] = []
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            folded.append(replace(stmt, expr=_safe_fold_expr(stmt.expr)))
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            folded.append(replace(stmt, values=tuple(_safe_fold_expr(value) for value in stmt.values)))
+        elif isinstance(stmt, AxonCond):
+            folded.append(
+                replace(
+                    stmt,
+                    cond=_safe_fold_expr(stmt.cond),
+                    true_body=_safe_fold_statements(stmt.true_body),
+                    false_body=_safe_fold_statements(stmt.false_body),
+                )
+            )
+        elif isinstance(stmt, AxonRepeat):
+            folded.append(
+                replace(
+                    stmt,
+                    to_expr=_safe_fold_expr(stmt.to_expr),
+                    from_expr=_safe_fold_expr(stmt.from_expr),
+                    step_expr=_safe_fold_expr(stmt.step_expr),
+                    body=_safe_fold_statements(stmt.body),
+                )
+            )
+        elif isinstance(stmt, AxonScopeBind):
+            folded.append(
+                replace(
+                    stmt,
+                    prefix=_safe_fold_expr(stmt.prefix),
+                    kwargs={
+                        key: _safe_fold_expr(value) if isinstance(value, AxonExpr) else value
+                        for key, value in stmt.kwargs.items()
+                    },
+                    body=_safe_fold_statements(stmt.body),
+                )
+            )
+        else:
+            folded.append(stmt)
+    return tuple(folded)
+
+
+def _optimize_safe_statements(statements: tuple[AxonStatement, ...]) -> tuple[AxonStatement, ...]:
+    return _inline_atomic_alias_statements(_safe_fold_statements(statements))
 
 
 def _module_alias_expr(module: AxonDefinition) -> AxonExpr | None:
@@ -3643,6 +3816,38 @@ def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None 
         current = retyped
 
 
+def optimize_safe_flat_typed_axon_file(
+    program: AxonFile,
+    *,
+    main_module: str | None = None,
+    max_iterations: int = 8,
+) -> AxonFile:
+    """Run only conservative pre-Graph-IR optimizations on flat typed Axon."""
+
+    selected_main = resolve_main_module(program, main_module=main_module)
+    validate_flat_axon_file(program, main_module=selected_main)
+    validate_typed_axon_file(program, main_module=selected_main)
+    current = prune_unreachable_definitions(program, entrypoint=selected_main)
+    validate_typed_axon_file(current, main_module=selected_main)
+    for _ in range(max_iterations):
+        rewritten = replace(
+            current,
+            modules=tuple(
+                replace(module, statements=_optimize_safe_statements(module.statements))
+                for module in current.modules
+            ),
+        )
+        validate_flat_axon_file(rewritten, main_module=selected_main)
+        retyped = typecheck2_flat_axon_file(rewritten, main_module=selected_main)
+        retyped = prune_unreachable_definitions(retyped, entrypoint=selected_main)
+        validate_typed_axon_file(retyped, main_module=selected_main)
+        if ast_equal(current, retyped):
+            return retyped
+        current = retyped
+    validate_typed_axon_file(current, main_module=selected_main)
+    return current
+
+
 def normalize_backend_required_flat_typed_axon_file(
     program: AxonFile, *, main_module: str | None = None
 ) -> AxonFile:
@@ -3665,4 +3870,8 @@ def normalize_backend_required_flat_typed_axon_file(
     return normalized
 
 
-__all__ = ["normalize_backend_required_flat_typed_axon_file", "optimize_flat_typed_axon_file"]
+__all__ = [
+    "normalize_backend_required_flat_typed_axon_file",
+    "optimize_flat_typed_axon_file",
+    "optimize_safe_flat_typed_axon_file",
+]

@@ -1,0 +1,42 @@
+\section{Resolve}
+
+\paragraph{Input and output.}
+Resolution consumes the loaded set of one-file ASTs and produces a single
+closed Axon AST.
+
+\paragraph{Contract.}
+Resolve merges imported modules, resolves qualified and unqualified references,
+checks export visibility, removes import-surface state, identifies the main
+module, and prunes definitions that are unreachable from the main module under
+the current compilation mode.
+
+\paragraph{Exclusions.}
+Resolve does not typecheck expressions, infer dimensions, lower operations, or
+apply warning policy.  Diagnostics such as unused imports or strict warning
+promotion belong to validation or orchestration.
+
+\paragraph{Rationale.}
+Downstream stages should never need to search the file system or infer lexical
+scope from import declarations.  They receive one closed program with explicit
+definition identities.
+
+\paragraph{Formal view.}
+Resolution maps a finite set of one-file ASTs to one closed AST:
+\[
+  \mathsf{resolve}: [A_f] \rightharpoonup A_c .
+\]
+The function is undefined when imports are missing, exported names are
+ambiguous, or reachable expressions reference undefined names.  The output
+\(A_c\) has no import-surface state in the reachable program.
+
+\paragraph{Example.}
+Given
+\begin{verbatim}
+import Tensor (reshape)
+
+f x = reshape x shape=[B, S, D]
+\end{verbatim}
+resolve links \code{reshape} to the imported \code{Tensor.reshape}
+definition.  If both \code{Tensor.reshape} and another imported \code{reshape}
+are available unqualified, resolution reports ambiguity rather than choosing
+one.

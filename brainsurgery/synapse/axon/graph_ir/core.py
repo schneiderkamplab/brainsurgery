@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TypeAlias
 
@@ -24,6 +25,7 @@ from ..ast import (
     AxonParam,
     AxonReturn,
     Constraint,
+    DimExprBinary,
     DimToken,
     TypeAny,
     TypeBool,
@@ -32,10 +34,16 @@ from ..ast import (
     TypeFloat,
     TypeInt,
     TypeList,
+    TypeNamed,
     TypeNull,
+    TypeOptional,
+    TypePath,
     TypeString,
     TypeTensor,
     TypeTuple,
+    TypeVar,
+    ast_equal,
+    render_type,
 )
 from ..entrypoint import resolve_main_module
 from ..ast.types import dim_token_names
@@ -89,6 +97,9 @@ class GraphExpr:
 
 GraphOperand: TypeAlias = GraphValueRef | GraphLiteral | GraphPath | GraphExpr
 GraphAttr: TypeAlias = GraphOperand
+
+
+_PATH_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 @dataclass(frozen=True)
@@ -599,6 +610,12 @@ def _validate_operand_defined(
         if isinstance(operand.type_expr, TypeDim) and operand.name in dim_symbols:
             return
         raise ValueError(f"{context} uses undefined value {operand.name!r}")
+    if isinstance(operand, GraphPath):
+        for name in graph_path_template_names(operand):
+            if name in defined or name in dim_symbols:
+                continue
+            raise ValueError(f"{context} path template uses undefined value {name!r}")
+        return
     if isinstance(operand, GraphExpr):
         for item in operand.inputs:
             _validate_operand_defined(
@@ -610,39 +627,468 @@ def _validate_operand_defined(
             )
 
 
-def _validate_graph_module(module: GraphModule, *, global_names: set[str] | None = None) -> None:
-    defined = {value.name for value in module.inputs}
-    globals_defined = set(global_names or ())
+def _type_compatible(actual: TypeExpr, expected: TypeExpr) -> bool:
+    if (
+        isinstance(actual, TypeAny | TypeVar)
+        or isinstance(expected, TypeAny | TypeVar)
+        or _is_type_variable_like(actual)
+        or _is_type_variable_like(expected)
+    ):
+        return True
+    if isinstance(actual, TypeInt) and isinstance(expected, TypeDim):
+        return True
+    if isinstance(actual, TypeDim) and isinstance(expected, TypeInt):
+        return True
+    if isinstance(actual, TypeDim) and isinstance(expected, TypeFloat):
+        return True
+    if isinstance(actual, TypeInt) and isinstance(expected, TypeFloat):
+        return True
+    if ast_equal(actual, expected):
+        return True
+    if isinstance(expected, TypeOptional):
+        if isinstance(actual, TypeNull):
+            return True
+        return _type_compatible(actual, expected.inner)
+    if isinstance(actual, TypeOptional) and isinstance(expected, TypeOptional):
+        return _type_compatible(actual.inner, expected.inner)
+    if isinstance(actual, TypeOptional):
+        return _type_compatible(actual.inner, expected)
+    if isinstance(actual, TypeTensor) and isinstance(expected, TypeTensor):
+        return actual.base == expected.base and _dim_sequence_compatible(actual.dims, expected.dims)
+    if isinstance(actual, TypeNamed) and isinstance(expected, TypeNamed):
+        return actual.name == expected.name and _dim_sequence_compatible(actual.args, expected.args)
+    if isinstance(actual, TypeList) and isinstance(expected, TypeList):
+        return _type_compatible(actual.item, expected.item)
+    if isinstance(actual, TypeTuple) and isinstance(expected, TypeTuple):
+        return len(actual.items) == len(expected.items) and all(
+            _type_compatible(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual.items, expected.items, strict=True)
+        )
+    return False
+
+
+def _is_type_variable_like(type_expr: TypeExpr) -> bool:
+    return isinstance(type_expr, TypeNamed) and not type_expr.args and (
+        type_expr.name.startswith("_") or type_expr.name[:1].isupper()
+    )
+
+
+def _dim_token_compatible(actual: DimToken, expected: DimToken) -> bool:
+    if ast_equal(actual, expected):
+        return True
+    if isinstance(actual, str) and actual.startswith(".."):
+        return True
+    if isinstance(expected, str) and expected.startswith(".."):
+        return True
+    if isinstance(actual, str) and isinstance(expected, str):
+        return True
+    if isinstance(actual, str):
+        return True
+    if isinstance(expected, str):
+        return True
+    if isinstance(actual, DimExprBinary) and isinstance(expected, DimExprBinary):
+        return (
+            actual.op == expected.op
+            and _dim_token_compatible(actual.left, expected.left)
+            and _dim_token_compatible(actual.right, expected.right)
+        )
+    return False
+
+
+def _is_variadic_dim(dim: DimToken) -> bool:
+    return isinstance(dim, str) and dim.startswith("..")
+
+
+def _dim_sequence_compatible(
+    actual: tuple[DimToken, ...],
+    expected: tuple[DimToken, ...],
+) -> bool:
+    if not any(_is_variadic_dim(dim) for dim in actual + expected):
+        return len(actual) == len(expected) and all(
+            _dim_token_compatible(actual_dim, expected_dim)
+            for actual_dim, expected_dim in zip(actual, expected, strict=True)
+        )
+    if len(expected) == 1 and _is_variadic_dim(expected[0]):
+        return True
+    if len(actual) == 1 and _is_variadic_dim(actual[0]):
+        return True
+    expected_variadic = next(
+        (index for index, dim in enumerate(expected) if _is_variadic_dim(dim)),
+        None,
+    )
+    if expected_variadic is not None:
+        prefix = expected[:expected_variadic]
+        suffix = expected[expected_variadic + 1 :]
+        if len(actual) < len(prefix) + len(suffix):
+            return False
+        return _dim_sequence_compatible(actual[: len(prefix)], prefix) and _dim_sequence_compatible(
+            actual[len(actual) - len(suffix) :] if suffix else (),
+            suffix,
+        )
+    actual_variadic = next(
+        (index for index, dim in enumerate(actual) if _is_variadic_dim(dim)),
+        None,
+    )
+    if actual_variadic is not None:
+        prefix = actual[:actual_variadic]
+        suffix = actual[actual_variadic + 1 :]
+        if len(expected) < len(prefix) + len(suffix):
+            return False
+        return _dim_sequence_compatible(prefix, expected[: len(prefix)]) and _dim_sequence_compatible(
+            suffix,
+            expected[len(expected) - len(suffix) :] if suffix else (),
+        )
+    return False
+
+
+def _require_type_compatible(
+    actual: TypeExpr,
+    expected: TypeExpr,
+    *,
+    context: str,
+) -> None:
+    if not _type_compatible(actual, expected):
+        raise ValueError(
+            f"{context}: expected {render_type(expected)}, got {render_type(actual)}"
+        )
+
+
+def _require_actual_compatible_with_formal(
+    actual: TypeExpr,
+    formal: GraphValue,
+    *,
+    context: str,
+) -> None:
+    if formal.optional and isinstance(actual, TypeNull):
+        return
+    _require_type_compatible(actual, formal.type_expr, context=context)
+
+
+def _declared_operand_type(operand: GraphOperand) -> TypeExpr:
+    if isinstance(operand, GraphLiteral):
+        return operand.type_expr
+    if isinstance(operand, GraphPath):
+        return TypePath()
+    if isinstance(operand, GraphValueRef):
+        return operand.type_expr
+    if isinstance(operand, GraphExpr):
+        return operand.type_expr
+    raise TypeError(f"unsupported graph operand {operand!r}")
+
+
+def graph_path_template_names(path: GraphPath) -> set[str]:
+    names: set[str] = set()
+    for part in path.parts:
+        names.update(match.group(1) for match in _PATH_PLACEHOLDER_RE.finditer(part))
+    return names
+
+
+def graph_operand_type(operand: GraphOperand) -> TypeExpr:
+    return _declared_operand_type(operand)
+
+
+def graph_type_compatible(actual: TypeExpr, expected: TypeExpr) -> bool:
+    return _type_compatible(actual, expected)
+
+
+def _result_types(type_expr: TypeExpr, output_count: int) -> tuple[TypeExpr, ...]:
+    if output_count == 1:
+        return (type_expr,)
+    if isinstance(type_expr, TypeTuple) and len(type_expr.items) == output_count:
+        return type_expr.items
+    if isinstance(type_expr, TypeList):
+        return tuple(type_expr.item for _ in range(output_count))
+    return tuple(TypeAny() for _ in range(output_count))
+
+
+def _module_output_types(module: GraphModule) -> tuple[TypeExpr, ...]:
+    if module.return_type_expr is not None:
+        return _result_types(module.return_type_expr, len(module.outputs))
+    return tuple(_declared_operand_type(output) for output in module.outputs)
+
+
+def _call_actuals_for_callee(
+    *,
+    op_name: str,
+    inputs: tuple[GraphOperand, ...],
+    attrs: dict[str, GraphAttr],
+    callee: GraphModule,
+    context: str,
+) -> tuple[GraphOperand, ...]:
+    formals = callee.inputs
+    if len(inputs) > len(formals):
+        raise ValueError(
+            f"{context}: call to {op_name!r} passes {len(inputs)} positional args "
+            f"to {len(formals)} parameters"
+        )
+    actuals: list[GraphOperand | None] = [None] * len(formals)
+    for index, operand in enumerate(inputs):
+        actuals[index] = operand
+    formal_by_name = {formal.name: index for index, formal in enumerate(formals)}
+    for key, operand in attrs.items():
+        index = formal_by_name.get(key)
+        if index is None:
+            raise ValueError(f"{context}: call to {op_name!r} passes unknown kwarg {key!r}")
+        if actuals[index] is not None:
+            raise ValueError(f"{context}: call to {op_name!r} passes duplicate arg {key!r}")
+        actuals[index] = operand
+    missing = [formal.name for formal, actual in zip(formals, actuals, strict=True) if actual is None]
+    if missing:
+        raise ValueError(
+            f"{context}: call to {op_name!r} is missing args: {', '.join(missing)}"
+        )
+    return tuple(actual for actual in actuals if actual is not None)
+
+
+def _validate_core_expr_contract(
+    expr: GraphExpr,
+    input_types: tuple[TypeExpr, ...],
+    *,
+    context: str,
+) -> None:
+    op_name = expr.op.name
+    if op_name == "core.alias":
+        if len(input_types) != 1:
+            raise ValueError(f"{context}: core.alias expects one input")
+        _require_type_compatible(input_types[0], expr.type_expr, context=context)
+        return
+    if op_name == "core.ascribe":
+        if len(input_types) != 1:
+            raise ValueError(f"{context}: core.ascribe expects one input")
+        return
+    if op_name == "core.select":
+        if len(input_types) != 3:
+            raise ValueError(f"{context}: core.select expects three inputs")
+        _require_type_compatible(input_types[0], TypeBool(), context=f"{context} condition")
+        return
+    if op_name.startswith("core.binary."):
+        if len(input_types) != 2:
+            raise ValueError(f"{context}: {op_name} expects two inputs")
+        return
+    if op_name == "core.tuple":
+        if isinstance(expr.type_expr, TypeTuple) and len(expr.type_expr.items) == len(input_types):
+            for index, (actual, expected) in enumerate(zip(input_types, expr.type_expr.items, strict=True)):
+                _require_type_compatible(actual, expected, context=f"{context} tuple item {index}")
+        return
+    if op_name == "core.list":
+        if isinstance(expr.type_expr, TypeList):
+            for index, actual in enumerate(input_types):
+                _require_type_compatible(actual, expr.type_expr.item, context=f"{context} list item {index}")
+        return
+
+
+def _operand_type_checked(
+    operand: GraphOperand,
+    *,
+    env: dict[str, GraphValue],
+    globals_env: dict[str, GraphValue],
+    dim_symbols: set[str],
+    modules_by_name: dict[str, GraphModule],
+    context: str,
+) -> TypeExpr:
+    if isinstance(operand, GraphLiteral):
+        return operand.type_expr
+    if isinstance(operand, GraphPath):
+        for name in graph_path_template_names(operand):
+            if name in set(env) | set(globals_env) or name in dim_symbols:
+                continue
+            raise ValueError(f"{context} path template uses undefined value {name!r}")
+        return TypePath()
+    if isinstance(operand, GraphValueRef):
+        value = env.get(operand.name) or globals_env.get(operand.name)
+        if value is not None:
+            _require_type_compatible(operand.type_expr, value.type_expr, context=context)
+            if (
+                operand.dims is not None
+                and value.dims is not None
+                and not _dim_sequence_compatible(operand.dims, value.dims)
+            ):
+                raise ValueError(
+                    f"{context}: stale dims for {operand.name!r}: "
+                    f"expected {value.dims!r}, got {operand.dims!r}"
+                )
+            return value.type_expr
+        if isinstance(operand.type_expr, TypeDim) and operand.name in dim_symbols:
+            return operand.type_expr
+        raise ValueError(f"{context} uses undefined value {operand.name!r}")
+    if isinstance(operand, GraphExpr):
+        input_types = tuple(
+            _operand_type_checked(
+                item,
+                env=env,
+                globals_env=globals_env,
+                dim_symbols=dim_symbols,
+                modules_by_name=modules_by_name,
+                context=f"{context} operand",
+            )
+            for item in operand.inputs
+        )
+        for key, item in operand.attrs.items():
+            _operand_type_checked(
+                item,
+                env=env,
+                globals_env=globals_env,
+                dim_symbols=dim_symbols,
+                modules_by_name=modules_by_name,
+                context=f"{context} attr {key!r}",
+            )
+        callee = modules_by_name.get(operand.op.name)
+        if callee is not None:
+            actuals = _call_actuals_for_callee(
+                op_name=operand.op.name,
+                inputs=operand.inputs,
+                attrs=operand.attrs,
+                callee=callee,
+                context=context,
+            )
+            for formal, actual in zip(callee.inputs, actuals, strict=True):
+                actual_type = _operand_type_checked(
+                    actual,
+                    env=env,
+                    globals_env=globals_env,
+                    dim_symbols=dim_symbols,
+                    modules_by_name=modules_by_name,
+                    context=f"{context} arg {formal.name!r}",
+                )
+                _require_actual_compatible_with_formal(
+                    actual_type,
+                    formal,
+                    context=f"{context} arg {formal.name!r}",
+                )
+            return operand.type_expr
+        if operand.op.name.startswith("core."):
+            _validate_core_expr_contract(operand, input_types, context=context)
+        return operand.type_expr
+    raise TypeError(f"unsupported graph operand {operand!r}")
+
+
+def _validate_graph_module(
+    module: GraphModule,
+    *,
+    global_values: dict[str, GraphValue] | None = None,
+    modules_by_name: dict[str, GraphModule] | None = None,
+) -> None:
+    env = {value.name: value for value in module.inputs}
+    defined = set(env)
+    globals_env = dict(global_values or {})
     dim_symbols = _module_dim_symbols(module)
     if len(defined) != len(module.inputs):
         raise ValueError(f"graph IR module {module.name!r} has duplicate inputs")
+    modules_by_name = dict(modules_by_name or {})
     for node in module.nodes:
         for operand in node.inputs:
             _validate_operand_defined(
                 operand,
-                defined=defined | globals_defined,
+                defined=defined | set(globals_env),
                 dim_symbols=dim_symbols,
                 context=f"graph IR node {node.id!r}",
             )
         for operand in node.attrs.values():
             _validate_operand_defined(
                 operand,
-                defined=defined | globals_defined,
+                defined=defined | set(globals_env),
                 dim_symbols=dim_symbols,
                 context=f"graph IR node {node.id!r}",
             )
-        for output in node.outputs:
+        input_types = tuple(
+            _operand_type_checked(
+                operand,
+                env=env,
+                globals_env=globals_env,
+                dim_symbols=dim_symbols,
+                modules_by_name=modules_by_name,
+                context=f"graph IR node {node.id!r} input",
+            )
+            for operand in node.inputs
+        )
+        for key, operand in node.attrs.items():
+            _operand_type_checked(
+                operand,
+                env=env,
+                globals_env=globals_env,
+                dim_symbols=dim_symbols,
+                modules_by_name=modules_by_name,
+                context=f"graph IR node {node.id!r} attr {key!r}",
+            )
+        expected_node_types = _result_types(node.type_expr, len(node.outputs))
+        callee = modules_by_name.get(node.op.name)
+        if callee is not None:
+            actuals = _call_actuals_for_callee(
+                op_name=node.op.name,
+                inputs=node.inputs,
+                attrs=node.attrs,
+                callee=callee,
+                context=f"graph IR node {node.id!r}",
+            )
+            for formal, actual in zip(callee.inputs, actuals, strict=True):
+                actual_type = _operand_type_checked(
+                    actual,
+                    env=env,
+                    globals_env=globals_env,
+                    dim_symbols=dim_symbols,
+                    modules_by_name=modules_by_name,
+                    context=f"graph IR node {node.id!r} arg {formal.name!r}",
+                )
+                _require_actual_compatible_with_formal(
+                    actual_type,
+                    formal,
+                    context=f"graph IR node {node.id!r} arg {formal.name!r}",
+                )
+        elif node.op.name.startswith("core."):
+            _validate_core_expr_contract(
+                GraphExpr(
+                    op=node.op,
+                    inputs=node.inputs,
+                    attrs=node.attrs,
+                    type_expr=node.type_expr,
+                    dims=node.dims,
+                ),
+                input_types,
+                context=f"graph IR node {node.id!r}",
+            )
+        for output_index, output in enumerate(node.outputs):
             if output.name in defined:
                 raise ValueError(
                     f"graph IR node {node.id!r} redefines value {output.name!r}"
                 )
+            if output_index < len(expected_node_types):
+                expected_output_type = expected_node_types[output_index]
+                _require_type_compatible(
+                    output.type_expr,
+                    expected_output_type,
+                    context=f"graph IR node {node.id!r} output {output.name!r}",
+                )
             defined.add(output.name)
+            env[output.name] = output
     for operand in module.outputs:
         _validate_operand_defined(
             operand,
-            defined=defined | globals_defined,
+            defined=defined | set(globals_env),
             dim_symbols=dim_symbols,
             context=f"graph IR module {module.name!r} return",
+        )
+    output_types = tuple(
+        _operand_type_checked(
+            operand,
+            env=env,
+            globals_env=globals_env,
+            dim_symbols=dim_symbols,
+            modules_by_name=modules_by_name,
+            context=f"graph IR module {module.name!r} return",
+        )
+        for operand in module.outputs
+    )
+    expected_return_types = _module_output_types(module)
+    if len(output_types) != len(expected_return_types):
+        raise ValueError(
+            f"graph IR module {module.name!r}: return arity mismatch, "
+            f"expected {len(expected_return_types)}, got {len(output_types)}"
+        )
+    for index, (actual, expected) in enumerate(zip(output_types, expected_return_types, strict=True)):
+        _require_type_compatible(
+            actual,
+            expected,
+            context=f"graph IR module {module.name!r} return {index}",
         )
 
 
@@ -652,13 +1098,22 @@ def validate_graph_program(program: GraphProgram) -> None:
         raise ValueError("graph IR program has duplicate module names")
     if program.main_module not in set(names):
         raise ValueError(f"graph IR main module {program.main_module!r} is missing")
-    global_names = {
-        module.name
+    modules_by_name = {module.name: module for module in program.modules}
+    global_values = {
+        module.name: GraphValue(
+            name=module.name,
+            type_expr=_module_output_types(module)[0],
+            dims=None,
+        )
         for module in program.modules
         if not module.inputs and len(module.outputs) == 1
     }
     for module in program.modules:
-        _validate_graph_module(module, global_names=global_names)
+        _validate_graph_module(
+            module,
+            global_values=global_values,
+            modules_by_name=modules_by_name,
+        )
 
 
 __all__ = [
@@ -673,6 +1128,9 @@ __all__ = [
     "GraphProgram",
     "GraphValue",
     "GraphValueRef",
+    "graph_operand_type",
+    "graph_path_template_names",
+    "graph_type_compatible",
     "lower_axon_program_to_graph_ir",
     "validate_graph_program",
 ]

@@ -202,7 +202,8 @@ Stage status as of now:
   - certified by `validate.backend_required`
 - status: implemented as a non-optional lowering preparation pass
 - note:
-  - `--optimize/--no-optimize` controls semantic optimization, not required canonical backend shape
+  - `--optimize-ast/--no-optimize-ast` controls conservative AST optimization,
+    not required canonical backend shape
 
 11. `lower`
 - input: flat fully typed closed Axon AST

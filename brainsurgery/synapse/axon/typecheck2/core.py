@@ -162,7 +162,13 @@ def _dim_equivalent_tc2(left: DimToken, right: DimToken, state: _Tc2) -> bool:
     return _dim_equivalent(resolved_left, resolved_right, state.ctx)
 
 
-def _unify_call_arg_type(actual: TypeExpr, formal: TypeExpr, state: _Tc2) -> TypeExpr:
+def _unify_call_arg_type(
+    actual: TypeExpr,
+    formal: TypeExpr,
+    state: _Tc2,
+    *,
+    local_fresh_dims: set[str] | None = None,
+) -> TypeExpr:
     ctx = state.ctx
     actual_expanded = _expand_alias(_apply_subst(actual, ctx), ctx)
     formal_expanded = _expand_alias(_apply_subst(formal, ctx), ctx)
@@ -204,6 +210,7 @@ def _unify_call_arg_type(actual: TypeExpr, formal: TypeExpr, state: _Tc2) -> Typ
                         isinstance(formal_dim, str)
                         and not formal_dim.startswith("..")
                         and _is_fresh_dim_name(formal_dim, state)
+                        and (local_fresh_dims is None or formal_dim in local_fresh_dims)
                         and formal_dim not in ctx.dim_substitutions
                     ):
                         _bind_dim_name(formal_dim, 1, ctx)
@@ -211,7 +218,9 @@ def _unify_call_arg_type(actual: TypeExpr, formal: TypeExpr, state: _Tc2) -> Typ
                     else:
                         out_dims.append(formal_dim)
                     continue
-                rebound = _rebind_fresh_dim_substitution(formal_dim, actual_dim, state)
+                rebound = _rebind_fresh_dim_substitution(
+                    formal_dim, actual_dim, state, local_fresh_dims=local_fresh_dims
+                )
                 if rebound is not None:
                     out_dims.append(rebound)
                     continue
@@ -231,15 +240,34 @@ def _unify_call_arg_type(actual: TypeExpr, formal: TypeExpr, state: _Tc2) -> Typ
                     raise
             return TypeTensor(base=formal_expanded.base, dims=tuple(out_dims))
     if isinstance(actual_expanded, TypeOptional) and isinstance(formal_expanded, TypeOptional):
-        return TypeOptional(_unify_call_arg_type(actual_expanded.inner, formal_expanded.inner, state))
+        return TypeOptional(
+            _unify_call_arg_type(
+                actual_expanded.inner,
+                formal_expanded.inner,
+                state,
+                local_fresh_dims=local_fresh_dims,
+            )
+        )
     if isinstance(actual_expanded, TypeList) and isinstance(formal_expanded, TypeList):
-        return TypeList(_unify_call_arg_type(actual_expanded.item, formal_expanded.item, state))
+        return TypeList(
+            _unify_call_arg_type(
+                actual_expanded.item,
+                formal_expanded.item,
+                state,
+                local_fresh_dims=local_fresh_dims,
+            )
+        )
     if isinstance(actual_expanded, TypeTuple) and isinstance(formal_expanded, TypeTuple):
         if len(actual_expanded.items) != len(formal_expanded.items):
             return _unify_tc2(actual, formal, ctx)
         return TypeTuple(
             items=tuple(
-                _unify_call_arg_type(actual_item, formal_item, state)
+                _unify_call_arg_type(
+                    actual_item,
+                    formal_item,
+                    state,
+                    local_fresh_dims=local_fresh_dims,
+                )
                 for actual_item, formal_item in zip(
                     actual_expanded.items, formal_expanded.items, strict=True
                 )
@@ -268,9 +296,12 @@ def _rebind_fresh_dim_substitution(
     formal_dim: DimToken,
     actual_dim: DimToken,
     state: _Tc2,
+    *,
+    local_fresh_dims: set[str] | None = None,
 ) -> DimToken | None:
     actual_names = dim_token_names(actual_dim)
-    for fresh_name in state.fresh_dim_names:
+    fresh_names = local_fresh_dims if local_fresh_dims is not None else state.fresh_dim_names
+    for fresh_name in fresh_names:
         if fresh_name in actual_names:
             continue
         if fresh_name not in state.ctx.dim_substitutions:
@@ -756,6 +787,16 @@ def _join_branch_types_tc2(left: TypeExpr, right: TypeExpr, state: _Tc2) -> Type
         if len(left_expanded.dims) != len(right_expanded.dims):
             return _join_branch_types(left, right, ctx)
         if any(isinstance(dim, str) and dim.startswith("..") for dim in (*left_expanded.dims, *right_expanded.dims)):
+            if left_expanded.base == right_expanded.base and left_expanded.dims == right_expanded.dims:
+                return left_expanded
+            if left_expanded.base == right_expanded.base and all(
+                isinstance(left_dim, str)
+                and left_dim.startswith("..")
+                and isinstance(right_dim, str)
+                and right_dim.startswith("..")
+                for left_dim, right_dim in zip(left_expanded.dims, right_expanded.dims, strict=True)
+            ):
+                return left_expanded
             return _join_branch_types(left, right, ctx)
         return TypeTensor(
             base=left_expanded.base,
@@ -1698,14 +1739,13 @@ def _prefer_closed_constant_dim_names(state: _Tc2) -> None:
         if not module.params and not module.path_params and module.path_param is None
     }
     for name, mapped in list(state.ctx.dim_substitutions.items()):
-        if (
-            name in constant_names
-            and isinstance(mapped, str)
-            and mapped not in constant_names
-            and not mapped.startswith("..")
-        ):
+        if name not in constant_names:
+            continue
+        if isinstance(mapped, str) and mapped not in constant_names and not mapped.startswith(".."):
             state.ctx.dim_substitutions.pop(name, None)
             _bind_dim_name(mapped, name, state.ctx)
+            continue
+        state.ctx.dim_substitutions.pop(name, None)
 
 
 def _align_loop_continue_signatures(
@@ -2022,13 +2062,18 @@ def _bind_call_args(
     bound_expr_defs: dict[str, AxonExpr] = {}
     fresh_dim_sources_before = set(state.fresh_dim_sources)
     instantiated_param_types, return_types = _instantiate_call_signature(module, state)
+    local_fresh_dim_sources = {
+        fresh_name: source_name
+        for fresh_name, source_name in state.fresh_dim_sources.items()
+        if fresh_name not in fresh_dim_sources_before
+    }
 
     def bind_fresh_dims_from_actual(param_name: str, actual: AxonExpr) -> None:
         resolved_actual = _resolved_expr_def(actual, expr_defs)
         token = _expr_to_dim_token_resolved_tc2(resolved_actual, expr_defs)
         if token is None:
             return
-        for fresh_name, source_name in tuple(state.fresh_dim_sources.items()):
+        for fresh_name, source_name in tuple(local_fresh_dim_sources.items()):
             if source_name == param_name:
                 _bind_dim_name(fresh_name, token, state.ctx)
 
@@ -2064,7 +2109,12 @@ def _bind_call_args(
         else:
             typed_actual, actual_tp = _tc_expr(state, actual_expr, caller_env, expr_defs)
             try:
-                bound_tp = _unify_call_arg_type(actual_tp, formal_env_type, state)
+                bound_tp = _unify_call_arg_type(
+                    actual_tp,
+                    formal_env_type,
+                    state,
+                    local_fresh_dims=set(local_fresh_dim_sources),
+                )
             except Exception as exc:
                 raise ValueError(
                     f"Axon typecheck2 failed: argument {param.name!r} for {module.name!r} "
@@ -2085,8 +2135,8 @@ def _bind_call_args(
             continue
         typed_kwargs[key] = value
     dim_bindings: dict[str, DimToken] = {}
-    for fresh_name, source_name in state.fresh_dim_sources.items():
-        if fresh_name in fresh_dim_sources_before or source_name.startswith(".."):
+    for fresh_name, source_name in local_fresh_dim_sources.items():
+        if source_name.startswith(".."):
             continue
         value = _normalize_dim_token(fresh_name, state.ctx)
         if value == fresh_name or value == source_name:
@@ -2458,6 +2508,7 @@ def _tc_primitive_call(
         )
         if _is_type_expr_instance(inferred):
             inferred = _resolve_type_dim_aliases(inferred, expr_defs)
+            inferred = _expand_alias(inferred, state.ctx)
             arity = len(inferred.items) if isinstance(inferred, TypeTuple) else 1
             return _annotate(state.ctx, typed_call, inferred, arity=arity), inferred
     returns = signature.get("returns")
@@ -2735,6 +2786,16 @@ def _tc_statements(
                             f"actual={actual!r} expected={expected!r}"
                         ) from exc
                 value_types = unified_values
+                if len(values) == len(value_types):
+                    values = [
+                        _annotate(
+                            state.ctx,
+                            value,
+                            value_type,
+                            arity=len(value_type.items) if isinstance(value_type, TypeTuple) else 1,
+                        )
+                        for value, value_type in zip(values, value_types, strict=True)
+                    ]
             returns = _merge_return_types(returns, tuple(value_types), state)
             typed.append(replace(stmt, values=tuple(values)))
             continue
@@ -2820,6 +2881,7 @@ def _tc_definition(
                 expr_return_tp = _unify_return_type(
                     expr_return_tp, expected_returns[0], state, protected_dim_names
                 )
+            _prefer_closed_constant_dim_names(state)
             typed_module = replace(
                 module,
                 body_expr=typed_expr,
@@ -2844,6 +2906,7 @@ def _tc_definition(
             protected_dim_names,
             refine_returns_from_body=specialize_signature,
         )
+        _prefer_closed_constant_dim_names(state)
         return_tp = _final_return_type(returns, state.ctx)
         refined_params: list[AxonParam] = []
         for param in module.params:

@@ -5,7 +5,6 @@ import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Math (mul)
-import MoE (scatter_add, select)
 import Positions (position_ids, rope_pair_base)
 import Cache
 import Config
@@ -35,17 +34,15 @@ ATTN_SCALE = Config.float@@attention_multiplier default=1.0
 granitemoe_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 granitemoe_norm@path x = NN.rmsnorm@path x eps=EPS
 
-granitemoe_moe :: Tensor[B,S,D] -> Tensor[B,S,EPT] -> Tensor[B,S,EPT] -> Tensor[B,S,D]
+granitemoe_moe :: Tensor[B,S,D] -> Tensor[B,S,EPT] -> IdxTensor[B,S,EPT] -> Tensor[B,S,D]
 granitemoe_moe hidden topk_scores topk_indices = do
-  routed <- hidden * 0.0
-  routed <- for e <- [0..E) carry (routed) do
-    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
-    gate_up <- NN.linear@w1 x_sel dim=(2 * FFN) bias=false transpose=false expert=e weight_path=@input_linear.weight
-    gate, up <- Tensor.chunk gate_up parts=2
-    x_upd <- gate |> silu |> mul up |> NN.linear@w2 dim=D bias=false transpose=false expert=e weight_path=@output_linear.weight
-    routed <- scatter_add routed token_idx x_upd sel_scores
-    yield routed
-  return routed
+  x_sel <- Tensor.unsqueeze hidden 2 |> Tensor.expand shape=[B, S, EPT, D]
+  scale <- Tensor.unsqueeze topk_scores -1
+  gate_up <- NN.expert_linear@w1 x_sel topk_indices dim=(2 * FFN) bias=false transpose=false weight_path=@input_linear.weight
+  gate, up <- Tensor.chunk gate_up parts=2
+  x_upd <- gate |> silu |> mul up |> NN.expert_linear@w2 topk_indices dim=D bias=false transpose=false weight_path=@output_linear.weight
+  x_weighted <- x_upd * scale
+  return Tensor.sum x_weighted dim=2 keepdim=false
 
 granitemoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
 granitemoe_block x pos_ids attn_mask past_kv = do

@@ -18,6 +18,8 @@ def graph_ir_strong_roundtrip_path(
     output_dir: Path,
     *,
     main_module: str | None = None,
+    optimize_ast: bool = False,
+    optimize_graph: bool = False,
     validate_typed: bool = True,
     show_types: bool = True,
     show_inferred_expression_types: bool = False,
@@ -25,6 +27,8 @@ def graph_ir_strong_roundtrip_path(
     first = _full_graph_render(
         path,
         main_module=main_module,
+        optimize_ast=optimize_ast,
+        optimize_graph=optimize_graph,
         validate=validate_typed,
         show_types=show_types,
         show_inferred_expression_types=show_inferred_expression_types,
@@ -34,6 +38,8 @@ def graph_ir_strong_roundtrip_path(
     second = _full_graph_render(
         first_path,
         main_module=main_module,
+        optimize_ast=optimize_ast,
+        optimize_graph=optimize_graph,
         validate=validate_typed,
         show_types=show_types,
         show_inferred_expression_types=show_inferred_expression_types,
@@ -43,6 +49,8 @@ def graph_ir_strong_roundtrip_path(
     third = _full_graph_render(
         second_path,
         main_module=main_module,
+        optimize_ast=optimize_ast,
+        optimize_graph=optimize_graph,
         validate=validate_typed,
         show_types=show_types,
         show_inferred_expression_types=show_inferred_expression_types,
@@ -57,6 +65,8 @@ def run_graph_ir_strong_roundtrip(
     *,
     main_module: str | None = None,
     output_dir: Path = Path("tmp/axon-stage-roundtrip-graph-ir-strong"),
+    optimize_ast: bool = False,
+    optimize_graph: bool = False,
     keep_existing: bool = False,
     include_stale_cache: bool = False,
     validate_typed: bool = True,
@@ -73,6 +83,8 @@ def run_graph_ir_strong_roundtrip(
             path,
             out,
             main_module=main_module,
+            optimize_ast=optimize_ast,
+            optimize_graph=optimize_graph,
             validate_typed=validate_typed,
             show_types=show_types,
             show_inferred_expression_types=show_inferred_expression_types,
@@ -87,6 +99,8 @@ def main() -> int:
     parser.add_argument("paths", nargs="*", type=Path, help="Axon files or directories.")
     parser.add_argument("--main-module")
     parser.add_argument("--output-dir", type=Path, default=Path("tmp/axon-stage-roundtrip-graph-ir-strong"))
+    parser.add_argument("--optimize-ast", action="store_true")
+    parser.add_argument("--optimize-graph", action="store_true")
     parser.add_argument("--keep-existing", action="store_true")
     parser.add_argument("--include-stale-cache", action="store_true")
     parser.add_argument("--no-validate-typed", action="store_true")
@@ -100,6 +114,8 @@ def main() -> int:
         args.paths,
         main_module=args.main_module,
         output_dir=args.output_dir,
+        optimize_ast=args.optimize_ast,
+        optimize_graph=args.optimize_graph,
         keep_existing=args.keep_existing,
         include_stale_cache=args.include_stale_cache,
         validate_typed=not args.no_validate_typed,

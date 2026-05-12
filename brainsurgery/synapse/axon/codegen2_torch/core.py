@@ -737,6 +737,16 @@ class Codegen2GraphModel(nn.Module):
         value = self._state.get(path)
         return value if torch.is_tensor(value) else None
 
+    @classmethod
+    def _move_to(cls, value: Any, device: torch.device | str) -> Any:
+        if torch.is_tensor(value):
+            return value.to(device=device)
+        if isinstance(value, tuple):
+            return tuple(cls._move_to(item, device) for item in value)
+        if isinstance(value, list):
+            return [cls._move_to(item, device) for item in value]
+        return value
+
     @staticmethod
     def _dtype_from_name(value: Any) -> torch.dtype:
         if value is None:
@@ -837,6 +847,42 @@ class Codegen2GraphModel(nn.Module):
                 out(torch.matmul(x, weight_run) + (bias_run if bias_run is not None else 0))
             else:
                 out(F.linear(x, weight_run, bias_run))
+            return True
+
+        if primitive == "expert_linear":
+            if len(args) < 3:
+                raise ValueError("expert_linear expects path, input, and expert indices")
+            base = args[0]
+            x = args[1]
+            expert_idx = args[2]
+            bias_flag = bool(args[4]) if len(args) > 4 and not self._is_null(args[4]) else False
+            transpose = bool(args[5]) if len(args) > 5 and not self._is_null(args[5]) else False
+            weight_leaf = args[6] if len(args) > 6 and not self._is_null(args[6]) else "@weight"
+            bias_leaf = args[7] if len(args) > 7 and not self._is_null(args[7]) else "@bias"
+            weight = self._required_param(self._compose_path(base, weight_leaf), field="expert_linear.weight")
+            x = self._move_to(x, weight.device)
+            expert_idx = self._move_to(expert_idx, weight.device).long()
+            selected_weight = weight[expert_idx]
+            bias = None
+            if bias_flag:
+                raw_bias = self._optional_param(self._compose_path(base, bias_leaf))
+                if raw_bias is not None:
+                    bias = self._move_to(raw_bias, weight.device)[expert_idx]
+            weight_run = (
+                selected_weight.to(dtype=x.dtype)
+                if x.is_floating_point() and selected_weight.is_floating_point() and x.dtype != selected_weight.dtype
+                else selected_weight
+            )
+            bias_run = (
+                bias.to(dtype=x.dtype)
+                if bias is not None and x.is_floating_point() and bias.is_floating_point() and x.dtype != bias.dtype
+                else bias
+            )
+            if transpose:
+                y = torch.matmul(x.unsqueeze(-2), weight_run).squeeze(-2)
+            else:
+                y = torch.matmul(x.unsqueeze(-2), weight_run.transpose(-1, -2)).squeeze(-2)
+            out(y + bias_run if bias_run is not None else y)
             return True
 
         if primitive == "layernorm":
@@ -1363,13 +1409,24 @@ class _DirectTorchEmitter:
         add(lines, 4, "def __init__(self, state_dict: dict[str, torch.Tensor], config: dict | None = None, param_devices=None):")
         add(lines, 8, "super().__init__()")
         add(lines, 8, "self.param_devices = self._normalize_param_devices(param_devices)")
-        add(lines, 8, "self.state_dict_tensors = self._place_state_dict(dict(state_dict), self.param_devices)")
+        add(lines, 8, "self.state_dict_tensors = {}")
         add(lines, 8, "self.config = dict(({} if _MODEL_CONFIG is None else _MODEL_CONFIG) if config is None else config)")
         add(lines, 8, "self._symbols = self._eval_symbols()")
+        add(lines, 8, "self.load_state_dict(state_dict)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None, param_devices=None):")
         add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config, param_devices=param_devices)")
+        add(lines, 4, "")
+        add(lines, 4, "def load_state_dict(self, state_dict, strict=True):")
+        add(lines, 8, "del strict")
+        add(lines, 8, "self.state_dict_tensors = self._place_state_dict(dict(state_dict), self.param_devices)")
+        add(lines, 8, "self.setup()")
+        add(lines, 8, "return self")
+        add(lines, 4, "")
+        add(lines, 4, "def setup(self):")
+        add(lines, 8, "self._materialize_expert_banks()")
+        add(lines, 8, "return None")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _normalize_param_devices(param_devices):")
@@ -1479,6 +1536,27 @@ class _DirectTorchEmitter:
         add(lines, 4, "def _optional_param(self, path):")
         add(lines, 8, "return _common_optional_state_value(self.state_dict_tensors, path)")
         add(lines, 4, "")
+        add(lines, 4, "def _materialize_expert_banks(self):")
+        add(lines, 8, "groups = {}")
+        add(lines, 8, "for key, value in list(self.state_dict_tensors.items()):")
+        add(lines, 12, "parts = key.split('.')")
+        add(lines, 12, "for idx, part in enumerate(parts):")
+        add(lines, 16, "if part == 'experts' and idx + 2 < len(parts) and parts[idx + 1].isdigit():")
+        add(lines, 20, "expert = int(parts[idx + 1])")
+        add(lines, 20, "bank_key = '.'.join(parts[:idx + 1] + parts[idx + 2:])")
+        add(lines, 20, "groups.setdefault(bank_key, {})[expert] = value")
+        add(lines, 20, "break")
+        add(lines, 8, "for bank_key, items in groups.items():")
+        add(lines, 12, "if bank_key in self.state_dict_tensors or not items:")
+        add(lines, 16, "continue")
+        add(lines, 12, "ordered = [items[i] for i in range(len(items)) if i in items]")
+        add(lines, 12, "if len(ordered) != len(items):")
+        add(lines, 16, "continue")
+        add(lines, 12, "first_shape = ordered[0].shape")
+        add(lines, 12, "if any(tuple(t.shape) != tuple(first_shape) for t in ordered):")
+        add(lines, 16, "continue")
+        add(lines, 12, "self.state_dict_tensors[bank_key] = torch.stack(ordered, dim=0)")
+        add(lines, 4, "")
         add(lines, 4, "def _linear(self, base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
         add(lines, 8, "if expert is not None:")
@@ -1497,6 +1575,22 @@ class _DirectTorchEmitter:
         add(lines, 8, "if transpose:")
         add(lines, 12, "return torch.matmul(x, weight_run) + (bias_run if bias_run is not None else 0)")
         add(lines, 8, "return F.linear(x, weight_run, bias_run)")
+        add(lines, 4, "")
+        add(lines, 4, "def _expert_linear(self, base, x, expert_idx, bias=False, transpose=False, weight_leaf='weight', bias_leaf='bias'):")
+        add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
+        add(lines, 8, "x = self._move_to(x, weight.device)")
+        add(lines, 8, "expert_idx = self._move_to(expert_idx, weight.device).long()")
+        add(lines, 8, "selected_weight = weight[expert_idx]")
+        add(lines, 8, "bias_value = self._optional_param(self._compose_path(base, bias_leaf)) if bias else None")
+        add(lines, 8, "if bias_value is not None:")
+        add(lines, 12, "bias_value = self._move_to(bias_value, weight.device)[expert_idx]")
+        add(lines, 8, "weight_run = selected_weight.to(dtype=x.dtype) if x.is_floating_point() and selected_weight.is_floating_point() and x.dtype != selected_weight.dtype else selected_weight")
+        add(lines, 8, "bias_run = bias_value.to(dtype=x.dtype) if bias_value is not None and x.is_floating_point() and bias_value.is_floating_point() and x.dtype != bias_value.dtype else bias_value")
+        add(lines, 8, "if transpose:")
+        add(lines, 12, "y = torch.matmul(x.unsqueeze(-2), weight_run).squeeze(-2)")
+        add(lines, 8, "else:")
+        add(lines, 12, "y = torch.matmul(x.unsqueeze(-2), weight_run.transpose(-1, -2)).squeeze(-2)")
+        add(lines, 8, "return y + bias_run if bias_run is not None else y")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _gegelu(x, limit=None):")
@@ -1668,7 +1762,7 @@ class _DirectTorchEmitter:
     def _emit_forward(self, lines: list[str]) -> None:
         main = self.modules_by_name[self.program.main_module]
         add = self._add
-        add(lines, 4, "def forward(self, input_ids=None, **inputs):")
+        add(lines, 4, "def _forward(self, input_ids=None, **inputs):")
         args: list[str] = []
         first_input = main.inputs[0].name if main.inputs else None
         for value in main.inputs:
@@ -1699,6 +1793,9 @@ class _DirectTorchEmitter:
             add(lines, 8, "return result[0]")
         else:
             add(lines, 8, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
+        add(lines, 4, "")
+        add(lines, 4, "def forward(self, input_ids=None, **inputs):")
+        add(lines, 8, "return self._forward(input_ids, **inputs)")
 
     def _emit_generate(self, lines: list[str]) -> None:
         add = self._add
@@ -1784,7 +1881,7 @@ class _DirectTorchEmitter:
                 add(lines, 12, f"forward_kwargs[{use_cache_name!r}] = True")
             if attention_name is not None:
                 add(lines, 12, f"forward_kwargs[{attention_name!r}] = attention_mask")
-            add(lines, 12, "result = self.forward(step_input, **forward_kwargs)")
+            add(lines, 12, "result = self._forward(step_input, **forward_kwargs)")
             add(lines, 12, "logits = _logits(result)")
             add(lines, 12, "if isinstance(result, dict):")
             add(lines, 16, f"cache = result.get({cache_output_name!r}, cache)")
@@ -1812,7 +1909,7 @@ class _DirectTorchEmitter:
             add(lines, 12, "forward_kwargs = dict(kwargs)")
             if attention_name is not None:
                 add(lines, 12, f"forward_kwargs[{attention_name!r}] = attention_mask")
-            add(lines, 12, "result = self.forward(out, **forward_kwargs)")
+            add(lines, 12, "result = self._forward(out, **forward_kwargs)")
             add(lines, 12, "next_id = _next_id(_logits(result))")
             add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
             add(lines, 12, "out = self._move_to(out, next_id.device)")
@@ -1846,7 +1943,7 @@ class _DirectTorchEmitter:
             add(lines, 12, f"forward_kwargs[{attention_name!r}] = attention_mask")
         if decoder_attention_name is not None:
             add(lines, 12, f"forward_kwargs[{decoder_attention_name!r}] = decoder_attention_mask")
-        add(lines, 12, "result = self.forward(input_ids, **forward_kwargs)")
+        add(lines, 12, "result = self._forward(input_ids, **forward_kwargs)")
         add(lines, 12, "next_id = _next_id(_logits(result))")
         add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
         add(lines, 12, "decoder_input_ids = self._move_to(decoder_input_ids, next_id.device)")
@@ -1946,6 +2043,12 @@ class _DirectTorchEmitter:
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
             return f"self._linear({args[0]}, {args[1]}, bias=bool({bias}), transpose=bool({transpose}), expert=({expert} if {expert} is not None else None), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
+        if primitive == "expert_linear":
+            bias = args[4] if len(args) > 4 else "False"
+            transpose = args[5] if len(args) > 5 else "False"
+            weight_leaf = args[6] if len(args) > 6 else "'weight'"
+            bias_leaf = args[7] if len(args) > 7 else "'bias'"
+            return f"self._expert_linear({args[0]}, {args[1]}, {args[2]}, bias=bool({bias}), transpose=bool({transpose}), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
         if primitive == "layernorm":
             eps = args[2] if len(args) > 2 else "1e-5"
             weight_leaf = args[4] if len(args) > 4 else "'weight'"

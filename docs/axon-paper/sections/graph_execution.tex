@@ -1,0 +1,48 @@
+\section{Graph Execution Backends}
+
+\paragraph{Input and output.}
+Execution backends consume Graph IR and a checkpoint state dictionary and
+produce model outputs.  The active backend family includes
+\code{codegen2-torch}, \code{runtime2-torch}, \code{pipeline2-torch}, and
+\code{codegen2-tinygrad}.
+
+\paragraph{Torch code generation.}
+\code{codegen2-torch} emits direct Python/PyTorch code.  It is the primary
+fidelity baseline for compiler-stage changes because it has the broadest
+operator coverage and the closest numerical behavior to the reference
+Transformers implementation.
+
+\paragraph{Runtime interpretation.}
+\code{runtime2-torch} interprets Graph IR without emitting a Python source
+module.  It is useful for debugging graph semantics and for separating graph
+correctness from code-emission bugs.
+
+\paragraph{Pipeline execution.}
+\code{pipeline2-torch} partitions Graph IR for multi-device execution.  Its
+contract is graph-based; it should not depend on old Synapse YAML artifacts or
+surface Axon scope constructs.
+
+\paragraph{Tinygrad code generation.}
+\code{codegen2-tinygrad} is a separate backend that targets tinygrad.  Backend
+fixes should be tinygrad-local unless they expose a generic Graph IR or Axon
+stage bug.  It must not weaken earlier validation contracts to make unsupported
+patterns run.
+
+\paragraph{Formal view.}
+An execution backend implements an interpretation function
+\[
+  \mathcal{E}_B(G,\theta,c,x) = y
+\]
+for backend \(B\), state dictionary \(\theta\), configuration \(c\), and model
+inputs \(x\).  Fidelity testing compares \(\mathcal{E}_B\) against
+the reference implementation for the same checkpoint.
+
+\paragraph{Example.}
+For a graph node representing
+\begin{verbatim}
+_linear @@w x weight_path=@weight bias_path=@bias
+\end{verbatim}
+the torch backend emits a call to a generated helper that reads
+\code{w.weight} and optional \code{w.bias} from the state dictionary and applies
+PyTorch linear algebra.  The tinygrad backend emits analogous tinygrad tensor
+operations but must preserve the same path lookup and transpose semantics.

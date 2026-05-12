@@ -4,7 +4,7 @@ import Activations (gelu_pytorch_tanh, tanh)
 import Attention (attention_scaled, merge_heads, reshape_heads)
 import Masking (causal_mask)
 import Math (mul, sqrt)
-import MoE (scatter_add, select, softmax_topk_router)
+import MoE (softmax_topk_router)
 import Params (has_root, param_scale)
 import Positions (position_ids, rope_pair_proportional)
 import Cache (CacheAny, CacheLayer)
@@ -65,17 +65,14 @@ gemma4_router x top_k ?scalar_root_size=null ?rms_eps=null = do
     return w, i
   return topk_weights, topk_indices
 
-gemma4_moe_experts :: Tensor[B,S,D] -> Tensor[B,S,K] -> Tensor[B,S,K] -> Int -> Tensor[B,S,D]
+gemma4_moe_experts :: Tensor[B,S,D] -> Tensor[B,S,K] -> IdxTensor[B,S,K] -> Int -> Tensor[B,S,D]
 gemma4_moe_experts hidden topk_weights topk_indices num_experts = do
-  routed <- Tensor.zeros_like hidden
-  routed <- for e <- [0..num_experts) carry (routed) do
-    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
-    gate_up <- NN.linear@experts x_sel dim=(2 * MOE_FFN) expert=e weight_path=@experts.gate_up_proj
-    gate, up <- Tensor.chunk gate_up parts=2
-    x_upd <- gate |> gelu_pytorch_tanh |> mul up |> NN.linear@experts dim=MODEL_DIM expert=e weight_path=@experts.down_proj
-    routed <- scatter_add routed token_idx x_upd sel_scores
-    yield routed
-  return routed
+  x_sel <- Tensor.unsqueeze hidden 2 |> Tensor.expand shape=[B, S, K, D]
+  scale <- Tensor.unsqueeze topk_weights -1
+  gate_up <- NN.expert_linear@experts x_sel topk_indices dim=(2 * MOE_FFN) weight_path=@experts.gate_up_proj
+  gate, up <- Tensor.chunk gate_up parts=2
+  x_upd <- gate |> gelu_pytorch_tanh |> mul up |> NN.expert_linear@experts topk_indices dim=MODEL_DIM weight_path=@experts.down_proj
+  return Tensor.sum (x_upd * scale) dim=2 keepdim=false
 
 gemma4_kv_shared :: Tensor[B,S,D] -> Dim -> Dim -> Dim -> (Tensor[B,kv_heads,S,hd], Tensor[B,kv_heads,S,hd])
 gemma4_kv_shared xn kv_dim kv_heads hd = do

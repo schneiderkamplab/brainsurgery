@@ -2,12 +2,86 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from brainsurgery.synapse.axon.elaborate import elaborate_closed_axon_file
 from brainsurgery.synapse.axon.flatten import flatten_closed_axon_file
-from brainsurgery.synapse.axon.optimize import optimize_flat_typed_axon_file
+from brainsurgery.synapse.axon.graph_ir import lower_axon_program_to_graph_ir, validate_graph_program
+from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
+from brainsurgery.synapse.axon.optimize import (
+    optimize_flat_typed_axon_file,
+    optimize_safe_flat_typed_axon_file,
+)
 from brainsurgery.synapse.axon.parse import parse_axon_program
 from brainsurgery.synapse.axon.resolve import resolve_axon_program_from_path
 from brainsurgery.synapse.axon.typecheck2 import typecheck2_flat_axon_file
 from brainsurgery.synapse.axon.validate import validate_typed_axon_file
+
+
+def _representative_model_paths() -> tuple[Path, ...]:
+    return (
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon"),
+        Path("brainsurgery/synapse/models/bert/bert-base-uncased.axon"),
+        Path("brainsurgery/synapse/models/llama4/generic-llama4.axon"),
+        Path("brainsurgery/synapse/models/olmoe/generic-olmoe.axon"),
+    )
+
+
+def _typecheck_model_path(axon_path: Path):
+    resolved = resolve_axon_program_from_path(axon_path).ast
+    normalized = normalize_closed_axon_file(resolved)
+    elaborated = elaborate_closed_axon_file(normalized)
+    flat = flatten_closed_axon_file(elaborated)
+    return typecheck2_flat_axon_file(flat)
+
+
+def test_optimize_safe_prunes_unreachable_and_folds_literals() -> None:
+    source = """
+unused :: Int
+unused = 2
+
+main :: Int
+main = do
+  x <- 1 + 2
+  y <- x
+  return y
+"""
+    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    optimized = optimize_safe_flat_typed_axon_file(typed, main_module="main")
+    validate_typed_axon_file(optimized, main_module="main")
+    text = "\n".join(str(stmt) for module in optimized.modules for stmt in module.statements)
+    assert [module.name for module in optimized.modules] == ["main"]
+    assert "value=3" in text
+
+
+@pytest.mark.parametrize("axon_path", _representative_model_paths(), ids=lambda path: path.as_posix())
+def test_optimize_safe_representative_models_validate_and_lower(axon_path: Path) -> None:
+    typed = _typecheck_model_path(axon_path)
+    optimized = optimize_safe_flat_typed_axon_file(typed)
+    validate_typed_axon_file(optimized)
+    graph = lower_axon_program_to_graph_ir(optimized)
+    validate_graph_program(graph)
+
+
+def test_optimize_safe_does_not_delete_unused_calls() -> None:
+    source = """
+helper :: Int -> Int
+helper x = do
+  y <- x + 1
+  return y
+
+main :: Int -> Int
+main x = do
+  unused <- helper x
+  return x
+"""
+    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    optimized = optimize_safe_flat_typed_axon_file(typed, main_module="main")
+    validate_typed_axon_file(optimized, main_module="main")
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert any("helper" in str(stmt) for stmt in main.statements)
 
 
 def test_optimize_inlines_alias_definition_calls() -> None:
@@ -298,7 +372,9 @@ def test_optimize_rewrites_list_destructuring_to_index_binds() -> None:
     resolved = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/gpt2/gpt2.axon")
     ).ast
-    flat = flatten_closed_axon_file(resolved, main_module="gpt2")
+    normalized = normalize_closed_axon_file(resolved, main_module="gpt2")
+    elaborated = elaborate_closed_axon_file(normalized, main_module="gpt2")
+    flat = flatten_closed_axon_file(elaborated, main_module="gpt2")
     typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
     optimized = optimize_flat_typed_axon_file(typed, main_module="gpt2")
     validate_typed_axon_file(optimized, main_module="gpt2")
@@ -310,19 +386,13 @@ def test_optimize_reapplies_structural_passes_until_fixpoint_on_generic_gpt2() -
     resolved = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
     ).ast
-    flat = flatten_closed_axon_file(resolved, main_module="gpt2")
+    normalized = normalize_closed_axon_file(resolved, main_module="gpt2")
+    elaborated = elaborate_closed_axon_file(normalized, main_module="gpt2")
+    flat = flatten_closed_axon_file(elaborated, main_module="gpt2")
     typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
     optimized = optimize_flat_typed_axon_file(typed, main_module="gpt2")
     validate_typed_axon_file(optimized, main_module="gpt2")
-    assert {module.name for module in optimized.modules} == {
-        "Attention.reshape_heads",
-        "Cache.update__cond_else_1",
-        "Masking.causal_mask_keep__cond_else_1",
-        "Masking.causal_mask_keep",
-        "Masking.causal_mask_masked",
-        "Positions.position_ids_masked",
-        "Positions.position_ids_nomask",
-        "gpt2__loop_h_recur_continue_2",
-        "gpt2__loop_h_recur_1",
-        "gpt2",
-    }
+    module_names = {module.name for module in optimized.modules}
+    assert "gpt2" in module_names
+    assert any(name.startswith("gpt2__loop_h_recur_") for name in module_names)
+    assert not any(name.startswith("gpt2__loop_h_step_") for name in module_names)

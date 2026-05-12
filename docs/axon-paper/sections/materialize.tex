@@ -1,0 +1,41 @@
+\section{Materialize}
+
+\paragraph{Input and output.}
+Materialization consumes a generic one-file Axon AST and checkpoint metadata.
+It emits a one-file Axon AST specialized enough to be inspected or used as a
+checkpoint-specific artifact.
+
+\paragraph{Contract.}
+The stage may resolve materialization-specific configuration expressions, but
+it must not become an optimizer.  It does not perform dead-code elimination,
+general constant folding, alias expansion, inlining, type inference, or
+backend-specific rewriting.
+
+\paragraph{Rationale.}
+Generic model files are the source of truth for model families.  Materialized
+files are useful for inspection and targeted debugging, but materialization
+must not silently repair or reinterpret the program in ways that diverge from
+the generic source.
+
+\paragraph{Formal view.}
+For generic AST \(A_f\) and checkpoint metadata \(C\), materialization is a
+source-to-source transformation
+\[
+  \mathsf{materialize}(A_f,C) = A_f'
+\]
+that may replace materialization-approved configuration expressions with
+checkpoint-specific values.  It must preserve the program's definition graph
+and must not depend on backend selection.
+
+\paragraph{Example.}
+A generic constant may be written as
+\begin{verbatim}
+MODEL_DIM = Config.int@@hidden_size default=768
+\end{verbatim}
+For a checkpoint whose configuration contains \verb|hidden_size = 1024|,
+materialization may emit
+\begin{verbatim}
+MODEL_DIM = 1024
+\end{verbatim}
+It should not also inline all uses of \verb|MODEL_DIM|, delete unused branches,
+or specialize unrelated functions.

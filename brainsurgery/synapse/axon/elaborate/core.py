@@ -50,6 +50,14 @@ def _path_slot_count(module: AxonDefinition) -> int:
     return len(module.path_params) + _leading_path_param_count(module)
 
 
+def _consumed_param_count(module: AxonDefinition, arg_count: int) -> int:
+    path_slots = _path_slot_count(module)
+    leading_path_params = _leading_path_param_count(module)
+    explicit_path_params = max(0, path_slots - leading_path_params)
+    positional_param_args = max(0, arg_count - explicit_path_params)
+    return min(len(module.params), positional_param_args)
+
+
 def _scoped_default_expr(
     expr: AxonExpr,
     *,
@@ -311,9 +319,8 @@ def _expr_has_defaults(expr: AxonExpr, *, modules_by_name: dict[str, AxonDefinit
     if isinstance(expr, AxonExprCall):
         module = modules_by_name.get(expr.callee)
         if module is not None:
-            path_slots = _path_slot_count(module)
             provided_params = set(expr.kwargs)
-            positional_params = max(0, len(expr.args) - path_slots)
+            positional_params = _consumed_param_count(module, len(expr.args))
             if positional_params < len(module.params):
                 for param in module.params[positional_params:]:
                     if param.name not in provided_params and (
@@ -481,8 +488,7 @@ def _elaborate_call(
     if module is None:
         return replace(expr, args=args, kwargs=kwargs)
 
-    path_slots = _path_slot_count(module)
-    positional_params = max(0, len(args) - path_slots)
+    positional_params = _consumed_param_count(module, len(args))
     default_base_path = _call_default_base_path(
         replace(expr, args=args, kwargs=kwargs),
         module=module,

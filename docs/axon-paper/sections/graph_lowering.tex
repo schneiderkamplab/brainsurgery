@@ -1,0 +1,49 @@
+\section{Graph IR Lowering}
+
+\paragraph{Input and output.}
+Graph lowering consumes a flat, closed, fully typed Axon AST and produces an
+in-memory typed Graph IR program.
+
+\paragraph{Contract.}
+The lowering stage translates Axon definitions to graph modules, bind
+statements to graph nodes, multi-output expressions to structured graph
+outputs, and path literals to structured graph paths.  It preserves operand
+types, output types, constraints, constants, and module boundaries needed by
+backends and later graph-level analysis.
+
+\paragraph{Exclusions.}
+Lowering does not accept surface constructs such as \code{scope}, \code{for},
+or statement-level \code{if}.  It also does not rewrite primitive calls into
+legacy string-based callee forms.
+
+\paragraph{Rationale.}
+Graph IR replaces the old serialized graph contract.  The compiler should pass
+typed structured objects to backends rather than relying on YAML-shaped
+dictionaries or render/parse cycles.
+
+\paragraph{Formal view.}
+Lowering is a homomorphism from typed flat modules to graph modules:
+\[
+  \mathsf{lower}: A_{\mathrm{flat}}^{\tau} \rightarrow G.
+\]
+Each flat definition becomes a graph module.  Each flat bind becomes one graph
+node with typed operands and typed outputs.  Calls to user definitions become
+module-call nodes; calls to primitive wrappers lower to primitive graph ops
+only when the source definition is itself a primitive wrapper.
+
+\paragraph{Example.}
+A typed flat bind
+\begin{verbatim}
+tok <- NN.embedding @@wte input_ids dim=MODEL_DIM
+\end{verbatim}
+lowers to a graph node whose op is the embedding primitive, whose first operand
+is a structured absolute path \code{@@wte}, and whose output type is the
+inferred tensor type, e.g. \verb|Tensor[B,S,MODEL_DIM]|.
+
+\paragraph{Multi-output nodes.}
+Graph IR preserves multi-output structure.  A flat destructuring bind such as
+\begin{verbatim}
+q, k, v <- Tensor.chunk qkv parts=3
+\end{verbatim}
+can lower to a single graph node with three outputs rather than a synthetic
+list plus three unrelated index operations.
