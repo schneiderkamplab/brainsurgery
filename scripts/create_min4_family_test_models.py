@@ -341,10 +341,23 @@ def _replace_packed_experts_with_real_checkpoint_keys(
 
 
 def _rewrite_test_checkpoint_keys(state_dict: dict[str, torch.Tensor], *, spec_name: str) -> None:
-    if spec_name not in {"Magistral-Test", "Mistral3-Test", "Mistral4-Test"}:
+    if spec_name not in {"GPT-OSS-Test", "Magistral-Test", "Mistral3-Test", "Mistral4-Test"}:
         return
     additions: dict[str, torch.Tensor] = {}
     removals: set[str] = set()
+    if spec_name == "GPT-OSS-Test":
+        suffix_map = {
+            ".mlp.experts.gate_up_proj": ".mlp.experts.gate_up_proj.weight",
+            ".mlp.experts.down_proj": ".mlp.experts.down_proj.weight",
+            ".mlp.experts.gate_up_proj_bias": ".mlp.experts.gate_up_proj.bias",
+            ".mlp.experts.down_proj_bias": ".mlp.experts.down_proj.bias",
+        }
+        for key, value in list(state_dict.items()):
+            for old_suffix, new_suffix in suffix_map.items():
+                if key.endswith(old_suffix):
+                    additions.setdefault(f"{key[: -len(old_suffix)]}{new_suffix}", value)
+                    removals.add(key)
+                    break
     if spec_name in {"Magistral-Test", "Mistral3-Test"}:
         old_prefix = "model.language_model."
         new_prefix = "language_model.model."
