@@ -1398,8 +1398,60 @@ def _safe_fold_statements(statements: tuple[AxonStatement, ...]) -> tuple[AxonSt
     return tuple(folded)
 
 
+def _is_generated_local_name(name: str) -> bool:
+    return name.startswith("__") or re.fullmatch(r"_v[0-9]+", name) is not None
+
+
+def _promote_return_alias_names(
+    statements: tuple[AxonStatement, ...],
+) -> tuple[AxonStatement, ...]:
+    counts: dict[str, int] = {}
+    _count_name_uses_stmts(statements, counts)
+    return_names = _return_position_names(statements)
+    bind_counts: dict[str, int] = {}
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            for target in stmt.targets:
+                bind_counts[target] = bind_counts.get(target, 0) + 1
+
+    rewritten: list[AxonStatement] = []
+    pending_by_target: dict[str, int] = {}
+    changed = False
+    for stmt in statements:
+        if isinstance(stmt, AxonBind) and len(stmt.targets) == 1:
+            target = stmt.targets[0]
+            expr = _unwrap_expr(stmt.expr)
+            if (
+                isinstance(expr, AxonExprName)
+                and target in return_names
+                and not _is_generated_local_name(target)
+                and _is_generated_local_name(expr.name)
+                and counts.get(target, 0) == 1
+                and counts.get(expr.name, 0) == 1
+                and bind_counts.get(target, 0) == 1
+                and bind_counts.get(expr.name, 0) == 1
+                and expr.name in pending_by_target
+            ):
+                producer_idx = pending_by_target.pop(expr.name)
+                producer = rewritten[producer_idx]
+                if isinstance(producer, AxonBind) and target not in _expr_names(producer.expr):
+                    rewritten[producer_idx] = replace(producer, targets=(target,))
+                    changed = True
+                    continue
+        rewritten.append(stmt)
+        if isinstance(stmt, AxonBind) and len(stmt.targets) == 1 and stmt.targets[0] != "_":
+            pending_by_target[stmt.targets[0]] = len(rewritten) - 1
+    return tuple(rewritten) if changed else statements
+
+
 def _optimize_safe_statements(statements: tuple[AxonStatement, ...]) -> tuple[AxonStatement, ...]:
-    return _inline_atomic_alias_statements(_safe_fold_statements(statements))
+    folded = _safe_fold_statements(statements)
+    promoted = _promote_return_alias_names(folded)
+    return _inline_atomic_alias_statements(promoted)
+
+
+def _optimize_safe_module(module: AxonDefinition) -> AxonDefinition:
+    return replace(module, statements=_optimize_safe_statements(module.statements))
 
 
 def _module_alias_expr(module: AxonDefinition) -> AxonExpr | None:
@@ -3820,7 +3872,7 @@ def optimize_safe_flat_typed_axon_file(
     program: AxonFile,
     *,
     main_module: str | None = None,
-    max_iterations: int = 8,
+    max_iterations: int = 64,
 ) -> AxonFile:
     """Run only conservative pre-Graph-IR optimizations on flat typed Axon."""
 
@@ -3833,7 +3885,7 @@ def optimize_safe_flat_typed_axon_file(
         rewritten = replace(
             current,
             modules=tuple(
-                replace(module, statements=_optimize_safe_statements(module.statements))
+                _optimize_safe_module(module)
                 for module in current.modules
             ),
         )
@@ -3844,8 +3896,10 @@ def optimize_safe_flat_typed_axon_file(
         if ast_equal(current, retyped):
             return retyped
         current = retyped
-    validate_typed_axon_file(current, main_module=selected_main)
-    return current
+    raise RuntimeError(
+        "safe Axon optimization failed to converge within "
+        f"{max_iterations} iterations for main module {selected_main!r}"
+    )
 
 
 def normalize_backend_required_flat_typed_axon_file(

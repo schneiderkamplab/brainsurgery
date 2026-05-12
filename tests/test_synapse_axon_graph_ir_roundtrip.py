@@ -38,6 +38,36 @@ def test_graph_ir_strong_roundtrip_is_canonical(axon_path: Path, tmp_path: Path)
     )
 
 
+@pytest.mark.parametrize("axon_path", _graph_ir_roundtrip_paths(), ids=lambda path: path.as_posix())
+def test_ast_optimized_graph_ir_weak_roundtrip_is_canonical(
+    axon_path: Path, tmp_path: Path
+) -> None:
+    assert graph_ir_weak_roundtrip_path(
+        axon_path,
+        tmp_path / "weak-opt-ast",
+        optimize_ast=True,
+        optimize_graph=False,
+    ), (
+        f"AST-optimized Graph IR weak roundtrip changed rendered output for {axon_path}; "
+        f"artifacts: {tmp_path}"
+    )
+
+
+@pytest.mark.parametrize("axon_path", _graph_ir_roundtrip_paths(), ids=lambda path: path.as_posix())
+def test_ast_optimized_graph_ir_strong_roundtrip_is_canonical(
+    axon_path: Path, tmp_path: Path
+) -> None:
+    assert graph_ir_strong_roundtrip_path(
+        axon_path,
+        tmp_path / "strong-opt-ast",
+        optimize_ast=True,
+        optimize_graph=False,
+    ), (
+        f"AST-optimized Graph IR strong roundtrip changed rendered output for {axon_path}; "
+        f"artifacts: {tmp_path}"
+    )
+
+
 @pytest.mark.parametrize("axon_path", _graph_optimize_roundtrip_paths(), ids=lambda path: path.as_posix())
 def test_graph_optimize_weak_roundtrip_is_canonical(axon_path: Path, tmp_path: Path) -> None:
     assert graph_ir_weak_roundtrip_path(axon_path, tmp_path / "weak-opt", optimize_graph=True), (

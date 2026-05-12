@@ -55,6 +55,27 @@ main = do
     assert "value=3" in text
 
 
+def test_optimize_safe_promotes_generated_return_alias_to_public_name() -> None:
+    source = """
+main :: Bool -> (Int, Int)
+main flag = do
+  __flat_1 <- flag ? 1 : 2
+  logits <- __flat_1
+  return logits, 0
+"""
+    flat = flatten_closed_axon_file(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    optimized = optimize_safe_flat_typed_axon_file(typed, main_module="main")
+    validate_typed_axon_file(optimized, main_module="main")
+    main = next(module for module in optimized.modules if module.name == "main")
+    text = "\n".join(str(stmt) for stmt in main.statements)
+    assert "targets=('logits',)" in text
+    assert "targets=('__flat_1',)" not in text
+    graph = lower_axon_program_to_graph_ir(optimized, main_module="main")
+    graph_main = next(module for module in graph.modules if module.name == graph.main_module)
+    assert graph_main.outputs[0].name == "logits"
+
+
 @pytest.mark.parametrize("axon_path", _representative_model_paths(), ids=lambda path: path.as_posix())
 def test_optimize_safe_representative_models_validate_and_lower(axon_path: Path) -> None:
     typed = _typecheck_model_path(axon_path)
