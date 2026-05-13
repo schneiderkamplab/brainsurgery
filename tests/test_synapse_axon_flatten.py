@@ -254,8 +254,9 @@ main x = use@proj x
     assert isinstance(call_expr, AxonExprCall)
     assert call_expr.callee == "use"
     assert call_expr.args[0] == AxonExprPath(absolute=True, parts=("proj",))
-    assert "flag" in call_expr.kwargs
-    assert "limit" in call_expr.kwargs
+    assert call_expr.kwargs == {}
+    assert call_expr.args[2] == AxonExprBool(value=False)
+    assert call_expr.args[3] == AxonExprNull()
 
 
 def test_flatten_tail_recurses_repeat_without_step_helper() -> None:
@@ -364,7 +365,7 @@ wrap@__scope x = do
     validate_flat_axon_file(flat, main_module="wrap")
     rendered = render_axon_file(flat)
     assert "scale x" in rendered
-    assert "scale_path=@@'{__scope}.layer_scalar'" in rendered
+    assert "scale x @@'{__scope}.layer_scalar'" in rendered
 
 
 def test_flatten_preserves_forwarded_path_kwarg_for_synthesized_scope_args() -> None:
@@ -381,7 +382,7 @@ norm@path x ?scale_path=@weight = do
     flat = _flatten(program, main_module="norm")
     validate_flat_axon_file(flat, main_module="norm")
     rendered = render_axon_file(flat)
-    assert "scale x scale_path=scale_path" in rendered
+    assert "scale x scale_path" in rendered
     assert "scale_path=@@'{path}.layer_scalar'" not in rendered
 
 
@@ -442,5 +443,6 @@ A = _config_int (@@text_config.hidden_size) default=(_config_int (@@hidden_size)
     assert isinstance(default_bind.expr, AxonExprCall)
     const_expr = bind_stmt.expr
     assert isinstance(const_expr, AxonExprCall)
-    default_expr = const_expr.kwargs["default"]
+    assert const_expr.kwargs == {}
+    default_expr = const_expr.args[1]
     assert default_expr == AxonExprName(default_bind.targets[0])

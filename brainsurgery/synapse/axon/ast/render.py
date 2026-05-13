@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..analysis import infer_axon_definition_effects
 from .nodes import (
     AxonBind,
     AxonCond,
@@ -459,7 +460,13 @@ def _render_expr_lines(
     return [render_axon_expr(expr, bound_names=bound_names, show_types=show_types, show_inferred_expr_types=show_inferred_expr_types)]
 
 
-def render_axon_module(module: AxonDefinition, *, show_types: bool = False, show_inferred_expr_types: bool | None = None) -> str:
+def render_axon_module(
+    module: AxonDefinition,
+    *,
+    show_types: bool = False,
+    show_inferred_expr_types: bool | None = None,
+    purity_comment: str | None = None,
+) -> str:
     path_params = list(module.path_params)
     if module.path_param and module.path_param not in path_params:
         path_params.append(module.path_param)
@@ -499,13 +506,21 @@ def render_axon_module(module: AxonDefinition, *, show_types: bool = False, show
         or any(param.type_expr is not None for param in module.params)
         or bool(path_params)
     )
-    if not has_signature:
-        return "\n".join(body_lines)
-    return "\n".join([f"{module.name} :: {signature}", *body_lines])
+    lines = body_lines if not has_signature else [f"{module.name} :: {signature}", *body_lines]
+    if purity_comment is not None:
+        lines = [f"-- purity: {purity_comment}", *lines]
+    return "\n".join(lines)
 
 
-def render_axon_file(ast: AxonFile, *, show_types: bool = False, show_inferred_expr_types: bool | None = None) -> str:
+def render_axon_file(
+    ast: AxonFile,
+    *,
+    show_types: bool = False,
+    show_inferred_expr_types: bool | None = None,
+    show_purity: bool = False,
+) -> str:
     blocks: list[str] = []
+    purity = infer_axon_definition_effects(ast.modules) if show_purity else {}
     for key, value in ast.pragmas.items():
         name = key.upper()
         for occurrence in _iter_pragma_values(value):
@@ -521,7 +536,15 @@ def render_axon_file(ast: AxonFile, *, show_types: bool = False, show_inferred_e
     for name, alias_def in _collect_file_type_aliases(ast).items():
         params = f"[{', '.join(alias_def.params)}]" if alias_def.params else ""
         blocks.append(f"type {name}{params} = {render_type(alias_def.value)}")
-    blocks.extend(render_axon_module(module, show_types=show_types, show_inferred_expr_types=show_inferred_expr_types) for module in ast.modules)
+    blocks.extend(
+        render_axon_module(
+            module,
+            show_types=show_types,
+            show_inferred_expr_types=show_inferred_expr_types,
+            purity_comment=purity[module.name].value if show_purity else None,
+        )
+        for module in ast.modules
+    )
     return "\n\n".join(blocks) + "\n"
 
 

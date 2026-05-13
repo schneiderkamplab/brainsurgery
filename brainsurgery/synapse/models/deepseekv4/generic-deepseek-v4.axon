@@ -187,39 +187,40 @@ deepseek_v4_hca_compress@path hidden_states layer_type = do
 
 deepseek_v4_csa_compress :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,Q_LORA_RANK] -> Tensor[B,S] -> String -> Tensor[B,1,T,HEAD_DIM]
 deepseek_v4_csa_compress@path hidden_states q_res pos_ids layer_type = do
-  kv <- NN.linear@kv_proj hidden_states dim=(2 * HEAD_DIM) bias=false
-  gate <- NN.linear@gate_proj hidden_states dim=(2 * HEAD_DIM) bias=false
   nwin <- floor (S / 4)
-  usable <- nwin * 4
-  kv <- Tensor.slice kv dim=1 start=0 end=usable
-  gate <- Tensor.slice gate dim=1 start=0 end=usable
-  kv <- Tensor.reshape kv shape=[B, nwin, 4, (2 * HEAD_DIM)]
-  gate <- Tensor.reshape gate shape=[B, nwin, 4, (2 * HEAD_DIM)]
-  pb <- param @position_bias |> Tensor.reshape shape=[1, 1, 4, (2 * HEAD_DIM)]
-  gate <- gate + pb
-  cur_kv <- Tensor.slice kv dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM)
-  cur_gate <- Tensor.slice gate dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM)
-  prev_kv <- Tensor.slice kv dim=-1 start=0 end=HEAD_DIM
-  prev_gate <- Tensor.slice gate dim=-1 start=0 end=HEAD_DIM
-  zero_kv <- Tensor.zeros cur_kv shape=[B, 1, 4, HEAD_DIM]
-  neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, HEAD_DIM] value=(Tensor.dtype_value cur_gate "min")
-  prev_kv_shift <- (nwin == 0) ? zero_kv : Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
-  prev_gate_shift <- (nwin == 0) ? neg_gate : Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
-  new_kv <- Tensor.concat prev_kv_shift cur_kv dim=2
-  new_gate <- Tensor.concat prev_gate_shift cur_gate dim=2
-  weights <- Tensor.softmax new_gate dim=2 dtype="float32"
-  compressed <- Tensor.sum (new_kv * weights) dim=2 keepdim=false
-  compressed <- NN.rmsnorm@kv_norm compressed eps=EPS dim=HEAD_DIM cast_float=true
-  pos <- Tensor.arange compressed start=0 end=nwin |> Tensor.reshape shape=[1, nwin] |> Tensor.expand shape=[B, nwin]
-  pos <- pos * 4
-  compressed <- Tensor.reshape compressed shape=[B, 1, nwin, HEAD_DIM]
-  compressed <- rope_apply_trailing compressed pos COMPRESS_THETA (HEAD_DIM * PARTIAL_ROPE) interleaved=true
-  topk, k_eff <- deepseek_v4_csa_index@indexer hidden_states q_res pos_ids
-  expanded <- Tensor.unsqueeze compressed dim=2 |> Tensor.expand shape=[B, 1, S, nwin, HEAD_DIM]
-  idx <- Tensor.unsqueeze topk dim=1 |> Tensor.unsqueeze dim=-1 |> Tensor.expand shape=[B, 1, S, k_eff, HEAD_DIM]
-  selected <- Tensor.gather expanded idx dim=3
-  selected <- Tensor.reshape selected shape=[B, 1, (S * k_eff), HEAD_DIM]
-  return (layer_type == "compressed_sparse_attention") ? selected : (Tensor.slice selected dim=2 start=0 end=0)
+  return (nwin == 0) ? (Tensor.zeros hidden_states shape=[B, 1, 0, HEAD_DIM]) : do
+    kv <- NN.linear@kv_proj hidden_states dim=(2 * HEAD_DIM) bias=false
+    gate <- NN.linear@gate_proj hidden_states dim=(2 * HEAD_DIM) bias=false
+    usable <- nwin * 4
+    kv <- Tensor.slice kv dim=1 start=0 end=usable
+    gate <- Tensor.slice gate dim=1 start=0 end=usable
+    kv <- Tensor.reshape kv shape=[B, nwin, 4, (2 * HEAD_DIM)]
+    gate <- Tensor.reshape gate shape=[B, nwin, 4, (2 * HEAD_DIM)]
+    pb <- param @position_bias |> Tensor.reshape shape=[1, 1, 4, (2 * HEAD_DIM)]
+    gate <- gate + pb
+    cur_kv <- Tensor.slice kv dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM)
+    cur_gate <- Tensor.slice gate dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM)
+    prev_kv <- Tensor.slice kv dim=-1 start=0 end=HEAD_DIM
+    prev_gate <- Tensor.slice gate dim=-1 start=0 end=HEAD_DIM
+    zero_kv <- Tensor.zeros cur_kv shape=[B, 1, 4, HEAD_DIM]
+    neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, HEAD_DIM] value=(Tensor.dtype_value cur_gate "min")
+    prev_kv_shift <- Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
+    prev_gate_shift <- Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
+    new_kv <- Tensor.concat prev_kv_shift cur_kv dim=2
+    new_gate <- Tensor.concat prev_gate_shift cur_gate dim=2
+    weights <- Tensor.softmax new_gate dim=2 dtype="float32"
+    compressed <- Tensor.sum (new_kv * weights) dim=2 keepdim=false
+    compressed <- NN.rmsnorm@kv_norm compressed eps=EPS dim=HEAD_DIM cast_float=true
+    pos <- Tensor.arange compressed start=0 end=nwin |> Tensor.reshape shape=[1, nwin] |> Tensor.expand shape=[B, nwin]
+    pos <- pos * 4
+    compressed <- Tensor.reshape compressed shape=[B, 1, nwin, HEAD_DIM]
+    compressed <- rope_apply_trailing compressed pos COMPRESS_THETA (HEAD_DIM * PARTIAL_ROPE) interleaved=true
+    topk, k_eff <- deepseek_v4_csa_index@indexer hidden_states q_res pos_ids
+    expanded <- Tensor.unsqueeze compressed dim=2 |> Tensor.expand shape=[B, 1, S, nwin, HEAD_DIM]
+    idx <- Tensor.unsqueeze topk dim=1 |> Tensor.unsqueeze dim=-1 |> Tensor.expand shape=[B, 1, S, k_eff, HEAD_DIM]
+    selected <- Tensor.gather expanded idx dim=3
+    selected <- Tensor.reshape selected shape=[B, 1, (S * k_eff), HEAD_DIM]
+    return (layer_type == "compressed_sparse_attention") ? selected : (Tensor.slice selected dim=2 start=0 end=0)
 
 deepseek_v4_csa_index :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,Q_LORA_RANK] -> Tensor[B,S] -> (Any, Dim)
 deepseek_v4_csa_index@path hidden_states q_res pos_ids = do

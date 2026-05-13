@@ -59,12 +59,14 @@ def _validate_expr_flat(
             raise ValueError(
                 f"Axon flat validation failed in module {module.name!r}: callee path sugar remains"
             )
+        if expr.kwargs:
+            raise ValueError(
+                f"Axon flat validation failed in module {module.name!r}: "
+                f"call to {expr.callee!r} still has kwargs"
+            )
         callee_module = modules_by_name.get(base_callee)
         for arg in expr.args:
             _validate_expr_flat(arg, module=module, modules_by_name=modules_by_name)
-        for value in expr.kwargs.values():
-            if isinstance(value, AxonExpr):
-                _validate_expr_flat(value, module=module, modules_by_name=modules_by_name)
         if callee_module is not None:
             path_slot_count = len(callee_module.path_params) + _leading_path_param_count(
                 callee_module

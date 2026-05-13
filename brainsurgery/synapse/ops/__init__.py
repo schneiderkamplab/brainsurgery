@@ -97,6 +97,49 @@ def get_op_lowering_type_signature(op_name: str) -> dict[str, Any] | None:
         return signature
     return None
 
+
+def get_op_parameter_names(op_name: str) -> tuple[str, ...] | None:
+    module = get_op_module(op_name)
+    if module is None:
+        return None
+    names_by_op = getattr(module, "LOWERING_PARAM_NAMES_BY_OP", None)
+    if isinstance(names_by_op, dict):
+        names = names_by_op.get(op_name)
+        if names is not None:
+            return tuple(names)
+    names = getattr(module, "LOWERING_PARAM_NAMES", None)
+    if names is not None:
+        return tuple(names)
+    signature = getattr(module, "LOWERING_TYPE_SIGNATURE", None)
+    if not isinstance(signature, dict):
+        return None
+    positional = tuple(f"arg{idx}" for idx, _ in enumerate(signature.get("args", ())))
+    named = tuple(signature.get("kwargs", {}).keys())
+    return positional + named
+
+
+def get_op_parameter_defaults(op_name: str) -> dict[str, Any]:
+    module = get_op_module(op_name)
+    if module is None:
+        return {}
+    defaults_by_op = getattr(module, "LOWERING_PARAM_DEFAULTS_BY_OP", None)
+    if isinstance(defaults_by_op, dict) and op_name in defaults_by_op:
+        defaults = defaults_by_op[op_name]
+        if not isinstance(defaults, dict):
+            raise RuntimeError(
+                f"Axon primitive op module {module.__name__!r} export "
+                "'LOWERING_PARAM_DEFAULTS_BY_OP' entries must be dicts"
+            )
+        return dict(defaults)
+    defaults = getattr(module, "LOWERING_PARAM_DEFAULTS", {})
+    if not isinstance(defaults, dict):
+        raise RuntimeError(
+            f"Axon primitive op module {module.__name__!r} export "
+            "'LOWERING_PARAM_DEFAULTS' must be a dict"
+        )
+    return dict(defaults)
+
+
 def get_op_type_rule(op_name: str) -> Any | None:
     module = get_op_module(op_name)
     if module is None:
@@ -111,5 +154,7 @@ __all__ = [
     "OP_MODULES",
     "get_op_module",
     "get_op_lowering_type_signature",
+    "get_op_parameter_defaults",
+    "get_op_parameter_names",
     "get_op_type_rule",
 ]

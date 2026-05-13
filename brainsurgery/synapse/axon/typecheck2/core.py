@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Any
 
-from ...ops import get_op_lowering_type_signature, get_op_type_rule
+from ...ops import get_op_lowering_type_signature, get_op_parameter_names, get_op_type_rule
 from ...ops._broadcast import broadcast_shape
 from ..ast import (
     AxonBind,
@@ -2125,6 +2125,11 @@ def _bind_call_args(
     caller_env: dict[str, TypeExpr],
     expr_defs: dict[str, AxonExpr],
 ) -> tuple[_CallBinding, list[AxonExpr], dict[str, AxonKwargValue]]:
+    if kwargs:
+        raise ValueError(
+            f"Axon typecheck2 failed: call to {module.name!r} still has kwargs; "
+            "run elaborate before flatten/typecheck2"
+        )
     typed_args: list[AxonExpr] = []
     typed_kwargs: dict[str, AxonKwargValue] = {}
     param_types: dict[str, TypeExpr] = {}
@@ -2165,12 +2170,6 @@ def _bind_call_args(
         if positional:
             actual_expr = positional.pop(0)
             actual_is_positional = True
-        else:
-            raw_kwarg = kwargs.get(param.name)
-            if isinstance(raw_kwarg, AxonExpr):
-                actual_expr = raw_kwarg
-            elif raw_kwarg is not None:
-                actual_expr = _scalar_to_expr(raw_kwarg)
         if actual_expr is None:
             raise ValueError(
                 f"Axon typecheck2 failed: missing argument {param.name!r} for {module.name}; "
@@ -2192,18 +2191,12 @@ def _bind_call_args(
                 ) from exc
             if actual_is_positional:
                 typed_args.append(typed_actual)
-            else:
-                typed_kwargs[param.name] = typed_actual
             bound_expr_defs[param.name] = _resolved_expr_def_deep(typed_actual, expr_defs)
             bind_fresh_dims_from_actual(param.name, typed_actual)
         param_types[param.name] = _apply_subst(bound_tp, state.ctx)
 
     if positional:
         raise ValueError(f"Axon typecheck2 failed: too many arguments for {module.name}")
-    for key, value in kwargs.items():
-        if key in {param.name for param in module.params}:
-            continue
-        typed_kwargs[key] = value
     dim_bindings: dict[str, DimToken] = {}
     for fresh_name, source_name in local_fresh_dim_sources.items():
         if source_name.startswith(".."):
@@ -2522,34 +2515,29 @@ def _tc_primitive_call(
     signature = get_op_lowering_type_signature(op_name)
     if signature is None:
         return None
-    arg_specs = signature.get("args")
-    if isinstance(arg_specs, tuple):
-        for idx, (arg_type, spec) in enumerate(zip(arg_types, arg_specs, strict=False)):
-            if isinstance(spec, str):
-                expected = _type_expr_from_spec(spec, ctx=state.ctx, module_name=f"_op::{op_name}")
-                if idx < len(typed_args) and _expr_contains_null_for_required_type(
-                    typed_args[idx], expected, expr_defs, state.ctx
-                ):
-                    raise ValueError(
-                        f"Axon typecheck2 failed: primitive {expr.callee} argument {idx} "
-                        f"requires {spec}, got null"
-                    )
-                _unify_tc2(arg_type, expected, state.ctx)
-    kwarg_specs = signature.get("kwargs")
-    if isinstance(kwarg_specs, dict):
-        for key, kwarg_type in kwarg_types.items():
-            spec = kwarg_specs.get(key)
-            if isinstance(spec, str):
-                expected = _type_expr_from_spec(spec, ctx=state.ctx, module_name=f"_op::{op_name}")
-                raw_kwarg = typed_kwargs.get(key)
-                if isinstance(raw_kwarg, AxonExpr) and _expr_contains_null_for_required_type(
-                    raw_kwarg, expected, expr_defs, state.ctx
-                ):
-                    raise ValueError(
-                        f"Axon typecheck2 failed: primitive {expr.callee} kwarg {key!r} "
-                        f"requires {spec}, got null"
-                    )
-                _unify_tc2(kwarg_type, expected, state.ctx)
+    if typed_kwargs:
+        raise ValueError(
+            f"Axon typecheck2 failed: primitive call {expr.callee!r} still has kwargs; "
+            "run elaborate before flatten/typecheck2"
+        )
+    positional_specs = tuple(signature.get("args", ())) + tuple(
+        signature.get("kwargs", {}).values()
+    )
+    param_names = get_op_parameter_names(op_name) or tuple(
+        f"arg{idx}" for idx, _ in enumerate(positional_specs)
+    )
+    for idx, (arg_type, spec) in enumerate(zip(arg_types, positional_specs, strict=False)):
+        if isinstance(spec, str):
+            expected = _type_expr_from_spec(spec, ctx=state.ctx, module_name=f"_op::{op_name}")
+            if idx < len(typed_args) and _expr_contains_null_for_required_type(
+                typed_args[idx], expected, expr_defs, state.ctx
+            ):
+                arg_name = param_names[idx] if idx < len(param_names) else str(idx)
+                raise ValueError(
+                    f"Axon typecheck2 failed: primitive {expr.callee} argument {arg_name!r} "
+                    f"requires {spec}, got null"
+                )
+            _unify_tc2(arg_type, expected, state.ctx)
     typed_call = AxonExprCall(callee=expr.callee, args=tuple(typed_args), kwargs=typed_kwargs)
     type_rule_args = tuple(_resolved_expr_def_deep(arg, expr_defs) for arg in typed_args)
     type_rule_kwargs = {
@@ -2756,6 +2744,11 @@ def _tc_expr(
             branch_result,
         ), branch_result
     if isinstance(expr, AxonExprCall):
+        if expr.kwargs:
+            raise ValueError(
+                f"Axon typecheck2 failed: call to {expr.callee!r} still has kwargs; "
+                "run elaborate before flatten/typecheck2"
+            )
         typed_args = []
         arg_types = []
         for arg in expr.args:
@@ -2764,13 +2757,6 @@ def _tc_expr(
             arg_types.append(tp)
         typed_kwargs: dict[str, AxonKwargValue] = {}
         kwarg_types: dict[str, TypeExpr] = {}
-        for key, value in expr.kwargs.items():
-            if isinstance(value, AxonExpr):
-                typed, tp = _tc_expr(state, value, env, expr_defs)
-                typed_kwargs[key] = typed
-                kwarg_types[key] = tp
-            else:
-                typed_kwargs[key] = value
         primitive = _tc_primitive_call(
             state, expr, typed_args, arg_types, typed_kwargs, kwarg_types, expr_defs
         )

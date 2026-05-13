@@ -49,11 +49,13 @@ main x = do
             "--optimize-ast",
             "--optimize-graph",
             "--show-types",
+            "--show-purity",
         ],
     )
 
     assert result.exit_code == 0, result.output
     text = output.read_text()
+    assert "-- purity: total_pure" in text
     assert "main :: Int -> Int" in text
     assert "return" in text
 
@@ -74,6 +76,7 @@ def test_synapse_stage_dump_uses_current_codegen2_stage_flags() -> None:
     assert "graph-ir-axon" in help_text
     assert "--optimize-ast" in help_text
     assert "--optimize-graph" in help_text
+    assert "--show-purity" in help_text
     assert "--canonicalize" not in help_text
     assert "--backend-required" not in help_text
     assert "--optimize-safe" not in help_text

@@ -38,7 +38,7 @@ from .core import (
     graph_type_compatible,
     validate_graph_program,
 )
-from .effects import GraphEffect, graph_op_effect, graph_operand_effect, infer_graph_module_effects
+from .effects import GraphEffect, graph_node_effect, graph_op_effect, graph_operand_effect, infer_graph_module_effects
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ def _is_safe_specialization_operand(operand: GraphOperand) -> bool:
     if isinstance(operand, GraphPath):
         return not _path_has_template(operand)
     if isinstance(operand, GraphLiteral):
-        return True
+        return operand.value is not None
     return False
 
 
@@ -76,6 +76,13 @@ def _is_total_pure_op(op_name: str, module_effects: Mapping[str, GraphEffect] | 
     if module_effects is not None and op_name in module_effects:
         return module_effects[op_name] == GraphEffect.TOTAL_PURE
     return graph_op_effect(op_name) == GraphEffect.TOTAL_PURE
+
+
+def _is_total_pure_node(
+    node: GraphNode,
+    module_effects: Mapping[str, GraphEffect] | None = None,
+) -> bool:
+    return graph_node_effect(node, module_effects=dict(module_effects or {})) == GraphEffect.TOTAL_PURE
 
 
 def _literal_like(value: object, type_like: GraphOperand | GraphNode | GraphExpr) -> GraphLiteral:
@@ -1146,8 +1153,8 @@ def _dead_temp_eliminate_module(
     kept_rev: list[GraphNode] = []
     for node in reversed(module.nodes):
         output_names = {value.name for value in node.outputs}
-        if output_names and not (output_names & live) and _is_total_pure_op(
-            node.op.name,
+        if output_names and not (output_names & live) and _is_total_pure_node(
+            node,
             module_effects,
         ):
             continue
@@ -1320,9 +1327,35 @@ def _can_specialize_module(module: GraphModule, *, recursive_modules: set[str], 
         return False
     if module.name in recursive_modules:
         return False
-    if module.constraints:
-        return False
     return True
+
+
+def _constraint_operand_ref_names(operand: ConstraintOperand) -> set[str]:
+    if isinstance(operand, tuple):
+        names: set[str] = set()
+        for item in operand:
+            names.update(_constraint_atom_ref_names(item))
+        return names
+    return _constraint_atom_ref_names(operand)
+
+
+def _constraint_atom_ref_names(atom: ConstraintAtom) -> set[str]:
+    if isinstance(atom, str):
+        return {atom}
+    if isinstance(atom, DimExprBinary):
+        return set(dim_token_names(atom))
+    return set()
+
+
+def _constraint_ref_names(constraint: Constraint) -> set[str]:
+    if constraint.relation == "callsite":
+        return set()
+    names = _constraint_operand_ref_names(constraint.left)
+    if constraint.right is not None:
+        names.update(_constraint_operand_ref_names(constraint.right))
+    for guard in constraint.guards:
+        names.update(_constraint_ref_names(guard))
+    return names
 
 
 def _specialized_module(
@@ -1342,9 +1375,26 @@ def _specialized_module(
             kept_inputs.append(formal)
     if not subst:
         return None
+    substituted_names = set(subst)
+    kept_constraints: list[Constraint] = []
+    for constraint in module.constraints:
+        refs = _constraint_ref_names(constraint)
+        if not refs:
+            kept_constraints.append(constraint)
+            continue
+        if refs <= substituted_names:
+            continue
+        return None
     nodes = tuple(_rewrite_node_operands(node, subst) for node in module.nodes)
     outputs = tuple(_replace_operand_refs(output, subst) for output in module.outputs)
-    return replace(module, name=name, inputs=tuple(kept_inputs), nodes=nodes, outputs=outputs)
+    return replace(
+        module,
+        name=name,
+        inputs=tuple(kept_inputs),
+        nodes=nodes,
+        outputs=outputs,
+        constraints=tuple(kept_constraints),
+    )
 
 
 def _rewrite_call_to_specialized(node: GraphNode, original: GraphModule, specialized_name: str) -> GraphNode:
@@ -1476,6 +1526,10 @@ def _is_atomic_constant_module(module: GraphModule) -> bool:
     )
 
 
+def _is_global_symbol_module(module: GraphModule) -> bool:
+    return not module.inputs and len(module.outputs) == 1
+
+
 def _can_inline_call_node(node: GraphNode, callee: GraphModule) -> bool:
     if len(node.inputs) != len(callee.inputs):
         return False
@@ -1540,6 +1594,7 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 counts[module.name] == 1
                 and top_level_counts[module.name] == 1
                 and not _is_atomic_constant_module(module)
+                and not _is_global_symbol_module(module)
             )
             or (
                 _is_atomic_constant_module(module)

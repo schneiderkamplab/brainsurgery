@@ -42,6 +42,8 @@ LOWERING_TYPE_SIGNATURE = {
     "kwargs": {'dim': 'int'},
     "returns": "dynamic",
 }
+LOWERING_PARAM_NAMES = ("x", "y", "dim")
+LOWERING_PARAM_DEFAULTS = {"dim": -1}
 
 
 def type_rule(
@@ -52,8 +54,8 @@ def type_rule(
     kwargs: dict[str, Any],
     helpers: Any,
 ) -> Any | None:
-    del kwarg_types, args
-    if len(arg_types) != 2:
+    del kwarg_types
+    if len(arg_types) not in {2, 3}:
         return None
     left_dims = helpers.type_dims(arg_types[0])
     right_dims = helpers.type_dims(arg_types[1])
@@ -72,7 +74,7 @@ def type_rule(
         if any(isinstance(dim, str) and dim.startswith("..") for dim in right_dims):
             return TypeTensor(base=output_base, dims=tuple(right_dims))
         return None
-    raw_dim = kwargs.get("dim", -1)
+    raw_dim = args[2] if len(args) > 2 else kwargs.get("dim", -1)
     while isinstance(raw_dim, AxonExprAscribe | AxonExprParen):
         raw_dim = raw_dim.expr if isinstance(raw_dim, AxonExprAscribe) else raw_dim.inner
     if isinstance(raw_dim, AxonExprInt):
@@ -109,5 +111,7 @@ def type_rule(
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "LOWERING_PARAM_DEFAULTS",
+    "LOWERING_PARAM_NAMES",
     "type_rule",
 ]

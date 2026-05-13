@@ -11,6 +11,7 @@ LOWERING_TYPE_SIGNATURE = {
     "kwargs": {'eps': 'number'},
     "returns": ("Tensor[..S]",),
 }
+LOWERING_PARAM_NAMES = ("x", "eps")
 
 
 def type_rule(
@@ -32,5 +33,6 @@ def type_rule(
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "LOWERING_PARAM_NAMES",
     "type_rule",
 ]

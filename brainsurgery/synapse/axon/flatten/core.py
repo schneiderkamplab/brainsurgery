@@ -50,7 +50,7 @@ from ..ast import (
     TypeVar,
     absolutize_path_expr,
 )
-from ..validate import validate_flat_axon_file, validate_normalized_axon_file
+from ..validate import validate_elaborated_axon_file, validate_flat_axon_file
 
 _ATOMIC_EXPR_TYPES = (
     AxonExprName,
@@ -2452,7 +2452,7 @@ def _flatten_module(
 
 
 def flatten_closed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
-    validate_normalized_axon_file(program, main_module=main_module)
+    validate_elaborated_axon_file(program, main_module=main_module)
     _ensure_elaborated_input(program)
     scoped_modules: frozenset[str] = frozenset()
     globals_by_name = {module.name for module in program.modules}

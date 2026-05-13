@@ -14,6 +14,8 @@ LOWERING_TYPE_SIGNATURE = {
     "kwargs": {'dim': 'int', 'parts': 'int'},
     "returns": "dynamic",
 }
+LOWERING_PARAM_NAMES = ("x", "dim", "parts")
+LOWERING_PARAM_DEFAULTS = {"dim": -1, "parts": None}
 
 
 def type_rule(
@@ -76,5 +78,7 @@ def _dim_div(left: Any, right: Any) -> Any:
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "LOWERING_PARAM_DEFAULTS",
+    "LOWERING_PARAM_NAMES",
     "type_rule",
 ]

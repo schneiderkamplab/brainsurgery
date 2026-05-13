@@ -33,6 +33,7 @@ from brainsurgery.synapse.axon.codegen2_tinygrad import (
     emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir,
     tinygrad_op_table_markdown,
 )
+from brainsurgery.synapse.axon.analysis import op_effect
 from brainsurgery.synapse.axon.graph_ir import (
     GraphLiteral,
     GraphExpr,
@@ -303,6 +304,70 @@ def test_graph_ir_effect_model_keeps_unknown_calls_partial() -> None:
     )
 
     assert graph_module_effect(module) == GraphEffect.PARTIAL_PURE
+
+
+def test_purity_effects_track_config_defaults_and_pure_primitives() -> None:
+    int_t = TypeInt()
+    assert op_effect("core.binary.+") == GraphEffect.TOTAL_PURE
+    assert op_effect("_add") == GraphEffect.TOTAL_PURE
+    assert op_effect("_config_dim") == GraphEffect.PARTIAL_PURE
+    assert (
+        op_effect("_config_dim", attrs={"default": GraphLiteral(1024, int_t)})
+        == GraphEffect.TOTAL_PURE
+    )
+    node = GraphNode(
+        id="n",
+        op=GraphOp("_config_dim"),
+        inputs=(GraphPath(True, ("n_layer",)), GraphLiteral(12, int_t)),
+        attrs={},
+        outputs=(GraphValue("x", int_t),),
+        source_module="main",
+        type_expr=int_t,
+    )
+    assert graph_module_effect(
+        GraphModule(
+            name="main",
+            inputs=(),
+            outputs=(GraphValueRef("x", int_t),),
+            output_names=("out",),
+            nodes=(node,),
+            return_type_expr=int_t,
+        )
+    ) == GraphEffect.TOTAL_PURE
+
+
+def test_render_axon_file_can_annotate_definition_purity() -> None:
+    program = parse_axon_program(
+        """
+pure_total :: Int
+pure_total = 1 + (_config_dim @@n_positions default=1024)
+
+pure_partial :: Tensor[..S]
+pure_partial = _params_param @@wte.weight
+"""
+    )
+
+    text = render_axon_file(program, show_purity=True)
+
+    assert "-- purity: total_pure\npure_total :: Int" in text
+    assert "-- purity: partial_pure\npure_partial :: Tensor[..S]" in text
+
+
+def test_callsite_default_makes_config_wrapper_total_pure() -> None:
+    program = parse_axon_program(
+        """
+Config.dim :: Path -> ?Dim -> Dim
+Config.dim key ?default=null = _config_dim key default
+
+NUM_LAYERS :: Dim
+NUM_LAYERS = Config.dim @@n_layer default=12
+"""
+    )
+
+    text = render_axon_file(program, show_purity=True)
+
+    assert "-- purity: partial_pure\nConfig.dim :: Path -> ?Dim -> Dim" in text
+    assert "-- purity: total_pure\nNUM_LAYERS :: Dim" in text
 
 
 def test_graph_ir_optimizer_does_not_fold_select_to_partial_expression() -> None:
@@ -579,6 +644,55 @@ def test_graph_ir_optimizer_does_not_inline_atomic_constant_by_default() -> None
     assert {module.name for module in optimized.modules} == {"VOCAB_SIZE", "main"}
     optimized_main = next(module for module in optimized.modules if module.name == "main")
     assert optimized_main.nodes[0].op.name == "VOCAB_SIZE"
+
+
+def test_graph_ir_optimizer_does_not_inline_total_pure_zero_arg_global() -> None:
+    dim_t = TypeDim()
+    const = GraphModule(
+        name="CONTEXT_SIZE",
+        inputs=(),
+        outputs=(GraphValueRef("value", dim_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="CONTEXT_SIZE:1",
+                op=GraphOp("_config_dim"),
+                inputs=(GraphPath(True, ("n_positions",)), GraphLiteral(1024, dim_t)),
+                attrs={},
+                outputs=(GraphValue("value", dim_t),),
+                source_module="CONTEXT_SIZE",
+                type_expr=dim_t,
+            ),
+        ),
+        return_type_expr=dim_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(),
+        outputs=(GraphValueRef("ctx", dim_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("CONTEXT_SIZE"),
+                inputs=(),
+                attrs={},
+                outputs=(GraphValue("ctx", dim_t),),
+                source_module="main",
+                type_expr=dim_t,
+            ),
+        ),
+        return_type_expr=dim_t,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(const, main), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(specialize_definitions="off"),
+    )
+
+    assert {module.name for module in optimized.modules} == {"CONTEXT_SIZE", "main"}
+    optimized_main = next(module for module in optimized.modules if module.name == "main")
+    assert [node.op.name for node in optimized_main.nodes] == ["CONTEXT_SIZE"]
 
 
 def test_graph_ir_optimizer_constant_dim_substitution_requires_local_constraint() -> None:

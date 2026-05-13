@@ -10,8 +10,10 @@ LOWERING_TYPE_SIGNATURE = {
     "kwargs": {"cond": "Bool"},
     "returns": "dynamic",
 }
+LOWERING_PARAM_NAMES = ("cond",)
 
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "LOWERING_PARAM_NAMES",
 ]

@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from typing import Mapping
 
+from ..analysis import PurityEffect, axon_expr_effect
 from ..ast import (
     AxonBind,
     AxonCond,
@@ -1654,26 +1655,12 @@ def _rewrite_expr(
     return expr
 
 
-def _is_pure_expr(expr: AxonExpr) -> bool:
-    if _is_atomic_expr(expr):
-        return True
-    if isinstance(expr, AxonExprAscribe):
-        return _is_pure_expr(expr.expr)
-    if isinstance(expr, AxonExprList | AxonExprTuple):
-        return all(_is_pure_expr(item) for item in expr.items)
-    if isinstance(expr, AxonExprBinary):
-        return _is_pure_expr(expr.left) and _is_pure_expr(expr.right)
-    if isinstance(expr, AxonExprTernary):
-        return (
-            _is_pure_expr(expr.cond)
-            and _is_pure_expr(expr.true_expr)
-            and _is_pure_expr(expr.false_expr)
-        )
-    if isinstance(expr, AxonExprCall):
-        return all(_is_pure_expr(arg) for arg in expr.args) and all(
-            _is_pure_expr(value) for value in expr.kwargs.values() if isinstance(value, AxonExpr)
-        )
-    return False
+def _is_total_pure_expr(expr: AxonExpr) -> bool:
+    return axon_expr_effect(expr) == PurityEffect.TOTAL_PURE
+
+
+def _is_non_effectful_expr(expr: AxonExpr) -> bool:
+    return axon_expr_effect(expr) != PurityEffect.EFFECTFUL
 
 
 def _inline_atomic_alias_statements(
@@ -1795,7 +1782,7 @@ def _inline_single_use_pure_binds(
                 if not isinstance(stmt, AxonBind) or len(stmt.targets) != 1 or stmt.targets[0] == "_":
                     continue
                 target = stmt.targets[0]
-                if counts.get(target, 0) > 1 or target in return_names or not _is_pure_expr(stmt.expr):
+                if counts.get(target, 0) > 1 or target in return_names or not _is_total_pure_expr(stmt.expr):
                     continue
                 if not _is_atomic_expr(stmt.expr) and _name_used_as_call_arg_stmts(
                     current[idx + 1 :], target
@@ -1901,7 +1888,7 @@ def _dead_code_eliminate_statements(
             if isinstance(stmt, AxonBind):
                 targets = {target for target in stmt.targets if target != "_"}
                 used = bool(targets & live)
-                if not used and targets and _is_pure_expr(stmt.expr):
+                if not used and targets and _is_non_effectful_expr(stmt.expr):
                     continue
                 live.difference_update(targets)
                 live.update(_expr_names(stmt.expr))
@@ -2595,32 +2582,19 @@ def _rewrite_call_for_signature_change(
     call: AxonExprCall, *, old_module: AxonDefinition, new_module: AxonDefinition
 ) -> AxonExprCall:
     provided_actuals = _provided_call_actuals_by_param(old_module, call)
-    old_names = _param_names(old_module)
-    kept_names = set(_param_names(new_module))
-    original_positional_names = old_names[: len(call.args)]
-
+    unknown_kwargs = sorted(set(call.kwargs) - set(_param_names(old_module)))
+    if unknown_kwargs:
+        raise ValueError(
+            "optimize failed: post-elaborate call still has non-parameter kwargs: "
+            + ", ".join(unknown_kwargs)
+        )
     new_args: list[AxonExpr] = []
-    new_kwargs: dict[str, AxonKwargValue] = {
-        key: value
-        for key, value in call.kwargs.items()
-        if key not in old_names and key not in kept_names
-    }
-    positional_prefix_open = True
     for name in _param_names(new_module):
         provided = provided_actuals.get(name)
         if provided is None:
-            positional_prefix_open = False
             continue
-        if (
-            positional_prefix_open
-            and len(new_args) < len(original_positional_names)
-            and original_positional_names[len(new_args)] == name
-        ):
-            new_args.append(provided)
-            continue
-        positional_prefix_open = False
-        new_kwargs[name] = provided
-    return replace(call, args=tuple(new_args), kwargs=new_kwargs)
+        new_args.append(provided)
+    return replace(call, args=tuple(new_args), kwargs={})
 
 
 def _canonicalize_path_params(program: AxonFile) -> AxonFile:

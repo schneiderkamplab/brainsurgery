@@ -3,6 +3,12 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 
+from brainsurgery.synapse.ops import (
+    get_op_lowering_type_signature,
+    get_op_parameter_defaults,
+    get_op_parameter_names,
+)
+
 from ..ast import (
     AxonBind,
     AxonCond,
@@ -11,9 +17,12 @@ from ..ast import (
     AxonExprAscribe,
     AxonExprBinary,
     AxonExprBind,
+    AxonExprBool,
     AxonExprCall,
     AxonExprDo,
+    AxonExprFloat,
     AxonExprIf,
+    AxonExprInt,
     AxonExprLambda,
     AxonExprList,
     AxonExprName,
@@ -21,6 +30,7 @@ from ..ast import (
     AxonExprParen,
     AxonExprPath,
     AxonExprPipe,
+    AxonExprString,
     AxonExprTernary,
     AxonExprTuple,
     AxonFile,
@@ -33,7 +43,7 @@ from ..ast import (
     AxonYield,
     TypePath,
 )
-from ..validate import validate_normalized_axon_file
+from ..validate import validate_elaborated_axon_file, validate_normalized_axon_file
 
 
 def _leading_path_param_count(module: AxonDefinition) -> int:
@@ -445,6 +455,84 @@ def _default_expr_for_param(
     )
 
 
+def _kwarg_value_to_expr(value: AxonKwargValue) -> AxonExpr:
+    if isinstance(value, AxonExpr):
+        return value
+    if isinstance(value, bool):
+        return AxonExprBool(value=value)
+    if isinstance(value, int):
+        return AxonExprInt(value=value)
+    if isinstance(value, float):
+        return AxonExprFloat(value=value)
+    if isinstance(value, str):
+        return AxonExprString(value=value)
+    if value is None:
+        return AxonExprNull()
+    if isinstance(value, list):
+        return AxonExprList(items=tuple(_kwarg_value_to_expr(item) for item in value))
+    raise TypeError(f"unsupported kwarg value type: {type(value).__name__}")
+
+
+def _primitive_op_name(callee: str) -> str:
+    return callee[1:] if callee.startswith("_") else callee
+
+
+def _canonicalize_primitive_call(
+    expr: AxonExprCall,
+    *,
+    args: tuple[AxonExpr, ...],
+    kwargs: dict[str, AxonKwargValue],
+) -> AxonExprCall:
+    op_name = _primitive_op_name(expr.callee)
+    signature = get_op_lowering_type_signature(op_name)
+    if signature is None:
+        if kwargs:
+            raise ValueError(
+                f"elaborate failed: unknown callee {expr.callee!r} still has kwargs"
+            )
+        return replace(expr, args=args, kwargs={})
+
+    param_names = get_op_parameter_names(op_name)
+    if param_names is None:
+        raise ValueError(
+            f"elaborate failed: primitive call {expr.callee!r} has no parameter metadata"
+        )
+    if len(args) > len(param_names):
+        raise ValueError(
+            f"elaborate failed: primitive call {expr.callee!r} got too many positional arguments"
+        )
+
+    actuals: dict[str, AxonExpr] = {}
+    for name, arg in zip(param_names, args, strict=False):
+        actuals[name] = arg
+    for key, value in kwargs.items():
+        if key not in param_names:
+            raise ValueError(
+                f"elaborate failed: primitive call {expr.callee!r} has unknown kwarg {key!r}"
+            )
+        if key in actuals:
+            raise ValueError(
+                f"elaborate failed: primitive call {expr.callee!r} got duplicate argument {key!r}"
+            )
+        actuals[key] = _kwarg_value_to_expr(value)
+
+    defaults = {
+        key: _kwarg_value_to_expr(value)
+        for key, value in get_op_parameter_defaults(op_name).items()
+    }
+    canonical_args: list[AxonExpr] = []
+    for name in param_names:
+        value = actuals.get(name)
+        if value is None:
+            value = defaults.get(name)
+        if value is None:
+            raise ValueError(
+                f"elaborate failed: primitive call {expr.callee!r} is missing argument {name!r}"
+            )
+        canonical_args.append(value)
+    return replace(expr, args=tuple(canonical_args), kwargs={})
+
+
 def _call_default_base_path(
     call: AxonExprCall,
     *,
@@ -486,7 +574,7 @@ def _elaborate_call(
     }
     module = modules_by_name.get(expr.callee)
     if module is None:
-        return replace(expr, args=args, kwargs=kwargs)
+        return _canonicalize_primitive_call(expr, args=args, kwargs=kwargs)
 
     positional_params = _consumed_param_count(module, len(args))
     default_base_path = _call_default_base_path(
@@ -495,19 +583,34 @@ def _elaborate_call(
         path_prefix=path_prefix,
         path_names=path_names,
     )
+    expanded_kwargs = dict(kwargs)
     for param in module.params[positional_params:]:
-        if param.name in kwargs:
+        if param.name in expanded_kwargs:
             continue
         if param.default_expr is None and not param.optional:
             continue
-        kwargs[param.name] = _default_expr_for_param(
+        expanded_kwargs[param.name] = _default_expr_for_param(
             param,
             path_prefix=path_prefix,
             path_names=path_names,
             default_base_path=default_base_path,
             modules_by_name=modules_by_name,
         )
-    return replace(expr, args=args, kwargs=kwargs)
+
+    explicit_path_args = max(0, _path_slot_count(module) - _leading_path_param_count(module))
+    canonical_args: list[AxonExpr] = list(args[:explicit_path_args])
+    for idx, param in enumerate(module.params):
+        positional_idx = explicit_path_args + idx
+        if idx < positional_params:
+            canonical_args.append(args[positional_idx])
+            continue
+        if param.name in expanded_kwargs:
+            canonical_args.append(_kwarg_value_to_expr(expanded_kwargs[param.name]))
+            continue
+        raise ValueError(
+            f"elaborate failed: call to {expr.callee!r} is missing required argument {param.name!r}"
+        )
+    return replace(expr, args=tuple(canonical_args), kwargs={})
 
 
 def _elaborate_expr(
@@ -735,19 +838,11 @@ def _elaborate_statement(
             ),
         )
     if isinstance(stmt, AxonScopeBind):
+        if stmt.kwargs:
+            raise ValueError("elaborate failed: scope kwargs are not supported after elaborate")
         return replace(
             stmt,
-            kwargs={
-                key: _elaborate_expr(
-                    value,
-                    modules_by_name=modules_by_name,
-                    path_prefix=path_prefix,
-                    path_names=path_names,
-                )
-                if isinstance(value, AxonExpr)
-                else deepcopy(value)
-                for key, value in stmt.kwargs.items()
-            },
+            kwargs={},
             body=_elaborate_statements(
                 stmt.body,
                 modules_by_name=modules_by_name,
@@ -842,7 +937,7 @@ def elaborate_closed_axon_file(
             )
             for module in elaborated.modules
         ):
-            validate_normalized_axon_file(elaborated, main_module=main_module)
+            validate_elaborated_axon_file(elaborated, main_module=main_module)
             return elaborated
         current = elaborated
 

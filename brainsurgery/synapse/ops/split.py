@@ -12,6 +12,8 @@ LOWERING_TYPE_SIGNATURE = {
     "kwargs": {'dim': 'int', 'sizes': 'list_dim'},
     "returns": "dynamic",
 }
+LOWERING_PARAM_NAMES = ("x", "dim", "sizes")
+LOWERING_PARAM_DEFAULTS = {"dim": -1, "sizes": None}
 
 
 def type_rule(
@@ -61,5 +63,7 @@ def type_rule(
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "LOWERING_PARAM_DEFAULTS",
+    "LOWERING_PARAM_NAMES",
     "type_rule",
 ]

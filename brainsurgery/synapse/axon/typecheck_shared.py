@@ -114,26 +114,33 @@ def _is_generic_named_type(tp: TypeExpr, *, type_aliases: dict[str, TypeAliasDef
 
 
 def _apply_subst(tp: TypeExpr, ctx: _TcCtx) -> TypeExpr:
-    def _apply_dim_token(dim: DimToken) -> tuple[DimToken, ...]:
+    def _apply_dim_token(dim: DimToken, seen: frozenset[str] = frozenset()) -> tuple[DimToken, ...]:
         if isinstance(dim, str):
+            if dim in seen:
+                return (dim,)
             mapped = ctx.dim_substitutions.get(dim)
             if mapped is None:
                 return (dim,)
+            next_seen = seen | {dim}
             if isinstance(mapped, tuple):
-                return tuple(_flatten_dim_tokens(mapped))
-            return _apply_dim_token(mapped)
+                return tuple(_flatten_dim_tokens(mapped, seen=next_seen))
+            return _apply_dim_token(mapped, seen=next_seen)
         if isinstance(dim, int):
             return (dim,)
-        left = _apply_dim_token(dim.left)
-        right = _apply_dim_token(dim.right)
+        left = _apply_dim_token(dim.left, seen=seen)
+        right = _apply_dim_token(dim.right, seen=seen)
         if len(left) == 1 and len(right) == 1:
             return (DimExprBinary(op=dim.op, left=left[0], right=right[0]),)
         return (dim,)
 
-    def _flatten_dim_tokens(dims: tuple[DimToken, ...]) -> tuple[DimToken, ...]:
+    def _flatten_dim_tokens(
+        dims: tuple[DimToken, ...],
+        *,
+        seen: frozenset[str] = frozenset(),
+    ) -> tuple[DimToken, ...]:
         out: list[DimToken] = []
         for item in dims:
-            out.extend(_apply_dim_token(item))
+            out.extend(_apply_dim_token(item, seen=seen))
         return tuple(out)
 
     if isinstance(tp, TypeVar):

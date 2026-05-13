@@ -391,10 +391,14 @@ def _lower_expr_to_lazy_operand(expr: AxonExpr, ctx: _GraphLowerCtx) -> GraphOpe
             dims=expr.inferred_dims,
         )
     if isinstance(expr, AxonExprCall):
+        if expr.kwargs:
+            raise ValueError(
+                f"graph IR lowering requires elaborated Axon; call to {expr.callee!r} still has kwargs"
+            )
         return GraphExpr(
             op=GraphOp(expr.callee),
             inputs=tuple(_lower_expr_to_lazy_operand(arg, ctx) for arg in expr.args),
-            attrs={key: _kwarg_to_attr(value, ctx) for key, value in expr.kwargs.items()},
+            attrs={},
             type_expr=_expr_type(expr),
             dims=expr.inferred_dims,
         )
@@ -421,13 +425,16 @@ def _node_for_expr(
         )
 
     if isinstance(core_expr, AxonExprCall):
+        if core_expr.kwargs:
+            raise ValueError(
+                f"graph IR lowering requires elaborated Axon; call to {core_expr.callee!r} still has kwargs"
+            )
         inputs = tuple(_lower_expr_to_operand(arg, ctx) for arg in core_expr.args)
-        attrs = {key: _kwarg_to_attr(value, ctx) for key, value in core_expr.kwargs.items()}
         return GraphNode(
             id=node_id,
             op=GraphOp(core_expr.callee),
             inputs=inputs,
-            attrs=attrs,
+            attrs={},
             outputs=_outputs(),
             source_module=module_name,
             type_expr=_expr_type(expr),

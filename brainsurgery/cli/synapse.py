@@ -60,6 +60,7 @@ def _dump_axon_stage_to_text(
     optimize_ast: bool,
     optimize_graph: bool,
     show_types: bool,
+    show_purity: bool,
 ) -> str:
     module = _axon_module()
     parse_fn = getattr(module, "parse_axon_program_from_path")
@@ -79,41 +80,43 @@ def _dump_axon_stage_to_text(
         raise typer.BadParameter(f"Unknown stage {stage!r}. Expected one of: {allowed}")
     if stage == "optimize-ast" and not optimize_ast:
         raise typer.BadParameter("--stage optimize-ast requires --optimize-ast")
+    if show_purity and stage in {"parse", "resolve", "normalize"}:
+        raise typer.BadParameter("--show-purity requires flatten or a later typed/lowered stage")
 
     if stage == "parse":
-        return render_fn(parse_fn(axon_path), show_types=show_types)
+        return render_fn(parse_fn(axon_path), show_types=show_types, show_purity=show_purity)
 
     report = resolve_fn(axon_path, strict=strict)
     program = report.ast
     if stage == "resolve":
-        return render_fn(program, show_types=show_types)
+        return render_fn(program, show_types=show_types, show_purity=show_purity)
 
     program = normalize_fn(program, main_module=main_module)
     if stage == "normalize":
-        return render_fn(program, show_types=show_types)
+        return render_fn(program, show_types=show_types, show_purity=show_purity)
 
     program = elaborate_fn(program, main_module=main_module)
     program = flatten_fn(program, main_module=main_module)
     if stage == "flatten":
-        return render_fn(program, show_types=show_types)
+        return render_fn(program, show_types=show_types, show_purity=show_purity)
 
     program = typecheck_fn(program, main_module=main_module)
     if stage == "typecheck":
-        return render_fn(program, show_types=show_types)
+        return render_fn(program, show_types=show_types, show_purity=show_purity)
 
     if optimize_ast:
         program = optimize_ast_fn(program, main_module=main_module)
         if stage == "optimize-ast":
-            return render_fn(program, show_types=show_types)
+            return render_fn(program, show_types=show_types, show_purity=show_purity)
 
     if stage in {"graph-ir", "graph-ir-axon"} or optimize_graph:
         graph_program = lower_graph_fn(program, main_module=main_module)
         if optimize_graph:
             graph_program = optimize_graph_fn(graph_program)
         graph_axon = graph_to_axon_fn(graph_program)
-        return render_fn(graph_axon, show_types=show_types)
+        return render_fn(graph_axon, show_types=show_types, show_purity=show_purity)
 
-    return render_fn(program, show_types=show_types)
+    return render_fn(program, show_types=show_types, show_purity=show_purity)
 
 
 def _axon_graph_ir_to_dot(
@@ -257,6 +260,11 @@ def axon_stage_dump(
         "--show-types/--no-show-types",
         help="Render inferred type annotations when available.",
     ),
+    show_purity: bool = typer.Option(
+        False,
+        "--show-purity/--no-show-purity",
+        help="Render a purity-lattice comment before each definition.",
+    ),
     force: bool = typer.Option(
         False,
         "--force",
@@ -280,6 +288,7 @@ def axon_stage_dump(
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
             show_types=show_types,
+            show_purity=show_purity,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

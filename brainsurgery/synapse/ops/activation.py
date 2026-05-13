@@ -11,6 +11,19 @@ LOWERING_TYPE_SIGNATURE = {
     "kwargs": {},
     "returns": "dynamic",
 }
+LOWERING_PARAM_NAMES_BY_OP = {
+    "activations_gegelu": ("x", "limit"),
+    "activations_gelu": ("x",),
+    "activations_gelu_new": ("x",),
+    "activations_gelu_pytorch_tanh": ("x",),
+    "activations_relu": ("x",),
+    "activations_relu2": ("x",),
+    "activations_sigmoid": ("x",),
+    "activations_silu": ("x",),
+    "activations_swiglu": ("x",),
+    "activations_tanh": ("x",),
+    "activations_xielu": ("x", "alpha_p", "alpha_n", "beta", "eps"),
+}
 
 
 def type_rule(
@@ -33,5 +46,6 @@ def type_rule(
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "LOWERING_PARAM_NAMES_BY_OP",
     "type_rule",
 ]

@@ -56,8 +56,8 @@ main x = do
     bind = next(stmt for stmt in main.statements if isinstance(stmt, AxonBind))
 
     assert isinstance(bind.expr, AxonExprCall)
-    assert bind.expr.kwargs["flag"] == AxonExprBool(value=False)
-    assert bind.expr.kwargs["limit"] == AxonExprNull()
+    assert bind.expr.kwargs == {}
+    assert bind.expr.args[-2:] == (AxonExprBool(value=False), AxonExprNull())
     use = next(module for module in elaborated.modules if module.name == "use")
     assert all(param.default_expr is None for param in use.params)
 
@@ -81,6 +81,5 @@ main x = do
     bind = next(stmt for stmt in scope.body if isinstance(stmt, AxonBind))
 
     assert isinstance(bind.expr, AxonExprCall)
-    assert bind.expr.kwargs["weight_path"] == AxonExprPath(
-        absolute=False, parts=("proj", "weight")
-    )
+    assert bind.expr.kwargs == {}
+    assert bind.expr.args[-1] == AxonExprPath(absolute=False, parts=("proj", "weight"))

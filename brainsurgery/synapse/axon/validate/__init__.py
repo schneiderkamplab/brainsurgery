@@ -5,6 +5,7 @@ from .closed import (
     warn_unused_import_diagnostics,
 )
 from .diagnostics import ValidationDiagnostic, raise_on_warnings
+from .elaborated import validate_elaborated_axon_file
 from .flat import validate_flat_axon_file
 from .normalized import validate_normalized_axon_file
 from .optimized import validate_optimized_flat_typed_axon_file
@@ -16,6 +17,7 @@ __all__ = [
     "raise_on_warnings",
     "validate_axon_program",
     "validate_closed_axon_file",
+    "validate_elaborated_axon_file",
     "validate_flat_axon_file",
     "validate_normalized_axon_file",
     "validate_optimized_flat_typed_axon_file",

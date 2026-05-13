@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from brainsurgery.synapse.ops import get_op_parameter_names
+
 from ..ast import (
     AxonBind,
     AxonDefinition,
@@ -156,11 +158,27 @@ def _node_expr_to_expr(
         return _typed(AxonExprList(items=input_exprs), type_expr, dims)
     if op_name == "core.tuple":
         return _typed(AxonExprTuple(items=input_exprs), type_expr, dims)
-    return _typed(
-        AxonExprCall(callee=op_name, args=input_exprs, kwargs=attr_exprs),
-        type_expr,
-        dims,
-    )
+    if attr_exprs:
+        param_names = get_op_parameter_names(op_name[1:] if op_name.startswith("_") else op_name)
+        if param_names is None:
+            raise ValueError(
+                f"cannot render graph op {op_name!r} with attrs as Axon: no parameter metadata"
+            )
+        positional: list[AxonExpr] = list(input_exprs)
+        for name in param_names[len(input_exprs) :]:
+            value = attr_exprs.pop(name, None)
+            if value is not None:
+                positional.append(value)
+                continue
+            if attr_exprs:
+                break
+        if attr_exprs:
+            names = ", ".join(sorted(attr_exprs))
+            raise ValueError(
+                f"cannot render graph op {op_name!r} with non-positional attrs: {names}"
+            )
+        input_exprs = tuple(positional)
+    return _typed(AxonExprCall(callee=op_name, args=input_exprs, kwargs={}), type_expr, dims)
 
 
 def _input_to_param(value: GraphValue) -> AxonParam:
@@ -332,11 +350,80 @@ def _render_nodes_and_outputs(
 def graph_module_to_axon_definition(module: GraphModule) -> AxonDefinition:
     statements: list[AxonBind | AxonReturn] = []
     nodes, outputs = _render_nodes_and_outputs(module)
+    used_names = {value.name for value in module.inputs}
     for node in nodes:
+        for output in node.outputs:
+            used_names.add(output.name)
+
+    def fresh_temp(base: str) -> str:
+        candidate = base
+        if candidate not in used_names:
+            used_names.add(candidate)
+            return candidate
+        index = 1
+        while True:
+            candidate = f"{base}_{index}"
+            if candidate not in used_names:
+                used_names.add(candidate)
+                return candidate
+            index += 1
+
+    def atomicize_operand(operand: GraphOperand, *, base: str) -> GraphOperand:
+        if not isinstance(operand, GraphExpr):
+            return operand
+        if operand.op.name == "core.ascribe" and len(operand.inputs) == 1 and not operand.attrs:
+            inner = operand.inputs[0]
+            if not isinstance(inner, GraphExpr):
+                return inner
+        if operand.op.name == "core.select" and len(operand.inputs) == 3 and not operand.attrs:
+            return replace(
+                operand,
+                inputs=(
+                    atomicize_operand(operand.inputs[0], base=f"{base}_cond"),
+                    operand.inputs[1],
+                    operand.inputs[2],
+                ),
+            )
+        inputs = tuple(
+            atomicize_operand(item, base=f"{base}_arg{idx + 1}")
+            for idx, item in enumerate(operand.inputs)
+        )
+        attrs = {
+            key: atomicize_operand(value, base=f"{base}_{key}")
+            for key, value in operand.attrs.items()
+        }
+        expr = _node_expr_to_expr(
+            op_name=operand.op.name,
+            inputs=inputs,
+            attrs=attrs,
+            type_expr=operand.type_expr,
+            dims=operand.dims,
+        )
+        temp = fresh_temp(base)
+        statements.append(AxonBind(targets=(temp,), expr=expr))
+        return GraphValueRef(name=temp, type_expr=operand.type_expr, dims=operand.dims)
+
+    for node in nodes:
+        output_base = node.outputs[0].name if node.outputs else node.id.replace(":", "_")
+        if node.op.name == "core.select" and len(node.inputs) == 3:
+            node_inputs = (
+                atomicize_operand(node.inputs[0], base=f"{output_base}_cond"),
+                node.inputs[1],
+                node.inputs[2],
+            )
+        else:
+            node_inputs = tuple(
+                atomicize_operand(item, base=f"{output_base}_arg{idx + 1}")
+                for idx, item in enumerate(node.inputs)
+            )
+        node_attrs = {
+            key: atomicize_operand(value, base=f"{output_base}_{key}")
+            for key, value in node.attrs.items()
+        }
         expr = _node_expr_to_expr(
             op_name=node.op.name,
-            inputs=node.inputs,
-            attrs=node.attrs,
+            inputs=node_inputs,
+            attrs=node_attrs,
             type_expr=node.type_expr,
             dims=node.dims,
         )
@@ -347,6 +434,10 @@ def graph_module_to_axon_definition(module: GraphModule) -> AxonDefinition:
             arity=len(node.outputs) if len(node.outputs) > 1 else None,
         )
         statements.append(AxonBind(targets=tuple(output.name for output in node.outputs), expr=expr))
+    outputs = tuple(
+        atomicize_operand(output, base=f"__return_{idx + 1}")
+        for idx, output in enumerate(outputs)
+    )
     statements.append(
         AxonReturn(values=tuple(_operand_to_expr(output) for output in outputs))
     )

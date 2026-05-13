@@ -43,6 +43,7 @@ from ..graph_ir import (
     GraphValueRef,
     validate_graph_program,
 )
+from ..graph_ir.effects import GraphEffect, infer_graph_module_effects
 
 
 def _graph_path_payload(path: GraphPath) -> dict[str, Any]:
@@ -141,11 +142,17 @@ def _is_global_symbol_module(module: GraphModule) -> bool:
     return not module.inputs and len(module.outputs) == 1
 
 
-def _global_symbol_module_names(program: GraphProgram) -> set[str]:
+def _global_symbol_module_names(
+    program: GraphProgram,
+    *,
+    total_pure_only: bool = False,
+) -> set[str]:
+    effects = infer_graph_module_effects(program.modules) if total_pure_only else {}
     return {
         module.name
         for module in program.modules
         if _is_global_symbol_module(module)
+        and (not total_pure_only or effects.get(module.name) == GraphEffect.TOTAL_PURE)
     }
 
 
@@ -385,6 +392,10 @@ class Codegen2GraphModel(nn.Module):
         self.graph = graph
         self.modules_by_name = {module.name: module for module in graph.modules}
         self.global_symbol_names = _global_symbol_module_names(graph)
+        self.cached_global_symbol_names = _global_symbol_module_names(
+            graph,
+            total_pure_only=True,
+        )
         main = self.modules_by_name[graph.main_module]
         self.main_inputs_spec = _module_inputs_spec(main)
         self.main_outputs_spec = _module_outputs_spec(main)
@@ -402,6 +413,7 @@ class Codegen2GraphModel(nn.Module):
         }
         self._state: dict[str, torch.Tensor] = {}
         self._symbols: dict[str, Any] = {}
+        self._cached_global_symbols: dict[str, Any] | None = None
         if state_dict is not None:
             self.load_state_dict_tensors(state_dict)
 
@@ -533,8 +545,34 @@ class Codegen2GraphModel(nn.Module):
         return outputs
 
     def _evaluate_global_symbols(self, env: dict[str, Any]) -> dict[str, Any]:
-        symbols: dict[str, Any] = {}
-        pending = sorted(self.global_symbol_names)
+        if self._cached_global_symbols is None:
+            self._cached_global_symbols = self._evaluate_global_symbol_subset(
+                names=self.cached_global_symbol_names,
+                env={},
+                initial={},
+            )
+        symbols: dict[str, Any] = dict(self._cached_global_symbols)
+        pending_names = self.global_symbol_names - set(symbols)
+        if not pending_names:
+            return symbols
+        symbols.update(
+            self._evaluate_global_symbol_subset(
+                names=pending_names,
+                env=env,
+                initial=symbols,
+            )
+        )
+        return symbols
+
+    def _evaluate_global_symbol_subset(
+        self,
+        *,
+        names: set[str],
+        env: dict[str, Any],
+        initial: dict[str, Any],
+    ) -> dict[str, Any]:
+        symbols: dict[str, Any] = dict(initial)
+        pending = sorted(names)
         last_errors: dict[str, Exception] = {}
         while pending:
             next_pending: list[str] = []
@@ -557,7 +595,7 @@ class Codegen2GraphModel(nn.Module):
                     f"unable to evaluate graph global symbols; blocked at {name!r}"
                 ) from exc
             pending = next_pending
-        return symbols
+        return {name: symbols[name] for name in names if name in symbols}
 
     def _eval_graph_operand(
         self,
@@ -594,6 +632,13 @@ class Codegen2GraphModel(nn.Module):
                 self._path_template_env({**symbols, **env}, symbols=symbols),
             )
         if isinstance(operand, GraphExpr):
+            if (
+                operand.op.name in self.cached_global_symbol_names
+                and not operand.inputs
+                and not operand.attrs
+                and operand.op.name in symbols
+            ):
+                return symbols[operand.op.name]
             return self._eval_graph_expr(operand, env=env, symbols=symbols)
         if isinstance(operand, tuple):
             return [self._eval_graph_operand(item, env=env, symbols=symbols) for item in operand]
@@ -1267,6 +1312,14 @@ class Codegen2GraphModel(nn.Module):
             self._assign_outputs(out_names, self._cache_past_length(cache), env)
             return
         if op in self.modules_by_name:
+            if (
+                op in self.cached_global_symbol_names
+                and not node.inputs
+                and not node.attrs
+                and op in symbols
+            ):
+                self._assign_outputs(out_names, symbols[op], env)
+                return
             args = [
                 self._eval_graph_operand(operand, env=env, symbols=symbols)
                 for operand in node.inputs
@@ -1384,7 +1437,10 @@ class _DirectTorchEmitter:
         self.class_name = class_name
         self.modules_by_name = {module.name: module for module in program.modules}
         self.method_names = {name: f"_def_{_py_ident(name)}" for name in self.modules_by_name}
-        self.global_symbol_names = _global_symbol_module_names(program)
+        self.global_symbol_names = _global_symbol_module_names(
+            program,
+            total_pure_only=True,
+        )
 
     def emit(self) -> str:
         lines: list[str] = [f"class {self.class_name}(nn.Module):"]
@@ -1411,7 +1467,7 @@ class _DirectTorchEmitter:
         add(lines, 8, "self.param_devices = self._normalize_param_devices(param_devices)")
         add(lines, 8, "self.state_dict_tensors = {}")
         add(lines, 8, "self.config = dict(({} if _MODEL_CONFIG is None else _MODEL_CONFIG) if config is None else config)")
-        add(lines, 8, "self._symbols = self._eval_symbols()")
+        add(lines, 8, "self._symbols = {}")
         add(lines, 8, "self.load_state_dict(state_dict)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
@@ -1422,6 +1478,7 @@ class _DirectTorchEmitter:
         add(lines, 8, "del strict")
         add(lines, 8, "self.state_dict_tensors = self._place_state_dict(dict(state_dict), self.param_devices)")
         add(lines, 8, "self.setup()")
+        add(lines, 8, "self._symbols = self._eval_symbols()")
         add(lines, 8, "return self")
         add(lines, 4, "")
         add(lines, 4, "def setup(self):")
@@ -1993,6 +2050,8 @@ class _DirectTorchEmitter:
             pyop = {"and": "&", "or": "|"} .get(binop, binop)
             return f"({left} {pyop} {right})"
         if op in self.method_names:
+            if op in self.global_symbol_names and not node.inputs and not node.attrs:
+                return f"{symbols_dict}[{op!r}]"
             if op in {"Cache.past_length", "Cache.past_length_kv"}:
                 args = [
                     self._operand_expr(x, local=local, symbols_dict=symbols_dict)
@@ -2152,6 +2211,12 @@ class _DirectTorchEmitter:
         if isinstance(operand, GraphPath):
             return self._path_expr(operand, local=local, symbols_dict=symbols_dict)
         if isinstance(operand, GraphExpr):
+            if (
+                operand.op.name in self.global_symbol_names
+                and not operand.inputs
+                and not operand.attrs
+            ):
+                return f"{symbols_dict}[{operand.op.name!r}]"
             if operand.op.name in {"Cache.past_length", "Cache.past_length_kv"}:
                 args = [
                     self._operand_expr(item, local=local, symbols_dict=symbols_dict)

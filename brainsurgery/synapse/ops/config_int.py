@@ -11,12 +11,16 @@ OP_NAME = "config_int"
 
 
 LOWERING_TYPE_SIGNATURE = {
-    "args": ("Path", "Int"),
+    "args": ("Path", "?Int"),
     "kwargs": {},
     "returns": ("Int",),
 }
+LOWERING_PARAM_NAMES = ("key", "default")
+LOWERING_PARAM_DEFAULTS = {"default": None}
 
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "LOWERING_PARAM_DEFAULTS",
+    "LOWERING_PARAM_NAMES",
 ]

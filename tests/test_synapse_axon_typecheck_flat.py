@@ -395,6 +395,25 @@ main x = do
     assert torch.equal(out, torch.full_like(out, 3.0))
 
 
+def test_concat_type_rule_updates_concatenated_axis_after_elaborate(tmp_path: Path) -> None:
+    source = """
+import Tensor (concat)
+
+main :: Tensor[B,S,1] -> Tensor[B,S,1] -> Tensor[B,S,2]
+main x y = do
+  z <- concat x y dim=-1
+  return z
+"""
+    path = tmp_path / "concat_main.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    module = next(module for module in typed.modules if module.name == "main")
+    bind = next(stmt for stmt in module.statements if isinstance(stmt, AxonBind))
+    assert bind.expr.inferred_type == TypeTensor(base="Tensor", dims=("B", "S", 2))
+
+
 def test_typecheck2_lowers_generic_mamba_without_shape_growth() -> None:
     resolved = resolve_axon_program_from_path(
         Path("brainsurgery/synapse/models/mamba/generic-mamba.axon")
