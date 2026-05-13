@@ -318,9 +318,12 @@ implementation or in an explicitly approved language extension.
 
 \section{Pipeline Overview}
 
-The current default path is shown below.  Optional optimization is separated
-from the correctness-critical path; the backend path is expected to work
-without the AST optimizer.
+The current default path is shown below.  Optional optimization is split into
+two explicitly named phases.  \code{optimize-ast} runs after typecheck2 on flat
+typed Axon, before Graph IR lowering.  \code{optimize-graph} runs after Graph
+IR lowering on the typed graph.  Both phases are off by default and are not
+part of the correctness-critical contract: the backend path is expected to
+work without either optimizer.
 
 \begin{figure}[t]
 \centering
@@ -332,11 +335,14 @@ source Axon
 \(\rightarrow\) normalize/elaborate
 \(\rightarrow\) flatten
 \(\rightarrow\) typecheck2
+\(\rightarrow\) [optional optimize-ast]
 \(\rightarrow\) Graph IR
+\(\rightarrow\) [optional optimize-graph]
 \(\rightarrow\) backend execution
 \end{minipage}}
-\caption{Default Axon compilation path.  Optional optimization is excluded from
-the correctness-critical path in this paper.}
+\caption{Default Axon compilation path.  \code{optimize-ast} and
+\code{optimize-graph} are optional, off by default, and outside the
+correctness-critical path.}
 \label{fig:pipeline}
 \end{figure}
 
@@ -361,8 +367,10 @@ the correctness-critical path in this paper.}
 \node[repbox, left=1.2cm of tc] (typed) {typed flat\\AST};
 \node[stagebox, left=1.2cm of typed] (lower) {Graph IR\\lowering};
 \node[repbox, below=1.0cm of lower] (graph) {typed\\Graph IR};
-\node[stagebox, right=1.2cm of graph] (backend) {torch / runtime\\pipeline / tinygrad};
+\node[stagebox, right=1.2cm of graph] (graphopt) {optional\\optimize-graph};
+\node[stagebox, right=1.2cm of graphopt] (backend) {torch / runtime\\pipeline / tinygrad};
 \node[repbox, right=1.2cm of backend] (exec) {executable\\model};
+\node[stagebox, below=0.9cm of typed] (astopt) {optional\\optimize-ast};
 
 \draw[edge] (src) -- (parse);
 \draw[edge] (parse) -- (onefile);
@@ -375,8 +383,11 @@ the correctness-critical path in this paper.}
 \draw[edge] (flat) -- (tc);
 \draw[edge] (tc) -- (typed);
 \draw[edge] (typed) -- (lower);
+\draw[edge, dashed] (typed) -- (astopt);
+\draw[edge, dashed] (astopt) -- (lower);
 \draw[edge] (lower) -- (graph);
-\draw[edge] (graph) -- (backend);
+\draw[edge] (graph) -- (graphopt);
+\draw[edge] (graphopt) -- (backend);
 \draw[edge] (backend) -- (exec);
 
 \node[note, below=0.35cm of graph] {optimization is optional and outside\\the correctness-critical path};
@@ -396,11 +407,35 @@ Resolve/validate & closed AST & no unresolved imports or names \\
 Normalize/elaborate & normalized AST & explicit call and default/defaultable structure \\
 Flatten & flat AST & no statement-level control or relative paths \\
 Typecheck2 & typed flat AST & expression types, arities, and dimensions \\
+Optimize-ast & typed flat AST & optional conservative AST cleanup \\
 Graph lowering & Graph IR & typed SSA-like graph modules \\
+Optimize-graph & Graph IR & optional graph cleanup and specialization \\
 Backend & generated/runtime code & executable tensor program \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\section{Optional Optimization}
+
+Optimization is intentionally split by representation.  The pre-Graph phase,
+\code{optimize-ast}, calls \code{optimize\_safe\_flat\_typed\_axon\_file} on
+flat typed Axon.  It is conservative: it prunes unreachable definitions from
+the selected main module, performs atomic alias cleanup, applies local
+literal/atomic folding, re-runs typecheck2, and validates after each iteration
+until a structural fixpoint.
+
+The graph phase, \code{optimize-graph}, calls \code{optimize\_graph\_program}
+on typed Graph IR.  It works with graph modules, typed operands, graph effects,
+and structured paths.  The current implementation performs graph pruning,
+atomic alias cleanup, dead temporary elimination for known-total core nodes,
+literal-only constant folding, conservative single-callsite specialization,
+and constrained safe inlining of total-pure helper modules.  Graph validation
+runs after each iteration.
+
+Neither optimizer is required for correctness.  Both are exposed by explicit
+CLI flags, \code{--optimize-ast} and \code{--optimize-graph}, and both are off
+by default.  Required backend behavior must be represented by stage contracts
+and validators, not hidden behind optional optimization.
 
 The following sections describe the stages in order.
 
@@ -548,6 +583,31 @@ for inspection or debugging, but execution backends receive the in-memory graph
 object.  This avoids the class of failures caused by serializing typed
 operands to strings and parsing them back into weaker representations.
 
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Round-trip family & Files or cases & Ordinary passes & XPass trackers \\
+\midrule
+Parser and resolver & models plus builtins & included & 0 \\
+Normalize, elaborate, flatten, typecheck2 & 256 model files & included & 0 \\
+Graph IR, non-optimized & 256 model files & included & 0 \\
+Graph IR, \code{optimize-ast} & 256 model files & included & 0 \\
+Graph IR, \code{optimize-graph} & 256 model files & included & 0 \\
+Combined optimized Graph IR trackers & 261 cases & 0 & 261 \\
+\midrule
+Full run & 4384 collected tests & 4123 & 261 \\
+\bottomrule
+\end{tabular}
+\caption{Round-trip validation snapshot from
+\code{pytest -q -n 8} over the parser, resolver, normalize, elaborate,
+flatten, typecheck2, and Graph IR round-trip tests.  The run completed with no
+failures in 2:14:36.  The XPass rows are tests intentionally marked as
+non-strict trackers for optimized Graph IR stability; they passed in this
+snapshot.}
+\label{tab:roundtrip}
+\end{table}
+
 \section{Failure Isolation}
 
 The staged architecture is intended to make failures actionable.  A closedness
@@ -592,61 +652,53 @@ Table~\ref{tab:coverage} summarizes the model coverage declared in the
 repository snapshot used for this document.  A ``pair'' is one Axon file and
 one declared checkpoint.  Test checkpoints are synthetic random models used to
 exercise families whose real checkpoints are too large for routine smoke
-testing.
+testing.  The snapshot was computed from the same declared model/checkpoint
+matrix used for round-trip reporting.
 
 \begin{table}[t]
 \centering
-\begin{tabular}{lrrrr}
+\begin{tabular}{lrrrrr}
 \toprule
-Set & Families & Axon files & Pairs & Test pairs \\
+Set & Families & Axon files & Pairs & Checkpoints & Test pairs \\
 \midrule
-All model files & 54 & 256 & 433 & 31 \\
-Generic model-family files & 54 & 77 & 300 & 31 \\
+All model files & 54 & 256 & 553 & 274 & 31 \\
+Generic model-family files & 54 & 77 & 301 & 274 & 31 \\
 \bottomrule
 \end{tabular}
 \caption{Declared Axon model coverage in the repository snapshot.}
 \label{tab:coverage}
 \end{table}
 
-\paragraph{Fidelity snapshots.}
-Table~\ref{tab:fidelity} reports representative benchmark snapshots from the
-active Graph IR path.  The tinygrad row is a current serial max-1B run snapshot;
-it was still running when the table was generated.  Under the project policy
-used here, test-checkpoint rows with top-1 agreement and maximum absolute
-difference below \(10^{-1}\) are not treated as blocking divergences.
+\paragraph{Stage stability.}
+Table~\ref{tab:roundtrip} reports the current stage-stability snapshot.  Unlike
+checkpoint fidelity, these tests do not execute model weights; they verify that
+rendered stage artifacts are stable under weak and strong reprocessing
+contracts.  The suite covers parser and resolver artifacts, weak and strong
+normalize/elaborate/flatten/typecheck2 artifacts, non-optimized Graph IR, and
+the optional \code{optimize-ast} and \code{optimize-graph} paths.
 
 \begin{table}[t]
 \centering
-\begin{tabular}{lrrrrr}
+\begin{tabular}{lrrrr}
 \toprule
-Run & Completed & Errors & Top-1 failures & Strict diffs & Policy issues \\
+Run & Collected & Ordinary passes & XPass trackers & Failures \\
 \midrule
-tinygrad max-1B snapshot & 64 & 6 & 0 & 3 & 0 \\
-tinygrad max-1B earlier sweep & 92 & 40 & 0 & 16 & 14 \\
-tinygrad targeted parity rerun & 11 & 0 & 0 & 2 & 2 \\
+Stage round trips, \code{-n 8} & 4384 & 4123 & 261 & 0 \\
 \bottomrule
 \end{tabular}
-\caption{Representative fidelity snapshots.  The current snapshot is from run
-\texttt{tinygrad-max1b-current-serial-20260511-120638}.  ``Strict diffs'' counts
-\(\max |\Delta| \ge 10^{-3}\).  ``Policy issues'' excludes accepted random
-test-checkpoint rows with top-1 agreement and \(\max |\Delta| < 10^{-1}\).}
-\label{tab:fidelity}
+\caption{Round-trip test outcome for the same repository snapshot.  XPass
+trackers are non-strict expected-failure markers used for optimized Graph IR
+stability; in this run they passed.}
+\label{tab:stage-stability}
 \end{table}
 
-\begin{figure}[t]
-\centering
-\begin{tabular}{r|cccccccccc}
-\toprule
-max-1B snapshot & \multicolumn{10}{c}{completed rows by outcome} \\
-\midrule
-healthy/policy-ok & \multicolumn{9}{l}{\rule{0.74\linewidth}{6pt}} & 58 \\
-error & \multicolumn{2}{l}{\rule{0.08\linewidth}{6pt}} & & & & & & & & 6 \\
-\bottomrule
-\end{tabular}
-\caption{Outcome distribution for the current tinygrad max-1B snapshot
-(\(64\) completed rows).}
-\label{fig:fidelity-bars}
-\end{figure}
+\paragraph{Checkpoint fidelity.}
+End-to-end checkpoint fidelity remains the runtime benchmark target: each row
+compares Axon-derived logits against the reference Transformers model using
+masked top-1 agreement and masked maximum absolute logit difference.  This
+paper snapshot does not claim a fresh completed fidelity sweep; stale partial
+tinygrad snapshots have been removed from the evaluation tables to avoid
+mixing runtime-backend progress with stage-stability claims.
 
 \section{Related Work}
 

@@ -9,7 +9,7 @@ The flat program has no statement-level \code{if}, no \code{for}, no
 expressions are lowered into explicit bind statements, loop constructs are
 converted into helper definitions, and returns/yields are restricted to atomic
 variables or tuples of variables.  Flatten expects elaboration to have resolved
-the defaultable call surface; it should not add compatibility defaults while
+the defaultable call surface; it does not add compatibility defaults while
 constructing the flat core.
 
 \paragraph{Path semantics.}
@@ -57,9 +57,9 @@ is converted into helper definitions and calls with ordinary path parameters.
 The resulting paths are absolute templates such as
 \code{@@'h.\{i\}.attn.c\_proj'} rather than dynamic scope statements.
 
-\paragraph{Round-trip implication.}
+\paragraph{Round-trip stability.}
 A rendered flat program is still Axon source, but it is already in the flat
-core.  Reprocessing it must preserve the explicit call surface.  For example,
+core.  Reprocessing it preserves the explicit call surface.  For example,
 if flatten emits
 \begin{verbatim}
 x, new_i <- gpt2_block @@'h.{i}' x attn_mask past_i
@@ -69,5 +69,6 @@ same argument structure.  Adding
 \begin{verbatim}
 past_kv=null
 \end{verbatim}
-would indicate that elaboration counted the leading \code{Path} argument
-incorrectly when deciding which optional parameters were already supplied.
+would violate the flat round-trip contract because \code{past\_i} already binds
+the optional \code{past\_kv} formal positionally.  Weak and strong flatten
+round-trips validate this property across model Axon files.
