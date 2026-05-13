@@ -9,8 +9,8 @@ a repaired program.
 The pre-flatten validator checks closedness, unresolved-name rejection,
 type-alias arity and visibility, and structural properties required before
 normalization and flattening.  Later validators check stronger stage-specific
-properties such as normalized calls, flat control, backend-required graph shape,
-and typed metadata consistency.
+properties such as normalized calls, flat control, Graph IR lowerability, and
+typed metadata consistency.
 
 \paragraph{Rationale.}
 Validation is a certification layer, not a transformation layer.  This is what

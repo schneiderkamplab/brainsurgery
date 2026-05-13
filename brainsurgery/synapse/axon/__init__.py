@@ -8,7 +8,6 @@ from .ast import (
     ast_equal,
     render_axon_file,
 )
-from .canonicalize import canonicalize_typed_axon_file
 from .expression_codec import axon_expr_to_runtime_value, parse_expression_to_runtime_value
 from .entrypoint import pragma_main_module, resolve_main_module
 from .elaborate import elaborate_closed_axon_file
@@ -31,7 +30,6 @@ from .materialize import (
 )
 from .normalize import normalize_closed_axon_file
 from .optimize import (
-    normalize_backend_required_flat_typed_axon_file,
     optimize_flat_typed_axon_file,
     optimize_safe_flat_typed_axon_file,
 )
@@ -81,7 +79,6 @@ __all__ = [
     "normalize_checkpoint_name",
     "normalize_closed_axon_file",
     "elaborate_closed_axon_file",
-    "normalize_backend_required_flat_typed_axon_file",
     "parse_expression_to_runtime_value",
     "pragma_main_module",
     "resolve_main_module",
@@ -99,7 +96,6 @@ __all__ = [
     "ResolveReport",
     "ResolveDiagnostic",
     "flatten_closed_axon_file",
-    "canonicalize_typed_axon_file",
     "optimize_flat_typed_axon_file",
     "optimize_safe_flat_typed_axon_file",
     "typecheck2_flat_axon_file",

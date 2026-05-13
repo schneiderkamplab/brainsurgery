@@ -160,7 +160,7 @@ Stage status as of now:
   - dead-code elimination
   - inlining
   - other local rewrites
-  - canonicalize path-sugar module parameters into ordinary `Path`-typed params
+  - normalize path-sugar module parameters into ordinary `Path`-typed params
 - examples:
   - simplify loop termination logic after flatten, such as folding `step=1`
   - remove dead temporaries introduced by flatten
@@ -183,7 +183,6 @@ Stage status as of now:
   - prune unused callee params and rewrite direct callsites accordingly
   - specialize single-callsite modules by constant actuals
   - inline single-callsite straight-line modules
-  - canonicalize generated helper and local names for readability
   - rerun structural and local rewrites to fixpoint with re-typecheck / re-validate between iterations
 - remaining work:
   - richer constraint-driven simplification and dead-code elimination
@@ -191,21 +190,7 @@ Stage status as of now:
   - further cleanup of flattening artifact helpers where semantics permit
   - any more aggressive inlining/specialization only with careful semantic justification
 
-10. `backend-required-normalize`
-- input: flat fully typed closed Axon AST
-- output: flat fully typed closed Axon AST satisfying backend shape requirements
-- responsibilities:
-  - run structural rewrites required by lowering/runtime even when `--no-optimize` is set
-  - currently includes list destructuring normalization into explicit `_list_index` binds
-- invariants after this stage:
-  - no list-valued multi-target destructuring bind remains
-  - certified by `validate.backend_required`
-- status: implemented as a non-optional lowering preparation pass
-- note:
-  - `--optimize-ast/--no-optimize-ast` controls conservative AST optimization,
-    not required canonical backend shape
-
-11. `lower`
+10. `lower`
 - input: flat fully typed closed Axon AST
 - output: Synapse graph
 - responsibilities:
@@ -270,7 +255,7 @@ Implementation status:
 
 - `brainsurgery/synapse/axon/graph_ir/` defines a typed in-memory graph IR.
 - `lower_axon_program_to_graph_ir(...)` is available as an alternative lowering target.
-- The graph IR lowering reuses the existing canonical flat typed Axon preparation pipeline.
+- The graph IR lowering reuses the existing flat typed Axon preparation pipeline.
 - Graph nodes carry typed positional operands, typed kwarg operands, SSA-style outputs, structured paths, constraints, constants, and inferred type metadata.
 - `brainsurgery/synapse/axon/codegen2_torch/` consumes graph IR directly, not Synapse spec dictionaries.
 - `brainsurgery/synapse/axon/codegen2_tinygrad/` is scaffolded as a separate configurable backend; see `docs/axon-tinygrad-backend.md` for the initial unsupported-op table.
@@ -284,8 +269,8 @@ Reasons:
 
 Recommended direction:
 
-- Keep Axon AST through `canonicalize`.
-- Lower canonical flat typed Axon into a typed graph IR, not directly into YAML dictionaries.
+- Keep Axon AST through typecheck and optional safe AST optimization.
+- Lower flat typed Axon into a typed graph IR, not directly into YAML dictionaries.
 - Make graph nodes dataclasses with typed fields:
   - `op`
   - `inputs`
@@ -306,13 +291,13 @@ Direct AST-to-codegen/runtime is possible, but less attractive:
 So the target should be:
 
 ```text
-canonical flat typed Axon AST -> typed Graph IR -> runtime/codegen/pipeline
+flat typed Axon AST -> typed Graph IR -> runtime/codegen/pipeline
 ```
 
 Active shape:
 
 ```text
-canonical flat typed Axon AST -> typed Graph IR -> codegen2-torch/runtime2-torch/pipeline2-torch
+flat typed Axon AST -> typed Graph IR -> codegen2-torch/runtime2-torch/pipeline2-torch
 ```
 
 ## Canonical AST
@@ -458,7 +443,6 @@ Representative validator groups:
 - `validate.flat`
 - `validate.normalized`
 - `validate.typed`
-- `validate.backend_required`
 
 Validation owns:
 
@@ -466,7 +450,6 @@ Validation owns:
 - explicit normalized-call and normalized-loop protocol checks
 - flat-core checks
 - typed metadata checks
-- backend-required flat typed checks
 - unused-import warnings
 - unused-definition warnings
 - strict-mode warning escalation used by CLI/workflow layers

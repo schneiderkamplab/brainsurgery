@@ -45,9 +45,8 @@ _AXON_DUMP_STAGES = {
     "flatten",
     "typecheck",
     "graph-ir",
-    "backend-required",
+    "graph-ir-axon",
     "optimize-ast",
-    "canonicalize",
     "final",
 }
 
@@ -58,9 +57,8 @@ def _dump_axon_stage_to_text(
     stage: str,
     main_module: str | None,
     strict: bool,
-    backend_required: bool,
     optimize_ast: bool,
-    canonicalize: bool,
+    optimize_graph: bool,
     show_types: bool,
 ) -> str:
     module = _axon_module()
@@ -72,20 +70,15 @@ def _dump_axon_stage_to_text(
     typecheck_fn = getattr(module, "typecheck2_flat_axon_file")
     lower_graph_fn = getattr(module, "lower_axon_program_to_graph_ir")
     graph_to_axon_fn = getattr(module, "graph_program_to_axon_file")
-    backend_required_fn = getattr(module, "normalize_backend_required_flat_typed_axon_file")
     optimize_ast_fn = getattr(module, "optimize_safe_flat_typed_axon_file")
-    canonicalize_fn = getattr(module, "canonicalize_typed_axon_file")
+    optimize_graph_fn = getattr(module, "optimize_graph_program")
     render_fn = getattr(module, "render_axon_file")
 
     if stage not in _AXON_DUMP_STAGES:
         allowed = ", ".join(sorted(_AXON_DUMP_STAGES))
         raise typer.BadParameter(f"Unknown stage {stage!r}. Expected one of: {allowed}")
-    if stage == "backend-required" and not backend_required:
-        raise typer.BadParameter("--stage backend-required requires --backend-required")
     if stage == "optimize-ast" and not optimize_ast:
         raise typer.BadParameter("--stage optimize-ast requires --optimize-ast")
-    if stage == "canonicalize" and not canonicalize:
-        raise typer.BadParameter("--stage canonicalize requires --canonicalize")
 
     if stage == "parse":
         return render_fn(parse_fn(axon_path), show_types=show_types)
@@ -107,25 +100,18 @@ def _dump_axon_stage_to_text(
     program = typecheck_fn(program, main_module=main_module)
     if stage == "typecheck":
         return render_fn(program, show_types=show_types)
-    if stage == "graph-ir":
-        graph_program = lower_graph_fn(program, main_module=main_module)
-        graph_axon = graph_to_axon_fn(graph_program)
-        return render_fn(graph_axon, show_types=show_types)
 
-    if stage == "backend-required":
-        program = backend_required_fn(program, main_module=main_module)
-        return render_fn(program, show_types=show_types)
-
-    if stage == "final" and backend_required:
-        program = backend_required_fn(program, main_module=main_module)
-
-    if stage == "optimize-ast" or (stage == "final" and optimize_ast):
+    if optimize_ast:
         program = optimize_ast_fn(program, main_module=main_module)
         if stage == "optimize-ast":
             return render_fn(program, show_types=show_types)
 
-    if stage == "canonicalize" or (stage == "final" and canonicalize):
-        program = canonicalize_fn(program, main_module=main_module)
+    if stage in {"graph-ir", "graph-ir-axon"} or optimize_graph:
+        graph_program = lower_graph_fn(program, main_module=main_module)
+        if optimize_graph:
+            graph_program = optimize_graph_fn(graph_program)
+        graph_axon = graph_to_axon_fn(graph_program)
+        return render_fn(graph_axon, show_types=show_types)
 
     return render_fn(program, show_types=show_types)
 
@@ -135,10 +121,8 @@ def _axon_graph_ir_to_dot(
     *,
     main_module: str | None,
     strict: bool,
-    backend_required: bool,
     optimize_ast: bool,
     optimize_graph: bool,
-    canonicalize: bool,
     direction: str,
     show_data_labels: bool,
     show_control_flow: bool,
@@ -149,10 +133,8 @@ def _axon_graph_ir_to_dot(
     elaborate_fn = getattr(module, "elaborate_closed_axon_file")
     flatten_fn = getattr(module, "flatten_closed_axon_file")
     typecheck_fn = getattr(module, "typecheck2_flat_axon_file")
-    backend_required_fn = getattr(module, "normalize_backend_required_flat_typed_axon_file")
     optimize_ast_fn = getattr(module, "optimize_safe_flat_typed_axon_file")
     optimize_graph_fn = getattr(module, "optimize_graph_program")
-    canonicalize_fn = getattr(module, "canonicalize_typed_axon_file")
     lower_graph_fn = getattr(module, "lower_axon_program_to_graph_ir")
     render_dot_fn = getattr(module, "render_graph_program_to_dot")
 
@@ -161,12 +143,8 @@ def _axon_graph_ir_to_dot(
     program = elaborate_fn(program, main_module=main_module)
     program = flatten_fn(program, main_module=main_module)
     program = typecheck_fn(program, main_module=main_module)
-    if backend_required:
-        program = backend_required_fn(program, main_module=main_module)
     if optimize_ast:
         program = optimize_ast_fn(program, main_module=main_module)
-    if canonicalize:
-        program = canonicalize_fn(program, main_module=main_module)
     graph = lower_graph_fn(program, main_module=main_module)
     if optimize_graph:
         graph = optimize_graph_fn(graph)
@@ -251,7 +229,7 @@ def axon_stage_dump(
         "--target-stage",
         help=(
             "Stage to dump: parse, resolve, normalize, flatten, typecheck, "
-            "graph-ir, backend-required, optimize-ast, canonicalize, or final."
+            "optimize-ast, graph-ir, graph-ir-axon, or final."
         ),
     ),
     main_module: str | None = typer.Option(
@@ -264,20 +242,15 @@ def axon_stage_dump(
         "--strict",
         help="Fail when the resolver emits warnings.",
     ),
-    backend_required: bool = typer.Option(
-        True,
-        "--backend-required/--no-backend-required",
-        help="For --stage final --no-optimize-ast, run backend-required rewrites after typecheck.",
-    ),
     optimize_ast: bool = typer.Option(
         False,
         "--optimize-ast/--no-optimize-ast",
-        help="For --stage final, run conservative AST optimization after typecheck/backend-required.",
+        help="Run conservative AST optimization after typecheck and before Graph IR lowering.",
     ),
-    canonicalize: bool = typer.Option(
+    optimize_graph: bool = typer.Option(
         False,
-        "--canonicalize/--no-canonicalize",
-        help="For --stage final, run canonicalization last.",
+        "--optimize-graph/--no-optimize-graph",
+        help="Run conservative Graph IR optimization before graph-rendered Axon output.",
     ),
     show_types: bool = typer.Option(
         False,
@@ -304,9 +277,8 @@ def axon_stage_dump(
             stage=stage,
             main_module=main_module,
             strict=strict,
-            backend_required=backend_required,
             optimize_ast=optimize_ast,
-            canonicalize=canonicalize,
+            optimize_graph=optimize_graph,
             show_types=show_types,
         )
     except ValueError as exc:
@@ -341,11 +313,6 @@ def axon_graph_ir_dot(
         "--strict",
         help="Fail when the resolver emits warnings.",
     ),
-    backend_required: bool = typer.Option(
-        True,
-        "--backend-required/--no-backend-required",
-        help="Run backend-required rewrites before Graph IR lowering.",
-    ),
     optimize_ast: bool = typer.Option(
         False,
         "--optimize-ast/--no-optimize-ast",
@@ -355,11 +322,6 @@ def axon_graph_ir_dot(
         False,
         "--optimize-graph/--no-optimize-graph",
         help="Run conservative Graph IR optimization before DOT rendering.",
-    ),
-    canonicalize: bool = typer.Option(
-        False,
-        "--canonicalize/--no-canonicalize",
-        help="Run canonicalization before Graph IR lowering.",
     ),
     direction: str = typer.Option(
         "top-down",
@@ -394,10 +356,8 @@ def axon_graph_ir_dot(
             axon_path,
             main_module=main_module,
             strict=strict,
-            backend_required=backend_required,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
-            canonicalize=canonicalize,
             direction=direction,
             show_data_labels=show_data_labels,
             show_control_flow=show_control_flow,
@@ -548,11 +508,6 @@ def axon_test(
         "--optimize-graph/--no-optimize-graph",
         help="Enable conservative Graph IR optimization before codegen/runtime.",
     ),
-    canonicalize: bool = typer.Option(
-        False,
-        "--canonicalize/--no-canonicalize",
-        help="Enable Axon canonicalization before codegen2-torch/runtime2-torch graph lowering.",
-    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -588,7 +543,6 @@ def axon_test(
             hf_strict_dtype=hf_strict_dtype,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
-            canonicalize=canonicalize,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -754,11 +708,6 @@ def axon_benchmark(
         "--optimize-graph/--no-optimize-graph",
         help="Enable conservative Graph IR optimization before codegen/runtime.",
     ),
-    canonicalize: bool = typer.Option(
-        False,
-        "--canonicalize/--no-canonicalize",
-        help="Enable Axon canonicalization before codegen2-torch/runtime2-torch graph lowering.",
-    ),
     skip_hf: bool = typer.Option(
         False,
         "--skip-hf/--no-skip-hf",
@@ -844,7 +793,6 @@ def axon_benchmark(
             pipeline_parallel_size=pipeline_parallel_size,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
-            canonicalize=canonicalize,
             skip_hf=skip_hf,
             hf_strict_dtype=hf_strict_dtype,
             oom_cpu_fallback=oom_cpu_fallback,

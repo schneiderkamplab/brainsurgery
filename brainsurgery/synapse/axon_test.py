@@ -37,7 +37,6 @@ from transformers.utils import import_utils as transformers_import_utils
 from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Config
 
 from .axon import (
-    canonicalize_typed_axon_file,
     candidate_tokenizer_dirs,
     elaborate_closed_axon_file,
     flatten_closed_axon_file,
@@ -2738,7 +2737,6 @@ def _run_axon_test_single(
     axon_typechecker: str = "typecheck2",
     optimize_ast: bool = False,
     optimize_graph: bool = False,
-    canonicalize: bool = False,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
@@ -2868,8 +2866,6 @@ def _run_axon_test_single(
         typed_axon = typecheck2_flat_axon_file(flat_axon)
         if optimize_ast:
             typed_axon = optimize_safe_flat_typed_axon_file(typed_axon)
-        if canonicalize:
-            typed_axon = canonicalize_typed_axon_file(typed_axon)
         graph_program = lower_axon_program_to_graph_ir(typed_axon)
         if optimize_graph:
             graph_program = optimize_graph_program(graph_program)
@@ -4269,7 +4265,6 @@ def run_axon_test(
     axon_typechecker: str = "typecheck2",
     optimize_ast: bool = False,
     optimize_graph: bool = False,
-    canonicalize: bool = False,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
 ) -> dict[str, Any]:
@@ -4302,7 +4297,6 @@ def run_axon_test(
         axon_typechecker=axon_typechecker,
         optimize_ast=optimize_ast,
         optimize_graph=optimize_graph,
-        canonicalize=canonicalize,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
     )

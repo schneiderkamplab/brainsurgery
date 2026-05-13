@@ -59,7 +59,6 @@ from ..entrypoint import resolve_main_module
 from ..resolve import prune_unreachable_definitions
 from ..typecheck2 import typecheck2_flat_axon_file
 from ..validate import (
-    validate_backend_required_flat_typed_axon_file,
     validate_flat_axon_file,
     validate_typed_axon_file,
 )
@@ -3902,30 +3901,7 @@ def optimize_safe_flat_typed_axon_file(
     )
 
 
-def normalize_backend_required_flat_typed_axon_file(
-    program: AxonFile, *, main_module: str | None = None
-) -> AxonFile:
-    """Run flat-Axon rewrites required by the current backend contract.
-
-    These are not semantic optimizations and therefore still run when CLI
-    optimization is disabled.
-    """
-
-    validate_typed_axon_file(program, main_module=main_module)
-    normalized = replace(
-        program,
-        modules=tuple(
-            replace(module, statements=_normalize_list_destructure_binds(module.statements))
-            for module in program.modules
-        ),
-    )
-    normalized = typecheck2_flat_axon_file(normalized, main_module=main_module)
-    validate_backend_required_flat_typed_axon_file(normalized, main_module=main_module)
-    return normalized
-
-
 __all__ = [
-    "normalize_backend_required_flat_typed_axon_file",
     "optimize_flat_typed_axon_file",
     "optimize_safe_flat_typed_axon_file",
 ]

@@ -515,7 +515,7 @@ def _module_to_graph(module: AxonDefinition) -> GraphModule:
             outputs = tuple(_lower_expr_to_operand(value, ctx) for value in stmt.values)
             continue
         raise ValueError(
-            f"graph IR lowering requires backend-required flat Axon; "
+            f"graph IR lowering requires flat typed Axon; "
             f"unexpected {type(stmt).__name__} in {module.name!r}"
         )
     if outputs is None:

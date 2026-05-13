@@ -79,11 +79,14 @@ Implementation status:
   typed Graph IR input, type-preserving rewrites, the graph verifier, and
   conservative effect defaults.
 
-## Backend-Required Normalize
+## Removed Backend-Required Normalize
 
-`normalize_backend_required_flat_typed_axon_file` is legacy in the Graph IR path.
+The old backend-required normalize stage has been removed from the active
+codegen2/Graph IR pipeline. Graph IR supports multi-output nodes natively, so
+list destructuring is represented structurally instead of being rewritten into
+backend-specific `_list_index` scaffolding.
 
-Its main current purpose is list-destructuring normalization:
+The removed pass used to rewrite:
 
 ```axon
 x, y, z <- Tensor.chunk value parts=3
@@ -98,25 +101,12 @@ y <- _list_index tmp 1
 z <- _list_index tmp 2
 ```
 
-Graph IR supports multi-output nodes natively, so the Graph IR pipeline should not
-need this rewrite. Lowering should preserve destructuring as multiple typed graph
-outputs where the source Axon bind has multiple targets.
+Current decision:
 
-Decision:
-
-- remove this pass from the Graph IR/codegen2 path after validating all consumers
-  can accept multi-output Graph IR
-- keep no legacy backend-required stage just for old Synapse graph constraints
+- keep no legacy backend-required stage just for old backend constraints
+- keep no `validate.backend_required` stage
 - if a backend cannot consume multi-output nodes, that backend should lower or split
   the graph IR explicitly, not force all Axon lowering through `_list_index`
-
-Validation needed before removal:
-
-- Graph IR roundtrip tests preserve multi-target binds
-- codegen2/runtime2 execute multi-output graph nodes correctly
-- no stage after Graph IR assumes list-index-expanded destructuring
-- `validate.backend_required` is either deleted or narrowed to properties still
-  actually required by the active backend
 
 ## Safe Passes
 
@@ -706,9 +696,7 @@ Missing:
 
 - move every safe pre-Graph rewrite into `optimize_safe`
 - move graph-suitable rewrites into `optimize_graph`
-- delete or quarantine legacy-only rewrites that exist for old backend contracts
-- remove `normalize_backend_required_flat_typed_axon_file` from active Graph
-  IR/codegen2 paths once multi-output graph consumption is fully validated
+- delete or quarantine any remaining legacy-only rewrites that exist for old backend contracts
 - ensure no required backend behavior is hidden behind optional optimization
 
 ### Graph-Level Constraints
@@ -800,10 +788,10 @@ should then fail with an unsupported primitive error.
 
 ## Proposed Refactor Slices
 
-1. Remove legacy backend-required destructuring from the Graph IR path.
-- Prove Graph IR/codegen2 handles multi-output nodes.
-- Delete or narrow `normalize_backend_required_flat_typed_axon_file`.
-- Update `validate.backend_required` accordingly.
+1. Keep backend-required normalization removed.
+- Graph IR/codegen2 should handle multi-output nodes directly.
+- Required backend behavior must be represented in Graph IR or in explicit backend lowering.
+- Do not reintroduce non-optional AST rewrites for old backend contracts.
 
 2. Introduce `optimize-ast` / `optimize_safe`.
 - Contains rooted pruning, atomic alias cleanup, literal-only folding.
