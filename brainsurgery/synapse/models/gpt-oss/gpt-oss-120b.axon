@@ -73,9 +73,13 @@ SWIGLU_ALPHA = 1.702
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-grouped_ffn_gated :: Tensor[..S] -> Float -> Float -> Tensor[..S]
+grouped_ffn_gated :: Tensor[N,W] -> Float -> Float -> Tensor[N,H]
 grouped_ffn_gated gate_up alpha limit = do
-  gate, up <- Tensor.deinterleave_last2 gate_up
+  w <- Tensor.size gate_up -1
+  h <- w / 2
+  pair <- Tensor.reshape gate_up shape=[N, h, 2]
+  gate <- Tensor.slice pair dim=-1 start=0 end=1 |> Tensor.reshape shape=[N, h]
+  up <- Tensor.slice pair dim=-1 start=1 end=2 |> Tensor.reshape shape=[N, h]
   gate <- clamp gate max=limit
   up <- clamp up min=(0.0 - limit) max=limit
   return (up + 1.0) * (gate * sigmoid (gate * alpha))
@@ -85,14 +89,13 @@ grouped_ffn hidden topk_scores topk_indices ?gate_up_weight=@experts.gate_up_pro
   alpha <- (alpha == null) ? 1.702 : alpha
   limit <- (limit == null) ? 7.0 : limit
   has_bias <- (has_bias == null) ? true : has_bias
-  has_gate <- (has_gate == null) ? true : has_gate
   transpose <- (transpose == null) ? true : transpose
   routed <- hidden * 0.0
   experts <- param path=gate_up_weight |> Tensor.size 0
   routed <- for e <- [0..experts) carry (routed) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_scores topk_indices e
     gate_up <- NN.linear@w1 x_sel dim=null bias=has_bias transpose=transpose expert=e weight_path=gate_up_weight bias_path=gate_up_bias
-    ff <- has_gate ? (grouped_ffn_gated gate_up alpha limit) : (gate_up |> silu)
+    ff <- grouped_ffn_gated gate_up alpha limit
     x_upd <- NN.linear@w2 ff dim=null bias=has_bias transpose=transpose expert=e weight_path=out_weight bias_path=out_bias
     routed <- scatter_add routed token_idx x_upd sel_scores
     yield routed

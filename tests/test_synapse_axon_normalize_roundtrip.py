@@ -114,6 +114,46 @@ main x = do
     assert z_arg.expr.callee == "EPS"
 
 
+def test_normalize_checkpoints_pragma_string_to_tuple() -> None:
+    source = """
+{-# CHECKPOINTS "google/gemma-3-270m" #-}
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    normalized = normalize_closed_axon_file(parse_axon_program(source), main_module="lin")
+
+    assert normalized.pragmas["checkpoints"] == ("google/gemma-3-270m",)
+
+
+def test_normalize_checkpoints_pragma_list_to_tuple() -> None:
+    source = """
+{-# CHECKPOINTS ["google/gemma-3-270m", "google/gemma-3-270m-it"] #-}
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    normalized = normalize_closed_axon_file(parse_axon_program(source), main_module="lin")
+
+    assert normalized.pragmas["checkpoints"] == (
+        "google/gemma-3-270m",
+        "google/gemma-3-270m-it",
+    )
+
+
+def test_normalize_multiple_tokenizer_pragmas_merge() -> None:
+    source = """
+{-# TOKENIZER "mistralai/Mistral-7B-v0.1" #-}
+{-# TOKENIZER ["mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"] #-}
+lin :: Tensor[B,S,D] -> Tensor[B,S,D]
+lin x = x
+"""
+    normalized = normalize_closed_axon_file(parse_axon_program(source), main_module="lin")
+
+    assert normalized.pragmas["tokenizer"] == (
+        "mistralai/Mistral-7B-v0.1",
+        ("mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"),
+    )
+
+
 def test_normalize_adds_implied_repeat_yield_and_carry() -> None:
     source = """
 step :: Tensor[B,S,D] -> Tensor[B,S,D]

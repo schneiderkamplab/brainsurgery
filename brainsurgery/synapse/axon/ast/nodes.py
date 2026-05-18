@@ -232,6 +232,7 @@ class AxonDefinition:
     type_aliases: dict[str, TypeAliasDef] | None = None
     return_type_expr: TypeExpr | None = None
     constraints: tuple[Constraint, ...] | None = None
+    is_global_binding: bool = False
 
 
 __all__ = [

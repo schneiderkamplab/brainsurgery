@@ -109,6 +109,7 @@ def _build_surface_modules(
                 pragmas=None,
                 type_aliases=dict(ast.type_aliases) or None,
                 return_type_expr=module.return_type_expr,
+                is_global_binding=module.is_global_binding,
             )
         )
     out = tuple(modules)
@@ -776,6 +777,7 @@ def _rewrite_modules_for_loaded_file(
                 pragmas=None,
                 type_aliases=None,
                 return_type_expr=module.return_type_expr,
+                is_global_binding=module.is_global_binding,
             )
         )
     return tuple(out)
@@ -1559,6 +1561,7 @@ def resolve_loaded_axon_files(
             pragmas=None,
             type_aliases=None,
             return_type_expr=module.return_type_expr,
+            is_global_binding=module.is_global_binding,
         )
         for module in ordered_modules_tuple
     )

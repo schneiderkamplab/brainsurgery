@@ -8,7 +8,7 @@
 
 4. Add roundtrip results table. Done for the current pass: the paper reports the full roundtrip suite result, `4384` collected tests with `4123` ordinary passes, `261` non-strict XPass optimized-Graph trackers, and zero failures.
 
-5. Document optimize split. Done for the first pass: the paper now describes `optimize-ast` and `optimize-graph` as separate optional phases, both off by default and outside the correctness-critical path.
+5. Document optimize split. Done for the current pass: the paper now describes `optimize-ast` as the narrow safe typed-AST cleanup pass and `optimize-graph` as the typed Graph IR fixpoint pipeline with pruning, dim substitution/simplification, zero-arg global promotion, local cleanup, CSE, specialization, inlining, graph validation, and final generated-name canonicalization.
 
 6. Re-check Elaborate/Flatten after the implementation contract is fixed. Done for the first pass: the text now states the validated contract that elaboration inserts defaults only for uncovered formals, flatten does not repair defaults, and weak/strong roundtrips preserve the call surface.
 

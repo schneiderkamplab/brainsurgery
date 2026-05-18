@@ -97,6 +97,81 @@ def _collect_type_dim_names(
     return set()
 
 
+def _collect_expr_type_dim_names(
+    expr: AxonExpr,
+    *,
+    type_aliases: dict[str, TypeAliasDef],
+) -> set[str]:
+    if not hasattr(expr, "inferred_type"):
+        return set()
+    names = _collect_type_dim_names(expr.inferred_type, type_aliases=type_aliases)
+    if isinstance(expr, AxonExprAscribe):
+        names.update(_collect_type_dim_names(expr.type_expr, type_aliases=type_aliases))
+        names.update(_collect_expr_type_dim_names(expr.expr, type_aliases=type_aliases))
+        return names
+    if isinstance(expr, AxonExprParen):
+        names.update(_collect_expr_type_dim_names(expr.inner, type_aliases=type_aliases))
+        return names
+    if isinstance(expr, AxonExprCall):
+        for arg in expr.args:
+            names.update(_collect_expr_type_dim_names(arg, type_aliases=type_aliases))
+        for kwarg in expr.kwargs.values():
+            value = kwarg.value if hasattr(kwarg, "value") else kwarg
+            names.update(_collect_expr_type_dim_names(value, type_aliases=type_aliases))
+        return names
+    if isinstance(expr, AxonExprBinary):
+        names.update(_collect_expr_type_dim_names(expr.left, type_aliases=type_aliases))
+        names.update(_collect_expr_type_dim_names(expr.right, type_aliases=type_aliases))
+        return names
+    if isinstance(expr, AxonExprTernary | AxonExprIf):
+        names.update(_collect_expr_type_dim_names(expr.cond, type_aliases=type_aliases))
+        names.update(_collect_expr_type_dim_names(expr.true_expr, type_aliases=type_aliases))
+        names.update(_collect_expr_type_dim_names(expr.false_expr, type_aliases=type_aliases))
+        return names
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            names.update(_collect_expr_type_dim_names(item, type_aliases=type_aliases))
+        return names
+    if isinstance(expr, AxonExprDo):
+        names.update(_collect_stmt_type_dim_names(expr.body, type_aliases=type_aliases))
+        return names
+    if isinstance(expr, AxonExprBind):
+        names.update(_collect_expr_type_dim_names(expr.value, type_aliases=type_aliases))
+        names.update(_collect_expr_type_dim_names(expr.body, type_aliases=type_aliases))
+        return names
+    if isinstance(expr, AxonExprPipe):
+        names.update(_collect_expr_type_dim_names(expr.value, type_aliases=type_aliases))
+        for stage in expr.stages:
+            names.update(_collect_expr_type_dim_names(stage, type_aliases=type_aliases))
+    return names
+
+
+def _collect_stmt_type_dim_names(
+    stmts: tuple[AxonStatement, ...],
+    *,
+    type_aliases: dict[str, TypeAliasDef],
+) -> set[str]:
+    names: set[str] = set()
+    for stmt in stmts:
+        if isinstance(stmt, AxonBind):
+            names.update(_collect_expr_type_dim_names(stmt.expr, type_aliases=type_aliases))
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                names.update(_collect_expr_type_dim_names(value, type_aliases=type_aliases))
+        elif isinstance(stmt, AxonCond):
+            names.update(_collect_expr_type_dim_names(stmt.cond, type_aliases=type_aliases))
+            names.update(_collect_stmt_type_dim_names(stmt.true_body, type_aliases=type_aliases))
+            names.update(_collect_stmt_type_dim_names(stmt.false_body, type_aliases=type_aliases))
+        elif isinstance(stmt, AxonRepeat):
+            names.update(_collect_expr_type_dim_names(stmt.to_expr, type_aliases=type_aliases))
+            names.update(_collect_expr_type_dim_names(stmt.from_expr, type_aliases=type_aliases))
+            names.update(_collect_expr_type_dim_names(stmt.step_expr, type_aliases=type_aliases))
+            names.update(_collect_stmt_type_dim_names(stmt.body, type_aliases=type_aliases))
+        elif isinstance(stmt, AxonScopeBind):
+            names.update(_collect_stmt_type_dim_names(stmt.body, type_aliases=type_aliases))
+    return names
+
+
 def _substitute_type_alias_dims(
     tp: TypeExpr, *, subst: dict[str, DimToken | tuple[DimToken, ...]]
 ) -> TypeExpr:
@@ -435,7 +510,10 @@ def _validate_stmt_closure(
                 collected.update(true_after & false_after)
         return collected
 
-    local_bound = set(bound_names)
+    local_bound = set(bound_names) | _collect_stmt_type_dim_names(
+        stmts,
+        type_aliases=type_aliases,
+    )
     for stmt in stmts:
         if isinstance(stmt, AxonBind):
             _validate_expr_closure(
@@ -447,6 +525,9 @@ def _validate_stmt_closure(
                 module=module,
             )
             local_bound.update(name for name in stmt.targets if name != "_")
+            local_bound.update(
+                _collect_type_dim_names(stmt.expr.inferred_type, type_aliases=type_aliases)
+            )
             continue
         if isinstance(stmt, AxonReturn | AxonYield):
             for value in stmt.values:

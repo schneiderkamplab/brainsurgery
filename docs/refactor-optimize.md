@@ -14,6 +14,69 @@ The current rule should be:
 
 ## Current Status
 
+Top optimizer strengthening priorities:
+
+- Eliminate stale shape symbols in Graph IR by construction. This is the top
+  blocker before re-enabling broader shape folding and helper inlining. After
+  every graph rewrite, tensor `type_expr`, `dims`, node result types, module
+  return types, and constraints must be re-instantiated from the producing op and
+  callsite actuals, then validated against runtime-shape-sensitive uses. In
+  particular, inlining helpers such as `Attention.merge_heads` must preserve the
+  fact that `Tensor.size`/`_shape` queries are authoritative for dynamic
+  generation shapes; prompt-time symbols such as `S`/`K` must not be reused for a
+  one-token decode-step tensor unless the op/type rule proves they are equal.
+  The current implementation keeps a conservative safety barrier: multi-node
+  helpers containing runtime shape queries are not inlined, and shape-query
+  folding only applies to stable module inputs. This should be relaxed only
+  after graph validation can prove shape metadata freshness end-to-end.
+- Lower flattened tail-recursive loop-helper SCCs to explicit iterative
+  graph/codegen loops. The recognizer should require a single-entry SCC, a loop
+  index/bound/step state, tail calls only in tail position, and a carry tuple
+  whose arity is stable across the base and recursive paths. Codegen can then
+  emit `for range(...)` for normal static positive-step loops and a validated
+  `while` form otherwise, preserving template-symbol dependencies such as
+  `@@'h.{i}'`.
+- Add a main-module-anchored intra- and inter-procedural domain analysis. The
+  analysis should run over the pruned reachable graph and derive facts that hold
+  on all non-dead paths from `MAIN`, including null/non-null facts, boolean
+  values, numeric literal/range equalities, path/global-value equalities, and
+  callsite-restricted argument domains. These facts should feed constant folding,
+  dead-branch cleanup, specialization, and inlining without relying on syntactic
+  guesses. Example: if every reachable call to `Positions.position_ids` passes
+  `attn_mask=null`, the callee should know `attn_mask is_null`, fold
+  `attn_mask == null` to `true`, and remove the masked branch before any clone or
+  inline rewrite is accepted.
+
+  Implementation plan:
+
+  - First land an analysis-only fact domain: unknown, null, non-null, exact
+    literal, exact path, and exact model-global value.
+  - Infer facts only from the `MAIN`-reachable graph. Unreachable definitions do
+    not contribute.
+  - Aggregate callsite facts per callee formal by intersection: if all reachable
+    callsites pass the same null/literal/path/global value, record that fact;
+    disagreements become unknown.
+  - Propagate facts intraprocedurally through aliases/ascriptions, literal
+    selects, and simple equality/inequality comparisons.
+  - Only after Graph IR validation is strong enough, feed the facts into
+    fold/dead-branch cleanup and then into specialization/inlining.
+  - Iterate fact derivation and cleanup to a validated graph fixpoint.
+- Inline single-use total-pure list/tuple literals when they are only argument
+  scaffolding for flat-safe primitive calls such as `_reshape`, `_expand`, and
+  `_permute`.
+- Continue simplifying scalar/dimension expressions in Graph IR. The first slice
+  reduces direct algebraic identities such as `NUM_HEADS * (MODEL_DIM /
+  NUM_HEADS)` to `MODEL_DIM` and updates term/type/dim metadata coherently.
+  Future identities must remain proof-gated and validator-backed.
+- Remove remaining return-only tuple scaffolding when the tuple expression is
+  flat-safe, typed, used exactly once, and does not duplicate partial/effectful
+  work.
+- Continue flat-safe optional/null specialization and inlining. Do not add
+  branch-region or do-expression operands; helpers containing live lazy branches
+  should remain as calls unless a flat-safe branch is eliminated first.
+- Keep path/template symbols and model-global bindings first-class through all
+  rewrites; do not turn them into string substitutions or definition aliases.
+
 `optimize_flat_typed_axon_file` currently mixes several categories:
 
 - required backend-shape normalization
@@ -38,25 +101,103 @@ Implementation status:
   folding to fixpoint with `typecheck2` and typed validation after each iteration.
 - `optimize_graph_program` exists as an optional typed Graph IR optimizer. It
   currently performs graph pruning, atomic alias cleanup, dead temp elimination for
-  total `core.*` nodes, literal-only constant folding, conservative single-callsite
-  specialization, and constrained safe inlining of total-pure helper modules.
+  total-pure nodes, literal-only constant folding, proof-gated literal dim
+  substitution, total-pure common-subexpression elimination, conservative
+  single-callsite specialization, and constrained safe inlining of total-pure
+  helper modules. It iterates to a fixpoint with a high iteration limit and now
+  fails loudly instead of returning a non-converged graph.
 - Graph IR pruning is metadata-aware: type annotations, dim metadata, constraints,
   and path-template symbols are treated as dependencies. This prevents pruning
   constants such as `CFG`/shape names that only appear in templates or typed
   metadata.
-- Safe inlining no longer treats zero-arg atomic constants as ordinary
-  single-callsite helpers. Atomic constants stay as constants by default; they are
-  only substituted by the explicit, opt-in constant-dim substitution pass.
-- Optional graph constant-dim substitution exists behind
-  `GraphOptimizeConfig.constant_dim_substitution=False`. It is local,
-  constraint-gated, and validates each candidate rewrite. A module must both
-  reference the constant in dim/type metadata and carry a local equality
-  constraint such as `VOCAB_SIZE = 151936` before the substitution can apply.
+- Literal zero-arg atomic constants are now inlined by default. If a dimension,
+  int, or float value is statically proven literal, Graph IR should carry and
+  render the literal rather than preserving a symbolic alias for readability.
+- Graph constant-dim substitution is enabled by default through
+  `GraphOptimizeConfig.constant_dim_substitution=True`. It is still local,
+  proof-gated, and validates each candidate rewrite. For metadata substitution,
+  a module must both reference the constant in dim/type metadata and carry a
+  local equality constraint such as `VOCAB_SIZE = 151936` before substitution can
+  apply.
+- Graph common-subexpression elimination is enabled by default through
+  `GraphOptimizeConfig.common_subexpression_elimination=True`. The initial
+  implementation eliminates duplicate single-output nodes and duplicate nested
+  expression operands proven `total_pure`; partial-pure nodes/expressions are not
+  CSE'd because Axon evaluation is eager and duplicated partial failures are
+  observable enough that the optimizer should not change them without a stronger
+  semantic rule.
+- Graph literal folding now includes a narrow scalar primitive table. `_sqrt`
+  folds when its argument is a non-negative int/float literal, so derived
+  arithmetic such as `1.0 / _sqrt(64)` can collapse through the existing binary
+  folding path. Tensor-valued primitives, config/param calls, and partial-pure
+  operations are not folded by this table.
+- Graph symbolic dim simplification now folds simple algebraic identities in
+  both metadata and local scalar-dim dataflow. For example, a producer sequence
+  equivalent to `hd = MODEL_DIM / NUM_HEADS; d = NUM_HEADS * hd` renders the
+  downstream shape as `MODEL_DIM`. The pass is structural and validator-backed;
+  it does not use string rewriting.
+- Graph-to-Axon rendering now preserves optimized atomic `core.list`/`core.tuple`
+  expressions inline when doing so is flat-safe. This exposes graph cleanup for
+  shape/order arguments such as `_reshape x [B,S,D]` and return tuple expressions
+  without allowing nested eager calls in argument positions.
+- Graph specialization now also handles call-site constants that flow through
+  nested `GraphExpr` calls and through local zero-arg global-value producer
+  temps. This lets helper calls such as `Masking.causal_mask_keep(...,
+  CONTEXT_SIZE)` specialize even when they sit inside lazy ternary operands or
+  are reached through another specialized helper. Null comparisons are folded
+  for substituted global values with statically non-null types, but not for
+  arbitrary local refs whose annotations may be over-refined.
+- Graph tuple-return cleanup now removes multi-output `core.tuple` destructuring
+  nodes when they only repackage atomic values or nested tuple repackaging
+  expressions. This eliminates scaffolding such as `__cond_result_2,
+  __cond_result_3, __cond_result_4 <- (k_all, v_all, (k_all, v_all))` while
+  preserving effect order and avoiding duplication of partial/effectful work.
+- Graph substitution now uses one shared utility for operand refs, path-template
+  refs, type/dim metadata, constraints, and value renaming. Specialization uses
+  this shared path to keep helper signatures, return types, outputs, constraints,
+  and body annotations coherent when literal dim formals are removed. Safe
+  inlining also substitutes call-site type/dim bindings through copied helper
+  nodes and returned operands, so rendered graph Axon does not keep stale callee
+  symbols such as `d` when the call site has already fixed that dimension.
+- Graph domain analysis has an initial analysis-only implementation. It derives
+  main-reachable callsite facts for module formals and local facts through
+  aliases/ascriptions, literal selects, and simple equality comparisons. It is
+  not yet wired into graph mutation; this is intentional until Graph IR
+  validation and optimize-graph idempotence are stronger.
+- Graph final naming now canonicalizes specialized module names and generated
+  local value names after the semantic optimizer reaches a fixpoint. The value
+  pass rewrites node outputs, value refs, path-template placeholders, type/dim
+  metadata, constraints, and return operands consistently, while preserving
+  source-readable names such as `logits`, `mask`, `scores`, or `new_kv`.
+- Graph optimization now promotes zero-arg, single-output modules proven
+  `total_pure` to model-global bindings before inlining. This keeps config-like
+  values such as `MODEL_DIM` and `NUM_HEADS` as explicit global values that
+  codegen2 can evaluate once and cache, rather than expanding their bodies at
+  every use site.
+- Graph-to-Axon rendering now treats zero-arg graph modules as callable values
+  when they occur in term positions. Repeated local zero-arg refs are canonicalized
+  through the first local binding, which keeps graph-rendered Axon typecheckable
+  without relying on downstream normalize to reinterpret bare names.
+- Constraint-aware specialization is implemented for the narrow safe case:
+  literal/path actuals are substituted into helper constraints, trivially true
+  constraints are pruned, false or unrepresentable substitutions reject the clone,
+  and unguarded stale constraint metadata is dropped conservatively. Primitive
+  wrapper modules are not specialized, because their apparent signatures can be
+  broader than the op-specific primitive type rule.
 - Graph IR validation now includes a conservative type/arity verifier for typed
   operands, module calls, core ops, stale value references, and node/module output
   contracts. It intentionally accepts current Axon polymorphism such as `Any`,
   type variables, symbolic dimension binders, row variables, optional-null
   defaults, Dim/Int coercions, and Int-to-Float widening.
+- The graph optimizer now validates at pass boundaries. Each mutating subpass
+  checks the resulting Graph IR for structural validity and stale metadata before
+  the next subpass runs. The metadata check is intentionally strict for concrete
+  numeric shape mismatches, but tolerant of current row-variable summaries such
+  as `..S`/`..R` until upstream type metadata canonicalization is stronger.
+- Optimizer validation also checks module-call result contracts after applying
+  call-site dimension substitutions. A helper returning `Tensor[B,d]` and called
+  with `d=8` must produce a call result compatible with `Tensor[B,8]`; stale
+  concrete annotations such as `Tensor[B,9]` are rejected before any rewrite.
 - Graph IR has an explicit effect model. Unknown calls are `partial_pure` by
   default; only known-total `core.*` ops are currently `total_pure`. Graph DCE and
   safe inlining consult this model instead of a local ad-hoc allowlist.
@@ -73,6 +214,46 @@ Implementation status:
   produced `512 passed` on 2026-05-12 after fixing the graph closure,
   path-template substitution, atomic-constant inlining, and loop-helper return
   type propagation clusters.
+- A max-4B `--optimize-graph` fidelity run on 2026-05-13 completed 153/153 rows
+  with zero `ERROR` rows and zero top-1 failures. Six rows exceeded the strict
+  `1e-3` max-abs threshold while preserving top-1: `Apertus-Test`,
+  `GPT-OSS-Test`, `Llama4-Test`, `Mistral4-Test`, `mt5-small`, and `mt5-base`.
+- A longer-prompt DeepSeek-V4 smoke on 2026-05-13 covered the non-empty CSA path
+  with `masked_top1_eq=True` and `masked_max_abs_diff=6.56e-7`.
+- A 10-row diverse max-4B `--optimize-graph` fidelity smoke on 2026-05-14 passed
+  before and after nested-expression CSE. All rows had `masked_top1_eq=True`;
+  known top-1-preserving strict-threshold outliers remained `GPT-OSS-Test`,
+  `Llama4-Test`, and `mt5-small`.
+- A 6-file optimized Graph IR weak+strong roundtrip smoke on 2026-05-14 passed
+  after inlining metadata substitution: GPT-2 KV, BERT, T5, Gemma3, Llama4, and
+  DeepSeek-V4.
+- A 20-file optimized Graph IR weak+strong roundtrip smoke on 2026-05-14 passed
+  after pass-level graph optimizer validation was added: `40/40` canonical
+  roundtrips. Artifact directory:
+  `tmp/graph-roundtrip-phase-validate-selected20-20260514b`.
+- A 10-row diverse max-4B `--optimize-graph` fidelity smoke on 2026-05-14 passed
+  after pass-level validation: `10/10` completed, zero errors, zero top-1
+  failures. The same known top-1-preserving strict-threshold outliers remained:
+  `GPT-OSS-Test`, `Llama4-Test`, and `mt5-small`. Log:
+  `log/opt-graph-phase-validate-fidelity10-20260514`.
+- A 20-file optimized Graph IR weak+strong roundtrip smoke on 2026-05-14 passed
+  after call-result validation was added: weak `20/20`, strong `20/20`.
+  Artifact directory:
+  `tmp/graph-roundtrip-call-result-validate-selected20-20260514`.
+- A 10-row diverse max-4B `--optimize-graph` fidelity smoke on 2026-05-14 passed
+  after call-result validation: `10/10` completed, zero errors, zero top-1
+  failures. The same known top-1-preserving strict-threshold outliers remained:
+  `GPT-OSS-Test`, `Llama4-Test`, and `mt5-small`. Log:
+  `log/opt-graph-call-result-validate-fidelity10-20260514`.
+- A 20-file combined optimized AST+Graph IR weak+strong roundtrip smoke on
+  2026-05-14 passed after constraint-aware specialization: weak `20/20`, strong
+  `20/20`. Artifact directory:
+  `tmp/graph-roundtrip-constraint-specialize-selected20-20260514`.
+- A 10-row diverse max-4B `--optimize-graph` fidelity smoke on 2026-05-14 passed
+  after constraint-aware specialization: `10/10` completed, zero errors, zero
+  top-1 failures. The same known top-1-preserving strict-threshold outliers
+  remained: `GPT-OSS-Test`, `Llama4-Test`, and `mt5-small`. Log:
+  `log/opt-graph-constraint-specialize-fidelity10-20260514`.
 - The old broad AST optimizer implementation remains as internal experimental
   code, but the user-facing `--optimize` flag has been removed.
 - There is still no full Graph IR inference engine. Graph optimization relies on
@@ -554,18 +735,23 @@ Status:
 
 - SCC analysis is implemented for specialization.
 - Recursive SCCs and self-recursive modules are not specialized.
-- Modules with constraints are not specialized until constraint substitution is
-  implemented.
+- Constrained modules can be specialized only when constraint substitution is
+  representable and leaves no false constraints. Stale unguarded constraints are
+  dropped as unusable optimization metadata; callsite-guarded interprocedural
+  facts may mention caller-side refs and are preserved.
 - Path actuals are specialized only when they do not contain template
   placeholders.
+- Primitive wrappers are not specialized; op-specific primitive type rules should
+  remain attached to direct primitive calls.
 - Specialized clone names are collision-safe.
 - Graph validation runs after clone creation and callsite rewrite.
-- Tests cover successful single-callsite literal specialization and rejection of
-  recursive self-specialization.
+- Tests cover successful single-callsite path/dim specialization, constraint
+  substitution, false-constraint rejection, primitive-wrapper rejection, stale
+  constraint cleanup, callsite-guarded constraint preservation, and recursive
+  self-specialization rejection.
 
 Missing:
 
-- constraint substitution and validation
 - structural substitution for path templates and template variables
 - rewriting support for nested module calls, or explicit validation that no nested
   callsites are being specialized accidentally
@@ -575,24 +761,30 @@ Missing:
 ### Inlining Hardening
 
 Current graph inlining only inlines helpers proven `total_pure` by the graph
-effect model. It is intentionally limited and only rewrites top-level call nodes.
+effect model. It is intentionally limited to single-callsite helpers.
 
 Status:
 
-- Inlining skips `main`, recursive SCCs, and modules with constraints.
-- Inlining requires exactly one callsite and exactly one top-level call node.
-- Nested expression callsites are not inlined yet.
+- Inlining skips `main` and recursive SCCs.
+- Constrained helpers may be inlined only when their constraints can be
+  substituted into the caller, are not false, and remain representable.
+- Inlining requires exactly one callsite.
+- Nested expression callsites are supported under the same total-pure and
+  representable-constraint requirements.
 - The call node must pass all args positionally, with matching input/output arity.
 - Actual/formal and returned/output types are checked with the same compatibility
   rules as `validate_graph_program`.
 - Inlining rewrites module returns through the same substitution used for nodes.
 - Graph validation runs after inlining and pruning.
+- Optimizer validation checks call-result types after applying call-site dim
+  substitutions, catching stale concrete result annotations before inlining or
+  specialization can preserve them.
 - Tests cover single-output helpers, multi-output helpers, path operands,
-  constrained helpers, and nested expression callsites.
+  constrained helpers, dim value refs instantiated from call-site types, and
+  nested expression callsites.
 
 Missing:
 
-- constraint substitution
 - explicit branch/laziness checks for nested expression inlining
 - cost policy for duplicating work
 - tests for tuple/list-valued helpers
@@ -662,9 +854,12 @@ Status:
   `_topk` should not preserve the eliminated `IdxTensor` alias in core typed AST,
   and `_tensor_like` should use the reference tensor shape.
 
-Missing:
+Status:
 
-- smoke benchmark with `--optimize-graph` alone
+- `--optimize-graph` smoke passed on `generic-gpt2-kv.axon` with
+  `openai-community/gpt2`: `masked_top1_eq=True`, max abs diff
+  `0.0001068115234375`. Latest log:
+  `log/gpt2-kv-global-backend-smoke/run.log`.
 - combined `--optimize-ast --optimize-graph` smoke passed on
   `generic-gpt2-kv.axon` with `openai-community/gpt2`: `masked_top1_eq=True`,
   max abs diff `3.0517578125e-05`. Log:
@@ -721,8 +916,10 @@ The current graph optimizer performs cleanup, not substantial backend optimizati
 
 Missing future passes:
 
+- scalar/dim expression simplification
+- single-use shape/list literal cleanup for flat-safe primitive arguments
+- return-only tuple scaffolding cleanup
 - CSE for total operations
-- shape/dim simplification
 - dead branch elimination with fresh constraints
 - backend argument normalization where needed
 - op fusion
@@ -810,14 +1007,21 @@ should then fail with an unsupported primitive error.
 - User definitions inherit the least-safe effect of their body.
 
 5. Harden specialization and inlining.
-- Shared signature rewrite utility.
-- Shared substitution utility for terms/types/dims/constraints/paths.
-- SCC-aware termination checks.
-- Explicit metadata for generated helpers.
+- Shared signature rewrite utility is partially implemented through the Graph IR
+  substitution helpers and should be extended instead of adding local rewrite
+  functions.
+- Shared substitution utility for terms/types/dims/constraints/paths is
+  implemented and is used by dim substitution, specialization, and inlining.
+- SCC-aware termination checks are implemented for specialization/inlining.
+- Inlining metadata substitution is implemented for copied nodes and returned
+  operands.
+- Explicit metadata for generated helpers remains open.
 
 6. Move broader rewrites to Graph IR.
 - DCE
-- CSE
+- CSE for single-output `total_pure` nodes and repeated nested `total_pure`
+  expression operands is implemented; broader CSE for partial-pure expressions
+  remains disabled until there is an explicit eager-semantics rule.
 - backend argument normalization
 - op fusion
 - shape/layout driven optimizations

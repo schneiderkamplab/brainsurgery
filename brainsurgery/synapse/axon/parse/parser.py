@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ..ast.nodes import (
     AxonExpr,
+    AxonExprAscribe,
     AxonExprDo,
     AxonDefinition,
     AxonParam,
@@ -21,6 +22,7 @@ from ..validate.surface import validate_parsed_program_source
 from ._cst import (
     CstDefinition,
     CstDefinitionSource,
+    CstGlobalBinding,
     CstPathTypeParam,
     CstSignature,
 )
@@ -213,12 +215,34 @@ def _build_file_module_from_surface_source(
     )
 
 
+def _build_global_binding_from_surface_source(binding: CstGlobalBinding) -> AxonDefinition:
+    rhs_expr = binding.rhs
+    return AxonDefinition(
+        name=binding.name,
+        path_param=None,
+        path_params=(),
+        params=(),
+        returns=(),
+        statements=rhs_expr.body if isinstance(rhs_expr, AxonExprDo) and not rhs_expr.inline else (),
+        body_expr=None if isinstance(rhs_expr, AxonExprDo) and not rhs_expr.inline else rhs_expr,
+        imports=(),
+        imported_members=None,
+        exports=(),
+        symbols=None,
+        pragmas=None,
+        type_aliases=None,
+        return_type_expr=rhs_expr.type_expr if isinstance(rhs_expr, AxonExprAscribe) else None,
+        is_global_binding=True,
+    )
+
+
 def _ast_pragmas_with_explicit_main(
     pragmas: dict[str, object], modules: tuple[AxonDefinition, ...]
 ) -> dict[str, object]:
     ast_pragmas = dict(pragmas)
     if "main" not in ast_pragmas and modules:
-        ast_pragmas["main"] = modules[-1].name
+        main_candidates = [module for module in modules if not module.is_global_binding]
+        ast_pragmas["main"] = (main_candidates[-1] if main_candidates else modules[-1]).name
     return ast_pragmas
 
 
@@ -233,8 +257,16 @@ def parse_axon_program(source: str) -> AxonFile:
     parsed_source = parse_surface_program_source(source)
     validate_parsed_program_source(parsed_source)
     modules = tuple(
-        _build_file_module_from_surface_source(definition_source=definition_source)
-        for definition_source in parsed_source.modules
+        [
+            *(
+                _build_global_binding_from_surface_source(binding)
+                for binding in parsed_source.global_bindings
+            ),
+            *(
+                _build_file_module_from_surface_source(definition_source=definition_source)
+                for definition_source in parsed_source.modules
+            ),
+        ]
     )
     validate_axon_program(modules)
     return AxonFile(

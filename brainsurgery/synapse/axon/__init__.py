@@ -15,6 +15,7 @@ from .flatten import flatten_closed_axon_file
 from .load import LoadedAxonFile, LoadedAxonProgram, load_axon_files_from_path, resolve_import_path
 from .lowering import lower_axon_program_to_graph_ir
 from .graph_ir import (
+    graph_domain_definition_comments,
     graph_program_to_axon_file,
     optimize_graph_program,
     prune_graph_to_main,
@@ -104,6 +105,7 @@ __all__ = [
     "validate_flat_axon_file",
     "lower_axon_program_to_graph_ir",
     "graph_program_to_axon_file",
+    "graph_domain_definition_comments",
     "optimize_graph_program",
     "prune_graph_to_main",
     "render_graph_program_to_dot",

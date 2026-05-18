@@ -13,6 +13,8 @@ def graph_op_effect(op_name: str) -> GraphEffect:
 def _graph_operand_non_null(operand: GraphOperand) -> bool:
     if isinstance(operand, GraphLiteral):
         return operand.value is not None
+    if isinstance(operand, GraphExpr) and operand.op.name in {"core.list", "core.tuple"}:
+        return True
     return False
 
 
@@ -78,17 +80,15 @@ def graph_operand_effect(
         )
     if not isinstance(operand, GraphExpr):
         return GraphEffect.TOTAL_PURE
-    inputs = tuple(_substitute_operand(item, subst or {}) for item in operand.inputs)
-    attrs = {key: _substitute_operand(value, subst or {}) for key, value in operand.attrs.items()}
     effect = _graph_op_call_effect(
         operand.op.name,
-        inputs=inputs,
-        attrs=attrs,
+        inputs=operand.inputs,
+        attrs=operand.attrs,
         module_effects=module_effects,
         modules_by_name=modules_by_name,
         active_modules=active_modules,
     )
-    for item in inputs:
+    for item in operand.inputs:
         effect = join_graph_effect(
             effect,
             graph_operand_effect(
@@ -99,7 +99,7 @@ def graph_operand_effect(
                 subst=subst,
             ),
         )
-    for item in attrs.values():
+    for item in operand.attrs.values():
         effect = join_graph_effect(
             effect,
             graph_operand_effect(
@@ -113,17 +113,49 @@ def graph_operand_effect(
     return effect
 
 
-def _substitute_operand(operand: GraphOperand, subst: dict[str, GraphOperand]) -> GraphOperand:
+def _substitute_operand(
+    operand: GraphOperand,
+    subst: dict[str, GraphOperand],
+    active_refs: frozenset[str] = frozenset(),
+    depth: int = 0,
+    cache: dict[tuple[int, frozenset[str]], GraphOperand] | None = None,
+) -> GraphOperand:
+    if len(active_refs) > 64 or depth > 64:
+        return operand
+    cache_key = (id(operand), active_refs)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
     if isinstance(operand, GraphValueRef):
-        return subst.get(operand.name, operand)
+        replacement = subst.get(operand.name)
+        if replacement is None or operand.name in active_refs:
+            return operand
+        result = _substitute_operand(
+            replacement,
+            subst,
+            active_refs | {operand.name},
+            depth + 1,
+            cache=cache,
+        )
+        if cache is not None:
+            cache[cache_key] = result
+        return result
     if isinstance(operand, GraphExpr):
-        return GraphExpr(
+        result = GraphExpr(
             op=operand.op,
-            inputs=tuple(_substitute_operand(item, subst) for item in operand.inputs),
-            attrs={key: _substitute_operand(value, subst) for key, value in operand.attrs.items()},
+            inputs=tuple(
+                _substitute_operand(item, subst, active_refs, depth + 1, cache=cache)
+                for item in operand.inputs
+            ),
+            attrs={
+                key: _substitute_operand(value, subst, active_refs, depth + 1, cache=cache)
+                for key, value in operand.attrs.items()
+            },
             type_expr=operand.type_expr,
             dims=operand.dims,
         )
+        if cache is not None:
+            cache[cache_key] = result
+        return result
     return operand
 
 
@@ -135,8 +167,121 @@ def graph_module_effect(
     active_modules: frozenset[str] = frozenset(),
     subst: dict[str, GraphOperand] | None = None,
 ) -> GraphEffect:
+    producers = {
+        output.name: node
+        for node in module.nodes
+        for output in node.outputs
+    }
+    demanded_nodes: set[str] = set()
+    visiting: set[tuple[str, bool]] = set()
+    memo: dict[tuple[str, bool], GraphEffect] = {}
+
+    def resolve_ref_operand(
+        operand: GraphOperand,
+        active_refs: frozenset[str] = frozenset(),
+    ) -> GraphOperand:
+        if subst is None or not isinstance(operand, GraphValueRef):
+            return operand
+        replacement = subst.get(operand.name)
+        if replacement is None or operand.name in active_refs:
+            return operand
+        return resolve_ref_operand(replacement, active_refs | {operand.name})
+
+    def value_ref_effect(ref: GraphValueRef, *, demand_content: bool) -> GraphEffect:
+        key = (ref.name, demand_content)
+        if key in memo:
+            return memo[key]
+        if key in visiting:
+            return GraphEffect.PARTIAL_PURE
+        producer = producers.get(ref.name)
+        if producer is None:
+            if (
+                modules_by_name is not None
+                and ref.name in modules_by_name
+                and ref.name not in active_modules
+            ):
+                return graph_module_effect(
+                    modules_by_name[ref.name],
+                    module_effects=module_effects,
+                    modules_by_name=modules_by_name,
+                    active_modules=active_modules | {ref.name},
+                    subst=subst,
+                )
+            if module_effects is not None and ref.name in module_effects:
+                return module_effects[ref.name]
+            return GraphEffect.TOTAL_PURE
+        visiting.add(key)
+        effect = node_effect(producer, demand_content=demand_content)
+        visiting.remove(key)
+        memo[key] = effect
+        return effect
+
+    def operand_effect(
+        operand: GraphOperand,
+        *,
+        demand_content: bool,
+        depth: int = 0,
+    ) -> GraphEffect:
+        if depth > 128:
+            return GraphEffect.PARTIAL_PURE
+        operand = resolve_ref_operand(operand)
+        if isinstance(operand, GraphValueRef):
+            return value_ref_effect(operand, demand_content=demand_content)
+        if not isinstance(operand, GraphExpr):
+            return GraphEffect.TOTAL_PURE
+        inputs = tuple(resolve_ref_operand(item) for item in operand.inputs)
+        attrs = {key: resolve_ref_operand(value) for key, value in operand.attrs.items()}
+        effect = _graph_op_call_effect_for_demand(
+            operand.op.name,
+            demand_content=demand_content,
+            inputs=inputs,
+            attrs=attrs,
+            module_effects=module_effects,
+            modules_by_name=modules_by_name,
+            active_modules=active_modules,
+        )
+        for item, item_demand in zip(
+            inputs,
+            _input_content_demands(operand.op.name, len(inputs), demand_content=demand_content),
+            strict=False,
+        ):
+            effect = join_graph_effect(effect, operand_effect(item, demand_content=item_demand, depth=depth + 1))
+        for item in attrs.values():
+            effect = join_graph_effect(effect, operand_effect(item, demand_content=True, depth=depth + 1))
+        return effect
+
+    def node_effect(node: GraphNode, *, demand_content: bool) -> GraphEffect:
+        demanded_nodes.add(node.id)
+        inputs = tuple(resolve_ref_operand(item) for item in node.inputs)
+        attrs = {key: resolve_ref_operand(value) for key, value in node.attrs.items()}
+        effect = _graph_op_call_effect_for_demand(
+            node.op.name,
+            demand_content=demand_content,
+            inputs=inputs,
+            attrs=attrs,
+            module_effects=module_effects,
+            modules_by_name=modules_by_name,
+            active_modules=active_modules,
+        )
+        for item, item_demand in zip(
+            inputs,
+            _input_content_demands(node.op.name, len(inputs), demand_content=demand_content),
+            strict=False,
+        ):
+            effect = join_graph_effect(effect, operand_effect(item, demand_content=item_demand))
+        for item in attrs.values():
+            effect = join_graph_effect(effect, operand_effect(item, demand_content=True))
+        return effect
+
     effect = GraphEffect.TOTAL_PURE
+    for item in module.outputs:
+        effect = join_graph_effect(
+            effect,
+            operand_effect(item, demand_content=True),
+        )
     for node in module.nodes:
+        if node.id in demanded_nodes:
+            continue
         effect = join_graph_effect(
             effect,
             graph_node_effect(
@@ -147,18 +292,44 @@ def graph_module_effect(
                 subst=subst,
             ),
         )
-    for item in module.outputs:
-        effect = join_graph_effect(
-            effect,
-            graph_operand_effect(
-                item,
-                module_effects=module_effects,
-                modules_by_name=modules_by_name,
-                active_modules=active_modules,
-                subst=subst,
-            ),
-        )
     return effect
+
+
+def _normalized_op_name(op_name: str) -> str:
+    return op_name[1:] if op_name.startswith("_") else op_name
+
+
+def _graph_op_call_effect_for_demand(
+    op_name: str,
+    *,
+    demand_content: bool,
+    inputs: tuple[GraphOperand, ...],
+    attrs: dict[str, GraphOperand],
+    module_effects: dict[str, GraphEffect] | None,
+    modules_by_name: dict[str, GraphModule] | None,
+    active_modules: frozenset[str],
+) -> GraphEffect:
+    if not demand_content and _normalized_op_name(op_name) == "empty_like":
+        return GraphEffect.TOTAL_PURE
+    return _graph_op_call_effect(
+        op_name,
+        inputs=inputs,
+        attrs=attrs,
+        module_effects=module_effects,
+        modules_by_name=modules_by_name,
+        active_modules=active_modules,
+    )
+
+
+def _input_content_demands(
+    op_name: str,
+    input_count: int,
+    *,
+    demand_content: bool,
+) -> tuple[bool, ...]:
+    if _normalized_op_name(op_name) == "fill" and input_count:
+        return (False, *([True] * (input_count - 1)))
+    return tuple(True for _ in range(input_count))
 
 
 def graph_node_effect(
@@ -169,8 +340,19 @@ def graph_node_effect(
     active_modules: frozenset[str] = frozenset(),
     subst: dict[str, GraphOperand] | None = None,
 ) -> GraphEffect:
-    inputs = tuple(_substitute_operand(item, subst or {}) for item in node.inputs)
-    attrs = {key: _substitute_operand(value, subst or {}) for key, value in node.attrs.items()}
+    def resolve_ref_operand(
+        operand: GraphOperand,
+        active_refs: frozenset[str] = frozenset(),
+    ) -> GraphOperand:
+        if subst is None or not isinstance(operand, GraphValueRef):
+            return operand
+        replacement = subst.get(operand.name)
+        if replacement is None or operand.name in active_refs:
+            return operand
+        return resolve_ref_operand(replacement, active_refs | {operand.name})
+
+    inputs = tuple(resolve_ref_operand(item) for item in node.inputs)
+    attrs = {key: resolve_ref_operand(value) for key, value in node.attrs.items()}
     effect = _graph_op_call_effect(
         node.op.name,
         inputs=inputs,

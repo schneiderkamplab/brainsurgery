@@ -1938,7 +1938,7 @@ def _flatten_expr(
                 program_ctx=program_ctx,
             )
             list_prelude.extend(item_pre)
-            list_items.append(item_flat)
+            list_items.append(_bind_if_non_atomic(list_prelude, item_flat, ctx))
         return list_prelude, AxonExprList(items=tuple(list_items))
     if isinstance(expr, AxonExprTuple):
         tuple_prelude: list[AxonStatement] = []
@@ -1951,7 +1951,7 @@ def _flatten_expr(
                 program_ctx=program_ctx,
             )
             tuple_prelude.extend(item_pre)
-            tuple_items.append(item_flat)
+            tuple_items.append(_bind_if_non_atomic(tuple_prelude, item_flat, ctx))
         return tuple_prelude, AxonExprTuple(items=tuple(tuple_items))
     if isinstance(expr, AxonExprCall):
         call_expr = _expand_call_surface(expr, program_ctx)
@@ -2046,6 +2046,7 @@ def _flatten_expr(
             path_prefix=path_prefix,
             program_ctx=program_ctx,
         )
+        cond_expr = _bind_if_non_atomic(cond_pre, cond_expr, ctx)
         true_pre, true_expr = _flatten_expr(
             expr.true_expr,
             ctx,
@@ -2078,6 +2079,7 @@ def _flatten_expr(
             path_prefix=path_prefix,
             program_ctx=program_ctx,
         )
+        cond_expr = _bind_if_non_atomic(cond_pre, cond_expr, ctx)
         true_pre, true_expr = _flatten_expr(
             expr.true_expr,
             ctx,
@@ -2447,6 +2449,7 @@ def _flatten_module(
             module.return_type_expr, type_aliases=program_ctx.type_aliases
         ),
         constraints=module.constraints,
+        is_global_binding=module.is_global_binding,
     )
     return flattened, tuple([*cond_helper_modules, *helper_modules])
 

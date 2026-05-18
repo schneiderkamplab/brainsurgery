@@ -71,9 +71,7 @@ append_kv :: ?CacheKV[B,H,T,DK,DV] -> ?CacheLayerKV[B,H,T,DK,DV] -> ?CacheKV[B,H
 append_kv values value = (values == null) ? null : ((value == null) ? values : List.append values value)
 
 past_length :: ?Cache[B,H,T,DH] -> Dim
-past_length cache = (cache == null) ? 0 : do
-  k, _ <- List.index cache 0
-  return Tensor.size k -2
+past_length cache = (cache == null) ? 0 : T
 
 past_length_any :: ?CacheAny -> Dim
 past_length_any cache = (cache == null) ? 0 : do
@@ -81,6 +79,4 @@ past_length_any cache = (cache == null) ? 0 : do
   return Tensor.size k -2
 
 past_length_kv :: ?CacheKV[B,H,T,DK,DV] -> Dim
-past_length_kv cache = (cache == null) ? 0 : do
-  k, _ <- List.index cache 0
-  return Tensor.size k -2
+past_length_kv cache = (cache == null) ? 0 : T

@@ -161,27 +161,27 @@ entry x = helper x
     assert render_axon_file(program).startswith('{-# MAIN "entry" #-}\n\n')
 
 
-def test_parse_program_source_checkpoints_pragma_string_normalizes_to_tuple() -> None:
+def test_parse_program_source_checkpoints_pragma_string_preserves_raw_value() -> None:
     source = """
 {-# CHECKPOINTS "google/gemma-3-270m" #-}
 lin :: Tensor[B,S,D] -> Tensor[B,S,D]
 lin x = x
 """
     parsed = parse_surface_program_source(source)
-    assert parsed.pragmas["checkpoints"] == ("google/gemma-3-270m",)
+    assert parsed.pragmas["checkpoints"] == "google/gemma-3-270m"
 
 
-def test_parse_program_source_checkpoints_pragma_list_preserved() -> None:
+def test_parse_program_source_checkpoints_pragma_list_preserves_raw_value() -> None:
     source = """
 {-# CHECKPOINTS ["google/gemma-3-270m", "google/gemma-3-270m-it"] #-}
 lin :: Tensor[B,S,D] -> Tensor[B,S,D]
 lin x = x
 """
     parsed = parse_surface_program_source(source)
-    assert parsed.pragmas["checkpoints"] == (
+    assert parsed.pragmas["checkpoints"] == [
         "google/gemma-3-270m",
         "google/gemma-3-270m-it",
-    )
+    ]
 
 
 def test_parse_program_source_tokenizer_pragma_preserved() -> None:
@@ -194,7 +194,7 @@ lin x = x
     assert parsed.pragmas["tokenizer"] == "EleutherAI/gpt-neox-20b"
 
 
-def test_parse_program_source_multiple_tokenizer_pragmas_merge() -> None:
+def test_parse_program_source_multiple_tokenizer_pragmas_preserve_occurrences() -> None:
     source = """
 {-# TOKENIZER "mistralai/Mistral-7B-v0.1" #-}
 {-# TOKENIZER ["mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"] #-}
@@ -202,10 +202,12 @@ lin :: Tensor[B,S,D] -> Tensor[B,S,D]
 lin x = x
 """
     parsed = parse_surface_program_source(source)
-    assert parsed.pragmas["tokenizer"] == (
-        "mistralai/Mistral-7B-v0.1",
-        ("mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"),
-    )
+    assert parsed.pragmas["tokenizer"] == {
+        "__pragma_occurrences__": [
+            "mistralai/Mistral-7B-v0.1",
+            ["mistralai/Devstral-Small-2507", "mistralai/Devstral-Small-2507"],
+        ]
+    }
 
 
 def test_parse_program_source_rejects_invalid_import_member_token() -> None:
@@ -225,12 +227,6 @@ lin x = x
 """
     with pytest.raises(ValueError):
         parse_axon_program(source)
-
-
-def test_parse_program_source_rejects_definition_without_signature() -> None:
-    source = "lin@path x = linear@path x dim=4\n"
-    with pytest.raises(ValueError, match="invalid Axon source syntax"):
-        parse_surface_program_source(source)
 
 
 def test_parse_absolute_callee_path_sugar_without_space() -> None:

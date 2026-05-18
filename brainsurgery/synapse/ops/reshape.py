@@ -31,6 +31,8 @@ def _shape_dim_tokens(shape_expr: Any, helpers: Any) -> tuple[Any, ...] | None:
             continue
         break
     items = getattr(current, "items", None)
+    if items is None and getattr(getattr(current, "op", None), "name", None) == "core.list":
+        items = getattr(current, "inputs", None)
     if not isinstance(items, tuple):
         return None
     dims: list[Any] = []

@@ -332,8 +332,8 @@ def test_typecheck_attention_preserves_matmul_and_mask_broadcast_shapes(tmp_path
     out_line = next(
         line for line in text.splitlines() if "out <-" in line and "Tensor.matmul" in line
     )
-    assert "Tensor[B,H,Q,..RB]" in scores_line
-    assert "Tensor[B,H,Q,..RB]" in mask_line
+    assert "Tensor[B,H,Q,K]" in scores_line
+    assert "Tensor[B,H,Q,K]" in mask_line
     assert "Tensor[B,H,Q,VD]" in out_line
 
 

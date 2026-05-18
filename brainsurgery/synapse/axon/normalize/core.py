@@ -275,6 +275,8 @@ def _module_bound_names(module: AxonDefinition) -> set[str]:
 
 def _is_zero_arg_definition(module: AxonDefinition) -> bool:
     return (
+        not module.is_global_binding
+        and
         not module.path_params
         and module.path_param is None
         and not module.params

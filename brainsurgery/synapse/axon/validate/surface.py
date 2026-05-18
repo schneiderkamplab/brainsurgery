@@ -84,6 +84,18 @@ def _do_expr_requires_return(expr: AxonExpr, *, module_index: int, module_name: 
 def validate_parsed_program_source(parsed_source: Any) -> None:
     modules = parsed_source.modules
     seen_module_decls: set[str] = set()
+    for idx, binding in enumerate(getattr(parsed_source, "global_bindings", ())):
+        name = binding.name.strip()
+        if not _is_mod_name(name):
+            raise ValueError(
+                f"Axon syntax validation failed at global_binding[{idx}]: invalid global binding name {name!r}"
+            )
+        if name in seen_module_decls:
+            raise ValueError(
+                f"Axon syntax validation failed: duplicate module declaration {name!r}"
+            )
+        seen_module_decls.add(name)
+        _do_expr_requires_return(binding.rhs, module_index=idx, module_name=name)
     for idx, module in enumerate(modules):
         sig_decl = (
             module.signature.definition_decl.strip()

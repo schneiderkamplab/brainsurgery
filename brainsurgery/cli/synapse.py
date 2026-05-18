@@ -61,6 +61,7 @@ def _dump_axon_stage_to_text(
     optimize_graph: bool,
     show_types: bool,
     show_purity: bool,
+    show_domain: bool,
 ) -> str:
     module = _axon_module()
     parse_fn = getattr(module, "parse_axon_program_from_path")
@@ -71,6 +72,7 @@ def _dump_axon_stage_to_text(
     typecheck_fn = getattr(module, "typecheck2_flat_axon_file")
     lower_graph_fn = getattr(module, "lower_axon_program_to_graph_ir")
     graph_to_axon_fn = getattr(module, "graph_program_to_axon_file")
+    graph_domain_comments_fn = getattr(module, "graph_domain_definition_comments")
     optimize_ast_fn = getattr(module, "optimize_safe_flat_typed_axon_file")
     optimize_graph_fn = getattr(module, "optimize_graph_program")
     render_fn = getattr(module, "render_axon_file")
@@ -82,6 +84,8 @@ def _dump_axon_stage_to_text(
         raise typer.BadParameter("--stage optimize-ast requires --optimize-ast")
     if show_purity and stage in {"parse", "resolve", "normalize"}:
         raise typer.BadParameter("--show-purity requires flatten or a later typed/lowered stage")
+    if show_domain and stage not in {"graph-ir", "graph-ir-axon", "final"}:
+        raise typer.BadParameter("--show-domain requires graph-ir, graph-ir-axon, or final stage")
 
     if stage == "parse":
         return render_fn(parse_fn(axon_path), show_types=show_types, show_purity=show_purity)
@@ -114,7 +118,12 @@ def _dump_axon_stage_to_text(
         if optimize_graph:
             graph_program = optimize_graph_fn(graph_program)
         graph_axon = graph_to_axon_fn(graph_program)
-        return render_fn(graph_axon, show_types=show_types, show_purity=show_purity)
+        return render_fn(
+            graph_axon,
+            show_types=show_types,
+            show_purity=show_purity,
+            definition_comments=graph_domain_comments_fn(graph_program) if show_domain else None,
+        )
 
     return render_fn(program, show_types=show_types, show_purity=show_purity)
 
@@ -265,6 +274,11 @@ def axon_stage_dump(
         "--show-purity/--no-show-purity",
         help="Render a purity-lattice comment before each definition.",
     ),
+    show_domain: bool = typer.Option(
+        False,
+        "--show-domain/--no-show-domain",
+        help="Render Graph IR domain-analysis comments before each definition.",
+    ),
     force: bool = typer.Option(
         False,
         "--force",
@@ -289,6 +303,7 @@ def axon_stage_dump(
             optimize_graph=optimize_graph,
             show_types=show_types,
             show_purity=show_purity,
+            show_domain=show_domain,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

@@ -1,5 +1,5 @@
 import Activations tanh
-import Math (add, sqrt)
+import Math sqrt
 import Tensor (concat, slice, softmax)
 export (
   attention,
@@ -72,12 +72,13 @@ attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null 
     squashed <- tanh scaled
     return squashed * softcap_val
   mask <- mask_to_additive scores keep
-  probs_in <- add scores mask
-  probs_in <- (rel_bias == null) ? probs_in : add probs_in rel_bias
+  probs_in <- scores + mask
+  probs_in <- (rel_bias == null) ? probs_in : (probs_in + rel_bias)
   probs_in <- (sink_logits == null) ? probs_in : concat probs_in sink_logits dim=-1
   probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
   K <- Tensor.size v dim=-2
   probs <- slice probs dim=-1 start=0 end=K
+  probs <- (probs :: Tensor[B,H,Q,K])
   probs <- zero_masked_after_softmax ? (Tensor.where keep probs 0) : probs
   v_work <- fp32_compute ? (Tensor.cast v dtype="float32") : v
   out <- Tensor.matmul probs v_work
@@ -89,7 +90,7 @@ attention_scaled q k v keep scale = do
   scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
   scores <- scores * scale
   mask <- mask_to_additive scores keep
-  probs_in <- add scores mask
+  probs_in <- scores + mask
   probs <- softmax probs_in dim=-1
   probs <- Tensor.where keep probs 0
   return Tensor.matmul probs v
@@ -103,7 +104,7 @@ attention_softcap q k v keep softcap scale = do
   squashed <- tanh scaled
   scores <- squashed * softcap
   mask <- mask_to_additive scores keep
-  probs_in <- add scores mask
+  probs_in <- scores + mask
   probs <- softmax probs_in dim=-1 dtype="float32"
   out <- Tensor.matmul probs (Tensor.cast v dtype="float32")
   return Tensor.cast out dtype="float32"

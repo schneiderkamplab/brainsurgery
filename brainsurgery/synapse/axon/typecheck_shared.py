@@ -398,6 +398,21 @@ def _simplify_dim_expr(dim: DimExprBinary) -> DimToken:
             return left
         if left == right:
             return 0
+        if isinstance(left, DimExprBinary) and left.op == "*":
+            if left.left == right and isinstance(left.right, int):
+                remaining = left.right - 1
+                if remaining == 0:
+                    return 0
+                if remaining == 1:
+                    return right
+                return DimExprBinary(op="*", left=remaining, right=right)
+            if left.right == right and isinstance(left.left, int):
+                remaining = left.left - 1
+                if remaining == 0:
+                    return 0
+                if remaining == 1:
+                    return right
+                return DimExprBinary(op="*", left=remaining, right=right)
         if isinstance(right, DimExprBinary) and right.op == "-" and right.left == left:
             return right.right
         if isinstance(left, DimExprBinary) and left.op == "+" and left.right == right:

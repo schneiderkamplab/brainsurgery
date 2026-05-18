@@ -99,6 +99,8 @@ def _render_kwarg_value(
 
 def _render_call_arg(expr: AxonExpr, *, bound_names: set[str], show_types: bool = False, show_inferred_expr_types: bool | None = None) -> str:
     rendered = render_axon_expr(expr, bound_names=bound_names, show_types=show_types, show_inferred_expr_types=show_inferred_expr_types)
+    if isinstance(expr, AxonExprCall) and not expr.args and not expr.kwargs:
+        return rendered
     if _emit_inferred_expr_types(show_types, show_inferred_expr_types) and expr.inferred_type is not None:
         return f"({rendered})"
     if isinstance(
@@ -466,7 +468,40 @@ def render_axon_module(
     show_types: bool = False,
     show_inferred_expr_types: bool | None = None,
     purity_comment: str | None = None,
+    extra_comments: tuple[str, ...] = (),
 ) -> str:
+    if module.is_global_binding:
+        if module.params or module.path_params or module.path_param is not None:
+            raise ValueError(f"global binding {module.name!r} cannot have parameters")
+        bound_names: set[str] = set()
+        if isinstance(module.body_expr, AxonExpr):
+            expr_lines = _render_expr_lines(
+                module.body_expr,
+                indent="  ",
+                bound_names=bound_names,
+                show_types=show_types,
+                show_inferred_expr_types=show_inferred_expr_types,
+            )
+            first, *rest = expr_lines
+            lines = [f"{module.name} <- {first}", *(f"  {line}" for line in rest)]
+        else:
+            lines = [
+                f"{module.name} <- do",
+                *_render_statements(
+                    module.statements,
+                    indent="  ",
+                    bound_names=bound_names,
+                    show_types=show_types,
+                    show_inferred_expr_types=show_inferred_expr_types,
+                ),
+            ]
+        comments = [f"-- {comment}" for comment in extra_comments]
+        if purity_comment is not None:
+            comments.insert(0, f"-- purity: {purity_comment}")
+        if comments:
+            lines = [*comments, *lines]
+        return "\n".join(lines)
+
     path_params = list(module.path_params)
     if module.path_param and module.path_param not in path_params:
         path_params.append(module.path_param)
@@ -507,8 +542,11 @@ def render_axon_module(
         or bool(path_params)
     )
     lines = body_lines if not has_signature else [f"{module.name} :: {signature}", *body_lines]
+    comments = [f"-- {comment}" for comment in extra_comments]
     if purity_comment is not None:
-        lines = [f"-- purity: {purity_comment}", *lines]
+        comments.insert(0, f"-- purity: {purity_comment}")
+    if comments:
+        lines = [*comments, *lines]
     return "\n".join(lines)
 
 
@@ -518,6 +556,7 @@ def render_axon_file(
     show_types: bool = False,
     show_inferred_expr_types: bool | None = None,
     show_purity: bool = False,
+    definition_comments: dict[str, tuple[str, ...]] | None = None,
 ) -> str:
     blocks: list[str] = []
     purity = infer_axon_definition_effects(ast.modules) if show_purity else {}
@@ -542,6 +581,7 @@ def render_axon_file(
             show_types=show_types,
             show_inferred_expr_types=show_inferred_expr_types,
             purity_comment=purity[module.name].value if show_purity else None,
+            extra_comments=(definition_comments or {}).get(module.name, ()),
         )
         for module in ast.modules
     )

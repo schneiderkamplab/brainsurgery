@@ -47,13 +47,22 @@ def _leading_path_param_count(module: AxonDefinition) -> int:
 
 
 def _validate_expr_flat(
-    expr: AxonExpr, *, module: AxonDefinition, modules_by_name: dict[str, AxonDefinition]
+    expr: AxonExpr,
+    *,
+    module: AxonDefinition,
+    modules_by_name: dict[str, AxonDefinition],
+    allow_call: bool = False,
 ) -> None:
     if isinstance(expr, AxonExprParen):
         raise ValueError(f"Axon flat validation failed in module {module.name!r}: parens remain")
     if isinstance(expr, AxonExprPipe):
         raise ValueError(f"Axon flat validation failed in module {module.name!r}: pipe remains")
     if isinstance(expr, AxonExprCall):
+        if not allow_call:
+            raise ValueError(
+                f"Axon flat validation failed in module {module.name!r}: "
+                "nested call remains; bind call result first"
+            )
         base_callee, path_suffixes = _split_callee_path_sugar(expr.callee)
         if path_suffixes:
             raise ValueError(
@@ -66,7 +75,12 @@ def _validate_expr_flat(
             )
         callee_module = modules_by_name.get(base_callee)
         for arg in expr.args:
-            _validate_expr_flat(arg, module=module, modules_by_name=modules_by_name)
+            _validate_expr_flat(
+                arg,
+                module=module,
+                modules_by_name=modules_by_name,
+                allow_call=False,
+            )
         if callee_module is not None:
             path_slot_count = len(callee_module.path_params) + _leading_path_param_count(
                 callee_module
@@ -77,15 +91,35 @@ def _validate_expr_flat(
                 )
         return
     if isinstance(expr, AxonExprBinary):
-        _validate_expr_flat(expr.left, module=module, modules_by_name=modules_by_name)
-        _validate_expr_flat(expr.right, module=module, modules_by_name=modules_by_name)
+        _validate_expr_flat(
+            expr.left,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=False,
+        )
+        _validate_expr_flat(
+            expr.right,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=False,
+        )
         return
     if isinstance(expr, AxonExprList | AxonExprTuple):
         for item in expr.items:
-            _validate_expr_flat(item, module=module, modules_by_name=modules_by_name)
+            _validate_expr_flat(
+                item,
+                module=module,
+                modules_by_name=modules_by_name,
+                allow_call=False,
+            )
         return
     if isinstance(expr, AxonExprAscribe):
-        _validate_expr_flat(expr.expr, module=module, modules_by_name=modules_by_name)
+        _validate_expr_flat(
+            expr.expr,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=allow_call,
+        )
         return
     if isinstance(expr, AxonExprBind):
         raise ValueError(
@@ -96,12 +130,32 @@ def _validate_expr_flat(
             f"Axon flat validation failed in module {module.name!r}: conditional expression remains"
         )
     if isinstance(expr, AxonExprTernary):
-        _validate_expr_flat(expr.cond, module=module, modules_by_name=modules_by_name)
-        _validate_expr_flat(expr.true_expr, module=module, modules_by_name=modules_by_name)
-        _validate_expr_flat(expr.false_expr, module=module, modules_by_name=modules_by_name)
+        _validate_expr_flat(
+            expr.cond,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=False,
+        )
+        _validate_expr_flat(
+            expr.true_expr,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=True,
+        )
+        _validate_expr_flat(
+            expr.false_expr,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=True,
+        )
         return
     if isinstance(expr, AxonExprLambda):
-        _validate_expr_flat(expr.body, module=module, modules_by_name=modules_by_name)
+        _validate_expr_flat(
+            expr.body,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=False,
+        )
         return
     if isinstance(expr, AxonExprDo):
         raise ValueError(
@@ -113,11 +167,21 @@ def _validate_statement_flat(
     stmt: AxonStatement, *, module: AxonDefinition, modules_by_name: dict[str, AxonDefinition]
 ) -> None:
     if isinstance(stmt, AxonBind):
-        _validate_expr_flat(stmt.expr, module=module, modules_by_name=modules_by_name)
+        _validate_expr_flat(
+            stmt.expr,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=True,
+        )
         return
     if isinstance(stmt, AxonReturn | AxonYield):
         for value in stmt.values:
-            _validate_expr_flat(value, module=module, modules_by_name=modules_by_name)
+            _validate_expr_flat(
+                value,
+                module=module,
+                modules_by_name=modules_by_name,
+                allow_call=False,
+            )
         return
     if isinstance(stmt, AxonCond):
         raise ValueError(

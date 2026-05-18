@@ -4,6 +4,7 @@ import NN rmsnorm_noscale
 import Params (param)
 import Tensor (
   concat,
+  expand,
   fill,
   matmul,
   reshape,
@@ -109,20 +110,12 @@ mamba_scan u delta b c ?A=@A_log ?D=@D ?a_is_log=true = do
   return y_all
 
 
-mamba2_expand_groups :: Tensor[B,G,N] -> Dim -> Dim -> Tensor[B,H,N]
+mamba2_expand_groups :: Tensor[B,G,N] -> Dim -> Dim -> Tensor[B,heads,N]
 mamba2_expand_groups x heads n_groups = do
   per_group <- heads / n_groups
-  out <- slice x dim=1 start=0 end=1
-  g <- 0
-  count <- 1
-  g, count, out <- for h <- [1..heads) carry (g, count, out) do
-    switch <- count >= per_group
-    g <- switch ? (g + 1) : g
-    count <- switch ? 1 : (count + 1)
-    xh <- slice x dim=1 start=g end=(g + 1)
-    out <- concat out xh dim=1
-    yield g, count, out
-  return out
+  x <- unsqueeze x dim=2
+  x <- expand x shape=[B, G, per_group, N]
+  return reshape x shape=[B, heads, N]
 
 
 mamba2_scan_step :: Tensor[B,H,HD,N] -> Tensor[B,H,HD] -> Tensor[B,H] -> Tensor[B,H,N] -> Tensor[B,H,N] -> Tensor[H] -> Tensor[H] -> (Tensor[B,H,HD,N], Tensor[B,H,HD])
@@ -140,14 +133,17 @@ mamba2_scan_step state u_t dt_t b_t c_t a d = do
 
 mamba2_scan :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S,H] -> Tensor[B,S,GN] -> Tensor[B,S,GN] -> Path -> Path -> Path -> Path -> Dim -> Dim -> ?Float -> ?Float -> Tensor[B,S,D]
 mamba2_scan u gate dt b c a_path d_path dt_bias_path norm_weight_path n_groups head_dim ?time_step_min=0.0 ?time_step_max=1e30 = do
+  norm_w <- param norm_weight_path
+  s <- size u 1
+  heads <- D / head_dim
   a_log <- param a_path
+  a_log <- (a_log :: Tensor[heads])
   a_exp <- exp a_log
   a <- 0.0 - a_exp
   d <- param d_path
+  d <- (d :: Tensor[heads])
   dt_b <- param dt_bias_path
-  norm_w <- param norm_weight_path
-  s <- size u 1
-  heads <- size dt -1
+  dt_b <- (dt_b :: Tensor[heads])
   b_last_dim <- size b -1
   state_dim <- b_last_dim / n_groups
   u_t0 <- slice u dim=1 start=0 end=1 |> reshape shape=[B, heads, head_dim]

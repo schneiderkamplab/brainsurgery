@@ -86,7 +86,7 @@ gemma4_apply_per_layer_input x per_layer_inputs i = do
   p <- rms@post_per_layer_input_norm p
   return x + p
 
-gemma4_shared_qk :: Tensor[B,HQ,S,DH] -> Tensor[B,HK,S,DH] -> Tensor[B,S] -> Bool -> (Tensor[B,HQ,S,DH], Tensor[B,HK,S,DH])
+gemma4_shared_qk :: Tensor[B,HQ,S,DHQ] -> Tensor[B,HK,S,DHK] -> Tensor[B,S] -> Bool -> (Tensor[B,HQ,S,DHQ], Tensor[B,HK,S,DHK])
 gemma4_shared_qk q k pos_ids full = do
   q_rot, _ <- rope_pair_proportional q q pos_ids theta=(full ? THETA_FULL : THETA_LOCAL) scale_factor=(full ? ROPE_SCALE_FULL : 1.0) partial_rotary_factor=(full ? ROTARY_PARTIAL_FULL : 1.0)
   return q_rot, k

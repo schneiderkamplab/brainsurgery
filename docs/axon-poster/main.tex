@@ -225,8 +225,10 @@ Normalize & uniform calls and canonical surface syntax \\
 Elaborate & explicit defaults and normalized optional arguments \\
 Flatten & surface control and scoped paths become a flat core program \\
 Typecheck & every expression has type, arity, and shape metadata \\
-Optimize-ast & optional conservative typed-Axon rewrites before graph lowering \\
+Optimize-ast & optional safe typed-Axon pruning, alias cleanup, and literal folding \\
 Graph lowering & typed SSA-like graph modules with structured paths \\
+Optimize-graph & optional typed Graph IR DCE, folding, CSE, specialization, and safe inlining \\
+Backends & torch, interpreter, pipeline placement, and tinygrad consume the same graph \\
 \bottomrule
 \end{tabular}
 }
@@ -262,6 +264,9 @@ Graph lowering & typed SSA-like graph modules with structured paths \\
 \node[rep, below=0.25in of tc] (typed) {typed flat\\AST};
 \node[opt, right=0.25in of typed] (astopt) {optional\\optimize-ast};
 \node[stage, right=0.25in of astopt] (lower) {Graph IR\\lowering};
+\node[rep, below=0.25in of lower] (graph) {typed\\Graph IR};
+\node[opt, left=0.25in of graph] (graphopt) {optional\\optimize-graph};
+\node[stage, left=0.25in of graphopt] (backend) {torch / interpreter\\pipeline / tinygrad};
 \draw[edge] (src) -- (parse);
 \draw[edge] (parse) -- (file);
 \draw[edge] (file) -- (resolve);
@@ -276,6 +281,9 @@ Graph lowering & typed SSA-like graph modules with structured paths \\
 \draw[edge] (tc) -- (typed);
 \draw[edge,dashed] (typed) -- (astopt);
 \draw[edge,dashed] (astopt) -- (lower);
+\draw[edge] (lower) -- (graph);
+\draw[edge,dashed] (graph) -- (graphopt);
+\draw[edge,dashed] (graphopt) -- (backend);
 \end{tikzpicture}
 \vspace{3mm}
 
@@ -283,8 +291,10 @@ Graph lowering & typed SSA-like graph modules with structured paths \\
 Each stage has a validation contract. Earlier stages preserve readable Axon while
 making names, imports, config access, defaults, and control forms explicit.
 Flattening removes surface control and scoped path sugar. Typecheck2 attaches
-shape, arity, optional/cache, and path metadata before optional safe AST rewrites
-or graph lowering.\par}
+shape, arity, optional/cache, and path metadata. Dashed optimizers are off by
+default: \code{optimize-ast} is narrow pre-Graph cleanup, while
+\code{optimize-graph} is the main typed rewrite home. Both run to fixpoint and
+validate rather than silently returning a non-converged result.\par}
 \end{tcolorbox}
 \end{minipage}
 \hfill
@@ -315,13 +325,15 @@ or graph lowering.\par}
 \end{tikzpicture}
 \vspace{3mm}
 
-{\raggedright\fontsize{21}{27}\selectfont
+{\raggedright\fontsize{19.5}{24.5}\selectfont
 The graph is not serialized as backend strings. Nodes keep typed operands,
 named outputs, symbolic dimensions, optional/cache shapes, and structured
 parameter paths. Multi-output operations such as \code{Tensor.chunk} remain
-first-class. Optional \code{optimize-graph} can then perform typed graph rewrites
-before torch codegen, interpreter execution, pipeline placement, or tinygrad
-experiments.\par}
+first-class. Optional \code{optimize-graph} performs metadata-aware pruning,
+dead-temp elimination for total-pure nodes, literal/scalar folding, proof-gated
+dimension simplification, total-pure CSE, call-site specialization, safe helper
+inlining, tuple-return cleanup, and final name canonicalization. Path-template
+symbols and constraints are dependencies, not strings to be reparsed.\par}
 \end{tcolorbox}
 \end{minipage}
 

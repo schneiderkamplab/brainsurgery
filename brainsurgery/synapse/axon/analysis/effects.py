@@ -80,6 +80,11 @@ _PARTIAL_PURE_OPS = {
     *_PARAM_PARTIAL_OPS,
 }
 
+_EFFECTFUL_PRIMITIVE_OPS = {
+    # Fresh mutable containers are not referentially transparent under sharing.
+    "list_init",
+}
+
 _TOTAL_PURE_PRIMITIVE_OPS = {
     "activation",
     "add",
@@ -112,7 +117,6 @@ _TOTAL_PURE_PRIMITIVE_OPS = {
     "linear",
     "list_append",
     "list_index",
-    "list_init",
     "list_length",
     "log",
     "matmul",
@@ -202,6 +206,8 @@ def op_effect(op_name: str, *, attrs: Mapping[str, object] | None = None) -> Pur
         return PurityEffect.PARTIAL_PURE
     if normalized.startswith("activations_"):
         return PurityEffect.TOTAL_PURE
+    if normalized in _EFFECTFUL_PRIMITIVE_OPS:
+        return PurityEffect.EFFECTFUL
     if normalized in _TOTAL_PURE_PRIMITIVE_OPS:
         return PurityEffect.TOTAL_PURE
     if normalized == "empty":
@@ -217,6 +223,10 @@ def _expr_non_null(
 ) -> bool:
     if isinstance(expr, AxonExprNull):
         return False
+    if isinstance(expr, AxonExprAscribe):
+        return _expr_non_null(expr.expr, env=env, active=active)
+    if isinstance(expr, AxonExprParen):
+        return _expr_non_null(expr.inner, env=env, active=active)
     if isinstance(expr, AxonExprName) and env is not None and expr.name in env and expr.name not in active:
         return _expr_non_null(env[expr.name], env=env, active=active | {expr.name})
     return isinstance(
@@ -282,6 +292,63 @@ def _kwarg_value_effect(
     return PurityEffect.TOTAL_PURE
 
 
+def _expr_name_refs(expr: AxonExpr, out: set[str]) -> None:
+    if isinstance(expr, AxonExprName):
+        out.add(expr.name)
+        return
+    if isinstance(expr, AxonExprAscribe):
+        _expr_name_refs(expr.expr, out)
+        return
+    if isinstance(expr, AxonExprParen):
+        _expr_name_refs(expr.inner, out)
+        return
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            _expr_name_refs(item, out)
+        return
+    if isinstance(expr, AxonExprBinary):
+        _expr_name_refs(expr.left, out)
+        _expr_name_refs(expr.right, out)
+        return
+    if isinstance(expr, AxonExprTernary | AxonExprIf):
+        _expr_name_refs(expr.cond, out)
+        _expr_name_refs(expr.true_expr, out)
+        _expr_name_refs(expr.false_expr, out)
+        return
+    if isinstance(expr, AxonExprCall):
+        for arg in expr.args:
+            _expr_name_refs(arg, out)
+        for value in expr.kwargs.values():
+            if isinstance(value, AxonExpr):
+                _expr_name_refs(value, out)
+        return
+    if isinstance(expr, AxonExprPipe):
+        _expr_name_refs(expr.value, out)
+        for stage in expr.stages:
+            _expr_name_refs(stage, out)
+        return
+    if isinstance(expr, AxonExprBind):
+        _expr_name_refs(expr.value, out)
+        _expr_name_refs(expr.body, out)
+        return
+    if isinstance(expr, AxonExprLambda):
+        _expr_name_refs(expr.body, out)
+        return
+    if isinstance(expr, AxonExprDo):
+        for statement in expr.body:
+            if isinstance(statement, AxonBind):
+                _expr_name_refs(statement.expr, out)
+            elif isinstance(statement, AxonReturn | AxonYield):
+                for value in statement.values:
+                    _expr_name_refs(value, out)
+
+
+def _safe_env_bind_expr(expr: AxonExpr, *, bound_names: set[str]) -> bool:
+    refs: set[str] = set()
+    _expr_name_refs(expr, refs)
+    return not (refs & bound_names)
+
+
 def axon_expr_effect(
     expr: AxonExpr,
     *,
@@ -303,7 +370,24 @@ def axon_expr_effect(
             active_calls=active_calls,
             active_names=active_names | {expr.name},
         )
-    if isinstance(expr, AxonExprName | AxonExprPath):
+    if isinstance(expr, AxonExprName):
+        definition = definitions.get(expr.name) if definitions is not None else None
+        if definition is not None and not definition.params and expr.name not in active_calls:
+            return _instantiated_definition_effect(
+                definition,
+                args=(),
+                kwargs={},
+                definition_effects=definition_effects,
+                definitions=definitions,
+                outer_env=env,
+                active_calls=active_calls | {expr.name},
+            )
+        if definition_effects is not None and expr.name in definition_effects:
+            return definition_effects[expr.name]
+        if expr.name.startswith("_"):
+            return op_effect(expr.name)
+        return PurityEffect.TOTAL_PURE
+    if isinstance(expr, AxonExprPath):
         return PurityEffect.TOTAL_PURE
     if isinstance(expr, AxonExprInt | AxonExprFloat | AxonExprBool | AxonExprNull | AxonExprString):
         return PurityEffect.TOTAL_PURE
@@ -402,6 +486,7 @@ def axon_statements_effect(
     active_calls: frozenset[str] = frozenset(),
 ) -> PurityEffect:
     effect = PurityEffect.TOTAL_PURE
+    local_env: dict[str, AxonExpr] = dict(env or {})
     for statement in statements:
         effect = join_effect(
             effect,
@@ -409,10 +494,19 @@ def axon_statements_effect(
                 statement,
                 definition_effects=definition_effects,
                 definitions=definitions,
-                env=env,
+                env=local_env,
                 active_calls=active_calls,
             ),
         )
+        if isinstance(statement, AxonBind):
+            if len(statement.targets) == 1 and _safe_env_bind_expr(
+                statement.expr,
+                bound_names=set(local_env) | set(statement.targets),
+            ):
+                local_env[statement.targets[0]] = statement.expr
+            else:
+                for target in statement.targets:
+                    local_env.pop(target, None)
     return effect
 
 

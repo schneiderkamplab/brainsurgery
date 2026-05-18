@@ -11,10 +11,10 @@ import Tensor
 
 
 
-CONTEXT_SIZE = 1024
-MODEL_DIM = 768
-NUM_LAYERS = 12
-NUM_HEADS = 12
+CONTEXT_SIZE <- (1024 :: Dim)
+MODEL_DIM <- (768 :: Dim)
+NUM_LAYERS <- (12 :: Dim)
+NUM_HEADS <- (12 :: Dim)
 
 gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
 gpt2_block x attn_mask past_kv = do

@@ -39,6 +39,12 @@ class CstDefinition:
 
 
 @dataclass(frozen=True)
+class CstGlobalBinding:
+    name: str
+    rhs: AxonExpr
+
+
+@dataclass(frozen=True)
 class CstDefinitionSource:
     signature: CstSignature | None
     definition: CstDefinition
@@ -47,6 +53,7 @@ class CstDefinitionSource:
 @dataclass(frozen=True)
 class CstProgramSource:
     modules: tuple[CstDefinitionSource, ...]
+    global_bindings: tuple[CstGlobalBinding, ...]
     imports: tuple[str, ...]
     imported_members: dict[str, tuple[str, ...]]
     exports: tuple[str, ...]
@@ -58,6 +65,7 @@ __all__ = [
     "CstDefParam",
     "CstDefinition",
     "CstFunctionType",
+    "CstGlobalBinding",
     "CstDefinitionSource",
     "CstPathTypeParam",
     "CstProgramSource",

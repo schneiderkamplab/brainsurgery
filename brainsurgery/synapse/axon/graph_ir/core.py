@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from functools import lru_cache
 from typing import TypeAlias
 
 from ..ast import (
@@ -123,6 +125,7 @@ class GraphModule:
     nodes: tuple[GraphNode, ...]
     return_type_expr: TypeExpr | None = None
     constraints: tuple[Constraint, ...] = ()
+    is_global_binding: bool = False
 
 
 @dataclass(frozen=True)
@@ -535,6 +538,7 @@ def _module_to_graph(module: AxonDefinition) -> GraphModule:
         nodes=tuple(ctx.nodes),
         return_type_expr=module.return_type_expr,
         constraints=module.constraints or (),
+        is_global_binding=module.is_global_binding,
     )
 
 
@@ -559,6 +563,7 @@ def lower_axon_program_to_graph_ir(
         main_module=resolved_main,
         pragmas=dict(program.pragmas),
     )
+    graph = _sanitize_graph_constraints_for_validation(graph)
     validate_graph_program(graph)
     return graph
 
@@ -588,20 +593,277 @@ def _type_dim_names(type_expr: TypeExpr) -> set[str]:
     return set()
 
 
-def _module_dim_symbols(module: GraphModule) -> set[str]:
+def _value_dim_names(value: GraphValue | GraphValueRef) -> set[str]:
+    names: set[str] = set()
+    names.update(_type_dim_names(value.type_expr))
+    if value.dims is not None:
+        for dim in value.dims:
+            names.update(dim_token_names(dim))
+    if isinstance(value.type_expr, TypeDim):
+        names.add(value.name)
+    return names
+
+
+def _module_boundary_dim_symbols(module: GraphModule) -> set[str]:
     names: set[str] = set()
     for value in module.inputs:
-        names.update(_type_dim_names(value.type_expr))
-        if value.dims is not None:
-            for dim in value.dims:
-                names.update(dim_token_names(dim))
-    for node in module.nodes:
-        for value in node.outputs:
-            names.update(_type_dim_names(value.type_expr))
-            if value.dims is not None:
-                for dim in value.dims:
+        names.update(_value_dim_names(value))
+    if module.return_type_expr is not None:
+        names.update(_type_dim_names(module.return_type_expr))
+    for output in module.outputs:
+        if isinstance(output, GraphValueRef):
+            names.update(_value_dim_names(output))
+        elif isinstance(output, GraphExpr):
+            names.update(_type_dim_names(output.type_expr))
+            if output.dims is not None:
+                for dim in output.dims:
                     names.update(dim_token_names(dim))
     return names
+
+
+def _constraint_operand_names(operand: object) -> set[str]:
+    if isinstance(operand, str):
+        return {operand}
+    if isinstance(operand, int | bool) or operand is None:
+        return set()
+    if isinstance(operand, DimExprBinary):
+        return dim_token_names(operand)
+    if isinstance(operand, tuple):
+        names: set[str] = set()
+        for item in operand:
+            names.update(_constraint_operand_names(item))
+        return names
+    return set()
+
+
+def _constraint_names(constraint: Constraint) -> set[str]:
+    names = _constraint_operand_names(constraint.left)
+    if constraint.right is not None:
+        names.update(_constraint_operand_names(constraint.right))
+    for guard in constraint.guards:
+        names.update(_constraint_names(guard))
+    return names
+
+
+def _constraint_has_callsite_guard(constraint: Constraint) -> bool:
+    return any(
+        guard.relation == "callsite" or _constraint_has_callsite_guard(guard)
+        for guard in constraint.guards
+    )
+
+
+def _constraint_is_trivial_identity(constraint: Constraint) -> bool:
+    return (
+        constraint.relation == "="
+        and constraint.right is not None
+        and constraint.left == constraint.right
+    )
+
+
+def _constraint_allowed_names_for_module(
+    module: GraphModule,
+    *,
+    global_values: dict[str, GraphValue],
+    modules_by_name: dict[str, GraphModule],
+) -> set[str]:
+    value_names = {value.name for value in module.inputs}
+    dim_symbols = _module_boundary_dim_symbols(module)
+    for value in global_values.values():
+        if isinstance(value.type_expr, TypeDim):
+            dim_symbols.add(value.name)
+        dim_symbols.update(_type_dim_names(value.type_expr))
+    for node in module.nodes:
+        value_names.update(output.name for output in node.outputs)
+        dim_symbols.update(_type_dim_names(node.type_expr))
+        if node.dims is not None:
+            for dim in node.dims:
+                dim_symbols.update(dim_token_names(dim))
+        for output in node.outputs:
+            dim_symbols.update(_value_dim_names(output))
+    return value_names | set(global_values) | set(modules_by_name) | dim_symbols
+
+
+def _sanitize_graph_constraints_for_validation(program: GraphProgram) -> GraphProgram:
+    """Drop stale constraint metadata that no longer closes over a graph module.
+
+    Constraints are optimization/debug metadata. They must never make an otherwise
+    well-formed graph invalid after earlier stages rewrite or remove temporaries.
+    Callsite-guarded constraints are preserved because graph validation treats
+    them as interprocedural facts rather than local module facts.
+    """
+
+    modules_by_name = {module.name: module for module in program.modules}
+    global_values = {
+        module.name: GraphValue(
+            name=module.name,
+            type_expr=_module_output_types(module)[0],
+            dims=None,
+        )
+        for module in program.modules
+        if not module.inputs and len(module.outputs) == 1
+    }
+    modules: list[GraphModule] = []
+    for module in program.modules:
+        if not module.constraints:
+            modules.append(module)
+            continue
+        allowed = _constraint_allowed_names_for_module(
+            module,
+            global_values=global_values,
+            modules_by_name=modules_by_name,
+        )
+        kept: list[Constraint] = []
+        for constraint in module.constraints:
+            if _constraint_is_trivial_identity(constraint):
+                continue
+            if _constraint_has_callsite_guard(constraint):
+                kept.append(constraint)
+                continue
+            if _constraint_names(constraint) - allowed:
+                continue
+            kept.append(constraint)
+        modules.append(replace(module, constraints=tuple(kept)))
+    return replace(program, modules=tuple(modules))
+
+
+def _validate_dim_names(
+    names: set[str],
+    *,
+    dim_symbols: set[str],
+    context: str,
+) -> None:
+    unknown = sorted(
+        name for name in names if name not in dim_symbols and not name.startswith("..")
+    )
+    if unknown:
+        raise ValueError(
+            f"{context} uses unbound dim symbol(s): {', '.join(repr(name) for name in unknown)}"
+        )
+
+
+def _validate_type_dim_closure(
+    type_expr: TypeExpr,
+    *,
+    dim_symbols: set[str],
+    context: str,
+) -> None:
+    _validate_dim_names(_type_dim_names(type_expr), dim_symbols=dim_symbols, context=context)
+
+
+def _validate_value_dim_closure(
+    value: GraphValue | GraphValueRef,
+    *,
+    dim_symbols: set[str],
+    context: str,
+) -> None:
+    _validate_type_dim_closure(value.type_expr, dim_symbols=dim_symbols, context=context)
+    if value.dims is not None:
+        names: set[str] = set()
+        for dim in value.dims:
+            names.update(dim_token_names(dim))
+        _validate_dim_names(names, dim_symbols=dim_symbols, context=f"{context} dims")
+
+
+def _validate_operand_dim_closure(
+    operand: GraphOperand,
+    *,
+    dim_symbols: set[str],
+    context: str,
+    typevar_names: set[str] | None = None,
+    defined_names: set[str] | None = None,
+) -> None:
+    typevar_names = typevar_names or set()
+    defined_names = defined_names or set()
+    if isinstance(operand, GraphLiteral):
+        _validate_type_dim_closure(operand.type_expr, dim_symbols=dim_symbols, context=context)
+        return
+    if isinstance(operand, GraphPath):
+        return
+    if isinstance(operand, GraphValueRef):
+        local_dim_symbols = set(dim_symbols)
+        if operand.name in typevar_names or operand.name in defined_names:
+            local_dim_symbols.update(_value_dim_names(operand))
+        _validate_value_dim_closure(operand, dim_symbols=local_dim_symbols, context=context)
+        return
+    if isinstance(operand, GraphExpr):
+        local_dim_symbols = set(dim_symbols)
+        local_dim_symbols.update(_type_dim_names(operand.type_expr))
+        if operand.dims is not None:
+            for dim in operand.dims:
+                local_dim_symbols.update(dim_token_names(dim))
+        _validate_type_dim_closure(
+            operand.type_expr,
+            dim_symbols=local_dim_symbols,
+            context=context,
+        )
+        if operand.dims is not None:
+            names: set[str] = set()
+            for dim in operand.dims:
+                names.update(dim_token_names(dim))
+            _validate_dim_names(names, dim_symbols=local_dim_symbols, context=f"{context} dims")
+        for index, item in enumerate(operand.inputs):
+            _validate_operand_dim_closure(
+                item,
+                dim_symbols=local_dim_symbols,
+                context=f"{context} input {index}",
+                typevar_names=typevar_names,
+                defined_names=defined_names,
+            )
+        for key, item in operand.attrs.items():
+            _validate_operand_dim_closure(
+                item,
+                dim_symbols=local_dim_symbols,
+                context=f"{context} attr {key!r}",
+                typevar_names=typevar_names,
+                defined_names=defined_names,
+            )
+        return
+    raise TypeError(f"unsupported graph operand {operand!r}")
+
+
+def _dims_metadata_compatible(
+    type_dims: tuple[DimToken, ...],
+    metadata_dims: tuple[DimToken, ...],
+) -> bool:
+    if type_dims == metadata_dims:
+        return True
+    if any(_is_variadic_dim(dim) for dim in (*type_dims, *metadata_dims)):
+        return _dim_sequence_compatible(metadata_dims, type_dims)
+    if len(type_dims) != len(metadata_dims):
+        return False
+    return all(type_dim == metadata_dim for type_dim, metadata_dim in zip(type_dims, metadata_dims, strict=True))
+
+
+def _require_value_metadata_coherent(value: GraphValue | GraphValueRef, *, context: str) -> None:
+    if (
+        isinstance(value.type_expr, TypeTensor)
+        and value.dims is not None
+        and not _dims_metadata_compatible(value.type_expr.dims, value.dims)
+    ):
+        raise ValueError(
+            f"{context} {value.name!r} has stale dims metadata: "
+            f"type has {value.type_expr.dims!r}, dims has {value.dims!r}"
+        )
+
+
+def _require_operand_metadata_coherent(operand: GraphOperand, *, context: str) -> None:
+    if isinstance(operand, GraphValueRef):
+        _require_value_metadata_coherent(operand, context=f"{context} ref")
+        return
+    if isinstance(operand, GraphExpr):
+        if (
+            isinstance(operand.type_expr, TypeTensor)
+            and operand.dims is not None
+            and not _dims_metadata_compatible(operand.type_expr.dims, operand.dims)
+        ):
+            raise ValueError(
+                f"{context} expr {operand.op.name!r} has stale dims metadata: "
+                f"type has {operand.type_expr.dims!r}, dims has {operand.dims!r}"
+            )
+        for index, item in enumerate(operand.inputs):
+            _require_operand_metadata_coherent(item, context=f"{context} input {index}")
+        for key, item in operand.attrs.items():
+            _require_operand_metadata_coherent(item, context=f"{context} attr {key!r}")
 
 
 def _validate_operand_defined(
@@ -634,6 +896,7 @@ def _validate_operand_defined(
             )
 
 
+@lru_cache(maxsize=200_000)
 def _type_compatible(actual: TypeExpr, expected: TypeExpr) -> bool:
     if (
         isinstance(actual, TypeAny | TypeVar)
@@ -680,8 +943,74 @@ def _is_type_variable_like(type_expr: TypeExpr) -> bool:
     )
 
 
+@lru_cache(maxsize=200_000)
+def _simplify_dim_token(dim: DimToken) -> DimToken:
+    if isinstance(dim, DimExprBinary):
+        left = _simplify_dim_token(dim.left)
+        right = _simplify_dim_token(dim.right)
+        if type(left) is int and type(right) is int:
+            if dim.op == "+":
+                return left + right
+            if dim.op == "-":
+                return left - right
+            if dim.op == "*":
+                return left * right
+            if dim.op == "/" and right != 0 and left % right == 0:
+                return left // right
+        if dim.op == "+":
+            if right == 0:
+                return left
+            if left == 0:
+                return right
+        if dim.op == "-":
+            if right == 0:
+                return left
+            if left == right:
+                return 0
+            if isinstance(left, DimExprBinary) and left.op == "*":
+                if left.left == right and isinstance(left.right, int):
+                    remaining = left.right - 1
+                    if remaining == 0:
+                        return 0
+                    if remaining == 1:
+                        return right
+                    return DimExprBinary(op="*", left=remaining, right=right)
+                if left.right == right and isinstance(left.left, int):
+                    remaining = left.left - 1
+                    if remaining == 0:
+                        return 0
+                    if remaining == 1:
+                        return right
+                    return DimExprBinary(op="*", left=remaining, right=right)
+        if dim.op == "*":
+            if right == 1:
+                return left
+            if left == 1:
+                return right
+            if right == 0 or left == 0:
+                return 0
+            if isinstance(right, DimExprBinary) and right.op == "/" and right.right == left:
+                return right.left
+            if isinstance(left, DimExprBinary) and left.op == "/" and left.right == right:
+                return left.left
+        if dim.op == "/":
+            if right == 1:
+                return left
+            if isinstance(left, DimExprBinary) and left.op == "*" and left.right == right:
+                return left.left
+            if isinstance(left, DimExprBinary) and left.op == "*" and left.left == right:
+                return left.right
+        return DimExprBinary(op=dim.op, left=left, right=right)
+    return dim
+
+
+@lru_cache(maxsize=200_000)
 def _dim_token_compatible(actual: DimToken, expected: DimToken) -> bool:
+    actual = _simplify_dim_token(actual)
+    expected = _simplify_dim_token(expected)
     if ast_equal(actual, expected):
+        return True
+    if dim_token_names(actual) or dim_token_names(expected):
         return True
     if isinstance(actual, str) and actual.startswith(".."):
         return True
@@ -769,6 +1098,148 @@ def _require_actual_compatible_with_formal(
     if formal.optional and isinstance(actual, TypeNull):
         return
     _require_type_compatible(actual, formal.type_expr, context=context)
+
+
+def _bind_dim_substitution_from_types(
+    formal: TypeExpr,
+    actual: TypeExpr,
+    subst: dict[str, DimToken],
+) -> None:
+    if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor) and formal.base == actual.base:
+        _bind_dim_substitution_from_sequences(formal.dims, actual.dims, subst)
+        return
+    if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed) and formal.name == actual.name:
+        _bind_dim_substitution_from_sequences(formal.args, actual.args, subst)
+        return
+    if isinstance(formal, TypeList) and isinstance(actual, TypeList):
+        _bind_dim_substitution_from_types(formal.item, actual.item, subst)
+        return
+    if isinstance(formal, TypeOptional) and isinstance(actual, TypeOptional):
+        _bind_dim_substitution_from_types(formal.inner, actual.inner, subst)
+        return
+    if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple) and len(formal.items) == len(actual.items):
+        for formal_item, actual_item in zip(formal.items, actual.items, strict=True):
+            _bind_dim_substitution_from_types(formal_item, actual_item, subst)
+
+
+def _bind_dim_substitution_from_sequences(
+    formal_dims: tuple[DimToken, ...],
+    actual_dims: tuple[DimToken, ...],
+    subst: dict[str, DimToken],
+) -> None:
+    if len(formal_dims) != len(actual_dims):
+        return
+    for formal_dim, actual_dim in zip(formal_dims, actual_dims, strict=True):
+        _bind_dim_substitution_from_dim(formal_dim, actual_dim, subst)
+
+
+def _bind_dim_substitution_from_dim(
+    formal_dim: DimToken,
+    actual_dim: DimToken,
+    subst: dict[str, DimToken],
+) -> None:
+    if isinstance(formal_dim, str):
+        existing = subst.get(formal_dim)
+        if existing is None:
+            subst[formal_dim] = actual_dim
+        elif existing != actual_dim:
+            # Keep the original binding; the type compatibility check reports shape mismatch.
+            return
+        return
+    if isinstance(formal_dim, DimExprBinary) and isinstance(actual_dim, DimExprBinary):
+        if formal_dim.op != actual_dim.op:
+            return
+        _bind_dim_substitution_from_dim(formal_dim.left, actual_dim.left, subst)
+        _bind_dim_substitution_from_dim(formal_dim.right, actual_dim.right, subst)
+
+
+def _operand_dim_token_for_validation(
+    operand: GraphOperand,
+    dim_values: Mapping[str, DimToken],
+) -> DimToken | None:
+    if isinstance(operand, GraphLiteral) and type(operand.value) is int:
+        return operand.value
+    if isinstance(operand, GraphValueRef):
+        if operand.name in dim_values:
+            return dim_values[operand.name]
+        if isinstance(operand.type_expr, TypeDim | TypeInt):
+            return operand.name
+        return None
+    if (
+        isinstance(operand, GraphExpr)
+        and operand.op.name.startswith("core.binary.")
+        and len(operand.inputs) == 2
+        and isinstance(operand.type_expr, TypeDim | TypeInt)
+    ):
+        op = operand.op.name.removeprefix("core.binary.")
+        if op not in {"+", "-", "*", "/"}:
+            return None
+        left = _operand_dim_token_for_validation(operand.inputs[0], dim_values)
+        right = _operand_dim_token_for_validation(operand.inputs[1], dim_values)
+        if left is None or right is None:
+            return None
+        return _substitute_dim_token(DimExprBinary(op=op, left=left, right=right), {})
+    return None
+
+
+def _call_dim_substitution(
+    callee: GraphModule,
+    actuals: tuple[GraphOperand, ...],
+    dim_values: Mapping[str, DimToken] | None = None,
+) -> dict[str, DimToken]:
+    subst: dict[str, DimToken] = {}
+    dim_values = dim_values or {}
+    for formal, actual in zip(callee.inputs, actuals, strict=True):
+        if isinstance(formal.type_expr, TypeDim):
+            actual_dim = _operand_dim_token_for_validation(actual, dim_values)
+            if actual_dim is not None:
+                subst[formal.name] = actual_dim
+        _bind_dim_substitution_from_types(formal.type_expr, _declared_operand_type(actual), subst)
+    return subst
+
+
+def _substitute_dim_token(dim: DimToken, subst: dict[str, DimToken]) -> DimToken:
+    if isinstance(dim, str):
+        return subst.get(dim, dim)
+    if isinstance(dim, DimExprBinary):
+        left = _substitute_dim_token(dim.left, subst)
+        right = _substitute_dim_token(dim.right, subst)
+        return _simplify_dim_token(DimExprBinary(op=dim.op, left=left, right=right))
+    return dim
+
+
+def _substitute_type_expr(type_expr: TypeExpr, subst: dict[str, DimToken]) -> TypeExpr:
+    if isinstance(type_expr, TypeTensor):
+        return TypeTensor(
+            type_expr.base,
+            tuple(_substitute_dim_token(dim, subst) for dim in type_expr.dims),
+        )
+    if isinstance(type_expr, TypeNamed):
+        return TypeNamed(
+            type_expr.name,
+            tuple(_substitute_dim_token(dim, subst) for dim in type_expr.args),
+        )
+    if isinstance(type_expr, TypeList):
+        return TypeList(_substitute_type_expr(type_expr.item, subst))
+    if isinstance(type_expr, TypeOptional):
+        return TypeOptional(_substitute_type_expr(type_expr.inner, subst))
+    if isinstance(type_expr, TypeTuple):
+        return TypeTuple(tuple(_substitute_type_expr(item, subst) for item in type_expr.items))
+    return type_expr
+
+
+def _instantiated_module_output_types(
+    callee: GraphModule,
+    actuals: tuple[GraphOperand, ...],
+    output_count: int,
+    dim_values: Mapping[str, DimToken] | None = None,
+) -> tuple[TypeExpr, ...]:
+    subst = _call_dim_substitution(callee, actuals, dim_values=dim_values)
+    if callee.return_type_expr is not None:
+        raw_types = _result_types(callee.return_type_expr, output_count)
+    else:
+        raw_types = _module_output_types(callee)
+    return tuple(_substitute_type_expr(type_expr, subst) for type_expr in raw_types)
 
 
 def _declared_operand_type(operand: GraphOperand) -> TypeExpr:
@@ -867,6 +1338,14 @@ def _validate_core_expr_contract(
         if len(input_types) != 3:
             raise ValueError(f"{context}: core.select expects three inputs")
         _require_type_compatible(input_types[0], TypeBool(), context=f"{context} condition")
+        selected_type: TypeExpr | None = None
+        if isinstance(expr.inputs[0], GraphLiteral) and isinstance(expr.inputs[0].value, bool):
+            selected_type = input_types[1] if expr.inputs[0].value else input_types[2]
+        if selected_type is not None:
+            _require_type_compatible(selected_type, expr.type_expr, context=f"{context} selected branch")
+            return
+        _require_type_compatible(input_types[1], expr.type_expr, context=f"{context} true branch")
+        _require_type_compatible(input_types[2], expr.type_expr, context=f"{context} false branch")
         return
     if op_name.startswith("core.binary."):
         if len(input_types) != 2:
@@ -962,6 +1441,20 @@ def _operand_type_checked(
                     formal,
                     context=f"{context} arg {formal.name!r}",
                 )
+            expected_output_count = len(callee.outputs)
+            if expected_output_count != 1 and not (
+                isinstance(operand.type_expr, TypeTuple)
+                and len(operand.type_expr.items) == expected_output_count
+            ):
+                raise ValueError(
+                    f"{context}: call to {operand.op.name!r} cannot be used as "
+                    f"single expression with {expected_output_count} results"
+                )
+            expected_types = _instantiated_module_output_types(callee, actuals, expected_output_count)
+            expected_type = (
+                expected_types[0] if expected_output_count == 1 else TypeTuple(expected_types)
+            )
+            _require_type_compatible(operand.type_expr, expected_type, context=f"{context} call result")
             return operand.type_expr
         if operand.op.name.startswith("core."):
             _validate_core_expr_contract(operand, input_types, context=context)
@@ -978,11 +1471,59 @@ def _validate_graph_module(
     env = {value.name: value for value in module.inputs}
     defined = set(env)
     globals_env = dict(global_values or {})
-    dim_symbols = _module_dim_symbols(module)
+    dim_values: dict[str, DimToken] = {}
+    dim_symbols = _module_boundary_dim_symbols(module)
+    for value in globals_env.values():
+        if isinstance(value.type_expr, TypeDim):
+            dim_symbols.add(value.name)
+        dim_symbols.update(_type_dim_names(value.type_expr))
     if len(defined) != len(module.inputs):
         raise ValueError(f"graph IR module {module.name!r} has duplicate inputs")
     modules_by_name = dict(modules_by_name or {})
+    typevar_names = {
+        name for name, value in env.items() if isinstance(value.type_expr, TypeVar)
+    }
+    all_value_names = set(defined) | set(globals_env)
+    all_constraint_dim_symbols = set(dim_symbols)
     for node in module.nodes:
+        all_value_names.update(output.name for output in node.outputs)
+        all_constraint_dim_symbols.update(_type_dim_names(node.type_expr))
+        if node.dims is not None:
+            for dim in node.dims:
+                all_constraint_dim_symbols.update(dim_token_names(dim))
+        for output in node.outputs:
+            all_constraint_dim_symbols.update(_value_dim_names(output))
+    for value in module.inputs:
+        _require_value_metadata_coherent(value, context=f"graph IR module {module.name!r} input")
+        _validate_value_dim_closure(
+            value,
+            dim_symbols=dim_symbols | _value_dim_names(value),
+            context=f"graph IR module {module.name!r} input {value.name!r}",
+        )
+    if module.return_type_expr is not None:
+        _validate_type_dim_closure(
+            module.return_type_expr,
+            dim_symbols=dim_symbols,
+            context=f"graph IR module {module.name!r} return type",
+        )
+    for constraint in module.constraints:
+        if constraint.relation == "=" and constraint.left == constraint.right:
+            continue
+        if any(guard.relation == "callsite" for guard in constraint.guards):
+            continue
+        _validate_dim_names(
+            _constraint_names(constraint),
+            dim_symbols=all_constraint_dim_symbols | all_value_names,
+            context=f"graph IR module {module.name!r} constraint",
+        )
+    for node in module.nodes:
+        node_local_dim_symbols = set(dim_symbols)
+        node_local_dim_symbols.update(_type_dim_names(node.type_expr))
+        if node.dims is not None:
+            for dim in node.dims:
+                node_local_dim_symbols.update(dim_token_names(dim))
+        for output in node.outputs:
+            node_local_dim_symbols.update(_value_dim_names(output))
         for operand in node.inputs:
             _validate_operand_defined(
                 operand,
@@ -990,12 +1531,51 @@ def _validate_graph_module(
                 dim_symbols=dim_symbols,
                 context=f"graph IR node {node.id!r}",
             )
+            _require_operand_metadata_coherent(operand, context=f"graph IR node {node.id!r} input")
+            _validate_operand_dim_closure(
+                operand,
+                dim_symbols=dim_symbols,
+                context=f"graph IR node {node.id!r} input",
+                typevar_names=typevar_names,
+                defined_names=defined | set(globals_env),
+            )
         for operand in node.attrs.values():
             _validate_operand_defined(
                 operand,
                 defined=defined | set(globals_env),
                 dim_symbols=dim_symbols,
                 context=f"graph IR node {node.id!r}",
+            )
+            _require_operand_metadata_coherent(operand, context=f"graph IR node {node.id!r} attr")
+            _validate_operand_dim_closure(
+                operand,
+                dim_symbols=dim_symbols,
+                context=f"graph IR node {node.id!r} attr",
+                typevar_names=typevar_names,
+                defined_names=defined | set(globals_env),
+            )
+        _validate_type_dim_closure(
+            node.type_expr,
+            dim_symbols=node_local_dim_symbols,
+            context=f"graph IR node {node.id!r} type",
+        )
+        if (
+            isinstance(node.type_expr, TypeTensor)
+            and node.dims is not None
+            and not _dims_metadata_compatible(node.type_expr.dims, node.dims)
+        ):
+            raise ValueError(
+                f"graph IR node {node.id!r} has stale dims metadata: "
+                f"type has {node.type_expr.dims!r}, dims has {node.dims!r}"
+            )
+        if node.dims is not None:
+            names: set[str] = set()
+            for dim in node.dims:
+                names.update(dim_token_names(dim))
+            _validate_dim_names(
+                names,
+                dim_symbols=node_local_dim_symbols,
+                context=f"graph IR node {node.id!r} dims",
             )
         input_types = tuple(
             _operand_type_checked(
@@ -1041,6 +1621,25 @@ def _validate_graph_module(
                     formal,
                     context=f"graph IR node {node.id!r} arg {formal.name!r}",
                 )
+            expected_callee_types = _instantiated_module_output_types(
+                callee,
+                actuals,
+                len(node.outputs),
+                dim_values=dim_values,
+            )
+            if len(node.outputs) != len(expected_callee_types):
+                raise ValueError(
+                    f"graph IR node {node.id!r}: call to {node.op.name!r} result arity mismatch, "
+                    f"expected {len(expected_callee_types)}, got {len(node.outputs)}"
+                )
+            for index, (output, expected_type) in enumerate(
+                zip(node.outputs, expected_callee_types, strict=True)
+            ):
+                _require_type_compatible(
+                    output.type_expr,
+                    expected_type,
+                    context=f"graph IR node {node.id!r} call result {index} stale type",
+                )
         elif node.op.name.startswith("core."):
             _validate_core_expr_contract(
                 GraphExpr(
@@ -1058,6 +1657,13 @@ def _validate_graph_module(
                 raise ValueError(
                     f"graph IR node {node.id!r} redefines value {output.name!r}"
                 )
+            _require_value_metadata_coherent(output, context=f"graph IR node {node.id!r} output")
+            local_dim_symbols = dim_symbols | ({output.name} if isinstance(output.type_expr, TypeDim) else set())
+            _validate_value_dim_closure(
+                output,
+                dim_symbols=node_local_dim_symbols | local_dim_symbols,
+                context=f"graph IR node {node.id!r} output {output.name!r}",
+            )
             if output_index < len(expected_node_types):
                 expected_output_type = expected_node_types[output_index]
                 _require_type_compatible(
@@ -1067,12 +1673,36 @@ def _validate_graph_module(
                 )
             defined.add(output.name)
             env[output.name] = output
+            if isinstance(output.type_expr, TypeDim):
+                dim_symbols.add(output.name)
+            dim_symbols.update(_value_dim_names(output))
+            if len(node.outputs) == 1 and isinstance(output.type_expr, TypeDim | TypeInt):
+                dim_value = _operand_dim_token_for_validation(
+                    GraphExpr(
+                        op=node.op,
+                        inputs=node.inputs,
+                        attrs=node.attrs,
+                        type_expr=node.type_expr,
+                        dims=node.dims,
+                    ),
+                    dim_values,
+                )
+                if dim_value is not None:
+                    dim_values[output.name] = dim_value
     for operand in module.outputs:
         _validate_operand_defined(
             operand,
             defined=defined | set(globals_env),
             dim_symbols=dim_symbols,
             context=f"graph IR module {module.name!r} return",
+        )
+        _require_operand_metadata_coherent(operand, context=f"graph IR module {module.name!r} return")
+        _validate_operand_dim_closure(
+            operand,
+            dim_symbols=dim_symbols,
+            context=f"graph IR module {module.name!r} return",
+            typevar_names=typevar_names,
+            defined_names=defined | set(globals_env),
         )
     output_types = tuple(
         _operand_type_checked(

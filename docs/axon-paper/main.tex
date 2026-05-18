@@ -386,8 +386,9 @@ correctness-critical path.}
 \draw[edge, dashed] (typed) -- (astopt);
 \draw[edge, dashed] (astopt) -- (lower);
 \draw[edge] (lower) -- (graph);
-\draw[edge] (graph) -- (graphopt);
-\draw[edge] (graphopt) -- (backend);
+\draw[edge, dashed] (graph) -- (graphopt);
+\draw[edge, dashed] (graphopt) -- (backend);
+\draw[edge, bend right=18] (graph) to (backend);
 \draw[edge] (backend) -- (exec);
 
 \node[note, below=0.35cm of graph] {optimization is optional and outside\\the correctness-critical path};
@@ -417,25 +418,60 @@ Backend & generated/runtime code & executable tensor program \\
 
 \section{Optional Optimization}
 
-Optimization is intentionally split by representation.  The pre-Graph phase,
-\code{optimize-ast}, calls \code{optimize\_safe\_flat\_typed\_axon\_file} on
-flat typed Axon.  It is conservative: it prunes unreachable definitions from
-the selected main module, performs atomic alias cleanup, applies local
-literal/atomic folding, re-runs typecheck2, and validates after each iteration
-until a structural fixpoint.
+Optimization is intentionally split by representation.  Both optimizers are
+explicitly requested with CLI flags and are off by default.  This keeps the
+correctness-critical contract simple: typecheck2 plus Graph IR lowering must
+produce executable programs without relying on optimization.
 
-The graph phase, \code{optimize-graph}, calls \code{optimize\_graph\_program}
-on typed Graph IR.  It works with graph modules, typed operands, graph effects,
-and structured paths.  The current implementation performs graph pruning,
-atomic alias cleanup, dead temporary elimination for known-total core nodes,
-literal-only constant folding, conservative single-callsite specialization,
-and constrained safe inlining of total-pure helper modules.  Graph validation
-runs after each iteration.
+\paragraph{Typed-AST optimization.}
+The pre-Graph phase, \code{optimize-ast}, calls
+\code{optimize\_safe\_flat\_typed\_axon\_file} on a closed, flat, typed Axon
+file.  It is deliberately narrow.  Starting from the selected main module, it
+prunes unreachable definitions, rewrites each remaining definition with local
+literal folding, atomic alias cleanup, and return-alias promotion, then re-runs
+typecheck2.  The pass validates flatness and typedness after each iteration and
+terminates only when structural AST equality reports a fixpoint.  It therefore
+acts as a safe readability and cleanup pass, not as a semantic repair step.
 
-Neither optimizer is required for correctness.  Both are exposed by explicit
-CLI flags, \code{--optimize-ast} and \code{--optimize-graph}, and both are off
-by default.  Required backend behavior must be represented by stage contracts
-and validators, not hidden behind optional optimization.
+\paragraph{Graph optimization.}
+The graph phase, \code{optimize-graph}, calls
+\code{optimize\_graph\_program} on typed Graph IR.  Its input is a
+\code{GraphProgram} containing typed modules, values, nodes, structured paths,
+dimension metadata, constraints, and graph-level effect information.  One graph
+iteration applies the following validator-backed sequence:
+\begin{enumerate}
+\item prune the module graph to the selected main module, treating type
+metadata, dimension metadata, constraints, and path templates as dependencies;
+\item substitute locally proven atomic dimension constants and simplify
+symbolic dimension expressions such as \(H \cdot (D / H)\);
+\item promote total-pure zero-argument modules to explicit model-global graph
+values;
+\item run local cleanup, including atomic alias cleanup, dead temporary
+elimination for total-pure nodes, literal scalar folding, and tuple/list
+repackaging cleanup;
+\item eliminate common subexpressions only for expressions proven
+\code{total\_pure};
+\item specialize recursive-invariant and single-callsite helpers when the
+actuals are safe constants, paths, or global values and constraint substitution
+can be represented;
+\item inline constrained total-pure helpers when doing so preserves eager Axon
+semantics and transfers constraints soundly;
+\item prune again, validate the whole graph, and repeat until structural
+equality reaches a fixpoint.
+\end{enumerate}
+The graph optimizer has a bounded iteration limit and fails loudly if it does
+not converge.  After convergence it canonicalizes generated module and value
+names while preserving source-readable names.  All substitutions use the same
+typed operand-substitution machinery for value references, path-template
+symbols, type and dimension metadata, constraints, and return operands, which
+prevents stale metadata after specialization or inlining.
+
+\paragraph{Optimization boundary.}
+Neither optimizer may weaken validation or introduce backend-required behavior.
+If a backend needs a program property, that property belongs in the stage
+contract and validator.  Optimization may make the graph smaller and more
+readable, expose constants for code generation, or prepare future graph-level
+kernel fusion, but it must preserve the non-optimized program's semantics.
 
 The following sections describe the stages in order.
 

@@ -41,6 +41,7 @@ from ..graph_ir import (
     GraphPath,
     GraphProgram,
     GraphValueRef,
+    graph_path_template_names,
     validate_graph_program,
 )
 from ..graph_ir.effects import GraphEffect, infer_graph_module_effects
@@ -108,6 +109,27 @@ def _fallback_output_names(module: GraphModule) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _task_value(program: GraphProgram) -> str | None:
+    raw = program.pragmas.get("TASK", program.pragmas.get("task"))
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (list, tuple)) and raw and isinstance(raw[0], str):
+        return raw[0]
+    return None
+
+
+def graph_main_output_names(program: GraphProgram, module: GraphModule) -> tuple[str, ...]:
+    names = tuple(module.output_names or ()) or _fallback_output_names(module)
+    task = _task_value(program)
+    if task in {"causal_lm", "masked_lm", "seq2seq_lm"} and names and "logits" not in names:
+        return ("logits", *names[1:])
+    return names
+
+
+def _main_output_names(program: GraphProgram, module: GraphModule) -> tuple[str, ...]:
+    return graph_main_output_names(program, module)
+
+
 def _display_graph_name(name: str) -> str:
     base, marker, suffix = name.rpartition("__g")
     if marker and base and suffix.isdigit():
@@ -139,7 +161,88 @@ def _type_dim_names(type_expr: Any) -> set[str]:
 
 
 def _is_global_symbol_module(module: GraphModule) -> bool:
+    return module.is_global_binding and not module.inputs and len(module.outputs) == 1
+
+
+def _is_runtime_symbol_module(module: GraphModule) -> bool:
     return not module.inputs and len(module.outputs) == 1
+
+
+def _referenced_symbol_names_in_operand(operand: GraphOperand, out: set[str]) -> None:
+    if isinstance(operand, GraphValueRef):
+        out.add(operand.name)
+        return
+    if isinstance(operand, GraphPath):
+        out.update(graph_path_template_names(operand))
+        return
+    if isinstance(operand, GraphExpr):
+        for item in operand.inputs:
+            _referenced_symbol_names_in_operand(item, out)
+        for item in operand.attrs.values():
+            _referenced_symbol_names_in_operand(item, out)
+        return
+    if isinstance(operand, tuple):
+        for item in operand:
+            _referenced_symbol_names_in_operand(item, out)
+
+
+def _referenced_runtime_symbol_module_names(program: GraphProgram) -> set[str]:
+    modules_by_name = {module.name: module for module in program.modules}
+    runtime_symbol_names = {
+        name for name, module in modules_by_name.items() if _is_runtime_symbol_module(module)
+    }
+    referenced: set[str] = set()
+    for module in program.modules:
+        local = {value.name for value in module.inputs}
+        for node in module.nodes:
+            local.update(value.name for value in node.outputs)
+        names: set[str] = set()
+        for node in module.nodes:
+            for operand in node.inputs:
+                _referenced_symbol_names_in_operand(operand, names)
+            for operand in node.attrs.values():
+                _referenced_symbol_names_in_operand(operand, names)
+        for operand in module.outputs:
+            _referenced_symbol_names_in_operand(operand, names)
+        referenced.update((names - local) & runtime_symbol_names)
+    return referenced
+
+
+def _walk_graph_operands(operand: GraphOperand, out: list[GraphOperand]) -> None:
+    out.append(operand)
+    if isinstance(operand, GraphExpr):
+        for item in operand.inputs:
+            _walk_graph_operands(item, out)
+        for item in operand.attrs.values():
+            _walk_graph_operands(item, out)
+    elif isinstance(operand, tuple):
+        for item in operand:
+            _walk_graph_operands(item, out)
+
+
+def _state_key_filter_prefixes(program: GraphProgram) -> tuple[str, ...]:
+    prefixes: set[str] = set()
+    operands: list[GraphOperand] = []
+    for module in program.modules:
+        for node in module.nodes:
+            for operand in node.inputs:
+                _walk_graph_operands(operand, operands)
+            for operand in node.attrs.values():
+                _walk_graph_operands(operand, operands)
+        for operand in module.outputs:
+            _walk_graph_operands(operand, operands)
+    for operand in operands:
+        if not isinstance(operand, GraphPath):
+            continue
+        text = ".".join(part for part in operand.parts if part).strip(".")
+        if not text:
+            continue
+        placeholder = text.find("{")
+        prefix = text[:placeholder] if placeholder >= 0 else text
+        prefix = prefix.strip(".")
+        if prefix:
+            prefixes.add(prefix)
+    return tuple(sorted(prefixes))
 
 
 def _global_symbol_module_names(
@@ -154,6 +257,19 @@ def _global_symbol_module_names(
         if _is_global_symbol_module(module)
         and (not total_pure_only or effects.get(module.name) == GraphEffect.TOTAL_PURE)
     }
+
+
+def _runtime_symbol_module_names(
+    program: GraphProgram,
+    *,
+    total_pure_only: bool = False,
+) -> set[str]:
+    names = _global_symbol_module_names(program)
+    names.update(_referenced_runtime_symbol_module_names(program))
+    if not total_pure_only:
+        return names
+    effects = infer_graph_module_effects(program.modules)
+    return {name for name in names if effects.get(name) == GraphEffect.TOTAL_PURE}
 
 
 def _free_dim_refs_in_operand(operand: GraphOperand, *, local: set[str], out: set[str]) -> None:
@@ -249,11 +365,12 @@ def _emit_bind_dim_expr(
     dim: Any,
     actual_expr: str,
     local: set[str],
+    protected: set[str],
     indent: int,
     guaranteed: bool,
 ) -> None:
     if isinstance(dim, str):
-        if dim.isidentifier() and dim not in local:
+        if dim.isidentifier() and dim not in protected and dim not in local:
             add(lines, indent, f"{dim} = {actual_expr}")
             local.add(dim)
         return
@@ -262,34 +379,90 @@ def _emit_bind_dim_expr(
     left = dim.left
     right = dim.right
     if dim.op == "+":
-        if isinstance(left, str) and left.isidentifier() and left not in local and isinstance(right, str) and right in local:
+        if (
+            isinstance(left, str)
+            and left.isidentifier()
+            and left not in protected
+            and left not in local
+            and isinstance(right, str)
+            and right in local
+        ):
             add(lines, indent, f"{left} = {actual_expr} - {right}")
             local.add(left)
-        if isinstance(right, str) and right.isidentifier() and right not in local and isinstance(left, str) and left in local:
+        if (
+            isinstance(right, str)
+            and right.isidentifier()
+            and right not in protected
+            and right not in local
+            and isinstance(left, str)
+            and left in local
+        ):
             add(lines, indent, f"{right} = {actual_expr} - {left}")
             local.add(right)
         return
     if dim.op == "-":
-        if isinstance(left, str) and left.isidentifier() and left not in local and isinstance(right, str) and right in local:
+        if (
+            isinstance(left, str)
+            and left.isidentifier()
+            and left not in protected
+            and left not in local
+            and isinstance(right, str)
+            and right in local
+        ):
             add(lines, indent, f"{left} = {actual_expr} + {right}")
             local.add(left)
-        if isinstance(right, str) and right.isidentifier() and right not in local and isinstance(left, str) and left in local:
+        if (
+            isinstance(right, str)
+            and right.isidentifier()
+            and right not in protected
+            and right not in local
+            and isinstance(left, str)
+            and left in local
+        ):
             add(lines, indent, f"{right} = {left} - {actual_expr}")
             local.add(right)
         return
     if dim.op == "*":
-        if isinstance(left, str) and left.isidentifier() and left not in local and isinstance(right, str) and right in local:
+        if (
+            isinstance(left, str)
+            and left.isidentifier()
+            and left not in protected
+            and left not in local
+            and isinstance(right, str)
+            and right in local
+        ):
             add(lines, indent, f"{left} = {actual_expr} // {right}")
             local.add(left)
-        if isinstance(right, str) and right.isidentifier() and right not in local and isinstance(left, str) and left in local:
+        if (
+            isinstance(right, str)
+            and right.isidentifier()
+            and right not in protected
+            and right not in local
+            and isinstance(left, str)
+            and left in local
+        ):
             add(lines, indent, f"{right} = {actual_expr} // {left}")
             local.add(right)
         return
     if dim.op == "/":
-        if isinstance(left, str) and left.isidentifier() and left not in local and isinstance(right, str) and right in local:
+        if (
+            isinstance(left, str)
+            and left.isidentifier()
+            and left not in protected
+            and left not in local
+            and isinstance(right, str)
+            and right in local
+        ):
             add(lines, indent, f"{left} = {actual_expr} * {right}")
             local.add(left)
-        if isinstance(right, str) and right.isidentifier() and right not in local and isinstance(left, str) and left in local:
+        if (
+            isinstance(right, str)
+            and right.isidentifier()
+            and right not in protected
+            and right not in local
+            and isinstance(left, str)
+            and left in local
+        ):
             add(lines, indent, f"{right} = {left} // {actual_expr}")
             local.add(right)
 
@@ -301,16 +474,31 @@ def _emit_bind_nested_shape_symbols(
     type_expr: Any,
     value_expr: str,
     local: set[str],
+    protected: set[str],
 ) -> None:
     if isinstance(type_expr, TypeOptional):
         add(lines, 8, f"if {value_expr} is not None:")
         add(lines, 12, "pass")
         _emit_bind_nested_shape_symbols_inner(
-            lines, add=add, type_expr=type_expr.inner, value_expr=value_expr, local=local, indent=12, guaranteed=False
+            lines,
+            add=add,
+            type_expr=type_expr.inner,
+            value_expr=value_expr,
+            local=local,
+            protected=protected,
+            indent=12,
+            guaranteed=False,
         )
         return
     _emit_bind_nested_shape_symbols_inner(
-        lines, add=add, type_expr=type_expr, value_expr=value_expr, local=local, indent=8, guaranteed=True
+        lines,
+        add=add,
+        type_expr=type_expr,
+        value_expr=value_expr,
+        local=local,
+        protected=protected,
+        indent=8,
+        guaranteed=True,
     )
 
 
@@ -321,6 +509,7 @@ def _emit_bind_nested_shape_symbols_inner(
     type_expr: Any,
     value_expr: str,
     local: set[str],
+    protected: set[str],
     indent: int,
     guaranteed: bool,
 ) -> None:
@@ -333,6 +522,7 @@ def _emit_bind_nested_shape_symbols_inner(
             type_expr=type_expr.inner,
             value_expr=value_expr,
             local=local,
+            protected=protected,
             indent=indent + 4,
             guaranteed=False,
         )
@@ -346,6 +536,7 @@ def _emit_bind_nested_shape_symbols_inner(
             type_expr=type_expr.item,
             value_expr=f"{value_expr}[0]",
             local=local,
+            protected=protected,
             indent=indent + 4,
             guaranteed=False,
         )
@@ -358,6 +549,7 @@ def _emit_bind_nested_shape_symbols_inner(
                 type_expr=item_type,
                 value_expr=f"{value_expr}[{idx}]",
                 local=local,
+                protected=protected,
                 indent=indent,
                 guaranteed=guaranteed,
             )
@@ -370,6 +562,7 @@ def _emit_bind_nested_shape_symbols_inner(
                 dim=dim,
                 actual_expr=f"{value_expr}.shape[{idx}]",
                 local=local,
+                protected=protected,
                 indent=indent,
                 guaranteed=guaranteed,
             )
@@ -391,8 +584,8 @@ class Codegen2GraphModel(nn.Module):
         validate_graph_program(graph)
         self.graph = graph
         self.modules_by_name = {module.name: module for module in graph.modules}
-        self.global_symbol_names = _global_symbol_module_names(graph)
-        self.cached_global_symbol_names = _global_symbol_module_names(
+        self.global_symbol_names = _runtime_symbol_module_names(graph)
+        self.cached_global_symbol_names = _runtime_symbol_module_names(
             graph,
             total_pure_only=True,
         )
@@ -472,6 +665,15 @@ class Codegen2GraphModel(nn.Module):
 
     def _state_tensor_from_resolved_path(self, path: str, *, field: str) -> torch.Tensor:
         resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
+        value = self._state.get(resolved)
+        if torch.is_tensor(value):
+            return value
+        bank = self._expert_bank_lookup(resolved)
+        if bank is not None:
+            bank_key, expert = bank
+            bank_value = self._state.get(bank_key)
+            if torch.is_tensor(bank_value):
+                return bank_value[expert]
         if resolved not in self._state:
             alternatives = self._state_key_alternatives(resolved, limit=8)
             alt_text = ", ".join(alternatives) if alternatives else "<none>"
@@ -479,6 +681,42 @@ class Codegen2GraphModel(nn.Module):
                 f"{field} tensor not found at path: {resolved}. Alternatives: {alt_text}"
             )
         return self._state[resolved]
+
+    @staticmethod
+    def _expert_bank_lookup(path: str) -> tuple[str, int] | None:
+        parts = path.split(".")
+        for idx, part in enumerate(parts):
+            if part == "experts" and idx + 2 < len(parts) and parts[idx + 1].isdigit():
+                expert = int(parts[idx + 1])
+                bank_key = ".".join(parts[: idx + 1] + parts[idx + 2 :])
+                return bank_key, expert
+        return None
+
+    def _linear_param(
+        self,
+        path: str,
+        expert: int | None,
+        *,
+        optional: bool = False,
+        field: str = "linear.weight",
+    ) -> tuple[torch.Tensor | None, int | None]:
+        resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
+        value = self._state.get(resolved)
+        bank = self._expert_bank_lookup(resolved)
+        if torch.is_tensor(value):
+            if bank is not None and (expert is None or expert == bank[1]):
+                return value, None
+            return value, expert
+        if bank is not None:
+            bank_key, path_expert = bank
+            bank_value = self._state.get(bank_key)
+            if torch.is_tensor(bank_value):
+                if expert is None or expert == path_expert:
+                    return bank_value[path_expert], None
+                return bank_value, expert
+        if optional:
+            return None, expert
+        return self._state_tensor_from_resolved_path(resolved, field=field), expert
 
     def _bind_shape_symbols_from_types(
         self,
@@ -536,9 +774,7 @@ class Codegen2GraphModel(nn.Module):
             symbols=symbols,
         )
         result = self._execute_module(self.graph.main_module, env, symbols)
-        names = self.modules_by_name[self.graph.main_module].output_names
-        if not names:
-            names = _fallback_output_names(self.modules_by_name[self.graph.main_module])
+        names = _main_output_names(self.graph, self.modules_by_name[self.graph.main_module])
         if len(result) == 1:
             return result[0]
         outputs = {name: value for name, value in zip(names, result, strict=False)}
@@ -779,7 +1015,16 @@ class Codegen2GraphModel(nn.Module):
         return self._state_tensor_from_resolved_path(path, field=field)
 
     def _optional_param(self, path: str) -> torch.Tensor | None:
-        value = self._state.get(path)
+        resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
+        value = self._state.get(resolved)
+        if torch.is_tensor(value):
+            return value
+        bank = self._expert_bank_lookup(resolved)
+        if bank is not None:
+            bank_key, expert = bank
+            bank_value = self._state.get(bank_key)
+            if torch.is_tensor(bank_value):
+                return bank_value[expert]
         return value if torch.is_tensor(value) else None
 
     @classmethod
@@ -874,14 +1119,23 @@ class Codegen2GraphModel(nn.Module):
             expert = None if len(args) <= 5 or self._is_null(args[5]) else int(args[5])
             weight_leaf = args[6] if len(args) > 6 and not self._is_null(args[6]) else "@weight"
             bias_leaf = args[7] if len(args) > 7 and not self._is_null(args[7]) else "@bias"
-            weight = self._required_param(self._compose_path(base, weight_leaf), field="linear.weight")
+            weight, expert = self._linear_param(
+                self._compose_path(base, weight_leaf),
+                expert,
+                field="linear.weight",
+            )
             if expert is not None:
                 weight = weight[expert]
             bias = None
             if bias_flag:
-                bias = self._optional_param(self._compose_path(base, bias_leaf))
-                if bias is not None and expert is not None and bias.ndim >= 2:
-                    bias = bias[expert]
+                bias, bias_expert = self._linear_param(
+                    self._compose_path(base, bias_leaf),
+                    expert,
+                    optional=True,
+                    field="linear.bias",
+                )
+                if bias is not None and bias_expert is not None and bias.ndim >= 2:
+                    bias = bias[bias_expert]
             weight_run = weight.to(dtype=x.dtype) if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype else weight
             bias_run = (
                 bias.to(dtype=x.dtype)
@@ -1437,10 +1691,12 @@ class _DirectTorchEmitter:
         self.class_name = class_name
         self.modules_by_name = {module.name: module for module in program.modules}
         self.method_names = {name: f"_def_{_py_ident(name)}" for name in self.modules_by_name}
-        self.global_symbol_names = _global_symbol_module_names(
+        self.global_symbol_names = _runtime_symbol_module_names(program)
+        self.cached_global_symbol_names = _runtime_symbol_module_names(
             program,
             total_pure_only=True,
         )
+        self.state_key_filter_prefixes = _state_key_filter_prefixes(program)
 
     def emit(self) -> str:
         lines: list[str] = [f"class {self.class_name}(nn.Module):"]
@@ -1476,6 +1732,7 @@ class _DirectTorchEmitter:
         add(lines, 4, "")
         add(lines, 4, "def load_state_dict(self, state_dict, strict=True):")
         add(lines, 8, "del strict")
+        add(lines, 8, "state_dict = self._filter_state_dict(state_dict)")
         add(lines, 8, "self.state_dict_tensors = self._place_state_dict(dict(state_dict), self.param_devices)")
         add(lines, 8, "self.setup()")
         add(lines, 8, "self._symbols = self._eval_symbols()")
@@ -1512,6 +1769,25 @@ class _DirectTorchEmitter:
         add(lines, 12, "idx = cls._first_numeric_path_segment(key)")
         add(lines, 12, "plan[str(key)] = layer_to_device[idx] if idx is not None else devices[0]")
         add(lines, 8, "return plan")
+        add(lines, 4, "")
+        add(lines, 4, f"_STATE_KEY_FILTER_PREFIXES = {self.state_key_filter_prefixes!r}")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _keep_state_key(cls, key):")
+        add(lines, 8, "prefixes = cls._STATE_KEY_FILTER_PREFIXES")
+        add(lines, 8, "if not prefixes:")
+        add(lines, 12, "return True")
+        add(lines, 8, "key = str(key)")
+        add(lines, 8, "for prefix in prefixes:")
+        add(lines, 12, "if key == prefix or key.startswith(prefix + '.'):")
+        add(lines, 16, "return True")
+        add(lines, 8, "return False")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _filter_state_dict(cls, state_dict):")
+        add(lines, 8, "if not cls._STATE_KEY_FILTER_PREFIXES:")
+        add(lines, 12, "return state_dict")
+        add(lines, 8, "return {key: value for key, value in state_dict.items() if cls._keep_state_key(key)}")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _place_state_dict(cls, state_dict, devices):")
@@ -1588,10 +1864,41 @@ class _DirectTorchEmitter:
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
-        add(lines, 8, "return _common_required_state_value(self.state_dict_tensors, path)")
+        add(lines, 8, "value, _ = self._linear_param(path, None, field='param')")
+        add(lines, 8, "return value")
         add(lines, 4, "")
         add(lines, 4, "def _optional_param(self, path):")
-        add(lines, 8, "return _common_optional_state_value(self.state_dict_tensors, path)")
+        add(lines, 8, "value, _ = self._linear_param(path, None, optional=True, field='optional_param')")
+        add(lines, 8, "return value")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _expert_bank_lookup(path):")
+        add(lines, 8, "parts = path.split('.')")
+        add(lines, 8, "for idx, part in enumerate(parts):")
+        add(lines, 12, "if part == 'experts' and idx + 2 < len(parts) and parts[idx + 1].isdigit():")
+        add(lines, 16, "expert = int(parts[idx + 1])")
+        add(lines, 16, "bank_key = '.'.join(parts[:idx + 1] + parts[idx + 2:])")
+        add(lines, 16, "return bank_key, expert")
+        add(lines, 8, "return None")
+        add(lines, 4, "")
+        add(lines, 4, "def _linear_param(self, path, expert, *, optional=False, field='linear.weight'):")
+        add(lines, 8, "resolved = path[2:] if isinstance(path, str) and path.startswith('@@') else path")
+        add(lines, 8, "value = self.state_dict_tensors.get(resolved)")
+        add(lines, 8, "bank = self._expert_bank_lookup(resolved)")
+        add(lines, 8, "if torch.is_tensor(value):")
+        add(lines, 12, "if bank is not None and (expert is None or int(expert) == bank[1]):")
+        add(lines, 16, "return value, None")
+        add(lines, 12, "return value, expert")
+        add(lines, 8, "if bank is not None:")
+        add(lines, 12, "bank_key, path_expert = bank")
+        add(lines, 12, "bank_value = self.state_dict_tensors.get(bank_key)")
+        add(lines, 12, "if torch.is_tensor(bank_value):")
+        add(lines, 16, "if expert is None or int(expert) == path_expert:")
+        add(lines, 20, "return bank_value[path_expert], None")
+        add(lines, 16, "return bank_value, expert")
+        add(lines, 8, "if optional:")
+        add(lines, 12, "return None, expert")
+        add(lines, 8, "return _common_required_state_value(self.state_dict_tensors, resolved), expert")
         add(lines, 4, "")
         add(lines, 4, "def _materialize_expert_banks(self):")
         add(lines, 8, "groups = {}")
@@ -1601,27 +1908,30 @@ class _DirectTorchEmitter:
         add(lines, 16, "if part == 'experts' and idx + 2 < len(parts) and parts[idx + 1].isdigit():")
         add(lines, 20, "expert = int(parts[idx + 1])")
         add(lines, 20, "bank_key = '.'.join(parts[:idx + 1] + parts[idx + 2:])")
-        add(lines, 20, "groups.setdefault(bank_key, {})[expert] = value")
+        add(lines, 20, "groups.setdefault(bank_key, {})[expert] = key")
         add(lines, 20, "break")
         add(lines, 8, "for bank_key, items in groups.items():")
         add(lines, 12, "if bank_key in self.state_dict_tensors or not items:")
         add(lines, 16, "continue")
-        add(lines, 12, "ordered = [items[i] for i in range(len(items)) if i in items]")
-        add(lines, 12, "if len(ordered) != len(items):")
+        add(lines, 12, "ordered_keys = [items[i] for i in range(len(items)) if i in items]")
+        add(lines, 12, "if len(ordered_keys) != len(items):")
         add(lines, 16, "continue")
-        add(lines, 12, "first_shape = ordered[0].shape")
-        add(lines, 12, "if any(tuple(t.shape) != tuple(first_shape) for t in ordered):")
+        add(lines, 12, "first = self.state_dict_tensors[ordered_keys[0]]")
+        add(lines, 12, "first_shape = first.shape")
+        add(lines, 12, "if any(tuple(self.state_dict_tensors[key].shape) != tuple(first_shape) for key in ordered_keys):")
         add(lines, 16, "continue")
+        add(lines, 12, "ordered = [self.state_dict_tensors.pop(key) for key in ordered_keys]")
         add(lines, 12, "self.state_dict_tensors[bank_key] = torch.stack(ordered, dim=0)")
+        add(lines, 12, "del ordered")
         add(lines, 4, "")
         add(lines, 4, "def _linear(self, base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
-        add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
+        add(lines, 8, "weight, expert = self._linear_param(self._compose_path(base, weight_leaf), expert)")
         add(lines, 8, "if expert is not None:")
         add(lines, 12, "weight = weight[int(expert)]")
         add(lines, 8, "x = self._move_to(x, weight.device)")
-        add(lines, 8, "bias_value = self._optional_param(self._compose_path(base, bias_leaf)) if bias else None")
-        add(lines, 8, "if bias_value is not None and expert is not None and bias_value.ndim >= 2:")
-        add(lines, 12, "bias_value = bias_value[int(expert)]")
+        add(lines, 8, "bias_value, bias_expert = self._linear_param(self._compose_path(base, bias_leaf), expert, optional=True, field='linear.bias') if bias else (None, expert)")
+        add(lines, 8, "if bias_value is not None and bias_expert is not None and bias_value.ndim >= 2:")
+        add(lines, 12, "bias_value = bias_value[int(bias_expert)]")
         add(lines, 8, "if bias_value is not None:")
         add(lines, 12, "bias_value = self._move_to(bias_value, weight.device)")
         add(lines, 8, "weight_run = weight.to(dtype=x.dtype) if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype else weight")
@@ -1747,14 +2057,36 @@ class _DirectTorchEmitter:
         add(lines, 4, "def _eval_symbols(self):")
         add(lines, 8, "symbols = {}")
         add(lines, 8, "self._symbols = symbols")
-        add(lines, 8, f"pending = {sorted(self.global_symbol_names)!r}")
+        add(lines, 8, f"pending = {sorted(self.cached_global_symbol_names)!r}")
         add(lines, 8, "last_errors = {}")
         add(lines, 8, "while pending:")
         add(lines, 12, "next_pending = []")
         add(lines, 12, "progressed = False")
         add(lines, 12, "for name in pending:")
         add(lines, 16, "try:")
-        for name in sorted(self.global_symbol_names):
+        for name in sorted(self.cached_global_symbol_names):
+            method = self.method_names[name]
+            add(lines, 20, f"if name == {name!r}:")
+            add(lines, 24, f"result = self.{method}()")
+            add(lines, 24, "symbols[name] = result[0] if len(result) == 1 else result")
+            add(lines, 24, "progressed = True")
+            add(lines, 24, "continue")
+        add(lines, 20, "raise KeyError(name)")
+        add(lines, 16, "except Exception as exc:")
+        add(lines, 20, "last_errors[name] = exc")
+        add(lines, 20, "next_pending.append(name)")
+        add(lines, 12, "if not progressed:")
+        add(lines, 16, "name, exc = next(iter(last_errors.items()))")
+        add(lines, 16, "raise RuntimeError(f'unable to evaluate cached graph global symbols; blocked at {name!r}') from exc")
+        add(lines, 12, "pending = next_pending")
+        add(lines, 8, f"pending = {sorted(self.global_symbol_names - self.cached_global_symbol_names)!r}")
+        add(lines, 8, "last_errors = {}")
+        add(lines, 8, "while pending:")
+        add(lines, 12, "next_pending = []")
+        add(lines, 12, "progressed = False")
+        add(lines, 12, "for name in pending:")
+        add(lines, 16, "try:")
+        for name in sorted(self.global_symbol_names - self.cached_global_symbol_names):
             method = self.method_names[name]
             add(lines, 20, f"if name == {name!r}:")
             add(lines, 24, f"result = self.{method}()")
@@ -1789,6 +2121,7 @@ class _DirectTorchEmitter:
                 type_expr=_effective_graph_value_type(value),
                 value_expr=value.name,
                 local=local,
+                protected=self.global_symbol_names,
             )
         dim_params = [
             value.name
@@ -1845,7 +2178,7 @@ class _DirectTorchEmitter:
                     add(lines, 8, f"{value.name} = inputs.get({value.name!r}, None)")
                 args.append(value.name)
         add(lines, 8, f"result = self.{self.method_names[main.name]}({', '.join(args)})")
-        names = main.output_names or _fallback_output_names(main)
+        names = _main_output_names(self.program, main)
         if len(names) == 1:
             add(lines, 8, "return result[0]")
         else:
@@ -1858,7 +2191,7 @@ class _DirectTorchEmitter:
         add = self._add
         main = self.modules_by_name[self.program.main_module]
         input_names = {value.name for value in main.inputs}
-        output_names = set(main.output_names or _fallback_output_names(main))
+        output_names = set(_main_output_names(self.program, main))
         attention_name = "attn_mask" if "attn_mask" in input_names else (
             "attention_mask" if "attention_mask" in input_names else None
         )
@@ -2380,6 +2713,7 @@ __all__ = [
     "Codegen2GraphModel",
     "Runtime2GraphModel",
     "emit_model_code_from_graph_ir",
+    "graph_main_output_names",
     "make_graph_model_class",
     "make_runtime2_model_class",
 ]

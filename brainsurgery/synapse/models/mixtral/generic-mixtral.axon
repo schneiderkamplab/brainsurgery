@@ -34,13 +34,13 @@ MAX_POSITIONS = HAS_SLIDING_WINDOW ? (Config.int@@sliding_window default=32768) 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
-mixtral_expert_ffn :: Tensor[N,D] -> Tensor[N,D]
+mixtral_expert_ffn :: Tensor[N,MODEL_DIM] -> Tensor[N,MODEL_DIM]
 mixtral_expert_ffn x = do
   gate <- NN.linear@w1 x dim=FFN
   up <- NN.linear@w3 x dim=FFN
   return gate |> silu |> mul up |> NN.linear@w2 dim=MODEL_DIM bias=false
 
-mixtral_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+mixtral_block :: Tensor[B,S,MODEL_DIM] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,MODEL_DIM], ?CacheLayer[B,KVH,K,DH])
 mixtral_block x pos_ids attn_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do

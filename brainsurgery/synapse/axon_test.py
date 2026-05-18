@@ -55,6 +55,7 @@ from .axon.ast import AxonFile, TypeOptional
 from .axon.codegen2_tinygrad import emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir
 from .axon.codegen2_torch import (
     emit_model_code_from_graph_ir as emit_torch_model_code_from_graph_ir,
+    graph_main_output_names as _graph_main_output_names,
     make_runtime2_model_class as make_runtime2_torch_model_class,
 )
 from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
@@ -394,7 +395,19 @@ def _infer_model_task(*, axon_file: Path, weights: Path) -> str:
 def _cleanup(device: torch.device) -> None:
     gc.collect()
     if device.type == "cuda":
-        torch.cuda.empty_cache()
+        current = torch.cuda.current_device()
+        for index in range(torch.cuda.device_count()):
+            with torch.cuda.device(index):
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+        torch.cuda.set_device(current)
     if device.type == "mps":
         torch.mps.empty_cache()
 
@@ -760,6 +773,8 @@ def _load_state_dict(
                 tensor = tensor.to(device=device)
             out[key] = tensor
     materialize_mxfp4_aliases(out, dtype=dtype, drop_packed=True)
+    if param_devices:
+        _drop_pipeline_duplicate_state_aliases(out)
 
     final_logits_bias = out.get("final_logits_bias")
     if (
@@ -789,6 +804,45 @@ def _load_state_dict(
                 out.setdefault("model.encoder.embed_positions.weight", sinusoidal)
                 out.setdefault("model.decoder.embed_positions.weight", sinusoidal)
     return out
+
+
+def _drop_pipeline_duplicate_state_aliases(state_dict: dict[str, torch.Tensor]) -> None:
+    """Drop wrapper-namespace duplicates before pipeline placement.
+
+    Some multimodal checkpoints expose the same text weights under both their
+    canonical nested text-module path and a flattened convenience alias. Keeping
+    both is harmless for single-device loading but can double large tensors
+    during pipeline placement. This is intentionally suffix-based and model
+    agnostic: only a shorter key is dropped when a longer key with the same
+    suffix and tensor metadata is present.
+    """
+    by_suffix: dict[str, list[str]] = {}
+    for key in state_dict:
+        pieces = key.split(".")
+        for idx in range(1, len(pieces)):
+            by_suffix.setdefault(".".join(pieces[idx:]), []).append(key)
+
+    drop: set[str] = set()
+    for key, value in state_dict.items():
+        if key in drop:
+            continue
+        candidates = by_suffix.get(key, ())
+        if not candidates:
+            continue
+        for candidate in candidates:
+            if candidate == key or candidate in drop:
+                continue
+            other = state_dict.get(candidate)
+            if not torch.is_tensor(value) or not torch.is_tensor(other):
+                continue
+            if tuple(value.shape) != tuple(other.shape) or value.dtype != other.dtype:
+                continue
+            if candidate.count(".") <= key.count("."):
+                continue
+            drop.add(key)
+            break
+    for key in drop:
+        state_dict.pop(key, None)
 
 
 def _clone_hf_state_dict(
@@ -1642,6 +1696,15 @@ def _build_reference_quantization_config(config: Any) -> Any | None:
     )
 
 
+def _patch_deepseek_v4_reference_runtime_config(config: Any) -> Any:
+    """Use deterministic eager HF reference kernels for DeepSeek-V4 comparisons."""
+    if str(getattr(config, "model_type", "")).strip().lower() != "deepseek_v4":
+        return config
+    setattr(config, "_attn_implementation", "eager")
+    setattr(config, "_experts_implementation", "eager")
+    return config
+
+
 _HF_MXFP4_EXPERT_ALIAS_RE = re.compile(r"\.mlp\.experts\.\d+\.")
 
 
@@ -1735,7 +1798,7 @@ def _load_hf_causal_lm_from_dequantized_mxfp4_state(
     target_device: torch.device,
     model_config: dict[str, Any] | None,
 ) -> Any:
-    plain_config = deepcopy(hf_config)
+    plain_config = _patch_deepseek_v4_reference_runtime_config(deepcopy(hf_config))
     if hasattr(plain_config, "quantization_config"):
         try:
             delattr(plain_config, "quantization_config")
@@ -2329,6 +2392,7 @@ def _collect_hf_param_names_for_device_map(
         if str(getattr(hf_config, "model_type", "")).strip().lower() in {
             "gemma4",
             "mistral3",
+            "mistral4",
             "llama4",
         }:
             constructors.append(AutoModelForImageTextToText)
@@ -2373,12 +2437,14 @@ def _collect_ordered_hf_param_names_for_device_map(
         if str(getattr(hf_config, "model_type", "")).strip().lower() in {
             "gemma4",
             "mistral3",
+            "mistral4",
             "llama4",
         }:
             constructors.append(AutoModelForImageTextToText)
     else:
         return []
 
+    fallback_ordered: list[str] = []
     for ctor in constructors:
         try:
             with init_empty_weights():
@@ -2394,10 +2460,13 @@ def _collect_ordered_hf_param_names_for_device_map(
                         continue
                     seen.add(name)
                     ordered.append(name)
-                return ordered
+                if any(_numeric_segment(name) is not None for name in ordered):
+                    return ordered
+                if not fallback_ordered:
+                    fallback_ordered = ordered
         except Exception:
             continue
-    return []
+    return fallback_ordered
 
 
 def _numeric_segment(name: str) -> tuple[int, int] | None:
@@ -2872,10 +2941,7 @@ def _run_axon_test_single(
         main_graph_module = next(
             module for module in graph_program.modules if module.name == graph_program.main_module
         )
-        output_names = main_graph_module.output_names or tuple(
-            getattr(operand, "name", f"out{idx}")
-            for idx, operand in enumerate(main_graph_module.outputs)
-        )
+        output_names = _graph_main_output_names(graph_program, main_graph_module)
         lowered_spec = {
             "synapse": 1,
             "model": {
@@ -2912,6 +2978,8 @@ def _run_axon_test_single(
 
         hf_config: Any | None = None
         reference_quant_config: Any | None = None
+        from_pretrained_quant_config: Any | None = None
+        reference_quant_method: str | None = None
         if resolved_model_task in {"masked_lm", "seq2seq_lm"} or resolved_model_type in {
             "phi3",
             "phi3small",
@@ -2933,18 +3001,21 @@ def _run_axon_test_single(
             )
             hf_config = _normalize_rope_numeric_fields(hf_config)
             hf_config = _patch_mistral4_config_compat(hf_config)
+            hf_config = _patch_deepseek_v4_reference_runtime_config(hf_config)
             if str(getattr(hf_config, "model_type", "")).strip().lower() == "deepseek":
                 rope_scaling = getattr(hf_config, "rope_scaling", None)
                 if isinstance(rope_scaling, dict):
                     rope_type = str(rope_scaling.get("type", rope_scaling.get("rope_type", "")))
                     if rope_type in {"", "default"}:
                         setattr(hf_config, "rope_scaling", None)
+            reference_quant_method = _read_quant_method(hf_config)
             reference_quant_config = _build_reference_quantization_config(hf_config)
+            from_pretrained_quant_config = reference_quant_config
             if hf_strict_dtype and reference_quant_config is not None:
                 print(
-                    "HF strict dtype enabled; ignoring reference quantization config to preserve requested dtype"
+                    "HF strict dtype enabled; not passing quantization_config to from_pretrained"
                 )
-                reference_quant_config = None
+                from_pretrained_quant_config = None
             if hf_strict_dtype and getattr(hf_config, "quantization_config", None) is not None:
                 print("HF strict dtype enabled; removing config.quantization_config")
                 try:
@@ -2967,6 +3038,7 @@ def _run_axon_test_single(
                 resolved_hf_model_dir,
                 trust_remote_code=effective_trust_remote_code,
             )
+            hf_config = _patch_deepseek_v4_reference_runtime_config(hf_config)
         exec_device_str = str(resolved_device)
         tokenizer_obj, input_ids_cpu, attention_mask_cpu = tokenize_prompts(
             prompts=prompts,
@@ -3242,7 +3314,7 @@ def _run_axon_test_single(
                     local_files_only=True,
                     torch_dtype=resolved_dtype,
                     config=hf_config,
-                    quantization_config=reference_quant_config,
+                    quantization_config=from_pretrained_quant_config,
                     trust_remote_code=effective_trust_remote_code,
                     device_map=hf_device_map,
                 )
@@ -3271,7 +3343,7 @@ def _run_axon_test_single(
                         )
                         hf_model.load_state_dict(local_state_ref_cpu, strict=True)
                     elif (
-                        _read_quant_method(hf_config) == "mxfp4"
+                        reference_quant_method == "mxfp4"
                         and reference_quant_config is not None
                         and bool(getattr(reference_quant_config, "dequantize", False))
                     ):
@@ -3288,7 +3360,7 @@ def _run_axon_test_single(
                     elif (
                         str(getattr(hf_config, "model_type", "")).strip().lower()
                         == "deepseek_v4"
-                        and _read_quant_method(hf_config) == "fp8"
+                        and reference_quant_method == "fp8"
                         and reference_quant_config is not None
                         and bool(getattr(reference_quant_config, "dequantize", False))
                     ):
@@ -3310,8 +3382,8 @@ def _run_axon_test_single(
                             "config": hf_config,
                             "trust_remote_code": effective_trust_remote_code,
                         }
-                        if reference_quant_config is not None:
-                            causal_kwargs["quantization_config"] = reference_quant_config
+                        if from_pretrained_quant_config is not None:
+                            causal_kwargs["quantization_config"] = from_pretrained_quant_config
                         if hf_device_map is not None:
                             causal_kwargs["device_map"] = hf_device_map
                         hf_model = AutoModelForCausalLM.from_pretrained(
@@ -3679,6 +3751,8 @@ def _run_axon_test_single(
             hf_layer_outputs = cast(dict[int, torch.Tensor], hf_result["layer_outputs"])
             hf_exec_device_str = cast(str, hf_result["device"])
             state_ref_cpu = cast(dict[str, torch.Tensor] | None, hf_result["state_ref_cpu"])
+            hf_result.clear()
+            _cleanup(_resolve_device(exec_device_str))
 
         def _run_syn_side(target_device_str: str) -> dict[str, Any]:
             target_device = _resolve_device(target_device_str)

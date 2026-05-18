@@ -64,6 +64,7 @@ from ._cst import (
     CstDefinition,
     CstDefParam,
     CstFunctionType,
+    CstGlobalBinding,
     CstDefinitionSource,
     CstPathTypeParam,
     CstProgramSource,
@@ -241,6 +242,7 @@ _GRAMMAR = r"""
 program: _NL* top_item (_NL+ top_item)* _NL*
 
 top_item: definition_decl
+    | global_binding
     | import_decl
     | export_decl
     | pragma
@@ -272,6 +274,7 @@ type_name: NAME
     | LPAR type_dim_expr RPAR -> type_dim_paren
 
 definition: mod_decl def_param* "=" expr
+global_binding: module_name BIND_ARROW expr
 def_param: NAME -> def_param_positional
     | "?" NAME "=" def_param_simple -> def_param_default
     | "?" NAME "=" LPAR expr RPAR -> def_param_default_paren
@@ -594,6 +597,7 @@ class _ProgramTransformer(Transformer[Token, object]):
 
     def program(self, children: list[object]) -> CstProgramSource:
         modules: list[CstDefinitionSource] = []
+        global_bindings: list[CstGlobalBinding] = []
         imports: list[str] = []
         imported_members: dict[str, tuple[str, ...]] = {}
         exports: list[str] = []
@@ -602,6 +606,9 @@ class _ProgramTransformer(Transformer[Token, object]):
         for child in children:
             if isinstance(child, CstDefinitionSource):
                 modules.append(child)
+                continue
+            if isinstance(child, CstGlobalBinding):
+                global_bindings.append(child)
                 continue
             if isinstance(child, tuple) and len(child) == 2 and child[0] == "import":
                 namespace = cast(str, child[1])
@@ -653,6 +660,7 @@ class _ProgramTransformer(Transformer[Token, object]):
                 type_aliases[name] = cast(TypeAliasDef, child[2])
         return CstProgramSource(
             modules=tuple(modules),
+            global_bindings=tuple(global_bindings),
             imports=tuple(dict.fromkeys(imports)),
             imported_members=imported_members,
             exports=tuple(dict.fromkeys(exports)),
@@ -843,6 +851,13 @@ class _ProgramTransformer(Transformer[Token, object]):
         if rhs is None:
             raise ValueError("definition rhs expression is required")
         return CstDefinition(definition_decl=mod, args=tuple(args), rhs=rhs)
+
+    def global_binding(self, children: list[object]) -> CstGlobalBinding:
+        name = cast(str, children[0])
+        rhs = next((self._as_expr(child) for child in children[1:] if self._is_expr(child)), None)
+        if rhs is None:
+            raise ValueError("global binding rhs expression is required")
+        return CstGlobalBinding(name=name, rhs=rhs)
 
     def def_param_positional(self, children: list[object]) -> CstDefParam:
         if len(children) != 1:

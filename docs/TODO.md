@@ -1,7 +1,5 @@
 # TODO
 
-- Fix `rope_pair_base` typing in `brainsurgery/synapse/builtins/Prelude.axon` to allow different query/key head counts (`HQ` vs `HK`) while keeping shared `B`, `T`, and `HD`.
-- Re-run the previously failing Qwen3 pairs after the signature update and verify no regressions in `masked_top1_eq` / `masked_max_abs_diff`.
 - Add Axon syntax for scoped/absolute variables or buffers, likely `#xyz`, before caching reusable generated tensors such as RoPE tables as model buffers.
 - After buffer syntax exists, evaluate moving reusable config-derived tables into backend `setup(...)` instead of recomputing them during `forward(...)`.
 - Explore native distributed Axon inference as a future language/runtime direction. One possible design is a Jolie/process-calculus-style layer with typed services/processes, typed channels or ports, explicit `spawn`/`send`/`recv`/`await`/`select`, placement annotations, and graph IR nodes for communication, barriers, pipeline stages, and collectives. This should be semantic and visible in Axon/Graph IR if pursued, not hidden as backend-only magic.
@@ -13,12 +11,55 @@
 
 These should stay optional until each pass has precise preconditions, typed validation, roundtrip coverage, and model-fidelity coverage. Prefer Graph IR for rewrites that need effect information, dataflow, shape metadata, or backend lowering knowledge; keep AST-level optimization limited to semantics-preserving canonical cleanup.
 
+- High priority: lower tail-recursive loop-helper SCCs to explicit iterative
+  graph/codegen loops. Detect the canonical flattened pattern with a loop index,
+  loop bound/step, carry tuple, base return, and tail calls only in tail
+  position. Emit a backend loop (`for range(...)` when the bound/step are
+  statically normal, otherwise `while` with the validated loop-done predicate)
+  while preserving path-template dependencies such as `@@'h.{i}'`.
+- High priority: implement main-module-anchored intra- and inter-procedural
+  domain analysis over the pruned reachable Graph IR. It should infer facts that
+  hold on all non-dead paths from `MAIN`, including null/non-null, boolean,
+  numeric literal/range, path/global-value, and callsite-restricted argument
+  domains. Initial analysis-only support exists for unknown/null/non-null, exact
+  literals, paths, and model-global values; next steps are wiring these facts
+  into validated folding/dead-branch cleanup and extending to ranges.
+- Graph-level shape/list literal cleanup: initial renderer-visible slice is
+  implemented for atomic `core.list`/`core.tuple` expressions. The optimized
+  graph already carries these structurally; Graph IR Axon rendering now keeps
+  flat-safe atomic shape/order lists inline in primitive call arguments instead
+  of introducing temporary list binds. Future work is broader single-use cleanup
+  with explicit use-count checks if graph rewrites still materialize scaffolds.
+- Graph-level scalar/dim expression simplification: continue expanding the
+  initial implementation. It now simplifies typed dimension expressions such as
+  `NUM_HEADS * (MODEL_DIM / NUM_HEADS)` to `MODEL_DIM` in term refs and
+  type/dim metadata. Remaining work is to add only proof-gated identities that
+  are valid under current integer dimension semantics and keep validating all
+  updated term refs, type refs, dim metadata, and constraints.
+- Graph-level return scaffolding cleanup: initial renderer-visible slice is
+  implemented for atomic tuple/list graph expressions in module outputs. Existing
+  graph cleanup removes return-only `core.tuple` producer nodes; Graph IR Axon
+  rendering now keeps the resulting atomic tuple expression inline in `return`
+  rather than reintroducing a temp.
+- Graph-level optional/null specialization: continue specializing helpers with
+  literal `null`/boolean arguments so existing branch cleanup can remove dead
+  paths before inlining. Do not introduce branch-region or do-expression
+  operands.
 - AST-level safe cleanup: continue limiting `--optimize-safe` to rooted pruning, atomic alias cleanup, and literal-only folding. Candidate extensions are only small local rewrites that do not duplicate or remove potentially partial calls and can be re-typechecked to a fixpoint after every iteration.
 - AST-level constraint folding: explore folding conditionals from fresh, provenance-aware constraints only after re-typecheck refreshes constraints. Avoid using stale constraints after any rewrite that changes operands, guards, signatures, or helper bodies.
-- Graph-level constant/dim substitution: reintroduce constant dimension substitution only as a local, constraint-gated rewrite. It should update operands, types, dim metadata, constraints, helper signatures, path templates, and rendered Axon consistently, and validate after each candidate rewrite.
-- Graph-level dead temp and dead branch cleanup: use Graph IR effects so total-pure dead computations can be removed while partial/impure operations are preserved. Branch cleanup should require literal conditions or validated constraints and must preserve eager Axon semantics outside ternary branches.
-- Graph-level CSE: common-subexpression elimination is plausible for total-pure graph expressions with identical operands, attributes, path templates, dtype, shape, and constraints. Unknown module calls should not be CSE candidates until effect metadata proves they are total and deterministic.
-- Graph-level specialization and inlining: specialize helpers when call-site constants or path templates materially improve types/codegen, but avoid unbounded cloning. Inlining should skip recursive SCCs, constrained helpers unless constraints are substituted correctly, and any helper containing partial effects unless proven safe.
+- Graph-level dead branch cleanup: use Graph IR effects so total-pure dead
+  computations can be removed while partial/impure operations are preserved.
+  Branch cleanup should require literal conditions or validated constraints and
+  must preserve eager Axon semantics outside ternary branches.
+- Graph-level CSE: extend current total-pure CSE only if operand identity,
+  attributes, path templates, dtype, shape, and constraints match. Unknown module
+  calls should not be CSE candidates until effect metadata proves they are total
+  and deterministic.
+- Graph-level specialization and inlining: keep expanding only flat-safe cases.
+  Specialize helpers when call-site constants or path templates materially
+  improve types/codegen, but avoid unbounded cloning. Inlining should skip
+  recursive SCCs, constrained helpers unless constraints are substituted
+  correctly, and any helper containing partial effects unless proven safe.
 - Graph-level shape/layout optimization: use preserved tensor shapes and path metadata to plan transposes, reshape/expand chains, layout choices, and backend-friendly argument forms without weakening Graph IR typing.
 - Graph-level fusion and custom kernels: identify typed patterns such as RMSNorm, attention score/mask/softmax/value, SwiGLU/MLP, RoPE, and selected-expert MoE routing. These should rewrite to backend-neutral graph ops or annotated regions, not backend-specific model-name branches.
 - Graph-level parameter/path normalization: continue canonicalizing path templates structurally, but do not inline constants or scopes by string rewriting. Template symbols are first-class dependencies and must remain visible to closure, validation, and codegen.
