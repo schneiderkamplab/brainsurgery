@@ -160,6 +160,14 @@ def _type_dim_names(type_expr: Any) -> set[str]:
     return set()
 
 
+def _tensor_dims_from_type(type_expr: Any) -> tuple[Any, ...] | None:
+    if isinstance(type_expr, TypeOptional):
+        return _tensor_dims_from_type(type_expr.inner)
+    if isinstance(type_expr, TypeTensor):
+        return tuple(type_expr.dims)
+    return None
+
+
 def _is_global_symbol_module(module: GraphModule) -> bool:
     return module.is_global_binding and not module.inputs and len(module.outputs) == 1
 
@@ -1724,7 +1732,40 @@ class _DirectTorchEmitter:
         add(lines, 8, "self.state_dict_tensors = {}")
         add(lines, 8, "self.config = dict(({} if _MODEL_CONFIG is None else _MODEL_CONFIG) if config is None else config)")
         add(lines, 8, "self._symbols = {}")
+        add(lines, 8, "self._profile_enabled = False")
+        add(lines, 8, "self._profile_cuda = True")
+        add(lines, 8, "self._profile_records = {}")
         add(lines, 8, "self.load_state_dict(state_dict)")
+        add(lines, 4, "")
+        add(lines, 4, "def enable_profile(self, enabled=True, *, cuda=True, reset=True):")
+        add(lines, 8, "self._profile_enabled = bool(enabled)")
+        add(lines, 8, "self._profile_cuda = bool(cuda)")
+        add(lines, 8, "if reset:")
+        add(lines, 12, "self._profile_records = {}")
+        add(lines, 8, "return self")
+        add(lines, 4, "")
+        add(lines, 4, "def _profile_call(self, name, fn, *args, **kwargs):")
+        add(lines, 8, "if not self._profile_enabled:")
+        add(lines, 12, "return fn(*args, **kwargs)")
+        add(lines, 8, "use_cuda = bool(self._profile_cuda and torch.cuda.is_available())")
+        add(lines, 8, "if use_cuda:")
+        add(lines, 12, "torch.cuda.synchronize()")
+        add(lines, 8, "start = time.perf_counter()")
+        add(lines, 8, "try:")
+        add(lines, 12, "return fn(*args, **kwargs)")
+        add(lines, 8, "finally:")
+        add(lines, 12, "if use_cuda:")
+        add(lines, 16, "torch.cuda.synchronize()")
+        add(lines, 12, "elapsed = time.perf_counter() - start")
+        add(lines, 12, "count, total = self._profile_records.get(name, (0, 0.0))")
+        add(lines, 12, "self._profile_records[name] = (count + 1, total + elapsed)")
+        add(lines, 4, "")
+        add(lines, 4, "def profile_summary(self, top_n=40):")
+        add(lines, 8, "rows = []")
+        add(lines, 8, "for name, (count, total) in self._profile_records.items():")
+        add(lines, 12, "rows.append({'name': name, 'count': count, 'seconds': total, 'avg_seconds': total / max(1, count)})")
+        add(lines, 8, "rows.sort(key=lambda row: row['seconds'], reverse=True)")
+        add(lines, 8, "return rows[: int(top_n)]")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None, param_devices=None):")
@@ -2112,7 +2153,16 @@ class _DirectTorchEmitter:
         params = ", ".join(f"{value.name}=None" for value in module.inputs)
         if params:
             params = ", " + params
-        add(lines, 4, f"def {self.method_names[module.name]}(self{params}):")
+        method_name = self.method_names[module.name]
+        impl_name = f"{method_name}__impl"
+        arg_names = ", ".join(value.name for value in module.inputs)
+        add(lines, 4, f"def {method_name}(self{params}):")
+        call_args = f", {arg_names}" if arg_names else ""
+        add(lines, 8, "if self._profile_enabled:")
+        add(lines, 12, f"return self._profile_call({('module:' + module.name)!r}, self.{impl_name}{call_args})")
+        add(lines, 8, f"return self.{impl_name}({arg_names})" if arg_names else f"return self.{impl_name}()")
+        add(lines, 4, "")
+        add(lines, 4, f"def {impl_name}(self{params}):")
         local = {value.name for value in module.inputs}
         for value in module.inputs:
             _emit_bind_nested_shape_symbols(
@@ -2140,7 +2190,7 @@ class _DirectTorchEmitter:
                 add(lines, 8, f"{target} = {source}")
                 local.add(name)
         for node in module.nodes:
-            self._emit_node(lines, node, indent=8, local=local, symbols_dict="self._symbols")
+            self._emit_node(lines, node, module_name=module.name, indent=8, local=local, symbols_dict="self._symbols")
             for output in node.outputs:
                 local.add(output.name)
         outs = ", ".join(self._operand_expr(item, local=local, symbols_dict="self._symbols") for item in module.outputs)
@@ -2345,15 +2395,24 @@ class _DirectTorchEmitter:
         add(lines, 16, "break")
         add(lines, 8, "return decoder_input_ids")
 
-    def _emit_node(self, lines: list[str], node: Any, *, indent: int, local: set[str], symbols_dict: str) -> None:
+    def _emit_node(self, lines: list[str], node: Any, *, module_name: str, indent: int, local: set[str], symbols_dict: str) -> None:
         add = self._add
         op = node.op.name
         targets = tuple(_py_ident(value.name) for value in node.outputs)
+        target_names = tuple(value.name for value in node.outputs)
         expr = self._node_expr(node, local=local, symbols_dict=symbols_dict)
+        label = f"node:{module_name}:{','.join(target_names) or '_'}:{op}"
         if len(targets) == 1:
-            add(lines, indent, f"{targets[0]} = {expr}")
+            add(lines, indent, "if self._profile_enabled:")
+            add(lines, indent + 4, f"{targets[0]} = self._profile_call({label!r}, lambda: {expr})")
+            add(lines, indent, "else:")
+            add(lines, indent + 4, f"{targets[0]} = {expr}")
         else:
-            add(lines, indent, f"{', '.join(targets)} = {expr}")
+            joined = ", ".join(targets)
+            add(lines, indent, "if self._profile_enabled:")
+            add(lines, indent + 4, f"{joined} = self._profile_call({label!r}, lambda: {expr})")
+            add(lines, indent, "else:")
+            add(lines, indent + 4, f"{joined} = {expr}")
 
     def _node_expr(self, node: Any, *, local: set[str], symbols_dict: str) -> str:
         op = node.op.name
@@ -2404,6 +2463,15 @@ class _DirectTorchEmitter:
     def _primitive_expr(self, primitive: str, node: Any, *, local: set[str], symbols_dict: str) -> str:
         args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
         attrs = {k: self._operand_expr(v, local=local, symbols_dict=symbols_dict) for k, v in node.attrs.items()}
+        if primitive == "tensor_size":
+            static_size = self._static_tensor_size_expr(
+                node,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+            if static_size is not None:
+                return static_size
+            return f"{args[0]}.shape[int({args[1]})]"
         if primitive == "params_param":
             return f"self._param({args[0]})"
         if primitive == "params_has_root":
@@ -2535,6 +2603,46 @@ class _DirectTorchEmitter:
             return simple[primitive]()
         raise NotImplementedError(f"direct codegen2-torch unsupported graph op {primitive!r}")
 
+    def _static_tensor_size_expr(self, node: Any, *, local: set[str], symbols_dict: str) -> str | None:
+        if len(node.inputs) != 2:
+            return None
+        tensor_operand = node.inputs[0]
+        dim_operand = node.inputs[1]
+        if not isinstance(dim_operand, GraphLiteral) or not isinstance(dim_operand.value, int):
+            return None
+        dims = _tensor_dims_from_type(getattr(tensor_operand, "type_expr", None))
+        if dims is None:
+            return None
+        axis = dim_operand.value if dim_operand.value >= 0 else len(dims) + dim_operand.value
+        if axis < 0 or axis >= len(dims):
+            return None
+        dim = dims[axis]
+        if isinstance(dim, str) and dim.startswith(".."):
+            return None
+        return self._dim_token_expr(dim, local=local, symbols_dict=symbols_dict)
+
+    def _dim_token_expr(self, dim: Any, *, local: set[str], symbols_dict: str) -> str | None:
+        if isinstance(dim, bool):
+            return repr(int(dim))
+        if isinstance(dim, int):
+            return repr(dim)
+        if isinstance(dim, str):
+            if dim.startswith(".."):
+                return None
+            name = _py_ident(dim)
+            if dim in local:
+                return name
+            if dim in self.global_symbol_names:
+                return f"{symbols_dict}[{dim!r}]"
+            return None
+        if isinstance(dim, DimExprBinary):
+            left = self._dim_token_expr(dim.left, local=local, symbols_dict=symbols_dict)
+            right = self._dim_token_expr(dim.right, local=local, symbols_dict=symbols_dict)
+            if left is None or right is None:
+                return None
+            return f"({left} {dim.op} {right})"
+        return repr(dim)
+
     def _operand_expr(self, operand: GraphOperand, *, local: set[str], symbols_dict: str) -> str:
         if isinstance(operand, GraphValueRef):
             name = _py_ident(operand.name)
@@ -2614,6 +2722,7 @@ def emit_model_code_from_graph_ir(
         [
             "from __future__ import annotations",
             "",
+            "import time",
             "import torch",
             "from torch import nn",
             "from torch.nn import functional as F",

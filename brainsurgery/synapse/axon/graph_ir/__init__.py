@@ -20,8 +20,10 @@ from .dot import render_graph_program_to_dot
 from .domain import (
     GraphDomainAnalysis,
     GraphDomainFact,
+    GraphDomainInterval,
     GraphDomainKind,
     infer_main_module_domain_facts,
+    validate_graph_domain_analysis,
 )
 from .effects import GraphEffect, graph_module_effect, graph_op_effect, infer_graph_module_effects
 from .optimize import GraphOptimizeConfig, optimize_graph_program, prune_graph_to_main
@@ -33,6 +35,7 @@ __all__ = [
     "GraphEffect",
     "GraphDomainAnalysis",
     "GraphDomainFact",
+    "GraphDomainInterval",
     "GraphDomainKind",
     "GraphLiteral",
     "GraphExpr",
@@ -59,4 +62,5 @@ __all__ = [
     "graph_program_to_axon_file",
     "infer_graph_module_effects",
     "infer_main_module_domain_facts",
+    "validate_graph_domain_analysis",
 ]

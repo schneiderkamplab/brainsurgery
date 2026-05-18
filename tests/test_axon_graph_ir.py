@@ -29,6 +29,7 @@ from brainsurgery.synapse.axon.ast import (
     TypeString,
     TypeTensor,
     TypeTuple,
+    TypeVar,
     render_axon_file,
 )
 from brainsurgery.synapse.axon.codegen2_torch import Codegen2GraphModel, emit_model_code_from_graph_ir
@@ -38,10 +39,13 @@ from brainsurgery.synapse.axon.codegen2_tinygrad import (
 )
 from brainsurgery.synapse.axon.analysis import infer_axon_definition_effects, op_effect
 from brainsurgery.synapse.axon.graph_ir import (
+    GraphDomainAnalysis,
+    GraphDomainFact,
     GraphLiteral,
     GraphExpr,
     GraphEffect,
     GraphOptimizeConfig,
+    GraphDomainInterval,
     GraphDomainKind,
     GraphModule,
     GraphNode,
@@ -58,6 +62,7 @@ from brainsurgery.synapse.axon.graph_ir import (
     optimize_graph_program,
     prune_graph_to_main,
     render_graph_program_to_dot,
+    validate_graph_domain_analysis,
     validate_graph_program,
 )
 
@@ -1072,6 +1077,71 @@ def test_graph_domain_analysis_infers_all_reachable_calls_pass_null() -> None:
     assert "unused" not in analysis.module_input_facts
 
 
+def test_graph_domain_analysis_propagates_facts_through_local_and_interprocedural_refs() -> None:
+    int_t = TypeInt()
+    null_t = TypeNull()
+    maybe_int_t = TypeOptional(int_t)
+    helper = GraphModule(
+        name="helper",
+        inputs=(GraphValue("value", maybe_int_t, optional=True),),
+        outputs=(GraphValueRef("value", maybe_int_t),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=maybe_int_t,
+    )
+    mid = GraphModule(
+        name="mid",
+        inputs=(GraphValue("mid_value", maybe_int_t, optional=True),),
+        outputs=(GraphValueRef("out", maybe_int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="mid:1",
+                op=GraphOp("helper"),
+                inputs=(GraphValueRef("mid_value", maybe_int_t),),
+                attrs={},
+                outputs=(GraphValue("out", maybe_int_t),),
+                source_module="mid",
+                type_expr=maybe_int_t,
+            ),
+        ),
+        return_type_expr=maybe_int_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(),
+        outputs=(GraphValueRef("out", maybe_int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.alias"),
+                inputs=(GraphLiteral(None, null_t),),
+                attrs={},
+                outputs=(GraphValue("tmp", maybe_int_t, optional=True),),
+                source_module="main",
+                type_expr=maybe_int_t,
+            ),
+            GraphNode(
+                id="main:2",
+                op=GraphOp("mid"),
+                inputs=(GraphValueRef("tmp", maybe_int_t),),
+                attrs={},
+                outputs=(GraphValue("out", maybe_int_t, optional=True),),
+                source_module="main",
+                type_expr=maybe_int_t,
+            ),
+        ),
+        return_type_expr=maybe_int_t,
+    )
+    graph = GraphProgram(modules=(helper, mid, main), main_module="main", pragmas={})
+
+    analysis = infer_main_module_domain_facts(graph)
+
+    assert analysis.module_input_facts["mid"]["mid_value"].kind == GraphDomainKind.NULL
+    assert analysis.module_input_facts["helper"]["value"].kind == GraphDomainKind.NULL
+
+
 def test_graph_domain_analysis_disagreed_calls_are_unknown() -> None:
     bool_t = TypeBool()
     helper = GraphModule(
@@ -1155,6 +1225,132 @@ def test_graph_domain_analysis_propagates_local_null_comparison() -> None:
     assert fact.value is True
 
 
+def test_graph_domain_analysis_refines_named_null_guard_select_branches() -> None:
+    int_t = TypeInt()
+    bool_t = TypeBool()
+    null_t = TypeNull()
+    maybe_int_t = TypeOptional(int_t)
+    module = GraphModule(
+        name="main",
+        inputs=(GraphValue("maybe", maybe_int_t, optional=True),),
+        outputs=(GraphValueRef("out", maybe_int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.binary.=="),
+                inputs=(GraphValueRef("maybe", maybe_int_t), GraphLiteral(None, null_t)),
+                attrs={},
+                outputs=(GraphValue("is_null", bool_t),),
+                source_module="main",
+                type_expr=bool_t,
+            ),
+            GraphNode(
+                id="main:2",
+                op=GraphOp("core.select"),
+                inputs=(
+                    GraphValueRef("is_null", bool_t),
+                    GraphLiteral(0, int_t),
+                    GraphValueRef("maybe", maybe_int_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", maybe_int_t),),
+                source_module="main",
+                type_expr=maybe_int_t,
+            ),
+        ),
+        return_type_expr=maybe_int_t,
+    )
+    graph = GraphProgram(modules=(module,), main_module="main", pragmas={})
+
+    analysis = infer_main_module_domain_facts(graph)
+
+    assert analysis.module_local_facts["main"]["out"].kind == GraphDomainKind.NOT_NULL
+    assert analysis.module_output_facts["main"][0].kind == GraphDomainKind.NOT_NULL
+
+
+def test_graph_domain_analysis_joins_numeric_literals_to_interval() -> None:
+    int_t = TypeInt()
+    bool_t = TypeBool()
+    module = GraphModule(
+        name="main",
+        inputs=(GraphValue("flag", bool_t),),
+        outputs=(GraphValueRef("out", int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.select"),
+                inputs=(
+                    GraphValueRef("flag", bool_t),
+                    GraphLiteral(1, int_t),
+                    GraphLiteral(4, int_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", int_t),),
+                source_module="main",
+                type_expr=int_t,
+            ),
+        ),
+        return_type_expr=int_t,
+    )
+    graph = GraphProgram(modules=(module,), main_module="main", pragmas={})
+
+    analysis = infer_main_module_domain_facts(graph)
+
+    fact = analysis.module_local_facts["main"]["out"]
+    assert fact.kind == GraphDomainKind.INTERVAL
+    assert fact.value == GraphDomainInterval(lower=1, upper=4)
+    rendered = render_axon_file(
+        graph_program_to_axon_file(graph),
+        definition_comments=graph_domain_definition_comments(graph),
+    )
+    assert "-- domain: outputs out0=[1,4]" in rendered
+
+
+def test_graph_domain_analysis_literal_equality_branch_refinement_can_form_interval() -> None:
+    int_t = TypeInt()
+    bool_t = TypeBool()
+    module = GraphModule(
+        name="main",
+        inputs=(GraphValue("x", int_t),),
+        outputs=(GraphValueRef("out", int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.binary.=="),
+                inputs=(GraphValueRef("x", int_t), GraphLiteral(3, int_t)),
+                attrs={},
+                outputs=(GraphValue("is_three", bool_t),),
+                source_module="main",
+                type_expr=bool_t,
+            ),
+            GraphNode(
+                id="main:2",
+                op=GraphOp("core.select"),
+                inputs=(
+                    GraphValueRef("is_three", bool_t),
+                    GraphValueRef("x", int_t),
+                    GraphLiteral(0, int_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", int_t),),
+                source_module="main",
+                type_expr=int_t,
+            ),
+        ),
+        return_type_expr=int_t,
+    )
+    graph = GraphProgram(modules=(module,), main_module="main", pragmas={})
+
+    analysis = infer_main_module_domain_facts(graph)
+
+    fact = analysis.module_local_facts["main"]["out"]
+    assert fact.kind == GraphDomainKind.INTERVAL
+    assert fact.value == GraphDomainInterval(lower=0, upper=3)
+
+
 def test_graph_domain_comments_render_as_definition_comments() -> None:
     int_t = TypeInt()
     bool_t = TypeBool()
@@ -1192,7 +1388,127 @@ def test_graph_domain_comments_render_as_definition_comments() -> None:
         definition_comments=graph_domain_definition_comments(graph),
     )
 
-    assert "-- domain: inputs flag=True\nhelper :: Bool -> Bool" in rendered
+    assert "-- domain: inputs flag=True\n-- domain: outputs out0=True\nhelper :: Bool -> Bool" in rendered
+
+
+def test_graph_domain_analysis_validation_rejects_invalid_interval() -> None:
+    int_t = TypeInt()
+    module = GraphModule(
+        name="main",
+        inputs=(),
+        outputs=(GraphValueRef("out", int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.alias"),
+                inputs=(GraphLiteral(1, int_t),),
+                attrs={},
+                outputs=(GraphValue("out", int_t),),
+                source_module="main",
+                type_expr=int_t,
+            ),
+        ),
+        return_type_expr=int_t,
+    )
+    graph = GraphProgram(modules=(module,), main_module="main", pragmas={})
+    analysis = GraphDomainAnalysis(
+        module_input_facts={"main": {}},
+        module_local_facts={
+            "main": {
+                "out": GraphDomainFact(
+                    GraphDomainKind.INTERVAL,
+                    GraphDomainInterval(lower=4, upper=1),
+                )
+            }
+        },
+        module_output_facts={"main": (GraphDomainFact(GraphDomainKind.UNKNOWN),)},
+    )
+
+    with pytest.raises(ValueError, match="lower bound greater than upper bound"):
+        validate_graph_domain_analysis(graph, analysis)
+
+
+def test_graph_domain_analysis_validation_rejects_wrong_output_arity() -> None:
+    int_t = TypeInt()
+    module = GraphModule(
+        name="main",
+        inputs=(),
+        outputs=(GraphLiteral(1, int_t),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=int_t,
+    )
+    graph = GraphProgram(modules=(module,), main_module="main", pragmas={})
+    analysis = GraphDomainAnalysis(
+        module_input_facts={"main": {}},
+        module_local_facts={"main": {}},
+        module_output_facts={"main": ()},
+    )
+
+    with pytest.raises(ValueError, match="0 output facts; expected 1"):
+        validate_graph_domain_analysis(graph, analysis)
+
+
+def test_graph_domain_analysis_validation_accepts_value_level_optional_null() -> None:
+    tensor_t = TypeTensor("Tensor", ("B", "S"))
+    module = GraphModule(
+        name="main",
+        inputs=(GraphValue("rel_bias", tensor_t, optional=True),),
+        outputs=(GraphLiteral(0, TypeInt()),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=TypeInt(),
+    )
+    graph = GraphProgram(modules=(module,), main_module="main", pragmas={})
+    analysis = GraphDomainAnalysis(
+        module_input_facts={"main": {"rel_bias": GraphDomainFact(GraphDomainKind.NULL)}},
+        module_local_facts={"main": {"rel_bias": GraphDomainFact(GraphDomainKind.NULL)}},
+        module_output_facts={"main": (GraphDomainFact(GraphDomainKind.LITERAL, 0),)},
+    )
+
+    validate_graph_domain_analysis(graph, analysis)
+
+
+def test_graph_domain_analysis_validation_rejects_obvious_type_mismatch() -> None:
+    bool_t = TypeBool()
+    module = GraphModule(
+        name="main",
+        inputs=(GraphValue("flag", bool_t),),
+        outputs=(GraphValueRef("flag", bool_t),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=bool_t,
+    )
+    graph = GraphProgram(modules=(module,), main_module="main", pragmas={})
+    analysis = GraphDomainAnalysis(
+        module_input_facts={"main": {"flag": GraphDomainFact(GraphDomainKind.LITERAL, 1)}},
+        module_local_facts={"main": {"flag": GraphDomainFact(GraphDomainKind.LITERAL, 1)}},
+        module_output_facts={"main": (GraphDomainFact(GraphDomainKind.LITERAL, 1),)},
+    )
+
+    with pytest.raises(ValueError, match="incompatible with type"):
+        validate_graph_domain_analysis(graph, analysis)
+
+
+def test_graph_domain_analysis_validation_accepts_literal_for_type_var() -> None:
+    var_t = TypeVar("_T")
+    module = GraphModule(
+        name="main",
+        inputs=(GraphValue("x", var_t),),
+        outputs=(GraphValueRef("x", var_t),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=var_t,
+    )
+    graph = GraphProgram(modules=(module,), main_module="main", pragmas={})
+    analysis = GraphDomainAnalysis(
+        module_input_facts={"main": {"x": GraphDomainFact(GraphDomainKind.LITERAL, 0.0)}},
+        module_local_facts={"main": {"x": GraphDomainFact(GraphDomainKind.LITERAL, 0.0)}},
+        module_output_facts={"main": (GraphDomainFact(GraphDomainKind.LITERAL, 0.0),)},
+    )
+
+    validate_graph_domain_analysis(graph, analysis)
 
 
 def test_graph_ir_optimizer_specializes_single_callsite_literal_argument() -> None:
@@ -4803,6 +5119,86 @@ def _toy_program(inputs: tuple[GraphValue, ...], output_names: tuple[str, ...]) 
         main_module="main",
         pragmas={"main": "main"},
     )
+
+
+def test_codegen2_tensor_size_uses_static_type_dim_when_available() -> None:
+    x_type = _tensor("B", "S")
+    program = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(GraphValueRef("s", TypeDim()),),
+                output_names=("s",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_tensor_size"),
+                        inputs=(
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(1, TypeInt()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("s", TypeDim()),),
+                        source_module="main",
+                        type_expr=TypeDim(),
+                    ),
+                ),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    code = emit_model_code_from_graph_ir(program)
+
+    assert "s = S" in code
+    assert ".shape[int(1)]" not in code
+
+
+def test_codegen2_tensor_size_uses_runtime_shape_for_unbound_result_dim() -> None:
+    x_type = _tensor("B", "S")
+    token_idx_type = _tensor("N")
+    program = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(GraphValueRef("n", TypeDim()),),
+                output_names=("n",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_where_indices"),
+                        inputs=(GraphValueRef("x", x_type, dims=x_type.dims),),
+                        attrs={},
+                        outputs=(GraphValue("token_idx", token_idx_type, dims=token_idx_type.dims),),
+                        source_module="main",
+                        type_expr=token_idx_type,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_tensor_size"),
+                        inputs=(
+                            GraphValueRef("token_idx", token_idx_type, dims=token_idx_type.dims),
+                            GraphLiteral(0, TypeInt()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("n", TypeDim()),),
+                        source_module="main",
+                        type_expr=TypeDim(),
+                    ),
+                ),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    code = emit_model_code_from_graph_ir(program)
+
+    assert "symbols['N']" not in code
+    assert "token_idx.shape[int(0)]" in code
 
 
 def test_codegen2_generate_uses_cached_decoder_contract_from_signature() -> None:

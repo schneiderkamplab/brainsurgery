@@ -23,6 +23,7 @@ SHARED_COMMON_PRIMITIVES: frozenset[str] = frozenset({
     "config_has",
     "config_has_value",
     "shape",
+    "tensor_size",
     "list_init",
     "list_append",
     "list_index",
@@ -52,6 +53,7 @@ SUPPORTED_TINYGRAD_PRIMITIVES: frozenset[str] = frozenset({
     "softmax",
     "sum",
     "where",
+    "where_indices",
     "gather",
     "scatter",
     "index_add",
@@ -155,7 +157,10 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "self._torch_backing_tensors = []")
         add(lines, 8, "self.state_dict_tensors = {}")
         add(lines, 8, "self.config = dict(({} if _MODEL_CONFIG is None else _MODEL_CONFIG) if config is None else config)")
-        add(lines, 8, "self._symbols = self._eval_symbols()")
+        add(lines, 8, "self._profile_enabled = False")
+        add(lines, 8, "self._profile_cuda = True")
+        add(lines, 8, "self._profile_records = {}")
+        add(lines, 8, "self._symbols = {}")
         add(lines, 8, "self.load_state_dict(state_dict)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
@@ -186,6 +191,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "self._torch_backing_tensors = []")
         add(lines, 8, "self.state_dict_tensors = {str(k): self._to_tiny(v) for k, v in state_dict.items()}")
         add(lines, 8, "self.setup()")
+        add(lines, 8, "self._symbols = self._eval_symbols()")
         add(lines, 8, "return self")
         add(lines, 4, "")
         add(lines, 4, "def setup(self):")
@@ -412,6 +418,10 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "if not isinstance(cond, Tensor):")
         add(lines, 12, "return yes if cond else no")
         add(lines, 8, "return cond.where(yes, no)")
+        add(lines, 4, "")
+        add(lines, 4, "def _where_indices(self, x):")
+        add(lines, 8, "indices = x.numpy().nonzero()")
+        add(lines, 8, "return tuple(Tensor(index.astype('int64'), dtype=dtypes.int64, device=self._tiny_device) for index in indices)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _concat(*args, dim=None):")
@@ -719,6 +729,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             "repeat": lambda: f"{args[0]}.repeat_interleave(int({args[1]}), dim=(int({args[2]}) if int({args[2]}) >= 0 else int({args[2]}) + len({args[0]}.shape)))",
             "matmul": lambda: f"{args[0]}.matmul({args[1]})",
             "where": lambda: f"self._where({args[0]}, {args[1]}, {args[2]})",
+            "where_indices": lambda: f"self._where_indices({args[0]})",
             "require": lambda: f"self._require_value({args[0]})",
             "list_length": lambda: f"len({args[0]})",
             "gather": lambda: f"{args[0]}.gather(int({args[2] if len(args) > 2 else '-1'}), {args[1]})",
@@ -763,6 +774,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             "list_append": lambda: f"([*({args[0]} or []), {args[1]}])",
             "list_index": lambda: f"{args[0]}[int({args[1]})]",
             "shape": lambda: f"list(self._value({args[0]}).shape)",
+            "tensor_size": lambda: f"self._value({args[0]}).shape[int({args[1]})]",
         }
         if primitive == "clamp":
             min_value = args[1] if len(args) > 1 else attrs.get("min", "None")

@@ -1678,16 +1678,12 @@ def _substitute_atomic_constant_dims_local(graph: GraphProgram) -> GraphProgram:
     }
     modules: list[GraphModule] = []
     for module in graph.modules:
-        shadowed_dim_names = _module_signature_dim_refs(module)
-        module_dim_constants = {
-            name: value
-            for name, value in dim_constants.items()
-            if name not in shadowed_dim_names
-        }
+        signature_dim_names = _module_signature_dim_refs(module)
+        module_dim_constants = dim_constants
         module_constants = {
             name: literal
             for name, literal in literal_constants.items()
-            if name != module.name and name not in shadowed_dim_names
+            if name != module.name and name not in signature_dim_names
         }
         candidate_module = (
             substitute_graph_module_dims(module, module_dim_constants)
@@ -5197,7 +5193,7 @@ def _can_inline_module(
 
 def _module_uses_runtime_shape_queries(module: GraphModule) -> bool:
     for node in module.nodes:
-        if node.op.name in {"_shape", "Tensor.size"}:
+        if node.op.name in {"_shape", "_tensor_size", "Tensor.size"}:
             return True
         for operand in (*node.inputs, *node.attrs.values()):
             if _operand_uses_runtime_shape_queries(operand):
@@ -5237,7 +5233,7 @@ def _module_has_tensor_values(module: GraphModule) -> bool:
 def _operand_uses_runtime_shape_queries(operand: GraphOperand) -> bool:
     if not isinstance(operand, GraphExpr):
         return False
-    if operand.op.name in {"_shape", "Tensor.size"}:
+    if operand.op.name in {"_shape", "_tensor_size", "Tensor.size"}:
         return True
     return any(_operand_uses_runtime_shape_queries(item) for item in operand.inputs) or any(
         _operand_uses_runtime_shape_queries(item) for item in operand.attrs.values()

@@ -11,6 +11,15 @@
 
 These should stay optional until each pass has precise preconditions, typed validation, roundtrip coverage, and model-fidelity coverage. Prefer Graph IR for rewrites that need effect information, dataflow, shape metadata, or backend lowering knowledge; keep AST-level optimization limited to semantics-preserving canonical cleanup.
 
+- Optimizer performance target ladder:
+  - fast dense smoke: `openai-community/gpt2` and `google/gemma-3-270m`
+  - inner MoE target: `allenai/OLMoE-1B-7B-0924`
+  - main MoE target: `Qwen/Qwen3-30B-A3B`
+  - dense sanity target: `google/gemma-3-4b-pt` or `Qwen/Qwen2.5-14B`
+  - large stress targets: `deepseek-ai/DeepSeek-V4-Flash` and `openai/gpt-oss-20b`
+  Use the inner MoE target for tight optimizer/codegen iteration, promote only
+  validated speedups to the main MoE target, and reserve large stress targets for
+  final regression/performance checks.
 - High priority: lower tail-recursive loop-helper SCCs to explicit iterative
   graph/codegen loops. Detect the canonical flattened pattern with a loop index,
   loop bound/step, carry tuple, base return, and tail calls only in tail

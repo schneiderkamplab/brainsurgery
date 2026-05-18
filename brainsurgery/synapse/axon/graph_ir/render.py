@@ -64,7 +64,12 @@ from .core import (
     graph_path_template_names,
     validate_graph_program,
 )
-from .domain import GraphDomainFact, GraphDomainKind, infer_main_module_domain_facts
+from .domain import (
+    GraphDomainFact,
+    GraphDomainInterval,
+    GraphDomainKind,
+    infer_main_module_domain_facts,
+)
 from .effects import GraphEffect, graph_operand_effect
 
 
@@ -1179,6 +1184,10 @@ def _format_domain_fact(fact: GraphDomainFact) -> str:
         return "not_null"
     if fact.kind == GraphDomainKind.LITERAL:
         return repr(fact.value)
+    if fact.kind == GraphDomainKind.INTERVAL and isinstance(fact.value, GraphDomainInterval):
+        lower = "-inf" if fact.value.lower is None else repr(fact.value.lower)
+        upper = "+inf" if fact.value.upper is None else repr(fact.value.upper)
+        return f"[{lower},{upper}]"
     if fact.kind == GraphDomainKind.GLOBAL_VALUE:
         return str(fact.value)
     if fact.kind == GraphDomainKind.PATH:
@@ -1210,6 +1219,14 @@ def graph_domain_definition_comments(program: GraphProgram) -> dict[str, tuple[s
         ]
         if local_parts:
             parts.append("locals " + ", ".join(local_parts[:24]))
+        output_facts = analysis.module_output_facts.get(module.name, ())
+        output_parts = [
+            f"out{index}={_format_domain_fact(fact)}"
+            for index, fact in enumerate(output_facts)
+            if fact.kind != GraphDomainKind.UNKNOWN
+        ]
+        if output_parts:
+            parts.append("outputs " + ", ".join(output_parts))
         if parts:
             comments[module.name] = tuple(f"domain: {part}" for part in parts)
     return comments

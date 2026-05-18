@@ -61,7 +61,7 @@ shape :: Tensor[..S] -> List[Dim]
 shape x = _shape x
 
 size :: Tensor[..S] -> Int -> Dim
-size x dim = shape x |> index dim
+size x dim = _tensor_size x dim
 
 expand :: Tensor[..S] -> ?List[Dim] -> Tensor[..R]
 expand x ?shape=null = _expand x shape

@@ -747,6 +747,20 @@ def axon_benchmark(
         "--oom-cpu-fallback/--no-oom-cpu-fallback",
         help="On CUDA OOM, retry HF/Axon on CPU (disable to fail fast on OOM).",
     ),
+    profile_axon: bool = typer.Option(
+        False,
+        "--profile-axon/--no-profile-axon",
+        help=(
+            "Print per-generated-module/node Axon timing for codegen2-torch. "
+            "CUDA timings synchronize around each recorded region and are diagnostic only."
+        ),
+    ),
+    profile_axon_top_n: int = typer.Option(
+        40,
+        "--profile-axon-top-n",
+        min=1,
+        help="Number of Axon profiling regions to print when --profile-axon is enabled.",
+    ),
     table_format: str = typer.Option(
         "markdown",
         "--table-format",
@@ -820,6 +834,8 @@ def axon_benchmark(
             skip_hf=skip_hf,
             hf_strict_dtype=hf_strict_dtype,
             oom_cpu_fallback=oom_cpu_fallback,
+            profile_axon=profile_axon,
+            profile_axon_top_n=profile_axon_top_n,
             table_format=table_format,
             log_dir=log_dir,
             stream_csv=stream_csv,

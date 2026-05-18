@@ -14,7 +14,11 @@ from brainsurgery.synapse.axon.ast import (
     AxonExprPath,
     AxonRepeat,
     AxonYield,
+    TypeAliasDef,
     TypeFloat,
+    TypeNamed,
+    TypeTensor,
+    TypeVar,
 )
 from brainsurgery.synapse.axon.normalize import normalize_closed_axon_file
 from brainsurgery.synapse.axon.parse import parse_axon_program
@@ -112,6 +116,39 @@ main x = do
     assert isinstance(z_arg.type_expr, TypeFloat)
     assert isinstance(z_arg.expr, AxonExprCall)
     assert z_arg.expr.callee == "EPS"
+
+
+def test_normalize_canonicalizes_unresolved_bare_type_names_to_typevars() -> None:
+    source = """
+id :: T -> T
+id x = x
+
+main :: TokenIds -> TokenIds
+main x = id x
+"""
+    parsed = parse_axon_program(source)
+    parsed = parsed.__class__(
+        modules=parsed.modules,
+        imports=parsed.imports,
+        imported_members=parsed.imported_members,
+        exports=parsed.exports,
+        pragmas=parsed.pragmas,
+        type_aliases={
+            "TokenIds": TypeAliasDef(params=(), value=TypeTensor(base="Tensor", dims=("B", "S")))
+        },
+        origin_path=parsed.origin_path,
+    )
+
+    normalized = normalize_closed_axon_file(parsed, main_module="main")
+    id_module = next(module for module in normalized.modules if module.name == "id")
+    main_module = next(module for module in normalized.modules if module.name == "main")
+
+    assert isinstance(id_module.params[0].type_expr, TypeVar)
+    assert id_module.params[0].type_expr.name == "T"
+    assert isinstance(id_module.return_type_expr, TypeVar)
+    assert id_module.return_type_expr.name == "T"
+    assert isinstance(main_module.params[0].type_expr, TypeNamed)
+    assert main_module.params[0].type_expr.name == "TokenIds"
 
 
 def test_normalize_checkpoints_pragma_string_to_tuple() -> None:

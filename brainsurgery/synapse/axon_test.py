@@ -13,7 +13,7 @@ import shutil
 import sys
 import time
 from copy import deepcopy
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType
@@ -2599,6 +2599,23 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
     return out, dt
 
 
+def _print_axon_profile_summary(rows: Sequence[Mapping[str, Any]]) -> None:
+    if not rows:
+        print("Axon profile: no recorded regions")
+        return
+    print("Axon profile top regions:")
+    print("| rank | region | calls | total_s | avg_ms |")
+    print("|---:|---|---:|---:|---:|")
+    for rank, row in enumerate(rows, start=1):
+        seconds = float(row.get("seconds", 0.0))
+        count = int(row.get("count", 0))
+        avg_ms = float(row.get("avg_seconds", 0.0)) * 1000.0
+        print(
+            f"| {rank} | {row.get('name', '')} | {count} | "
+            f"{seconds:.6f} | {avg_ms:.3f} |"
+        )
+
+
 def _maybe_compile_model(
     model: Any,
     *,
@@ -2809,6 +2826,8 @@ def _run_axon_test_single(
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
+    profile_axon: bool = False,
+    profile_axon_top_n: int = 40,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
@@ -2855,6 +2874,8 @@ def _run_axon_test_single(
             raise ValueError("trace_layers is not supported with axon_backend='pipeline2-torch'")
     if axon_backend == "runtime2-torch" and trace_layers:
         raise ValueError(f"trace_layers is not supported with axon_backend={axon_backend!r}")
+    if profile_axon and compile_axon:
+        raise ValueError("--profile-axon is not supported together with --compile-axon")
 
     safetensors_files = _resolve_safetensors_paths(weights_path)
     default_hf_dir = weights_path if weights_path.is_dir() else safetensors_files[0].parent
@@ -3765,12 +3786,14 @@ def _run_axon_test_single(
             )
             state_load_device = torch.device("cpu") if axon_backend == "pipeline2-torch" else target_device
             if axon_backend == "codegen2-tinygrad":
-                syn = model_cls.from_safetensors(
-                    safetensors_files,
-                    model_config=model_config,
-                    dtype=str(resolved_dtype).removeprefix("torch."),
-                ).to(target_device).eval()
-                local_state_dict = None
+                if local_state_dict is None:
+                    syn = model_cls.from_safetensors(
+                        safetensors_files,
+                        model_config=model_config,
+                        dtype=str(resolved_dtype).removeprefix("torch."),
+                    ).to(target_device).eval()
+                else:
+                    syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
             elif local_state_dict is None:
                 local_state_dict = _load_state_dict(
                     safetensors_files,
@@ -3792,6 +3815,11 @@ def _run_axon_test_single(
                 ).eval()
             elif axon_backend != "codegen2-tinygrad":
                 syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
+            if profile_axon:
+                enable_profile = getattr(syn, "enable_profile", None)
+                if not callable(enable_profile):
+                    raise ValueError(f"--profile-axon is not supported with axon_backend={axon_backend!r}")
+                enable_profile(True, cuda=target_device.type == "cuda", reset=True)
             if local_state_dict is not None and local_state_dict is not state_ref_cpu:
                 local_state_dict.clear()
             if local_state_dict is not None:
@@ -3924,6 +3952,12 @@ def _run_axon_test_single(
                 and isinstance(original_block_name, str)
             ):
                 setattr(syn, original_block_name, original_block_call)
+            profile_rows: list[dict[str, Any]] = []
+            if profile_axon:
+                profile_summary = getattr(syn, "profile_summary", None)
+                if callable(profile_summary):
+                    profile_rows = list(profile_summary(profile_axon_top_n))
+                    _print_axon_profile_summary(profile_rows)
             syn_logits_cpu = syn_logits.detach().cpu()
             syn_gen_cpu = None if syn_gen is None else syn_gen.detach().cpu()
             del syn
@@ -3935,6 +3969,7 @@ def _run_axon_test_single(
                 "layer_inputs": syn_layer_inputs,
                 "layer_outputs": syn_layer_outputs,
                 "device": str(target_device),
+                "profile": profile_rows,
             }
 
         syn_result: dict[str, Any]
@@ -3957,6 +3992,7 @@ def _run_axon_test_single(
         syn_layer_inputs = cast(dict[int, torch.Tensor], syn_result["layer_inputs"])
         syn_layer_outputs = cast(dict[int, torch.Tensor], syn_result["layer_outputs"])
         syn_exec_device_str = cast(str, syn_result["device"])
+        syn_profile = cast(list[dict[str, Any]], syn_result.get("profile", []))
         requested_device_str = str(resolved_device)
         requested_cuda = requested_device_str.startswith("cuda")
         hf_fallback = bool((not skip_hf) and requested_cuda and hf_exec_device_str == "cpu")
@@ -4304,6 +4340,7 @@ def _run_axon_test_single(
             "hf_device": hf_exec_device_str,
             "axon_device": syn_exec_device_str,
             "skip_hf": bool(skip_hf),
+            "axon_profile": syn_profile,
         }
 
         return result
@@ -4341,6 +4378,8 @@ def run_axon_test(
     optimize_graph: bool = False,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
+    profile_axon: bool = False,
+    profile_axon_top_n: int = 40,
 ) -> dict[str, Any]:
     return _run_axon_test_single(
         axon_file=axon_file,
@@ -4373,6 +4412,8 @@ def run_axon_test(
         optimize_graph=optimize_graph,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
+        profile_axon=profile_axon,
+        profile_axon_top_n=profile_axon_top_n,
     )
 
 

@@ -80,6 +80,22 @@ _SUMMARY_FIELDNAMES = [
 _MAX_BENCHMARK_WORKER_RETRIES = 1
 
 
+def _cuda_visible_tokens_for_indices(indices: Sequence[int]) -> list[str]:
+    parent_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if parent_visible:
+        tokens = [token.strip() for token in parent_visible.split(",") if token.strip()]
+        if tokens:
+            resolved: list[str] = []
+            for index in indices:
+                if index < 0 or index >= len(tokens):
+                    raise ValueError(
+                        f"visible CUDA index {index} is outside CUDA_VISIBLE_DEVICES={parent_visible!r}"
+                    )
+                resolved.append(tokens[index])
+            return resolved
+    return [str(index) for index in indices]
+
+
 def _resolve_pipeline_worker_specs(
     *,
     backend: str,
@@ -146,9 +162,10 @@ def _resolve_pipeline_worker_specs(
     worker_specs: list[_WorkerSpec] = []
     for worker_index in range(processes):
         group_start = start_index + worker_index * pp_size
-        group = [f"{idx}" for idx in range(group_start, group_start + pp_size)]
+        group_indices = list(range(group_start, group_start + pp_size))
+        group = _cuda_visible_tokens_for_indices(group_indices)
         visible = ",".join(group)
-        label = ",".join(f"cuda:{idx}" for idx in range(group_start, group_start + pp_size))
+        label = ",".join(f"cuda:{idx}" for idx in group_indices)
         worker_specs.append(
             _WorkerSpec(
                 run_device="cuda",
@@ -157,6 +174,18 @@ def _resolve_pipeline_worker_specs(
             )
         )
     return worker_specs
+
+
+def _resolve_tinygrad_worker_specs(*, device: str, processes: int) -> list[_WorkerSpec] | None:
+    normalized = str(device).strip().lower()
+    if processes <= 1 or not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
+        return None
+    return _resolve_pipeline_worker_specs(
+        backend="codegen2-tinygrad",
+        device=device,
+        processes=processes,
+        pipeline_parallel_size=1,
+    )
 
 
 def _estimate_model_param_count(model_dir: Path) -> tuple[int, bool] | None:
@@ -517,6 +546,35 @@ def _append_stream_csv_row(csv_path: Path, row: dict[str, object]) -> None:
         writer.writerow({key: "" if value is None else str(value) for key, value in row.items()})
 
 
+def _worker_result_path(log_path: Path | None) -> Path | None:
+    if log_path is None:
+        return None
+    return log_path.with_suffix(".result.json")
+
+
+def _write_worker_result_file(log_path: Path | None, result: dict[str, Any]) -> None:
+    result_path = _worker_result_path(log_path)
+    if result_path is None:
+        return
+    serializable = {key: str(value) if isinstance(value, Path) else value for key, value in result.items()}
+    tmp_path = result_path.with_suffix(result_path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(serializable, handle, sort_keys=True)
+    tmp_path.replace(result_path)
+
+
+def _read_worker_result_file(log_path: Path | None) -> dict[str, Any] | None:
+    result_path = _worker_result_path(log_path)
+    if result_path is None or not result_path.exists():
+        return None
+    with result_path.open("r", encoding="utf-8") as handle:
+        row = json.load(handle)
+    for key in ("axon_file", "weights", "hf_model_dir"):
+        if key in row:
+            row[key] = Path(row[key])
+    return cast(dict[str, Any], row)
+
+
 def render_axon_benchmark_csv(*, csv_path: Path, table_format: str = "markdown") -> str:
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -598,6 +656,8 @@ def _run_benchmark_pair(
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
+    profile_axon: bool = False,
+    profile_axon_top_n: int = 40,
 ) -> dict[str, Any]:
     model_dir = _ensure_checkpoint_model_dir(repo_root=repo_root, checkpoint_id=pair.checkpoint_id)
     print()
@@ -639,6 +699,8 @@ def _run_benchmark_pair(
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
         oom_cpu_fallback=oom_cpu_fallback,
+        profile_axon=profile_axon,
+        profile_axon_top_n=profile_axon_top_n,
     )
     enriched = dict(result)
     enriched["axon_file"] = pair.axon_file
@@ -790,12 +852,13 @@ def _run_benchmark_worker_loop(
                 print(f"result.masked_top1_eq={result.get('masked_top1_eq')}")
                 print(f"result.masked_max_abs_diff={result.get('masked_max_diff')}")
                 print(f"result.masked_max_rel_diff={result.get('masked_max_rel_diff')}")
+                _write_worker_result_file(log_path, result)
                 result_queue.put(
                     (
                         pair_index,
                         result,
                         None,
-                        capture.getvalue(),
+                        "",
                         log_path.name if log_path else None,
                     )
                 )
@@ -911,9 +974,33 @@ def _run_benchmark_jobs_parallel(
                 pair_index, result, error, captured_output, log_path = result_queue.get(timeout=1.0)
             except queue.Empty:
                 for active_pair_index, process in list(active_processes.items()):
+                    pair = pairs[int(active_pair_index)]
+                    actual_log_path = worker_log_path(
+                        log_dir,
+                        axon_name=pair.axon_file.stem.replace(" ", "_"),
+                        model_name=pair.model_dir.name.replace(" ", "_"),
+                        pid=process.pid,
+                    )
+                    published_result = _read_worker_result_file(actual_log_path)
+                    if published_result is not None:
+                        active_processes.pop(active_pair_index, None)
+                        process.join(timeout=1.0)
+                        if process.is_alive():
+                            process.terminate()
+                            process.join(timeout=5.0)
+                        results_by_index[int(active_pair_index)] = published_result
+                        if stream_csv is not None:
+                            _append_stream_csv_row(stream_csv, _summary_row_from_result(published_result))
+                        progress.update(1)
+                        parent_logger.log(
+                            "child_finish "
+                            f"pair_index={active_pair_index} pid={process.pid} status=success_result_file "
+                            f"exitcode={process.exitcode} axon={pair.axon_file.name} checkpoint={pair.checkpoint_id} "
+                            f"model_dir={pair.model_dir} log_path={actual_log_path.name if actual_log_path else None}"
+                        )
+                        continue
                     if process.is_alive():
                         continue
-                    pair = pairs[int(active_pair_index)]
                     process.join(timeout=0.1)
                     dead_exitcode = int(process.exitcode or 0)
                     log_path = worker_log_display_path(
@@ -1063,6 +1150,8 @@ def run_axon_benchmark(
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
+    profile_axon: bool = False,
+    profile_axon_top_n: int = 40,
     table_format: str = "markdown",
     log_dir: Path | None = None,
     stream_csv: Path | None = None,
@@ -1181,6 +1270,8 @@ def run_axon_benchmark(
         "skip_hf": skip_hf,
         "hf_strict_dtype": hf_strict_dtype,
         "oom_cpu_fallback": oom_cpu_fallback,
+        "profile_axon": profile_axon,
+        "profile_axon_top_n": profile_axon_top_n,
     }
 
     if stream_csv is not None:
@@ -1199,6 +1290,11 @@ def run_axon_benchmark(
         if processes <= 1:
             serial_cuda_visible_devices = pipeline_worker_specs[0].cuda_visible_devices
             effective_device = pipeline_worker_specs[0].run_device
+    elif axon_backend == "codegen2-tinygrad":
+        pipeline_worker_specs = _resolve_tinygrad_worker_specs(
+            device=device,
+            processes=max(1, int(processes)),
+        )
 
     if processes <= 1:
         results = _run_benchmark_jobs_serial(

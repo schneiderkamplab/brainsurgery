@@ -34,6 +34,15 @@ from ..ast import (
     AxonStatement,
     AxonYield,
     TypePath,
+    TypeAliasDef,
+    TypeAny,
+    TypeExpr,
+    TypeList,
+    TypeNamed,
+    TypeOptional,
+    TypeTensor,
+    TypeTuple,
+    TypeVar,
 )
 from ..validate import validate_closed_axon_file, validate_normalized_axon_file
 
@@ -189,6 +198,75 @@ def _normalize_pragmas(pragmas: dict[str, object]) -> dict[str, object]:
     return normalized
 
 
+def _is_unresolved_generic_type_name(
+    type_expr: TypeExpr,
+    *,
+    type_aliases: dict[str, TypeAliasDef],
+) -> bool:
+    return (
+        isinstance(type_expr, TypeNamed)
+        and not type_expr.args
+        and type_expr.name != "Tensor"
+        and type_expr.name not in type_aliases
+        and "." not in type_expr.name
+        and "::" not in type_expr.name
+    )
+
+
+def _normalize_type_expr(
+    type_expr: TypeExpr | None,
+    *,
+    type_aliases: dict[str, TypeAliasDef],
+) -> TypeExpr | None:
+    if type_expr is None:
+        return None
+    if isinstance(type_expr, TypeVar | TypeAny):
+        return type_expr
+    if _is_unresolved_generic_type_name(type_expr, type_aliases=type_aliases):
+        assert isinstance(type_expr, TypeNamed)
+        return TypeVar(type_expr.name)
+    if isinstance(type_expr, TypeOptional):
+        inner = _normalize_type_expr(type_expr.inner, type_aliases=type_aliases)
+        assert inner is not None
+        return TypeOptional(inner)
+    if isinstance(type_expr, TypeList):
+        item = _normalize_type_expr(type_expr.item, type_aliases=type_aliases)
+        assert item is not None
+        return TypeList(item)
+    if isinstance(type_expr, TypeTuple):
+        return TypeTuple(
+            tuple(
+                normalized
+                for item in type_expr.items
+                for normalized in (_normalize_type_expr(item, type_aliases=type_aliases),)
+                if normalized is not None
+            )
+        )
+    if isinstance(type_expr, TypeTensor | TypeNamed):
+        return type_expr
+    return type_expr
+
+
+def _normalize_type_aliases(
+    type_aliases: dict[str, TypeAliasDef],
+    *,
+    known_type_aliases: dict[str, TypeAliasDef] | None = None,
+) -> dict[str, TypeAliasDef]:
+    if not type_aliases:
+        return {}
+    alias_scope = known_type_aliases if known_type_aliases is not None else type_aliases
+    return {
+        name: replace(
+            alias,
+            value=cast(
+                TypeExpr,
+                _normalize_type_expr(alias.value, type_aliases=alias_scope),
+            ),
+        )
+        for name, alias in type_aliases.items()
+    }
+
+
 def _split_callee_path_sugar(callee: str) -> tuple[str, tuple[AxonExprPath, ...]]:
     if "@" not in callee:
         return callee, ()
@@ -306,6 +384,7 @@ def _normalize_expr(
     modules_by_name: dict[str, AxonDefinition],
     value_names: set[str],
     bound_names: set[str],
+    type_aliases: dict[str, TypeAliasDef],
 ) -> AxonExpr:
     if isinstance(expr, AxonExprName):
         base, suffix = _split_callable_surface_name(expr.name)
@@ -321,6 +400,7 @@ def _normalize_expr(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             )
         if (
             module is not None
@@ -346,6 +426,7 @@ def _normalize_expr(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             )
             for arg in expr.args
         )
@@ -355,6 +436,7 @@ def _normalize_expr(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             )
             if isinstance(value, AxonExpr)
             else value
@@ -369,6 +451,7 @@ def _normalize_expr(
             modules_by_name=modules_by_name,
             value_names=value_names,
             bound_names=bound_names,
+            type_aliases=type_aliases,
         )
         for stage in expr.stages:
             current = _normalize_expr(
@@ -376,6 +459,7 @@ def _normalize_expr(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             )
         return current
     if isinstance(expr, AxonExprBind):
@@ -388,12 +472,14 @@ def _normalize_expr(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
             body=_normalize_expr(
                 expr.body,
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=nested_bound,
+                type_aliases=type_aliases,
             ),
         )
     if isinstance(expr, AxonExprIf | AxonExprTernary):
@@ -402,6 +488,7 @@ def _normalize_expr(
             modules_by_name=modules_by_name,
             value_names=value_names,
             bound_names=bound_names,
+            type_aliases=type_aliases,
         )
         if (
             isinstance(expr, AxonExprTernary)
@@ -417,12 +504,14 @@ def _normalize_expr(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
             false_expr=_normalize_expr(
                 expr.false_expr,
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
         )
     if isinstance(expr, AxonExprBinary):
@@ -433,12 +522,14 @@ def _normalize_expr(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
             right=_normalize_expr(
                 expr.right,
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
         )
     if isinstance(expr, AxonExprLambda):
@@ -451,6 +542,7 @@ def _normalize_expr(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=nested_bound,
+                type_aliases=type_aliases,
             ),
         )
     if isinstance(expr, AxonExprParen):
@@ -459,6 +551,7 @@ def _normalize_expr(
             modules_by_name=modules_by_name,
             value_names=value_names,
             bound_names=bound_names,
+            type_aliases=type_aliases,
         )
         if isinstance(inner, AxonExprAscribe):
             return inner
@@ -469,12 +562,17 @@ def _normalize_expr(
             modules_by_name=modules_by_name,
             value_names=value_names,
             bound_names=bound_names,
+            type_aliases=type_aliases,
         )
         if isinstance(inner, AxonExprParen):
             inner = inner.inner
         return replace(
             expr,
             expr=inner,
+            type_expr=cast(
+                TypeExpr,
+                _normalize_type_expr(expr.type_expr, type_aliases=type_aliases),
+            ),
         )
     if isinstance(expr, AxonExprList | AxonExprTuple):
         return replace(
@@ -485,6 +583,7 @@ def _normalize_expr(
                     modules_by_name=modules_by_name,
                     value_names=value_names,
                     bound_names=bound_names,
+                    type_aliases=type_aliases,
                 )
                 for item in expr.items
             ),
@@ -497,6 +596,7 @@ def _normalize_expr(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=set(bound_names),
+                type_aliases=type_aliases,
             ),
         )
     return expr
@@ -538,6 +638,7 @@ def _normalize_statement(
     modules_by_name: dict[str, AxonDefinition],
     value_names: set[str],
     bound_names: set[str],
+    type_aliases: dict[str, TypeAliasDef],
 ) -> AxonStatement:
     if isinstance(stmt, AxonBind):
         return replace(
@@ -547,6 +648,7 @@ def _normalize_statement(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
         )
     if isinstance(stmt, AxonReturn | AxonYield):
@@ -558,6 +660,7 @@ def _normalize_statement(
                     modules_by_name=modules_by_name,
                     value_names=value_names,
                     bound_names=bound_names,
+                    type_aliases=type_aliases,
                 )
                 for value in stmt.values
             ),
@@ -570,18 +673,21 @@ def _normalize_statement(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
             true_body=_normalize_statements(
                 stmt.true_body,
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=set(bound_names),
+                type_aliases=type_aliases,
             ),
             false_body=_normalize_statements(
                 stmt.false_body,
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=set(bound_names),
+                type_aliases=type_aliases,
             ),
         )
     if isinstance(stmt, AxonRepeat):
@@ -596,24 +702,28 @@ def _normalize_statement(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
             to_expr=_normalize_expr(
                 stmt.to_expr,
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
             step_expr=_normalize_expr(
                 stmt.step_expr,
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             ),
             body=_normalize_statements(
                 stmt.body,
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=loop_bound,
+                type_aliases=type_aliases,
             ),
         )
         return _normalize_repeat_yield(normalized)
@@ -627,6 +737,7 @@ def _normalize_statement(
                     modules_by_name=modules_by_name,
                     value_names=value_names,
                     bound_names=bound_names,
+                    type_aliases=type_aliases,
                 )
                 if isinstance(value, AxonExpr)
                 else value
@@ -637,6 +748,7 @@ def _normalize_statement(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=set(bound_names),
+                type_aliases=type_aliases,
             ),
         )
     return stmt
@@ -648,6 +760,7 @@ def _normalize_statements(
     modules_by_name: dict[str, AxonDefinition],
     value_names: set[str],
     bound_names: set[str],
+    type_aliases: dict[str, TypeAliasDef],
 ) -> tuple[AxonStatement, ...]:
     normalized: list[AxonStatement] = []
     local_bound = set(bound_names)
@@ -657,6 +770,7 @@ def _normalize_statements(
             modules_by_name=modules_by_name,
             value_names=value_names,
             bound_names=local_bound,
+            type_aliases=type_aliases,
         )
         normalized.append(normalized_stmt)
         if isinstance(normalized_stmt, AxonBind | AxonScopeBind):
@@ -671,18 +785,26 @@ def _normalize_module(
     *,
     modules_by_name: dict[str, AxonDefinition],
     value_names: set[str],
+    type_aliases: dict[str, TypeAliasDef],
 ) -> AxonDefinition:
     bound_names = _module_bound_names(module)
     return replace(
         module,
+        type_aliases=_normalize_type_aliases(
+            dict(module.type_aliases or {}),
+            known_type_aliases=type_aliases,
+        )
+        or None,
         params=tuple(
             replace(
                 param,
+                type_expr=_normalize_type_expr(param.type_expr, type_aliases=type_aliases),
                 default_expr=_normalize_expr(
                     param.default_expr,
                     modules_by_name=modules_by_name,
                     value_names=value_names,
                     bound_names=bound_names,
+                    type_aliases=type_aliases,
                 )
                 if param.default_expr is not None
                 else None,
@@ -694,6 +816,7 @@ def _normalize_module(
             modules_by_name=modules_by_name,
             value_names=value_names,
             bound_names=bound_names,
+            type_aliases=type_aliases,
         ),
         body_expr=(
             _normalize_expr(
@@ -701,22 +824,28 @@ def _normalize_module(
                 modules_by_name=modules_by_name,
                 value_names=value_names,
                 bound_names=bound_names,
+                type_aliases=type_aliases,
             )
             if module.body_expr is not None
             else None
         ),
+        return_type_expr=_normalize_type_expr(module.return_type_expr, type_aliases=type_aliases),
     )
 
 
 def normalize_closed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
     validate_closed_axon_file(program, main_module=main_module)
     modules_by_name = {module.name: module for module in program.modules}
+    type_aliases = dict(program.type_aliases)
+    for module in program.modules:
+        type_aliases.update(module.type_aliases or {})
     value_names: set[str] = set()
     normalized_modules = tuple(
         _normalize_module(
             module,
             modules_by_name=modules_by_name,
             value_names=value_names,
+            type_aliases=type_aliases,
         )
         for module in program.modules
     )
@@ -724,6 +853,10 @@ def normalize_closed_axon_file(program: AxonFile, *, main_module: str | None = N
         program,
         modules=normalized_modules,
         pragmas=_normalize_pragmas(dict(program.pragmas)),
+        type_aliases=_normalize_type_aliases(
+            dict(program.type_aliases),
+            known_type_aliases=type_aliases,
+        ),
     )
     validate_normalized_axon_file(normalized, main_module=main_module)
     return normalized
