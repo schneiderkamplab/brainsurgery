@@ -801,6 +801,10 @@ def _interval_fact_from_bounds(
     lower: DomainIntervalBound,
     upper: DomainIntervalBound,
 ) -> GraphDomainFact:
+    if type(lower) is float and lower.is_integer():
+        lower = int(lower)
+    if type(upper) is float and upper.is_integer():
+        upper = int(upper)
     if lower is not None and upper is not None and lower == upper:
         return literal_domain_fact(lower)
     return interval_domain_fact(lower, upper)

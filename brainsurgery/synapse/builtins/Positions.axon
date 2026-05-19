@@ -24,6 +24,7 @@ import Tensor (
   transpose,
   unsqueeze,
   where,
+  zeros,
   zeros_like,
 )
 export (
@@ -32,6 +33,9 @@ export (
   relative_bias_disentangled,
   relative_position_bias,
   rope_pair_base,
+  rope_base_factors,
+  rope_apply_factors,
+  rope_pair_base_factors,
   rope_pair_base_split_interleaved,
   rope_pair_freq_scale,
   rope_pair_hf_yarn,
@@ -213,6 +217,27 @@ rope_apply_raw x position_ids theta ?interleaved=false = do
   cos <- expand cos shape=[B, H, S, R]
   return (x * cos) + ((rope_rotate_half x interleaved=interleaved) * sin)
 
+
+rope_base_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Bool -> (Tensor[B,1,S,R], Tensor[B,1,S,R])
+rope_base_factors position_ids rotary_dim ?theta=10000.0 ?interleaved=false = do
+  ref <- zeros position_ids shape=[B, S, rotary_dim] dtype="float32"
+  emb <- sinusoidal_positions ref position_ids theta=theta offset=0 padding_idx=null mode="rope"
+  half <- floor (rotary_dim / 2)
+  sin_half <- slice emb dim=-1 start=0 end=half
+  cos_half <- slice emb dim=-1 start=half end=rotary_dim
+  sin_half <- reshape sin_half shape=[B, 1, S, half]
+  cos_half <- reshape cos_half shape=[B, 1, S, half]
+  sin <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  return sin, cos
+
+
+rope_apply_factors :: Tensor[B,H,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> Tensor[B,H,S,R]
+rope_apply_factors x sin cos ?interleaved=false = do
+  sin <- expand sin shape=[B, H, S, R]
+  cos <- expand cos shape=[B, H, S, R]
+  return (x * cos) + ((rope_rotate_half x interleaved=interleaved) * sin)
+
 rope_apply_raw_inverse :: Tensor[B,H,S,R] -> Tensor[B,S] -> Float -> ?Bool -> Tensor[B,H,S,R]
 rope_apply_raw_inverse x position_ids theta ?interleaved=false = do
   ref <- slice x dim=1 start=0 end=1 |> reshape shape=[B, S, R]
@@ -272,6 +297,13 @@ rope_pair_base q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotar
   position_ids_eff <- (scale_factor == null) ? position_ids : (position_ids_scale position_ids scale_factor)
   q_rot <- rope_apply q position_ids_eff theta partial_rotary_factor=partial_rotary_factor interleaved=interleaved
   k_rot <- rope_apply k position_ids_eff theta partial_rotary_factor=partial_rotary_factor interleaved=interleaved
+  return q_rot, k_rot
+
+
+rope_pair_base_factors :: Tensor[B,HQ,S,R] -> Tensor[B,HK,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> (Tensor[B,HQ,S,R], Tensor[B,HK,S,R])
+rope_pair_base_factors q k sin cos ?interleaved=false = do
+  q_rot <- rope_apply_factors q sin cos interleaved=interleaved
+  k_rot <- rope_apply_factors k sin cos interleaved=interleaved
   return q_rot, k_rot
 
 

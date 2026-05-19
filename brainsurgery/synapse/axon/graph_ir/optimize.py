@@ -5,7 +5,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
-from ...ops import get_op_type_rule
+from ...ops import get_op_semantics, get_op_type_rule
 from ..ast import (
     Constraint,
     ConstraintAtom,
@@ -554,6 +554,11 @@ def _module_output_types_for_arity(module: GraphModule, output_count: int) -> tu
     return tuple(TypeAny() for _ in range(output_count))
 
 
+def _return_type_expr_from_outputs(outputs: tuple[GraphOperand, ...]) -> TypeExpr:
+    output_types = tuple(graph_operand_type(output) for output in outputs)
+    return output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
+
+
 def _bind_dim_sequence_map(
     formal_dims: tuple[DimToken, ...],
     actual_dims: tuple[DimToken, ...],
@@ -995,7 +1000,21 @@ def _more_specific_compatible_type(
     refreshed: TypeExpr,
     *,
     preferred_dim_names: set[str] | None = None,
+    prefer_refreshed_dim_names: set[str] | None = None,
 ) -> TypeExpr:
+    prefer_refreshed_dim_names = prefer_refreshed_dim_names or set()
+    if (
+        prefer_refreshed_dim_names
+        and graph_type_compatible(existing, refreshed)
+        and isinstance(existing, TypeTensor)
+        and isinstance(refreshed, TypeTensor)
+        and len(existing.dims) == len(refreshed.dims)
+    ):
+        for existing_dim, refreshed_dim in zip(existing.dims, refreshed.dims, strict=True):
+            refreshed_preferred = _dim_token_uses_any_name(refreshed_dim, prefer_refreshed_dim_names)
+            existing_preferred = _dim_token_uses_any_name(existing_dim, prefer_refreshed_dim_names)
+            if refreshed_preferred and not existing_preferred:
+                return refreshed
     if (
         isinstance(existing, TypeTensor)
         and isinstance(refreshed, TypeTensor)
@@ -1057,6 +1076,202 @@ def _select_result_type(existing: TypeExpr, true_type: TypeExpr, false_type: Typ
     )
 
 
+def _primitive_semantics(op_name: str) -> dict[str, object]:
+    return get_op_semantics(op_name[1:] if op_name.startswith("_") else op_name)
+
+
+def _primitive_value_dependent_output_types(node: GraphNode) -> tuple[TypeExpr, ...] | None:
+    groups = _primitive_semantics(node.op.name).get("value_dependent_output_dim_groups")
+    if not isinstance(groups, tuple) or not groups:
+        return None
+    output_types = [output.type_expr for output in node.outputs]
+    changed = False
+    for group in groups:
+        if not isinstance(group, tuple):
+            continue
+        positions: list[tuple[int, int]] = []
+        for item in group:
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and type(item[0]) is int
+                and type(item[1]) is int
+            ):
+                positions.append(item)
+        if not positions:
+            continue
+        output_value_names = {output.name for output in node.outputs}
+        dynamic_dim: DimToken | None = None
+        needs_rewrite = False
+        for output_index, dim_index in positions:
+            if output_index < 0 or output_index >= len(node.outputs):
+                continue
+            type_expr = node.outputs[output_index].type_expr
+            if not isinstance(type_expr, TypeTensor):
+                continue
+            if dim_index < 0 or dim_index >= len(type_expr.dims):
+                continue
+            dim = type_expr.dims[dim_index]
+            if isinstance(dim, str) and dim.startswith(".."):
+                continue
+            if isinstance(dim, str):
+                if dim not in output_value_names:
+                    dynamic_dim = dim
+                    break
+                needs_rewrite = True
+                continue
+            needs_rewrite = True
+        if dynamic_dim is None and not needs_rewrite:
+            continue
+        if dynamic_dim is None:
+            first_output_index = positions[0][0]
+            if first_output_index < 0 or first_output_index >= len(node.outputs):
+                continue
+            dynamic_dim = f"{node.outputs[first_output_index].name}_dim"
+        for output_index, dim_index in positions:
+            if output_index < 0 or output_index >= len(output_types):
+                continue
+            type_expr = output_types[output_index]
+            if not isinstance(type_expr, TypeTensor):
+                continue
+            if dim_index < 0 or dim_index >= len(type_expr.dims):
+                continue
+            dims = list(type_expr.dims)
+            if dims[dim_index] != dynamic_dim:
+                dims[dim_index] = dynamic_dim
+                output_types[output_index] = replace(type_expr, dims=tuple(dims))
+                changed = True
+    return tuple(output_types) if changed else None
+
+
+def _primitive_dim_output_value(
+    node: GraphNode,
+    *,
+    output_index: int,
+) -> DimToken | None:
+    metadata = _primitive_semantics(node.op.name).get("dim_output_from_tensor_axis")
+    if not isinstance(metadata, dict):
+        return None
+    if metadata.get("output") != output_index:
+        return None
+    tensor_arg = metadata.get("tensor_arg")
+    axis_arg = metadata.get("axis_arg")
+    if type(tensor_arg) is not int or type(axis_arg) is not int:
+        return None
+    if tensor_arg < 0 or axis_arg < 0 or max(tensor_arg, axis_arg) >= len(node.inputs):
+        return None
+    dims = _type_dims(graph_operand_type(node.inputs[tensor_arg]))
+    axis = _literal_int(node.inputs[axis_arg])
+    if dims is None or axis is None:
+        return None
+    resolved = axis if axis >= 0 else len(dims) + axis
+    if resolved < 0 or resolved >= len(dims):
+        return None
+    return dims[resolved]
+
+
+def _module_input_dim_symbols(module: GraphModule) -> set[str]:
+    symbols: set[str] = set()
+    for value in module.inputs:
+        symbols.update(_type_dim_refs(value.type_expr))
+        if isinstance(value.type_expr, TypeDim | TypeInt):
+            symbols.add(value.name)
+        if isinstance(value.type_expr, TypeOptional) and isinstance(value.type_expr.inner, TypeDim | TypeInt):
+            symbols.add(value.name)
+    return symbols
+
+
+def _dim_has_unbound_names(dim: DimToken, bound_names: set[str]) -> bool:
+    return any(
+        isinstance(name, str) and not name.startswith("..") and name not in bound_names
+        for name in dim_token_names(dim)
+    )
+
+
+def _preserve_unbound_output_dims(
+    instantiated: TypeExpr,
+    candidate: TypeExpr,
+    *,
+    bound_dim_names: set[str],
+) -> TypeExpr:
+    if (
+        isinstance(instantiated, TypeTensor)
+        and isinstance(candidate, TypeTensor)
+        and len(instantiated.dims) == len(candidate.dims)
+    ):
+        dims = tuple(
+            instantiated_dim
+            if _dim_has_unbound_names(instantiated_dim, bound_dim_names)
+            else candidate_dim
+            for instantiated_dim, candidate_dim in zip(instantiated.dims, candidate.dims, strict=True)
+        )
+        return replace(candidate, dims=dims)
+    if isinstance(instantiated, TypeOptional) and isinstance(candidate, TypeOptional):
+        return TypeOptional(
+            _preserve_unbound_output_dims(
+                instantiated.inner,
+                candidate.inner,
+                bound_dim_names=bound_dim_names,
+            )
+        )
+    if isinstance(instantiated, TypeList) and isinstance(candidate, TypeList):
+        return TypeList(
+            _preserve_unbound_output_dims(
+                instantiated.item,
+                candidate.item,
+                bound_dim_names=bound_dim_names,
+            )
+        )
+    if (
+        isinstance(instantiated, TypeTuple)
+        and isinstance(candidate, TypeTuple)
+        and len(instantiated.items) == len(candidate.items)
+    ):
+        return TypeTuple(
+            tuple(
+                _preserve_unbound_output_dims(
+                    instantiated_item,
+                    candidate_item,
+                    bound_dim_names=bound_dim_names,
+                )
+                for instantiated_item, candidate_item in zip(
+                    instantiated.items,
+                    candidate.items,
+                    strict=True,
+                )
+            )
+        )
+    return candidate
+
+
+def _module_call_result_type(
+    existing: TypeExpr,
+    instantiated: TypeExpr,
+    *,
+    bound_dim_names: set[str],
+    preferred_dim_names: set[str] | None = None,
+) -> TypeExpr:
+    if isinstance(instantiated, TypeAny):
+        return existing
+    candidate = _more_specific_compatible_type(
+        existing,
+        instantiated,
+        preferred_dim_names=preferred_dim_names,
+    )
+    return _preserve_unbound_output_dims(
+        instantiated,
+        candidate,
+        bound_dim_names=bound_dim_names,
+    )
+
+
+def _dim_value_symbol_names(dim_values: Mapping[str, DimToken] | None) -> set[str]:
+    names = set(dim_values or {})
+    for dim in (dim_values or {}).values():
+        names.update(name for name in dim_token_names(dim) if isinstance(name, str))
+    return names
+
+
 def _refresh_graph_operand_types(
     operand: GraphOperand,
     *,
@@ -1092,7 +1307,8 @@ def _refresh_graph_operand_types(
         )
         for key, value in operand.attrs.items()
     }
-    preferred_dim_names = set(globals_env)
+    refreshed_dim_names = _dim_value_symbol_names(dim_values)
+    preferred_dim_names = set(globals_env) | refreshed_dim_names
     callee = modules_by_name.get(operand.op.name)
     if callee is None:
         primitive_type = _infer_primitive_graph_type(
@@ -1106,6 +1322,7 @@ def _refresh_graph_operand_types(
                 operand.type_expr,
                 primitive_type,
                 preferred_dim_names=preferred_dim_names,
+                prefer_refreshed_dim_names=refreshed_dim_names,
             )
             return replace(
                 operand,
@@ -1126,6 +1343,7 @@ def _refresh_graph_operand_types(
                     operand.type_expr,
                     result_type,
                     preferred_dim_names=preferred_dim_names,
+                    prefer_refreshed_dim_names=refreshed_dim_names,
                 )
                 return replace(
                     operand,
@@ -1157,9 +1375,10 @@ def _refresh_graph_operand_types(
     )
     if len(result_types) != 1:
         return replace(call, type_expr=TypeTuple(result_types))
-    result_type = _more_specific_compatible_type(
+    result_type = _module_call_result_type(
         call.type_expr,
         result_types[0],
+        bound_dim_names=_module_input_dim_symbols(callee),
         preferred_dim_names=preferred_dim_names,
     )
     dims = result_type.dims if isinstance(result_type, TypeTensor) else None
@@ -1181,9 +1400,10 @@ def _refresh_graph_module_types(
         for name, value in (global_dim_values or {}).items()
         if name not in shadowed_dim_names
     }
-    preferred_dim_names = set(globals_env)
     nodes: list[GraphNode] = []
     for node in module.nodes:
+        refreshed_dim_names = _dim_value_symbol_names(dim_values)
+        preferred_dim_names = set(globals_env) | refreshed_dim_names
         inputs = tuple(
             _refresh_graph_operand_types(
                 item,
@@ -1216,9 +1436,10 @@ def _refresh_graph_module_types(
                 dim_values=dim_values,
             )
             output_types = tuple(
-                _more_specific_compatible_type(
+                _module_call_result_type(
                     node.outputs[index].type_expr,
                     output_type,
+                    bound_dim_names=_module_input_dim_symbols(callee),
                     preferred_dim_names=preferred_dim_names,
                 )
                 if index < len(node.outputs)
@@ -1245,6 +1466,7 @@ def _refresh_graph_module_types(
                     type_expr,
                     binary_type,
                     preferred_dim_names=preferred_dim_names,
+                    prefer_refreshed_dim_names=refreshed_dim_names,
                 )
                 output_types = (type_expr,)
         elif node.op.name == "core.select" and len(inputs) == 3:
@@ -1277,8 +1499,31 @@ def _refresh_graph_module_types(
                         type_expr,
                         primitive_type,
                         preferred_dim_names=preferred_dim_names,
+                        prefer_refreshed_dim_names=refreshed_dim_names,
                     )
                 output_types = _result_types(type_expr, len(node.outputs))
+        value_dependent_output_types = _primitive_value_dependent_output_types(
+            replace(
+                node,
+                inputs=inputs,
+                attrs=attrs,
+                outputs=tuple(
+                    replace(
+                        output,
+                        type_expr=output_types[index] if index < len(output_types) else output.type_expr,
+                        dims=(
+                            output_types[index].dims
+                            if index < len(output_types) and isinstance(output_types[index], TypeTensor)
+                            else output.dims
+                        ),
+                    )
+                    for index, output in enumerate(node.outputs)
+                ),
+            )
+        )
+        if value_dependent_output_types is not None:
+            output_types = value_dependent_output_types
+            type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
         outputs = tuple(
             replace(
                 output,
@@ -1333,6 +1578,10 @@ def _refresh_graph_module_types(
                 )
                 if dim is not None:
                     dim_values[output.name] = dim
+            elif isinstance(output.type_expr, TypeDim | TypeInt):
+                dim = _primitive_dim_output_value(rewritten, output_index=0)
+                if dim is not None:
+                    dim_values[output.name] = dim
     outputs = tuple(
         _refresh_graph_operand_types(
             output,
@@ -1343,7 +1592,12 @@ def _refresh_graph_module_types(
         )
         for output in module.outputs
     )
-    return replace(module, nodes=tuple(nodes), outputs=outputs)
+    return replace(
+        module,
+        nodes=tuple(nodes),
+        outputs=outputs,
+        return_type_expr=_return_type_expr_from_outputs(outputs),
+    )
 
 
 def _refresh_graph_program_types(graph: GraphProgram) -> GraphProgram:
@@ -1679,7 +1933,11 @@ def _substitute_atomic_constant_dims_local(graph: GraphProgram) -> GraphProgram:
     modules: list[GraphModule] = []
     for module in graph.modules:
         signature_dim_names = _module_signature_dim_refs(module)
-        module_dim_constants = dim_constants
+        module_dim_constants = {
+            name: value
+            for name, value in dim_constants.items()
+            if name not in signature_dim_names
+        }
         module_constants = {
             name: literal
             for name, literal in literal_constants.items()

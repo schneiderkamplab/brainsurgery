@@ -228,6 +228,28 @@ def _resolve_model_task(name: str) -> str:
     )
 
 
+def _resolve_benchmark_mode(name: str) -> str:
+    normalized = str(name).strip().lower()
+    if normalized in {"auto", "forward", "generate"}:
+        return normalized
+    raise ValueError(
+        f"Unsupported benchmark_mode: {name!r} (expected 'auto', 'forward', or 'generate')"
+    )
+
+
+def _should_generate_for_benchmark(*, model_task: str, benchmark_mode: str) -> bool:
+    if benchmark_mode == "forward":
+        return False
+    if benchmark_mode == "auto":
+        return model_task == "causal_lm"
+    if model_task in {"causal_lm", "seq2seq_lm"}:
+        return True
+    raise ValueError(
+        f"benchmark_mode='generate' is not supported for model_task={model_task!r}; "
+        "encoder-only and masked-LM models only support forward benchmarking"
+    )
+
+
 def _task_pragma_from_axon(*, axon_file: Path) -> str | None:
     parsed = parse_axon_program_from_path(axon_file)
     module = _select_main_axon_module(parsed)
@@ -2805,6 +2827,7 @@ def _run_axon_test_single(
     class_name: str = "AxonGeneratedModel",
     dtype: str = "float32",
     model_task: str = "auto",
+    benchmark_mode: str = "auto",
     trace_layers: bool = False,
     hf_align_bf16_profile: bool = False,
     hf_align_mask_contract: bool = False,
@@ -2832,6 +2855,7 @@ def _run_axon_test_single(
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
     resolved_model_task = _resolve_model_task(model_task)
+    resolved_benchmark_mode = _resolve_benchmark_mode(benchmark_mode)
     align_mask_contract = bool(hf_align_bf16_profile or hf_align_mask_contract)
     align_position_ids = bool(hf_align_bf16_profile or hf_align_position_ids)
     align_add_fp32 = bool(hf_align_bf16_profile or hf_align_add_fp32_accum)
@@ -2846,6 +2870,10 @@ def _run_axon_test_single(
         raise FileNotFoundError(f"Weights path not found: {weights_path}")
     if resolved_model_task == "auto":
         resolved_model_task = _infer_model_task(axon_file=axon_file, weights=weights_path)
+    run_generate_benchmark = _should_generate_for_benchmark(
+        model_task=resolved_model_task,
+        benchmark_mode=resolved_benchmark_mode,
+    )
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
         backend_token = "codegen2-torch"
@@ -3101,6 +3129,7 @@ def _run_axon_test_single(
             hf_inputs: dict[str, Any] = {"input_ids": input_ids}
             if attention_mask is not None:
                 hf_inputs["attention_mask"] = attention_mask
+            hf_generate_inputs = dict(hf_inputs)
             decoder_input_ids: torch.Tensor | None = None
             decoder_attention_mask: torch.Tensor | None = None
             if resolved_model_task == "seq2seq_lm":
@@ -3145,6 +3174,7 @@ def _run_axon_test_single(
                 "attention_mask": attention_mask,
                 "decoder_attention_mask": decoder_attention_mask,
                 "hf_inputs": hf_inputs,
+                "hf_generate_inputs": hf_generate_inputs,
                 "hf_forward_inputs": hf_forward_inputs,
                 "syn_inputs": syn_inputs,
             }
@@ -3618,7 +3648,7 @@ def _run_axon_test_single(
 
             hf_gen: torch.Tensor | None = None
             hf_time = 0.0
-            if resolved_model_task in {"masked_lm", "seq2seq_lm"}:
+            if not run_generate_benchmark:
                 hf_t0 = time.perf_counter()
                 with timing(message="HF"), torch.no_grad():
                     hf_logits = _run_hf_forward(hf)
@@ -3663,6 +3693,12 @@ def _run_axon_test_single(
                             hf_logits = _run_hf_forward(hf)
                             hf_forward_time = time.perf_counter() - hf_t0
 
+                hf_max_new_tokens = (
+                    max(1, max_len)
+                    if resolved_model_task == "seq2seq_lm"
+                    else max(1, max_len - int(io["input_ids"].shape[1]))
+                )
+
                 def _run_hf_generate(model: Any) -> torch.Tensor:
                     if _is_deepseek_family_model_type(resolved_model_type):
                         pad_id = tokenizer_obj.eos_token_id
@@ -3670,7 +3706,7 @@ def _run_axon_test_single(
                         batch_size = int(io["input_ids"].shape[0])
                         for batch_idx in range(batch_size):
                             sample_inputs: dict[str, Any] = {}
-                            for key, value in io["hf_inputs"].items():
+                            for key, value in io["hf_generate_inputs"].items():
                                 if (
                                     torch.is_tensor(value)
                                     and value.ndim > 0
@@ -3687,7 +3723,7 @@ def _run_axon_test_single(
                             generated.append(
                                 model.generate(
                                     **sample_inputs,
-                                    max_new_tokens=max(1, max_len - int(io["input_ids"].shape[1])),
+                                    max_new_tokens=hf_max_new_tokens,
                                     eos_token_id=tokenizer_obj.eos_token_id,
                                     pad_token_id=pad_id,
                                     use_cache=False,
@@ -3704,8 +3740,8 @@ def _run_axon_test_single(
                         ]
                         return torch.stack(padded, dim=0)
                     return model.generate(
-                        **io["hf_inputs"],
-                        max_new_tokens=max(1, max_len - int(io["input_ids"].shape[1])),
+                        **io["hf_generate_inputs"],
+                        max_new_tokens=hf_max_new_tokens,
                         eos_token_id=tokenizer_obj.eos_token_id,
                         pad_token_id=tokenizer_obj.eos_token_id,
                     )
@@ -3752,6 +3788,7 @@ def _run_axon_test_single(
         hf_layer_outputs: dict[int, torch.Tensor] = {}
         hf_exec_device_str = "skipped"
         state_ref_cpu: dict[str, torch.Tensor] | None = None
+        decoder_attention_mask_for_metrics: torch.Tensor | None = None
         if not skip_hf:
             try:
                 hf_result = _run_hf_side(exec_device_str)
@@ -3772,6 +3809,9 @@ def _run_axon_test_single(
             hf_layer_outputs = cast(dict[int, torch.Tensor], hf_result["layer_outputs"])
             hf_exec_device_str = cast(str, hf_result["device"])
             state_ref_cpu = cast(dict[str, torch.Tensor] | None, hf_result["state_ref_cpu"])
+            decoder_attention_mask_for_metrics = cast(
+                torch.Tensor | None, hf_result.get("decoder_attention_mask")
+            )
             hf_result.clear()
             _cleanup(_resolve_device(exec_device_str))
 
@@ -3923,7 +3963,7 @@ def _run_axon_test_single(
 
             syn_gen: torch.Tensor | None = None
             syn_time = 0.0
-            if resolved_model_task in {"masked_lm", "seq2seq_lm"}:
+            if not run_generate_benchmark:
                 syn_t0 = time.perf_counter()
                 with timing(message="AxonDerived"), torch.no_grad():
                     syn_logits = _run_syn_forward()
@@ -4010,8 +4050,16 @@ def _run_axon_test_single(
 
         input_ids = input_ids_cpu
         attention_mask = attention_mask_cpu
-        gen_hf = 0 if hf_gen is None else int(hf_gen.shape[1] - input_ids.shape[1])
-        gen_syn = 0 if syn_gen is None else int(syn_gen.shape[1] - input_ids.shape[1])
+
+        def _generated_token_count(generated: torch.Tensor | None) -> int:
+            if generated is None:
+                return 0
+            if resolved_model_task == "seq2seq_lm":
+                return int(generated.shape[1])
+            return max(0, int(generated.shape[1] - input_ids.shape[1]))
+
+        gen_hf = _generated_token_count(hf_gen)
+        gen_syn = _generated_token_count(syn_gen)
 
         hf_nan_count = 0 if hf_logits is None else int(torch.isnan(hf_logits).sum().item())
         syn_nan_count = int(torch.isnan(syn_logits).sum().item())
@@ -4093,11 +4141,10 @@ def _run_axon_test_single(
                     bool(top1_matches[has_valid_last].all()) if bool(has_valid_last.any()) else None
                 )
 
-            decoder_attention_mask = cast(
-                torch.Tensor | None, hf_result.get("decoder_attention_mask")
-            )
             metric_attention_mask = (
-                decoder_attention_mask if resolved_model_task == "seq2seq_lm" else attention_mask
+                decoder_attention_mask_for_metrics
+                if resolved_model_task == "seq2seq_lm"
+                else attention_mask
             )
             if metric_attention_mask is not None:
                 if metric_attention_mask.device != diff.device:
@@ -4205,6 +4252,8 @@ def _run_axon_test_single(
         print(f"Fallback:       {fallback}")
         print(f"Prompts:        {len(prompts)}")
         print(f"Model task:     {resolved_model_task}")
+        print(f"Benchmark mode: {resolved_benchmark_mode}")
+        print(f"Benchmark path: {'generate' if run_generate_benchmark else 'forward'}")
         print(f"HF-align bf16 profile: {bool(hf_align_bf16_profile)}")
         print(f"HF-align mask:         {align_mask_contract}")
         print(f"HF-align posid:        {align_position_ids}")
@@ -4224,11 +4273,14 @@ def _run_axon_test_single(
             assert hf_time is not None
         if skip_hf:
             print("HF:             skipped")
-            print(
-                f"Axon-derived:   {syn_time:.4f}s total, {gen_syn / max(syn_time, 1e-9):.2f} tok/s, generated={gen_syn}"
-            )
+            if run_generate_benchmark:
+                print(
+                    f"Axon-derived:   {syn_time:.4f}s total, {gen_syn / max(syn_time, 1e-9):.2f} tok/s, generated={gen_syn}"
+                )
+            else:
+                print(f"Axon forward:   {syn_time:.4f}s total")
             print("Speed ratio (Axon/HF): N/A")
-        elif resolved_model_task == "causal_lm":
+        elif run_generate_benchmark:
             print(
                 f"HF:             {hf_time_safe:.4f}s total, {gen_hf / max(hf_time_safe, 1e-9):.2f} tok/s, generated={gen_hf}"
             )
@@ -4242,7 +4294,7 @@ def _run_axon_test_single(
         print()
         if (
             (not skip_hf)
-            and resolved_model_task == "causal_lm"
+            and run_generate_benchmark
             and hf_gen is not None
             and syn_gen is not None
         ):
@@ -4333,6 +4385,8 @@ def _run_axon_test_single(
             "compile_fullgraph": bool(compile_fullgraph),
             "compile_dynamic": bool(compile_dynamic),
             "model_task": resolved_model_task,
+            "benchmark_mode": resolved_benchmark_mode,
+            "benchmark_path": "generate" if run_generate_benchmark else "forward",
             "prompts": prompts,
             "generated_hf": hf_gen,
             "generated_axon": syn_gen,
@@ -4358,6 +4412,7 @@ def run_axon_test(
     class_name: str = "AxonGeneratedModel",
     dtype: str = "float32",
     model_task: str = "auto",
+    benchmark_mode: str = "auto",
     trace_layers: bool = False,
     hf_align_bf16_profile: bool = False,
     hf_align_mask_contract: bool = False,
@@ -4392,6 +4447,7 @@ def run_axon_test(
         class_name=class_name,
         dtype=dtype,
         model_task=model_task,
+        benchmark_mode=benchmark_mode,
         trace_layers=trace_layers,
         hf_align_bf16_profile=hf_align_bf16_profile,
         hf_align_mask_contract=hf_align_mask_contract,

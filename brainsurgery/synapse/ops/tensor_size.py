@@ -14,6 +14,16 @@ LOWERING_TYPE_SIGNATURE = {
 }
 
 
+PRIMITIVE_SEMANTICS = {
+    # The scalar Dim result equals the selected axis of the input tensor shape.
+    "dim_output_from_tensor_axis": {
+        "output": 0,
+        "tensor_arg": 0,
+        "axis_arg": 1,
+    },
+}
+
+
 def _expr_int(expr: Any) -> int | None:
     while isinstance(expr, AxonExprAscribe | AxonExprParen):
         expr = expr.expr if isinstance(expr, AxonExprAscribe) else expr.inner
@@ -46,5 +56,6 @@ def type_rule(
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "PRIMITIVE_SEMANTICS",
     "type_rule",
 ]

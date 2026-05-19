@@ -5162,6 +5162,15 @@ def test_codegen2_tensor_size_uses_runtime_shape_for_unbound_result_dim() -> Non
     program = GraphProgram(
         modules=(
             GraphModule(
+                name="N",
+                inputs=(),
+                outputs=(GraphLiteral(16, TypeInt()),),
+                output_names=("N",),
+                nodes=(),
+                return_type_expr=TypeInt(),
+                is_global_binding=True,
+            ),
+            GraphModule(
                 name="main",
                 inputs=(GraphValue("x", x_type, dims=x_type.dims),),
                 outputs=(GraphValueRef("n", TypeDim()),),
@@ -5197,8 +5206,95 @@ def test_codegen2_tensor_size_uses_runtime_shape_for_unbound_result_dim() -> Non
 
     code = emit_model_code_from_graph_ir(program)
 
-    assert "symbols['N']" not in code
-    assert "token_idx.shape[int(0)]" in code
+    assert "n = self._symbols['N']" not in code
+    assert "N = token_idx.shape[0]" in code
+    assert "n = N" in code
+
+
+def test_graph_optimizer_preserves_value_dependent_primitive_dims() -> None:
+    mask_type = _tensor(2, "BT")
+    stale_idx_type = _tensor(16)
+    x_type = _tensor("BT", "D")
+    stale_selected_type = _tensor(16, "D")
+    program = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("mask", mask_type, dims=mask_type.dims),
+                    GraphValue("x", x_type, dims=x_type.dims),
+                ),
+                outputs=(GraphValueRef("selected", stale_selected_type, dims=stale_selected_type.dims),),
+                output_names=("selected",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_where_indices"),
+                        inputs=(GraphValueRef("mask", mask_type, dims=mask_type.dims),),
+                        attrs={},
+                        outputs=(
+                            GraphValue("topk_pos", stale_idx_type, dims=stale_idx_type.dims),
+                            GraphValue("token_idx", stale_idx_type, dims=stale_idx_type.dims),
+                        ),
+                        source_module="main",
+                        type_expr=TypeTuple((stale_idx_type, stale_idx_type)),
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_tensor_size"),
+                        inputs=(
+                            GraphValueRef("token_idx", stale_idx_type, dims=stale_idx_type.dims),
+                            GraphLiteral(0, TypeInt()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("n", TypeDim()),),
+                        source_module="main",
+                        type_expr=TypeDim(),
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_expand"),
+                        inputs=(
+                            GraphValueRef("token_idx", stale_idx_type, dims=stale_idx_type.dims),
+                            GraphExpr(
+                                op=GraphOp("core.list"),
+                                inputs=(GraphValueRef("n", TypeDim()), GraphValueRef("D", TypeDim())),
+                                attrs={},
+                                type_expr=TypeList(TypeDim()),
+                            ),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("selected", stale_selected_type, dims=stale_selected_type.dims),),
+                        source_module="main",
+                        type_expr=stale_selected_type,
+                        dims=stale_selected_type.dims,
+                    ),
+                ),
+                return_type_expr=stale_selected_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        program,
+        config=GraphOptimizeConfig(
+            atomic_alias_cleanup=False,
+            dead_temp_elimination=False,
+            constant_folding=False,
+            constant_dim_substitution=False,
+            common_subexpression_elimination=False,
+            specialize_definitions="off",
+            inline_safe=False,
+        ),
+    )
+
+    main = optimized.modules[0]
+    assert main.nodes[0].outputs[0].type_expr == _tensor("topk_pos_dim")
+    assert main.nodes[0].outputs[1].type_expr == _tensor("topk_pos_dim")
+    assert main.nodes[2].outputs[0].type_expr == _tensor("topk_pos_dim", "D")
+    assert main.return_type_expr == _tensor("topk_pos_dim", "D")
 
 
 def test_codegen2_generate_uses_cached_decoder_contract_from_signature() -> None:

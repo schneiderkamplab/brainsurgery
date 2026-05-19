@@ -26,6 +26,16 @@ These should stay optional until each pass has precise preconditions, typed vali
   position. Emit a backend loop (`for range(...)` when the bound/step are
   statically normal, otherwise `while` with the validated loop-done predicate)
   while preserving path-template dependencies such as `@@'h.{i}'`.
+- High priority: avoid materializing grouped-query / multi-query attention KV
+  repeats. Models such as Qwen2.5 repeat K/V heads before attention; Graph IR and
+  codegen2 should represent this as a view/expand-style operation or teach
+  attention lowering to consume grouped K/V directly. This must stay generic over
+  GQA/MQA patterns and should not introduce model-family branches.
+- High priority: optimize the factorized RoPE apply path. After hoisting
+  sin/cos creation out of layer loops, the remaining cost is repeated
+  `rotate_half`, expand, multiply, and add work. Add a validated graph rewrite or
+  backend-neutral fused op for common RoPE apply patterns, starting with the
+  non-interleaved path used by Qwen2/OLMoE-style models.
 - High priority: implement main-module-anchored intra- and inter-procedural
   domain analysis over the pruned reachable Graph IR. It should infer facts that
   hold on all non-dead paths from `MAIN`, including null/non-null, boolean,
@@ -60,6 +70,10 @@ These should stay optional until each pass has precise preconditions, typed vali
   computations can be removed while partial/impure operations are preserved.
   Branch cleanup should require literal conditions or validated constraints and
   must preserve eager Axon semantics outside ternary branches.
+- Graph-level masking simplification: use domain facts and shape/cache facts to
+  select simpler attention-mask paths when `attn_mask` is known null/non-null or
+  when the causal-only path is provably sufficient. This should remove dead
+  masking branches before codegen without changing Axon's eager semantics.
 - Graph-level CSE: extend current total-pure CSE only if operand identity,
   attributes, path templates, dtype, shape, and constraints match. Unknown module
   calls should not be CSE candidates until effect metadata proves they are total
@@ -71,5 +85,9 @@ These should stay optional until each pass has precise preconditions, typed vali
   correctly, and any helper containing partial effects unless proven safe.
 - Graph-level shape/layout optimization: use preserved tensor shapes and path metadata to plan transposes, reshape/expand chains, layout choices, and backend-friendly argument forms without weakening Graph IR typing.
 - Graph-level fusion and custom kernels: identify typed patterns such as RMSNorm, attention score/mask/softmax/value, SwiGLU/MLP, RoPE, and selected-expert MoE routing. These should rewrite to backend-neutral graph ops or annotated regions, not backend-specific model-name branches.
+- Codegen2 overhead cleanup: reduce residual wrapper and parameter-lookup
+  overhead for small hot operations such as RMSNorm and path-derived weight
+  access. Prefer graph-validated inlining or generated-code local caching over
+  ad-hoc backend special cases.
 - Graph-level parameter/path normalization: continue canonicalizing path templates structurally, but do not inline constants or scopes by string rewriting. Template symbols are first-class dependencies and must remain visible to closure, validation, and codegen.
 - Backend-aware but semantic-preserving lowering: add optional graph passes for pipeline partitioning, parameter placement, buffer hoisting, and dtype/dequant planning once Graph IR carries enough metadata to validate the transformed graph before code generation.

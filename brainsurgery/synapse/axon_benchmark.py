@@ -34,6 +34,7 @@ from .axon_test import (
     _format_checkpoint_summary_table,
     _format_metric_value,
     _repo_root,
+    _resolve_benchmark_mode,
     _run_axon_test_single,
 )
 
@@ -635,6 +636,7 @@ def _run_benchmark_pair(
     class_name: str,
     dtype: str,
     model_task: str,
+    benchmark_mode: str,
     trace_layers: bool,
     hf_align_bf16_profile: bool,
     hf_align_mask_contract: bool,
@@ -678,6 +680,7 @@ def _run_benchmark_pair(
         class_name=class_name,
         dtype=dtype,
         model_task=model_task,
+        benchmark_mode=benchmark_mode,
         trace_layers=trace_layers,
         hf_align_bf16_profile=hf_align_bf16_profile,
         hf_align_mask_contract=hf_align_mask_contract,
@@ -1128,6 +1131,7 @@ def run_axon_benchmark(
     class_name: str = "AxonGeneratedModel",
     dtype: str = "float32",
     model_task: str = "auto",
+    benchmark_mode: str = "auto",
     trace_layers: bool = False,
     hf_align_bf16_profile: bool = False,
     hf_align_mask_contract: bool = False,
@@ -1174,6 +1178,7 @@ def run_axon_benchmark(
     if typechecker_token != "typecheck2":
         raise ValueError("axon_typechecker must be 'typecheck2'")
     axon_typechecker = typechecker_token
+    benchmark_mode = _resolve_benchmark_mode(benchmark_mode)
     if axon_backend != "pipeline2-torch" and pipeline_parallel_size is not None:
         raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2-torch")
     repo_root = _repo_root()
@@ -1249,6 +1254,7 @@ def run_axon_benchmark(
         "class_name": class_name,
         "dtype": dtype,
         "model_task": model_task,
+        "benchmark_mode": benchmark_mode,
         "trace_layers": trace_layers,
         "hf_align_bf16_profile": hf_align_bf16_profile,
         "hf_align_mask_contract": hf_align_mask_contract,

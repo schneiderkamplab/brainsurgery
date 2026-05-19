@@ -150,11 +150,25 @@ def get_op_type_rule(op_name: str) -> Any | None:
     return None
 
 
+def get_op_semantics(op_name: str) -> dict[str, Any]:
+    module = get_op_module(op_name)
+    if module is None:
+        return {}
+    semantics = getattr(module, "PRIMITIVE_SEMANTICS", {})
+    if not isinstance(semantics, dict):
+        raise RuntimeError(
+            f"Axon primitive op module {module.__name__!r} export "
+            "'PRIMITIVE_SEMANTICS' must be a dict"
+        )
+    return dict(semantics)
+
+
 __all__ = [
     "OP_MODULES",
     "get_op_module",
     "get_op_lowering_type_signature",
     "get_op_parameter_defaults",
     "get_op_parameter_names",
+    "get_op_semantics",
     "get_op_type_rule",
 ]

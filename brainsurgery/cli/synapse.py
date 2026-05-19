@@ -447,6 +447,14 @@ def axon_test(
         "--model-task",
         help="Model execution task (auto, causal_lm, masked_lm, or seq2seq_lm).",
     ),
+    benchmark_mode: str = typer.Option(
+        "auto",
+        "--benchmark-mode",
+        help=(
+            "Benchmark execution mode (auto, forward, or generate). "
+            "generate is supported for causal_lm and seq2seq_lm; encoder-only models are forward-only."
+        ),
+    ),
     trace_layers: bool = typer.Option(
         False,
         "--trace-layers/--no-trace-layers",
@@ -548,9 +556,9 @@ def axon_test(
             hf_model_dir=hf_model_dir,
             tokenizer=tokenizer,
             class_name=class_name,
-            main_module=main_module,
             dtype=dtype,
             model_task=model_task,
+            benchmark_mode=benchmark_mode,
             trace_layers=trace_layers,
             hf_align_bf16_profile=hf_align_bf16_profile,
             hf_align_mask_contract=hf_align_mask_contract,
@@ -634,6 +642,14 @@ def axon_benchmark(
         "auto",
         "--model-task",
         help="Model execution task (auto, causal_lm, masked_lm, or seq2seq_lm).",
+    ),
+    benchmark_mode: str = typer.Option(
+        "auto",
+        "--benchmark-mode",
+        help=(
+            "Benchmark execution mode (auto, forward, or generate). "
+            "generate is supported for causal_lm and seq2seq_lm; encoder-only models are forward-only."
+        ),
     ),
     trace_layers: bool = typer.Option(
         False,
@@ -813,6 +829,7 @@ def axon_benchmark(
             class_name=class_name,
             dtype=dtype,
             model_task=model_task,
+            benchmark_mode=benchmark_mode,
             trace_layers=trace_layers,
             hf_align_bf16_profile=hf_align_bf16_profile,
             hf_align_mask_contract=hf_align_mask_contract,

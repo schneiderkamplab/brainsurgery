@@ -168,6 +168,43 @@ def _tensor_dims_from_type(type_expr: Any) -> tuple[Any, ...] | None:
     return None
 
 
+def _materialize_expert_banks_in_state(state: dict[str, torch.Tensor]) -> None:
+    groups: dict[str, dict[int, str]] = {}
+    for key in list(state):
+        parts = str(key).split(".")
+        for idx, part in enumerate(parts):
+            if part == "experts" and idx + 2 < len(parts) and parts[idx + 1].isdigit():
+                expert = int(parts[idx + 1])
+                bank_key = ".".join(parts[: idx + 1] + parts[idx + 2 :])
+                groups.setdefault(bank_key, {})[expert] = key
+                break
+    for bank_key, items in groups.items():
+        if bank_key in state or not items:
+            continue
+        ordered_keys = [items[i] for i in range(len(items)) if i in items]
+        if len(ordered_keys) != len(items):
+            continue
+        first = state[ordered_keys[0]]
+        first_shape = tuple(first.shape)
+        if any(tuple(state[key].shape) != first_shape for key in ordered_keys):
+            continue
+        state[bank_key] = torch.stack([state.pop(key) for key in ordered_keys], dim=0)
+    for gate_key, gate in list(state.items()):
+        if ".gate_proj." not in str(gate_key):
+            continue
+        up_key = str(gate_key).replace(".gate_proj.", ".up_proj.", 1)
+        gate_up_key = str(gate_key).replace(".gate_proj.", ".gate_up_proj.", 1)
+        if gate_up_key in state:
+            continue
+        up = state.get(up_key)
+        if not torch.is_tensor(gate) or not torch.is_tensor(up):
+            continue
+        if gate.shape[:-2] != up.shape[:-2] or gate.shape[-1:] != up.shape[-1:]:
+            continue
+        concat_dim = -2 if gate.ndim >= 2 else -1
+        state[gate_up_key] = torch.cat([gate, up], dim=concat_dim)
+
+
 def _is_global_symbol_module(module: GraphModule) -> bool:
     return module.is_global_binding and not module.inputs and len(module.outputs) == 1
 
@@ -310,9 +347,28 @@ def _module_free_dim_refs(module: GraphModule, *, global_names: set[str]) -> set
     return out
 
 
-def _bind_dim_expr_runtime(dim: Any, actual: int, symbols: dict[str, Any]) -> None:
+def _set_dim_symbol_runtime(
+    symbols: dict[str, Any],
+    name: str,
+    value: int,
+    *,
+    overwrite: bool,
+) -> None:
+    if overwrite:
+        symbols[name] = value
+    else:
+        symbols.setdefault(name, value)
+
+
+def _bind_dim_expr_runtime(
+    dim: Any,
+    actual: int,
+    symbols: dict[str, Any],
+    *,
+    overwrite: bool = False,
+) -> None:
     if isinstance(dim, str):
-        symbols.setdefault(dim, actual)
+        _set_dim_symbol_runtime(symbols, dim, actual, overwrite=overwrite)
         return
     if not isinstance(dim, DimExprBinary):
         return
@@ -320,44 +376,74 @@ def _bind_dim_expr_runtime(dim: Any, actual: int, symbols: dict[str, Any]) -> No
     right = dim.right
     if dim.op == "+":
         if isinstance(left, str) and right in symbols:
-            symbols.setdefault(left, actual - int(symbols[right]))
+            _set_dim_symbol_runtime(
+                symbols, left, actual - int(symbols[right]), overwrite=overwrite
+            )
         if isinstance(right, str) and left in symbols:
-            symbols.setdefault(right, actual - int(symbols[left]))
+            _set_dim_symbol_runtime(
+                symbols, right, actual - int(symbols[left]), overwrite=overwrite
+            )
     if dim.op == "-":
         if isinstance(left, str) and right in symbols:
-            symbols.setdefault(left, actual + int(symbols[right]))
+            _set_dim_symbol_runtime(
+                symbols, left, actual + int(symbols[right]), overwrite=overwrite
+            )
         if isinstance(right, str) and left in symbols:
-            symbols.setdefault(right, int(symbols[left]) - actual)
+            _set_dim_symbol_runtime(
+                symbols, right, int(symbols[left]) - actual, overwrite=overwrite
+            )
     if dim.op == "*":
         if isinstance(left, str) and right in symbols and int(symbols[right]) != 0:
-            symbols.setdefault(left, actual // int(symbols[right]))
+            _set_dim_symbol_runtime(
+                symbols, left, actual // int(symbols[right]), overwrite=overwrite
+            )
         if isinstance(right, str) and left in symbols and int(symbols[left]) != 0:
-            symbols.setdefault(right, actual // int(symbols[left]))
+            _set_dim_symbol_runtime(
+                symbols, right, actual // int(symbols[left]), overwrite=overwrite
+            )
     if dim.op == "/":
         if isinstance(left, str) and right in symbols:
-            symbols.setdefault(left, actual * int(symbols[right]))
+            _set_dim_symbol_runtime(
+                symbols, left, actual * int(symbols[right]), overwrite=overwrite
+            )
         if isinstance(right, str) and left in symbols and actual != 0:
-            symbols.setdefault(right, int(symbols[left]) // actual)
+            _set_dim_symbol_runtime(
+                symbols, right, int(symbols[left]) // actual, overwrite=overwrite
+            )
 
 
-def _bind_nested_shape_symbols_runtime(type_expr: Any, value: Any, symbols: dict[str, Any]) -> None:
+def _bind_nested_shape_symbols_runtime(
+    type_expr: Any,
+    value: Any,
+    symbols: dict[str, Any],
+    *,
+    overwrite: bool = False,
+) -> None:
     if isinstance(type_expr, TypeOptional):
         if value is not None:
-            _bind_nested_shape_symbols_runtime(type_expr.inner, value, symbols)
+            _bind_nested_shape_symbols_runtime(
+                type_expr.inner, value, symbols, overwrite=overwrite
+            )
         return
     if isinstance(type_expr, TypeList):
         if isinstance(value, list | tuple) and value:
-            _bind_nested_shape_symbols_runtime(type_expr.item, value[0], symbols)
+            _bind_nested_shape_symbols_runtime(
+                type_expr.item, value[0], symbols, overwrite=overwrite
+            )
         return
     if isinstance(type_expr, TypeTuple):
         if isinstance(value, list | tuple):
             for item_type, item_value in zip(type_expr.items, value, strict=False):
-                _bind_nested_shape_symbols_runtime(item_type, item_value, symbols)
+                _bind_nested_shape_symbols_runtime(
+                    item_type, item_value, symbols, overwrite=overwrite
+                )
         return
     if isinstance(type_expr, TypeTensor) and torch.is_tensor(value):
         for idx, dim in enumerate(type_expr.dims):
             if idx < value.dim():
-                _bind_dim_expr_runtime(dim, int(value.shape[idx]), symbols)
+                _bind_dim_expr_runtime(
+                    dim, int(value.shape[idx]), symbols, overwrite=overwrite
+                )
 
 
 def _effective_graph_value_type(value: GraphValue) -> TypeExpr:
@@ -631,6 +717,7 @@ class Codegen2GraphModel(nn.Module):
     def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:
         loaded = dict(state_dict)
         materialize_mxfp4_aliases(loaded, drop_packed=True)
+        _materialize_expert_banks_in_state(loaded)
         self._state = loaded
 
     def _prepare_env(
@@ -1093,7 +1180,7 @@ class Codegen2GraphModel(nn.Module):
         }
 
         def out(value: Any) -> None:
-            self._assign_outputs(out_names, value, env)
+            self._assign_outputs(out_names, value, env, outputs=node.outputs, symbols=symbols)
 
         handled, value = execute_common_primitive(
             primitive=primitive,
@@ -1460,8 +1547,7 @@ class Codegen2GraphModel(nn.Module):
                 dim_names.update(dim_token_names(dim))
         local_symbols = dict(symbols)
         for name in dim_names:
-            if name not in self.global_symbol_names:
-                local_symbols.pop(name, None)
+            local_symbols.pop(name, None)
             value = local_env.get(name)
             if isinstance(value, int | float) and not isinstance(value, bool):
                 local_symbols[name] = int(value)
@@ -1484,7 +1570,10 @@ class Codegen2GraphModel(nn.Module):
         )
         for value in module.inputs:
             _bind_nested_shape_symbols_runtime(
-                _effective_graph_value_type(value), local_env.get(value.name), local_symbols
+                _effective_graph_value_type(value),
+                local_env.get(value.name),
+                local_symbols,
+                overwrite=True,
             )
         for name in dim_names:
             value = local_env.get(name)
@@ -1514,64 +1603,56 @@ class Codegen2GraphModel(nn.Module):
     ) -> None:
         op = node.op.name
         out_names = tuple(value.name for value in node.outputs)
+
+        def assign(value: Any) -> None:
+            self._assign_outputs(out_names, value, env, outputs=node.outputs, symbols=symbols)
+
         if op == "core.alias":
             values = [
                 self._eval_graph_operand(operand, env=env, symbols=symbols)
                 for operand in node.inputs
             ]
-            self._assign_outputs(out_names, values[0] if len(values) == 1 else tuple(values), env)
+            assign(values[0] if len(values) == 1 else tuple(values))
             return
         if op == "core.tuple":
-            self._assign_outputs(
-                out_names,
+            assign(
                 tuple(
                     self._eval_graph_operand(operand, env=env, symbols=symbols)
                     for operand in node.inputs
                 ),
-                env,
             )
             return
         if op == "core.list":
-            self._assign_outputs(
-                out_names,
+            assign(
                 [
                     self._eval_graph_operand(operand, env=env, symbols=symbols)
                     for operand in node.inputs
                 ],
-                env,
             )
             return
         if op == "core.ascribe":
             if len(node.inputs) != 1:
                 raise ValueError("core.ascribe expects one input")
-            self._assign_outputs(
-                out_names,
-                self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols),
-                env,
-            )
+            assign(self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols))
             return
         if op == "core.select":
             cond, true_value, false_value = node.inputs
             selected = true_value if bool(
                 self._eval_graph_operand(cond, env=env, symbols=symbols)
             ) else false_value
-            self._assign_outputs(
-                out_names,
-                self._eval_graph_operand(selected, env=env, symbols=symbols),
-                env,
-            )
+            assign(self._eval_graph_operand(selected, env=env, symbols=symbols))
             return
         if op.startswith("core.binary."):
             operator = op.removeprefix("core.binary.")
             left = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
             right = self._eval_graph_operand(node.inputs[1], env=env, symbols=symbols)
-            self._assign_outputs(out_names, self._eval_binary(operator, left, right), env)
+            assign(self._eval_binary(operator, left, right))
             return
         if op in {"Cache.past_length", "Cache.past_length_kv"}:
             if len(node.inputs) != 1:
                 raise ValueError(f"{op} expects one argument")
             cache = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
-            self._assign_outputs(out_names, self._cache_past_length(cache), env)
+            assign(self._cache_past_length(cache))
             return
         if op in self.modules_by_name:
             if (
@@ -1580,7 +1661,7 @@ class Codegen2GraphModel(nn.Module):
                 and not node.attrs
                 and op in symbols
             ):
-                self._assign_outputs(out_names, symbols[op], env)
+                assign(symbols[op])
                 return
             args = [
                 self._eval_graph_operand(operand, env=env, symbols=symbols)
@@ -1595,14 +1676,14 @@ class Codegen2GraphModel(nn.Module):
                     raise ValueError(f"duplicate graph call argument {key!r} for {op!r}")
                 call_env[key] = self._eval_graph_operand(operand, env=env, symbols=symbols)
             result = self._execute_module(op, call_env, symbols)
-            self._assign_outputs(out_names, result[0] if len(result) == 1 else result, env)
+            assign(result[0] if len(result) == 1 else result)
             return
 
         if op == "_sqrt":
             value = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
             if isinstance(value, list | tuple) and value:
                 value = value[-1]
-            self._assign_outputs(out_names, torch.sqrt(torch.tensor(float(value))).item(), env)
+            assign(torch.sqrt(torch.tensor(float(value))).item())
             return
         if op == "_reshape":
             src = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
@@ -1627,7 +1708,7 @@ class Codegen2GraphModel(nn.Module):
                     f"reshape from {src_shape} to {tuple(shape)!r} failed; "
                     f"env={debug_env!r}; symbols={debug_symbols!r}"
                 ) from exc
-            self._assign_outputs(out_names, reshaped, env)
+            assign(reshaped)
             return
 
         primitive = _normalize_primitive_op(op)
@@ -1640,14 +1721,26 @@ class Codegen2GraphModel(nn.Module):
         names: tuple[str, ...],
         value: Any,
         env: dict[str, Any],
+        *,
+        outputs: tuple[GraphValue, ...] | None = None,
+        symbols: dict[str, Any] | None = None,
     ) -> None:
         if len(names) == 1:
             env[names[0]] = value
+        else:
+            if not isinstance(value, (tuple, list)) or len(value) != len(names):
+                raise ValueError(f"cannot assign {value!r} to outputs {names!r}")
+            for name, item in zip(names, value, strict=True):
+                env[name] = item
+        if outputs is None or symbols is None:
             return
-        if not isinstance(value, (tuple, list)) or len(value) != len(names):
-            raise ValueError(f"cannot assign {value!r} to outputs {names!r}")
-        for name, item in zip(names, value, strict=True):
-            env[name] = item
+        for output in outputs:
+            _bind_nested_shape_symbols_runtime(
+                _effective_graph_value_type(output),
+                env.get(output.name),
+                symbols,
+                overwrite=True,
+            )
 
     @staticmethod
     def _eval_binary(op: str, left: Any, right: Any) -> Any:
@@ -1964,6 +2057,20 @@ class _DirectTorchEmitter:
         add(lines, 12, "ordered = [self.state_dict_tensors.pop(key) for key in ordered_keys]")
         add(lines, 12, "self.state_dict_tensors[bank_key] = torch.stack(ordered, dim=0)")
         add(lines, 12, "del ordered")
+        add(lines, 8, "for gate_key, gate in list(self.state_dict_tensors.items()):")
+        add(lines, 12, "if '.gate_proj.' not in str(gate_key):")
+        add(lines, 16, "continue")
+        add(lines, 12, "up_key = str(gate_key).replace('.gate_proj.', '.up_proj.', 1)")
+        add(lines, 12, "gate_up_key = str(gate_key).replace('.gate_proj.', '.gate_up_proj.', 1)")
+        add(lines, 12, "if gate_up_key in self.state_dict_tensors:")
+        add(lines, 16, "continue")
+        add(lines, 12, "up = self.state_dict_tensors.get(up_key)")
+        add(lines, 12, "if not torch.is_tensor(gate) or not torch.is_tensor(up):")
+        add(lines, 16, "continue")
+        add(lines, 12, "if gate.shape[:-2] != up.shape[:-2] or gate.shape[-1:] != up.shape[-1:]:")
+        add(lines, 16, "continue")
+        add(lines, 12, "concat_dim = -2 if gate.ndim >= 2 else -1")
+        add(lines, 12, "self.state_dict_tensors[gate_up_key] = torch.cat([gate, up], dim=concat_dim)")
         add(lines, 4, "")
         add(lines, 4, "def _linear(self, base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "weight, expert = self._linear_param(self._compose_path(base, weight_leaf), expert)")
@@ -2171,7 +2278,7 @@ class _DirectTorchEmitter:
                 type_expr=_effective_graph_value_type(value),
                 value_expr=value.name,
                 local=local,
-                protected=self.global_symbol_names,
+                protected=set(),
             )
         dim_params = [
             value.name
@@ -2193,6 +2300,14 @@ class _DirectTorchEmitter:
             self._emit_node(lines, node, module_name=module.name, indent=8, local=local, symbols_dict="self._symbols")
             for output in node.outputs:
                 local.add(output.name)
+                _emit_bind_nested_shape_symbols(
+                    lines,
+                    add=add,
+                    type_expr=_effective_graph_value_type(output),
+                    value_expr=output.name,
+                    local=local,
+                    protected=set(),
+                )
         outs = ", ".join(self._operand_expr(item, local=local, symbols_dict="self._symbols") for item in module.outputs)
         if len(module.outputs) == 1:
             add(lines, 8, f"return ({outs},)")
