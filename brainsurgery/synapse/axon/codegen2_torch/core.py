@@ -107,75 +107,6 @@ def _graph_uses_expert_linear(program: GraphProgram) -> bool:
     return False
 
 
-def _causal_conv1d_torch(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: Any,
-) -> torch.Tensor:
-    if x.device != weight.device:
-        x = x.to(device=weight.device)
-    if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype:
-        weight = weight.to(dtype=x.dtype)
-    if bias is not None:
-        if bias.device != weight.device:
-            bias = bias.to(device=weight.device)
-        if x.is_floating_point() and bias.is_floating_point() and x.dtype != bias.dtype:
-            bias = bias.to(dtype=x.dtype)
-    kernel = int(weight.shape[-1])
-    y = F.conv1d(
-        F.pad(x.transpose(1, 2), (kernel - 1, 0)),
-        weight,
-        bias=bias,
-        groups=int(weight.shape[0]),
-    ).transpose(1, 2)
-    activation_name = str(activation)
-    if activation_name == "relu":
-        return F.relu(y)
-    if activation_name == "gelu":
-        return F.gelu(y)
-    return F.silu(y)
-
-
-def _mamba_scan_torch(
-    u: torch.Tensor,
-    delta: torch.Tensor,
-    b: torch.Tensor,
-    c: torch.Tensor,
-    a: torch.Tensor,
-    d: torch.Tensor,
-) -> torch.Tensor:
-    if u.device != a.device:
-        u = u.to(device=a.device)
-        delta = delta.to(device=a.device)
-        b = b.to(device=a.device)
-        c = c.to(device=a.device)
-    if u.is_floating_point() and a.is_floating_point() and u.dtype != a.dtype:
-        a = a.to(dtype=u.dtype)
-    if u.is_floating_point() and d.is_floating_point() and u.dtype != d.dtype:
-        d = d.to(dtype=u.dtype)
-    batch = int(u.shape[0])
-    steps = int(u.shape[1])
-    width = int(u.shape[2])
-    u0 = u[:, 0, :]
-    b0 = b[:, 0, :]
-    state = ((u0.unsqueeze(-1) * b0.unsqueeze(1)) * 0.0)
-    out: list[torch.Tensor] = []
-    a_b = a.unsqueeze(0)
-    for t in range(steps):
-        u_t = u[:, t, :]
-        delta_t = delta[:, t, :]
-        b_t = b[:, t, :]
-        c_t = c[:, t, :]
-        delta_sp = F.softplus(delta_t)
-        a_t = torch.exp(delta_sp.unsqueeze(-1) * a_b)
-        bu_t = (delta_sp * u_t).unsqueeze(-1) * b_t.unsqueeze(1)
-        state = (a_t * state) + bu_t
-        y_t = torch.sum(state * c_t.unsqueeze(1), dim=-1).reshape(batch, width)
-        out.append(y_t + (u_t * d))
-    return torch.stack(out, dim=1)
-
-
 def _module_inputs_spec(module: GraphModule) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for value in module.inputs:
@@ -1165,24 +1096,37 @@ class Codegen2GraphModel(nn.Module):
         return value
 
     @staticmethod
-    def _causal_conv1d(
+    def _conv1d(
         x: torch.Tensor,
         weight: torch.Tensor,
-        bias: torch.Tensor,
-        activation: Any,
+        bias: torch.Tensor | None,
+        stride: Any,
+        padding_left: Any,
+        padding_right: Any,
+        dilation: Any,
+        groups: Any,
     ) -> torch.Tensor:
-        return _causal_conv1d_torch(x, weight, bias, activation)
-
-    @staticmethod
-    def _mamba_scan(
-        u: torch.Tensor,
-        delta: torch.Tensor,
-        b: torch.Tensor,
-        c: torch.Tensor,
-        a: torch.Tensor,
-        d: torch.Tensor,
-    ) -> torch.Tensor:
-        return _mamba_scan_torch(u, delta, b, c, a, d)
+        if x.device != weight.device:
+            x = x.to(device=weight.device)
+        if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype:
+            weight = weight.to(dtype=x.dtype)
+        if bias is not None:
+            if bias.device != weight.device:
+                bias = bias.to(device=weight.device)
+            if x.is_floating_point() and bias.is_floating_point() and x.dtype != bias.dtype:
+                bias = bias.to(dtype=x.dtype)
+        left = int(padding_left)
+        right = int(padding_right)
+        if left or right:
+            x = F.pad(x, (left, right))
+        return F.conv1d(
+            x,
+            weight,
+            bias=bias,
+            stride=int(stride),
+            dilation=int(dilation),
+            groups=int(groups),
+        )
 
     def _state_key_alternatives(self, key: str, *, limit: int = 8) -> list[str]:
         if not isinstance(key, str) or not key:
@@ -1739,15 +1683,10 @@ class Codegen2GraphModel(nn.Module):
             out(y)
             return True
 
-        if primitive == "causal_conv1d":
-            if len(args) != 4:
-                raise ValueError("causal_conv1d expects x, weight, bias, activation")
-            out(self._causal_conv1d(args[0], args[1], args[2], args[3]))
-            return True
-        if primitive == "mamba_scan":
-            if len(args) != 6:
-                raise ValueError("mamba_scan expects u, delta, b, c, a, d")
-            out(self._mamba_scan(args[0], args[1], args[2], args[3], args[4], args[5]))
+        if primitive == "conv1d":
+            if len(args) != 8:
+                raise ValueError("conv1d expects x, weight, bias, stride, padding_left, padding_right, dilation, groups")
+            out(self._conv1d(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]))
             return True
         if primitive in {"activations_gelu", "activations_gelu_new", "activations_gelu_pytorch_tanh"}:
             x = args[0]
@@ -2649,8 +2588,7 @@ class _DirectTorchEmitter:
         add(lines, 12, "return value[1:].strip('.')")
         add(lines, 8, "return value")
         add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _causal_conv1d(x, weight, bias, activation):")
+        add(lines, 4, "def _conv1d(self, x, weight, bias, stride, padding_left, padding_right, dilation, groups):")
         add(lines, 8, "if x.device != weight.device:")
         add(lines, 12, "x = x.to(device=weight.device)")
         add(lines, 8, "if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype:")
@@ -2660,46 +2598,11 @@ class _DirectTorchEmitter:
         add(lines, 16, "bias = bias.to(device=weight.device)")
         add(lines, 12, "if x.is_floating_point() and bias.is_floating_point() and x.dtype != bias.dtype:")
         add(lines, 16, "bias = bias.to(dtype=x.dtype)")
-        add(lines, 8, "kernel = int(weight.shape[-1])")
-        add(lines, 8, "y = F.conv1d(F.pad(x.transpose(1, 2), (kernel - 1, 0)), weight, bias=bias, groups=int(weight.shape[0])).transpose(1, 2)")
-        add(lines, 8, "activation_name = str(activation)")
-        add(lines, 8, "if activation_name == 'relu':")
-        add(lines, 12, "return F.relu(y)")
-        add(lines, 8, "if activation_name == 'gelu':")
-        add(lines, 12, "return F.gelu(y)")
-        add(lines, 8, "return F.silu(y)")
-        add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _mamba_scan(u, delta, b, c, a, d):")
-        add(lines, 8, "if u.device != a.device:")
-        add(lines, 12, "u = u.to(device=a.device)")
-        add(lines, 12, "delta = delta.to(device=a.device)")
-        add(lines, 12, "b = b.to(device=a.device)")
-        add(lines, 12, "c = c.to(device=a.device)")
-        add(lines, 8, "if u.is_floating_point() and a.is_floating_point() and u.dtype != a.dtype:")
-        add(lines, 12, "a = a.to(dtype=u.dtype)")
-        add(lines, 8, "if u.is_floating_point() and d.is_floating_point() and u.dtype != d.dtype:")
-        add(lines, 12, "d = d.to(dtype=u.dtype)")
-        add(lines, 8, "batch = int(u.shape[0])")
-        add(lines, 8, "steps = int(u.shape[1])")
-        add(lines, 8, "width = int(u.shape[2])")
-        add(lines, 8, "u0 = u[:, 0, :]")
-        add(lines, 8, "b0 = b[:, 0, :]")
-        add(lines, 8, "state = ((u0.unsqueeze(-1) * b0.unsqueeze(1)) * 0.0)")
-        add(lines, 8, "out = []")
-        add(lines, 8, "a_b = a.unsqueeze(0)")
-        add(lines, 8, "for t in range(steps):")
-        add(lines, 12, "u_t = u[:, t, :]")
-        add(lines, 12, "delta_t = delta[:, t, :]")
-        add(lines, 12, "b_t = b[:, t, :]")
-        add(lines, 12, "c_t = c[:, t, :]")
-        add(lines, 12, "delta_sp = F.softplus(delta_t)")
-        add(lines, 12, "a_t = torch.exp(delta_sp.unsqueeze(-1) * a_b)")
-        add(lines, 12, "bu_t = (delta_sp * u_t).unsqueeze(-1) * b_t.unsqueeze(1)")
-        add(lines, 12, "state = (a_t * state) + bu_t")
-        add(lines, 12, "y_t = torch.sum(state * c_t.unsqueeze(1), dim=-1).reshape(batch, width)")
-        add(lines, 12, "out.append(y_t + (u_t * d))")
-        add(lines, 8, "return torch.stack(out, dim=1)")
+        add(lines, 8, "left = int(padding_left)")
+        add(lines, 8, "right = int(padding_right)")
+        add(lines, 8, "if left or right:")
+        add(lines, 12, "x = F.pad(x, (left, right))")
+        add(lines, 8, "return F.conv1d(x, weight, bias=bias, stride=int(stride), dilation=int(dilation), groups=int(groups))")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
         add(lines, 8, "value, _ = self._linear_param(path, None, field='param')")
@@ -4570,10 +4473,8 @@ class _DirectTorchEmitter:
             y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps}))"
             y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
             return f"({y_float}.to(dtype={x}.dtype) if {cast_float} else {y})"
-        if primitive == "causal_conv1d":
-            return f"self._causal_conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]})"
-        if primitive == "mamba_scan":
-            return f"self._mamba_scan({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]})"
+        if primitive == "conv1d":
+            return f"self._conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]})"
         if primitive == "tensor_like":
             dtype = args[2] if len(args) > 2 else "None"
             target_dtype = f"({args[1]}.dtype if self._dtype_from_name({dtype}) is None else self._dtype_from_name({dtype}))"

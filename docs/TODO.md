@@ -76,13 +76,16 @@ These should stay optional until each pass has precise preconditions, typed vali
   for other generic MoE layouts or moved to explicit load/config adaptation
   rather than staying as unexplained core codegen scaffolding.
 - High priority: add an incremental/cache-aware Mamba selective-scan execution
-  path. The current generic `_causal_conv1d` and `_mamba_scan` primitives remove
-  the worst graph-node explosion and make BlackMamba much faster, but decoder
+  path. `SSM.causal_conv1d_full` now uses the generic `_conv1d` primitive, and
+  `mamba_scan_full` is expressed as an Axon loop over `mamba_scan_step`. Decoder
   generation still recomputes a full sequence scan for each token. A correct
-  fix should make the recurrent SSM state explicit in Axon/Graph IR or add a
+  fix should make recurrent SSM state explicit in Axon/Graph IR or add a
   validated backend-neutral scan/cache region, then codegen should execute one
-  step per generated token. Avoid model-family branches; validate on
-  `BlackMamba-2.8B`, `mamba-2.8b-hf`, and Jamba/Mamba2-style users separately.
+  step per generated token. If the pure Axon scan loop does not scale well
+  enough, treat selective scan as a future optimized-lowering target rather than
+  reintroducing a permanent high-level `_mamba_scan` primitive. Avoid
+  model-family branches; validate on `BlackMamba-2.8B`, `mamba-2.8b-hf`, and
+  Jamba/Mamba2-style users separately.
 - High priority: implement main-module-anchored intra- and inter-procedural
   domain analysis over the pruned reachable Graph IR. It should infer facts that
   hold on all non-dead paths from `MAIN`, including null/non-null, boolean,

@@ -352,7 +352,7 @@ def substitute_graph_operand_dims(
                     ),
                 )
             if isinstance(replacement, DimExprBinary):
-                return _dim_token_operand(replacement, subst)
+                return _resolved_dim_token_operand(replacement)
         result: GraphOperand = replace(
             operand,
             type_expr=substitute_type_expr(operand.type_expr, subst, _dim_cache, _type_cache),
@@ -400,6 +400,31 @@ def substitute_graph_operand_dims(
     return operand
 
 
+def _resolved_dim_token_operand(dim: DimToken) -> GraphOperand:
+    """Convert an already-substituted dimension token to a graph operand.
+
+    Dimension substitution is a hygienic parallel substitution. If a callee
+    formal `S` is instantiated with the caller expression `S + S`, the `S`
+    occurrences inside the replacement belong to the caller scope and must not
+    be substituted again.
+    """
+    if type(dim) is int:
+        return GraphLiteral(value=dim, type_expr=TypeDim())
+    if isinstance(dim, str):
+        return GraphValueRef(name=dim, type_expr=TypeDim())
+    if isinstance(dim, DimExprBinary):
+        return GraphExpr(
+            op=GraphOp(f"core.binary.{dim.op}"),
+            inputs=(
+                _resolved_dim_token_operand(dim.left),
+                _resolved_dim_token_operand(dim.right),
+            ),
+            attrs={},
+            type_expr=TypeDim(),
+        )
+    return GraphValueRef(name=str(dim), type_expr=TypeDim())
+
+
 def _dim_token_operand(dim: DimToken, subst: Mapping[str, DimToken]) -> GraphOperand:
     resolved = substitute_dim_token(dim, subst)
     if type(resolved) is int:
@@ -407,15 +432,7 @@ def _dim_token_operand(dim: DimToken, subst: Mapping[str, DimToken]) -> GraphOpe
     if isinstance(resolved, str):
         return GraphValueRef(name=resolved, type_expr=TypeDim())
     if isinstance(resolved, DimExprBinary):
-        return GraphExpr(
-            op=GraphOp(f"core.binary.{resolved.op}"),
-            inputs=(
-                _dim_token_operand(resolved.left, subst),
-                _dim_token_operand(resolved.right, subst),
-            ),
-            attrs={},
-            type_expr=TypeDim(),
-        )
+        return _resolved_dim_token_operand(resolved)
     return GraphValueRef(name=str(resolved), type_expr=TypeDim())
 
 

@@ -68,7 +68,10 @@ from brainsurgery.synapse.axon.graph_ir import (
     validate_graph_domain_analysis,
     validate_graph_program,
 )
-from brainsurgery.synapse.axon.graph_ir.substitute import substitute_dim_token
+from brainsurgery.synapse.axon.graph_ir.substitute import (
+    substitute_dim_token,
+    substitute_graph_operand_dims,
+)
 
 
 def _typed(program, *, main_module: str):
@@ -1794,6 +1797,19 @@ def test_graph_dim_simplifies_add_then_subtract_same_symbol() -> None:
     )
 
     assert substitute_dim_token(dim, {}) == "S"
+
+
+def test_graph_dim_substitution_is_hygienic_for_same_named_caller_dims() -> None:
+    dim_t = TypeDim()
+    operand = GraphValueRef("S", dim_t)
+    rewritten = substitute_graph_operand_dims(
+        operand,
+        {"S": DimExprBinary(op="+", left="S", right="S")},
+    )
+
+    assert isinstance(rewritten, GraphExpr)
+    assert rewritten.op == GraphOp("core.binary.+")
+    assert rewritten.inputs == (GraphValueRef("S", dim_t), GraphValueRef("S", dim_t))
 
 
 def test_graph_domain_analysis_validation_accepts_literal_for_type_var() -> None:

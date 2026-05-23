@@ -24,7 +24,7 @@ export (
 )
 
 
-activate :: Tensor[B,1,C] -> String -> Tensor[B,1,C]
+activate :: Tensor[..S] -> String -> Tensor[..S]
 activate x activation = (activation == "relu") ? relu x : ((activation == "gelu") ? (gelu x) : (silu x))
 
 
@@ -45,7 +45,15 @@ causal_conv1d_step x_t w b t activation = do
 
 
 causal_conv1d_full :: Tensor[B,S,C] -> Tensor[C,1,K] -> Tensor[C] -> String -> Tensor[B,S,C]
-causal_conv1d_full x w b activation = _causal_conv1d x w b activation
+causal_conv1d_full x w b activation = do
+  x_t <- transpose x dim1=1 dim2=2
+  s <- size x 1
+  k <- size w -1
+  pad <- k - 1
+  y <- _conv1d x_t w b 1 pad 0 1 C
+  y <- slice y dim=-1 start=0 end=s
+  y <- transpose y dim1=1 dim2=2
+  return activate y activation
 
 
 sequence_mask :: Tensor[B,S,C] -> ?Tensor[B,S] -> Tensor[B,S,C]
@@ -75,7 +83,23 @@ mamba_scan_step state u_t delta_t b_t c_t a d = do
 
 
 mamba_scan_full :: Tensor[B,S,DM] -> Tensor[B,S,DM] -> Tensor[B,S,N] -> Tensor[B,S,N] -> Tensor[DM,N] -> Tensor[DM] -> Tensor[B,S,DM]
-mamba_scan_full u delta b c a d = _mamba_scan u delta b c a d
+mamba_scan_full u delta b c a d = do
+  s <- size u 1
+  u0 <- slice u dim=1 start=0 end=1 |> reshape shape=[B, DM]
+  b0 <- slice b dim=1 start=0 end=1 |> reshape shape=[B, N]
+  state <- ((unsqueeze u0 dim=-1) * (unsqueeze b0 dim=1)) * 0.0
+  y_all <- zeros_like u
+  state, y_all <- for t <- [0..s) carry (state, y_all) do
+    u_t <- slice u dim=1 start=t end=(t + 1) |> reshape shape=[B, DM]
+    delta_t <- slice delta dim=1 start=t end=(t + 1) |> reshape shape=[B, DM]
+    b_t <- slice b dim=1 start=t end=(t + 1) |> reshape shape=[B, N]
+    c_t <- slice c dim=1 start=t end=(t + 1) |> reshape shape=[B, N]
+    state, y_t <- mamba_scan_step state u_t delta_t b_t c_t a d
+    y_step <- reshape y_t shape=[B, 1, DM]
+    idx <- fill y_step t dtype="long"
+    y_all <- scatter y_all idx y_step dim=1
+    yield state, y_all
+  return y_all
 
 
 mamba_scan :: Tensor[B,S,DM] -> Tensor[B,S,DM] -> Tensor[B,S,N] -> Tensor[B,S,N] -> ?Path -> ?Path -> ?Bool -> Tensor[B,S,DM]
