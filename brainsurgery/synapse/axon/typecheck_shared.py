@@ -2529,6 +2529,7 @@ class _PrimitiveTypeHelpers:
     resolve_name_expr: Any
     broadcast_tensor_dims: Any
     dim_equivalent: Any
+    unify_dim: Any
 
 
 def _is_type_expr_instance(value: object) -> bool:
@@ -2612,6 +2613,7 @@ def _infer_primitive_call(
                     tuple(left), tuple(right), ctx
                 ),
                 dim_equivalent=lambda left, right: _dim_equivalent(left, right, ctx),
+                unify_dim=lambda left, right: _unify_dim_token(left, right, ctx),
             ),
         )
         if _is_type_expr_instance(inferred):

@@ -323,6 +323,7 @@ def _inferred_dim_names_stmts(statements: tuple[AxonStatement, ...]) -> set[str]
             names.update(_inferred_dim_names_expr(stmt.from_expr))
             names.update(_inferred_dim_names_expr(stmt.to_expr))
             names.update(_inferred_dim_names_expr(stmt.step_expr))
+            names.update(carry for carry in stmt.carry or () if carry != "_")
             names.update(_inferred_dim_names_stmts(stmt.body))
         elif isinstance(stmt, AxonScopeBind):
             names.update(_inferred_dim_names_expr(stmt.prefix))
@@ -349,6 +350,7 @@ def _stmt_param_like_names(statements: tuple[AxonStatement, ...]) -> set[str]:
             names.update(_expr_param_like_names(stmt.from_expr))
             names.update(_expr_param_like_names(stmt.to_expr))
             names.update(_expr_param_like_names(stmt.step_expr))
+            names.update(carry for carry in stmt.carry or () if carry != "_")
             names.update(_stmt_param_like_names(stmt.body))
         elif isinstance(stmt, AxonScopeBind):
             names.update(_expr_param_like_names(stmt.prefix))
@@ -375,6 +377,7 @@ def _stmt_expr_names(statements: tuple[AxonStatement, ...]) -> set[str]:
             names.update(_expr_names(stmt.from_expr))
             names.update(_expr_names(stmt.to_expr))
             names.update(_expr_names(stmt.step_expr))
+            names.update(carry for carry in stmt.carry or () if carry != "_")
             names.update(_stmt_expr_names(stmt.body))
         elif isinstance(stmt, AxonScopeBind):
             names.update(_expr_names(stmt.prefix))
@@ -436,6 +439,7 @@ def _stmt_names(statements: tuple[AxonStatement, ...]) -> set[str]:
             names.update(_expr_names(stmt.from_expr))
             names.update(_expr_names(stmt.to_expr))
             names.update(_expr_names(stmt.step_expr))
+            names.update(carry for carry in stmt.carry or () if carry != "_")
             names.update(_stmt_names(stmt.body))
         elif isinstance(stmt, AxonScopeBind):
             for raw_value in stmt.kwargs.values():
@@ -501,6 +505,9 @@ def _count_name_uses_stmts(statements: tuple[AxonStatement, ...], counts: dict[s
             _count_name_uses_expr(stmt.from_expr, counts)
             _count_name_uses_expr(stmt.to_expr, counts)
             _count_name_uses_expr(stmt.step_expr, counts)
+            for carry in stmt.carry or ():
+                if carry != "_":
+                    counts[carry] = counts.get(carry, 0) + 1
             _count_name_uses_stmts(stmt.body, counts)
         elif isinstance(stmt, AxonScopeBind):
             for raw_value in stmt.kwargs.values():

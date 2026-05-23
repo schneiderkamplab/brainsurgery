@@ -1354,7 +1354,7 @@ def _extract_repeat_helper(
         elif isinstance(inner, AxonScopeBind):
             local_bound.update(name for name in inner.targets if name != "_")
 
-    loop_var_type = ctx.fresh_type_var()
+    loop_var_type = TypeInt()
     carry_param_types = tuple(ctx.fresh_type_var() for _ in carry_names)
     free_param_types = tuple(ctx.fresh_type_var() for _ in free_names)
     helper_params = (
@@ -1410,7 +1410,10 @@ def _extract_repeat_helper(
         *(AxonExprName(name=name) for name in free_names),
     )
     rewritten_repeat = AxonRepeat(
-        name=normalized.name,
+        # The loop scope has already been threaded into path expressions while
+        # flattening the body. Flat Axon keeps structured loops but not scope
+        # sugar.
+        name=None,
         var=normalized.var,
         to_expr=normalized.to_expr,
         from_expr=normalized.from_expr,
@@ -1480,14 +1483,18 @@ def _extract_repeat_helpers_from_statements(
                 targets=stmt.targets,
                 carry=stmt.carry,
             )
-            replacement_stmts, recur_helpers = _extract_repeat_recursive_helper(
+            extracted = _extract_repeat_helper(
                 normalized_repeat,
                 module_name=module_name,
                 ctx=ctx,
                 globals_by_name=globals_by_name,
             )
-            out.extend(replacement_stmts)
-            helpers.extend(recur_helpers)
+            if extracted is None:
+                out.append(replace(normalized_repeat, name=None))
+            else:
+                rewritten_repeat, step_helper = extracted
+                out.append(rewritten_repeat)
+                helpers.append(step_helper)
             helpers.extend(nested_helpers)
             continue
         out.append(stmt)

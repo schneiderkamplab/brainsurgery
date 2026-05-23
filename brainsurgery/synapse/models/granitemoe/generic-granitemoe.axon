@@ -3,9 +3,9 @@
 
 import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (causal_mask)
+import Masking (causal_mask_for_input)
 import Math (mul)
-import Positions (position_ids, rope_pair_base)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
 import Cache
 import Config
 import NN
@@ -44,18 +44,17 @@ granitemoe_moe hidden topk_scores topk_indices = do
   x_weighted <- x_upd * scale
   return Tensor.sum x_weighted dim=2 keepdim=false
 
-granitemoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
-granitemoe_block x pos_ids attn_mask past_kv = do
+granitemoe_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+granitemoe_block x mask rope_sin rope_cos past_kv = do
   xn <- granitemoe_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
     q <- NN.linear@q_proj xn dim=MODEL_DIM bias=ATTN_BIAS |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@k_proj xn dim=KVD bias=ATTN_BIAS |> reshape_heads heads=KVH
     v <- NN.linear@v_proj xn dim=KVD bias=ATTN_BIAS |> reshape_heads heads=KVH
-    q, k <- rope_pair_base q k pos_ids THETA
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
     k, v, new_kv <- Cache.update past_kv k v
     k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
     v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
-    mask <- causal_mask q k padding_mask=attn_mask
     a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=ATTN_BIAS
     return a, new_kv
   x <- x + (a * RESID_MUL)
@@ -69,14 +68,18 @@ granitemoe_block x pos_ids attn_mask past_kv = do
 
 granitemoe :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 granitemoe input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
+  past_length <- Cache.past_length past_kv
+  key_len <- past_length + S
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     x <- x * EMBED_MUL
     new_kv <- use_cache ? Cache.init : null
     x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
-      x, new_i <- granitemoe_block x pos_ids attn_mask past_i
+      x, new_i <- granitemoe_block x mask rope_sin rope_cos past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- granitemoe_norm@norm x

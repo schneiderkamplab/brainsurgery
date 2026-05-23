@@ -3,8 +3,11 @@ import Math sqrt
 import Tensor (concat, slice, softmax)
 export (
   attention,
+  attention_gqa_with_additive_mask,
+  attention_with_additive_mask,
   attention_scaled,
   attention_softcap,
+  mask_to_additive_for_input,
   merge_heads,
   reshape_heads,
   split_qkv_grouped,
@@ -61,6 +64,12 @@ mask_to_additive :: Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> Tensor[B,H,Q,K]
 mask_to_additive ref keep = Tensor.where keep (Tensor.zeros_like ref) (Tensor.min_like ref)
 
 
+mask_to_additive_for_input :: Tensor[B,Q] -> Tensor[B,HM,Q,K] -> Dim -> ?String -> Tensor[B,H,Q,K]
+mask_to_additive_for_input ref keep heads ?dtype="float32" = do
+  zero <- Tensor.zeros ref shape=[B, heads, Q, K] dtype=dtype
+  return Tensor.where keep zero (Tensor.min_like zero)
+
+
 attention :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,VD] -> Tensor[B,HM,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,VD]
 attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
   scale_eff <- (scale == null) ? (1.0 / sqrt HD) : scale
@@ -82,6 +91,61 @@ attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null 
   probs <- zero_masked_after_softmax ? (Tensor.where keep probs 0) : probs
   v_work <- fp32_compute ? (Tensor.cast v dtype="float32") : v
   out <- Tensor.matmul probs v_work
+  return fp32_compute ? (Tensor.cast out dtype="float32") : out
+
+
+attention_with_additive_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,VD] -> Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,VD]
+attention_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
+  scale_eff <- (scale == null) ? (1.0 / sqrt HD) : scale
+  scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
+  scores <- scores * scale_eff
+  softcap_val <- (softcap == null) ? 0.0 : softcap
+  scores <- ((softcap == null) or (softcap_val == 0.0)) ? scores : do
+    scaled <- scores / softcap_val
+    squashed <- tanh scaled
+    return squashed * softcap_val
+  probs_in <- scores + mask
+  probs_in <- (rel_bias == null) ? probs_in : (probs_in + rel_bias)
+  probs_in <- (sink_logits == null) ? probs_in : concat probs_in sink_logits dim=-1
+  probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
+  K <- Tensor.size v dim=-2
+  probs <- slice probs dim=-1 start=0 end=K
+  probs <- (probs :: Tensor[B,H,Q,K])
+  probs <- zero_masked_after_softmax ? (Tensor.where keep probs 0) : probs
+  v_work <- fp32_compute ? (Tensor.cast v dtype="float32") : v
+  out <- Tensor.matmul probs v_work
+  return fp32_compute ? (Tensor.cast out dtype="float32") : out
+
+
+attention_gqa_with_additive_mask :: Tensor[B,H,Q,HD] -> Tensor[B,KVH,K,HD] -> Tensor[B,KVH,K,VD] -> Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,VD]
+attention_gqa_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
+  groups <- H / KVH
+  qg <- Tensor.reshape q shape=[B, KVH, groups, Q, HD]
+  kg <- Tensor.unsqueeze k 2
+  vg <- Tensor.unsqueeze v 2
+  scale_eff <- (scale == null) ? (1.0 / sqrt HD) : scale
+  scores <- Tensor.matmul qg (Tensor.transpose kg dim1=3 dim2=4)
+  scores <- (scores :: Tensor[B,KVH,groups,Q,K])
+  scores <- scores * scale_eff
+  softcap_val <- (softcap == null) ? 0.0 : softcap
+  scores <- ((softcap == null) or (softcap_val == 0.0)) ? scores : do
+    scaled <- scores / softcap_val
+    squashed <- tanh scaled
+    return squashed * softcap_val
+  mask_g <- Tensor.reshape mask shape=[B, KVH, groups, Q, K]
+  probs_in <- scores + mask_g
+  probs_in <- (rel_bias == null) ? probs_in : (probs_in + (Tensor.reshape rel_bias shape=[B, KVH, groups, Q, K]))
+  probs_in <- (sink_logits == null) ? probs_in : (concat probs_in (Tensor.reshape sink_logits shape=[B, KVH, groups, Q, 1]) dim=-1)
+  probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
+  K <- Tensor.size v dim=-2
+  probs <- slice probs dim=-1 start=0 end=K
+  probs <- (probs :: Tensor[B,KVH,groups,Q,K])
+  keep_g <- Tensor.reshape keep shape=[B, 1, 1, Q, K] |> Tensor.expand shape=[B, KVH, groups, Q, K]
+  probs <- zero_masked_after_softmax ? (Tensor.where keep_g probs 0) : probs
+  v_work <- fp32_compute ? (Tensor.cast vg dtype="float32") : vg
+  out <- Tensor.matmul probs v_work
+  out <- (out :: Tensor[B,KVH,groups,Q,VD])
+  out <- Tensor.reshape out shape=[B, H, Q, VD]
   return fp32_compute ? (Tensor.cast out dtype="float32") : out
 
 

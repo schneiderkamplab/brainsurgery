@@ -30,12 +30,59 @@ These should stay optional until each pass has precise preconditions, typed vali
   repeats. Models such as Qwen2.5 repeat K/V heads before attention; Graph IR and
   codegen2 should represent this as a view/expand-style operation or teach
   attention lowering to consume grouped K/V directly. This must stay generic over
-  GQA/MQA patterns and should not introduce model-family branches.
+  GQA/MQA patterns and should not introduce model-family branches. Current
+  status: T5Gemma2, T5Gemma UL2, T5Gemma prefix-LM, and SmolLM3 have been
+  migrated off explicit KV repeats and use `attention_gqa_with_additive_mask`.
+  Future work: recognize the generic matmul/scale/additive-mask/softmax GQA
+  subgraph in Graph IR/codegen and lower it to backend SDPA when all semantic
+  guards hold, instead of exposing SDPA as an Axon primitive.
+  The typecheck2 callee-dim capture and codegen2 inlined-temp/type-metadata
+  collision exposed by those migrations have been fixed generically; remaining
+  work is broader family coverage and performance tuning, not blocker work for
+  these migrated rows.
 - High priority: optimize the factorized RoPE apply path. After hoisting
   sin/cos creation out of layer loops, the remaining cost is repeated
   `rotate_half`, expand, multiply, and add work. Add a validated graph rewrite or
   backend-neutral fused op for common RoPE apply patterns, starting with the
   non-interleaved path used by Qwen2/OLMoE-style models.
+- High priority: validate proportional-RoPE factor hoisting on real Gemma4
+  checkpoints when GPU memory is available.
+  `Positions.rope_proportional_factors` /
+  `Positions.rope_pair_proportional_factors` now exist, and Gemma4 dense/E/MoE
+  have been migrated to precompute local/full proportional RoPE factors once per
+  forward. Test rows and graph/codegen dumps are clean. Dense 31B and MoE 26B
+  still need clean real-checkpoint performance reruns on idle GPUs; an attempted
+  MoE 26B run fell back to CPU after CUDA OOM on an occupied GPU.
+- High priority: continue DeepSeek-family real-checkpoint reruns.
+  DeepSeek v1 now precomputes base RoPE factors and causal masks and uses
+  grouped selected-expert FFN on the test/materialized rows. DeepSeek v2 now
+  precomputes its causal mask and exact YaRN RoPE factors on the tiny generic
+  and materialized test rows. DeepSeek v3 now precomputes causal masks and both
+  base/YaRN split-interleaved RoPE factors on the tiny generic and materialized
+  test rows. Remaining work is clean real 16B/v2-lite/v3 reruns on idle GPUs.
+  Keep changes model-file/generic-builtin only; avoid checkpoint-family routing
+  or codegen special cases.
+- High priority: add a generic fused selected-expert FFN path for MoE models.
+  GPT-OSS 20B still spends most Axon time in the two `_expert_linear` calls even
+  after RoPE/mask/GQA cleanup. The safe next step is a typed Graph IR/codegen
+  pattern for selected-expert FFN:
+  `expert_linear(gate_up) -> alpha/limit-aware gated activation -> expert_linear(down) -> scale/sum`.
+  This must preserve configurable GPT-OSS `SWIGLU_ALPHA` semantics, avoid
+  model-family branches, and validate on GPT-OSS plus existing direct
+  `NN.expert_linear` users such as Mixtral and GraniteMoE. Also audit the current
+  codegen2-torch expert-bank materialization helpers: GPT-OSS checkpoints
+  already expose `gate_up_proj_*` aliases after MXFP4 materialization, so any
+  extra `gate_proj/up_proj -> gate_up_proj` synthesis should be proven useful
+  for other generic MoE layouts or moved to explicit load/config adaptation
+  rather than staying as unexplained core codegen scaffolding.
+- High priority: add an incremental/cache-aware Mamba selective-scan execution
+  path. The current generic `_causal_conv1d` and `_mamba_scan` primitives remove
+  the worst graph-node explosion and make BlackMamba much faster, but decoder
+  generation still recomputes a full sequence scan for each token. A correct
+  fix should make the recurrent SSM state explicit in Axon/Graph IR or add a
+  validated backend-neutral scan/cache region, then codegen should execute one
+  step per generated token. Avoid model-family branches; validate on
+  `BlackMamba-2.8B`, `mamba-2.8b-hf`, and Jamba/Mamba2-style users separately.
 - High priority: implement main-module-anchored intra- and inter-procedural
   domain analysis over the pruned reachable Graph IR. It should infer facts that
   hold on all non-dead paths from `MAIN`, including null/non-null, boolean,

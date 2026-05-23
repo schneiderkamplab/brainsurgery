@@ -25,7 +25,9 @@ from ..ast import (
     AxonFile,
     AxonDefinition,
     AxonParam,
+    AxonRepeat,
     AxonReturn,
+    AxonYield,
     Constraint,
     DimExprBinary,
     DimToken,
@@ -230,7 +232,13 @@ def _expr_to_operand(expr: AxonExpr, ctx: _GraphLowerCtx | None = None) -> Graph
 
 
 def _graph_ref(value: GraphValue) -> GraphValueRef:
-    return GraphValueRef(name=value.name, type_expr=value.type_expr, dims=value.dims)
+    return GraphValueRef(name=value.name, type_expr=_value_ref_type(value), dims=value.dims)
+
+
+def _value_ref_type(value: GraphValue) -> TypeExpr:
+    if value.optional and not isinstance(value.type_expr, TypeOptional):
+        return TypeOptional(value.type_expr)
+    return value.type_expr
 
 
 def _kwarg_to_attr(value: object, ctx: _GraphLowerCtx | None = None) -> GraphAttr:
@@ -499,6 +507,87 @@ def _node_for_expr(
     )
 
 
+def _repeat_yield_expr(stmt: AxonRepeat) -> AxonExpr:
+    if len(stmt.body) != 1 or not isinstance(stmt.body[0], AxonYield):
+        raise ValueError("graph IR lowering requires flat repeat bodies to be a single yield")
+    if len(stmt.body[0].values) != 1:
+        raise ValueError("graph IR lowering requires flat repeat yields to contain one expression")
+    return stmt.body[0].values[0]
+
+
+def _ascribed_call(expr: AxonExpr) -> AxonExprCall | None:
+    if isinstance(expr, AxonExprAscribe):
+        return _ascribed_call(expr.expr)
+    if isinstance(expr, AxonExprCall):
+        return expr
+    return None
+
+
+def _node_for_repeat(
+    stmt: AxonRepeat,
+    *,
+    node_id: str,
+    module_name: str,
+    ctx: _GraphLowerCtx,
+) -> GraphNode:
+    if stmt.targets is None:
+        raise ValueError("graph IR lowering requires flat repeat targets")
+    yield_expr = _repeat_yield_expr(stmt)
+    call = _ascribed_call(yield_expr)
+    if call is None:
+        raise ValueError("graph IR lowering requires flat repeat body to yield a helper call")
+    carry_names = tuple(stmt.carry or ())
+    if len(stmt.targets) != len(carry_names):
+        raise ValueError("graph IR lowering requires repeat targets to match carry arity")
+
+    types = _target_types(yield_expr, len(stmt.targets))
+    dims = _target_dims(yield_expr, len(stmt.targets))
+    carry_index = {name: index for index, name in enumerate(carry_names)}
+    inputs: list[GraphOperand] = [
+        _lower_expr_to_operand(stmt.from_expr, ctx),
+        _lower_expr_to_operand(stmt.to_expr, ctx),
+        _lower_expr_to_operand(stmt.step_expr, ctx),
+    ]
+    inputs.extend(
+        GraphValueRef(name=ctx.env.get(name, name), type_expr=tp, dims=dim)
+        for name, tp, dim in zip(carry_names, types, dims, strict=True)
+    )
+    attrs: dict[str, GraphAttr] = {
+        "callee": GraphLiteral(call.callee, TypeString()),
+        "var": GraphLiteral(stmt.var, TypeString()),
+        "arg_count": GraphLiteral(len(call.args), TypeInt()),
+        "carry_count": GraphLiteral(len(carry_names), TypeInt()),
+    }
+    for index, name in enumerate(carry_names):
+        attrs[f"carry_{index}"] = GraphLiteral(name, TypeString())
+    for index, arg in enumerate(call.args):
+        if isinstance(arg, AxonExprName) and arg.name == stmt.var:
+            role = "iter"
+        elif isinstance(arg, AxonExprName) and arg.name in carry_index:
+            role = f"carry:{carry_index[arg.name]}"
+        else:
+            input_index = len(inputs)
+            inputs.append(_lower_expr_to_operand(arg, ctx))
+            role = f"input:{input_index}"
+        attrs[f"arg_{index}"] = GraphLiteral(role, TypeString())
+
+    graph_targets = tuple(ctx.define_target(target) for target in stmt.targets)
+    outputs = tuple(
+        GraphValue(name=target, type_expr=type_expr, dims=dim)
+        for target, type_expr, dim in zip(graph_targets, types, dims, strict=True)
+    )
+    return GraphNode(
+        id=node_id,
+        op=GraphOp("core.repeat"),
+        inputs=tuple(inputs),
+        attrs=attrs,
+        outputs=outputs,
+        source_module=module_name,
+        type_expr=_expr_type(yield_expr),
+        dims=yield_expr.inferred_dims,
+    )
+
+
 def _module_to_graph(module: AxonDefinition) -> GraphModule:
     inputs = tuple(_param_to_value(param) for param in module.params)
     input_names = {value.name for value in inputs}
@@ -515,6 +604,16 @@ def _module_to_graph(module: AxonDefinition) -> GraphModule:
                 _node_for_expr(
                     stmt.expr,
                     targets=stmt.targets,
+                    node_id=ctx.node_id(),
+                    module_name=module.name,
+                    ctx=ctx,
+                )
+            )
+            continue
+        if isinstance(stmt, AxonRepeat):
+            ctx.nodes.append(
+                _node_for_repeat(
+                    stmt,
                     node_id=ctx.node_id(),
                     module_name=module.name,
                     ctx=ctx,
@@ -967,6 +1066,11 @@ def _simplify_dim_token(dim: DimToken) -> DimToken:
                 return left
             if left == right:
                 return 0
+            if isinstance(left, DimExprBinary) and left.op == "+":
+                if left.left == right:
+                    return left.right
+                if left.right == right:
+                    return left.left
             if isinstance(left, DimExprBinary) and left.op == "*":
                 if left.left == right and isinstance(left.right, int):
                     remaining = left.right - 1
@@ -1347,6 +1451,13 @@ def _validate_core_expr_contract(
         _require_type_compatible(input_types[1], expr.type_expr, context=f"{context} true branch")
         _require_type_compatible(input_types[2], expr.type_expr, context=f"{context} false branch")
         return
+    if op_name == "core.repeat":
+        if len(input_types) < 3:
+            raise ValueError(f"{context}: core.repeat expects at least from/to/step inputs")
+        _require_type_compatible(input_types[0], TypeInt(), context=f"{context} from")
+        _require_type_compatible(input_types[1], TypeInt(), context=f"{context} to")
+        _require_type_compatible(input_types[2], TypeInt(), context=f"{context} step")
+        return
     if op_name.startswith("core.binary."):
         if len(input_types) != 2:
             raise ValueError(f"{context}: {op_name} expects two inputs")
@@ -1361,6 +1472,87 @@ def _validate_core_expr_contract(
             for index, actual in enumerate(input_types):
                 _require_type_compatible(actual, expr.type_expr.item, context=f"{context} list item {index}")
         return
+
+
+def _repeat_attr_string(node: GraphNode, key: str, *, context: str) -> str:
+    value = node.attrs.get(key)
+    if not isinstance(value, GraphLiteral) or not isinstance(value.value, str):
+        raise ValueError(f"{context}: core.repeat attr {key!r} must be a string literal")
+    return value.value
+
+
+def _repeat_attr_int(node: GraphNode, key: str, *, context: str) -> int:
+    value = node.attrs.get(key)
+    if not isinstance(value, GraphLiteral) or type(value.value) is not int:
+        raise ValueError(f"{context}: core.repeat attr {key!r} must be an int literal")
+    return value.value
+
+
+def _validate_core_repeat_node(
+    node: GraphNode,
+    *,
+    env: dict[str, GraphValue],
+    globals_env: dict[str, GraphValue],
+    dim_symbols: set[str],
+    modules_by_name: dict[str, GraphModule],
+    context: str,
+) -> None:
+    if len(node.inputs) < 3:
+        raise ValueError(f"{context}: core.repeat expects at least from/to/step inputs")
+    callee_name = _repeat_attr_string(node, "callee", context=context)
+    arg_count = _repeat_attr_int(node, "arg_count", context=context)
+    carry_count = _repeat_attr_int(node, "carry_count", context=context)
+    if carry_count != len(node.outputs):
+        raise ValueError(f"{context}: core.repeat carry/output arity mismatch")
+    if len(node.inputs) < 3 + carry_count:
+        raise ValueError(f"{context}: core.repeat missing carry inputs")
+    callee = modules_by_name.get(callee_name)
+    if callee is None:
+        raise ValueError(f"{context}: core.repeat references unknown callee {callee_name!r}")
+    if len(callee.inputs) != arg_count:
+        raise ValueError(f"{context}: core.repeat call arity mismatch for {callee_name!r}")
+    actuals: list[GraphOperand] = []
+    for index in range(arg_count):
+        role = _repeat_attr_string(node, f"arg_{index}", context=context)
+        if role == "iter":
+            actuals.append(GraphLiteral(0, TypeInt()))
+            continue
+        if role.startswith("carry:"):
+            carry_index = int(role.removeprefix("carry:"))
+            if carry_index < 0 or carry_index >= carry_count:
+                raise ValueError(f"{context}: invalid core.repeat carry role {role!r}")
+            actuals.append(node.inputs[3 + carry_index])
+            continue
+        if role.startswith("input:"):
+            input_index = int(role.removeprefix("input:"))
+            if input_index < 0 or input_index >= len(node.inputs):
+                raise ValueError(f"{context}: invalid core.repeat input role {role!r}")
+            actuals.append(node.inputs[input_index])
+            continue
+        raise ValueError(f"{context}: invalid core.repeat arg role {role!r}")
+    for formal, actual in zip(callee.inputs, actuals, strict=True):
+        actual_type = _operand_type_checked(
+            actual,
+            env=env,
+            globals_env=globals_env,
+            dim_symbols=dim_symbols,
+            modules_by_name=modules_by_name,
+            context=f"{context} arg {formal.name!r}",
+        )
+        _require_actual_compatible_with_formal(
+            actual_type,
+            formal,
+            context=f"{context} arg {formal.name!r}",
+        )
+    expected_types = _instantiated_module_output_types(callee, tuple(actuals), len(node.outputs))
+    if len(expected_types) != len(node.outputs):
+        raise ValueError(f"{context}: core.repeat output arity mismatch")
+    for index, (output, expected) in enumerate(zip(node.outputs, expected_types, strict=True)):
+        _require_type_compatible(
+            output.type_expr,
+            expected,
+            context=f"{context} output {index}",
+        )
 
 
 def _operand_type_checked(
@@ -1383,7 +1575,8 @@ def _operand_type_checked(
     if isinstance(operand, GraphValueRef):
         value = env.get(operand.name) or globals_env.get(operand.name)
         if value is not None:
-            _require_type_compatible(operand.type_expr, value.type_expr, context=context)
+            value_type = _value_ref_type(value)
+            _require_type_compatible(operand.type_expr, value_type, context=context)
             if (
                 operand.dims is not None
                 and value.dims is not None
@@ -1393,7 +1586,7 @@ def _operand_type_checked(
                     f"{context}: stale dims for {operand.name!r}: "
                     f"expected {value.dims!r}, got {operand.dims!r}"
                 )
-            return value.type_expr
+            return value_type
         if isinstance(operand.type_expr, TypeDim) and operand.name in dim_symbols:
             return operand.type_expr
         raise ValueError(f"{context} uses undefined value {operand.name!r}")
@@ -1640,6 +1833,15 @@ def _validate_graph_module(
                     expected_type,
                     context=f"graph IR node {node.id!r} call result {index} stale type",
                 )
+        elif node.op.name == "core.repeat":
+            _validate_core_repeat_node(
+                node,
+                env=env,
+                globals_env=globals_env,
+                dim_symbols=dim_symbols,
+                modules_by_name=modules_by_name,
+                context=f"graph IR node {node.id!r}",
+            )
         elif node.op.name.startswith("core."):
             _validate_core_expr_contract(
                 GraphExpr(

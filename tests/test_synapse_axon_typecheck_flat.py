@@ -68,14 +68,15 @@ main x = do
     flat = _flat(parse_axon_program(source), main_module="main")
     typed = typecheck2_flat_axon_file(flat, main_module="main")
     validate_typed_axon_file(typed, main_module="main")
-    helper = next(
-        module
-        for module in typed.modules
-        if module.name.startswith("main__loop_h_recur_") and "_recur_continue_" not in module.name
-    )
+    module = next(module for module in typed.modules if module.name == "main")
+    repeat = next(stmt for stmt in module.statements if isinstance(stmt, AxonRepeat))
+    assert repeat.name is None
+    assert repeat.from_expr.inferred_type is not None
+    assert repeat.to_expr.inferred_type is not None
+    assert repeat.step_expr.inferred_type is not None
+    helper = next(module for module in typed.modules if module.name.startswith("main__loop_h_step_"))
     assert isinstance(helper.params[0].type_expr, TypeInt)
-    assert isinstance(helper.params[3].type_expr, TypeTensor)
-    assert isinstance(helper.return_type_expr, TypeTensor)
+    assert not any(module.name.startswith("main__loop_h_recur_") for module in typed.modules)
 
 
 def test_typecheck_flat_populates_expr_annotations() -> None:
@@ -293,7 +294,7 @@ def test_typecheck_flat_preserves_cache_update_shape_information() -> None:
     update_line = next(
         line for line in text.splitlines() if "k, v, new_kv <-" in line and "Cache.update" in line
     )
-    assert "?Tensor[B,K]" in block_sig
+    assert "Tensor[B,1,S,K]" in block_sig
     assert (
         "?CacheLayer[B,H,P,DH]" in block_sig or "?(Tensor[B,H,P,DH], Tensor[B,H,P,DH])" in block_sig
     )
@@ -337,6 +338,49 @@ def test_typecheck_attention_preserves_matmul_and_mask_broadcast_shapes(tmp_path
     assert "Tensor[B,H,Q,VD]" in out_line
 
 
+def test_typecheck_attention_allows_relative_bias_broadcast(tmp_path: Path) -> None:
+    source = """
+import Attention (attention)
+
+main :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,HD] -> Tensor[B,1,Q,K] -> Tensor[B,H,1,K] -> Tensor[B,H,Q,HD]
+main q k v keep rel_bias = attention q k v keep rel_bias=rel_bias
+"""
+    path = tmp_path / "attention_rel_bias_main.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    text = render_axon_file(typed, show_types=True)
+    probs_line = next(
+        line
+        for line in text.splitlines()
+        if "probs_in <-" in line and "rel_bias" in line and "+" in line
+    )
+    assert "Tensor[B,H,Q,K]" in probs_line
+
+
+def test_typecheck_transpose_matmul_infers_attention_score_shape(tmp_path: Path) -> None:
+    source = """
+import Tensor (matmul, transpose)
+
+main :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,Q,K]
+main q k = do
+  kt <- transpose k dim1=2 dim2=3
+  scores <- matmul q kt
+  return scores
+"""
+    path = tmp_path / "transpose_matmul.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    text = render_axon_file(typed, show_types=True)
+    kt_line = next(line for line in text.splitlines() if "kt <-" in line)
+    scores_line = next(line for line in text.splitlines() if "scores <-" in line)
+    assert "Tensor[B,H,HD,K]" in kt_line
+    assert "Tensor[B,H,Q,K]" in scores_line
+
+
 def test_typecheck_rejects_chunk_wrapper_that_claims_unchanged_shape() -> None:
     source = """
 bad_chunk :: Tensor[..S] -> List[Tensor[..S]]
@@ -369,6 +413,30 @@ main x = do
     split_line = next(line for line in text.splitlines() if "a, c <-" in line and "Tensor.split" in line)
     assert "Tensor[B,S,A]" in split_line
     assert "Tensor[B,S,C]" in split_line
+
+
+def test_typecheck2_gegelu_halves_last_dimension(tmp_path: Path) -> None:
+    source = """
+import Activations (gegelu)
+
+main :: Tensor[B,S,2 * D] -> Tensor[B,S,D]
+main x = gegelu x
+"""
+    path = tmp_path / "gegelu_main.axon"
+    path.write_text(source)
+    resolved = resolve_axon_program_from_path(path).ast
+    flat = _flat(resolved, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    text = render_axon_file(typed, show_types=True)
+    assert "Activations.gegelu :: Tensor[..S,D] -> ?Float -> Tensor[..S,D / 2]" in text
+    assert "main :: Tensor[B,S,2 * D] -> Tensor[B,S,D]" in text
+    gegelu_line = next(
+        line
+        for line in text.splitlines()
+        if "Activations.gegelu" in line and "__flat_1 <-" in line
+    )
+    assert "Tensor[B,S,D]" in gegelu_line
 
 
 def test_tensor_shape_constructors_typecheck_and_run_with_runtime2(tmp_path: Path) -> None:
@@ -426,7 +494,7 @@ def test_typecheck2_lowers_generic_mamba_without_shape_growth() -> None:
     assert "Tensor.concat" not in next(
         module_text
         for module_text in text.split("\n\n")
-        if module_text.startswith("SSM.mamba_scan ::")
+        if module_text.startswith("SSM.mamba_scan_step ::")
     )
 
 

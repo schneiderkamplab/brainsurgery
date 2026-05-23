@@ -24,7 +24,7 @@ gelu_new x = _activations_gelu_new x
 gelu_pytorch_tanh :: Tensor[..S] -> Tensor[..S]
 gelu_pytorch_tanh x = _activations_gelu_pytorch_tanh x
 
-gegelu :: Tensor[..S] -> ?Float -> Tensor[..S]
+gegelu :: Tensor[..S,D] -> ?Float -> Tensor[..S,D / 2]
 gegelu x ?limit=null = _activations_gegelu x limit
 
 relu :: Tensor[..S] -> Tensor[..S]

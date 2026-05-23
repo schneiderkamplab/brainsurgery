@@ -188,7 +188,51 @@ def _validate_statement_flat(
             f"Axon flat validation failed in module {module.name!r}: conditional statement remains"
         )
     if isinstance(stmt, AxonRepeat):
-        raise ValueError(f"Axon flat validation failed in module {module.name!r}: repeat remains")
+        if stmt.name is not None:
+            raise ValueError(
+                f"Axon flat validation failed in module {module.name!r}: scoped repeat remains"
+            )
+        _validate_expr_flat(
+            stmt.from_expr,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=False,
+        )
+        _validate_expr_flat(
+            stmt.to_expr,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=False,
+        )
+        _validate_expr_flat(
+            stmt.step_expr,
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=False,
+        )
+        if len(stmt.body) != 1 or not isinstance(stmt.body[0], AxonYield):
+            raise ValueError(
+                f"Axon flat validation failed in module {module.name!r}: "
+                "repeat body must be a single yield expression"
+            )
+        yield_stmt = stmt.body[0]
+        if len(yield_stmt.values) != 1:
+            raise ValueError(
+                f"Axon flat validation failed in module {module.name!r}: "
+                "repeat body must yield one expression"
+            )
+        if isinstance(yield_stmt.values[0], AxonExprTernary):
+            raise ValueError(
+                f"Axon flat validation failed in module {module.name!r}: "
+                "repeat body expression must not be a ternary"
+            )
+        _validate_expr_flat(
+            yield_stmt.values[0],
+            module=module,
+            modules_by_name=modules_by_name,
+            allow_call=True,
+        )
+        return
     if isinstance(stmt, AxonScopeBind):
         raise ValueError(
             f"Axon flat validation failed in module {module.name!r}: scope bind remains"

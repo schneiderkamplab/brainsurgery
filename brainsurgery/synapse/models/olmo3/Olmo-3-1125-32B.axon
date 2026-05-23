@@ -6,9 +6,9 @@
 
 import Activations (silu)
 
-import Attention (attention, merge_heads, reshape_heads)
+import Attention (attention, merge_heads)
 
-import Masking (causal_mask)
+import Masking (causal_mask_for_input)
 
 import Math (mul, sqrt)
 
@@ -56,18 +56,21 @@ ROPE_CONTEXT = 8192
 
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
-olmo3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
-olmo3_block x i pos_ids attn_mask past_kv = do
+olmo3_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+olmo3_block x i pos_ids mask_slide mask_full past_kv = do
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj x dim=(NUM_HEADS * MODEL_HEAD_DIM) |> NN.rmsnorm@q_norm eps=EPS cast_float=true |> reshape_heads heads=NUM_HEADS
-    k <- NN.linear@k_proj x dim=(KVH * MODEL_HEAD_DIM) |> NN.rmsnorm@k_norm eps=EPS cast_float=true |> reshape_heads heads=KVH
-    v <- NN.linear@v_proj x dim=(KVH * MODEL_HEAD_DIM) |> reshape_heads heads=KVH
+    q <- NN.linear@q_proj x dim=(NUM_HEADS * MODEL_HEAD_DIM) |> NN.rmsnorm@q_norm eps=EPS cast_float=true
+    q <- q |> Tensor.reshape shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    k <- NN.linear@k_proj x dim=(KVH * MODEL_HEAD_DIM) |> NN.rmsnorm@k_norm eps=EPS cast_float=true
+    k <- k |> Tensor.reshape shape=[B, S, KVH, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    v <- NN.linear@v_proj x dim=(KVH * MODEL_HEAD_DIM)
+    v <- v |> Tensor.reshape shape=[B, S, KVH, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
     q, k <- rope_pair_yarn q k pos_ids THETA ROPE_SCALE ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT
     k, v, new_kv <- Cache.update past_kv k v
     k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
     v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
-    window <- ((i + 1) % FULL_ATTN_PERIOD) == 0 ? MAX_POSITIONS : SW
-    mask <- causal_mask q k window=window padding_mask=attn_mask
+    full <- ((i + 1) % FULL_ATTN_PERIOD) == 0
+    mask <- full ? mask_full : mask_slide
     a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
     return a, new_kv
   a <- NN.rmsnorm@post_attention_layernorm a eps=EPS cast_float=true
@@ -81,13 +84,17 @@ olmo3_block x i pos_ids attn_mask past_kv = do
 
 olmo3 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 olmo3 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
+  past_length <- Cache.past_length past_kv
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  key_len <- past_length + S
+  mask_slide <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=SW
+  mask_full <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
     x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
-      x, new_i <- olmo3_block x i pos_ids attn_mask past_i
+      x, new_i <- olmo3_block x i pos_ids mask_slide mask_full past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- NN.rmsnorm@norm x eps=EPS cast_float=true

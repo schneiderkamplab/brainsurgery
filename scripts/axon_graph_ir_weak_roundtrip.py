@@ -91,7 +91,8 @@ def _weak_graph_render(
 ) -> str:
     normalized = normalize_closed_axon_file(parse_axon_program(source), main_module=main_module)
     elaborated = elaborate_closed_axon_file(normalized, main_module=main_module)
-    typed = typecheck2_flat_axon_file(elaborated, main_module=main_module)
+    flattened = flatten_closed_axon_file(elaborated, main_module=main_module)
+    typed = typecheck2_flat_axon_file(flattened, main_module=main_module)
     if optimize_ast:
         typed = optimize_safe_flat_typed_axon_file(typed, main_module=main_module)
     return _graph_render(
@@ -185,7 +186,7 @@ def run_graph_ir_weak_roundtrip(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Weak Graph IR roundtrip: full pipeline to graph-rendered Axon, then reparse/retypecheck/regraph without reresolve/reflatten."
+        description="Weak Graph IR roundtrip: full pipeline to graph-rendered Axon, then reparse/renormalize/reflatten/retypecheck/regraph without reresolve."
     )
     parser.add_argument("paths", nargs="*", type=Path, help="Axon files or directories.")
     parser.add_argument("--main-module")

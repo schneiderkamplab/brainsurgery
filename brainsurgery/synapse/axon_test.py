@@ -2835,6 +2835,7 @@ def _run_axon_test_single(
     hf_align_add_fp32_accum: bool = False,
     hf_align_linear_fp32_accum: bool = False,
     hf_align_norm_fp32: bool = False,
+    hf_attn_implementation: str | None = None,
     compile_hf: bool = False,
     compile_axon: bool = False,
     compile_backend: str | None = None,
@@ -3021,6 +3022,8 @@ def _run_axon_test_single(
                     graph_program,
                     class_name=class_name,
                     model_config=model_config,
+                    profile=profile_axon,
+                    align_devices=axon_backend == "pipeline2-torch",
                 )
             generated_py_path.write_text(code, encoding="utf-8")
             model_cls = _load_generated_class(generated_py_path, class_name)
@@ -3079,6 +3082,7 @@ def _run_axon_test_single(
                     setattr(hf_config, "num_experts", int(getattr(hf_config, "num_local_experts")))
         if (
             hf_config is None
+            and hf_attn_implementation is None
             and axon_backend == "pipeline2-torch"
             and resolved_model_task in {"causal_lm", "seq2seq_lm"}
             and not skip_hf
@@ -3088,6 +3092,16 @@ def _run_axon_test_single(
                 trust_remote_code=effective_trust_remote_code,
             )
             hf_config = _patch_deepseek_v4_reference_runtime_config(hf_config)
+        if hf_attn_implementation is not None:
+            token = str(hf_attn_implementation).strip()
+            if not token:
+                raise ValueError("--hf-attn-implementation must not be empty")
+            if hf_config is None:
+                hf_config = _load_auto_config_with_compat_fallback(
+                    resolved_hf_model_dir,
+                    trust_remote_code=effective_trust_remote_code,
+                )
+            setattr(hf_config, "_attn_implementation", token)
         exec_device_str = str(resolved_device)
         tokenizer_obj, input_ids_cpu, attention_mask_cpu = tokenize_prompts(
             prompts=prompts,
@@ -3726,6 +3740,8 @@ def _run_axon_test_single(
                                     max_new_tokens=hf_max_new_tokens,
                                     eos_token_id=tokenizer_obj.eos_token_id,
                                     pad_token_id=pad_id,
+                                    num_beams=1,
+                                    do_sample=False,
                                     use_cache=False,
                                 )[0]
                             )
@@ -3744,6 +3760,9 @@ def _run_axon_test_single(
                         max_new_tokens=hf_max_new_tokens,
                         eos_token_id=tokenizer_obj.eos_token_id,
                         pad_token_id=tokenizer_obj.eos_token_id,
+                        num_beams=1,
+                        do_sample=False,
+                        use_cache=False,
                     )
 
                 hf_gen, hf_time = _time_generate("HF", lambda model=hf: _run_hf_generate(model))
@@ -3843,9 +3862,13 @@ def _run_axon_test_single(
                     storage_dtype=adapter_storage_dtype,
                     param_devices=param_devices,
                 )
-            elif resolved_model_type == "phi3small":
+            elif axon_backend != "pipeline2-torch":
                 local_state_dict = {
-                    key: value.to(device=target_device, dtype=resolved_dtype)
+                    key: (
+                        value.to(device=target_device, dtype=resolved_dtype)
+                        if value.is_floating_point()
+                        else value.to(device=target_device)
+                    )
                     for key, value in local_state_dict.items()
                 }
             if axon_backend == "pipeline2-torch":
@@ -4420,6 +4443,7 @@ def run_axon_test(
     hf_align_add_fp32_accum: bool = False,
     hf_align_linear_fp32_accum: bool = False,
     hf_align_norm_fp32: bool = False,
+    hf_attn_implementation: str | None = None,
     compile_hf: bool = False,
     compile_axon: bool = False,
     compile_backend: str | None = None,
@@ -4455,6 +4479,7 @@ def run_axon_test(
         hf_align_add_fp32_accum=hf_align_add_fp32_accum,
         hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
         hf_align_norm_fp32=hf_align_norm_fp32,
+        hf_attn_implementation=hf_attn_implementation,
         compile_hf=compile_hf,
         compile_axon=compile_axon,
         compile_backend=compile_backend,

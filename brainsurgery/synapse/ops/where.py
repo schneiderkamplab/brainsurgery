@@ -24,7 +24,11 @@ def type_rule(
 ) -> Any | None:
     del kwarg_types, args, kwargs
     dims: tuple[Any, ...] | None = None
-    for arg_type in arg_types:
+    # torch.where broadcasts all three operands, but the selected value
+    # operands define the data shape. Processing them before the condition
+    # preserves generic cases such as keep[B,1,Q,K] with values[B,H,Q,K].
+    ordered_arg_types = (*arg_types[1:], arg_types[0])
+    for arg_type in ordered_arg_types:
         arg_dims = helpers.type_dims(arg_type)
         if arg_dims is None:
             continue

@@ -31,6 +31,7 @@ import Tensor (
 export (
   grouped_sigmoid_router,
   grouped_swiglu_ffn_basic,
+  grouped_swiglu_ffn_separate,
   scatter_add,
   select,
   sigmoid_topk_router,
@@ -38,38 +39,44 @@ export (
   sparsemixer_router,
 )
 
-grouped_sigmoid_router :: Path -> Tensor[B,S,D] -> Dim -> ?Dim -> ?Dim -> ?Bool -> ?Float -> ?Path -> ?Path -> (Tensor[B,S,TOPK], IdxTensor[B,S,TOPK])
-grouped_sigmoid_router@path x top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 ?weight=@weight ?e_score_correction_bias=@e_score_correction_bias = do
+grouped_sigmoid_router :: Path -> Tensor[B,S,D] -> Dim -> Dim -> ?Dim -> ?Dim -> ?Bool -> ?Float -> ?Path -> ?Path -> (Tensor[B,S,TOPK], IdxTensor[B,S,TOPK])
+grouped_sigmoid_router@path x experts top_k ?n_group=1 ?topk_group=1 ?norm_topk_prob=true ?routed_scaling_factor=1.0 ?weight=@weight ?e_score_correction_bias=@e_score_correction_bias = do
   x32 <- cast x dtype="float32"
-  logits <- linear@path x32 dim=null bias=false weight_path=weight
+  logits <- linear@path x32 dim=experts bias=false weight_path=weight
   probs <- sigmoid logits
   b <- size probs 0
   s <- size probs 1
-  e <- size probs 2
+  e <- experts
   eps <- e / n_group
   corr <- param path=e_score_correction_bias |> cast_like probs
   corr <- reshape corr shape=[1, 1, e] |> expand shape=[b, s, e]
   scores <- probs + corr
 
-  group_scores <- (eps == 1)
-    ? (reshape scores shape=[b, s, n_group])
+  masked <- (n_group == 1)
+    ? scores
     : (do
-      top2, _ <- reshape scores shape=[b, s, n_group, eps] |> topk 2 -1 true false
-      a, b2 <- chunk top2 parts=2
-      a <- reshape a shape=[b, s, n_group]
-      b2 <- reshape b2 shape=[b, s, n_group]
-      return a + b2
+      group_scores <- (eps == 1)
+        ? (reshape scores shape=[b, s, n_group])
+        : (do
+          top2, _ <- reshape scores shape=[b, s, n_group, eps] |> topk 2 -1 true false
+          a, b2 <- chunk top2 parts=2
+          a <- reshape a shape=[b, s, n_group]
+          b2 <- reshape b2 shape=[b, s, n_group]
+          return a + b2
+        )
+      _, group_idx <- topk group_scores topk_group -1 true false
+      one <- 1.0
+      group_keep <- zeros_like group_scores |> scatter group_idx one -1
+      score_mask <- unsqueeze group_keep -1 |> expand shape=[b, s, n_group, eps] |> reshape shape=[b, s, e]
+      neg_inf <- (zeros_like scores) - 1.0e30
+      return where (eq score_mask 1.0) scores neg_inf
     )
-  _, group_idx <- topk group_scores topk_group -1 true false
-  one <- 1.0
-  group_keep <- zeros_like group_scores |> scatter group_idx one -1
-  score_mask <- unsqueeze group_keep -1 |> expand shape=[b, s, n_group, eps] |> reshape shape=[b, s, e]
-  neg_inf <- (zeros_like scores) - 1.0e30
-  masked <- where (eq score_mask 1.0) scores neg_inf
   _, topk_indices <- topk masked top_k -1 true false
   topk_weights <- gather probs topk_indices -1
   topk_weights <- norm_topk_prob
-    ? (topk_weights |> log |> softmax dim=-1 dtype="float32")
+    ? do
+      denom <- sum topk_weights dim=-1 keepdim=true
+      return topk_weights / (denom + 1.0e-20)
     : topk_weights
   topk_weights <- (topk_weights * routed_scaling_factor) |> cast_like x
   return topk_weights, topk_indices
@@ -121,13 +128,24 @@ sigmoid_topk_router@path x top_k ?weight=@weight = do
   topk_weights <- sigmoid topk_logits |> cast_like x
   return topk_weights, topk_indices
 
-grouped_swiglu_ffn_basic :: Tensor[B,T,D] -> Tensor[B,T,K] -> IdxTensor[B,T,K] -> Dim -> ?Path -> ?Path -> ?Bool -> ?Bool -> Tensor[B,T,D]
+grouped_swiglu_ffn_basic :: Tensor[B,T,D] -> Tensor[B,T,TOPK] -> IdxTensor[B,T,TOPK] -> Dim -> ?Path -> ?Path -> ?Bool -> ?Bool -> Tensor[B,T,D]
 grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts ?gate_up_weight=@experts.gate_up_proj ?out_weight=@experts.down_proj ?transpose=false ?pre_scale_input=false = do
-  x_sel <- unsqueeze hidden 2 |> expand shape=[B, T, K, D]
+  x_sel <- unsqueeze hidden 2 |> expand shape=[B, T, TOPK, D]
   scale <- unsqueeze topk_scores -1
   x_in <- pre_scale_input ? (x_sel * scale) : x_sel
   gate_up <- expert_linear@w1 x_in topk_indices dim=null bias=false transpose=transpose weight_path=gate_up_weight
   gate, up <- chunk gate_up parts=2
+  x_upd <- gate |> silu |> mul up |> expert_linear@w2 topk_indices dim=D bias=false transpose=transpose weight_path=out_weight
+  x_weighted <- pre_scale_input ? x_upd : (x_upd * scale)
+  return sum x_weighted dim=2 keepdim=false
+
+grouped_swiglu_ffn_separate :: Tensor[B,T,D] -> Tensor[B,T,TOPK] -> IdxTensor[B,T,TOPK] -> Dim -> Dim -> ?Path -> ?Path -> ?Path -> ?Bool -> ?Bool -> Tensor[B,T,D]
+grouped_swiglu_ffn_separate hidden topk_scores topk_indices experts hidden_dim ?gate_weight=@experts.gate_proj ?up_weight=@experts.up_proj ?out_weight=@experts.down_proj ?transpose=false ?pre_scale_input=false = do
+  x_sel <- unsqueeze hidden 2 |> expand shape=[B, T, TOPK, D]
+  scale <- unsqueeze topk_scores -1
+  x_in <- pre_scale_input ? (x_sel * scale) : x_sel
+  gate <- expert_linear@w1 x_in topk_indices dim=hidden_dim bias=false transpose=transpose weight_path=gate_weight
+  up <- expert_linear@w3 x_in topk_indices dim=hidden_dim bias=false transpose=transpose weight_path=up_weight
   x_upd <- gate |> silu |> mul up |> expert_linear@w2 topk_indices dim=D bias=false transpose=transpose weight_path=out_weight
   x_weighted <- pre_scale_input ? x_upd : (x_upd * scale)
   return sum x_weighted dim=2 keepdim=false

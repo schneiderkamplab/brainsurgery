@@ -8,13 +8,13 @@ import Activations (silu)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (causal_mask)
+import Masking (causal_mask_for_input)
 
 import Math (mul)
 
 import Params (has_root)
 
-import Positions (position_ids, rope_pair_freq_scale)
+import Positions (position_ids, rope_freq_scale_factors, rope_pair_base_factors)
 
 import Cache
 
@@ -24,53 +24,68 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 4096
+MODEL_DIM <- do
+  return ((4096 :: Dim) :: Dim)
 
-VOCAB_SIZE = 128256
+VOCAB_SIZE <- do
+  return ((128256 :: Dim) :: Dim)
 
-NUM_LAYERS = 32
+NUM_LAYERS <- do
+  return ((32 :: Dim) :: Dim)
 
-NUM_HEADS = 32
+NUM_HEADS <- do
+  return ((32 :: Dim) :: Dim)
 
-KVH = 8
+KVH <- do
+  return ((8 :: Dim) :: Dim)
 
-MODEL_HEAD_DIM = 64
+MODEL_HEAD_DIM <- do
+  return (false ? (64 :: Dim) : ((MODEL_DIM / NUM_HEADS) :: Dim))
 
-KVD = KVH * MODEL_HEAD_DIM
+KVD <- do
+  return ((KVH * MODEL_HEAD_DIM) :: Dim)
 
-FFN = 14336
+FFN <- do
+  return ((14336 :: Dim) :: Dim)
 
-EPS = 1e-05
+EPS <- do
+  return (1e-05)
 
-THETA = 500000.0
+THETA <- do
+  return (500000.0)
 
-MAX_POSITIONS = 131072
+MAX_POSITIONS <- do
+  return ((131072 :: Dim) :: Dim)
 
-ROPE_SCALE = 8.0
+ROPE_SCALE <- do
+  return (8.0)
 
-ROPE_LOW_FREQ = 1.0
+ROPE_LOW_FREQ <- do
+  return (1.0)
 
-ROPE_HIGH_FREQ = 4.0
+ROPE_HIGH_FREQ <- do
+  return (4.0)
 
-ROPE_CONTEXT = 8192
+ROPE_CONTEXT <- do
+  return ((8192 :: Dim) :: Dim)
 
-HAS_LM_HEAD = has_root "lm_head"
+HAS_LM_HEAD <- do
+  return has_root "lm_head"
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
-llama3_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
-llama3_block x pos_ids attn_mask past_kv = do
+llama3_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+llama3_block x rope_sin rope_cos mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
     q <- NN.linear@q_proj xn dim=MODEL_DIM |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
     v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
-    q, k <- rope_pair_freq_scale q k pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
     k, v, new_kv <- Cache.update past_kv k v
     k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
     v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
-    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
     a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
     return a, new_kv
   x <- x + a
@@ -83,16 +98,19 @@ llama3_block x pos_ids attn_mask past_kv = do
 
 llama3 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 llama3 input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
-  logits, new_kv <- scope@model do
-    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-    new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index past_kv i
-      x, new_i <- llama3_block x pos_ids attn_mask past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
-    x <- rms@norm x
-    logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE weight_path=@@lm_head.weight) : (NN.linear@embed_tokens x dim=VOCAB_SIZE)
-    return logits, new_kv
+  past_length <- Cache.past_length past_kv
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_ref <- Tensor.zeros input_ids shape=[B, 1, S, MODEL_HEAD_DIM] dtype="float32"
+  rope_sin, rope_cos <- rope_freq_scale_factors rope_ref pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT
+  key_len <- past_length + S
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  x <- NN.embedding@@model.embed_tokens input_ids dim=MODEL_DIM
+  new_kv <- use_cache ? Cache.init : null
+  x, new_kv <- for@model.layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
+    past_i <- Cache.index past_kv i
+    x, new_i <- llama3_block x rope_sin rope_cos mask past_i
+    new_kv <- Cache.append new_kv new_i
+    yield x, new_kv
+  x <- rms@@model.norm x
+  logits <- HAS_LM_HEAD ? (NN.linear@@lm_head x dim=VOCAB_SIZE weight_path=@@lm_head.weight) : (NN.linear@@model.embed_tokens x dim=VOCAB_SIZE)
   return logits, new_kv

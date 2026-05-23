@@ -11,4 +11,4 @@ param :: Path -> Tensor[..S]
 param path = _params_param path
 
 param_scale :: Tensor[..S] -> ?Path -> Tensor[..S]
-param_scale x ?scale_path=@layer_scalar = x * (param scale_path)
+param_scale x ?scale_path=@layer_scalar = ((x * (param scale_path)) :: Tensor[..S])

@@ -3,7 +3,7 @@
 
 import Activations (gelu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (bidirectional_mask)
+import Masking (bidirectional_mask_for_input)
 import Positions (position_ids)
 import Config
 import NN
@@ -18,13 +18,12 @@ FFN = Config.int @@intermediate_size default=3072
 EPS = Config.float @@layer_norm_eps default=1e-05
 PAD = Config.int @@pad_token_id default=1
 
-roberta_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
-roberta_block x attn_mask = do
+roberta_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+roberta_block x keep = do
   a <- scope@attention do
     q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
     v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
-    keep <- bidirectional_mask q k padding_mask=attn_mask
     return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
   x <- x + a
   x <- NN.layernorm@attention.output.LayerNorm x eps=EPS
@@ -39,6 +38,7 @@ roberta input_ids attn_mask = do
   pos_base <- position_ids input_ids attn_mask=attn_mask pad_fill=-1
   pos_shift <- PAD + 1
   pos_ids <- pos_base + pos_shift
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
   tok_type_ids <- input_ids - input_ids
   tok <- NN.embedding@roberta.embeddings.word_embeddings input_ids dim=MODEL_DIM
   pos <- NN.embedding@roberta.embeddings.position_embeddings pos_ids dim=MODEL_DIM
@@ -47,7 +47,7 @@ roberta input_ids attn_mask = do
   x <- x + typ
   x <- NN.layernorm@roberta.embeddings.LayerNorm x eps=EPS
   x <- for@roberta.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
-    x <- roberta_block x attn_mask
+    x <- roberta_block x keep
     yield x
   logits <- scope@lm_head do
     x <- NN.linear@dense x dim=MODEL_DIM bias=true |> gelu

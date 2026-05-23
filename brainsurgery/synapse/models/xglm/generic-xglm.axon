@@ -3,7 +3,7 @@
 
 import Activations (gelu, relu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (causal_mask)
+import Masking (causal_mask_for_input)
 import Math (sqrt)
 import Params (has_root)
 import Positions (position_ids, sinusoidal_positions)
@@ -13,33 +13,56 @@ import NN
 
 
 
-MODEL_DIM = Config.int @@d_model default=1024
-VOCAB_SIZE = Config.int @@vocab_size default=256008
-NUM_LAYERS = Config.int @@num_layers default=24
-NUM_HEADS = Config.int @@attention_heads default=16
-MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
-FFN = Config.int @@ffn_dim default=4096
-EPS = Config.float @@layer_norm_eps default=1e-05
-MAX_POSITIONS = Config.int @@max_position_embeddings default=2048
-ACT = Config.str @@activation_function default="gelu"
-SCALE_EMB = Config.bool @@scale_embedding default=true
-EMB_SCALE = SCALE_EMB ? (sqrt MODEL_DIM) : 1.0
-ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
+MODEL_DIM <- do
+  return (Config.dim @@d_model default=1024)
 
-HAS_POS = has_root "model.embed_positions.weight"
+VOCAB_SIZE <- do
+  return (Config.dim @@vocab_size default=256008)
+
+NUM_LAYERS <- do
+  return (Config.dim @@num_layers default=24)
+
+NUM_HEADS <- do
+  return (Config.dim @@attention_heads default=16)
+
+MODEL_HEAD_DIM <- do
+  return MODEL_DIM / NUM_HEADS
+
+FFN <- do
+  return (Config.dim @@ffn_dim default=4096)
+
+EPS <- do
+  return (Config.float @@layer_norm_eps default=1e-05)
+
+MAX_POSITIONS <- do
+  return (Config.dim @@max_position_embeddings default=2048)
+
+ACT <- do
+  return (Config.str @@activation_function default="gelu")
+
+SCALE_EMB <- do
+  return (Config.bool @@scale_embedding default=true)
+
+EMB_SCALE <- do
+  return SCALE_EMB ? (sqrt MODEL_DIM) : 1.0
+
+ATTN_SCALE <- do
+  return 1.0 / sqrt MODEL_HEAD_DIM
+
+HAS_POS <- do
+  return has_root "model.embed_positions.weight"
 
 xglm_act :: Tensor[..S] -> Tensor[..S]
 xglm_act x = (ACT == "relu") ? (relu x) : (gelu x)
 
-xglm_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
-xglm_block x attn_mask past_kv = do
+xglm_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+xglm_block x mask past_kv = do
   xn <- NN.layernorm@self_attn_layer_norm x eps=EPS
   a, new_kv <- scope@self_attn do
     q <- NN.linear@q_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@k_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
     v <- NN.linear@v_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
     k, v, new_kv <- Cache.update past_kv k v
-    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
     a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@out_proj dim=MODEL_DIM bias=true
     return a, new_kv
   x <- x + a
@@ -50,22 +73,23 @@ xglm_block x attn_mask past_kv = do
 
 xglm :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 xglm input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=(-1)
+  past_length <- Cache.past_length past_kv
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=(-1)
   pos_ids_rope <- pos_ids + 2
-  x, new_kv <- scope@model do
-    tok <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-    x <- tok * EMB_SCALE
-    pos <- HAS_POS
-      ? (NN.embedding@embed_positions pos_ids_rope dim=MODEL_DIM)
-      : (sinusoidal_positions x pos_ids_rope theta=10000.0 offset=0 padding_idx=null)
-    x <- x + pos
-    new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index past_kv i
-      x, new_i <- xglm_block x attn_mask past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
-    x <- NN.layernorm@layer_norm x eps=EPS
-    return x, new_kv
+  key_len <- past_length + S
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  tok <- NN.embedding@@model.embed_tokens input_ids dim=MODEL_DIM
+  x <- tok * EMB_SCALE
+  pos <- HAS_POS
+    ? (NN.embedding@@model.embed_positions pos_ids_rope dim=MODEL_DIM)
+    : (sinusoidal_positions x pos_ids_rope theta=10000.0 offset=0 padding_idx=null)
+  x <- x + pos
+  new_kv <- use_cache ? Cache.init : null
+  x, new_kv <- for@model.layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
+    past_i <- Cache.index past_kv i
+    x, new_i <- xglm_block x mask past_i
+    new_kv <- Cache.append new_kv new_i
+    yield x, new_kv
+  x <- NN.layernorm@@model.layer_norm x eps=EPS
   logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
   return logits, new_kv

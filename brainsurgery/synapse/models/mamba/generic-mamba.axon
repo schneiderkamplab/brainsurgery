@@ -2,13 +2,17 @@
 {-# TASK "causal_lm" #-}
 {-# PADDING_SIDE "right" #-}
 import Activations (silu)
-import Math (mul)
-import SSM (causal_conv1d, mamba_scan)
+import Math (exp, log, mul)
+import SSM (causal_conv1d_full, mamba_scan_step)
 import Config
+import List
 import NN
+import Params (param)
 import Tensor
 
 
+type MambaLayerCache[B,C,K,D,N] = (Tensor[B,C,K], Tensor[B,D,N])
+type MambaCache[B,C,K,D,N] = List[MambaLayerCache[B,C,K,D,N]]
 
 -- Mamba-2.8B architecture constants.
 MODEL_DIM = Config.int@@hidden_size default=2560                          -- residual hidden size
@@ -22,31 +26,107 @@ EPS = Config.float@@layer_norm_epsilon default=1e-5               -- RMSNorm eps
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-mamba_mixer :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
-mamba_mixer x attn_mask = do
+causal_conv1d_cached :: Tensor[B,S,C] -> ?Tensor[B,C,K] -> Tensor[C,1,K] -> Tensor[C] -> String -> (Tensor[B,S,C], Tensor[B,C,K])
+causal_conv1d_cached x past w b activation = do
+  x_c <- Tensor.transpose x dim1=1 dim2=2
+  kernel <- Tensor.size w dim=-1
+  zero_prefix <- Tensor.zeros x_c shape=[B, C, kernel - 1]
+  prefix <- (past == null) ? zero_prefix : Tensor.slice past dim=-1 start=1 end=kernel
+  conv_input <- Tensor.concat prefix x_c dim=-1
+  y_all <- causal_conv1d_full (Tensor.transpose conv_input dim1=1 dim2=2) w b activation
+  y <- Tensor.slice y_all dim=1 start=(kernel - 1) end=(kernel - 1 + S)
+  total <- Tensor.size conv_input dim=-1
+  state_start <- total - kernel
+  conv_state <- Tensor.slice conv_input dim=-1 start=state_start end=total
+  return y, conv_state
+
+causal_conv1d_cached_step :: Tensor[B,S,C] -> Tensor[B,C,K] -> Tensor[C,1,K] -> Tensor[C] -> String -> (Tensor[B,S,C], Tensor[B,C,K])
+causal_conv1d_cached_step x past w b activation = do
+  x_c <- Tensor.transpose x dim1=1 dim2=2
+  kernel <- Tensor.size w dim=-1
+  past_tail <- Tensor.slice past dim=-1 start=1 end=kernel
+  conv_state <- Tensor.concat past_tail x_c dim=-1
+  y_all <- causal_conv1d_full (Tensor.transpose conv_state dim1=1 dim2=2) w b activation
+  y <- Tensor.slice y_all dim=1 start=(kernel - 1) end=kernel
+  y <- Tensor.reshape y shape=[B, S, C]
+  return y, conv_state
+
+mamba_scan_cached :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S,N] -> Tensor[B,S,N] -> ?Tensor[B,D,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,S,D], Tensor[B,D,N])
+mamba_scan_cached u delta b c past_state a d = do
+  u_t0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B, D]
+  b_t0 <- Tensor.slice b dim=1 start=0 end=1 |> Tensor.reshape shape=[B, N]
+  zero_state <- ((Tensor.unsqueeze u_t0 dim=-1) * (Tensor.unsqueeze b_t0 dim=1)) * 0.0
+  state <- (past_state == null) ? zero_state : past_state
+  y_all <- Tensor.zeros_like u
+  state, y_all <- for t <- [0..S) carry (state, y_all) do
+    u_t <- Tensor.slice u dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, D]
+    delta_t <- Tensor.slice delta dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, D]
+    b_t <- Tensor.slice b dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, N]
+    c_t <- Tensor.slice c dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, N]
+    state, y_t <- mamba_scan_step state u_t delta_t b_t c_t a d
+    y_step <- Tensor.reshape y_t shape=[B, 1, D]
+    idx <- Tensor.fill y_step t dtype="long"
+    y_all <- Tensor.scatter y_all idx y_step dim=1
+    yield state, y_all
+  return y_all, state
+
+mamba_scan_cached_step :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S,N] -> Tensor[B,S,N] -> Tensor[B,D,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,S,D], Tensor[B,D,N])
+mamba_scan_cached_step u delta b c past_state a d = do
+  u_t <- Tensor.reshape u shape=[B, D]
+  delta_t <- Tensor.reshape delta shape=[B, D]
+  b_t <- Tensor.reshape b shape=[B, N]
+  c_t <- Tensor.reshape c shape=[B, N]
+  state, y_t <- mamba_scan_step past_state u_t delta_t b_t c_t a d
+  y <- Tensor.reshape y_t shape=[B, S, D]
+  return y, state
+
+mamba_mixer :: Tensor[B,S,D] -> ?MambaLayerCache[B,I,K,I,N] -> (Tensor[B,S,D], MambaLayerCache[B,I,K,I,N])
+mamba_mixer x past = do
   in_proj <- NN.linear@in_proj x dim=2*I
   u, gate <- Tensor.split in_proj sizes=[I, I]
-  u_conv <- causal_conv1d@conv1d u activation="silu" weight_path=@conv1d.weight bias_path=@conv1d.bias attention_mask=attn_mask
+  past_conv, past_state <- (past == null) ? (null, null) : past
+  w <- param @conv1d.weight
+  b_conv <- param @conv1d.bias
+  seq <- Tensor.size u dim=1
+  cached_step <- (past_conv != null) and (seq == 1)
+  u_conv, conv_state <- cached_step
+    ? causal_conv1d_cached_step u (past_conv :: Tensor[B,I,K]) (w :: Tensor[I,1,K]) (b_conv :: Tensor[I]) "silu"
+    : causal_conv1d_cached u past_conv (w :: Tensor[I,1,K]) (b_conv :: Tensor[I]) "silu"
   params <- NN.linear@x_proj u_conv dim=R + 2*N
   dt, b, c <- Tensor.split params sizes=[R, N, N]
   delta <- NN.linear@dt_proj dt dim=I bias=true
-  y_scan <- mamba_scan u_conv delta b c A=@A_log D=@D a_is_log=true
-  return y_scan |> mul (silu gate) |> NN.linear@out_proj dim=MODEL_DIM
+  a_raw <- param @A_log
+  a_exp <- exp (a_raw :: Tensor[I,N])
+  a <- 0.0 - a_exp
+  d <- param @D
+  cached_scan_step <- (past_state != null) and (seq == 1)
+  y_scan, scan_state <- cached_scan_step
+    ? mamba_scan_cached_step u_conv delta b c (past_state :: Tensor[B,I,N]) a (d :: Tensor[I])
+    : mamba_scan_cached u_conv delta b c past_state a (d :: Tensor[I])
+  y <- y_scan |> mul (silu gate) |> NN.linear@out_proj dim=MODEL_DIM
+  return y, (conv_state, scan_state)
 
-mamba_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
-mamba_block x attn_mask = do
+mamba_block :: Tensor[B,S,D] -> ?MambaLayerCache[B,I,K,I,N] -> (Tensor[B,S,D], MambaLayerCache[B,I,K,I,N])
+mamba_block x past = do
   x_norm <- rms@norm x
-  y <- scope@mixer do
-    return mamba_mixer x_norm attn_mask
-  return x + y
+  y, new_state <- scope@mixer do
+    y, new_state <- mamba_mixer x_norm past
+    return y, new_state
+  return x + y, new_state
 
-mamba_2_8b :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
-mamba_2_8b input_ids attn_mask = do
-  logits <- scope@backbone do
+mamba_2_8b :: TokenIds[B,S] -> ?MambaCache[B,I,K,I,N] -> ?Bool -> (Tensor[B,S,V], ?MambaCache[B,I,K,I,N])
+mamba_2_8b input_ids past_kv use_cache = do
+  logits, new_kv <- scope@backbone do
     x <- NN.embedding@embeddings input_ids dim=MODEL_DIM
-    x <- for@layers i <- [0..NUM_LAYERS) carry (x) do
-      x <- mamba_block x attn_mask
-      yield x
+    new_kv <- use_cache ? List.init : null
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
+      past_i <- (past_kv == null)
+        ? (null :: ?MambaLayerCache[B,I,K,I,N])
+        : ((List.index past_kv i) :: MambaLayerCache[B,I,K,I,N])
+      x, new_i <- mamba_block x past_i
+      new_kv <- (new_kv == null) ? null : List.append new_kv new_i
+      yield x, new_kv
     x <- rms@norm_f x
-    return NN.linear@embeddings x dim=VOCAB_SIZE
-  return logits
+    logits <- NN.linear@embeddings x dim=VOCAB_SIZE
+    return logits, new_kv
+  return logits, new_kv

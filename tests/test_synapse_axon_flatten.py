@@ -25,6 +25,7 @@ from brainsurgery.synapse.axon.ast import (
     AxonRepeat,
     AxonReturn,
     AxonScopeBind,
+    AxonYield,
     TypeInt,
     TypeNamed,
     TypeOptional,
@@ -259,7 +260,7 @@ main x = use@proj x
     assert call_expr.args[3] == AxonExprNull()
 
 
-def test_flatten_tail_recurses_repeat_without_step_helper() -> None:
+def test_flatten_preserves_repeat_as_single_expression_body() -> None:
     source = """
 L = 4
 
@@ -276,23 +277,20 @@ main x = do
     flat = _flatten(program, main_module="main")
     validate_flat_axon_file(flat, main_module="main")
     main_module = next(module for module in flat.modules if module.name == "main")
-    assert not any(isinstance(stmt, AxonRepeat) for stmt in main_module.statements)
-    recur_bind = next(
-        stmt
-        for stmt in main_module.statements
-        if isinstance(stmt, AxonBind)
-        and isinstance(stmt.expr, AxonExprCall)
-        and stmt.expr.callee.startswith("main__loop_h_recur")
-    )
-    recur_call = recur_bind.expr
-    assert isinstance(recur_call, AxonExprCall)
-    recur_module = next(module for module in flat.modules if module.name == recur_call.callee)
-    assert recur_module.name.startswith("main__loop_h_recur")
-    assert isinstance(recur_module.params[0].type_expr, TypeInt)
-    assert isinstance(recur_module.params[1].type_expr, TypeInt)
-    assert isinstance(recur_module.params[2].type_expr, TypeInt)
-    assert not any(module.name.startswith("main__loop_h_step") for module in flat.modules)
-    assert any(module.name.startswith("main__loop_h_recur_continue") for module in flat.modules)
+    repeats = [stmt for stmt in main_module.statements if isinstance(stmt, AxonRepeat)]
+    assert len(repeats) == 1
+    repeat = repeats[0]
+    assert repeat.name is None
+    assert len(repeat.body) == 1
+    assert isinstance(repeat.body[0], AxonYield)
+    assert len(repeat.body[0].values) == 1
+    body_expr = repeat.body[0].values[0]
+    assert isinstance(body_expr, AxonExprCall)
+    assert body_expr.callee.startswith("main__loop_h_step")
+    step_module = next(module for module in flat.modules if module.name == body_expr.callee)
+    assert step_module.name.startswith("main__loop_h_step")
+    assert isinstance(step_module.params[0].type_expr, TypeInt)
+    assert not any(module.name.startswith("main__loop_h_recur") for module in flat.modules)
 
 
 def test_flatten_threads_loop_scope_into_called_module_paths() -> None:

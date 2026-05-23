@@ -191,7 +191,19 @@ def _has_bindable_fresh_dim(
     local_fresh_dims: set[str] | None,
 ) -> bool:
     fresh_names = local_fresh_dims if local_fresh_dims is not None else state.fresh_dim_names
-    return any(name in fresh_names for name in dim_token_names(dim))
+    return any(
+        name in fresh_names or name.startswith("__d") or name.startswith("..__d")
+        for name in dim_token_names(dim)
+    )
+
+
+def _fresh_join_dim(state: _Tc2) -> str:
+    while True:
+        state.ctx.fresh_counter += 1
+        fresh = f"__d{state.ctx.fresh_counter}"
+        if fresh not in state.reserved_dim_names and fresh not in state.fresh_dim_names:
+            state.fresh_dim_names.add(fresh)
+            return fresh
 
 
 def _unify_call_arg_type(
@@ -758,8 +770,6 @@ def _instantiate_call_signature(
 
     def rewrite_dim(dim: DimToken) -> DimToken:
         if isinstance(dim, str):
-            if dim in state.constant_expr_defs:
-                return dim
             return fresh_dim(dim)
         if isinstance(dim, int):
             return dim
@@ -1018,7 +1028,7 @@ def _join_branch_types_tc2(left: TypeExpr, right: TypeExpr, state: _Tc2) -> Type
         return TypeTensor(
             base=left_expanded.base,
             dims=tuple(
-                _preferred_equivalent_dim(left_dim, right_dim, state)
+                _join_branch_dim_tc2(left_dim, right_dim, state)
                 for left_dim, right_dim in zip(left_expanded.dims, right_expanded.dims, strict=True)
             ),
         )
@@ -1036,6 +1046,22 @@ def _join_branch_types_tc2(left: TypeExpr, right: TypeExpr, state: _Tc2) -> Type
             )
         )
     return _join_branch_types(left, right, ctx)
+
+
+def _join_branch_dim_tc2(left: DimToken, right: DimToken, state: _Tc2) -> DimToken:
+    ctx = state.ctx
+    left = _normalize_dim_token(left, ctx)
+    right = _normalize_dim_token(right, ctx)
+    if left == right or _dim_equivalent_tc2(left, right, state):
+        return _preferred_equivalent_dim(left, right, state)
+    left_fresh = _has_bindable_fresh_dim(left, state, None)
+    right_fresh = _has_bindable_fresh_dim(right, state, None)
+    if left_fresh or right_fresh:
+        try:
+            return _unify_dim_token(left, right, ctx)
+        except ValueError:
+            return _fresh_join_dim(state)
+    return _fresh_join_dim(state)
 
 
 def _merge_return_types(
@@ -1065,10 +1091,16 @@ def _binary_arithmetic_type(left: TypeExpr, right: TypeExpr, state: _Tc2) -> Typ
             )
         ):
             return TypeTensor(base="Tensor", dims=left_expanded.dims)
-        dims = _unify_broadcast_tensor_dims(left_expanded.dims, right_expanded.dims, ctx)
+        dims = _unify_arithmetic_broadcast_tensor_dims(
+            left_expanded.dims,
+            right_expanded.dims,
+            state,
+        )
         if dims is not None:
             return TypeTensor(base="Tensor", dims=dims)
-        return _broadcast_tensor_branch_types(left, right, ctx)
+        raise ValueError(
+            f"Axon typecheck2 failed: tensor arithmetic shape mismatch {left_expanded!r} vs {right_expanded!r}"
+        )
     if isinstance(left_expanded, TypeTensor) and _is_scalar_numeric_type(right_expanded):
         return _apply_subst(left, ctx)
     if isinstance(right_expanded, TypeTensor) and _is_scalar_numeric_type(left_expanded):
@@ -1103,6 +1135,41 @@ def _binary_arithmetic_type(left: TypeExpr, right: TypeExpr, state: _Tc2) -> Typ
     _unify(left, fallback, ctx)
     _unify(right, fallback, ctx)
     return fallback
+
+
+def _unify_arithmetic_broadcast_tensor_dims(
+    left: tuple[DimToken, ...],
+    right: tuple[DimToken, ...],
+    state: _Tc2,
+) -> tuple[DimToken, ...] | None:
+    ctx = state.ctx
+    max_rank = max(len(left), len(right))
+    left_full: tuple[DimToken, ...] = (1,) * (max_rank - len(left)) + left
+    right_full: tuple[DimToken, ...] = (1,) * (max_rank - len(right)) + right
+    merged: list[DimToken] = []
+    for left_dim, right_dim in zip(left_full, right_full, strict=True):
+        left_dim = _normalize_dim_token(left_dim, ctx)
+        right_dim = _normalize_dim_token(right_dim, ctx)
+        if left_dim == right_dim or _dim_equivalent_tc2(left_dim, right_dim, state):
+            merged.append(_preferred_equivalent_dim(left_dim, right_dim, state))
+            continue
+        if left_dim == 1:
+            merged.append(right_dim)
+            continue
+        if right_dim == 1:
+            merged.append(left_dim)
+            continue
+        left_fresh = _has_bindable_fresh_dim(left_dim, state, None)
+        right_fresh = _has_bindable_fresh_dim(right_dim, state, None)
+        left_global = isinstance(left_dim, str) and left_dim in state.constant_expr_defs
+        right_global = isinstance(right_dim, str) and right_dim in state.constant_expr_defs
+        if not left_fresh and not right_fresh and not left_global and not right_global:
+            return None
+        try:
+            merged.append(_unify_dim_token(left_dim, right_dim, ctx))
+        except ValueError:
+            return None
+    return tuple(_normalize_dim_token(dim, ctx) for dim in merged)
 
 
 def _final_return_type(types: tuple[TypeExpr, ...] | None, ctx: _TcCtx) -> TypeExpr | None:
@@ -1644,6 +1711,13 @@ def _store_typed_module(state: _Tc2, module: AxonDefinition) -> None:
 
 
 def _normalize_typed_module(module: AxonDefinition, ctx: _TcCtx) -> AxonDefinition:
+    protected_dim_names = _env_dim_names(_module_header_env(module, ctx))
+    if module.return_type_expr is not None:
+        protected_dim_names.update(_collect_dim_names(module.return_type_expr))
+    ctx = _normalization_ctx_preserving_header_dims(
+        ctx,
+        protected_dim_names=protected_dim_names,
+    )
     normalized_params = tuple(
         replace(param, type_expr=_normalize_type_expr_for_module(param.type_expr, ctx))
         for param in module.params
@@ -1676,9 +1750,6 @@ def _normalize_typed_module(module: AxonDefinition, ctx: _TcCtx) -> AxonDefiniti
     if normalized.path_param is not None:
         bound.add(normalized.path_param)
     bound.update(normalized.path_params)
-    protected_dim_names = _env_dim_names(_module_header_env(normalized, ctx))
-    if normalized.return_type_expr is not None:
-        protected_dim_names.update(_collect_dim_names(normalized.return_type_expr))
     for name, mapped in ctx.dim_substitutions.items():
         if isinstance(mapped, tuple) or not isinstance(name, str) or name.startswith(".."):
             continue
@@ -1716,6 +1787,41 @@ def _normalize_typed_module(module: AxonDefinition, ctx: _TcCtx) -> AxonDefiniti
             *prefix_bindings,
             *_rewrite_statements_names(normalized.statements, replacements, bound),
         ),
+    )
+
+
+def _normalization_ctx_preserving_header_dims(
+    ctx: _TcCtx,
+    *,
+    protected_dim_names: set[str],
+) -> _TcCtx:
+    def uses_only_global_constants(dim: DimToken) -> bool:
+        names = dim_token_names(dim)
+        return bool(names) and all(
+            name in ctx.modules_by_name
+            and not ctx.modules_by_name[name].params
+            and not ctx.modules_by_name[name].path_params
+            and ctx.modules_by_name[name].path_param is None
+            for name in names
+        )
+
+    dim_substitutions: dict[str, DimToken | tuple[DimToken, ...]] = {}
+    for name, value in ctx.dim_substitutions.items():
+        if (
+            name in protected_dim_names
+            and not isinstance(value, tuple)
+            and not uses_only_global_constants(value)
+        ):
+            continue
+        if name in protected_dim_names and isinstance(value, tuple):
+            continue
+        dim_substitutions[name] = value
+    return _TcCtx(
+        modules_by_name=ctx.modules_by_name,
+        type_aliases=ctx.type_aliases,
+        substitutions=ctx.substitutions,
+        dim_substitutions=dim_substitutions,
+        fresh_counter=ctx.fresh_counter,
     )
 
 
@@ -1925,6 +2031,16 @@ def _canonicalize_fresh_statements(
 
 
 def _canonicalize_fresh_module(module: AxonDefinition, state: _Tc2) -> AxonDefinition:
+    protected_dim_names = _env_dim_names(_module_header_env(module, state.ctx))
+    if module.return_type_expr is not None:
+        protected_dim_names.update(_collect_dim_names(module.return_type_expr))
+    state = replace(
+        state,
+        ctx=_normalization_ctx_preserving_header_dims(
+            state.ctx,
+            protected_dim_names=protected_dim_names,
+        ),
+    )
     bound = {
         *(param.name for param in module.params),
         *module.path_params,
@@ -2137,6 +2253,25 @@ def _unify_return_type(
     if isinstance(expected, TypeAny):
         return _apply_subst(actual, ctx)
     if isinstance(actual, TypeTensor) and isinstance(expected, TypeTensor):
+        actual_variadics = {
+            dim
+            for dim in actual.dims
+            if isinstance(dim, str) and dim.startswith("..")
+        }
+        expected_variadics = {
+            dim
+            for dim in expected.dims
+            if isinstance(dim, str) and dim.startswith("..")
+        }
+        protected_expected_variadics = expected_variadics & protected_dim_names
+        if (
+            actual_variadics
+            and protected_expected_variadics
+            and not protected_expected_variadics <= actual_variadics
+        ):
+            raise ValueError(
+                "Axon typecheck2 failed: return variadic tensor dims do not preserve signature shape"
+            )
         if any(isinstance(dim, str) and dim.startswith("..") for dim in (*actual.dims, *expected.dims)):
             _unify_tc2(actual, expected, ctx)
             return _apply_subst(expected, ctx)
@@ -2741,6 +2876,7 @@ def _tc_primitive_call(
                     tuple(left), tuple(right), state.ctx
                 ),
                 dim_equivalent=lambda left, right: _dim_equivalent_tc2(left, right, state),
+                unify_dim=lambda left, right: _unify_dim_token(left, right, state.ctx),
             ),
         )
         if _is_type_expr_instance(inferred):
@@ -3108,7 +3244,52 @@ def _tc_statements(
                 returns = _merge_return_types(returns, false_returns, state)
             typed.append(replace(stmt, cond=typed_cond, true_body=true_body, false_body=false_body))
             continue
-        if isinstance(stmt, AxonScopeBind | AxonRepeat):
+        if isinstance(stmt, AxonRepeat):
+            typed_from, from_tp = _tc_expr(state, stmt.from_expr, env, expr_defs)
+            typed_to, to_tp = _tc_expr(state, stmt.to_expr, env, expr_defs)
+            typed_step, step_tp = _tc_expr(state, stmt.step_expr, env, expr_defs)
+            try:
+                _unify_tc2(from_tp, TypeInt(), state.ctx)
+                _unify_tc2(to_tp, TypeInt(), state.ctx)
+                _unify_tc2(step_tp, TypeInt(), state.ctx)
+            except ValueError as exc:
+                raise ValueError("Axon typecheck2 failed: repeat bounds must be Int/Dim") from exc
+
+            loop_env = dict(env)
+            loop_env[stmt.var] = TypeInt()
+            carry_names = tuple(stmt.carry or ())
+            carry_types: list[TypeExpr] = []
+            for name in carry_names:
+                carry_type = loop_env.get(name, state.ctx.fresh_type_var())
+                carry_types.append(carry_type)
+                loop_env[name] = carry_type
+
+            typed_body, _, _ = _tc_statements(
+                state,
+                stmt.body,
+                loop_env,
+                dict(expr_defs),
+                tuple(carry_types) if carry_types else None,
+                protected_dim_names | _env_dim_names(loop_env),
+                refine_returns_from_body=refine_returns_from_body,
+            )
+            if carry_names and stmt.targets is not None:
+                for name, tp in zip(stmt.targets, carry_types, strict=True):
+                    if name == "_":
+                        continue
+                    env[name] = _apply_subst(tp, state.ctx)
+                    expr_defs.pop(name, None)
+            typed.append(
+                replace(
+                    stmt,
+                    from_expr=typed_from,
+                    to_expr=typed_to,
+                    step_expr=typed_step,
+                    body=typed_body,
+                )
+            )
+            continue
+        if isinstance(stmt, AxonScopeBind):
             raise ValueError(f"Axon typecheck2 failed: expected flat input, got {type(stmt).__name__}")
         typed.append(stmt)
     return tuple(typed), env, returns

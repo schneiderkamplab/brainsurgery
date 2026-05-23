@@ -41,9 +41,12 @@ def type_rule(
         rank = len(item_dims)
         dim_idx = dim_token if dim_token >= 0 else rank + dim_token
         if 0 <= dim_idx < rank:
-            updated = list(item_dims)
-            updated[dim_idx] = _dim_div(updated[dim_idx], parts_token)
-            item_dims = tuple(updated)
+            if _is_variadic_dim(item_dims[dim_idx]):
+                item_dims = ("..R",)
+            else:
+                updated = list(item_dims)
+                updated[dim_idx] = _dim_div(updated[dim_idx], parts_token)
+                item_dims = tuple(updated)
     item_tp = helpers.type_tensor(dims=item_dims)
     return TypeList(item=item_tp)
 
@@ -73,6 +76,10 @@ def _dim_div(left: Any, right: Any) -> Any:
             quotient = left.right // right
             return left.left if quotient == 1 else DimExprBinary(op="*", left=left.left, right=quotient)
     return DimExprBinary(op="/", left=left, right=right)
+
+
+def _is_variadic_dim(dim: Any) -> bool:
+    return isinstance(dim, str) and dim.startswith("..")
 
 
 __all__ = [

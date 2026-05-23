@@ -2,10 +2,10 @@
 {-# TASK "seq2seq_lm" #-}
 
 import Activations (gelu_pytorch_tanh, sigmoid)
-import Attention (attention, merge_heads, reshape_heads)
-import Masking (bidirectional_mask, causal_mask)
+import Attention (attention_gqa_with_additive_mask, mask_to_additive_for_input, merge_heads, reshape_heads)
+import Masking (bidirectional_mask_for_input, causal_mask_for_input)
 import Math (mul, sqrt)
-import Positions (position_ids, rope_pair_base)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
 import Config
 import NN
 import Tensor
@@ -45,20 +45,18 @@ EMB_SCALE_ENC = sqrt D_ENC
 EMB_SCALE_DEC = sqrt D_DEC
 LOGIT_SOFTCAP = Config.float @@'decoder.final_logit_softcapping' default=30.0
 
-t5gemma_encoder_block :: Tensor[B,S,D_ENC] -> Int -> Tensor[B,S] -> ?Tensor[B,S] -> Tensor[B,S,D_ENC]
-t5gemma_encoder_block x i pos_ids attention_mask = do
+t5gemma_encoder_block :: Tensor[B,S,D_ENC] -> Int -> Tensor[B,1,S,S] -> Tensor[B,1,S,S] -> Tensor[B,H_ENC,S,S] -> Tensor[B,H_ENC,S,S] -> Tensor[B,1,S,HD_ENC] -> Tensor[B,1,S,HD_ENC] -> Tensor[B,S,D_ENC]
+t5gemma_encoder_block x i mask_slide mask_full additive_mask_slide additive_mask_full rope_sin rope_cos = do
   xn <- NN.rmsnorm@pre_self_attn_layernorm x eps=EPS_ENC cast_float=true unit_offset=true
   a <- scope@self_attn do
     q <- NN.linear@q_proj xn dim=QD_ENC bias=false |> reshape_heads heads=H_ENC
     k <- NN.linear@k_proj xn dim=KVD_ENC bias=false |> reshape_heads heads=KVH_ENC
     v <- NN.linear@v_proj xn dim=KVD_ENC bias=false |> reshape_heads heads=KVH_ENC
-    q, k <- rope_pair_base q k pos_ids THETA_ENC
-    k <- Tensor.repeat k repeats=(H_ENC / KVH_ENC)
-    v <- Tensor.repeat v repeats=(H_ENC / KVH_ENC)
     full_attn <- ((i + 1) % ROPE_PERIOD_ENC) == 0
-    window <- full_attn ? WIN_FULL_ENC : WIN_SLIDE_ENC
-    mask <- bidirectional_mask q k window=window padding_mask=attention_mask
-    return attention q k v mask scale=ATTN_SCALE_ENC |> merge_heads |> NN.linear@o_proj dim=D_ENC bias=false
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    mask <- full_attn ? mask_full : mask_slide
+    additive_mask <- full_attn ? additive_mask_full : additive_mask_slide
+    return attention_gqa_with_additive_mask q k v additive_mask mask scale=ATTN_SCALE_ENC |> merge_heads |> NN.linear@o_proj dim=D_ENC bias=false
   a <- NN.rmsnorm@post_self_attn_layernorm a eps=EPS_ENC cast_float=true unit_offset=true
   x <- x + a
 
@@ -70,20 +68,18 @@ t5gemma_encoder_block x i pos_ids attention_mask = do
   m <- NN.rmsnorm@post_feedforward_layernorm m eps=EPS_ENC cast_float=true unit_offset=true
   return x + m
 
-t5gemma_decoder_block :: Tensor[B,SDEC,D_DEC] -> Tensor[B,SENC,D_ENC] -> Int -> Tensor[B,SDEC] -> ?Tensor[B,SENC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,D_DEC]
-t5gemma_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_attention_mask = do
+t5gemma_decoder_block :: Tensor[B,SDEC,D_DEC] -> Tensor[B,SENC,D_ENC] -> Int -> Tensor[B,1,SDEC,SDEC] -> Tensor[B,1,SDEC,SDEC] -> Tensor[B,1,SDEC,SENC] -> Tensor[B,H_DEC,SDEC,SDEC] -> Tensor[B,H_DEC,SDEC,SDEC] -> Tensor[B,H_DEC,SDEC,SENC] -> Tensor[B,1,SDEC,HD_DEC] -> Tensor[B,1,SDEC,HD_DEC] -> Tensor[B,SDEC,D_DEC]
+t5gemma_decoder_block x enc_hidden i self_mask_slide self_mask_full cross_mask self_additive_mask_slide self_additive_mask_full cross_additive_mask rope_sin rope_cos = do
   xn <- NN.rmsnorm@pre_self_attn_layernorm x eps=EPS_DEC cast_float=true unit_offset=true
   a <- scope@self_attn do
     q <- NN.linear@q_proj xn dim=QD_DEC bias=false |> reshape_heads heads=H_DEC
     k <- NN.linear@k_proj xn dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
     v <- NN.linear@v_proj xn dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
-    q, k <- rope_pair_base q k pos_ids THETA_DEC
-    k <- Tensor.repeat k repeats=(H_DEC / KVH_DEC)
-    v <- Tensor.repeat v repeats=(H_DEC / KVH_DEC)
     full_attn <- ((i + 1) % ROPE_PERIOD_DEC) == 0
-    window <- full_attn ? WIN_FULL_DEC : WIN_SLIDE_DEC
-    mask <- causal_mask q k window=window padding_mask=decoder_attention_mask
-    return attention q k v mask scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    mask <- full_attn ? self_mask_full : self_mask_slide
+    additive_mask <- full_attn ? self_additive_mask_full : self_additive_mask_slide
+    return attention_gqa_with_additive_mask q k v additive_mask mask scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
   a <- NN.rmsnorm@post_self_attn_layernorm a eps=EPS_DEC cast_float=true unit_offset=true
   x <- x + a
 
@@ -92,10 +88,8 @@ t5gemma_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_atte
     q <- NN.linear@q_proj xn dim=QD_DEC bias=false |> reshape_heads heads=H_DEC
     k <- NN.linear@k_proj enc_hidden dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
     v <- NN.linear@v_proj enc_hidden dim=KVD_DEC bias=false |> reshape_heads heads=KVH_DEC
-    k <- Tensor.repeat k repeats=(H_DEC / KVH_DEC)
-    v <- Tensor.repeat v repeats=(H_DEC / KVH_DEC)
-    mask <- bidirectional_mask q k padding_mask=encoder_attention_mask
-    return attention q k v mask scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
+    mask <- cross_mask
+    return attention_gqa_with_additive_mask q k v cross_additive_mask mask scale=ATTN_SCALE_DEC |> merge_heads |> NN.linear@o_proj dim=D_DEC bias=false
   a <- NN.rmsnorm@post_cross_attn_layernorm a eps=EPS_DEC cast_float=true unit_offset=true
   x <- x + a
 
@@ -110,16 +104,28 @@ t5gemma_decoder_block x enc_hidden i pos_ids encoder_attention_mask decoder_atte
 t5gemma :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
 t5gemma input_ids attention_mask decoder_input_ids decoder_attention_mask = do
   enc_pos_ids <- position_ids input_ids
+  enc_mask_slide <- bidirectional_mask_for_input input_ids SENC padding_mask=attention_mask window=WIN_SLIDE_ENC
+  enc_mask_full <- bidirectional_mask_for_input input_ids SENC padding_mask=attention_mask window=WIN_FULL_ENC
+  enc_additive_mask_slide <- mask_to_additive_for_input input_ids enc_mask_slide H_ENC
+  enc_additive_mask_full <- mask_to_additive_for_input input_ids enc_mask_full H_ENC
+  enc_rope_sin, enc_rope_cos <- rope_base_factors enc_pos_ids HD_ENC THETA_ENC
   enc_hidden <- NN.embedding@model.encoder.embed_tokens input_ids dim=D_ENC scale=EMB_SCALE_ENC
   enc_hidden <- for@model.encoder.layers i <- [0..L_ENC) carry (enc_hidden) do
-    enc_hidden <- t5gemma_encoder_block enc_hidden i enc_pos_ids attention_mask
+    enc_hidden <- t5gemma_encoder_block enc_hidden i enc_mask_slide enc_mask_full enc_additive_mask_slide enc_additive_mask_full enc_rope_sin enc_rope_cos
     yield enc_hidden
   enc_hidden <- NN.rmsnorm@model.encoder.norm enc_hidden eps=EPS_ENC cast_float=true unit_offset=true
 
   dec_pos_ids <- position_ids decoder_input_ids
+  dec_self_mask_slide <- causal_mask_for_input decoder_input_ids SDEC padding_mask=decoder_attention_mask window=WIN_SLIDE_DEC
+  dec_self_mask_full <- causal_mask_for_input decoder_input_ids SDEC padding_mask=decoder_attention_mask window=WIN_FULL_DEC
+  cross_mask <- bidirectional_mask_for_input decoder_input_ids SENC padding_mask=attention_mask
+  dec_self_additive_mask_slide <- mask_to_additive_for_input decoder_input_ids dec_self_mask_slide H_DEC
+  dec_self_additive_mask_full <- mask_to_additive_for_input decoder_input_ids dec_self_mask_full H_DEC
+  cross_additive_mask <- mask_to_additive_for_input decoder_input_ids cross_mask H_DEC
+  dec_rope_sin, dec_rope_cos <- rope_base_factors dec_pos_ids HD_DEC THETA_DEC
   dec_hidden <- NN.embedding@model.decoder.embed_tokens decoder_input_ids dim=D_DEC scale=EMB_SCALE_DEC
   dec_hidden <- for@model.decoder.layers i <- [0..L_DEC) carry (dec_hidden) do
-    dec_hidden <- t5gemma_decoder_block dec_hidden enc_hidden i dec_pos_ids attention_mask decoder_attention_mask
+    dec_hidden <- t5gemma_decoder_block dec_hidden enc_hidden i dec_self_mask_slide dec_self_mask_full cross_mask dec_self_additive_mask_slide dec_self_additive_mask_full cross_additive_mask dec_rope_sin dec_rope_cos
     yield dec_hidden
   dec_hidden <- NN.rmsnorm@model.decoder.norm dec_hidden eps=EPS_DEC cast_float=true unit_offset=true
 

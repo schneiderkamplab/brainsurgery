@@ -8,7 +8,7 @@ import Activations (gelu_new)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (bidirectional_mask)
+import Masking (bidirectional_mask_for_input)
 
 import Positions (position_ids)
 
@@ -30,13 +30,12 @@ FFN = 3072
 
 EPS = 1e-12
 
-albert_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
-albert_block x attn_mask = do
+albert_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+albert_block x keep = do
   a <- scope@attention do
     q <- NN.linear@query x dim=MODEL_DIM bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.query.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.query.bias |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@key x dim=MODEL_DIM bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.key.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.key.bias |> reshape_heads heads=NUM_HEADS
     v <- NN.linear@value x dim=MODEL_DIM bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.value.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.value.bias |> reshape_heads heads=NUM_HEADS
-    keep <- bidirectional_mask q k padding_mask=attn_mask
     return attention q k v keep |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.dense.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.dense.bias
   x <- x + a
   x <- NN.layernorm@attention.LayerNorm x eps=EPS weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.LayerNorm.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.attention.LayerNorm.bias
@@ -49,6 +48,7 @@ albert_block x attn_mask = do
 albert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
 albert input_ids attn_mask = do
   pos_ids <- position_ids input_ids
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
   tok_type_ids <- input_ids - input_ids
   tok <- NN.embedding@albert.embeddings.word_embeddings input_ids dim=E
   pos <- NN.embedding@albert.embeddings.position_embeddings pos_ids dim=E
@@ -58,7 +58,7 @@ albert input_ids attn_mask = do
   x <- NN.layernorm@albert.embeddings.LayerNorm x eps=EPS
   x <- NN.linear@albert.encoder.embedding_hidden_mapping_in x dim=MODEL_DIM bias=true
   x <- for i <- [0..NUM_LAYERS) carry (x) do
-    x <- albert_block x attn_mask
+    x <- albert_block x keep
     yield x
   x <- NN.linear@predictions.dense x dim=E bias=true |> gelu_new
   x <- NN.layernorm@predictions.LayerNorm x eps=EPS

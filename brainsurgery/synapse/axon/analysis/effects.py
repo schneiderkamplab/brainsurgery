@@ -81,8 +81,6 @@ _PARTIAL_PURE_OPS = {
 }
 
 _EFFECTFUL_PRIMITIVE_OPS = {
-    # Fresh mutable containers are not referentially transparent under sharing.
-    "list_init",
 }
 
 _TOTAL_PURE_PRIMITIVE_OPS = {
@@ -117,6 +115,7 @@ _TOTAL_PURE_PRIMITIVE_OPS = {
     "linear",
     "list_append",
     "list_index",
+    "list_init",
     "list_length",
     "log",
     "matmul",
@@ -200,6 +199,20 @@ def op_effect(op_name: str, *, attrs: Mapping[str, object] | None = None) -> Pur
         return PurityEffect.PARTIAL_PURE
 
     normalized = _normalize_op_name(op_name)
+    try:
+        from brainsurgery.synapse.ops import get_op_semantics
+    except Exception:
+        semantics: Mapping[str, object] = {}
+    else:
+        semantics = get_op_semantics(normalized)
+    effect = semantics.get("effect")
+    if isinstance(effect, str):
+        if effect == "total_pure":
+            return PurityEffect.TOTAL_PURE
+        if effect == "partial_pure":
+            return PurityEffect.PARTIAL_PURE
+        if effect == "effectful":
+            return PurityEffect.EFFECTFUL
     if normalized in _CONFIG_VALUE_OPS:
         return PurityEffect.TOTAL_PURE if _has_non_null_default(attrs) else PurityEffect.PARTIAL_PURE
     if normalized in _PARTIAL_PURE_OPS:

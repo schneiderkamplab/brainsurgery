@@ -24,6 +24,7 @@ from ..ast import (
     TypeOptional,
     TypeTensor,
     TypeTuple,
+    TypeVar,
     dim_token_names,
 )
 from ..typecheck_shared import _PrimitiveTypeHelpers
@@ -42,9 +43,20 @@ from .core import (
     graph_path_template_names,
     graph_type_compatible,
     validate_graph_program,
+    _value_ref_type,
 )
 from .domain import GraphDomainFact, GraphDomainKind, infer_main_module_domain_facts
-from .effects import GraphEffect, graph_node_effect, graph_op_effect, graph_operand_effect, infer_graph_module_effects
+from .effects import (
+    GraphEffect,
+    UsageClass,
+    graph_node_effect,
+    graph_node_usage,
+    graph_op_effect,
+    graph_operand_effect,
+    graph_operand_usage,
+    infer_graph_module_effects,
+    infer_graph_module_usages,
+)
 from .substitute import (
     UnsupportedConstraintSubstitution,
     replace_constraint_refs,
@@ -72,6 +84,7 @@ class GraphOptimizeConfig:
 
 
 _SPECIALIZE_MODES = {"off", "single-callsite", "monomorphize"}
+_SMALL_INLINE_NODE_LIMIT = 4
 
 
 def _is_atomic_operand(operand: GraphOperand) -> bool:
@@ -180,6 +193,24 @@ def _is_total_pure_node(
     module_effects: Mapping[str, GraphEffect] | None = None,
 ) -> bool:
     return graph_node_effect(node, module_effects=dict(module_effects or {})) == GraphEffect.TOTAL_PURE
+
+
+def _is_unrestricted_node(
+    node: GraphNode,
+    module_usages: Mapping[str, UsageClass] | None = None,
+) -> bool:
+    return graph_node_usage(node, module_usages=dict(module_usages or {})) == UsageClass.UNRESTRICTED
+
+
+def _is_unrestricted_operand(
+    operand: GraphOperand,
+    module_usages: Mapping[str, UsageClass] | None = None,
+) -> bool:
+    return graph_operand_usage(operand, module_usages=dict(module_usages or {})) == UsageClass.UNRESTRICTED
+
+
+def _is_non_effectful(effect: GraphEffect | None) -> bool:
+    return effect in {GraphEffect.TOTAL_PURE, GraphEffect.PARTIAL_PURE}
 
 
 def _literal_like(value: object, type_like: GraphOperand | GraphNode | GraphExpr) -> GraphLiteral:
@@ -538,6 +569,206 @@ def _result_types(type_expr: TypeExpr, output_count: int) -> tuple[TypeExpr, ...
     return tuple(TypeAny() for _ in range(output_count))
 
 
+def _destructured_list_output_types(
+    primitive_type: TypeList,
+    output_count: int,
+) -> tuple[TypeExpr, ...] | None:
+    if output_count <= 1 or isinstance(primitive_type.item, TypeAny):
+        return None
+    return tuple(primitive_type.item for _ in range(output_count))
+
+
+def _type_contains_inference_var(type_expr: TypeExpr) -> bool:
+    if isinstance(type_expr, TypeAny | TypeVar):
+        return True
+    if isinstance(type_expr, TypeOptional):
+        return _type_contains_inference_var(type_expr.inner)
+    if isinstance(type_expr, TypeList):
+        return _type_contains_inference_var(type_expr.item)
+    if isinstance(type_expr, TypeTuple):
+        return any(_type_contains_inference_var(item) for item in type_expr.items)
+    return False
+
+
+def _type_contains_unbound_dim(type_expr: TypeExpr, bound_dim_names: set[str]) -> bool:
+    if isinstance(type_expr, TypeTensor):
+        return any(
+            isinstance(name, str) and (name.startswith("..") or name not in bound_dim_names)
+            for dim in type_expr.dims
+            for name in dim_token_names(dim)
+        )
+    if isinstance(type_expr, TypeOptional):
+        return _type_contains_unbound_dim(type_expr.inner, bound_dim_names)
+    if isinstance(type_expr, TypeList):
+        return _type_contains_unbound_dim(type_expr.item, bound_dim_names)
+    if isinstance(type_expr, TypeTuple):
+        return any(_type_contains_unbound_dim(item, bound_dim_names) for item in type_expr.items)
+    return False
+
+
+def _type_references_any_dim_name(type_expr: TypeExpr | None, names: set[str]) -> bool:
+    if type_expr is None or not names:
+        return False
+    if isinstance(type_expr, TypeTensor):
+        return any(
+            isinstance(name, str) and name in names
+            for dim in type_expr.dims
+            for name in dim_token_names(dim)
+        )
+    if isinstance(type_expr, TypeOptional):
+        return _type_references_any_dim_name(type_expr.inner, names)
+    if isinstance(type_expr, TypeList):
+        return _type_references_any_dim_name(type_expr.item, names)
+    if isinstance(type_expr, TypeTuple):
+        return any(_type_references_any_dim_name(item, names) for item in type_expr.items)
+    return False
+
+
+def _type_has_non_dim_local_dim_ref(
+    type_expr: TypeExpr,
+    *,
+    env: Mapping[str, GraphValue],
+    globals_env: Mapping[str, GraphValue],
+) -> bool:
+    for name in _type_dim_refs(type_expr):
+        value = env.get(name) or globals_env.get(name)
+        if value is None:
+            # Generated names in type positions should either be live local
+            # dim/int values or already substituted away.  If they are no
+            # longer bound, they are stale metadata from an earlier rewrite and
+            # must not be allowed to override freshly computed types.
+            if _is_generated_value_name(name):
+                return True
+            continue
+        value_type = _value_ref_type(value)
+        if isinstance(value_type, TypeOptional):
+            value_type = value_type.inner
+        if not isinstance(value_type, TypeDim | TypeInt):
+            return True
+    return False
+
+
+def _refined_compatible_type(current: TypeExpr, desired: TypeExpr) -> TypeExpr:
+    if not (graph_type_compatible(current, desired) or graph_type_compatible(desired, current)):
+        return current
+    if (
+        isinstance(current, TypeTensor)
+        and isinstance(desired, TypeTensor)
+        and len(current.dims) == len(desired.dims)
+        and any(isinstance(old, DimExprBinary) and isinstance(new, str) for old, new in zip(current.dims, desired.dims, strict=True))
+    ):
+        return desired
+    if _type_contains_inference_var(current) and not _type_contains_inference_var(desired):
+        return desired
+    return _more_specific_compatible_type(current, desired)
+
+
+def _refine_operand_type_metadata(operand: GraphOperand, desired: TypeExpr) -> GraphOperand:
+    if not isinstance(operand, GraphValueRef | GraphExpr):
+        return operand
+    refined = _refined_compatible_type(operand.type_expr, desired)
+    if refined == operand.type_expr:
+        return operand
+    dims = refined.dims if isinstance(refined, TypeTensor) else operand.dims
+    return replace(operand, type_expr=refined, dims=dims)
+
+
+def _refine_select_inputs_from_result(
+    inputs: tuple[GraphOperand, ...],
+    result_type: TypeExpr,
+) -> tuple[GraphOperand, ...]:
+    if len(inputs) != 3:
+        return inputs
+    _, true_operand, false_operand = inputs
+    if isinstance(result_type, TypeOptional):
+        inner = result_type.inner
+        if isinstance(graph_operand_type(false_operand), TypeNull):
+            true_operand = _refine_operand_type_metadata(true_operand, inner)
+        if isinstance(graph_operand_type(true_operand), TypeNull):
+            false_operand = _refine_operand_type_metadata(false_operand, inner)
+    return (inputs[0], true_operand, false_operand)
+
+
+def _strip_optional_operand_type(operand: GraphOperand) -> GraphOperand:
+    if not isinstance(operand, GraphValueRef | GraphExpr):
+        return operand
+    if not isinstance(operand.type_expr, TypeOptional):
+        return operand
+    inner = operand.type_expr.inner
+    return replace(
+        operand,
+        type_expr=inner,
+        dims=inner.dims if isinstance(inner, TypeTensor) else operand.dims,
+    )
+
+
+def _strip_optional_refs_in_operand(
+    operand: GraphOperand,
+    non_null_names: set[str],
+) -> GraphOperand:
+    if isinstance(operand, GraphValueRef):
+        if operand.name in non_null_names:
+            return _strip_optional_operand_type(operand)
+        return operand
+    if isinstance(operand, GraphExpr):
+        return _strip_optional_operand_type(
+            replace(
+                operand,
+                inputs=tuple(_strip_optional_refs_in_operand(item, non_null_names) for item in operand.inputs),
+                attrs={
+                    key: _strip_optional_refs_in_operand(value, non_null_names)
+                    for key, value in operand.attrs.items()
+                },
+            )
+        )
+    return operand
+
+
+def _condition_non_null_names(
+    condition: GraphOperand,
+    *,
+    branch_value: bool,
+    conditions: Mapping[str, GraphExpr],
+) -> set[str]:
+    if isinstance(condition, GraphValueRef):
+        condition = conditions.get(condition.name, condition)
+    if (
+        not isinstance(condition, GraphExpr)
+        or not condition.op.name.startswith("core.binary.")
+        or len(condition.inputs) != 2
+        or condition.attrs
+    ):
+        return set()
+    op = condition.op.name.removeprefix("core.binary.")
+    if op not in {"==", "!="}:
+        return set()
+    equality_branch = branch_value if op == "==" else not branch_value
+    left, right = condition.inputs
+    names: set[str] = set()
+    if isinstance(left, GraphValueRef) and isinstance(right, GraphLiteral) and right.value is None and not equality_branch:
+        names.add(left.name)
+    if isinstance(right, GraphValueRef) and isinstance(left, GraphLiteral) and left.value is None and not equality_branch:
+        names.add(right.name)
+    return names
+
+
+def _refine_select_inputs_from_condition(
+    inputs: tuple[GraphOperand, ...],
+    *,
+    conditions: Mapping[str, GraphExpr],
+) -> tuple[GraphOperand, ...]:
+    if len(inputs) != 3:
+        return inputs
+    condition, true_operand, false_operand = inputs
+    true_non_null = _condition_non_null_names(condition, branch_value=True, conditions=conditions)
+    false_non_null = _condition_non_null_names(condition, branch_value=False, conditions=conditions)
+    if true_non_null:
+        true_operand = _strip_optional_refs_in_operand(true_operand, true_non_null)
+    if false_non_null:
+        false_operand = _strip_optional_refs_in_operand(false_operand, false_non_null)
+    return (condition, true_operand, false_operand)
+
+
 def _module_output_types(module: GraphModule) -> tuple[TypeExpr, ...]:
     if module.return_type_expr is not None:
         return _result_types(module.return_type_expr, len(module.outputs))
@@ -559,11 +790,104 @@ def _return_type_expr_from_outputs(outputs: tuple[GraphOperand, ...]) -> TypeExp
     return output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
 
 
+class _DimUnificationError(ValueError):
+    pass
+
+
+def _is_plain_dim_symbol(dim: DimToken) -> bool:
+    return isinstance(dim, str) and dim.isidentifier() and not dim.startswith("..")
+
+
+def _choose_dim_representative(left: DimToken, right: DimToken) -> DimToken:
+    if type(left) is int or type(right) is int:
+        return left if type(left) is int else right
+    if isinstance(left, str) and _is_plain_dim_symbol(left) and not isinstance(right, str):
+        return left
+    if isinstance(right, str) and _is_plain_dim_symbol(right) and not isinstance(left, str):
+        return right
+    left_score = _dim_specificity_score(left)
+    right_score = _dim_specificity_score(right)
+    if left_score != right_score:
+        return left if left_score > right_score else right
+    if isinstance(left, str) and isinstance(right, str):
+        return left if (len(left), left) <= (len(right), right) else right
+    return left
+
+
+def _dim_substitution_would_cycle(
+    name: str,
+    replacement: DimToken,
+    dim_map: Mapping[str, DimToken],
+) -> bool:
+    stack = [replacement]
+    seen: set[str] = set()
+    while stack:
+        current = stack.pop()
+        for symbol in dim_token_names(current):
+            if not isinstance(symbol, str):
+                continue
+            if symbol == name:
+                return True
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            mapped = dim_map.get(symbol)
+            if mapped is not None:
+                stack.append(mapped)
+    return False
+
+
+def _set_dim_binding_if_acyclic(
+    dim_map: dict[str, DimToken],
+    name: str,
+    replacement: DimToken,
+) -> None:
+    if replacement == name:
+        dim_map.pop(name, None)
+        return
+    if _dim_substitution_would_cycle(name, replacement, dim_map):
+        return
+    dim_map[name] = replacement
+
+
+def _unify_dim_binding(
+    formal_name: str,
+    actual_dim: DimToken,
+    dim_map: dict[str, DimToken],
+) -> None:
+    actual = substitute_dim_token(actual_dim, dim_map)
+    existing = dim_map.get(formal_name)
+    if existing is None:
+        if actual != formal_name:
+            _set_dim_binding_if_acyclic(dim_map, formal_name, actual)
+        return
+    existing = substitute_dim_token(existing, dim_map)
+    if existing == actual:
+        _set_dim_binding_if_acyclic(dim_map, formal_name, existing)
+        return
+    if type(existing) is int and type(actual) is int:
+        return
+    if _is_plain_dim_symbol(existing) or _is_plain_dim_symbol(actual):
+        representative = _choose_dim_representative(existing, actual)
+        if representative == formal_name:
+            dim_map.pop(formal_name, None)
+        else:
+            _set_dim_binding_if_acyclic(dim_map, formal_name, representative)
+        if _is_plain_dim_symbol(existing) and existing != representative:
+            _set_dim_binding_if_acyclic(dim_map, existing, representative)
+        if _is_plain_dim_symbol(actual) and actual != representative and actual != formal_name:
+            _set_dim_binding_if_acyclic(dim_map, actual, representative)
+        return
+    return
+
+
 def _bind_dim_sequence_map(
     formal_dims: tuple[DimToken, ...],
     actual_dims: tuple[DimToken, ...],
     dim_map: dict[str, DimToken],
     row_map: dict[str, tuple[DimToken, ...]] | None = None,
+    *,
+    bind_singleton_plain_dims: bool = True,
 ) -> None:
     variadic_indexes = [
         index
@@ -596,7 +920,13 @@ def _bind_dim_sequence_map(
         if isinstance(formal_dim, str) and not formal_dim.startswith(".."):
             if any(isinstance(name, str) and name.startswith("..") for name in dim_token_names(actual_dim)):
                 continue
-            dim_map.setdefault(formal_dim, actual_dim)
+            if (
+                not bind_singleton_plain_dims
+                and actual_dim == 1
+                and _is_plain_dim_symbol(formal_dim)
+            ):
+                continue
+            _unify_dim_binding(formal_dim, actual_dim, dim_map)
 
 
 def _bind_type_dim_map(
@@ -604,22 +934,71 @@ def _bind_type_dim_map(
     actual: TypeExpr,
     dim_map: dict[str, DimToken],
     row_map: dict[str, tuple[DimToken, ...]] | None = None,
+    *,
+    bind_singleton_plain_dims: bool = True,
 ) -> None:
     if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor):
-        _bind_dim_sequence_map(formal.dims, actual.dims, dim_map, row_map=row_map)
+        _bind_dim_sequence_map(
+            formal.dims,
+            actual.dims,
+            dim_map,
+            row_map=row_map,
+            bind_singleton_plain_dims=bind_singleton_plain_dims,
+        )
         return
     if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed):
-        _bind_dim_sequence_map(formal.args, actual.args, dim_map)
+        _bind_dim_sequence_map(
+            formal.args,
+            actual.args,
+            dim_map,
+            bind_singleton_plain_dims=bind_singleton_plain_dims,
+        )
         return
     if isinstance(formal, TypeOptional) and isinstance(actual, TypeOptional):
-        _bind_type_dim_map(formal.inner, actual.inner, dim_map, row_map=row_map)
+        _bind_type_dim_map(
+            formal.inner,
+            actual.inner,
+            dim_map,
+            row_map=row_map,
+            bind_singleton_plain_dims=bind_singleton_plain_dims,
+        )
+        return
+    if isinstance(formal, TypeOptional):
+        _bind_type_dim_map(
+            formal.inner,
+            actual,
+            dim_map,
+            row_map=row_map,
+            bind_singleton_plain_dims=bind_singleton_plain_dims,
+        )
+        return
+    if isinstance(actual, TypeOptional):
+        _bind_type_dim_map(
+            formal,
+            actual.inner,
+            dim_map,
+            row_map=row_map,
+            bind_singleton_plain_dims=bind_singleton_plain_dims,
+        )
         return
     if isinstance(formal, TypeList) and isinstance(actual, TypeList):
-        _bind_type_dim_map(formal.item, actual.item, dim_map, row_map=row_map)
+        _bind_type_dim_map(
+            formal.item,
+            actual.item,
+            dim_map,
+            row_map=row_map,
+            bind_singleton_plain_dims=bind_singleton_plain_dims,
+        )
         return
     if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple):
         for formal_item, actual_item in zip(formal.items, actual.items, strict=False):
-            _bind_type_dim_map(formal_item, actual_item, dim_map, row_map=row_map)
+            _bind_type_dim_map(
+                formal_item,
+                actual_item,
+                dim_map,
+                row_map=row_map,
+                bind_singleton_plain_dims=bind_singleton_plain_dims,
+            )
 
 
 def _operand_dim_token(
@@ -629,7 +1008,10 @@ def _operand_dim_token(
     if isinstance(operand, GraphLiteral) and type(operand.value) is int:
         return operand.value
     if isinstance(operand, GraphValueRef):
-        if not isinstance(operand.type_expr, TypeDim | TypeInt):
+        operand_type = operand.type_expr
+        if isinstance(operand_type, TypeOptional):
+            operand_type = operand_type.inner
+        if not isinstance(operand_type, TypeDim | TypeInt):
             return None
         if dim_values is not None and operand.name in dim_values:
             return dim_values[operand.name]
@@ -715,7 +1097,8 @@ def _bind_value_dim_map(
         return
     actual_dim = _operand_dim_token(actual, dim_values)
     if actual_dim is not None:
-        dim_map.setdefault(formal.name, actual_dim)
+        if formal.name not in dim_map:
+            _set_dim_binding_if_acyclic(dim_map, formal.name, actual_dim)
 
 
 def _call_actuals(
@@ -742,7 +1125,12 @@ def _call_dim_subst(
 ) -> dict[str, DimToken]:
     dim_map: dict[str, DimToken] = {}
     for formal, actual in zip(callee.inputs, actuals, strict=False):
-        _bind_type_dim_map(formal.type_expr, graph_operand_type(actual), dim_map)
+        _bind_type_dim_map(
+            formal.type_expr,
+            graph_operand_type(actual),
+            dim_map,
+            bind_singleton_plain_dims=False,
+        )
         _bind_value_dim_map(formal, actual, dim_map, dim_values=dim_values)
     return dim_map
 
@@ -864,7 +1252,10 @@ def _graph_operand_dim_token_for_type_rule(
     if isinstance(operand, GraphValueRef):
         if dim_values is not None and operand.name in dim_values:
             return dim_values[operand.name]
-        if isinstance(operand.type_expr, TypeDim | TypeInt):
+        operand_type = operand.type_expr
+        if isinstance(operand_type, TypeOptional):
+            operand_type = operand_type.inner
+        if isinstance(operand_type, TypeDim | TypeInt):
             return operand.name
         return None
     if isinstance(operand, GraphExpr):
@@ -911,9 +1302,33 @@ def _infer_primitive_graph_type(
             else None,
             broadcast_tensor_dims=lambda left, right: _broadcast_graph_dims(left, right),
             dim_equivalent=lambda left, right: substitute_dim_token(left, {}) == substitute_dim_token(right, {}),
+            unify_dim=_unify_graph_dim_for_type_rule,
         ),
     )
     return inferred if isinstance(inferred, TypeExpr) else None
+
+
+def _unify_graph_dim_for_type_rule(left: DimToken, right: DimToken) -> DimToken:
+    left = substitute_dim_token(left, {})
+    right = substitute_dim_token(right, {})
+    if left == right:
+        return left
+    if isinstance(left, int) and isinstance(right, int):
+        raise ValueError(f"graph primitive dim mismatch {left!r} vs {right!r}")
+    if isinstance(left, str) and not left.startswith(".."):
+        return right if not isinstance(right, str) else _choose_dim_representative(left, right)
+    if isinstance(right, str) and not right.startswith(".."):
+        return left if not isinstance(left, str) else _choose_dim_representative(left, right)
+    if isinstance(left, DimExprBinary) and isinstance(right, DimExprBinary) and left.op == right.op:
+        return substitute_dim_token(
+            DimExprBinary(
+                op=left.op,
+                left=_unify_graph_dim_for_type_rule(left.left, right.left),
+                right=_unify_graph_dim_for_type_rule(left.right, right.right),
+            ),
+            {},
+        )
+    raise ValueError(f"graph primitive dim mismatch {left!r} vs {right!r}")
 
 
 def _broadcast_graph_dim(left: DimToken, right: DimToken) -> DimToken | None:
@@ -932,6 +1347,10 @@ def _broadcast_graph_dim(left: DimToken, right: DimToken) -> DimToken | None:
     if isinstance(left, str) and not isinstance(right, int):
         return left
     if isinstance(right, str) and not isinstance(left, int):
+        return right
+    if isinstance(left, int) and isinstance(right, str):
+        return left
+    if isinstance(right, int) and isinstance(left, str):
         return right
     if isinstance(left, str):
         return left
@@ -1054,26 +1473,24 @@ def _more_specific_compatible_type(
 
 
 def _select_result_type(existing: TypeExpr, true_type: TypeExpr, false_type: TypeExpr) -> TypeExpr:
-    if graph_type_compatible(true_type, existing) and graph_type_compatible(false_type, existing):
-        return existing
+    del existing
     if isinstance(true_type, TypeNull):
         return TypeOptional(false_type) if not isinstance(false_type, TypeOptional) else false_type
     if isinstance(false_type, TypeNull):
         return TypeOptional(true_type) if not isinstance(true_type, TypeOptional) else true_type
-    branch_type = (
-        _more_specific_compatible_type(true_type, false_type)
-        if graph_type_compatible(true_type, false_type)
-        else true_type
-        if graph_type_compatible(true_type, existing)
-        else false_type
-        if graph_type_compatible(false_type, existing)
-        else existing
-    )
-    return (
-        _more_specific_compatible_type(existing, branch_type)
-        if graph_type_compatible(existing, branch_type)
-        else branch_type
-    )
+    if (
+        isinstance(true_type, TypeTensor)
+        and isinstance(false_type, TypeTensor)
+        and true_type.base == false_type.base
+    ):
+        dims = _broadcast_graph_dims(true_type.dims, false_type.dims)
+        if dims is not None:
+            return TypeTensor(true_type.base, dims)
+    if graph_type_compatible(true_type, false_type):
+        return _more_specific_compatible_type(true_type, false_type)
+    if graph_type_compatible(false_type, true_type):
+        return _more_specific_compatible_type(false_type, true_type)
+    return true_type
 
 
 def _primitive_semantics(op_name: str) -> dict[str, object]:
@@ -1253,6 +1670,8 @@ def _module_call_result_type(
 ) -> TypeExpr:
     if isinstance(instantiated, TypeAny):
         return existing
+    if not _type_contains_unbound_dim(instantiated, bound_dim_names):
+        return instantiated
     candidate = _more_specific_compatible_type(
         existing,
         instantiated,
@@ -1284,7 +1703,7 @@ def _refresh_graph_operand_types(
         value = env.get(operand.name) or globals_env.get(operand.name)
         if value is None:
             return operand
-        return replace(operand, type_expr=value.type_expr, dims=value.dims)
+        return replace(operand, type_expr=_value_ref_type(value), dims=value.dims)
     if not isinstance(operand, GraphExpr):
         return operand
     inputs = tuple(
@@ -1318,12 +1737,7 @@ def _refresh_graph_operand_types(
             dim_values=dim_values,
         )
         if primitive_type is not None:
-            result_type = _more_specific_compatible_type(
-                operand.type_expr,
-                primitive_type,
-                preferred_dim_names=preferred_dim_names,
-                prefer_refreshed_dim_names=refreshed_dim_names,
-            )
+            result_type = operand.type_expr if isinstance(primitive_type, TypeAny) else primitive_type
             return replace(
                 operand,
                 inputs=inputs,
@@ -1339,12 +1753,6 @@ def _refresh_graph_operand_types(
                 graph_operand_type(inputs[1]),
             )
             if result_type is not None:
-                result_type = _more_specific_compatible_type(
-                    operand.type_expr,
-                    result_type,
-                    preferred_dim_names=preferred_dim_names,
-                    prefer_refreshed_dim_names=refreshed_dim_names,
-                )
                 return replace(
                     operand,
                     inputs=inputs,
@@ -1358,6 +1766,7 @@ def _refresh_graph_operand_types(
                 graph_operand_type(inputs[1]),
                 graph_operand_type(inputs[2]),
             )
+            inputs = _refine_select_inputs_from_result(inputs, result_type)
             return replace(
                 operand,
                 inputs=inputs,
@@ -1375,8 +1784,15 @@ def _refresh_graph_operand_types(
     )
     if len(result_types) != 1:
         return replace(call, type_expr=TypeTuple(result_types))
+    existing_type = call.type_expr
+    if _type_has_non_dim_local_dim_ref(
+        existing_type,
+        env=env,
+        globals_env=globals_env,
+    ):
+        existing_type = result_types[0]
     result_type = _module_call_result_type(
-        call.type_expr,
+        existing_type,
         result_types[0],
         bound_dim_names=_module_input_dim_symbols(callee),
         preferred_dim_names=preferred_dim_names,
@@ -1400,7 +1816,73 @@ def _refresh_graph_module_types(
         for name, value in (global_dim_values or {}).items()
         if name not in shadowed_dim_names
     }
+    desired_output_types: dict[str, TypeExpr] = {}
+    local_output_names = {
+        output.name
+        for node in module.nodes
+        for output in node.outputs
+    }
+    for output in module.outputs:
+        if isinstance(output, GraphValueRef) and (
+            not isinstance(output.type_expr, TypeTensor)
+            or
+            _type_contains_inference_var(output.type_expr)
+            or (
+                isinstance(output.type_expr, TypeTensor)
+                and any(isinstance(dim, DimExprBinary) for dim in output.type_expr.dims)
+            )
+        ) and not (_type_dim_refs(output.type_expr) & local_output_names):
+            desired_output_types[output.name] = output.type_expr
+    for node in module.nodes:
+        if node.op.name != "core.repeat":
+            continue
+        for carry_index, output in enumerate(node.outputs):
+            input_index = 3 + carry_index
+            if input_index >= len(node.inputs):
+                continue
+            carry_input = node.inputs[input_index]
+            if not isinstance(carry_input, GraphValueRef):
+                continue
+            current = desired_output_types.get(carry_input.name)
+            desired_output_types[carry_input.name] = (
+                output.type_expr
+                if current is None
+                else _refined_compatible_type(current, output.type_expr)
+            )
+    for _ in range(8):
+        changed_desired_types = False
+        for node in module.nodes:
+            if (
+                not node.op.name.startswith("core.binary.")
+                or node.op.name.removeprefix("core.binary.") not in {"+", "-", "*", "/"}
+                or len(node.inputs) != 2
+                or len(node.outputs) != 1
+                or node.outputs[0].name not in desired_output_types
+            ):
+                continue
+            desired = desired_output_types[node.outputs[0].name]
+            if not isinstance(desired, TypeTensor):
+                continue
+            for item in node.inputs:
+                if not isinstance(item, GraphValueRef):
+                    continue
+                item_type = graph_operand_type(item)
+                if not isinstance(item_type, TypeTensor):
+                    continue
+                if not (
+                    _type_contains_inference_var(item_type)
+                    or _type_contains_unbound_dim(item_type, shadowed_dim_names | set(globals_env))
+                ):
+                    continue
+                current = desired_output_types.get(item.name)
+                refined = desired if current is None else _refined_compatible_type(current, desired)
+                if current != refined:
+                    desired_output_types[item.name] = refined
+                    changed_desired_types = True
+        if not changed_desired_types:
+            break
     nodes: list[GraphNode] = []
+    conditions: dict[str, GraphExpr] = {}
     for node in module.nodes:
         refreshed_dim_names = _dim_value_symbol_names(dim_values)
         preferred_dim_names = set(globals_env) | refreshed_dim_names
@@ -1437,7 +1919,15 @@ def _refresh_graph_module_types(
             )
             output_types = tuple(
                 _module_call_result_type(
-                    node.outputs[index].type_expr,
+                    (
+                        output_type
+                        if _type_has_non_dim_local_dim_ref(
+                            node.outputs[index].type_expr,
+                            env=env,
+                            globals_env=globals_env,
+                        )
+                        else node.outputs[index].type_expr
+                    ),
                     output_type,
                     bound_dim_names=_module_input_dim_symbols(callee),
                     preferred_dim_names=preferred_dim_names,
@@ -1450,10 +1940,12 @@ def _refresh_graph_module_types(
         elif node.op.name == "core.tuple":
             output_types = tuple(graph_operand_type(item) for item in inputs)
             type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
-        elif node.op.name in {"core.alias", "core.ascribe"} and len(inputs) == 1:
+        elif node.op.name == "core.alias" and len(inputs) == 1:
             input_type = graph_operand_type(inputs[0])
             output_types = _result_types(input_type, len(node.outputs))
             type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
+        elif node.op.name == "core.ascribe" and len(inputs) == 1:
+            output_types = _result_types(type_expr, len(node.outputs))
         elif node.op.name.startswith("core.binary.") and len(inputs) == 2:
             op = node.op.name.removeprefix("core.binary.")
             binary_type = _core_binary_result_type(
@@ -1462,19 +1954,45 @@ def _refresh_graph_module_types(
                 graph_operand_type(inputs[1]),
             )
             if binary_type is not None:
-                type_expr = _more_specific_compatible_type(
-                    type_expr,
-                    binary_type,
-                    preferred_dim_names=preferred_dim_names,
-                    prefer_refreshed_dim_names=refreshed_dim_names,
-                )
+                # The result of a core binary node is determined by its
+                # refreshed operands. Existing node metadata can be stale after
+                # specialization/inlining, so do not let equally-specific old
+                # symbolic names (for example K vs S) override the operand
+                # result.
+                type_expr = binary_type
+                if len(node.outputs) == 1 and node.outputs[0].name in desired_output_types:
+                    type_expr = _refined_compatible_type(
+                        type_expr,
+                        desired_output_types[node.outputs[0].name],
+                    )
+                if op in {"+", "-", "*", "/"} and isinstance(type_expr, TypeTensor):
+                    inputs = tuple(
+                        _refine_operand_type_metadata(item, type_expr)
+                        if isinstance(graph_operand_type(item), TypeTensor)
+                        and (
+                            _type_contains_inference_var(graph_operand_type(item))
+                            or _type_contains_unbound_dim(
+                                graph_operand_type(item),
+                                shadowed_dim_names | set(globals_env),
+                            )
+                        )
+                        else item
+                        for item in inputs
+                    )
                 output_types = (type_expr,)
         elif node.op.name == "core.select" and len(inputs) == 3:
+            inputs = _refine_select_inputs_from_condition(inputs, conditions=conditions)
             type_expr = _select_result_type(
                 type_expr,
                 graph_operand_type(inputs[1]),
                 graph_operand_type(inputs[2]),
             )
+            if len(node.outputs) == 1 and node.outputs[0].name in desired_output_types:
+                type_expr = _refined_compatible_type(
+                    type_expr,
+                    desired_output_types[node.outputs[0].name],
+                )
+            inputs = _refine_select_inputs_from_result(inputs, type_expr)
             output_types = _result_types(type_expr, len(node.outputs))
         else:
             primitive_type = _infer_primitive_graph_type(
@@ -1484,24 +2002,17 @@ def _refresh_graph_module_types(
                 dim_values=dim_values,
             )
             if primitive_type is not None:
-                if (
-                    len(node.outputs) > 1
-                    and isinstance(type_expr, TypeTuple)
-                    and isinstance(primitive_type, TypeList)
-                    and len(type_expr.items) == len(node.outputs)
-                ):
-                    # Primitive type rules for list-returning ops can be less
-                    # precise than a destructuring call site. Keep the refined
-                    # tuple shape rather than widening back to List[item].
-                    type_expr = type_expr
+                destructured_types = (
+                    _destructured_list_output_types(primitive_type, len(node.outputs))
+                    if isinstance(primitive_type, TypeList)
+                    else None
+                )
+                if destructured_types is not None:
+                    output_types = destructured_types
+                    type_expr = TypeTuple(output_types)
                 else:
-                    type_expr = _more_specific_compatible_type(
-                        type_expr,
-                        primitive_type,
-                        preferred_dim_names=preferred_dim_names,
-                        prefer_refreshed_dim_names=refreshed_dim_names,
-                    )
-                output_types = _result_types(type_expr, len(node.outputs))
+                    type_expr = type_expr if isinstance(primitive_type, TypeAny) else primitive_type
+                    output_types = _result_types(type_expr, len(node.outputs))
         value_dependent_output_types = _primitive_value_dependent_output_types(
             replace(
                 node,
@@ -1527,15 +2038,36 @@ def _refresh_graph_module_types(
         outputs = tuple(
             replace(
                 output,
-                type_expr=output_types[index] if index < len(output_types) else output.type_expr,
+                type_expr=(
+                    _refined_compatible_type(output_types[index], desired_output_types[output.name])
+                    if index < len(output_types) and output.name in desired_output_types
+                    else output_types[index]
+                    if index < len(output_types)
+                    else output.type_expr
+                ),
                 dims=(
-                    output_types[index].dims
+                    (
+                        _refined_compatible_type(
+                            output_types[index],
+                            desired_output_types[output.name],
+                        ).dims
+                        if output.name in desired_output_types
+                        and isinstance(
+                            _refined_compatible_type(
+                                output_types[index],
+                                desired_output_types[output.name],
+                            ),
+                            TypeTensor,
+                        )
+                        else output_types[index].dims
+                    )
                     if index < len(output_types) and isinstance(output_types[index], TypeTensor)
                     else output.dims
                 ),
             )
             for index, output in enumerate(node.outputs)
         )
+        type_expr = outputs[0].type_expr if len(outputs) == 1 else TypeTuple(tuple(output.type_expr for output in outputs))
         rewritten = replace(
             node,
             inputs=inputs,
@@ -1546,6 +2078,19 @@ def _refresh_graph_module_types(
         )
         nodes.append(rewritten)
         env.update({output.name: output for output in outputs})
+        if (
+            len(outputs) == 1
+            and rewritten.op.name.startswith("core.binary.")
+            and len(rewritten.inputs) == 2
+            and not rewritten.attrs
+        ):
+            conditions[outputs[0].name] = GraphExpr(
+                op=rewritten.op,
+                inputs=rewritten.inputs,
+                attrs=rewritten.attrs,
+                type_expr=rewritten.type_expr,
+                dims=rewritten.dims,
+            )
         if len(outputs) == 1:
             output = outputs[0]
             if node.op.name in globals_env and isinstance(globals_env[node.op.name].type_expr, TypeDim | TypeInt):
@@ -1582,6 +2127,50 @@ def _refresh_graph_module_types(
                 dim = _primitive_dim_output_value(rewritten, output_index=0)
                 if dim is not None:
                     dim_values[output.name] = dim
+    use_types: dict[str, TypeExpr] = {}
+    for node in nodes:
+        for operand in (*node.inputs, *node.attrs.values()):
+            _collect_ref_type_uses(operand, use_types)
+    for output in module.outputs:
+        _collect_ref_type_uses(output, use_types)
+    refined_nodes: list[GraphNode] = []
+    for node in nodes:
+        refined_outputs: list[GraphValue] = []
+        changed_outputs = False
+        for output in node.outputs:
+            used_type = use_types.get(output.name)
+            if used_type is None:
+                refined_outputs.append(output)
+                continue
+            refined_type = _refined_compatible_type(output.type_expr, used_type)
+            if refined_type != output.type_expr:
+                changed_outputs = True
+                refined_outputs.append(
+                    replace(
+                        output,
+                        type_expr=refined_type,
+                        dims=refined_type.dims if isinstance(refined_type, TypeTensor) else output.dims,
+                    )
+                )
+            else:
+                refined_outputs.append(output)
+        if not changed_outputs:
+            refined_nodes.append(node)
+            continue
+        node_type = (
+            refined_outputs[0].type_expr
+            if len(refined_outputs) == 1
+            else TypeTuple(tuple(output.type_expr for output in refined_outputs))
+        )
+        refined_nodes.append(
+            replace(
+                node,
+                outputs=tuple(refined_outputs),
+                type_expr=node_type,
+                dims=node_type.dims if isinstance(node_type, TypeTensor) else node.dims,
+            )
+        )
+    nodes = refined_nodes
     outputs = tuple(
         _refresh_graph_operand_types(
             output,
@@ -1598,6 +2187,153 @@ def _refresh_graph_module_types(
         outputs=outputs,
         return_type_expr=_return_type_expr_from_outputs(outputs),
     )
+
+
+def _repeat_attr_value(node: GraphNode, key: str) -> object | None:
+    value = node.attrs.get(key)
+    return value.value if isinstance(value, GraphLiteral) else None
+
+
+def _repeat_call_actuals_for_refresh(
+    node: GraphNode,
+    callee: GraphModule,
+) -> tuple[GraphOperand, ...] | None:
+    if node.op.name != "core.repeat":
+        return None
+    arg_count = _repeat_attr_value(node, "arg_count")
+    carry_count = _repeat_attr_value(node, "carry_count")
+    if type(arg_count) is not int or type(carry_count) is not int:
+        return None
+    if arg_count != len(callee.inputs) or carry_count != len(node.outputs):
+        return None
+    actuals: list[GraphOperand] = []
+    for index in range(arg_count):
+        role = _repeat_attr_value(node, f"arg_{index}")
+        if not isinstance(role, str):
+            return None
+        if role == "iter":
+            actuals.append(GraphLiteral(0, TypeInt()))
+            continue
+        if role.startswith("carry:"):
+            carry_index = int(role.removeprefix("carry:"))
+            if carry_index < 0 or carry_index >= carry_count:
+                return None
+            carry_name = _repeat_attr_value(node, f"carry_{carry_index}")
+            actuals.append(
+                GraphValueRef(
+                    name=carry_name if isinstance(carry_name, str) else node.outputs[carry_index].name,
+                    type_expr=node.outputs[carry_index].type_expr,
+                    dims=node.outputs[carry_index].dims,
+                )
+            )
+            continue
+        if role.startswith("input:"):
+            input_index = int(role.removeprefix("input:"))
+            if input_index < 0 or input_index >= len(node.inputs):
+                return None
+            actuals.append(node.inputs[input_index])
+            continue
+        return None
+    return tuple(actuals)
+
+
+def _collect_ref_type_uses(operand: GraphOperand, out: dict[str, TypeExpr]) -> None:
+    if isinstance(operand, GraphValueRef):
+        current = out.get(operand.name)
+        out[operand.name] = (
+            operand.type_expr if current is None else _refined_compatible_type(current, operand.type_expr)
+        )
+        return
+    if not isinstance(operand, GraphExpr):
+        return
+    for item in operand.inputs:
+        _collect_ref_type_uses(item, out)
+    for item in operand.attrs.values():
+        _collect_ref_type_uses(item, out)
+
+
+def _refine_repeat_callee_signatures(graph: GraphProgram) -> GraphProgram:
+    modules_by_name = {module.name: module for module in graph.modules}
+    repeat_calls: dict[str, list[tuple[GraphNode, tuple[GraphOperand, ...]]]] = {}
+    non_repeat_counts: Counter[str] = Counter()
+    module_names = set(modules_by_name)
+    for module in graph.modules:
+        for node in module.nodes:
+            if node.op.name == "core.repeat":
+                callee_name = _repeat_attr_value(node, "callee")
+                if isinstance(callee_name, str) and callee_name in modules_by_name:
+                    actuals = _repeat_call_actuals_for_refresh(node, modules_by_name[callee_name])
+                    if actuals is not None:
+                        repeat_calls.setdefault(callee_name, []).append((node, actuals))
+                continue
+            if node.op.name in module_names:
+                non_repeat_counts[node.op.name] += 1
+            for operand in (*node.inputs, *node.attrs.values()):
+                for callee_name in _operand_called_module_names(operand, module_names):
+                    non_repeat_counts[callee_name] += 1
+        for output in module.outputs:
+            for callee_name in _operand_called_module_names(output, module_names):
+                non_repeat_counts[callee_name] += 1
+
+    rewritten_modules: list[GraphModule] = []
+    changed = False
+    for module in graph.modules:
+        calls = repeat_calls.get(module.name, [])
+        if len(calls) != 1 or non_repeat_counts[module.name]:
+            rewritten_modules.append(module)
+            continue
+        repeat_node, actuals = calls[0]
+        inputs: list[GraphValue] = []
+        for formal, actual in zip(module.inputs, actuals, strict=True):
+            actual_type = graph_operand_type(actual)
+            refined_type = _refined_compatible_type(formal.type_expr, actual_type)
+            if refined_type != formal.type_expr:
+                changed = True
+                inputs.append(
+                    replace(
+                        formal,
+                        type_expr=refined_type,
+                        dims=refined_type.dims if isinstance(refined_type, TypeTensor) else formal.dims,
+                    )
+                )
+            else:
+                inputs.append(formal)
+        outputs: list[GraphOperand] = []
+        for index, output in enumerate(module.outputs):
+            if index >= len(repeat_node.outputs):
+                outputs.append(output)
+                continue
+            desired_type = repeat_node.outputs[index].type_expr
+            refined_output = (
+                replace(
+                    output,
+                    type_expr=desired_type,
+                    dims=desired_type.dims if isinstance(desired_type, TypeTensor) else output.dims,
+                )
+                if isinstance(output, GraphValueRef | GraphExpr)
+                and (
+                    graph_type_compatible(graph_operand_type(output), desired_type)
+                    or graph_type_compatible(desired_type, graph_operand_type(output))
+                )
+                else output
+            )
+            if refined_output != output:
+                changed = True
+            outputs.append(refined_output)
+        return_type_expr = (
+            outputs[0].type_expr
+            if len(outputs) == 1 and isinstance(outputs[0], GraphValueRef | GraphExpr)
+            else TypeTuple(tuple(graph_operand_type(output) for output in outputs))
+        )
+        rewritten_modules.append(
+            replace(
+                module,
+                inputs=tuple(inputs),
+                outputs=tuple(outputs),
+                return_type_expr=return_type_expr,
+            )
+        )
+    return replace(graph, modules=tuple(rewritten_modules)) if changed else graph
 
 
 def _refresh_graph_program_types(graph: GraphProgram) -> GraphProgram:
@@ -1626,6 +2362,7 @@ def _refresh_graph_program_types(graph: GraphProgram) -> GraphProgram:
                 for module in current.modules
             ),
         )
+        refreshed = _refine_repeat_callee_signatures(refreshed)
         if refreshed == current:
             return current
         current = refreshed
@@ -1925,29 +2662,19 @@ def _substitute_atomic_constant_dims_local(graph: GraphProgram) -> GraphProgram:
     literal_constants = _atomic_literal_constants(graph)
     if not literal_constants:
         return graph
-    dim_constants = {
+    dim_subst = {
         name: literal.value
         for name, literal in literal_constants.items()
         if type(literal.value) is int
     }
     modules: list[GraphModule] = []
     for module in graph.modules:
-        signature_dim_names = _module_signature_dim_refs(module)
-        module_dim_constants = {
-            name: value
-            for name, value in dim_constants.items()
-            if name not in signature_dim_names
-        }
         module_constants = {
             name: literal
             for name, literal in literal_constants.items()
-            if name != module.name and name not in signature_dim_names
+            if name != module.name
         }
-        candidate_module = (
-            substitute_graph_module_dims(module, module_dim_constants)
-            if module_dim_constants
-            else module
-        )
+        candidate_module = substitute_graph_module_dims(module, dim_subst)
         candidate_module = replace(
             candidate_module,
             nodes=tuple(
@@ -1970,10 +2697,20 @@ def _substitute_atomic_constant_dims_local(graph: GraphProgram) -> GraphProgram:
             ),
         )
         modules.append(candidate_module)
-    candidate = replace(graph, modules=tuple(modules))
+    pre_refresh_modules = tuple(modules)
+    candidate = replace(graph, modules=pre_refresh_modules)
     if candidate == graph:
         return graph
     candidate = _refresh_graph_program_types(candidate)
+    candidate = replace(
+        candidate,
+        modules=_preserve_unchanged_module_types(
+            graph.modules,
+            pre_refresh_modules,
+            candidate.modules,
+            main_module=graph.main_module,
+        ),
+    )
     candidate = _sanitize_graph_constraints(candidate)
     try:
         _validate_optimizer_graph(candidate, phase="constant_dim_substitution")
@@ -1987,8 +2724,18 @@ def _substitute_atomic_constant_dims_local(graph: GraphProgram) -> GraphProgram:
                 continue
             candidate_modules = list(accepted)
             candidate_modules[index] = candidate_module
+            pre_refresh_candidate_modules = tuple(candidate_modules)
             module_candidate = replace(graph, modules=tuple(candidate_modules))
             module_candidate = _refresh_graph_program_types(module_candidate)
+            module_candidate = replace(
+                module_candidate,
+                modules=_preserve_unchanged_module_types(
+                    graph.modules,
+                    pre_refresh_candidate_modules,
+                    module_candidate.modules,
+                    main_module=graph.main_module,
+                ),
+            )
             module_candidate = _sanitize_graph_constraints(module_candidate)
             try:
                 _validate_optimizer_graph(
@@ -2003,6 +2750,39 @@ def _substitute_atomic_constant_dims_local(graph: GraphProgram) -> GraphProgram:
             return graph
         return replace(graph, modules=tuple(accepted))
     return candidate
+
+
+def _preserve_unchanged_module_types(
+    original_modules: tuple[GraphModule, ...],
+    pre_refresh_modules: tuple[GraphModule, ...],
+    refreshed_modules: tuple[GraphModule, ...],
+    *,
+    main_module: str,
+) -> tuple[GraphModule, ...]:
+    return tuple(
+        replace(
+            refreshed_module,
+            inputs=original_module.inputs,
+            outputs=original_module.outputs,
+            return_type_expr=original_module.return_type_expr,
+        )
+        if (
+            original_module.name != main_module
+            and
+            pre_refresh_module.inputs == original_module.inputs
+            and pre_refresh_module.outputs == original_module.outputs
+            and pre_refresh_module.nodes == original_module.nodes
+            and pre_refresh_module.return_type_expr == original_module.return_type_expr
+            and refreshed_module != original_module
+        )
+        else refreshed_module
+        for original_module, pre_refresh_module, refreshed_module in zip(
+            original_modules,
+            pre_refresh_modules,
+            refreshed_modules,
+            strict=True,
+        )
+    )
 
 
 def _simplify_symbolic_graph_dims(graph: GraphProgram) -> GraphProgram:
@@ -2097,6 +2877,8 @@ def _operand_is_statically_non_null_for_fold(operand: GraphOperand) -> bool:
         return True
     if isinstance(operand, GraphLiteral):
         return operand.value is not None
+    if isinstance(operand, GraphValueRef):
+        return not isinstance(operand.type_expr, TypeAny | TypeOptional | TypeNull)
     if isinstance(operand, GraphExpr) and not operand.inputs and not operand.attrs:
         return not isinstance(operand.type_expr, TypeAny | TypeOptional | TypeNull)
     return False
@@ -2344,6 +3126,12 @@ def _shape_query_replacement(
         )
     if expr.op.name == "_list_index" and len(expr.inputs) == 2:
         items = _shape_items_operand(expr.inputs[0], modules_by_name=modules_by_name)
+        index = _literal_int(expr.inputs[1])
+        if items is None or index is None:
+            return None
+        return allowed(_indexed_operand(items, index))
+    if expr.op.name == "_tensor_size" and len(expr.inputs) == 2:
+        items = _typed_shape_operands(expr.inputs[0])
         index = _literal_int(expr.inputs[1])
         if items is None or index is None:
             return None
@@ -2923,7 +3711,7 @@ def _replace_operand_refs(
     modules_by_name: Mapping[str, GraphModule] | None = None,
     local_domain_facts: Mapping[str, GraphDomainFact] | None = None,
 ) -> GraphOperand:
-    return replace_operand_refs(
+    rewritten = replace_operand_refs(
         operand,
         subst,
         fold_operand=(
@@ -2937,6 +3725,23 @@ def _replace_operand_refs(
             )
         ),
     )
+    dim_subst = _dim_alias_subst(subst)
+    return substitute_graph_operand_dims(rewritten, dim_subst) if dim_subst else rewritten
+
+
+def _dim_alias_subst(subst: Mapping[str, GraphOperand]) -> dict[str, DimToken]:
+    dim_subst: dict[str, DimToken] = {}
+    for name, replacement in subst.items():
+        replacement_dim = _operand_dim_token(replacement)
+        if replacement_dim is not None:
+            dim_subst[name] = replacement_dim
+        elif isinstance(replacement, GraphValueRef):
+            # Alias cleanup can replace a local value before all type metadata
+            # that refers to it has been revisited.  If that old value name
+            # appears in a type-level dimension position, it must follow the
+            # same alias as the term-level reference.
+            dim_subst[name] = replacement.name
+    return dim_subst
 
 
 def _fold_operand(
@@ -3016,7 +3821,7 @@ def _rewrite_node_operands(
     modules_by_name: Mapping[str, GraphModule] | None = None,
     local_domain_facts: Mapping[str, GraphDomainFact] | None = None,
 ) -> GraphNode:
-    return replace(
+    rewritten = replace(
         node,
         inputs=tuple(
             _replace_operand_refs(
@@ -3041,6 +3846,8 @@ def _rewrite_node_operands(
             for key, value in node.attrs.items()
         },
     )
+    dim_subst = _dim_alias_subst(subst)
+    return substitute_graph_node_dims(rewritten, dim_subst) if dim_subst else rewritten
 
 
 def _node_replacement(
@@ -3476,6 +4283,59 @@ def _optimize_module_local(
     return _dead_temp_eliminate_module(module, module_effects=module_effects)
 
 
+def _optimize_modules_local_with_fresh_domain_facts(
+    graph: GraphProgram,
+    *,
+    config: GraphOptimizeConfig,
+    phase: str,
+) -> GraphProgram:
+    current = graph
+    for iteration in range(config.max_iterations):
+        before = current
+        module_effects = infer_graph_module_effects(current.modules)
+        modules_by_name = {module.name: module for module in current.modules}
+        domain_analysis = infer_main_module_domain_facts(current)
+        global_literals = _atomic_literal_constants(current)
+        global_dim_values = _atomic_int_constant_dims(current)
+        pre_refresh_modules = tuple(
+            _optimize_module_local(
+                module,
+                config=config,
+                module_effects=module_effects,
+                modules_by_name=modules_by_name,
+                local_domain_facts=domain_analysis.module_local_facts.get(module.name),
+                global_dim_values=global_dim_values,
+                global_literals=global_literals,
+            )
+            for module in current.modules
+        )
+        candidate = replace(
+            current,
+            modules=pre_refresh_modules,
+        )
+        candidate = _refresh_graph_program_types(candidate)
+        candidate = replace(
+            candidate,
+            modules=_preserve_unchanged_module_types(
+                current.modules,
+                pre_refresh_modules,
+                candidate.modules,
+                main_module=current.main_module,
+            ),
+        )
+        candidate = _sanitize_graph_constraints(candidate)
+        try:
+            _validate_optimizer_graph(candidate, phase=f"{phase}.{iteration}")
+        except ValueError:
+            return current
+        current = candidate
+        if current == before:
+            return current
+    raise RuntimeError(
+        f"graph local cleanup did not converge after {config.max_iterations} iterations"
+    )
+
+
 def _dead_temp_eliminate_module(
     module: GraphModule,
     *,
@@ -3512,19 +4372,164 @@ def _dead_temp_eliminate_module(
     return replace(module, nodes=kept_nodes, constraints=kept_constraints)
 
 
+def _collect_value_ref_counts(
+    operand: GraphOperand,
+    *,
+    counts: Counter[str],
+    path_template_refs: set[str],
+) -> None:
+    if isinstance(operand, GraphValueRef):
+        counts[operand.name] += 1
+        return
+    if isinstance(operand, GraphPath):
+        path_template_refs.update(graph_path_template_names(operand))
+        return
+    if isinstance(operand, GraphExpr):
+        for item in operand.inputs:
+            _collect_value_ref_counts(
+                item,
+                counts=counts,
+                path_template_refs=path_template_refs,
+            )
+        for item in operand.attrs.values():
+            _collect_value_ref_counts(
+                item,
+                counts=counts,
+                path_template_refs=path_template_refs,
+            )
+
+
+def _inlineable_single_use_expr_node(node: GraphNode) -> bool:
+    if len(node.outputs) != 1:
+        return False
+    if node.op.name in {"core.alias", "core.ascribe"}:
+        return len(node.inputs) == 1 and not node.attrs
+    if node.op.name == "core.list":
+        return bool(node.inputs) and not node.attrs
+    if node.op.name.startswith("core.binary."):
+        return len(node.inputs) == 2 and not node.attrs
+    if node.op.name == "core.select":
+        return len(node.inputs) == 3 and not node.attrs
+    return False
+
+
+def _inline_single_use_total_pure_exprs_module(
+    module: GraphModule,
+    *,
+    module_effects: Mapping[str, GraphEffect],
+    module_usages: Mapping[str, UsageClass],
+    modules_by_name: Mapping[str, GraphModule],
+) -> GraphModule:
+    counts: Counter[str] = Counter()
+    path_template_refs: set[str] = set()
+    output_refs: set[str] = set()
+    for node in module.nodes:
+        for operand in (*node.inputs, *node.attrs.values()):
+            _collect_value_ref_counts(
+                operand,
+                counts=counts,
+                path_template_refs=path_template_refs,
+            )
+        if node.op.name == "core.repeat":
+            for operand in node.inputs:
+                _operand_refs(operand, output_refs)
+    for output in module.outputs:
+        _collect_value_ref_counts(
+            output,
+            counts=counts,
+            path_template_refs=path_template_refs,
+        )
+        _operand_refs(output, output_refs)
+
+    blocked_refs = path_template_refs | output_refs | _collect_module_free_symbols(module).type_dim_refs
+    subst: dict[str, GraphOperand] = {}
+    nodes: list[GraphNode] = []
+    changed = False
+    for node in module.nodes:
+        rewritten = _rewrite_node_operands(
+            node,
+            subst,
+            fold=True,
+            module_effects=module_effects,
+            modules_by_name=modules_by_name,
+        )
+        if not _inlineable_single_use_expr_node(rewritten):
+            nodes.append(rewritten)
+            continue
+        output = rewritten.outputs[0]
+        if output.name in blocked_refs or counts[output.name] != 1:
+            nodes.append(rewritten)
+            continue
+        replacement = GraphExpr(
+            op=rewritten.op,
+            inputs=rewritten.inputs,
+            attrs=rewritten.attrs,
+            type_expr=output.type_expr,
+            dims=output.dims,
+        )
+        if _constraints_reference_any(module.constraints, {output.name}) and _specialize_constraints(
+            module.constraints,
+            {**subst, output.name: replacement},
+        ) is None:
+            nodes.append(rewritten)
+            continue
+        if graph_node_effect(
+            rewritten,
+            module_effects=dict(module_effects),
+        ) != GraphEffect.TOTAL_PURE:
+            nodes.append(rewritten)
+            continue
+        if not _is_unrestricted_node(rewritten, module_usages):
+            nodes.append(rewritten)
+            continue
+        subst[output.name] = replacement
+        changed = True
+
+    if not changed:
+        return module
+    outputs = tuple(
+        _replace_operand_refs(
+            output,
+            subst,
+            fold=True,
+            module_effects=module_effects,
+            modules_by_name=modules_by_name,
+        )
+        for output in module.outputs
+    )
+    constraints = _specialize_constraints(module.constraints, subst)
+    if constraints is None:
+        return module
+    return replace(module, nodes=tuple(nodes), outputs=outputs, constraints=constraints)
+
+
 def _collect_nested_total_expr_counts(
     operand: GraphOperand,
     *,
     module_effects: Mapping[str, GraphEffect],
+    module_usages: Mapping[str, UsageClass],
     counts: Counter[object],
 ) -> None:
     if not isinstance(operand, GraphExpr):
         return
     for item in operand.inputs:
-        _collect_nested_total_expr_counts(item, module_effects=module_effects, counts=counts)
+        _collect_nested_total_expr_counts(
+            item,
+            module_effects=module_effects,
+            module_usages=module_usages,
+            counts=counts,
+        )
     for item in operand.attrs.values():
-        _collect_nested_total_expr_counts(item, module_effects=module_effects, counts=counts)
-    if graph_operand_effect(operand, module_effects=dict(module_effects)) == GraphEffect.TOTAL_PURE:
+        _collect_nested_total_expr_counts(
+            item,
+            module_effects=module_effects,
+            module_usages=module_usages,
+            counts=counts,
+        )
+    if (
+        graph_operand_effect(operand, module_effects=dict(module_effects)) == GraphEffect.TOTAL_PURE
+        and _is_unrestricted_operand(operand, module_usages)
+    ):
         counts[_graph_operand_key(operand)] += 1
 
 
@@ -3545,6 +4550,7 @@ def _hoist_repeated_nested_total_exprs_module(
     module: GraphModule,
     *,
     module_effects: Mapping[str, GraphEffect],
+    module_usages: Mapping[str, UsageClass],
 ) -> GraphModule:
     counts: Counter[object] = Counter()
     for node in module.nodes:
@@ -3552,12 +4558,14 @@ def _hoist_repeated_nested_total_exprs_module(
             _collect_nested_total_expr_counts(
                 operand,
                 module_effects=module_effects,
+                module_usages=module_usages,
                 counts=counts,
             )
     for output in module.outputs:
         _collect_nested_total_expr_counts(
             output,
             module_effects=module_effects,
+            module_usages=module_usages,
             counts=counts,
         )
     repeated = {key for key, count in counts.items() if count > 1}
@@ -3647,6 +4655,7 @@ def _hoist_eager_nested_exprs_module(
     module: GraphModule,
     *,
     module_effects: Mapping[str, GraphEffect],
+    module_usages: Mapping[str, UsageClass],
 ) -> GraphModule:
     used_names = _module_value_names(module)
     next_index = 1
@@ -3717,6 +4726,7 @@ def _hoist_eager_nested_exprs_module(
             not eager
             or rewritten.op.name in {"core.list", "core.tuple"}
             or graph_operand_effect(rewritten, module_effects=dict(module_effects)) != GraphEffect.TOTAL_PURE
+            or not _is_unrestricted_operand(rewritten, module_usages)
         ):
             return rewritten
         name = fresh_name()
@@ -3766,9 +4776,14 @@ def _hoist_eager_nested_exprs(
     graph: GraphProgram,
     *,
     module_effects: Mapping[str, GraphEffect],
+    module_usages: Mapping[str, UsageClass],
 ) -> GraphProgram:
     modules = tuple(
-        _hoist_eager_nested_exprs_module(module, module_effects=module_effects)
+        _hoist_eager_nested_exprs_module(
+            module,
+            module_effects=module_effects,
+            module_usages=module_usages,
+        )
         for module in graph.modules
     )
     if modules == graph.modules:
@@ -3780,6 +4795,7 @@ def _common_subexpression_eliminate_module(
     module: GraphModule,
     *,
     module_effects: Mapping[str, GraphEffect],
+    module_usages: Mapping[str, UsageClass],
     fold: bool,
 ) -> GraphModule:
     subst: dict[str, GraphOperand] = {}
@@ -3796,6 +4812,7 @@ def _common_subexpression_eliminate_module(
         if (
             len(rewritten.outputs) == 1
             and _is_total_pure_node(rewritten, module_effects)
+            and _is_unrestricted_node(rewritten, module_usages)
         ):
             key = _graph_node_cse_key(rewritten)
             previous = seen.get(key)
@@ -3848,6 +4865,7 @@ def _common_subexpression_eliminate_module(
     return _hoist_repeated_nested_total_exprs_module(
         rewritten_module,
         module_effects=module_effects,
+        module_usages=module_usages,
     )
 
 
@@ -3905,6 +4923,9 @@ def _graph_call_graph(graph: GraphProgram) -> dict[str, set[str]]:
         for node in module.nodes:
             if node.op.name in module_names:
                 calls[module.name].add(node.op.name)
+            repeat_callee = _core_repeat_callee(node, module_names)
+            if repeat_callee is not None:
+                calls[module.name].add(repeat_callee)
             for operand in node.inputs:
                 _operand_module_calls(operand, module_names, calls[module.name])
             for operand in node.attrs.values():
@@ -3913,6 +4934,15 @@ def _graph_call_graph(graph: GraphProgram) -> dict[str, set[str]]:
             _operand_module_calls(operand, module_names, calls[module.name])
         _module_metadata_refs(module, module_names, calls[module.name])
     return calls
+
+
+def _core_repeat_callee(node: GraphNode, module_names: set[str]) -> str | None:
+    if node.op.name != "core.repeat":
+        return None
+    callee = node.attrs.get("callee")
+    if isinstance(callee, GraphLiteral) and isinstance(callee.value, str) and callee.value in module_names:
+        return callee.value
+    return None
 
 
 def _strongly_connected_components(edges: Mapping[str, set[str]]) -> list[set[str]]:
@@ -4037,6 +5067,185 @@ def _all_calls_by_callee(graph: GraphProgram) -> dict[str, list[tuple[str, Graph
         for output in module.outputs:
             collect_operand(module.name, output)
     return calls
+
+
+def _dead_formal_referenced_names(module: GraphModule) -> set[str]:
+    symbols = _collect_module_free_symbols(module)
+    refs = set(symbols.value_refs)
+    refs.update(symbols.path_refs)
+    refs.update(symbols.type_dim_refs)
+    refs.update(symbols.term_dim_refs)
+    refs.update(symbols.constraint_refs)
+    return refs
+
+
+def _formal_bound_dim_names(formal: GraphValue) -> set[str]:
+    refs = _type_dim_refs(formal.type_expr)
+    refs.update(_dims_dim_refs(formal.dims))
+    return refs
+
+
+def _safe_to_drop_dead_actual(
+    operand: GraphOperand,
+    *,
+    module_effects: dict[str, GraphEffect],
+    modules_by_name: dict[str, GraphModule],
+) -> bool:
+    if isinstance(operand, GraphValueRef | GraphLiteral | GraphPath):
+        return True
+    return (
+        graph_operand_effect(
+            operand,
+            module_effects=module_effects,
+            modules_by_name=modules_by_name,
+        )
+        == GraphEffect.TOTAL_PURE
+    )
+
+
+def _rewrite_dead_formal_call_operand(
+    operand: GraphOperand,
+    *,
+    drop_indices_by_module: Mapping[str, set[int]],
+) -> GraphOperand:
+    if not isinstance(operand, GraphExpr):
+        return operand
+    inputs = tuple(
+        _rewrite_dead_formal_call_operand(
+            item,
+            drop_indices_by_module=drop_indices_by_module,
+        )
+        for item in operand.inputs
+    )
+    attrs = {
+        name: _rewrite_dead_formal_call_operand(
+            item,
+            drop_indices_by_module=drop_indices_by_module,
+        )
+        for name, item in operand.attrs.items()
+    }
+    drop_indices = drop_indices_by_module.get(operand.op.name)
+    if drop_indices:
+        inputs = tuple(
+            item
+            for index, item in enumerate(inputs)
+            if index not in drop_indices
+        )
+    if inputs == operand.inputs and attrs == operand.attrs:
+        return operand
+    return replace(operand, inputs=inputs, attrs=attrs)
+
+
+def _rewrite_dead_formal_call_node(
+    node: GraphNode,
+    *,
+    drop_indices_by_module: Mapping[str, set[int]],
+) -> GraphNode:
+    inputs = tuple(
+        _rewrite_dead_formal_call_operand(
+            item,
+            drop_indices_by_module=drop_indices_by_module,
+        )
+        for item in node.inputs
+    )
+    attrs = {
+        name: _rewrite_dead_formal_call_operand(
+            item,
+            drop_indices_by_module=drop_indices_by_module,
+        )
+        for name, item in node.attrs.items()
+    }
+    drop_indices = drop_indices_by_module.get(node.op.name)
+    if drop_indices:
+        inputs = tuple(
+            item
+            for index, item in enumerate(inputs)
+            if index not in drop_indices
+        )
+    if inputs == node.inputs and attrs == node.attrs:
+        return node
+    return replace(node, inputs=inputs, attrs=attrs)
+
+
+def _prune_dead_formals(graph: GraphProgram) -> GraphProgram:
+    module_by_name = {module.name: module for module in graph.modules}
+    module_effects = infer_graph_module_effects(graph.modules)
+    recursive_modules = _recursive_modules(graph)
+    calls_by_callee = _all_calls_by_callee(graph)
+    drop_indices_by_module: dict[str, set[int]] = {}
+
+    for module in graph.modules:
+        if module.name == graph.main_module or module.is_global_binding:
+            continue
+        if module.name in recursive_modules:
+            continue
+        formal_names = {formal.name for formal in module.inputs}
+        if _type_references_any_dim_name(module.return_type_expr, formal_names):
+            continue
+        callsites = calls_by_callee.get(module.name, [])
+        if not callsites:
+            continue
+        if any(len(call.inputs) != len(module.inputs) for _, call in callsites):
+            continue
+        referenced = _dead_formal_referenced_names(module)
+        drop_indices: set[int] = set()
+        for index, formal in enumerate(module.inputs):
+            if formal.name in referenced:
+                continue
+            if _formal_bound_dim_names(formal) & referenced:
+                continue
+            if not all(
+                _safe_to_drop_dead_actual(
+                    call.inputs[index],
+                    module_effects=module_effects,
+                    modules_by_name=module_by_name,
+                )
+                for _, call in callsites
+            ):
+                continue
+            drop_indices.add(index)
+        if drop_indices:
+            drop_indices_by_module[module.name] = drop_indices
+
+    if not drop_indices_by_module:
+        return graph
+
+    rewritten_modules: list[GraphModule] = []
+    for module in graph.modules:
+        drop_indices = drop_indices_by_module.get(module.name, set())
+        inputs = tuple(
+            value
+            for index, value in enumerate(module.inputs)
+            if index not in drop_indices
+        )
+        nodes = tuple(
+            _rewrite_dead_formal_call_node(
+                node,
+                drop_indices_by_module=drop_indices_by_module,
+            )
+            for node in module.nodes
+        )
+        outputs = tuple(
+            _rewrite_dead_formal_call_operand(
+                output,
+                drop_indices_by_module=drop_indices_by_module,
+            )
+            for output in module.outputs
+        )
+        rewritten_modules.append(replace(module, inputs=inputs, nodes=nodes, outputs=outputs))
+
+    pruned = replace(graph, modules=tuple(rewritten_modules))
+    pruned = _refresh_graph_program_types(pruned)
+    pruned = _sanitize_graph_constraints(pruned)
+    original_return_types = {module.name: module.return_type_expr for module in graph.modules}
+    for module in pruned.modules:
+        if module.return_type_expr != original_return_types.get(module.name):
+            return graph
+    try:
+        _validate_optimizer_graph(pruned, phase="prune_dead_formals")
+    except ValueError:
+        return graph
+    return pruned
 
 
 def _top_level_call_counts(graph: GraphProgram) -> Counter[str]:
@@ -5263,26 +6472,11 @@ def _specialize_definitions(graph: GraphProgram, *, config: GraphOptimizeConfig)
             )
         )
     specialized_graph = replace(graph, modules=tuple(rewritten_modules))
-    module_effects = infer_graph_module_effects(specialized_graph.modules)
-    specialized_modules_by_name = {module.name: module for module in specialized_graph.modules}
-    global_literals = _atomic_literal_constants(specialized_graph)
-    global_dim_values = _atomic_int_constant_dims(specialized_graph)
-    specialized_graph = replace(
+    specialized_graph = _optimize_modules_local_with_fresh_domain_facts(
         specialized_graph,
-        modules=tuple(
-            _optimize_module_local(
-                module,
-                config=config,
-                module_effects=module_effects,
-                modules_by_name=specialized_modules_by_name,
-                global_dim_values=global_dim_values,
-                global_literals=global_literals,
-            )
-            for module in specialized_graph.modules
-        ),
+        config=config,
+        phase="specialize.local_cleanup",
     )
-    specialized_graph = _refresh_graph_program_types(specialized_graph)
-    specialized_graph = _sanitize_graph_constraints(specialized_graph)
     try:
         _validate_optimizer_graph(specialized_graph, phase="specialize")
     except ValueError:
@@ -5302,32 +6496,11 @@ def _specialize_definitions_to_fixpoint(
         _validate_optimizer_graph(current, phase=f"recursive_specialize.fixpoint.{iteration}")
         current = _specialize_definitions(current, config=config)
         _validate_optimizer_graph(current, phase=f"specialize.fixpoint.{iteration}")
-        module_effects = infer_graph_module_effects(current.modules)
-        modules_by_name = {module.name: module for module in current.modules}
-        global_literals = _atomic_literal_constants(current)
-        global_dim_values = _atomic_int_constant_dims(current)
-        cleanup_candidate = replace(
+        current = _optimize_modules_local_with_fresh_domain_facts(
             current,
-            modules=tuple(
-                _optimize_module_local(
-                    module,
-                    config=config,
-                    module_effects=module_effects,
-                    modules_by_name=modules_by_name,
-                    global_dim_values=global_dim_values,
-                    global_literals=global_literals,
-                )
-                for module in current.modules
-            ),
+            config=config,
+            phase=f"specialize.cleanup.{iteration}",
         )
-        cleanup_candidate = _refresh_graph_program_types(cleanup_candidate)
-        cleanup_candidate = _sanitize_graph_constraints(cleanup_candidate)
-        try:
-            _validate_optimizer_graph(cleanup_candidate, phase=f"specialize.cleanup.{iteration}")
-        except ValueError:
-            pass
-        else:
-            current = cleanup_candidate
         if current == before:
             return current
     raise RuntimeError(
@@ -5427,26 +6600,37 @@ def _can_inline_module(
     recursive_modules: set[str],
     main_module: str,
     allow_control_select: bool,
+    allow_multi_node_tensor: bool = False,
 ) -> bool:
     if module.name == main_module:
         return False
     if module.name in recursive_modules:
         return False
-    if _forwarding_node(module) is not None:
+    forwarding = _forwarding_node(module)
+    if forwarding is not None:
+        if forwarding.op.name == "core.select" and not allow_control_select:
+            return False
         return True
     forwarding_expr = _forwarding_expr(module)
     if forwarding_expr is not None:
         return not _operand_has_core_select(forwarding_expr)
-    if len(module.nodes) > 1 and _module_has_tensor_values(module):
+    if len(module.nodes) > 1 and _module_has_tensor_values(module) and not allow_multi_node_tensor:
         return False
     if module.is_global_binding and not _is_atomic_constant_module(module):
         return False
     if _module_has_core_select(module):
         if not allow_control_select:
             return False
-        if not _module_select_branches_do_not_use_local_outputs(module):
-            return False
-    return module_effects.get(module.name) == GraphEffect.TOTAL_PURE
+    return _is_non_effectful(module_effects.get(module.name))
+
+
+def _is_small_inline_candidate(module: GraphModule, counts: Counter[str]) -> bool:
+    return (
+        counts[module.name] > 0
+        and not module.is_global_binding
+        and len(module.nodes) <= _SMALL_INLINE_NODE_LIMIT
+        and not _is_atomic_constant_module(module)
+    )
 
 
 def _module_uses_runtime_shape_queries(module: GraphModule) -> bool:
@@ -5515,6 +6699,7 @@ def _promote_total_pure_zero_arg_modules_to_globals(
     graph: GraphProgram,
     *,
     module_effects: Mapping[str, GraphEffect],
+    module_usages: Mapping[str, UsageClass],
 ) -> GraphProgram:
     modules: list[GraphModule] = []
     changed = False
@@ -5525,6 +6710,7 @@ def _promote_total_pure_zero_arg_modules_to_globals(
             and not module.inputs
             and len(module.outputs) == 1
             and module_effects.get(module.name) == GraphEffect.TOTAL_PURE
+            and module_usages.get(module.name) == UsageClass.UNRESTRICTED
         )
         if should_promote:
             modules.append(replace(module, is_global_binding=True))
@@ -5538,11 +6724,65 @@ def _promote_total_pure_zero_arg_modules_to_globals(
     return promoted
 
 
+def _inline_call_substitution_is_closed(
+    callee: GraphModule,
+    actuals: tuple[GraphOperand, ...],
+) -> bool:
+    formal_subst = {
+        formal.name: actual
+        for formal, actual in zip(callee.inputs, actuals, strict=True)
+    }
+    dim_subst = _call_dim_subst(callee, actuals)
+    allowed_refs: set[str] = set()
+    for actual in actuals:
+        _operand_refs(actual, allowed_refs)
+        for dim in _type_dims(graph_operand_type(actual)) or ():
+            if isinstance(dim, str):
+                allowed_refs.add(dim)
+            else:
+                allowed_refs.update(str(name) for name in dim_token_names(dim))
+    for dim in dim_subst.values():
+        if isinstance(dim, str):
+            allowed_refs.add(dim)
+        else:
+            allowed_refs.update(str(name) for name in dim_token_names(dim))
+    local_refs = {
+        output.name
+        for node in callee.nodes
+        for output in node.outputs
+    }
+
+    def rewritten_refs(operand: GraphOperand) -> set[str]:
+        rewritten = _replace_operand_refs(
+            operand,
+            formal_subst,
+            fold=True,
+        )
+        rewritten = substitute_graph_operand_dims(rewritten, dim_subst) if dim_subst else rewritten
+        refs: set[str] = set()
+        _operand_refs(rewritten, refs)
+        return refs
+
+    for node in callee.nodes:
+        for operand in (*node.inputs, *node.attrs.values()):
+            if not rewritten_refs(operand) <= allowed_refs | local_refs:
+                return False
+    for output in callee.outputs:
+        if not rewritten_refs(output) <= allowed_refs | local_refs:
+            return False
+    return True
+
+
 def _can_inline_call_node(node: GraphNode, callee: GraphModule) -> bool:
     if len(node.inputs) != len(callee.inputs):
         return False
     if len(node.outputs) != len(callee.outputs):
-        return False
+        if not (
+            len(callee.outputs) == 1
+            and isinstance(graph_operand_type(callee.outputs[0]), TypeTuple)
+            and len(graph_operand_type(callee.outputs[0]).items) == len(node.outputs)
+        ):
+            return False
     if node.attrs:
         return False
     for actual, formal in zip(node.inputs, callee.inputs, strict=True):
@@ -5555,26 +6795,17 @@ def _can_inline_call_node(node: GraphNode, callee: GraphModule) -> bool:
         node.inputs,
         len(node.outputs),
     )
+    if len(expected_output_types) != len(node.outputs):
+        return False
     for call_output, expected in zip(node.outputs, expected_output_types, strict=True):
         if not (
             graph_type_compatible(expected, call_output.type_expr)
             or graph_type_compatible(call_output.type_expr, expected)
         ):
             return False
+    if not _inline_call_substitution_is_closed(callee, node.inputs):
+        return False
     return True
-
-
-def _dim_subst_uses_caller_local_values(
-    callee: GraphModule,
-    actuals: tuple[GraphOperand, ...],
-    *,
-    caller_local_values: set[str],
-) -> bool:
-    dim_subst = _call_dim_subst(callee, actuals)
-    for dim in dim_subst.values():
-        if dim_token_names(dim) & caller_local_values:
-            return True
-    return False
 
 
 def _can_inline_forwarded_call_node(node: GraphNode, callee: GraphModule, inner: GraphNode) -> bool:
@@ -5592,17 +6823,67 @@ def _can_inline_forwarded_call_node(node: GraphNode, callee: GraphModule, inner:
         node.inputs,
         len(node.outputs),
     )
+    forwarded = _rewrite_forwarded_call_node(node, callee, inner, fold=True)
+    if not _forwarded_node_outputs_compatible(forwarded, node.outputs):
+        return False
     if len(expected_output_types) == len(node.outputs) and all(
         graph_type_compatible(expected, output.type_expr)
         or graph_type_compatible(output.type_expr, expected)
         for expected, output in zip(expected_output_types, node.outputs, strict=True)
     ):
         return True
-    forwarded = _rewrite_forwarded_call_node(node, callee, inner, fold=True)
-    return graph_type_compatible(forwarded.type_expr, node.type_expr) or graph_type_compatible(
-        node.type_expr,
-        forwarded.type_expr,
+    return (
+        _inline_call_substitution_is_closed(callee, node.inputs)
+        and (
+            graph_type_compatible(forwarded.type_expr, node.type_expr)
+            or graph_type_compatible(
+                node.type_expr,
+                forwarded.type_expr,
+            )
+        )
     )
+
+
+def _forwarded_node_outputs_compatible(
+    forwarded: GraphNode,
+    original_outputs: tuple[GraphValue, ...],
+) -> bool:
+    output_types = _forwarded_node_output_types(forwarded, len(original_outputs))
+    if output_types is None:
+        return True
+    if len(output_types) != len(original_outputs):
+        return False
+    for output, inferred in zip(original_outputs, output_types, strict=True):
+        if output.type_expr == inferred:
+            continue
+        if not (
+            graph_type_compatible(inferred, output.type_expr)
+            or graph_type_compatible(output.type_expr, inferred)
+        ):
+            return False
+    return True
+
+
+def _forwarded_node_output_types(
+    forwarded: GraphNode,
+    output_count: int,
+) -> tuple[TypeExpr, ...] | None:
+    primitive_type = _infer_primitive_graph_type(
+        forwarded.op.name,
+        forwarded.inputs,
+        forwarded.attrs,
+        dim_values={},
+    )
+    if primitive_type is None or isinstance(primitive_type, TypeAny):
+        return None
+    output_types = (
+        _destructured_list_output_types(primitive_type, output_count)
+        if isinstance(primitive_type, TypeList)
+        else None
+    )
+    if output_types is None:
+        output_types = _result_types(primitive_type, output_count)
+    return output_types
 
 
 def _can_inline_call_expr(expr: GraphExpr, callee: GraphModule) -> bool:
@@ -5621,10 +6902,9 @@ def _can_inline_call_expr(expr: GraphExpr, callee: GraphModule) -> bool:
     if len(expected_output_types) != 1:
         return False
     expected = expected_output_types[0]
-    if not (
-        graph_type_compatible(expected, expr.type_expr)
-        or graph_type_compatible(expr.type_expr, expected)
-    ):
+    if expr.type_expr != expected:
+        return False
+    if not _inline_call_substitution_is_closed(callee, expr.inputs):
         return False
     return True
 
@@ -5639,12 +6919,26 @@ def _can_inline_forwarded_call_expr(expr: GraphExpr, callee: GraphModule, inner:
             continue
         if not graph_type_compatible(graph_operand_type(actual), formal.type_expr):
             return False
+    if not _inline_call_substitution_is_closed(callee, expr.inputs):
+        return False
     if len(callee.outputs) == 1 and graph_type_compatible(graph_operand_type(callee.outputs[0]), expr.type_expr):
         return True
     forwarded = _rewrite_forwarded_call_expr(expr, callee, inner, fold=True)
     return graph_type_compatible(graph_operand_type(forwarded), expr.type_expr) or graph_type_compatible(
         expr.type_expr,
         graph_operand_type(forwarded),
+    )
+
+
+def _can_inline_forwarder_inside_lazy_branch(
+    callee: GraphModule,
+    *,
+    module_effects: Mapping[str, GraphEffect],
+    module_usages: Mapping[str, UsageClass],
+) -> bool:
+    return (
+        _is_non_effectful(module_effects.get(callee.name))
+        and module_usages.get(callee.name) in {UsageClass.UNRESTRICTED, UsageClass.AFFINE}
     )
 
 
@@ -5728,6 +7022,51 @@ def _rewrite_inlined_node(
     return substitute_graph_node_dims(rewritten, dim_subst) if dim_subst else rewritten
 
 
+def _inlined_dim_subst(
+    callee: GraphModule,
+    *,
+    renames: Mapping[str, str],
+    dim_subst: Mapping[str, DimToken],
+    used_names: set[str],
+) -> dict[str, DimToken]:
+    """Dimension substitution for an inlined callee.
+
+    Inlined value names are freshened to avoid collisions in the caller.  Some
+    local values are also first-class dimension/int values and may be referenced
+    from later type annotations.  Those type-level references must be renamed
+    with the value; otherwise stale local names can later be rebound to
+    unrelated caller temporaries during type refresh.
+    """
+
+    combined = dict(dim_subst)
+    for node in callee.nodes:
+        for output in node.outputs:
+            if output.name not in renames:
+                continue
+            output_type = output.type_expr
+            if isinstance(output_type, TypeOptional):
+                output_type = output_type.inner
+            if isinstance(output_type, TypeDim | TypeInt):
+                combined.setdefault(output.name, renames[output.name])
+    input_dim_symbols = _module_input_dim_symbols(callee)
+    free_symbols = _collect_module_free_symbols(callee)
+    value_level_names = free_symbols.value_refs | free_symbols.term_dim_refs | set(callee.output_names)
+    for dim_name in sorted(_module_dim_refs(callee)):
+        if (
+            dim_name in combined
+            or dim_name in input_dim_symbols
+            or dim_name in value_level_names
+            or not _is_plain_dim_symbol(dim_name)
+        ):
+            continue
+        fresh_name = _fresh_graph_value_name(
+            used_names,
+            f"__dim_{callee.name.replace('.', '_')}__{dim_name}",
+        )
+        combined[dim_name] = fresh_name
+    return combined
+
+
 def _rewrite_forwarded_call_node(
     node: GraphNode,
     callee: GraphModule,
@@ -5753,11 +7092,26 @@ def _rewrite_forwarded_call_node(
         },
     )
     rewritten = substitute_graph_node_dims(rewritten, dim_subst) if dim_subst else rewritten
+    output_types = _forwarded_node_output_types(rewritten, len(node.outputs))
+    outputs = node.outputs
+    type_expr = node.type_expr
+    dims = node.dims
+    if output_types is not None and len(output_types) == len(node.outputs):
+        outputs = tuple(
+            replace(
+                output,
+                type_expr=output_type,
+                dims=output_type.dims if isinstance(output_type, TypeTensor) else output.dims,
+            )
+            for output, output_type in zip(node.outputs, output_types, strict=True)
+        )
+        type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
+        dims = output_types[0].dims if len(output_types) == 1 and isinstance(output_types[0], TypeTensor) else dims
     return replace(
         rewritten,
-        outputs=node.outputs,
-        type_expr=node.type_expr,
-        dims=node.dims,
+        outputs=outputs,
+        type_expr=type_expr,
+        dims=dims,
         source_module=node.source_module,
     )
 
@@ -5901,14 +7255,26 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
     top_level_counts = _top_level_call_counts(graph)
     modules_by_name = {module.name: module for module in graph.modules}
     module_effects = infer_graph_module_effects(graph.modules)
+    module_usages = infer_graph_module_usages(graph.modules)
     recursive = _recursive_modules(graph)
+    single_callsite_candidates = {
+        module.name
+        for module in graph.modules
+        if _is_single_callsite_inline_candidate(module, counts, top_level_counts)
+    }
+    small_inline_candidates = {
+        module.name
+        for module in graph.modules
+        if _is_small_inline_candidate(module, counts)
+    }
     inlineable = {
         module.name: module
         for module in graph.modules
         if (
             _forwarding_node(module) is not None
             or _forwarding_expr(module) is not None
-            or _is_single_callsite_inline_candidate(module, counts, top_level_counts)
+            or module.name in single_callsite_candidates
+            or module.name in small_inline_candidates
             or (
                 _is_atomic_constant_module(module)
                 and config.constant_dim_substitution
@@ -5919,10 +7285,10 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
             module_effects=module_effects,
             recursive_modules=recursive,
             main_module=graph.main_module,
-            allow_control_select=_is_single_callsite_inline_candidate(
-                module,
-                counts,
-                top_level_counts,
+            allow_control_select=True,
+            allow_multi_node_tensor=(
+                module.name in single_callsite_candidates
+                or module.name in small_inline_candidates
             ),
         )
     }
@@ -5935,18 +7301,11 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
         constraints: list[Constraint] = list(module.constraints)
         temp_index = 0
         used_names = _module_value_names(module)
-        caller_local_values = used_names - {value.name for value in module.inputs}
 
         def _inline_expr_call(expr: GraphExpr, *, prefix: str) -> GraphOperand:
             nonlocal temp_index
             callee = inlineable.get(expr.op.name)
             if callee is None or not _can_inline_call_expr(expr, callee):
-                return expr
-            if _dim_subst_uses_caller_local_values(
-                callee,
-                expr.inputs,
-                caller_local_values=caller_local_values,
-            ):
                 return expr
             formal_subst = {
                 formal.name: actual
@@ -5963,6 +7322,12 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                             used_names.add(candidate)
                             renames[output.name] = candidate
                             break
+            inline_dim_subst = _inlined_dim_subst(
+                callee,
+                renames=renames,
+                dim_subst=dim_subst,
+                used_names=used_names,
+            )
             inlined_constraints = _inlined_constraints(
                 callee,
                 renames=renames,
@@ -5978,7 +7343,7 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                         node_id=f"{module.name}:inl:output:{expr.op.name}:{inner.id}",
                         renames=renames,
                         formal_subst=formal_subst,
-                        dim_subst=dim_subst,
+                        dim_subst=inline_dim_subst,
                         fold=config.constant_folding,
                     )
                 )
@@ -5987,7 +7352,7 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 callee.outputs[0],
                 renames=renames,
                 formal_subst=formal_subst,
-                dim_subst=dim_subst,
+                dim_subst=inline_dim_subst,
                 fold=config.constant_folding,
             )
 
@@ -6003,15 +7368,19 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
             forwarding_callee = inlineable.get(operand.op.name)
             forwarding = _forwarding_node(forwarding_callee) if forwarding_callee is not None else None
             forwarded_expr = _forwarding_expr(forwarding_callee) if forwarding_callee is not None else None
+            allow_forwarding_inline = allow_general_inline or (
+                forwarding_callee is not None
+                and _can_inline_forwarder_inside_lazy_branch(
+                    forwarding_callee,
+                    module_effects=module_effects,
+                    module_usages=module_usages,
+                )
+            )
             if (
                 forwarding_callee is not None
                 and forwarding is not None
+                and allow_forwarding_inline
                 and _can_inline_forwarded_call_expr(operand, forwarding_callee, forwarding)
-                and not _dim_subst_uses_caller_local_values(
-                    forwarding_callee,
-                    operand.inputs,
-                    caller_local_values=caller_local_values,
-                )
             ):
                 forwarded = _rewrite_forwarded_call_expr(
                     operand,
@@ -6027,12 +7396,8 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
             if (
                 forwarding_callee is not None
                 and forwarded_expr is not None
+                and allow_forwarding_inline
                 and _can_inline_call_expr(operand, forwarding_callee)
-                and not _dim_subst_uses_caller_local_values(
-                    forwarding_callee,
-                    operand.inputs,
-                    caller_local_values=caller_local_values,
-                )
             ):
                 forwarded = _rewrite_forwarded_expr_call_expr(
                     operand,
@@ -6138,14 +7503,8 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 nodes.append(node)
                 continue
             forwarding = _forwarding_node(callee)
-            unsafe_local_dim_subst = _dim_subst_uses_caller_local_values(
-                callee,
-                node.inputs,
-                caller_local_values=caller_local_values,
-            )
             if (
                 forwarding is not None
-                and not unsafe_local_dim_subst
                 and _can_inline_forwarded_call_node(node, callee, forwarding)
             ):
                 inlined_constraints = _inlined_constraints(
@@ -6160,20 +7519,24 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                     },
                 )
                 if inlined_constraints is not None:
-                    nodes.append(
-                        _rewrite_forwarded_call_node(
-                            node,
-                            callee,
-                            forwarding,
-                            fold=config.constant_folding,
-                        )
+                    forwarded_node = _rewrite_forwarded_call_node(
+                        node,
+                        callee,
+                        forwarding,
+                        fold=config.constant_folding,
                     )
+                    nodes.append(forwarded_node)
+                    for output in forwarded_node.outputs:
+                        subst[output.name] = GraphValueRef(
+                            output.name,
+                            output.type_expr,
+                            output.dims,
+                        )
                     constraints.extend(inlined_constraints)
                     continue
             forwarded_expr = _forwarding_expr(callee)
             if (
                 forwarded_expr is not None
-                and not unsafe_local_dim_subst
                 and _can_inline_call_node(node, callee)
             ):
                 inlined_constraints = _inlined_constraints(
@@ -6185,20 +7548,22 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                     },
                 )
                 if inlined_constraints is not None:
-                    nodes.append(
-                        _rewrite_forwarded_expr_call_node(
-                            node,
-                            callee,
-                            forwarded_expr,
-                            fold=config.constant_folding,
-                        )
+                    forwarded_node = _rewrite_forwarded_expr_call_node(
+                        node,
+                        callee,
+                        forwarded_expr,
+                        fold=config.constant_folding,
                     )
+                    nodes.append(forwarded_node)
+                    for output in forwarded_node.outputs:
+                        subst[output.name] = GraphValueRef(
+                            output.name,
+                            output.type_expr,
+                            output.dims,
+                        )
                     constraints.extend(inlined_constraints)
                     continue
             if not _can_inline_call_node(node, callee):
-                nodes.append(node)
-                continue
-            if unsafe_local_dim_subst:
                 nodes.append(node)
                 continue
             formal_subst = {formal.name: actual for formal, actual in zip(callee.inputs, node.inputs, strict=True)}
@@ -6213,6 +7578,12 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                             used_names.add(candidate)
                             renames[output.name] = candidate
                             break
+            inline_dim_subst = _inlined_dim_subst(
+                callee,
+                renames=renames,
+                dim_subst=dim_subst,
+                used_names=used_names,
+            )
             inlined_constraints = _inlined_constraints(
                 callee,
                 renames=renames,
@@ -6229,19 +7600,49 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                         node_id=f"{module.name}:inl:{node.id}:{inner.id}",
                         renames=renames,
                         formal_subst=formal_subst,
-                        dim_subst=dim_subst,
+                        dim_subst=inline_dim_subst,
                         fold=config.constant_folding,
                     )
                 )
             constraints.extend(inlined_constraints)
-            for output, returned in zip(node.outputs, callee.outputs, strict=True):
-                subst[output.name] = _rewrite_inlined_return(
-                    returned,
+            if len(callee.outputs) == len(node.outputs):
+                for output, returned in zip(node.outputs, callee.outputs, strict=True):
+                    subst[output.name] = _rewrite_inlined_return(
+                        returned,
+                        renames=renames,
+                        formal_subst=formal_subst,
+                        dim_subst=inline_dim_subst,
+                        fold=config.constant_folding,
+                    )
+                continue
+            if len(callee.outputs) == 1:
+                returned = _rewrite_inlined_return(
+                    callee.outputs[0],
                     renames=renames,
                     formal_subst=formal_subst,
-                    dim_subst=dim_subst,
+                    dim_subst=inline_dim_subst,
                     fold=config.constant_folding,
                 )
+                alias_type = TypeTuple(tuple(output.type_expr for output in node.outputs))
+                nodes.append(
+                    GraphNode(
+                        id=f"{module.name}:inl:{node.id}:destructure",
+                        op=GraphOp("core.ascribe"),
+                        inputs=(returned,),
+                        attrs={},
+                        outputs=node.outputs,
+                        source_module=module.name,
+                        type_expr=alias_type,
+                    )
+                )
+                for output in node.outputs:
+                    subst[output.name] = GraphValueRef(
+                        output.name,
+                        output.type_expr,
+                        output.dims,
+                    )
+                continue
+            nodes.append(node)
         outputs = tuple(
             _inline_nested_expr_calls(
                 _replace_operand_refs(
@@ -6312,47 +7713,60 @@ def optimize_graph_program(
         if config.constant_folding:
             current = _simplify_symbolic_graph_dims(current)
         module_effects = infer_graph_module_effects(current.modules)
+        module_usages = infer_graph_module_usages(current.modules)
         current = _promote_total_pure_zero_arg_modules_to_globals(
             current,
             module_effects=module_effects,
+            module_usages=module_usages,
         )
         _validate_optimizer_graph(current, phase="promote_zero_arg_globals")
-        module_effects = infer_graph_module_effects(current.modules)
-        modules_by_name = {module.name: module for module in current.modules}
-        domain_analysis = infer_main_module_domain_facts(current)
-        global_literals = _atomic_literal_constants(current)
-        global_dim_values = _atomic_int_constant_dims(current)
-        cleanup_candidate = replace(
+        current = _optimize_modules_local_with_fresh_domain_facts(
             current,
-            modules=tuple(
-                _optimize_module_local(
+            config=config,
+            phase="local_cleanup",
+        )
+        current = _prune_dead_formals(current)
+        if config.constant_folding:
+            module_effects = infer_graph_module_effects(current.modules)
+            module_usages = infer_graph_module_usages(current.modules)
+            modules_by_name = {module.name: module for module in current.modules}
+            pre_refresh_modules = tuple(
+                _inline_single_use_total_pure_exprs_module(
                     module,
-                    config=config,
                     module_effects=module_effects,
+                    module_usages=module_usages,
                     modules_by_name=modules_by_name,
-                    local_domain_facts=domain_analysis.module_local_facts.get(module.name),
-                    global_dim_values=global_dim_values,
-                    global_literals=global_literals,
                 )
                 for module in current.modules
-            ),
-        )
-        cleanup_candidate = _refresh_graph_program_types(cleanup_candidate)
-        cleanup_candidate = _sanitize_graph_constraints(cleanup_candidate)
-        try:
-            _validate_optimizer_graph(cleanup_candidate, phase="local_cleanup")
-        except ValueError:
-            pass
-        else:
-            current = cleanup_candidate
+            )
+            candidate = replace(current, modules=pre_refresh_modules)
+            candidate = _refresh_graph_program_types(candidate)
+            candidate = replace(
+                candidate,
+                modules=_preserve_unchanged_module_types(
+                    current.modules,
+                    pre_refresh_modules,
+                    candidate.modules,
+                    main_module=current.main_module,
+                ),
+            )
+            candidate = _sanitize_graph_constraints(candidate)
+            try:
+                _validate_optimizer_graph(candidate, phase="inline_single_use_exprs")
+            except ValueError:
+                pass
+            else:
+                current = candidate
         if config.common_subexpression_elimination:
             module_effects = infer_graph_module_effects(current.modules)
+            module_usages = infer_graph_module_usages(current.modules)
             candidate = replace(
                 current,
                 modules=tuple(
                     _common_subexpression_eliminate_module(
                         module,
                         module_effects=module_effects,
+                        module_usages=module_usages,
                         fold=config.constant_folding,
                     )
                     for module in current.modules
@@ -6373,12 +7787,14 @@ def optimize_graph_program(
             _validate_optimizer_graph(current, phase="inline")
             if config.common_subexpression_elimination:
                 module_effects = infer_graph_module_effects(current.modules)
+                module_usages = infer_graph_module_usages(current.modules)
                 candidate = replace(
                     current,
                     modules=tuple(
                         _common_subexpression_eliminate_module(
                             module,
                             module_effects=module_effects,
+                            module_usages=module_usages,
                             fold=config.constant_folding,
                         )
                         for module in current.modules
@@ -6394,7 +7810,12 @@ def optimize_graph_program(
                     current = candidate
         if config.constant_folding:
             module_effects = infer_graph_module_effects(current.modules)
-            hoist_candidate = _hoist_eager_nested_exprs(current, module_effects=module_effects)
+            module_usages = infer_graph_module_usages(current.modules)
+            hoist_candidate = _hoist_eager_nested_exprs(
+                current,
+                module_effects=module_effects,
+                module_usages=module_usages,
+            )
             hoist_candidate = _refresh_graph_program_types(hoist_candidate)
             hoist_candidate = _sanitize_graph_constraints(hoist_candidate)
             try:
@@ -6403,6 +7824,36 @@ def optimize_graph_program(
                 pass
             else:
                 current = hoist_candidate
+            module_effects = infer_graph_module_effects(current.modules)
+            module_usages = infer_graph_module_usages(current.modules)
+            modules_by_name = {module.name: module for module in current.modules}
+            pre_refresh_modules = tuple(
+                _inline_single_use_total_pure_exprs_module(
+                    module,
+                    module_effects=module_effects,
+                    module_usages=module_usages,
+                    modules_by_name=modules_by_name,
+                )
+                for module in current.modules
+            )
+            candidate = replace(current, modules=pre_refresh_modules)
+            candidate = _refresh_graph_program_types(candidate)
+            candidate = replace(
+                candidate,
+                modules=_preserve_unchanged_module_types(
+                    current.modules,
+                    pre_refresh_modules,
+                    candidate.modules,
+                    main_module=current.main_module,
+                ),
+            )
+            candidate = _sanitize_graph_constraints(candidate)
+            try:
+                _validate_optimizer_graph(candidate, phase="post_hoist_inline_single_use_exprs")
+            except ValueError:
+                pass
+            else:
+                current = candidate
         if config.prune_to_main:
             current = prune_graph_to_main(current)
             _validate_optimizer_graph(current, phase="prune")

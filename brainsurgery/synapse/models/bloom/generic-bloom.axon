@@ -3,10 +3,10 @@
 
 import Activations (gelu_new)
 import Attention (attention, merge_heads, split_qkv_heads)
-import Masking (causal_mask)
+import Masking (causal_mask_for_input)
 import Math (sqrt)
 import Params (has_root)
-import Positions (linear_position_bias)
+import Positions (linear_position_bias_for_input)
 import Tensor (size)
 import Cache
 import Config
@@ -14,26 +14,42 @@ import NN
 
 
 
-MODEL_DIM = (Config.has_value @@hidden_size) ? (Config.int @@hidden_size default=1024) : (Config.int @@n_embed default=1024)
-VOCAB_SIZE = Config.int @@vocab_size default=250880
-NUM_LAYERS = Config.int @@n_layer default=24
-NUM_HEADS = Config.int @@n_head default=16
-FFN = 4 * MODEL_DIM
-EPS = Config.float @@layer_norm_epsilon default=1e-05
-MAX_CTX = Config.int @@seq_length default=2048
-POST_LN_RESID = Config.bool @@apply_residual_connection_post_layernorm default=false
-HAS_LM_HEAD = has_root "lm_head"
+MODEL_DIM <- do
+  return (Config.has_value @@hidden_size) ? (Config.int @@hidden_size default=1024) : (Config.int @@n_embed default=1024)
 
-bloom_block :: Tensor[B,S,D] -> Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
-bloom_block x attn_mask past_kv = do
+VOCAB_SIZE <- do
+  return Config.int @@vocab_size default=250880
+
+NUM_LAYERS <- do
+  return Config.int @@n_layer default=24
+
+NUM_HEADS <- do
+  return Config.int @@n_head default=16
+
+FFN <- do
+  return 4 * MODEL_DIM
+
+EPS <- do
+  return Config.float @@layer_norm_epsilon default=1e-05
+
+MAX_CTX <- do
+  return Config.int @@seq_length default=2048
+
+POST_LN_RESID <- do
+  return Config.bool @@apply_residual_connection_post_layernorm default=false
+
+HAS_LM_HEAD <- do
+  return has_root "lm_head"
+
+bloom_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,HB,1,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+bloom_block x keep pos_bias past_kv = do
   xn <- NN.layernorm@input_layernorm x eps=EPS
   attn_res <- POST_LN_RESID ? xn : x
   a, new_kv <- scope@self_attention do
     qkv <- NN.linear@query_key_value xn dim=(3 * MODEL_DIM) bias=true
-    q, k, v <- split_qkv_heads qkv heads=NUM_HEADS layout="interleaved"
+    qkv_heads <- split_qkv_heads qkv heads=NUM_HEADS layout="interleaved"
+    q, k, v <- (qkv_heads :: (Tensor[B,NUM_HEADS,S,MODEL_DIM / NUM_HEADS], Tensor[B,NUM_HEADS,S,MODEL_DIM / NUM_HEADS], Tensor[B,NUM_HEADS,S,MODEL_DIM / NUM_HEADS]))
     k, v, new_kv <- Cache.update past_kv k v
-    keep <- causal_mask q k window=MAX_CTX padding_mask=attn_mask
-    pos_bias <- linear_position_bias attn_mask heads=NUM_HEADS
     head_dim <- size q 3
     scale <- 1.0 / sqrt head_dim
     a <- attention q k v keep rel_bias=pos_bias scale=scale |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
@@ -51,9 +67,11 @@ bloom input_ids attn_mask past_kv use_cache = do
   tok <- NN.embedding@word_embeddings input_ids dim=MODEL_DIM
   x <- NN.layernorm@word_embeddings_layernorm tok eps=EPS
   new_kv <- use_cache ? Cache.init : null
+  keep <- causal_mask_for_input input_ids K padding_mask=attn_mask window=MAX_CTX
+  pos_bias <- linear_position_bias_for_input attn_mask heads=NUM_HEADS
   x, new_kv <- for@h i <- [0..NUM_LAYERS) carry (x, new_kv) do
     past_i <- Cache.index past_kv i
-    x, new_i <- bloom_block x attn_mask past_i
+    x, new_i <- bloom_block x keep pos_bias past_i
     new_kv <- Cache.append new_kv new_i
     yield x, new_kv
   x <- NN.layernorm@ln_f x eps=EPS

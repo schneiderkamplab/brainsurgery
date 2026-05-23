@@ -44,6 +44,7 @@ from brainsurgery.synapse.axon.graph_ir import (
     GraphLiteral,
     GraphExpr,
     GraphEffect,
+    UsageClass,
     GraphOptimizeConfig,
     GraphDomainInterval,
     GraphDomainKind,
@@ -56,8 +57,10 @@ from brainsurgery.synapse.axon.graph_ir import (
     GraphValueRef,
     graph_program_to_axon_file,
     graph_module_effect,
+    graph_module_usage,
     graph_domain_definition_comments,
     infer_graph_module_effects,
+    infer_graph_module_usages,
     infer_main_module_domain_facts,
     optimize_graph_program,
     prune_graph_to_main,
@@ -65,6 +68,7 @@ from brainsurgery.synapse.axon.graph_ir import (
     validate_graph_domain_analysis,
     validate_graph_program,
 )
+from brainsurgery.synapse.axon.graph_ir.substitute import substitute_dim_token
 
 
 def _typed(program, *, main_module: str):
@@ -196,6 +200,69 @@ def test_graph_ir_renderer_uses_global_value_refs_directly_without_shadowing() -
     assert "((MODEL_DIM :: Dim))" in rendered
     assert "MODEL_DIM <- do" in rendered
     assert path_t == TypePath()
+
+
+def test_graph_optimizer_prunes_dead_formal_and_rewrites_all_callsites() -> None:
+    int_t = TypeInt()
+    helper = GraphModule(
+        name="helper",
+        inputs=(GraphValue("x", int_t), GraphValue("unused", int_t)),
+        outputs=(GraphValueRef("x", int_t),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=int_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("a", int_t), GraphValue("b", int_t)),
+        outputs=(GraphValueRef("out", TypeTuple((int_t, int_t))),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("helper"),
+                inputs=(GraphValueRef("a", int_t), GraphLiteral(1024, int_t)),
+                attrs={},
+                outputs=(GraphValue("left", int_t),),
+                source_module="main",
+                type_expr=int_t,
+            ),
+            GraphNode(
+                id="main:2",
+                op=GraphOp("helper"),
+                inputs=(GraphValueRef("b", int_t), GraphLiteral(1024, int_t)),
+                attrs={},
+                outputs=(GraphValue("right", int_t),),
+                source_module="main",
+                type_expr=int_t,
+            ),
+            GraphNode(
+                id="main:3",
+                op=GraphOp("core.tuple"),
+                inputs=(GraphValueRef("left", int_t), GraphValueRef("right", int_t)),
+                attrs={},
+                outputs=(GraphValue("out", TypeTuple((int_t, int_t))),),
+                source_module="main",
+                type_expr=TypeTuple((int_t, int_t)),
+            ),
+        ),
+        return_type_expr=TypeTuple((int_t, int_t)),
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(helper, main), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(
+            specialize_definitions="off",
+            inline_safe=False,
+            common_subexpression_elimination=False,
+        ),
+    )
+    optimized_helper = next(module for module in optimized.modules if module.name == "helper")
+    optimized_main = next(module for module in optimized.modules if module.name == "main")
+
+    assert [value.name for value in optimized_helper.inputs] == ["x"]
+    helper_calls = [node for node in optimized_main.nodes if node.op.name == "helper"]
+    assert [len(node.inputs) for node in helper_calls] == [1, 1]
 
 
 def test_graph_specialization_rejects_unbound_term_dim_clone() -> None:
@@ -639,7 +706,7 @@ def test_purity_effects_track_config_defaults_and_pure_primitives() -> None:
     int_t = TypeInt()
     assert op_effect("core.binary.+") == GraphEffect.TOTAL_PURE
     assert op_effect("_add") == GraphEffect.TOTAL_PURE
-    assert op_effect("_list_init") == GraphEffect.EFFECTFUL
+    assert op_effect("_list_init") == GraphEffect.TOTAL_PURE
     assert op_effect("_config_dim") == GraphEffect.PARTIAL_PURE
     assert (
         op_effect("_config_dim", attrs={"default": GraphLiteral(1024, int_t)})
@@ -715,7 +782,7 @@ def test_graph_purity_treats_fully_overwritten_empty_like_as_total_pure() -> Non
     assert graph_module_effect(leaked) == GraphEffect.PARTIAL_PURE
 
 
-def test_graph_purity_propagates_effectful_zero_arg_global_refs() -> None:
+def test_graph_usage_marks_fresh_zero_arg_global_refs_affine() -> None:
     list_t = TypeList(TypeAny())
     list_init = GraphModule(
         name="List.init",
@@ -745,9 +812,12 @@ def test_graph_purity_propagates_effectful_zero_arg_global_refs() -> None:
     )
 
     effects = infer_graph_module_effects((list_init, cache_init))
+    usages = infer_graph_module_usages((list_init, cache_init))
 
-    assert effects["List.init"] == GraphEffect.EFFECTFUL
-    assert effects["Cache.init"] == GraphEffect.EFFECTFUL
+    assert effects["List.init"] == GraphEffect.TOTAL_PURE
+    assert effects["Cache.init"] == GraphEffect.TOTAL_PURE
+    assert usages["List.init"] == UsageClass.AFFINE
+    assert usages["Cache.init"] == UsageClass.AFFINE
 
 
 def test_graph_ir_optimizer_inlines_effectful_zero_arg_forwarder_without_sharing() -> None:
@@ -865,6 +935,57 @@ def test_graph_ir_optimizer_refreshes_primitive_shape_rules() -> None:
     assert optimized.modules[0].outputs[0].type_expr == scores_t
 
 
+def test_graph_ir_optimizer_select_uses_broadcast_branch_shape() -> None:
+    bool_t = TypeBool()
+    broad_t = TypeTensor("Tensor", ("B", 1, "Q", "K"))
+    narrow_t = TypeTensor("Tensor", ("B", 1, 1, "K"))
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("cond", bool_t),
+                    GraphValue("keep", broad_t),
+                    GraphValue("pad", narrow_t),
+                ),
+                outputs=(GraphValueRef("out", narrow_t),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("core.select"),
+                        inputs=(
+                            GraphValueRef("cond", bool_t),
+                            GraphValueRef("keep", broad_t),
+                            GraphValueRef("pad", narrow_t),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("out", narrow_t),),
+                        source_module="main",
+                        type_expr=narrow_t,
+                    ),
+                ),
+                return_type_expr=narrow_t,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(
+            specialize_definitions="off",
+            inline_safe=False,
+            constant_folding=False,
+        ),
+    )
+
+    assert optimized.modules[0].nodes[0].type_expr == broad_t
+    assert optimized.modules[0].nodes[0].outputs[0].type_expr == broad_t
+    assert optimized.modules[0].outputs[0].type_expr == broad_t
+
+
 def test_graph_ir_optimizer_refreshes_broadcast_and_slice_shape_rules() -> None:
     cond_t = TypeTensor("Tensor", ("B", 1, "S", "K"))
     value_t = TypeTensor("Tensor", ("B", "H", "S", "K"))
@@ -928,7 +1049,7 @@ def test_graph_ir_optimizer_refreshes_broadcast_and_slice_shape_rules() -> None:
     assert optimized.modules[0].outputs[0].type_expr == out_t
 
 
-def test_axon_purity_propagates_effectful_zero_arg_name_refs() -> None:
+def test_axon_purity_treats_fresh_zero_arg_name_refs_as_total_pure() -> None:
     program = parse_axon_program(
         """
 List.init :: List[_T]
@@ -941,8 +1062,8 @@ Cache.init = List.init
 
     effects = infer_axon_definition_effects(program.modules)
 
-    assert effects["List.init"] == GraphEffect.EFFECTFUL
-    assert effects["Cache.init"] == GraphEffect.EFFECTFUL
+    assert effects["List.init"] == GraphEffect.TOTAL_PURE
+    assert effects["Cache.init"] == GraphEffect.TOTAL_PURE
 
 
 def test_render_axon_file_can_annotate_definition_purity() -> None:
@@ -1184,6 +1305,110 @@ def test_graph_domain_analysis_disagreed_calls_are_unknown() -> None:
     analysis = infer_main_module_domain_facts(graph)
 
     assert analysis.module_input_facts["helper"]["flag"].kind == GraphDomainKind.NOT_NULL
+
+
+def test_graph_domain_analysis_includes_repeat_body_calls_for_shared_facts() -> None:
+    bool_t = TypeBool()
+    int_t = TypeInt()
+    string_t = TypeString()
+    where = GraphModule(
+        name="Tensor.where",
+        inputs=(
+            GraphValue("cond", bool_t),
+            GraphValue("x", int_t),
+            GraphValue("y", int_t),
+        ),
+        outputs=(GraphValueRef("out", int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="where:1",
+                op=GraphOp("_where"),
+                inputs=(
+                    GraphValueRef("cond", bool_t),
+                    GraphValueRef("x", int_t),
+                    GraphValueRef("y", int_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", int_t),),
+                source_module="Tensor.where",
+                type_expr=int_t,
+            ),
+        ),
+        return_type_expr=int_t,
+    )
+    loop_step = GraphModule(
+        name="loop_step",
+        inputs=(GraphValue("i", int_t), GraphValue("value", int_t)),
+        outputs=(GraphValueRef("out", int_t),),
+        output_names=("value",),
+        nodes=(
+            GraphNode(
+                id="loop_step:1",
+                op=GraphOp("Tensor.where"),
+                inputs=(
+                    GraphLiteral(True, bool_t),
+                    GraphValueRef("value", int_t),
+                    GraphLiteral(0, int_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", int_t),),
+                source_module="loop_step",
+                type_expr=int_t,
+            ),
+        ),
+        return_type_expr=int_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("value", int_t),),
+        outputs=(GraphValueRef("out", int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("Tensor.where"),
+                inputs=(
+                    GraphLiteral(True, bool_t),
+                    GraphLiteral(1, int_t),
+                    GraphLiteral(2, int_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("direct", int_t),),
+                source_module="main",
+                type_expr=int_t,
+            ),
+            GraphNode(
+                id="main:2",
+                op=GraphOp("core.repeat"),
+                inputs=(
+                    GraphLiteral(0, int_t),
+                    GraphLiteral(2, int_t),
+                    GraphLiteral(1, int_t),
+                    GraphValueRef("value", int_t),
+                ),
+                attrs={
+                    "callee": GraphLiteral("loop_step", string_t),
+                    "var": GraphLiteral("i", string_t),
+                    "arg_count": GraphLiteral(2, int_t),
+                    "carry_count": GraphLiteral(1, int_t),
+                    "carry_0": GraphLiteral("out", string_t),
+                    "arg_0": GraphLiteral("iter", string_t),
+                    "arg_1": GraphLiteral("carry:0", string_t),
+                },
+                outputs=(GraphValue("out", int_t),),
+                source_module="main",
+                type_expr=int_t,
+            ),
+        ),
+        return_type_expr=int_t,
+    )
+    graph = GraphProgram(modules=(where, loop_step, main), main_module="main", pragmas={})
+
+    analysis = infer_main_module_domain_facts(graph)
+
+    assert "loop_step" in analysis.module_input_facts
+    assert analysis.module_input_facts["Tensor.where"]["x"].kind == GraphDomainKind.UNKNOWN
 
 
 def test_graph_domain_analysis_propagates_local_null_comparison() -> None:
@@ -1491,6 +1716,86 @@ def test_graph_domain_analysis_validation_rejects_obvious_type_mismatch() -> Non
         validate_graph_domain_analysis(graph, analysis)
 
 
+def test_graph_optimizer_refines_optional_refs_in_non_null_select_branch() -> None:
+    int_t = TypeInt()
+    null_t = TypeNull()
+    bool_t = TypeBool()
+    maybe_int_t = TypeOptional(int_t)
+    helper = GraphModule(
+        name="helper",
+        inputs=(GraphValue("x", int_t),),
+        outputs=(GraphValueRef("x", int_t),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=int_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("maybe", int_t, optional=True),),
+        outputs=(GraphValueRef("out", int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.binary.=="),
+                inputs=(GraphValueRef("maybe", maybe_int_t), GraphLiteral(None, null_t)),
+                attrs={},
+                outputs=(GraphValue("is_null", bool_t),),
+                source_module="main",
+                type_expr=bool_t,
+            ),
+            GraphNode(
+                id="main:2",
+                op=GraphOp("core.select"),
+                inputs=(
+                    GraphValueRef("is_null", bool_t),
+                    GraphLiteral(0, int_t),
+                    GraphExpr(
+                        op=GraphOp("helper"),
+                        inputs=(GraphValueRef("maybe", maybe_int_t),),
+                        attrs={},
+                        type_expr=int_t,
+                    ),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", int_t),),
+                source_module="main",
+                type_expr=int_t,
+            ),
+        ),
+        return_type_expr=int_t,
+    )
+    graph = GraphProgram(modules=(helper, main), main_module="main", pragmas={})
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(
+            inline_safe=False,
+            specialize_definitions="off",
+            constant_dim_substitution=False,
+            common_subexpression_elimination=False,
+            dead_temp_elimination=False,
+        ),
+    )
+
+    main_module = next(module for module in optimized.modules if module.name == "main")
+    select = main_module.nodes[0]
+    false_call = select.inputs[2]
+    assert isinstance(false_call, GraphExpr)
+    assert isinstance(false_call.inputs[0], GraphValueRef)
+    assert false_call.inputs[0].type_expr == int_t
+
+
+def test_graph_dim_simplifies_add_then_subtract_same_symbol() -> None:
+    dim = DimExprBinary(
+        op="-",
+        left=DimExprBinary(op="+", left="past_length", right="S"),
+        right="past_length",
+    )
+
+    assert substitute_dim_token(dim, {}) == "S"
+
+
 def test_graph_domain_analysis_validation_accepts_literal_for_type_var() -> None:
     var_t = TypeVar("_T")
     module = GraphModule(
@@ -1599,9 +1904,13 @@ def test_graph_ir_optimizer_keeps_compact_suffix_when_original_module_remains() 
         config=GraphOptimizeConfig(specialize_definitions="monomorphize", inline_safe=False),
     )
 
-    assert {module.name for module in optimized.modules} == {"helper", "helper__s1", "main"}
+    assert {module.name for module in optimized.modules} == {"helper", "main"}
+    optimized_helper = next(module for module in optimized.modules if module.name == "helper")
+    assert [value.name for value in optimized_helper.inputs] == ["x"]
     optimized_main = next(module for module in optimized.modules if module.name == "main")
-    assert [node.op.name for node in optimized_main.nodes] == ["helper__s1", "helper"]
+    helper_calls = [node for node in optimized_main.nodes if node.op.name == "helper"]
+    assert helper_calls
+    assert all(len(node.inputs) == 1 for node in helper_calls)
 
 
 def test_graph_ir_optimizer_specialization_substitutes_dim_metadata() -> None:
@@ -2004,7 +2313,7 @@ def test_graph_ir_optimizer_folds_total_pure_numeric_primitive_literals() -> Non
     assert optimized_main.outputs == (GraphLiteral(0.125, float_t),)
 
 
-def test_graph_ir_optimizer_inlines_one_op_forwarders_with_destructuring() -> None:
+def test_graph_ir_optimizer_inlines_chunk_forwarder_with_fresh_variadic_result() -> None:
     dim_t = TypeDim()
     tensor_t = TypeTensor("Tensor", ("..S",))
     item_t = TypeTensor("Tensor", ("B", "S", "D"))
@@ -2057,7 +2366,163 @@ def test_graph_ir_optimizer_inlines_one_op_forwarders_with_destructuring() -> No
     assert len(optimized_main.nodes[0].outputs) == 3
 
 
-def test_graph_ir_optimizer_inlines_one_op_forwarders_inside_select_branches() -> None:
+def test_graph_ir_optimizer_refreshes_destructured_chunk_shapes() -> None:
+    dim_t = TypeDim()
+    input_t = TypeTensor("Tensor", ("B", "S", 2304))
+    stale_item_t = TypeTensor("Tensor", ("B", "S", 2304))
+    expected_item_t = TypeTensor("Tensor", ("B", "S", 768))
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("x", input_t),),
+        outputs=(
+            GraphValueRef("q", stale_item_t),
+            GraphValueRef("k", stale_item_t),
+            GraphValueRef("v", stale_item_t),
+        ),
+        output_names=("q", "k", "v"),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("_chunk"),
+                inputs=(
+                    GraphValueRef("x", input_t),
+                    GraphLiteral(-1, TypeInt()),
+                    GraphLiteral(3, dim_t),
+                ),
+                attrs={},
+                outputs=(
+                    GraphValue("q", stale_item_t),
+                    GraphValue("k", stale_item_t),
+                    GraphValue("v", stale_item_t),
+                ),
+                source_module="main",
+                type_expr=TypeTuple((stale_item_t, stale_item_t, stale_item_t)),
+            ),
+        ),
+        return_type_expr=TypeTuple((stale_item_t, stale_item_t, stale_item_t)),
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(main,), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(
+            inline_safe=False,
+            specialize_definitions="off",
+            constant_folding=False,
+            constant_dim_substitution=False,
+            common_subexpression_elimination=False,
+            dead_temp_elimination=False,
+            atomic_alias_cleanup=False,
+        ),
+    )
+
+    optimized_main = optimized.modules[0]
+    node = optimized_main.nodes[0]
+    assert [output.type_expr for output in node.outputs] == [
+        expected_item_t,
+        expected_item_t,
+        expected_item_t,
+    ]
+    assert optimized_main.return_type_expr == TypeTuple(
+        (expected_item_t, expected_item_t, expected_item_t)
+    )
+
+
+def test_graph_ir_optimizer_refreshes_binary_output_from_operands() -> None:
+    left_t = TypeTensor("Tensor", ("B", "S", 768))
+    right_t = TypeTensor("Tensor", ("B", "S", 768))
+    stale_t = TypeTensor("Tensor", ("B", "K", 768))
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("x", left_t), GraphValue("a", right_t)),
+        outputs=(GraphValueRef("out", stale_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.binary.+"),
+                inputs=(GraphValueRef("x", left_t), GraphValueRef("a", right_t)),
+                attrs={},
+                outputs=(GraphValue("out", stale_t),),
+                source_module="main",
+                type_expr=stale_t,
+            ),
+        ),
+        return_type_expr=stale_t,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(main,), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(
+            inline_safe=False,
+            specialize_definitions="off",
+            constant_folding=False,
+            constant_dim_substitution=False,
+            common_subexpression_elimination=False,
+            dead_temp_elimination=False,
+            atomic_alias_cleanup=False,
+        ),
+    )
+
+    optimized_main = optimized.modules[0]
+    assert optimized_main.nodes[0].outputs[0].type_expr == left_t
+    assert optimized_main.return_type_expr == left_t
+
+
+def test_graph_ir_call_substitution_unifies_repeated_formal_dims() -> None:
+    helper = GraphModule(
+        name="helper",
+        inputs=(
+            GraphValue("past", TypeTensor("Tensor", ("B", "H", "P", "DH"))),
+            GraphValue("k", TypeTensor("Tensor", ("B", "H", "S", "DH"))),
+        ),
+        outputs=(GraphValueRef("k", TypeTensor("Tensor", ("B", "H", "S", "DH"))),),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=TypeTensor("Tensor", ("B", "H", "S", "DH")),
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(
+            GraphValue("past", TypeTensor("Tensor", ("B", "H", "P", "DH"))),
+            GraphValue("k", TypeTensor("Tensor", ("B", 12, "S", 64))),
+        ),
+        outputs=(GraphValueRef("out", TypeTensor("Tensor", ("B", "H", "S", "DH"))),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("helper"),
+                inputs=(
+                    GraphValueRef("past", TypeTensor("Tensor", ("B", "H", "P", "DH"))),
+                    GraphValueRef("k", TypeTensor("Tensor", ("B", 12, "S", 64))),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", TypeTensor("Tensor", ("B", "H", "S", "DH"))),),
+                source_module="main",
+                type_expr=TypeTensor("Tensor", ("B", "H", "S", "DH")),
+            ),
+        ),
+        return_type_expr=TypeTensor("Tensor", ("B", "H", "S", "DH")),
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(helper, main), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(
+            inline_safe=False,
+            specialize_definitions="off",
+            constant_folding=False,
+            constant_dim_substitution=False,
+            common_subexpression_elimination=False,
+            dead_temp_elimination=False,
+            atomic_alias_cleanup=False,
+        ),
+    )
+
+    optimized_main = next(module for module in optimized.modules if module.name == "main")
+    assert optimized_main.nodes[0].outputs[0].type_expr == TypeTensor("Tensor", ("B", 12, "S", 64))
+
+
+def test_graph_ir_optimizer_keeps_partial_one_op_forwarders_inside_select_branches() -> None:
     bool_t = TypeBool()
     int_t = TypeInt()
     list_t = TypeList(int_t)
@@ -2111,7 +2576,7 @@ def test_graph_ir_optimizer_inlines_one_op_forwarders_inside_select_branches() -
         GraphProgram(modules=(index, main), main_module="main", pragmas={}),
     )
 
-    optimized_main = optimized.modules[0]
+    optimized_main = next(module for module in optimized.modules if module.name == "main")
     select = optimized_main.nodes[0].inputs[2]
     assert isinstance(select, GraphExpr)
     assert select.op.name == "_list_index"
@@ -2417,8 +2882,10 @@ def test_graph_ir_optimizer_does_not_specialize_changing_recursive_argument() ->
     spec_continue = next(module for module in optimized.modules if module.name == "continue")
     assert [value.name for value in spec_recur.inputs] == ["i"]
     assert [value.name for value in spec_continue.inputs] == ["i"]
-    assert spec_continue.nodes[1].op.name == "recur"
-    assert len(spec_continue.nodes[1].inputs) == 1
+    assert spec_continue.nodes[0].op.name == "recur"
+    assert len(spec_continue.nodes[0].inputs) == 1
+    assert isinstance(spec_continue.nodes[0].inputs[0], GraphExpr)
+    assert spec_continue.nodes[0].inputs[0].op.name == "core.binary.+"
 
 
 def test_graph_ir_optimizer_constraints_do_not_keep_dead_temps_alive() -> None:
@@ -2576,7 +3043,7 @@ def test_graph_ir_optimizer_inlines_single_callsite_helper_with_select() -> None
     assert optimized_main.outputs == (GraphValueRef("out", int_t),)
 
 
-def test_graph_ir_optimizer_does_not_inline_select_with_local_branch_work() -> None:
+def test_graph_ir_optimizer_inlines_select_helper_with_local_branch_work_at_callsite() -> None:
     bool_t = TypeBool()
     int_t = TypeInt()
     helper = GraphModule(
@@ -2634,9 +3101,93 @@ def test_graph_ir_optimizer_does_not_inline_select_with_local_branch_work() -> N
         config=GraphOptimizeConfig(specialize_definitions="off"),
     )
 
-    assert {module.name for module in optimized.modules} == {"helper", "main"}
+    assert [module.name for module in optimized.modules] == ["main"]
+    optimized_main = optimized.modules[0]
+    assert [node.op.name for node in optimized_main.nodes] == ["core.select"]
+    assert optimized_main.nodes[0].inputs == (
+        GraphValueRef("flag", bool_t),
+        GraphLiteral(0, int_t),
+        GraphExpr(
+            op=GraphOp("core.binary.+"),
+            inputs=(GraphValueRef("a", int_t), GraphLiteral(1, int_t)),
+            attrs={},
+            type_expr=int_t,
+        ),
+    )
+
+
+def test_graph_ir_optimizer_preserves_lazy_branch_for_inlined_general_call() -> None:
+    bool_t = TypeBool()
+    int_t = TypeInt()
+    helper = GraphModule(
+        name="helper",
+        inputs=(GraphValue("x", int_t),),
+        outputs=(GraphValueRef("out", int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="helper:1",
+                op=GraphOp("core.binary.+"),
+                inputs=(GraphValueRef("x", int_t), GraphLiteral(1, int_t)),
+                attrs={},
+                outputs=(GraphValue("tmp", int_t),),
+                source_module="helper",
+                type_expr=int_t,
+            ),
+            GraphNode(
+                id="helper:2",
+                op=GraphOp("core.binary.+"),
+                inputs=(GraphValueRef("tmp", int_t), GraphLiteral(1, int_t)),
+                attrs={},
+                outputs=(GraphValue("out", int_t),),
+                source_module="helper",
+                type_expr=int_t,
+            ),
+        ),
+        return_type_expr=int_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("flag", bool_t), GraphValue("a", int_t), GraphValue("b", int_t)),
+        outputs=(GraphValueRef("out", int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.select"),
+                inputs=(
+                    GraphValueRef("flag", bool_t),
+                    GraphExpr(
+                        op=GraphOp("helper"),
+                        inputs=(GraphValueRef("a", int_t),),
+                        attrs={},
+                        type_expr=int_t,
+                    ),
+                    GraphValueRef("b", int_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", int_t),),
+                source_module="main",
+                type_expr=int_t,
+            ),
+        ),
+        return_type_expr=int_t,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(helper, main), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(specialize_definitions="off"),
+    )
+
+    assert [module.name for module in optimized.modules] == ["main"]
     optimized_main = next(module for module in optimized.modules if module.name == "main")
-    assert [node.op.name for node in optimized_main.nodes] == ["helper"]
+    assert [node.op.name for node in optimized_main.nodes] == ["core.select"]
+    branch = optimized_main.nodes[0].inputs[1]
+    assert isinstance(branch, GraphExpr)
+    assert branch.op.name == "core.binary.+"
+    assert isinstance(branch.inputs[0], GraphExpr)
+    assert branch.inputs[0].op.name == "core.binary.+"
+    assert branch.inputs[1] == GraphLiteral(1, int_t)
 
 
 def test_graph_ir_optimizer_inlining_substitutes_callsite_dim_metadata() -> None:
@@ -4786,7 +5337,7 @@ def test_codegen2_tinygrad_emits_gpt2_source() -> None:
     assert "def _forward_tiny" not in code
 
 
-def test_codegen2_tinygrad_reports_where_indices_as_unsupported_primitive() -> None:
+def test_codegen2_tinygrad_accepts_where_indices_primitive() -> None:
     tensor_type = _tensor("B", "S")
     idx_type = _tensor("N")
     where_module = GraphModule(
@@ -4832,13 +5383,13 @@ def test_codegen2_tinygrad_reports_where_indices_as_unsupported_primitive() -> N
     )
 
     table = tinygrad_op_table_markdown(graph)
+    code = emit_tinygrad_model_code_from_graph_ir(graph)
 
-    assert "`where_indices`" in table
-    with pytest.raises(NotImplementedError, match="where_indices"):
-        emit_tinygrad_model_code_from_graph_ir(graph)
+    assert "`where_indices`" not in table
+    assert "def _where_indices(self, x):" in code
 
 
-def _expert_linear_graph() -> GraphProgram:
+def _expert_linear_graph(*, bias: bool = False, transpose: bool = False) -> GraphProgram:
     x_type = _tensor("B", "T", "K", "D")
     idx_type = TypeTensor("IdxTensor", ("B", "T", "K"))
     y_type = _tensor("B", "T", "K", "O")
@@ -4859,8 +5410,8 @@ def _expert_linear_graph() -> GraphProgram:
                     GraphValueRef("x", x_type),
                     GraphValueRef("expert_idx", idx_type),
                     GraphLiteral(5, TypeDim()),
-                    GraphLiteral(False, TypeBool()),
-                    GraphLiteral(False, TypeBool()),
+                    GraphLiteral(bias, TypeBool()),
+                    GraphLiteral(transpose, TypeBool()),
                     GraphLiteral("@weight", TypePath()),
                     GraphLiteral("@bias", TypePath()),
                 ),
@@ -4908,6 +5459,45 @@ def test_codegen2_torch_generated_expert_linear_matches_interpreter() -> None:
     expected = torch.matmul(
         x.unsqueeze(-2),
         weight[expert_idx].transpose(-1, -2),
+    ).squeeze(-2)
+
+    assert torch.allclose(actual, expected)
+
+
+def test_codegen2_torch_generated_expert_linear_groups_with_bias_and_empty_experts() -> None:
+    graph = _expert_linear_graph(bias=True)
+    weight = torch.arange(4 * 5 * 4, dtype=torch.float32).reshape(4, 5, 4) / 10.0
+    bias = torch.arange(4 * 5, dtype=torch.float32).reshape(4, 5) / 17.0
+    x = torch.arange(1 * 2 * 2 * 4, dtype=torch.float32).reshape(1, 2, 2, 4) / 7.0
+    expert_idx = torch.tensor([[[0, 2], [2, 0]]], dtype=torch.long)
+    namespace: dict[str, object] = {}
+    exec(emit_model_code_from_graph_ir(graph), namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    model = model_cls.from_state_dict({"experts.weight": weight, "experts.bias": bias})
+
+    actual = model.forward(x=x, expert_idx=expert_idx)
+    expected = torch.matmul(
+        x.unsqueeze(-2),
+        weight[expert_idx].transpose(-1, -2),
+    ).squeeze(-2) + bias[expert_idx]
+
+    assert torch.allclose(actual, expected)
+
+
+def test_codegen2_torch_generated_expert_linear_groups_transpose() -> None:
+    graph = _expert_linear_graph(transpose=True)
+    weight = torch.arange(4 * 4 * 5, dtype=torch.float32).reshape(4, 4, 5) / 10.0
+    x = torch.arange(1 * 2 * 2 * 4, dtype=torch.float32).reshape(1, 2, 2, 4) / 7.0
+    expert_idx = torch.tensor([[[0, 2], [2, 0]]], dtype=torch.long)
+    namespace: dict[str, object] = {}
+    exec(emit_model_code_from_graph_ir(graph), namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    model = model_cls.from_state_dict({"experts.weight": weight})
+
+    actual = model.forward(x=x, expert_idx=expert_idx)
+    expected = torch.matmul(
+        x.unsqueeze(-2),
+        weight[expert_idx],
     ).squeeze(-2)
 
     assert torch.allclose(actual, expected)
@@ -5207,8 +5797,7 @@ def test_codegen2_tensor_size_uses_runtime_shape_for_unbound_result_dim() -> Non
     code = emit_model_code_from_graph_ir(program)
 
     assert "n = self._symbols['N']" not in code
-    assert "N = token_idx.shape[0]" in code
-    assert "n = N" in code
+    assert "n = token_idx.shape[0]" in code
 
 
 def test_graph_optimizer_preserves_value_dependent_primitive_dims() -> None:

@@ -4,15 +4,13 @@
 
 {-# MAIN "phimoe" #-}
 
-import Activations (silu)
-
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (causal_mask)
+import Masking (causal_mask_for_input)
 
-import Math (mul, sqrt)
+import Math (sqrt)
 
-import MoE (scatter_add, select, sparsemixer_router)
+import MoE (grouped_swiglu_ffn_separate, sparsemixer_router)
 
 import Params (has_root)
 
@@ -78,8 +76,8 @@ HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
-phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
-phimoe_block x pos_ids attn_mask past_kv = do
+phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+phimoe_block x pos_ids mask past_kv = do
   xn <- NN.layernorm@input_layernorm x eps=EPS bias=true
   a, new_kv <- scope@self_attn do
     q <- NN.linear@q_proj xn dim=QD bias=true |> reshape_heads heads=NUM_HEADS
@@ -89,31 +87,28 @@ phimoe_block x pos_ids attn_mask past_kv = do
     k, v, new_kv <- Cache.update past_kv k v
     k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
     v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
-    mask <- causal_mask q k window=WINDOW padding_mask=attn_mask
     a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=true
     return a, new_kv
   x <- x + a
   xn <- NN.layernorm@post_attention_layernorm x eps=EPS bias=true
   m <- scope@block_sparse_moe do
     topk_scores, topk_indices <- sparsemixer_router xn E ROUTER_JITTER
-    m <- xn * 0.0
-    m <- for@experts e <- [0..E) carry (m) do
-      x_sel, token_idx, topk_pos, sel_scores <- select xn topk_scores topk_indices e
-      x_upd <- NN.linear@w1 x_sel dim=FFN |> silu |> mul (NN.linear@w3 x_sel dim=FFN) |> NN.linear@w2 dim=MODEL_DIM bias=false
-      m <- scatter_add m token_idx x_upd sel_scores
-      yield m
+    m <- grouped_swiglu_ffn_separate xn topk_scores topk_indices E FFN gate_weight=@experts.w1.weight up_weight=@experts.w3.weight out_weight=@experts.w2.weight
     return m
   return x + m, new_kv
 
 phimoe :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 phimoe input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv)
+  past_length <- Cache.past_length past_kv
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  key_len <- past_length + S
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WINDOW
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     new_kv <- use_cache ? Cache.init : null
     x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
-      x, new_i <- phimoe_block x pos_ids attn_mask past_i
+      x, new_i <- phimoe_block x pos_ids mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- NN.layernorm@norm x eps=EPS bias=true

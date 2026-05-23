@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -10,10 +11,14 @@ from torch import nn
 from torch.nn import functional as F
 
 from ...mxfp4 import materialize_mxfp4_aliases
+from ...ops import get_op_semantics
 from ..ast import (
     AxonExprPath,
     DimExprBinary,
+    TypeBool,
     TypeDim,
+    TypeFloat,
+    TypeInt,
     TypeList,
     TypeNamed,
     TypeOptional,
@@ -40,11 +45,14 @@ from ..graph_ir import (
     GraphOperand,
     GraphPath,
     GraphProgram,
+    GraphValue,
     GraphValueRef,
+    graph_operand_type,
     graph_path_template_names,
     validate_graph_program,
 )
-from ..graph_ir.effects import GraphEffect, infer_graph_module_effects
+from ..graph_ir.effects import GraphEffect, UsageClass, infer_graph_module_effects, infer_graph_module_usages
+from ..graph_ir.substitute import substitute_graph_node_dims, substitute_graph_operand_dims
 
 
 def _graph_path_payload(path: GraphPath) -> dict[str, Any]:
@@ -75,6 +83,97 @@ def _operand_payload(operand: GraphOperand) -> Any:
 
 def _normalize_primitive_op(name: str) -> str:
     return normalize_primitive_op(name)
+
+
+def _operand_uses_expert_linear(operand: GraphOperand) -> bool:
+    if isinstance(operand, GraphExpr):
+        if _normalize_primitive_op(operand.op.name) == "expert_linear":
+            return True
+        return any(_operand_uses_expert_linear(item) for item in operand.inputs) or any(
+            _operand_uses_expert_linear(item) for item in operand.attrs.values()
+        )
+    return False
+
+
+def _graph_uses_expert_linear(program: GraphProgram) -> bool:
+    for module in program.modules:
+        for node in module.nodes:
+            if _normalize_primitive_op(node.op.name) == "expert_linear":
+                return True
+            if any(_operand_uses_expert_linear(item) for item in node.inputs):
+                return True
+            if any(_operand_uses_expert_linear(item) for item in node.attrs.values()):
+                return True
+    return False
+
+
+def _causal_conv1d_torch(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    activation: Any,
+) -> torch.Tensor:
+    if x.device != weight.device:
+        x = x.to(device=weight.device)
+    if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype:
+        weight = weight.to(dtype=x.dtype)
+    if bias is not None:
+        if bias.device != weight.device:
+            bias = bias.to(device=weight.device)
+        if x.is_floating_point() and bias.is_floating_point() and x.dtype != bias.dtype:
+            bias = bias.to(dtype=x.dtype)
+    kernel = int(weight.shape[-1])
+    y = F.conv1d(
+        F.pad(x.transpose(1, 2), (kernel - 1, 0)),
+        weight,
+        bias=bias,
+        groups=int(weight.shape[0]),
+    ).transpose(1, 2)
+    activation_name = str(activation)
+    if activation_name == "relu":
+        return F.relu(y)
+    if activation_name == "gelu":
+        return F.gelu(y)
+    return F.silu(y)
+
+
+def _mamba_scan_torch(
+    u: torch.Tensor,
+    delta: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    a: torch.Tensor,
+    d: torch.Tensor,
+) -> torch.Tensor:
+    if u.device != a.device:
+        u = u.to(device=a.device)
+        delta = delta.to(device=a.device)
+        b = b.to(device=a.device)
+        c = c.to(device=a.device)
+    if u.is_floating_point() and a.is_floating_point() and u.dtype != a.dtype:
+        a = a.to(dtype=u.dtype)
+    if u.is_floating_point() and d.is_floating_point() and u.dtype != d.dtype:
+        d = d.to(dtype=u.dtype)
+    batch = int(u.shape[0])
+    steps = int(u.shape[1])
+    width = int(u.shape[2])
+    u0 = u[:, 0, :]
+    b0 = b[:, 0, :]
+    state = ((u0.unsqueeze(-1) * b0.unsqueeze(1)) * 0.0)
+    out: list[torch.Tensor] = []
+    a_b = a.unsqueeze(0)
+    for t in range(steps):
+        u_t = u[:, t, :]
+        delta_t = delta[:, t, :]
+        b_t = b[:, t, :]
+        c_t = c[:, t, :]
+        delta_sp = F.softplus(delta_t)
+        a_t = torch.exp(delta_sp.unsqueeze(-1) * a_b)
+        bu_t = (delta_sp * u_t).unsqueeze(-1) * b_t.unsqueeze(1)
+        state = (a_t * state) + bu_t
+        y_t = torch.sum(state * c_t.unsqueeze(1), dim=-1).reshape(batch, width)
+        out.append(y_t + (u_t * d))
+    return torch.stack(out, dim=1)
 
 
 def _module_inputs_spec(module: GraphModule) -> dict[str, Any]:
@@ -168,41 +267,194 @@ def _tensor_dims_from_type(type_expr: Any) -> tuple[Any, ...] | None:
     return None
 
 
-def _materialize_expert_banks_in_state(state: dict[str, torch.Tensor]) -> None:
-    groups: dict[str, dict[int, str]] = {}
-    for key in list(state):
-        parts = str(key).split(".")
-        for idx, part in enumerate(parts):
-            if part == "experts" and idx + 2 < len(parts) and parts[idx + 1].isdigit():
-                expert = int(parts[idx + 1])
-                bank_key = ".".join(parts[: idx + 1] + parts[idx + 2 :])
-                groups.setdefault(bank_key, {})[expert] = key
-                break
-    for bank_key, items in groups.items():
-        if bank_key in state or not items:
+def _bind_inline_dim_subst(formal: Any, actual: Any, subst: dict[str, Any]) -> None:
+    if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor):
+        if len(formal.dims) != len(actual.dims):
+            return
+        for formal_dim, actual_dim in zip(formal.dims, actual.dims, strict=True):
+            if (
+                isinstance(formal_dim, str)
+                and formal_dim.isidentifier()
+                and not formal_dim.startswith("..")
+                and not any(
+                    isinstance(name, str) and name.startswith("..")
+                    for name in dim_token_names(actual_dim)
+                )
+            ):
+                subst.setdefault(formal_dim, actual_dim)
+        return
+    if isinstance(formal, TypeOptional):
+        _bind_inline_dim_subst(formal.inner, actual.inner if isinstance(actual, TypeOptional) else actual, subst)
+        return
+    if isinstance(actual, TypeOptional):
+        _bind_inline_dim_subst(formal, actual.inner, subst)
+        return
+    if isinstance(formal, TypeList) and isinstance(actual, TypeList):
+        _bind_inline_dim_subst(formal.item, actual.item, subst)
+        return
+    if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple):
+        for formal_item, actual_item in zip(formal.items, actual.items, strict=False):
+            _bind_inline_dim_subst(formal_item, actual_item, subst)
+        return
+    if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed) and len(formal.args) == len(actual.args):
+        for formal_dim, actual_dim in zip(formal.args, actual.args, strict=True):
+            if isinstance(formal_dim, str) and formal_dim.isidentifier() and not formal_dim.startswith(".."):
+                subst.setdefault(formal_dim, actual_dim)
+
+
+def _inline_dim_subst(
+    params: tuple[GraphValue, ...],
+    arg_operands: tuple[GraphOperand, ...],
+) -> dict[str, Any]:
+    subst: dict[str, Any] = {}
+    for param, operand in zip(params, arg_operands, strict=False):
+        _bind_inline_dim_subst(param.type_expr, graph_operand_type(operand), subst)
+    return {name: dim for name, dim in subst.items() if dim != name}
+
+
+def _is_int_dim_list_type(type_expr: Any) -> bool:
+    return isinstance(type_expr, TypeList) and isinstance(type_expr.item, TypeDim | TypeInt)
+
+
+def _tuple_literal_expr(items: list[str]) -> str:
+    if not items:
+        return "()"
+    if len(items) == 1:
+        return f"({items[0]},)"
+    return "(" + ", ".join(items) + ")"
+
+
+def _collapse_one_numeric_segment(key: str) -> tuple[str, int, int] | None:
+    parts = str(key).split(".")
+    for index, part in enumerate(parts):
+        if part.isdigit():
+            return ".".join(parts[:index] + parts[index + 1 :]), int(part), index
+    return None
+
+
+def _collapsed_numeric_segments(key: str) -> list[tuple[str, int, int]]:
+    parts = str(key).split(".")
+    return [
+        (".".join(parts[:index] + parts[index + 1 :]), int(part), index)
+        for index, part in enumerate(parts)
+        if part.isdigit()
+    ]
+
+
+def _keys_for_collapsed_bank(state: Mapping[str, torch.Tensor], bank_key: str) -> list[str]:
+    items: dict[int, str] = {}
+    numeric_index: int | None = None
+    for key in state:
+        for collapsed_key, expert, index in _collapsed_numeric_segments(str(key)):
+            if collapsed_key != bank_key:
+                continue
+            if numeric_index is None:
+                numeric_index = index
+            elif numeric_index != index:
+                continue
+            items[expert] = str(key)
+            break
+    if not items:
+        return []
+    ordered = [items[i] for i in range(len(items)) if i in items]
+    return ordered if len(ordered) == len(items) else []
+
+
+def _fused_gate_up_source_bank_keys(bank_key: str) -> tuple[str, str] | None:
+    parts = bank_key.split(".")
+    for index, part in enumerate(parts):
+        if "gate_up" not in part:
             continue
-        ordered_keys = [items[i] for i in range(len(items)) if i in items]
-        if len(ordered_keys) != len(items):
-            continue
+        gate_parts = list(parts)
+        up_parts = list(parts)
+        gate_parts[index] = part.replace("gate_up", "gate", 1)
+        up_parts[index] = part.replace("gate_up", "up", 1)
+        return ".".join(gate_parts), ".".join(up_parts)
+    return None
+
+
+def _materialize_expert_bank_for_path(state: dict[str, torch.Tensor], bank_key: str) -> torch.Tensor | None:
+    existing = state.get(bank_key)
+    if torch.is_tensor(existing):
+        return existing
+    ordered_keys = _keys_for_collapsed_bank(state, bank_key)
+    if ordered_keys:
         first = state[ordered_keys[0]]
         first_shape = tuple(first.shape)
-        if any(tuple(state[key].shape) != first_shape for key in ordered_keys):
-            continue
-        state[bank_key] = torch.stack([state.pop(key) for key in ordered_keys], dim=0)
-    for gate_key, gate in list(state.items()):
-        if ".gate_proj." not in str(gate_key):
-            continue
-        up_key = str(gate_key).replace(".gate_proj.", ".up_proj.", 1)
-        gate_up_key = str(gate_key).replace(".gate_proj.", ".gate_up_proj.", 1)
-        if gate_up_key in state:
-            continue
-        up = state.get(up_key)
-        if not torch.is_tensor(gate) or not torch.is_tensor(up):
-            continue
-        if gate.shape[:-2] != up.shape[:-2] or gate.shape[-1:] != up.shape[-1:]:
-            continue
-        concat_dim = -2 if gate.ndim >= 2 else -1
-        state[gate_up_key] = torch.cat([gate, up], dim=concat_dim)
+        if all(torch.is_tensor(state[key]) and tuple(state[key].shape) == first_shape for key in ordered_keys):
+            bank = torch.stack([state.pop(key) for key in ordered_keys], dim=0)
+            state[bank_key] = bank
+            return bank
+    fused_sources = _fused_gate_up_source_bank_keys(bank_key)
+    if fused_sources is None:
+        return None
+    gate_key, up_key = fused_sources
+    gate = _materialize_expert_bank_for_path(state, gate_key)
+    up = _materialize_expert_bank_for_path(state, up_key)
+    if not torch.is_tensor(gate) or not torch.is_tensor(up):
+        return None
+    if gate.shape[:-2] != up.shape[:-2] or gate.shape[-1:] != up.shape[-1:]:
+        return None
+    concat_dim = -2 if gate.ndim >= 2 else -1
+    bank = torch.cat([gate, up], dim=concat_dim)
+    state[bank_key] = bank
+    return bank
+
+
+def _expert_bank_lookup_from_state(state: dict[str, torch.Tensor], path: str) -> tuple[str, int] | None:
+    for bank_key, expert, _ in _collapsed_numeric_segments(path):
+        bank = state.get(bank_key)
+        if torch.is_tensor(bank):
+            return bank_key, expert
+    return None
+
+
+def _grouped_expert_linear_torch(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    expert_idx: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    transpose: bool = False,
+) -> torch.Tensor:
+    expert_idx = expert_idx.to(device=weight.device, dtype=torch.long)
+    x = x.to(device=weight.device)
+    out_dim = int(weight.shape[-1] if transpose else weight.shape[-2])
+    out = x.new_empty((*x.shape[:-1], out_dim))
+    if x.numel() == 0:
+        return out
+    flat_x = x.reshape(-1, x.shape[-1])
+    flat_idx = expert_idx.reshape(-1)
+    if flat_idx.numel() != flat_x.shape[0]:
+        raise ValueError(
+            f"expert_idx shape {tuple(expert_idx.shape)} is incompatible with input shape {tuple(x.shape)}"
+        )
+    grouped_weight = weight if transpose else weight.transpose(-2, -1)
+    expert_ids_g, perm = torch.sort(flat_idx)
+    x_g = flat_x.index_select(0, perm)
+    x_run = x_g.to(dtype=grouped_weight.dtype) if x_g.is_floating_point() and grouped_weight.is_floating_point() and x_g.dtype != grouped_weight.dtype else x_g
+    histc_input = expert_ids_g.float() if weight.device.type in ("cpu", "mps") else expert_ids_g.int()
+    tokens_per_expert = torch.histc(histc_input, bins=weight.shape[0], min=0, max=weight.shape[0] - 1)
+    offsets = torch.cumsum(tokens_per_expert, dim=0, dtype=torch.int32)
+    if hasattr(torch.nn.functional, "grouped_mm") and weight.device.type == "cuda":
+        y_g = torch.nn.functional.grouped_mm(x_run, grouped_weight, offs=offsets)
+    elif hasattr(torch, "_grouped_mm") and weight.device.type == "cuda":
+        y_g = torch._grouped_mm(x_run, grouped_weight, offs=offsets)
+    else:
+        y_g = x_run.new_empty((x_run.shape[0], out_dim))
+        start = 0
+        for expert, end in enumerate(offsets.tolist()):
+            if start != end:
+                torch.mm(x_run[start:end], grouped_weight[expert], out=y_g[start:end])
+            start = end
+    y_g = y_g.to(dtype=x.dtype) if x.is_floating_point() and y_g.is_floating_point() and y_g.dtype != x.dtype else y_g
+    if bias is not None:
+        bias_g = bias.to(device=weight.device).index_select(0, expert_ids_g)
+        bias_g = bias_g.to(dtype=x.dtype) if x.is_floating_point() and bias_g.is_floating_point() and bias_g.dtype != x.dtype else bias_g
+        y_g = y_g + bias_g
+    inv_perm = torch.empty_like(perm)
+    inv_perm[perm] = torch.arange(perm.numel(), device=perm.device)
+    return y_g.index_select(0, inv_perm).reshape_as(out)
 
 
 def _is_global_symbol_module(module: GraphModule) -> bool:
@@ -221,6 +473,7 @@ def _referenced_symbol_names_in_operand(operand: GraphOperand, out: set[str]) ->
         out.update(graph_path_template_names(operand))
         return
     if isinstance(operand, GraphExpr):
+        out.add(operand.op.name)
         for item in operand.inputs:
             _referenced_symbol_names_in_operand(item, out)
         for item in operand.attrs.values():
@@ -229,6 +482,18 @@ def _referenced_symbol_names_in_operand(operand: GraphOperand, out: set[str]) ->
     if isinstance(operand, tuple):
         for item in operand:
             _referenced_symbol_names_in_operand(item, out)
+
+
+def _referenced_type_symbol_names_in_operand(operand: GraphOperand, out: set[str]) -> None:
+    out.update(_type_dim_names(graph_operand_type(operand)))
+    if isinstance(operand, GraphExpr):
+        for item in operand.inputs:
+            _referenced_type_symbol_names_in_operand(item, out)
+        for item in operand.attrs.values():
+            _referenced_type_symbol_names_in_operand(item, out)
+    elif isinstance(operand, tuple):
+        for item in operand:
+            _referenced_type_symbol_names_in_operand(item, out)
 
 
 def _referenced_runtime_symbol_module_names(program: GraphProgram) -> set[str]:
@@ -242,13 +507,22 @@ def _referenced_runtime_symbol_module_names(program: GraphProgram) -> set[str]:
         for node in module.nodes:
             local.update(value.name for value in node.outputs)
         names: set[str] = set()
+        for value in module.inputs:
+            names.update(_type_dim_names(_effective_graph_value_type(value)))
+        for operand in module.outputs:
+            names.update(_type_dim_names(graph_operand_type(operand)))
         for node in module.nodes:
+            for value in node.outputs:
+                names.update(_type_dim_names(_effective_graph_value_type(value)))
             for operand in node.inputs:
                 _referenced_symbol_names_in_operand(operand, names)
+                _referenced_type_symbol_names_in_operand(operand, names)
             for operand in node.attrs.values():
                 _referenced_symbol_names_in_operand(operand, names)
+                _referenced_type_symbol_names_in_operand(operand, names)
         for operand in module.outputs:
             _referenced_symbol_names_in_operand(operand, names)
+            _referenced_type_symbol_names_in_operand(operand, names)
         referenced.update((names - local) & runtime_symbol_names)
     return referenced
 
@@ -287,6 +561,9 @@ def _state_key_filter_prefixes(program: GraphProgram) -> tuple[str, ...]:
         prefix = prefix.strip(".")
         if prefix:
             prefixes.add(prefix)
+            fused_sources = _fused_gate_up_source_bank_keys(prefix)
+            if fused_sources is not None:
+                prefixes.update(item for item in fused_sources if item)
     return tuple(sorted(prefixes))
 
 
@@ -296,11 +573,18 @@ def _global_symbol_module_names(
     total_pure_only: bool = False,
 ) -> set[str]:
     effects = infer_graph_module_effects(program.modules) if total_pure_only else {}
+    usages = infer_graph_module_usages(program.modules) if total_pure_only else {}
     return {
         module.name
         for module in program.modules
         if _is_global_symbol_module(module)
-        and (not total_pure_only or effects.get(module.name) == GraphEffect.TOTAL_PURE)
+        and (
+            not total_pure_only
+            or (
+                effects.get(module.name) == GraphEffect.TOTAL_PURE
+                and usages.get(module.name) == UsageClass.UNRESTRICTED
+            )
+        )
     }
 
 
@@ -309,18 +593,35 @@ def _runtime_symbol_module_names(
     *,
     total_pure_only: bool = False,
 ) -> set[str]:
+    effects = infer_graph_module_effects(program.modules)
+    usages = infer_graph_module_usages(program.modules)
     names = _global_symbol_module_names(program)
-    names.update(_referenced_runtime_symbol_module_names(program))
+    names.update(
+        name
+        for name in _referenced_runtime_symbol_module_names(program)
+        if effects.get(name) != GraphEffect.EFFECTFUL
+        and usages.get(name) == UsageClass.UNRESTRICTED
+    )
     if not total_pure_only:
         return names
-    effects = infer_graph_module_effects(program.modules)
-    return {name for name in names if effects.get(name) == GraphEffect.TOTAL_PURE}
+    return {
+        name
+        for name in names
+        if effects.get(name) == GraphEffect.TOTAL_PURE
+        and usages.get(name) == UsageClass.UNRESTRICTED
+    }
 
 
 def _free_dim_refs_in_operand(operand: GraphOperand, *, local: set[str], out: set[str]) -> None:
     if isinstance(operand, GraphValueRef):
         if operand.name not in local and isinstance(operand.type_expr, TypeDim):
             out.add(operand.name)
+        # Direct codegen for primitives and inlined modules may use symbolic
+        # dimensions from tensor-typed value operands (for example reshape
+        # shapes derived from TokenIds[B,S]). Treat those shape variables as
+        # required when the value itself is used, otherwise generated code can
+        # reference them before any output happens to bind them.
+        out.update(name for name in _type_dim_names(operand.type_expr) if name not in local)
         return
     if isinstance(operand, GraphExpr):
         for item in operand.inputs:
@@ -452,6 +753,38 @@ def _effective_graph_value_type(value: GraphValue) -> TypeExpr:
     return value.type_expr
 
 
+def _direct_tensor_dim_names(type_expr: TypeExpr) -> set[str]:
+    if isinstance(type_expr, TypeOptional):
+        return _direct_tensor_dim_names(type_expr.inner)
+    if not isinstance(type_expr, TypeTensor):
+        return set()
+    out: set[str] = set()
+    for dim in type_expr.dims:
+        out.update(dim_token_names(dim))
+    return out
+
+
+def _tensor_size_static_dim_names(module: GraphModule) -> set[str]:
+    out: set[str] = set()
+    for node in module.nodes:
+        if _normalize_primitive_op(node.op.name) != "tensor_size" or len(node.inputs) < 2:
+            continue
+        tensor_type = getattr(node.inputs[0], "type_expr", None)
+        if isinstance(tensor_type, TypeOptional):
+            tensor_type = tensor_type.inner
+        dim_operand = node.inputs[1]
+        if not isinstance(tensor_type, TypeTensor) or not isinstance(dim_operand, GraphLiteral):
+            continue
+        if type(dim_operand.value) is not int or not tensor_type.dims:
+            continue
+        index = dim_operand.value
+        if index < 0:
+            index += len(tensor_type.dims)
+        if 0 <= index < len(tensor_type.dims):
+            out.update(dim_token_names(tensor_type.dims[index]))
+    return out
+
+
 def _emit_bind_dim_expr(
     lines: list[str],
     *,
@@ -462,9 +795,17 @@ def _emit_bind_dim_expr(
     protected: set[str],
     indent: int,
     guaranteed: bool,
+    required_names: set[str] | None = None,
 ) -> None:
+    if required_names is not None and not (dim_token_names(dim) & required_names):
+        return
     if isinstance(dim, str):
-        if dim.isidentifier() and dim not in protected and dim not in local:
+        if (
+            dim.isidentifier()
+            and dim not in protected
+            and dim not in local
+            and (required_names is None or dim in required_names)
+        ):
             add(lines, indent, f"{dim} = {actual_expr}")
             local.add(dim)
         return
@@ -478,6 +819,7 @@ def _emit_bind_dim_expr(
             and left.isidentifier()
             and left not in protected
             and left not in local
+            and (required_names is None or left in required_names)
             and isinstance(right, str)
             and right in local
         ):
@@ -488,6 +830,7 @@ def _emit_bind_dim_expr(
             and right.isidentifier()
             and right not in protected
             and right not in local
+            and (required_names is None or right in required_names)
             and isinstance(left, str)
             and left in local
         ):
@@ -500,6 +843,7 @@ def _emit_bind_dim_expr(
             and left.isidentifier()
             and left not in protected
             and left not in local
+            and (required_names is None or left in required_names)
             and isinstance(right, str)
             and right in local
         ):
@@ -510,6 +854,7 @@ def _emit_bind_dim_expr(
             and right.isidentifier()
             and right not in protected
             and right not in local
+            and (required_names is None or right in required_names)
             and isinstance(left, str)
             and left in local
         ):
@@ -522,6 +867,7 @@ def _emit_bind_dim_expr(
             and left.isidentifier()
             and left not in protected
             and left not in local
+            and (required_names is None or left in required_names)
             and isinstance(right, str)
             and right in local
         ):
@@ -532,6 +878,7 @@ def _emit_bind_dim_expr(
             and right.isidentifier()
             and right not in protected
             and right not in local
+            and (required_names is None or right in required_names)
             and isinstance(left, str)
             and left in local
         ):
@@ -544,6 +891,7 @@ def _emit_bind_dim_expr(
             and left.isidentifier()
             and left not in protected
             and left not in local
+            and (required_names is None or left in required_names)
             and isinstance(right, str)
             and right in local
         ):
@@ -554,6 +902,7 @@ def _emit_bind_dim_expr(
             and right.isidentifier()
             and right not in protected
             and right not in local
+            and (required_names is None or right in required_names)
             and isinstance(left, str)
             and left in local
         ):
@@ -569,20 +918,40 @@ def _emit_bind_nested_shape_symbols(
     value_expr: str,
     local: set[str],
     protected: set[str],
+    required_names: set[str] | None = None,
+    indent: int = 8,
 ) -> None:
     if isinstance(type_expr, TypeOptional):
-        add(lines, 8, f"if {value_expr} is not None:")
-        add(lines, 12, "pass")
+        nested_lines: list[str] = []
+        nested_local = set(local)
         _emit_bind_nested_shape_symbols_inner(
-            lines,
+            nested_lines,
             add=add,
             type_expr=type_expr.inner,
             value_expr=value_expr,
-            local=local,
+            local=nested_local,
             protected=protected,
-            indent=12,
+            required_names=required_names,
+            indent=indent + 4,
             guaranteed=False,
         )
+        if nested_lines:
+            add(lines, indent, f"if {value_expr} is not None:")
+            lines.extend(nested_lines)
+            zero_names = sorted(
+                name
+                for name in _type_dim_names(type_expr.inner)
+                if name.isidentifier()
+                and name not in protected
+                and name not in local
+                and (required_names is None or name in required_names)
+            )
+            if zero_names:
+                add(lines, indent, "else:")
+                for name in zero_names:
+                    add(lines, indent + 4, f"{name} = 0")
+                nested_local.update(zero_names)
+            local.update(nested_local)
         return
     _emit_bind_nested_shape_symbols_inner(
         lines,
@@ -591,7 +960,8 @@ def _emit_bind_nested_shape_symbols(
         value_expr=value_expr,
         local=local,
         protected=protected,
-        indent=8,
+        required_names=required_names,
+        indent=indent,
         guaranteed=True,
     )
 
@@ -604,36 +974,75 @@ def _emit_bind_nested_shape_symbols_inner(
     value_expr: str,
     local: set[str],
     protected: set[str],
+    required_names: set[str] | None,
     indent: int,
     guaranteed: bool,
 ) -> None:
     if isinstance(type_expr, TypeOptional):
-        add(lines, indent, f"if {value_expr} is not None:")
-        add(lines, indent + 4, "pass")
+        nested_lines: list[str] = []
+        nested_local = set(local)
         _emit_bind_nested_shape_symbols_inner(
-            lines,
+            nested_lines,
             add=add,
             type_expr=type_expr.inner,
             value_expr=value_expr,
-            local=local,
+            local=nested_local,
             protected=protected,
+            required_names=required_names,
             indent=indent + 4,
             guaranteed=False,
         )
+        if nested_lines:
+            add(lines, indent, f"if {value_expr} is not None:")
+            lines.extend(nested_lines)
+            if guaranteed:
+                zero_names = sorted(
+                    name
+                    for name in _type_dim_names(type_expr.inner)
+                    if name.isidentifier()
+                    and name not in protected
+                    and name not in local
+                    and (required_names is None or name in required_names)
+                )
+                if zero_names:
+                    add(lines, indent, "else:")
+                    for name in zero_names:
+                        add(lines, indent + 4, f"{name} = 0")
+                    nested_local.update(zero_names)
+                local.update(nested_local)
         return
     if isinstance(type_expr, TypeList):
-        add(lines, indent, f"if isinstance({value_expr}, (list, tuple)) and {value_expr}:")
-        add(lines, indent + 4, "pass")
+        nested_lines: list[str] = []
+        nested_local = set(local)
         _emit_bind_nested_shape_symbols_inner(
-            lines,
+            nested_lines,
             add=add,
             type_expr=type_expr.item,
             value_expr=f"{value_expr}[0]",
-            local=local,
+            local=nested_local,
             protected=protected,
+            required_names=required_names,
             indent=indent + 4,
             guaranteed=False,
         )
+        if nested_lines:
+            add(lines, indent, f"if isinstance({value_expr}, (list, tuple)) and {value_expr}:")
+            lines.extend(nested_lines)
+            if guaranteed:
+                zero_names = sorted(
+                    name
+                    for name in _type_dim_names(type_expr.item)
+                    if name.isidentifier()
+                    and name not in protected
+                    and name not in local
+                    and (required_names is None or name in required_names)
+                )
+                if zero_names:
+                    add(lines, indent, "else:")
+                    for name in zero_names:
+                        add(lines, indent + 4, f"{name} = 0")
+                    nested_local.update(zero_names)
+                local.update(nested_local)
         return
     if isinstance(type_expr, TypeTuple):
         for idx, item_type in enumerate(type_expr.items):
@@ -644,6 +1053,7 @@ def _emit_bind_nested_shape_symbols_inner(
                 value_expr=f"{value_expr}[{idx}]",
                 local=local,
                 protected=protected,
+                required_names=required_names,
                 indent=indent,
                 guaranteed=guaranteed,
             )
@@ -657,6 +1067,7 @@ def _emit_bind_nested_shape_symbols_inner(
                 actual_expr=f"{value_expr}.shape[{idx}]",
                 local=local,
                 protected=protected,
+                required_names=required_names,
                 indent=indent,
                 guaranteed=guaranteed,
             )
@@ -678,6 +1089,7 @@ class Codegen2GraphModel(nn.Module):
         validate_graph_program(graph)
         self.graph = graph
         self.modules_by_name = {module.name: module for module in graph.modules}
+        self.needs_expert_banks = _graph_uses_expert_linear(graph)
         self.global_symbol_names = _runtime_symbol_module_names(graph)
         self.cached_global_symbol_names = _runtime_symbol_module_names(
             graph,
@@ -717,7 +1129,6 @@ class Codegen2GraphModel(nn.Module):
     def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:
         loaded = dict(state_dict)
         materialize_mxfp4_aliases(loaded, drop_packed=True)
-        _materialize_expert_banks_in_state(loaded)
         self._state = loaded
 
     def _prepare_env(
@@ -745,6 +1156,34 @@ class Codegen2GraphModel(nn.Module):
         out.update(env)
         return out
 
+    @staticmethod
+    def _path_template_part(value: Any) -> Any:
+        if isinstance(value, str) and value.startswith("@@"):
+            return value[2:].strip(".")
+        if isinstance(value, str) and value.startswith("@"):
+            return value[1:].strip(".")
+        return value
+
+    @staticmethod
+    def _causal_conv1d(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        activation: Any,
+    ) -> torch.Tensor:
+        return _causal_conv1d_torch(x, weight, bias, activation)
+
+    @staticmethod
+    def _mamba_scan(
+        u: torch.Tensor,
+        delta: torch.Tensor,
+        b: torch.Tensor,
+        c: torch.Tensor,
+        a: torch.Tensor,
+        d: torch.Tensor,
+    ) -> torch.Tensor:
+        return _mamba_scan_torch(u, delta, b, c, a, d)
+
     def _state_key_alternatives(self, key: str, *, limit: int = 8) -> list[str]:
         if not isinstance(key, str) or not key:
             return []
@@ -763,7 +1202,11 @@ class Codegen2GraphModel(nn.Module):
         value = self._state.get(resolved)
         if torch.is_tensor(value):
             return value
-        bank = self._expert_bank_lookup(resolved)
+        _materialize_expert_bank_for_path(self._state, resolved)
+        value = self._state.get(resolved)
+        if torch.is_tensor(value):
+            return value
+        bank = _expert_bank_lookup_from_state(self._state, resolved)
         if bank is not None:
             bank_key, expert = bank
             bank_value = self._state.get(bank_key)
@@ -777,16 +1220,6 @@ class Codegen2GraphModel(nn.Module):
             )
         return self._state[resolved]
 
-    @staticmethod
-    def _expert_bank_lookup(path: str) -> tuple[str, int] | None:
-        parts = path.split(".")
-        for idx, part in enumerate(parts):
-            if part == "experts" and idx + 2 < len(parts) and parts[idx + 1].isdigit():
-                expert = int(parts[idx + 1])
-                bank_key = ".".join(parts[: idx + 1] + parts[idx + 2 :])
-                return bank_key, expert
-        return None
-
     def _linear_param(
         self,
         path: str,
@@ -797,11 +1230,13 @@ class Codegen2GraphModel(nn.Module):
     ) -> tuple[torch.Tensor | None, int | None]:
         resolved = path[2:] if isinstance(path, str) and path.startswith("@@") else path
         value = self._state.get(resolved)
-        bank = self._expert_bank_lookup(resolved)
         if torch.is_tensor(value):
-            if bank is not None and (expert is None or expert == bank[1]):
-                return value, None
             return value, expert
+        _materialize_expert_bank_for_path(self._state, resolved)
+        value = self._state.get(resolved)
+        if torch.is_tensor(value):
+            return value, expert
+        bank = _expert_bank_lookup_from_state(self._state, resolved)
         if bank is not None:
             bank_key, path_expert = bank
             bank_value = self._state.get(bank_key)
@@ -991,7 +1426,13 @@ class Codegen2GraphModel(nn.Module):
                 "op": expr.op,
                 "inputs": expr.inputs,
                 "attrs": expr.attrs,
-                "outputs": [type("_PseudoGraphValue", (), {"name": out_name})()],
+                "outputs": [
+                    GraphValue(
+                        name=out_name,
+                        type_expr=expr.type_expr,
+                        dims=expr.dims,
+                    )
+                ],
             },
         )()
         self._execute_node(pseudo_node, env=scratch, symbols=symbols)
@@ -1151,6 +1592,15 @@ class Codegen2GraphModel(nn.Module):
             return torch.bool
         raise ValueError(f"unsupported dtype name {value!r}")
 
+    @classmethod
+    def _tensor_like(cls, value: Any, ref: torch.Tensor, dtype: torch.dtype | None = None) -> torch.Tensor:
+        target_dtype = dtype or ref.dtype
+        if torch.is_tensor(value):
+            return value.to(device=ref.device, dtype=target_dtype)
+        if isinstance(value, (list, tuple)):
+            return torch.as_tensor(value, device=ref.device, dtype=target_dtype)
+        return torch.full_like(ref, value, dtype=target_dtype)
+
     def _read_config_key(self, path: Any, *, env: Mapping[str, Any], symbols: Mapping[str, Any]) -> str:
         if isinstance(path, GraphPath):
             payload = _graph_path_payload(path)
@@ -1254,29 +1704,12 @@ class Codegen2GraphModel(nn.Module):
             weight_leaf = args[6] if len(args) > 6 and not self._is_null(args[6]) else "@weight"
             bias_leaf = args[7] if len(args) > 7 and not self._is_null(args[7]) else "@bias"
             weight = self._required_param(self._compose_path(base, weight_leaf), field="expert_linear.weight")
-            x = self._move_to(x, weight.device)
-            expert_idx = self._move_to(expert_idx, weight.device).long()
-            selected_weight = weight[expert_idx]
             bias = None
             if bias_flag:
                 raw_bias = self._optional_param(self._compose_path(base, bias_leaf))
                 if raw_bias is not None:
-                    bias = self._move_to(raw_bias, weight.device)[expert_idx]
-            weight_run = (
-                selected_weight.to(dtype=x.dtype)
-                if x.is_floating_point() and selected_weight.is_floating_point() and x.dtype != selected_weight.dtype
-                else selected_weight
-            )
-            bias_run = (
-                bias.to(dtype=x.dtype)
-                if bias is not None and x.is_floating_point() and bias.is_floating_point() and x.dtype != bias.dtype
-                else bias
-            )
-            if transpose:
-                y = torch.matmul(x.unsqueeze(-2), weight_run).squeeze(-2)
-            else:
-                y = torch.matmul(x.unsqueeze(-2), weight_run.transpose(-1, -2)).squeeze(-2)
-            out(y + bias_run if bias_run is not None else y)
+                    bias = self._move_to(raw_bias, weight.device)
+            out(_grouped_expert_linear_torch(x, weight, expert_idx, bias, transpose=transpose))
             return True
 
         if primitive == "layernorm":
@@ -1306,6 +1739,16 @@ class Codegen2GraphModel(nn.Module):
             out(y)
             return True
 
+        if primitive == "causal_conv1d":
+            if len(args) != 4:
+                raise ValueError("causal_conv1d expects x, weight, bias, activation")
+            out(self._causal_conv1d(args[0], args[1], args[2], args[3]))
+            return True
+        if primitive == "mamba_scan":
+            if len(args) != 6:
+                raise ValueError("mamba_scan expects u, delta, b, c, a, d")
+            out(self._mamba_scan(args[0], args[1], args[2], args[3], args[4], args[5]))
+            return True
         if primitive in {"activations_gelu", "activations_gelu_new", "activations_gelu_pytorch_tanh"}:
             x = args[0]
             if primitive == "activations_gelu":
@@ -1336,7 +1779,7 @@ class Codegen2GraphModel(nn.Module):
             return True
 
         if primitive == "reshape":
-            out(torch.reshape(args[0], tuple(int(v) for v in args[1])))
+            out(torch.reshape(args[0], tuple(args[1])))
             return True
         if primitive == "arange":
             if len(args) < 3:
@@ -1376,11 +1819,11 @@ class Codegen2GraphModel(nn.Module):
             return True
         if primitive == "expand":
             x, shape = args[:2]
-            out(x.expand(tuple(int(v) for v in shape)))
+            out(x.expand(tuple(shape)))
             return True
         if primitive == "permute":
             x, dims = args[:2]
-            out(torch.permute(x, tuple(int(v) for v in dims)))
+            out(torch.permute(x, tuple(dims)))
             return True
         if primitive == "transpose":
             x, dim0, dim1 = args[:3]
@@ -1515,20 +1958,24 @@ class Codegen2GraphModel(nn.Module):
         if primitive == "empty":
             ref, shape = args[:2]
             dtype = None if len(args) < 3 or self._is_null(args[2]) else self._dtype_from_name(args[2])
-            out(torch.empty(tuple(int(v) for v in shape), device=ref.device, dtype=dtype or ref.dtype))
+            out(torch.empty(tuple(shape), device=ref.device, dtype=dtype or ref.dtype))
             return True
         if primitive == "zeros":
             ref, shape = args[:2]
             dtype = None if len(args) < 3 or self._is_null(args[2]) else self._dtype_from_name(args[2])
-            out(torch.zeros(tuple(int(v) for v in shape), device=ref.device, dtype=dtype or ref.dtype))
+            out(torch.zeros(tuple(shape), device=ref.device, dtype=dtype or ref.dtype))
             return True
         if primitive == "full":
             ref, shape, value = args[:3]
             dtype = None if len(args) < 4 or self._is_null(args[3]) else self._dtype_from_name(args[3])
-            out(torch.full(tuple(int(v) for v in shape), value, device=ref.device, dtype=dtype or ref.dtype))
+            out(torch.full(tuple(shape), value, device=ref.device, dtype=dtype or ref.dtype))
             return True
         if primitive == "zeros_like":
             out(torch.zeros_like(args[0]))
+            return True
+        if primitive == "tensor_like":
+            dtype = None if len(args) < 3 or self._is_null(args[2]) else self._dtype_from_name(args[2])
+            out(self._tensor_like(args[0], args[1], dtype=dtype))
             return True
         return False
 
@@ -1641,6 +2088,58 @@ class Codegen2GraphModel(nn.Module):
                 self._eval_graph_operand(cond, env=env, symbols=symbols)
             ) else false_value
             assign(self._eval_graph_operand(selected, env=env, symbols=symbols))
+            return
+        if op == "core.repeat":
+            callee_attr = node.attrs.get("callee")
+            arg_count_attr = node.attrs.get("arg_count")
+            carry_count_attr = node.attrs.get("carry_count")
+            if (
+                not isinstance(callee_attr, GraphLiteral)
+                or not isinstance(callee_attr.value, str)
+                or not isinstance(arg_count_attr, GraphLiteral)
+                or type(arg_count_attr.value) is not int
+                or not isinstance(carry_count_attr, GraphLiteral)
+                or type(carry_count_attr.value) is not int
+            ):
+                raise ValueError("core.repeat has invalid metadata")
+            callee = callee_attr.value
+            arg_count = arg_count_attr.value
+            carry_count = carry_count_attr.value
+            current = [
+                self._eval_graph_operand(node.inputs[3 + index], env=env, symbols=symbols)
+                for index in range(carry_count)
+            ]
+            for i in range(
+                int(self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)),
+                int(self._eval_graph_operand(node.inputs[1], env=env, symbols=symbols)),
+                int(self._eval_graph_operand(node.inputs[2], env=env, symbols=symbols)),
+            ):
+                args: list[Any] = []
+                for index in range(arg_count):
+                    role_attr = node.attrs.get(f"arg_{index}")
+                    if not isinstance(role_attr, GraphLiteral) or not isinstance(role_attr.value, str):
+                        raise ValueError(f"core.repeat arg_{index} metadata is invalid")
+                    role = role_attr.value
+                    if role == "iter":
+                        args.append(i)
+                    elif role.startswith("carry:"):
+                        args.append(current[int(role.removeprefix("carry:"))])
+                    elif role.startswith("input:"):
+                        args.append(
+                            self._eval_graph_operand(
+                                node.inputs[int(role.removeprefix("input:"))],
+                                env=env,
+                                symbols=symbols,
+                            )
+                        )
+                    else:
+                        raise ValueError(f"invalid core.repeat arg role {role!r}")
+                callee_module = self.modules_by_name[callee]
+                call_env = {
+                    value.name: arg for value, arg in zip(callee_module.inputs, args, strict=False)
+                }
+                current = list(self._execute_module(callee, call_env, symbols))
+            assign(current[0] if len(current) == 1 else tuple(current))
             return
         if op.startswith("core.binary."):
             operator = op.removeprefix("core.binary.")
@@ -1787,9 +2286,18 @@ def _py_ident(name: str) -> str:
 
 
 class _DirectTorchEmitter:
-    def __init__(self, *, program: GraphProgram, class_name: str) -> None:
+    def __init__(
+        self,
+        *,
+        program: GraphProgram,
+        class_name: str,
+        profile: bool = False,
+        align_devices: bool = False,
+    ) -> None:
         self.program = program
         self.class_name = class_name
+        self.profile = bool(profile)
+        self.align_devices = bool(align_devices)
         self.modules_by_name = {module.name: module for module in program.modules}
         self.method_names = {name: f"_def_{_py_ident(name)}" for name in self.modules_by_name}
         self.global_symbol_names = _runtime_symbol_module_names(program)
@@ -1798,6 +2306,9 @@ class _DirectTorchEmitter:
             total_pure_only=True,
         )
         self.state_key_filter_prefixes = _state_key_filter_prefixes(program)
+        self.emitted_module_names = self._emitted_module_names()
+        self.needs_expert_banks = _graph_uses_expert_linear(program)
+        self._inline_stack: set[str] = set()
 
     def emit(self) -> str:
         lines: list[str] = [f"class {self.class_name}(nn.Module):"]
@@ -1805,6 +2316,8 @@ class _DirectTorchEmitter:
         lines.append("")
         self._emit_eval_symbols(lines)
         for module in self.program.modules:
+            if module.name not in self.emitted_module_names:
+                continue
             lines.append("")
             self._emit_module(lines, module)
         lines.append("")
@@ -1812,6 +2325,168 @@ class _DirectTorchEmitter:
         lines.append("")
         self._emit_generate(lines)
         return "\n".join(lines)
+
+    def _repeat_callee_is_inlineable(self, node: Any) -> bool:
+        if node.op.name != "core.repeat":
+            return False
+        try:
+            callee = self._repeat_attr_string(node, "callee")
+            arg_count = self._repeat_attr_int(node, "arg_count")
+            carry_count = self._repeat_attr_int(node, "carry_count")
+        except ValueError:
+            return False
+        callee_module = self.modules_by_name.get(callee)
+        return (
+            callee_module is not None
+            and len(callee_module.inputs) == arg_count
+            and len(callee_module.outputs) == carry_count
+        )
+
+    def _collect_codegen_module_refs(
+        self,
+        operand: GraphOperand,
+        refs: set[str],
+    ) -> None:
+        if isinstance(operand, GraphExpr):
+            if operand.op.name in self.modules_by_name:
+                refs.add(operand.op.name)
+            for item in operand.inputs:
+                self._collect_codegen_module_refs(item, refs)
+            for item in operand.attrs.values():
+                self._collect_codegen_module_refs(item, refs)
+
+    def _collect_emitted_module_refs_from_operand(
+        self,
+        operand: GraphOperand,
+        refs: set[str],
+    ) -> None:
+        if isinstance(operand, GraphExpr):
+            if operand.op.name in self.modules_by_name:
+                refs.add(operand.op.name)
+            for item in operand.inputs:
+                self._collect_emitted_module_refs_from_operand(item, refs)
+            for item in operand.attrs.values():
+                self._collect_emitted_module_refs_from_operand(item, refs)
+
+    def _collect_emitted_module_refs_from_module_body(
+        self,
+        module: GraphModule,
+        refs: set[str],
+        *,
+        visiting_inline: set[str] | None = None,
+    ) -> None:
+        if visiting_inline is None:
+            visiting_inline = set()
+        if module.name in visiting_inline:
+            return
+        visiting_inline.add(module.name)
+        try:
+            for node in module.nodes:
+                self._collect_emitted_module_refs_from_node(
+                    node,
+                    refs,
+                    module_name=module.name,
+                    visiting_inline=visiting_inline,
+                )
+            for output in module.outputs:
+                self._collect_emitted_module_refs_from_operand(output, refs)
+        finally:
+            visiting_inline.remove(module.name)
+
+    def _collect_emitted_module_refs_from_node(
+        self,
+        node: Any,
+        refs: set[str],
+        *,
+        module_name: str,
+        visiting_inline: set[str],
+    ) -> None:
+        if self._repeat_callee_is_inlineable(node):
+            for operand in (*node.inputs, *node.attrs.values()):
+                self._collect_emitted_module_refs_from_operand(operand, refs)
+            callee = self._repeat_attr_string(node, "callee")
+            callee_module = self.modules_by_name.get(callee)
+            if callee_module is not None:
+                self._collect_emitted_module_refs_from_module_body(
+                    callee_module,
+                    refs,
+                    visiting_inline=visiting_inline,
+                )
+            return
+        if node.op.name == "core.select" and len(node.inputs) == 3:
+            self._collect_emitted_module_refs_from_operand(node.inputs[0], refs)
+            for branch in node.inputs[1:]:
+                if isinstance(branch, GraphExpr) and self._branch_benefits_from_control_inline(
+                    branch,
+                    module_name=module_name,
+                ):
+                    callee_module = self.modules_by_name.get(branch.op.name)
+                    if callee_module is not None:
+                        for arg in branch.inputs:
+                            self._collect_emitted_module_refs_from_operand(arg, refs)
+                        for arg in branch.attrs.values():
+                            self._collect_emitted_module_refs_from_operand(arg, refs)
+                        self._collect_emitted_module_refs_from_module_body(
+                            callee_module,
+                            refs,
+                            visiting_inline=visiting_inline,
+                        )
+                    continue
+                self._collect_emitted_module_refs_from_operand(branch, refs)
+            return
+        if self._can_inline_direct_module_call(
+            node.op.name,
+            module_name=module_name,
+            attrs=node.attrs,
+            visiting_inline=visiting_inline,
+        ):
+            refs.add(node.op.name)
+            for operand in (*node.inputs, *node.attrs.values()):
+                self._collect_emitted_module_refs_from_operand(operand, refs)
+            callee_module = self.modules_by_name.get(node.op.name)
+            if callee_module is not None:
+                self._collect_emitted_module_refs_from_module_body(
+                    callee_module,
+                    refs,
+                    visiting_inline=visiting_inline,
+                )
+            return
+        if node.op.name in self.modules_by_name:
+            refs.add(node.op.name)
+        for operand in (*node.inputs, *node.attrs.values()):
+            self._collect_emitted_module_refs_from_operand(operand, refs)
+
+    def _can_inline_direct_module_call(
+        self,
+        callee: str,
+        *,
+        module_name: str,
+        attrs: Mapping[str, GraphOperand],
+        visiting_inline: set[str] | None = None,
+    ) -> bool:
+        return (
+            callee in self.modules_by_name
+            and callee != module_name
+            and callee not in self.global_symbol_names
+            and not attrs
+            and (visiting_inline is None or callee not in visiting_inline)
+        )
+
+    def _emitted_module_names(self) -> set[str]:
+        emitted: set[str] = {self.program.main_module} | set(self.global_symbol_names)
+        pending = list(emitted)
+        while pending:
+            name = pending.pop()
+            module = self.modules_by_name.get(name)
+            if module is None:
+                continue
+            refs: set[str] = set()
+            self._collect_emitted_module_refs_from_module_body(module, refs)
+            for ref in refs:
+                if ref not in emitted:
+                    emitted.add(ref)
+                    pending.append(ref)
+        return emitted
 
     @staticmethod
     def _add(lines: list[str], indent: int, text: str = "") -> None:
@@ -1825,41 +2500,40 @@ class _DirectTorchEmitter:
         add(lines, 8, "self.state_dict_tensors = {}")
         add(lines, 8, "self.config = dict(({} if _MODEL_CONFIG is None else _MODEL_CONFIG) if config is None else config)")
         add(lines, 8, "self._symbols = {}")
-        add(lines, 8, "self._profile_enabled = False")
-        add(lines, 8, "self._profile_cuda = True")
-        add(lines, 8, "self._profile_records = {}")
+        if self.profile:
+            add(lines, 8, "self._profile_cuda = True")
+            add(lines, 8, "self._profile_records = {}")
         add(lines, 8, "self.load_state_dict(state_dict)")
         add(lines, 4, "")
-        add(lines, 4, "def enable_profile(self, enabled=True, *, cuda=True, reset=True):")
-        add(lines, 8, "self._profile_enabled = bool(enabled)")
-        add(lines, 8, "self._profile_cuda = bool(cuda)")
-        add(lines, 8, "if reset:")
-        add(lines, 12, "self._profile_records = {}")
-        add(lines, 8, "return self")
-        add(lines, 4, "")
-        add(lines, 4, "def _profile_call(self, name, fn, *args, **kwargs):")
-        add(lines, 8, "if not self._profile_enabled:")
-        add(lines, 12, "return fn(*args, **kwargs)")
-        add(lines, 8, "use_cuda = bool(self._profile_cuda and torch.cuda.is_available())")
-        add(lines, 8, "if use_cuda:")
-        add(lines, 12, "torch.cuda.synchronize()")
-        add(lines, 8, "start = time.perf_counter()")
-        add(lines, 8, "try:")
-        add(lines, 12, "return fn(*args, **kwargs)")
-        add(lines, 8, "finally:")
-        add(lines, 12, "if use_cuda:")
-        add(lines, 16, "torch.cuda.synchronize()")
-        add(lines, 12, "elapsed = time.perf_counter() - start")
-        add(lines, 12, "count, total = self._profile_records.get(name, (0, 0.0))")
-        add(lines, 12, "self._profile_records[name] = (count + 1, total + elapsed)")
-        add(lines, 4, "")
-        add(lines, 4, "def profile_summary(self, top_n=40):")
-        add(lines, 8, "rows = []")
-        add(lines, 8, "for name, (count, total) in self._profile_records.items():")
-        add(lines, 12, "rows.append({'name': name, 'count': count, 'seconds': total, 'avg_seconds': total / max(1, count)})")
-        add(lines, 8, "rows.sort(key=lambda row: row['seconds'], reverse=True)")
-        add(lines, 8, "return rows[: int(top_n)]")
-        add(lines, 4, "")
+        if self.profile:
+            add(lines, 4, "def enable_profile(self, enabled=True, *, cuda=True, reset=True):")
+            add(lines, 8, "del enabled")
+            add(lines, 8, "self._profile_cuda = bool(cuda)")
+            add(lines, 8, "if reset:")
+            add(lines, 12, "self._profile_records = {}")
+            add(lines, 8, "return self")
+            add(lines, 4, "")
+            add(lines, 4, "def _profile_call(self, name, fn, *args, **kwargs):")
+            add(lines, 8, "use_cuda = bool(self._profile_cuda and torch.cuda.is_available())")
+            add(lines, 8, "if use_cuda:")
+            add(lines, 12, "torch.cuda.synchronize()")
+            add(lines, 8, "start = time.perf_counter()")
+            add(lines, 8, "try:")
+            add(lines, 12, "return fn(*args, **kwargs)")
+            add(lines, 8, "finally:")
+            add(lines, 12, "if use_cuda:")
+            add(lines, 16, "torch.cuda.synchronize()")
+            add(lines, 12, "elapsed = time.perf_counter() - start")
+            add(lines, 12, "count, total = self._profile_records.get(name, (0, 0.0))")
+            add(lines, 12, "self._profile_records[name] = (count + 1, total + elapsed)")
+            add(lines, 4, "")
+            add(lines, 4, "def profile_summary(self, top_n=40):")
+            add(lines, 8, "rows = []")
+            add(lines, 8, "for name, (count, total) in self._profile_records.items():")
+            add(lines, 12, "rows.append({'name': name, 'count': count, 'seconds': total, 'avg_seconds': total / max(1, count)})")
+            add(lines, 8, "rows.sort(key=lambda row: row['seconds'], reverse=True)")
+            add(lines, 8, "return rows[: int(top_n)]")
+            add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None, param_devices=None):")
         add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config, param_devices=param_devices)")
@@ -1873,7 +2547,7 @@ class _DirectTorchEmitter:
         add(lines, 8, "return self")
         add(lines, 4, "")
         add(lines, 4, "def setup(self):")
-        add(lines, 8, "self._materialize_expert_banks()")
+        add(lines, 8, "pass")
         add(lines, 8, "return None")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
@@ -1953,49 +2627,79 @@ class _DirectTorchEmitter:
         add(lines, 12, "return [cls._move_to(item, device) for item in value]")
         add(lines, 8, "return value")
         add(lines, 4, "")
-        add(lines, 4, "@classmethod")
-        add(lines, 4, "def _align_pair(cls, left, right, *, prefer='right'):")
-        add(lines, 8, "left_tensor = torch.is_tensor(left)")
-        add(lines, 8, "right_tensor = torch.is_tensor(right)")
-        add(lines, 8, "if not left_tensor or not right_tensor or left.device == right.device:")
-        add(lines, 12, "return left, right")
-        add(lines, 8, "device = right.device if prefer == 'right' else left.device")
-        add(lines, 8, "return cls._move_to(left, device), cls._move_to(right, device)")
-        add(lines, 4, "")
-        add(lines, 4, "@classmethod")
-        add(lines, 4, "def _binary_op(cls, op, left, right, *, prefer='right'):")
-        add(lines, 8, "left, right = cls._align_pair(left, right, prefer=prefer)")
-        add(lines, 8, "if op == '+':")
-        add(lines, 12, "return left + right")
-        add(lines, 8, "if op == '-':")
-        add(lines, 12, "return left - right")
-        add(lines, 8, "if op == '*':")
-        add(lines, 12, "return left * right")
-        add(lines, 8, "if op == '/':")
-        add(lines, 12, "return left / right")
-        add(lines, 8, "if op == '%':")
-        add(lines, 12, "return left % right")
-        add(lines, 8, "if op == '<=':")
-        add(lines, 12, "return left <= right")
-        add(lines, 8, "if op == '<':")
-        add(lines, 12, "return left < right")
-        add(lines, 8, "if op == '>=':")
-        add(lines, 12, "return left >= right")
-        add(lines, 8, "if op == '>':")
-        add(lines, 12, "return left > right")
-        add(lines, 8, "if op == '==':")
-        add(lines, 12, "if left is None or right is None:")
-        add(lines, 16, "return left is right")
-        add(lines, 12, "return torch.eq(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left == right")
-        add(lines, 8, "if op == '!=':")
-        add(lines, 12, "if left is None or right is None:")
-        add(lines, 16, "return left is not right")
-        add(lines, 12, "return torch.ne(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left != right")
-        add(lines, 8, "raise NotImplementedError(f'unsupported binary op {op!r}')")
-        add(lines, 4, "")
+        if self.align_devices:
+            add(lines, 4, "@classmethod")
+            add(lines, 4, "def _align_pair(cls, left, right, *, prefer='right'):")
+            add(lines, 8, "left_tensor = torch.is_tensor(left)")
+            add(lines, 8, "right_tensor = torch.is_tensor(right)")
+            add(lines, 8, "if not left_tensor or not right_tensor or left.device == right.device:")
+            add(lines, 12, "return left, right")
+            add(lines, 8, "device = right.device if prefer == 'right' else left.device")
+            add(lines, 8, "return cls._move_to(left, device), cls._move_to(right, device)")
+            add(lines, 4, "")
         add(lines, 4, "_compose_path = staticmethod(_common_compose_path)")
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _path_template_part(value):")
+        add(lines, 8, "if isinstance(value, str) and value.startswith('@@'):")
+        add(lines, 12, "return value[2:].strip('.')")
+        add(lines, 8, "if isinstance(value, str) and value.startswith('@'):")
+        add(lines, 12, "return value[1:].strip('.')")
+        add(lines, 8, "return value")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _causal_conv1d(x, weight, bias, activation):")
+        add(lines, 8, "if x.device != weight.device:")
+        add(lines, 12, "x = x.to(device=weight.device)")
+        add(lines, 8, "if x.is_floating_point() and weight.is_floating_point() and x.dtype != weight.dtype:")
+        add(lines, 12, "weight = weight.to(dtype=x.dtype)")
+        add(lines, 8, "if bias is not None:")
+        add(lines, 12, "if bias.device != weight.device:")
+        add(lines, 16, "bias = bias.to(device=weight.device)")
+        add(lines, 12, "if x.is_floating_point() and bias.is_floating_point() and x.dtype != bias.dtype:")
+        add(lines, 16, "bias = bias.to(dtype=x.dtype)")
+        add(lines, 8, "kernel = int(weight.shape[-1])")
+        add(lines, 8, "y = F.conv1d(F.pad(x.transpose(1, 2), (kernel - 1, 0)), weight, bias=bias, groups=int(weight.shape[0])).transpose(1, 2)")
+        add(lines, 8, "activation_name = str(activation)")
+        add(lines, 8, "if activation_name == 'relu':")
+        add(lines, 12, "return F.relu(y)")
+        add(lines, 8, "if activation_name == 'gelu':")
+        add(lines, 12, "return F.gelu(y)")
+        add(lines, 8, "return F.silu(y)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _mamba_scan(u, delta, b, c, a, d):")
+        add(lines, 8, "if u.device != a.device:")
+        add(lines, 12, "u = u.to(device=a.device)")
+        add(lines, 12, "delta = delta.to(device=a.device)")
+        add(lines, 12, "b = b.to(device=a.device)")
+        add(lines, 12, "c = c.to(device=a.device)")
+        add(lines, 8, "if u.is_floating_point() and a.is_floating_point() and u.dtype != a.dtype:")
+        add(lines, 12, "a = a.to(dtype=u.dtype)")
+        add(lines, 8, "if u.is_floating_point() and d.is_floating_point() and u.dtype != d.dtype:")
+        add(lines, 12, "d = d.to(dtype=u.dtype)")
+        add(lines, 8, "batch = int(u.shape[0])")
+        add(lines, 8, "steps = int(u.shape[1])")
+        add(lines, 8, "width = int(u.shape[2])")
+        add(lines, 8, "u0 = u[:, 0, :]")
+        add(lines, 8, "b0 = b[:, 0, :]")
+        add(lines, 8, "state = ((u0.unsqueeze(-1) * b0.unsqueeze(1)) * 0.0)")
+        add(lines, 8, "out = []")
+        add(lines, 8, "a_b = a.unsqueeze(0)")
+        add(lines, 8, "for t in range(steps):")
+        add(lines, 12, "u_t = u[:, t, :]")
+        add(lines, 12, "delta_t = delta[:, t, :]")
+        add(lines, 12, "b_t = b[:, t, :]")
+        add(lines, 12, "c_t = c[:, t, :]")
+        add(lines, 12, "delta_sp = F.softplus(delta_t)")
+        add(lines, 12, "a_t = torch.exp(delta_sp.unsqueeze(-1) * a_b)")
+        add(lines, 12, "bu_t = (delta_sp * u_t).unsqueeze(-1) * b_t.unsqueeze(1)")
+        add(lines, 12, "state = (a_t * state) + bu_t")
+        add(lines, 12, "y_t = torch.sum(state * c_t.unsqueeze(1), dim=-1).reshape(batch, width)")
+        add(lines, 12, "out.append(y_t + (u_t * d))")
+        add(lines, 8, "return torch.stack(out, dim=1)")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
         add(lines, 8, "value, _ = self._linear_param(path, None, field='param')")
@@ -2006,23 +2710,96 @@ class _DirectTorchEmitter:
         add(lines, 8, "return value")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _expert_bank_lookup(path):")
-        add(lines, 8, "parts = path.split('.')")
-        add(lines, 8, "for idx, part in enumerate(parts):")
-        add(lines, 12, "if part == 'experts' and idx + 2 < len(parts) and parts[idx + 1].isdigit():")
-        add(lines, 16, "expert = int(parts[idx + 1])")
-        add(lines, 16, "bank_key = '.'.join(parts[:idx + 1] + parts[idx + 2:])")
+        add(lines, 4, "def _collapse_one_numeric_segment(key):")
+        add(lines, 8, "parts = str(key).split('.')")
+        add(lines, 8, "for index, part in enumerate(parts):")
+        add(lines, 12, "if part.isdigit():")
+        add(lines, 16, "return '.'.join(parts[:index] + parts[index + 1:]), int(part), index")
+        add(lines, 8, "return None")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _collapsed_numeric_segments(key):")
+        add(lines, 8, "parts = str(key).split('.')")
+        add(lines, 8, "return [('.'.join(parts[:index] + parts[index + 1:]), int(part), index) for index, part in enumerate(parts) if part.isdigit()]")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _keys_for_collapsed_bank(cls, state, bank_key):")
+        add(lines, 8, "items = {}")
+        add(lines, 8, "numeric_index = None")
+        add(lines, 8, "for key in state:")
+        add(lines, 12, "for collapsed_key, expert, index in cls._collapsed_numeric_segments(str(key)):")
+        add(lines, 16, "if collapsed_key != bank_key:")
+        add(lines, 20, "continue")
+        add(lines, 16, "if numeric_index is None:")
+        add(lines, 20, "numeric_index = index")
+        add(lines, 16, "elif numeric_index != index:")
+        add(lines, 20, "continue")
+        add(lines, 16, "items[expert] = str(key)")
+        add(lines, 16, "break")
+        add(lines, 8, "if not items:")
+        add(lines, 12, "return []")
+        add(lines, 8, "ordered = [items[i] for i in range(len(items)) if i in items]")
+        add(lines, 8, "return ordered if len(ordered) == len(items) else []")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _fused_gate_up_source_bank_keys(bank_key):")
+        add(lines, 8, "parts = str(bank_key).split('.')")
+        add(lines, 8, "for index, part in enumerate(parts):")
+        add(lines, 12, "if 'gate_up' not in part:")
+        add(lines, 16, "continue")
+        add(lines, 12, "gate_parts = list(parts)")
+        add(lines, 12, "up_parts = list(parts)")
+        add(lines, 12, "gate_parts[index] = part.replace('gate_up', 'gate', 1)")
+        add(lines, 12, "up_parts[index] = part.replace('gate_up', 'up', 1)")
+        add(lines, 12, "return '.'.join(gate_parts), '.'.join(up_parts)")
+        add(lines, 8, "return None")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _materialize_expert_bank_for_path(cls, state, bank_key):")
+        add(lines, 8, "existing = state.get(bank_key)")
+        add(lines, 8, "if torch.is_tensor(existing):")
+        add(lines, 12, "return existing")
+        add(lines, 8, "ordered_keys = cls._keys_for_collapsed_bank(state, bank_key)")
+        add(lines, 8, "if ordered_keys:")
+        add(lines, 12, "first = state[ordered_keys[0]]")
+        add(lines, 12, "first_shape = tuple(first.shape)")
+        add(lines, 12, "if all(torch.is_tensor(state[key]) and tuple(state[key].shape) == first_shape for key in ordered_keys):")
+        add(lines, 16, "bank = torch.stack([state.pop(key) for key in ordered_keys], dim=0)")
+        add(lines, 16, "state[bank_key] = bank")
+        add(lines, 16, "return bank")
+        add(lines, 8, "fused_sources = cls._fused_gate_up_source_bank_keys(bank_key)")
+        add(lines, 8, "if fused_sources is None:")
+        add(lines, 12, "return None")
+        add(lines, 8, "gate_key, up_key = fused_sources")
+        add(lines, 8, "gate = cls._materialize_expert_bank_for_path(state, gate_key)")
+        add(lines, 8, "up = cls._materialize_expert_bank_for_path(state, up_key)")
+        add(lines, 8, "if not torch.is_tensor(gate) or not torch.is_tensor(up):")
+        add(lines, 12, "return None")
+        add(lines, 8, "if gate.shape[:-2] != up.shape[:-2] or gate.shape[-1:] != up.shape[-1:]:")
+        add(lines, 12, "return None")
+        add(lines, 8, "concat_dim = -2 if gate.ndim >= 2 else -1")
+        add(lines, 8, "bank = torch.cat([gate, up], dim=concat_dim)")
+        add(lines, 8, "state[bank_key] = bank")
+        add(lines, 8, "return bank")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _expert_bank_lookup(cls, state, path):")
+        add(lines, 8, "for bank_key, expert, _ in cls._collapsed_numeric_segments(path):")
+        add(lines, 12, "bank = state.get(bank_key)")
+        add(lines, 12, "if torch.is_tensor(bank):")
         add(lines, 16, "return bank_key, expert")
         add(lines, 8, "return None")
         add(lines, 4, "")
         add(lines, 4, "def _linear_param(self, path, expert, *, optional=False, field='linear.weight'):")
         add(lines, 8, "resolved = path[2:] if isinstance(path, str) and path.startswith('@@') else path")
         add(lines, 8, "value = self.state_dict_tensors.get(resolved)")
-        add(lines, 8, "bank = self._expert_bank_lookup(resolved)")
         add(lines, 8, "if torch.is_tensor(value):")
-        add(lines, 12, "if bank is not None and (expert is None or int(expert) == bank[1]):")
-        add(lines, 16, "return value, None")
         add(lines, 12, "return value, expert")
+        add(lines, 8, "self._materialize_expert_bank_for_path(self.state_dict_tensors, resolved)")
+        add(lines, 8, "value = self.state_dict_tensors.get(resolved)")
+        add(lines, 8, "if torch.is_tensor(value):")
+        add(lines, 12, "return value, expert")
+        add(lines, 8, "bank = self._expert_bank_lookup(self.state_dict_tensors, resolved)")
         add(lines, 8, "if bank is not None:")
         add(lines, 12, "bank_key, path_expert = bank")
         add(lines, 12, "bank_value = self.state_dict_tensors.get(bank_key)")
@@ -2033,44 +2810,6 @@ class _DirectTorchEmitter:
         add(lines, 8, "if optional:")
         add(lines, 12, "return None, expert")
         add(lines, 8, "return _common_required_state_value(self.state_dict_tensors, resolved), expert")
-        add(lines, 4, "")
-        add(lines, 4, "def _materialize_expert_banks(self):")
-        add(lines, 8, "groups = {}")
-        add(lines, 8, "for key, value in list(self.state_dict_tensors.items()):")
-        add(lines, 12, "parts = key.split('.')")
-        add(lines, 12, "for idx, part in enumerate(parts):")
-        add(lines, 16, "if part == 'experts' and idx + 2 < len(parts) and parts[idx + 1].isdigit():")
-        add(lines, 20, "expert = int(parts[idx + 1])")
-        add(lines, 20, "bank_key = '.'.join(parts[:idx + 1] + parts[idx + 2:])")
-        add(lines, 20, "groups.setdefault(bank_key, {})[expert] = key")
-        add(lines, 20, "break")
-        add(lines, 8, "for bank_key, items in groups.items():")
-        add(lines, 12, "if bank_key in self.state_dict_tensors or not items:")
-        add(lines, 16, "continue")
-        add(lines, 12, "ordered_keys = [items[i] for i in range(len(items)) if i in items]")
-        add(lines, 12, "if len(ordered_keys) != len(items):")
-        add(lines, 16, "continue")
-        add(lines, 12, "first = self.state_dict_tensors[ordered_keys[0]]")
-        add(lines, 12, "first_shape = first.shape")
-        add(lines, 12, "if any(tuple(self.state_dict_tensors[key].shape) != tuple(first_shape) for key in ordered_keys):")
-        add(lines, 16, "continue")
-        add(lines, 12, "ordered = [self.state_dict_tensors.pop(key) for key in ordered_keys]")
-        add(lines, 12, "self.state_dict_tensors[bank_key] = torch.stack(ordered, dim=0)")
-        add(lines, 12, "del ordered")
-        add(lines, 8, "for gate_key, gate in list(self.state_dict_tensors.items()):")
-        add(lines, 12, "if '.gate_proj.' not in str(gate_key):")
-        add(lines, 16, "continue")
-        add(lines, 12, "up_key = str(gate_key).replace('.gate_proj.', '.up_proj.', 1)")
-        add(lines, 12, "gate_up_key = str(gate_key).replace('.gate_proj.', '.gate_up_proj.', 1)")
-        add(lines, 12, "if gate_up_key in self.state_dict_tensors:")
-        add(lines, 16, "continue")
-        add(lines, 12, "up = self.state_dict_tensors.get(up_key)")
-        add(lines, 12, "if not torch.is_tensor(gate) or not torch.is_tensor(up):")
-        add(lines, 16, "continue")
-        add(lines, 12, "if gate.shape[:-2] != up.shape[:-2] or gate.shape[-1:] != up.shape[-1:]:")
-        add(lines, 16, "continue")
-        add(lines, 12, "concat_dim = -2 if gate.ndim >= 2 else -1")
-        add(lines, 12, "self.state_dict_tensors[gate_up_key] = torch.cat([gate, up], dim=concat_dim)")
         add(lines, 4, "")
         add(lines, 4, "def _linear(self, base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "weight, expert = self._linear_param(self._compose_path(base, weight_leaf), expert)")
@@ -2095,17 +2834,43 @@ class _DirectTorchEmitter:
         add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
         add(lines, 8, "x = self._move_to(x, weight.device)")
         add(lines, 8, "expert_idx = self._move_to(expert_idx, weight.device).long()")
-        add(lines, 8, "selected_weight = weight[expert_idx]")
         add(lines, 8, "bias_value = self._optional_param(self._compose_path(base, bias_leaf)) if bias else None")
         add(lines, 8, "if bias_value is not None:")
-        add(lines, 12, "bias_value = self._move_to(bias_value, weight.device)[expert_idx]")
-        add(lines, 8, "weight_run = selected_weight.to(dtype=x.dtype) if x.is_floating_point() and selected_weight.is_floating_point() and x.dtype != selected_weight.dtype else selected_weight")
-        add(lines, 8, "bias_run = bias_value.to(dtype=x.dtype) if bias_value is not None and x.is_floating_point() and bias_value.is_floating_point() and x.dtype != bias_value.dtype else bias_value")
-        add(lines, 8, "if transpose:")
-        add(lines, 12, "y = torch.matmul(x.unsqueeze(-2), weight_run).squeeze(-2)")
+        add(lines, 12, "bias_value = self._move_to(bias_value, weight.device)")
+        add(lines, 8, "out_dim = int(weight.shape[-1] if transpose else weight.shape[-2])")
+        add(lines, 8, "out = x.new_empty((*x.shape[:-1], out_dim))")
+        add(lines, 8, "if x.numel() == 0:")
+        add(lines, 12, "return out")
+        add(lines, 8, "flat_x = x.reshape(-1, x.shape[-1])")
+        add(lines, 8, "flat_idx = expert_idx.reshape(-1)")
+        add(lines, 8, "if flat_idx.numel() != flat_x.shape[0]:")
+        add(lines, 12, "raise ValueError(f'expert_idx shape {tuple(expert_idx.shape)} is incompatible with input shape {tuple(x.shape)}')")
+        add(lines, 8, "grouped_weight = weight if transpose else weight.transpose(-2, -1)")
+        add(lines, 8, "expert_ids_g, perm = torch.sort(flat_idx)")
+        add(lines, 8, "x_g = flat_x.index_select(0, perm)")
+        add(lines, 8, "x_run = x_g.to(dtype=grouped_weight.dtype) if x_g.is_floating_point() and grouped_weight.is_floating_point() and x_g.dtype != grouped_weight.dtype else x_g")
+        add(lines, 8, "histc_input = expert_ids_g.float() if weight.device.type in ('cpu', 'mps') else expert_ids_g.int()")
+        add(lines, 8, "tokens_per_expert = torch.histc(histc_input, bins=weight.shape[0], min=0, max=weight.shape[0] - 1)")
+        add(lines, 8, "offsets = torch.cumsum(tokens_per_expert, dim=0, dtype=torch.int32)")
+        add(lines, 8, "if hasattr(torch.nn.functional, 'grouped_mm') and weight.device.type == 'cuda':")
+        add(lines, 12, "y_g = torch.nn.functional.grouped_mm(x_run, grouped_weight, offs=offsets)")
+        add(lines, 8, "elif hasattr(torch, '_grouped_mm') and weight.device.type == 'cuda':")
+        add(lines, 12, "y_g = torch._grouped_mm(x_run, grouped_weight, offs=offsets)")
         add(lines, 8, "else:")
-        add(lines, 12, "y = torch.matmul(x.unsqueeze(-2), weight_run.transpose(-1, -2)).squeeze(-2)")
-        add(lines, 8, "return y + bias_run if bias_run is not None else y")
+        add(lines, 12, "y_g = x_run.new_empty((x_run.shape[0], out_dim))")
+        add(lines, 12, "start = 0")
+        add(lines, 12, "for expert, end in enumerate(offsets.tolist()):")
+        add(lines, 16, "if start != end:")
+        add(lines, 20, "torch.mm(x_run[start:end], grouped_weight[expert], out=y_g[start:end])")
+        add(lines, 16, "start = end")
+        add(lines, 8, "y_g = y_g.to(dtype=x.dtype) if x.is_floating_point() and y_g.is_floating_point() and y_g.dtype != x.dtype else y_g")
+        add(lines, 8, "if bias_value is not None:")
+        add(lines, 12, "bias_g = bias_value.index_select(0, expert_ids_g)")
+        add(lines, 12, "bias_g = bias_g.to(dtype=x.dtype) if x.is_floating_point() and bias_g.is_floating_point() and bias_g.dtype != x.dtype else bias_g")
+        add(lines, 12, "y_g = y_g + bias_g")
+        add(lines, 8, "inv_perm = torch.empty_like(perm)")
+        add(lines, 8, "inv_perm[perm] = torch.arange(perm.numel(), device=perm.device)")
+        add(lines, 8, "return y_g.index_select(0, inv_perm).reshape_as(out)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _gegelu(x, limit=None):")
@@ -2158,22 +2923,13 @@ class _DirectTorchEmitter:
         add(lines, 8, "raise ValueError(f'unsupported dtype name {value!r}')")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
-        add(lines, 4, "def _binary_add(cls, left, right):")
-        add(lines, 8, "if left is None:")
-        add(lines, 12, "return right")
-        add(lines, 8, "if right is None:")
-        add(lines, 12, "return left")
-        add(lines, 8, "return cls._binary_op('+', left, right)")
-        add(lines, 4, "")
-        add(lines, 4, "@classmethod")
-        add(lines, 4, "def _binary_sub(cls, left, right):")
-        add(lines, 8, "if right is None:")
-        add(lines, 12, "return left")
-        add(lines, 8, "return cls._binary_op('-', left, right)")
-        add(lines, 4, "")
-        add(lines, 4, "@classmethod")
-        add(lines, 4, "def _eq(cls, left, right):")
-        add(lines, 8, "return cls._binary_op('==', left, right)")
+        add(lines, 4, "def _tensor_like(cls, value, ref, dtype=None):")
+        add(lines, 8, "target_dtype = dtype or ref.dtype")
+        add(lines, 8, "if torch.is_tensor(value):")
+        add(lines, 12, "return value.to(device=ref.device, dtype=target_dtype)")
+        add(lines, 8, "if isinstance(value, (list, tuple)):")
+        add(lines, 12, "return torch.as_tensor(value, device=ref.device, dtype=target_dtype)")
+        add(lines, 8, "return torch.full_like(ref, value, dtype=target_dtype)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _where(cls, cond, yes, no):")
@@ -2261,16 +3017,19 @@ class _DirectTorchEmitter:
         if params:
             params = ", " + params
         method_name = self.method_names[module.name]
-        impl_name = f"{method_name}__impl"
         arg_names = ", ".join(value.name for value in module.inputs)
-        add(lines, 4, f"def {method_name}(self{params}):")
-        call_args = f", {arg_names}" if arg_names else ""
-        add(lines, 8, "if self._profile_enabled:")
-        add(lines, 12, f"return self._profile_call({('module:' + module.name)!r}, self.{impl_name}{call_args})")
-        add(lines, 8, f"return self.{impl_name}({arg_names})" if arg_names else f"return self.{impl_name}()")
-        add(lines, 4, "")
-        add(lines, 4, f"def {impl_name}(self{params}):")
+        body_name = method_name
+        if self.profile:
+            impl_name = f"{method_name}__impl"
+            add(lines, 4, f"def {method_name}(self{params}):")
+            call_args = f", {arg_names}" if arg_names else ""
+            add(lines, 8, f"return self._profile_call({('module:' + module.name)!r}, self.{impl_name}{call_args})")
+            add(lines, 4, "")
+            body_name = impl_name
+        add(lines, 4, f"def {body_name}(self{params}):")
         local = {value.name for value in module.inputs}
+        required_dim_names = _module_free_dim_refs(module, global_names=self.global_symbol_names)
+        required_dim_names.update(_tensor_size_static_dim_names(module))
         for value in module.inputs:
             _emit_bind_nested_shape_symbols(
                 lines,
@@ -2278,7 +3037,8 @@ class _DirectTorchEmitter:
                 type_expr=_effective_graph_value_type(value),
                 value_expr=value.name,
                 local=local,
-                protected=set(),
+                protected=self.global_symbol_names,
+                required_names=required_dim_names,
             )
         dim_params = [
             value.name
@@ -2300,13 +3060,23 @@ class _DirectTorchEmitter:
             self._emit_node(lines, node, module_name=module.name, indent=8, local=local, symbols_dict="self._symbols")
             for output in node.outputs:
                 local.add(output.name)
+                output_type = _effective_graph_value_type(output)
+                # Node outputs can introduce local symbolic dimensions that are
+                # consumed later in the same module, e.g. Tensor[N] from
+                # _where_indices followed by Tensor[N,D] gathers. These symbols
+                # are not necessarily module-free dims, so bind all local
+                # output shape names. If type inference assigned a name that
+                # collides with a model-global constant, codegen must not
+                # create a Python local with that name: Python would shadow the
+                # global symbol expression throughout the function.
                 _emit_bind_nested_shape_symbols(
                     lines,
                     add=add,
-                    type_expr=_effective_graph_value_type(output),
+                    type_expr=output_type,
                     value_expr=output.name,
                     local=local,
-                    protected=set(),
+                    protected=self.global_symbol_names,
+                    required_names=None,
                 )
         outs = ", ".join(self._operand_expr(item, local=local, symbols_dict="self._symbols") for item in module.outputs)
         if len(module.outputs) == 1:
@@ -2442,10 +3212,12 @@ class _DirectTorchEmitter:
             add(lines, 16, f"cache = result.get({cache_output_name!r}, cache)")
             add(lines, 12, "next_id = _next_id(logits)")
             add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
-            add(lines, 12, "out = self._move_to(out, next_id.device)")
+            if self.align_devices:
+                add(lines, 12, "out = self._move_to(out, next_id.device)")
             add(lines, 12, "out = torch.cat([out, next_id], dim=1)")
             if attention_name is not None:
-                add(lines, 12, "attention_mask = self._move_to(attention_mask, next_id.device)")
+                if self.align_devices:
+                    add(lines, 12, "attention_mask = self._move_to(attention_mask, next_id.device)")
                 add(lines, 12, "attention_mask = torch.cat([attention_mask, _ones_like_ids(next_id)], dim=1)")
             add(lines, 12, "if finished is not None and bool(finished.all().item()):")
             add(lines, 16, "break")
@@ -2467,10 +3239,12 @@ class _DirectTorchEmitter:
             add(lines, 12, "result = self._forward(out, **forward_kwargs)")
             add(lines, 12, "next_id = _next_id(_logits(result))")
             add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
-            add(lines, 12, "out = self._move_to(out, next_id.device)")
+            if self.align_devices:
+                add(lines, 12, "out = self._move_to(out, next_id.device)")
             add(lines, 12, "out = torch.cat([out, next_id], dim=1)")
             if attention_name is not None:
-                add(lines, 12, "attention_mask = self._move_to(attention_mask, next_id.device)")
+                if self.align_devices:
+                    add(lines, 12, "attention_mask = self._move_to(attention_mask, next_id.device)")
                 add(lines, 12, "attention_mask = torch.cat([attention_mask, _ones_like_ids(next_id)], dim=1)")
             add(lines, 12, "if finished is not None and bool(finished.all().item()):")
             add(lines, 16, "break")
@@ -2501,10 +3275,12 @@ class _DirectTorchEmitter:
         add(lines, 12, "result = self._forward(input_ids, **forward_kwargs)")
         add(lines, 12, "next_id = _next_id(_logits(result))")
         add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
-        add(lines, 12, "decoder_input_ids = self._move_to(decoder_input_ids, next_id.device)")
+        if self.align_devices:
+            add(lines, 12, "decoder_input_ids = self._move_to(decoder_input_ids, next_id.device)")
         add(lines, 12, "decoder_input_ids = torch.cat([decoder_input_ids, next_id], dim=1)")
         if decoder_attention_name is not None:
-            add(lines, 12, "decoder_attention_mask = self._move_to(decoder_attention_mask, next_id.device)")
+            if self.align_devices:
+                add(lines, 12, "decoder_attention_mask = self._move_to(decoder_attention_mask, next_id.device)")
             add(lines, 12, "decoder_attention_mask = torch.cat([decoder_attention_mask, _ones_like_ids(next_id)], dim=1)")
         add(lines, 12, "if finished is not None and bool(finished.all().item()):")
         add(lines, 16, "break")
@@ -2513,21 +3289,990 @@ class _DirectTorchEmitter:
     def _emit_node(self, lines: list[str], node: Any, *, module_name: str, indent: int, local: set[str], symbols_dict: str) -> None:
         add = self._add
         op = node.op.name
+        if op == "core.repeat":
+            self._emit_repeat_node(
+                lines,
+                node,
+                module_name=module_name,
+                indent=indent,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+            return
         targets = tuple(_py_ident(value.name) for value in node.outputs)
         target_names = tuple(value.name for value in node.outputs)
+        if (
+            self._emit_direct_module_call_node(
+                lines,
+                node,
+                targets=targets,
+                module_name=module_name,
+                indent=indent,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+        ):
+            return
+        if (
+            op == "core.select"
+            and self._emit_select_node_as_control(
+                lines,
+                node,
+                targets=targets,
+                module_name=module_name,
+                indent=indent,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+        ):
+            return
+        if (
+            len(targets) == 1
+            and _normalize_primitive_op(op) == "list_append"
+            and self._emit_list_append_node(
+                lines,
+                node,
+                target=targets[0],
+                indent=indent,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+        ):
+            return
+        if (
+            len(targets) == 1
+            and _normalize_primitive_op(op) == "linear"
+            and self._emit_linear_node(
+                lines,
+                node,
+                target=targets[0],
+                indent=indent,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+        ):
+            return
+        if (
+            len(targets) == 1
+            and _normalize_primitive_op(op) == "layernorm"
+            and self._emit_layernorm_node(
+                lines,
+                node,
+                target=targets[0],
+                indent=indent,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+        ):
+            return
         expr = self._node_expr(node, local=local, symbols_dict=symbols_dict)
         label = f"node:{module_name}:{','.join(target_names) or '_'}:{op}"
         if len(targets) == 1:
-            add(lines, indent, "if self._profile_enabled:")
-            add(lines, indent + 4, f"{targets[0]} = self._profile_call({label!r}, lambda: {expr})")
-            add(lines, indent, "else:")
-            add(lines, indent + 4, f"{targets[0]} = {expr}")
+            if self.profile:
+                add(lines, indent, f"{targets[0]} = self._profile_call({label!r}, lambda: {expr})")
+            else:
+                add(lines, indent, f"{targets[0]} = {expr}")
         else:
             joined = ", ".join(targets)
-            add(lines, indent, "if self._profile_enabled:")
-            add(lines, indent + 4, f"{joined} = self._profile_call({label!r}, lambda: {expr})")
-            add(lines, indent, "else:")
-            add(lines, indent + 4, f"{joined} = {expr}")
+            if self.profile:
+                add(lines, indent, f"{joined} = self._profile_call({label!r}, lambda: {expr})")
+            else:
+                add(lines, indent, f"{joined} = {expr}")
+
+    def _literal_bool_arg(self, operand: GraphOperand) -> bool | None:
+        if isinstance(operand, GraphLiteral) and type(operand.value) is bool:
+            return operand.value
+        return None
+
+    def _literal_null_arg(self, operand: GraphOperand) -> bool:
+        return isinstance(operand, GraphLiteral) and operand.value is None
+
+    def _emit_optional_param_bind(
+        self,
+        lines: list[str],
+        *,
+        target: str,
+        value_expr: str,
+        flag_expr: str,
+        flag_literal: bool | None,
+        indent: int,
+    ) -> None:
+        if flag_literal is True:
+            self._add(lines, indent, f"{target} = {value_expr}")
+        elif flag_literal is False:
+            self._add(lines, indent, f"{target} = None")
+        else:
+            self._add(lines, indent, f"{target} = ({value_expr} if {flag_expr} else None)")
+
+    def _emit_list_append_node(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        target: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if len(node.inputs) != 2:
+            return False
+        values = self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
+        value = self._operand_expr(node.inputs[1], local=local, symbols_dict=symbols_dict)
+        self._add(lines, indent, f"{target} = {values}")
+        self._add(lines, indent, f"if {target} is None:")
+        self._add(lines, indent + 4, f"{target} = []")
+        self._add(lines, indent, f"{target}.append({value})")
+        return True
+
+    def _emit_list_append_expr(
+        self,
+        lines: list[str],
+        expr: GraphExpr,
+        *,
+        target: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if _normalize_primitive_op(expr.op.name) != "list_append" or len(expr.inputs) != 2:
+            return False
+        values = self._operand_expr(expr.inputs[0], local=local, symbols_dict=symbols_dict)
+        value = self._operand_expr(expr.inputs[1], local=local, symbols_dict=symbols_dict)
+        self._add(lines, indent, f"{target} = {values}")
+        self._add(lines, indent, f"if {target} is None:")
+        self._add(lines, indent + 4, f"{target} = []")
+        self._add(lines, indent, f"{target}.append({value})")
+        return True
+
+    def _emit_select_node_as_control(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        targets: tuple[str, ...],
+        module_name: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if len(node.inputs) != 3 or not targets:
+            return False
+        cond_operand, then_operand, else_operand = node.inputs
+        if not (
+            self._branch_benefits_from_control_inline(then_operand, module_name=module_name)
+            or self._branch_benefits_from_control_inline(else_operand, module_name=module_name)
+        ):
+            return False
+        cond = self._operand_expr(cond_operand, local=local, symbols_dict=symbols_dict)
+        cond_expr = cond if self._operand_is_bool(cond_operand) else f"bool({cond})"
+        self._add(lines, indent, f"if {cond_expr}:")
+        self._emit_select_branch(
+            lines,
+            then_operand,
+            targets=targets,
+            module_name=module_name,
+            indent=indent + 4,
+            local=local,
+            symbols_dict=symbols_dict,
+            inline_prefix=f"__select_inline_{node.id.replace(':', '_')}_then",
+        )
+        self._add(lines, indent, "else:")
+        self._emit_select_branch(
+            lines,
+            else_operand,
+            targets=targets,
+            module_name=module_name,
+            indent=indent + 4,
+            local=local,
+            symbols_dict=symbols_dict,
+            inline_prefix=f"__select_inline_{node.id.replace(':', '_')}_else",
+        )
+        return True
+
+    def _branch_benefits_from_control_inline(self, operand: GraphOperand, *, module_name: str) -> bool:
+        if isinstance(operand, GraphExpr) and _normalize_primitive_op(operand.op.name) == "list_append":
+            return True
+        return (
+            isinstance(operand, GraphExpr)
+            and operand.op.name in self.modules_by_name
+            and operand.op.name != module_name
+            and operand.op.name not in self.global_symbol_names
+            and not operand.attrs
+        )
+
+    def _emit_direct_module_call_node(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        targets: tuple[str, ...],
+        module_name: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if (
+            not targets
+            or not self._can_inline_direct_module_call(
+                node.op.name,
+                module_name=module_name,
+                attrs=node.attrs,
+            )
+        ):
+            return False
+        callee_module = self.modules_by_name.get(node.op.name)
+        if callee_module is None:
+            return False
+        return self._emit_inline_module_body(
+            lines,
+            callee_module=callee_module,
+            arg_operands=node.inputs,
+            targets=targets,
+            target_outputs=node.outputs,
+            module_name=module_name,
+            indent=indent,
+            local=local,
+            symbols_dict=symbols_dict,
+            inline_prefix=f"__call_inline_{node.id.replace(':', '_')}",
+        )
+
+    def _emit_select_branch(
+        self,
+        lines: list[str],
+        operand: GraphOperand,
+        *,
+        targets: tuple[str, ...],
+        module_name: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+        inline_prefix: str,
+    ) -> None:
+        if (
+            len(targets) == 1
+            and isinstance(operand, GraphExpr)
+            and self._emit_list_append_expr(
+                lines,
+                operand,
+                target=targets[0],
+                indent=indent,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+        ):
+            return
+        if isinstance(operand, GraphExpr) and self._emit_inline_call_expr(
+            lines,
+            operand,
+            targets=targets,
+            module_name=module_name,
+            indent=indent,
+            local=local,
+            symbols_dict=symbols_dict,
+            inline_prefix=inline_prefix,
+        ):
+            return
+        expr = self._operand_expr(operand, local=local, symbols_dict=symbols_dict)
+        joined = ", ".join(targets)
+        self._add(lines, indent, f"{joined} = {expr}")
+
+    def _emit_inline_call_expr(
+        self,
+        lines: list[str],
+        expr: GraphExpr,
+        *,
+        targets: tuple[str, ...],
+        module_name: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+        inline_prefix: str,
+    ) -> bool:
+        callee = expr.op.name
+        callee_module = self.modules_by_name.get(callee)
+        if (
+            callee_module is None
+            or callee == module_name
+            or expr.attrs
+            or len(callee_module.inputs) != len(expr.inputs)
+        ):
+            return False
+        return self._emit_inline_module_body(
+            lines,
+            callee_module=callee_module,
+            arg_operands=expr.inputs,
+            targets=targets,
+            target_outputs=None,
+            module_name=module_name,
+            indent=indent,
+            local=local,
+            symbols_dict=symbols_dict,
+            inline_prefix=inline_prefix,
+        )
+
+    def _emit_inline_module_body(
+        self,
+        lines: list[str],
+        *,
+        callee_module: GraphModule,
+        arg_operands: tuple[GraphOperand, ...],
+        targets: tuple[str, ...],
+        target_outputs: tuple[GraphValue, ...] | None,
+        module_name: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+        inline_prefix: str,
+    ) -> bool:
+        if len(callee_module.inputs) != len(arg_operands):
+            return False
+        if not self._inline_outputs_match_targets(callee_module, targets):
+            return False
+        if callee_module.name in self._inline_stack:
+            return False
+        self._inline_stack.add(callee_module.name)
+        subst: dict[str, GraphOperand] = {}
+        dim_name_subst: dict[str, Any] = {}
+        inline_local = set(local)
+        dim_subst = _inline_dim_subst(callee_module.inputs, arg_operands)
+        callee_required_dim_names = _module_free_dim_refs(
+            callee_module,
+            global_names=self.global_symbol_names,
+        )
+        try:
+            safe_prefix = _py_ident(inline_prefix)
+            for param, operand in zip(callee_module.inputs, arg_operands, strict=True):
+                temp_name = f"{safe_prefix}_{_py_ident(param.name)}"
+                expr = self._operand_expr(operand, local=local, symbols_dict=symbols_dict)
+                self._add(lines, indent, f"{temp_name} = {expr}")
+                inline_local.add(temp_name)
+                subst[param.name] = GraphValueRef(
+                    name=temp_name,
+                    type_expr=graph_operand_type(operand),
+                    dims=operand.dims if isinstance(operand, GraphValueRef | GraphExpr) else None,
+                )
+                if isinstance(param.type_expr, TypeDim | TypeInt):
+                    dim_name_subst[param.name] = temp_name
+                _emit_bind_nested_shape_symbols(
+                    lines,
+                    add=self._add,
+                    type_expr=graph_operand_type(operand),
+                    value_expr=temp_name,
+                    local=inline_local,
+                    protected=self.global_symbol_names,
+                    required_names=callee_required_dim_names,
+                    indent=indent,
+                )
+                formal_ref = GraphValueRef(name=temp_name, type_expr=param.type_expr, dims=param.dims)
+                if dim_subst:
+                    formal_ref = substitute_graph_operand_dims(formal_ref, dim_subst)
+                _emit_bind_nested_shape_symbols(
+                    lines,
+                    add=self._add,
+                    type_expr=formal_ref.type_expr,
+                    value_expr=temp_name,
+                    local=inline_local,
+                    protected=self.global_symbol_names,
+                    required_names=callee_required_dim_names,
+                    indent=indent,
+                )
+
+            def rewrite_operand(operand: GraphOperand) -> GraphOperand:
+                if isinstance(operand, GraphValueRef):
+                    return subst.get(operand.name, operand)
+                if isinstance(operand, GraphPath):
+                    parts: list[str] = []
+                    for part in operand.parts:
+                        rewritten_part = part
+                        for name, replacement in subst.items():
+                            if isinstance(replacement, GraphValueRef):
+                                rewritten_part = rewritten_part.replace(
+                                    "{" + name + "}",
+                                    "{" + replacement.name + "}",
+                                )
+                        parts.append(rewritten_part)
+                    return replace(operand, parts=tuple(parts))
+                if isinstance(operand, GraphExpr):
+                    return replace(
+                        operand,
+                        inputs=tuple(rewrite_operand(item) for item in operand.inputs),
+                        attrs={key: rewrite_operand(value) for key, value in operand.attrs.items()},
+                    )
+                return operand
+
+            for inner_index, inner_node in enumerate(callee_module.nodes, start=1):
+                rewritten_outputs: list[GraphValue] = []
+                original_output_names = tuple(output.name for output in inner_node.outputs)
+                for output in inner_node.outputs:
+                    name = f"{safe_prefix}_{inner_index}_{_py_ident(output.name)}"
+                    rewritten = GraphValue(name=name, type_expr=output.type_expr, dims=output.dims, optional=output.optional)
+                    rewritten_outputs.append(rewritten)
+                    subst[output.name] = GraphValueRef(name=name, type_expr=output.type_expr, dims=output.dims)
+                    if isinstance(output.type_expr, TypeDim | TypeInt):
+                        dim_name_subst[output.name] = name
+                rewritten_node = replace(
+                    inner_node,
+                    id=f"{safe_prefix}:inline:{inner_index}",
+                    inputs=tuple(rewrite_operand(item) for item in inner_node.inputs),
+                    attrs={key: rewrite_operand(value) for key, value in inner_node.attrs.items()},
+                    outputs=tuple(rewritten_outputs),
+                    source_module=module_name,
+                )
+                if dim_subst:
+                    rewritten_node = substitute_graph_node_dims(
+                        rewritten_node,
+                        dim_subst,
+                    )
+                for original_name, rewritten_output in zip(
+                    original_output_names,
+                    rewritten_node.outputs,
+                    strict=True,
+                ):
+                    subst[original_name] = GraphValueRef(
+                        name=rewritten_output.name,
+                        type_expr=rewritten_output.type_expr,
+                        dims=rewritten_output.dims,
+                    )
+                    if isinstance(rewritten_output.type_expr, TypeDim | TypeInt):
+                        dim_name_subst[original_name] = rewritten_output.name
+                self._emit_node(
+                    lines,
+                    rewritten_node,
+                    module_name=module_name,
+                    indent=indent,
+                    local=inline_local,
+                    symbols_dict=symbols_dict,
+                )
+                for output in rewritten_node.outputs:
+                    inline_local.add(output.name)
+                    output_type = _effective_graph_value_type(output)
+                    _emit_bind_nested_shape_symbols(
+                        lines,
+                        add=self._add,
+                        type_expr=output_type,
+                        value_expr=output.name,
+                        local=inline_local,
+                        protected=self.global_symbol_names,
+                        required_names=None,
+                        indent=indent,
+                    )
+            output_exprs = [
+                self._operand_expr(
+                    substitute_graph_operand_dims(rewrite_operand(output), dim_subst)
+                    if dim_subst
+                    else rewrite_operand(output),
+                    local=inline_local,
+                    symbols_dict=symbols_dict,
+                )
+                for output in callee_module.outputs
+            ]
+            if len(targets) == 1:
+                rhs = output_exprs[0] if len(output_exprs) == 1 else f"({', '.join(output_exprs)})"
+            elif len(output_exprs) == len(targets):
+                rhs = ", ".join(output_exprs)
+            elif (
+                len(output_exprs) == 1
+                and len(callee_module.outputs) == 1
+                and isinstance(graph_operand_type(callee_module.outputs[0]), TypeTuple)
+                and len(graph_operand_type(callee_module.outputs[0]).items) == len(targets)
+            ):
+                rhs = output_exprs[0]
+            else:
+                return False
+            joined = ", ".join(targets)
+            self._add(lines, indent, f"{joined} = {rhs}")
+            if target_outputs is not None:
+                for target, output in zip(targets, target_outputs, strict=True):
+                    output_type = _effective_graph_value_type(output)
+                    _emit_bind_nested_shape_symbols(
+                        lines,
+                        add=self._add,
+                        type_expr=output_type,
+                        value_expr=target,
+                        local=inline_local,
+                        protected=self.global_symbol_names,
+                        required_names=None,
+                        indent=indent,
+                    )
+                local.update(inline_local)
+            return True
+        finally:
+            self._inline_stack.remove(callee_module.name)
+
+    @staticmethod
+    def _inline_outputs_match_targets(callee_module: GraphModule, targets: tuple[str, ...]) -> bool:
+        if not targets:
+            return False
+        if len(targets) == 1:
+            return True
+        if len(callee_module.outputs) == len(targets):
+            return True
+        if len(callee_module.outputs) != 1:
+            return False
+        output_type = graph_operand_type(callee_module.outputs[0])
+        return isinstance(output_type, TypeTuple) and len(output_type.items) == len(targets)
+
+    def _emit_linear_node(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        target: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if len(node.inputs) < 2:
+            return False
+        if len(node.inputs) > 5 and not self._literal_null_arg(node.inputs[5]):
+            return False
+        args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+        bias_expr = self._scalar_operand_expr(
+            node.inputs[3],
+            local=local,
+            symbols_dict=symbols_dict,
+            expected=(TypeBool,),
+            cast="bool",
+        ) if len(node.inputs) > 3 else "False"
+        transpose_expr = self._scalar_operand_expr(
+            node.inputs[4],
+            local=local,
+            symbols_dict=symbols_dict,
+            expected=(TypeBool,),
+            cast="bool",
+        ) if len(node.inputs) > 4 else "False"
+        bias_literal = self._literal_bool_arg(node.inputs[3]) if len(node.inputs) > 3 else False
+        transpose_literal = self._literal_bool_arg(node.inputs[4]) if len(node.inputs) > 4 else False
+        weight = self._param_expr_for_path(
+            node.inputs[0],
+            node.inputs[6] if len(node.inputs) > 6 else "weight",
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        bias_value = self._param_expr_for_path(
+            node.inputs[0],
+            node.inputs[7] if len(node.inputs) > 7 else "bias",
+            optional=True,
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        weight_name = f"{target}__weight"
+        bias_name = f"{target}__bias"
+        x_name = f"{target}__x"
+        self._add(lines, indent, f"{weight_name} = {weight}")
+        if bias_literal is False:
+            bias_arg = "None"
+        else:
+            self._emit_optional_param_bind(
+                lines,
+                target=bias_name,
+                value_expr=bias_value,
+                flag_expr=bias_expr,
+                flag_literal=bias_literal,
+                indent=indent,
+            )
+            if self.align_devices:
+                self._add(lines, indent, f"{bias_name} = self._move_to({bias_name}, {weight_name}.device) if {bias_name} is not None else None")
+            bias_arg = bias_name
+        if self.align_devices:
+            self._add(lines, indent, f"{x_name} = self._move_to({args[1]}, {weight_name}.device)")
+        else:
+            self._add(lines, indent, f"{x_name} = {args[1]}")
+        if transpose_literal is True:
+            if bias_literal is False:
+                op_expr = f"torch.matmul({x_name}, {weight_name})"
+            else:
+                op_expr = f"torch.matmul({x_name}, {weight_name}) + ({bias_arg} if {bias_arg} is not None else 0)"
+        elif transpose_literal is False:
+            op_expr = f"F.linear({x_name}, {weight_name}, {bias_arg})"
+        else:
+            op_expr = f"(torch.matmul({x_name}, {weight_name}) + ({bias_arg} if {bias_arg} is not None else 0) if {transpose_expr} else F.linear({x_name}, {weight_name}, {bias_arg}))"
+        if self.profile:
+            self._add(lines, indent, f"{target} = self._profile_call({f'node:{target}:_linear'!r}, lambda: {op_expr})")
+        else:
+            self._add(lines, indent, f"{target} = {op_expr}")
+        return True
+
+    def _emit_layernorm_node(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        target: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if len(node.inputs) < 2:
+            return False
+        args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+        eps = self._scalar_operand_expr(
+            node.inputs[2],
+            local=local,
+            symbols_dict=symbols_dict,
+            expected=(TypeFloat, TypeInt, TypeDim),
+            cast="float",
+        ) if len(node.inputs) > 2 else "1e-5"
+        bias = self._scalar_operand_expr(
+            node.inputs[5],
+            local=local,
+            symbols_dict=symbols_dict,
+            expected=(TypeBool,),
+            cast="bool",
+        ) if len(node.inputs) > 5 else "True"
+        bias_literal = self._literal_bool_arg(node.inputs[5]) if len(node.inputs) > 5 else True
+        weight = self._param_expr_for_path(
+            node.inputs[0],
+            node.inputs[4] if len(node.inputs) > 4 else "weight",
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        bias_value = self._param_expr_for_path(
+            node.inputs[0],
+            node.inputs[6] if len(node.inputs) > 6 else "bias",
+            optional=True,
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        weight_name = f"{target}__weight"
+        bias_name = f"{target}__bias"
+        self._add(lines, indent, f"{weight_name} = {weight}")
+        self._emit_optional_param_bind(
+            lines,
+            target=bias_name,
+            value_expr=bias_value,
+            flag_expr=bias,
+            flag_literal=bias_literal,
+            indent=indent,
+        )
+        x_expr = (
+            f"self._move_to({args[1]}, {weight_name}.device)"
+            if self.align_devices
+            else args[1]
+        )
+        bias_expr = (
+            f"(self._move_to({bias_name}, {weight_name}.device) if {bias_name} is not None else None)"
+            if self.align_devices
+            else bias_name
+        )
+        op_expr = (
+            f"F.layer_norm({x_expr}, "
+            f"({args[1]}.shape[-1],), weight={weight_name}, "
+            f"bias={bias_expr}, "
+            f"eps={eps})"
+        )
+        if self.profile:
+            self._add(lines, indent, f"{target} = self._profile_call({f'node:{target}:_layernorm'!r}, lambda: {op_expr})")
+        else:
+            self._add(lines, indent, f"{target} = {op_expr}")
+        return True
+
+    def _repeat_attr_string(self, node: Any, key: str) -> str:
+        value = node.attrs.get(key)
+        if not isinstance(value, GraphLiteral) or not isinstance(value.value, str):
+            raise ValueError(f"core.repeat attr {key!r} must be a string literal")
+        return value.value
+
+    def _repeat_attr_int(self, node: Any, key: str) -> int:
+        value = node.attrs.get(key)
+        if not isinstance(value, GraphLiteral) or type(value.value) is not int:
+            raise ValueError(f"core.repeat attr {key!r} must be an int literal")
+        return value.value
+
+    def _emit_repeat_node(self, lines: list[str], node: Any, *, module_name: str, indent: int, local: set[str], symbols_dict: str) -> None:
+        add = self._add
+        callee = self._repeat_attr_string(node, "callee")
+        arg_count = self._repeat_attr_int(node, "arg_count")
+        carry_count = self._repeat_attr_int(node, "carry_count")
+        if callee not in self.method_names:
+            raise ValueError(f"core.repeat references unknown callee {callee!r}")
+        if len(node.inputs) < 3 + carry_count:
+            raise ValueError("core.repeat missing carry inputs")
+        targets = tuple(_py_ident(value.name) for value in node.outputs)
+        for index, target in enumerate(targets):
+            init_expr = self._operand_expr(node.inputs[3 + index], local=local, symbols_dict=symbols_dict)
+            add(lines, indent, f"{target} = {init_expr}")
+        loop_var = f"__loop_i_{node.id.rsplit(':', 1)[-1].replace('-', '_')}"
+        start = self._scalar_operand_expr(
+            node.inputs[0],
+            local=local,
+            symbols_dict=symbols_dict,
+            expected=(TypeInt, TypeDim),
+            cast="int",
+        )
+        stop = self._scalar_operand_expr(
+            node.inputs[1],
+            local=local,
+            symbols_dict=symbols_dict,
+            expected=(TypeInt, TypeDim),
+            cast="int",
+        )
+        step = self._scalar_operand_expr(
+            node.inputs[2],
+            local=local,
+            symbols_dict=symbols_dict,
+            expected=(TypeInt, TypeDim),
+            cast="int",
+        )
+        add(lines, indent, f"for {loop_var} in range({start}, {stop}, {step}):")
+        if self._emit_repeat_inline_body(
+            lines,
+            node,
+            callee=callee,
+            arg_count=arg_count,
+            carry_count=carry_count,
+            targets=targets,
+            loop_var=loop_var,
+            module_name=module_name,
+            indent=indent + 4,
+            local=local,
+            symbols_dict=symbols_dict,
+        ):
+            return
+        args: list[str] = []
+        for index in range(arg_count):
+            role = self._repeat_attr_string(node, f"arg_{index}")
+            if role == "iter":
+                args.append(loop_var)
+            elif role.startswith("carry:"):
+                carry_index = int(role.removeprefix("carry:"))
+                args.append(targets[carry_index])
+            elif role.startswith("input:"):
+                input_index = int(role.removeprefix("input:"))
+                args.append(self._operand_expr(node.inputs[input_index], local=local, symbols_dict=symbols_dict))
+            else:
+                raise ValueError(f"invalid core.repeat arg role {role!r}")
+        call = f"self.{self.method_names[callee]}({', '.join(args)})"
+        label = f"node:{module_name}:{','.join(value.name for value in node.outputs) or '_'}:core.repeat"
+        joined = ", ".join(targets)
+        rhs = f"{call}[0]" if len(targets) == 1 else call
+        if self.profile:
+            add(lines, indent + 4, f"{joined} = self._profile_call({label!r}, lambda: {rhs})")
+        else:
+            add(lines, indent + 4, f"{joined} = {rhs}")
+
+    def _repeat_arg_exprs(
+        self,
+        node: Any,
+        *,
+        arg_count: int,
+        targets: tuple[str, ...],
+        loop_var: str,
+        local: set[str],
+        symbols_dict: str,
+    ) -> list[str]:
+        args: list[str] = []
+        for index in range(arg_count):
+            role = self._repeat_attr_string(node, f"arg_{index}")
+            if role == "iter":
+                args.append(loop_var)
+            elif role.startswith("carry:"):
+                carry_index = int(role.removeprefix("carry:"))
+                args.append(targets[carry_index])
+            elif role.startswith("input:"):
+                input_index = int(role.removeprefix("input:"))
+                args.append(self._operand_expr(node.inputs[input_index], local=local, symbols_dict=symbols_dict))
+            else:
+                raise ValueError(f"invalid core.repeat arg role {role!r}")
+        return args
+
+    def _emit_repeat_inline_body(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        callee: str,
+        arg_count: int,
+        carry_count: int,
+        targets: tuple[str, ...],
+        loop_var: str,
+        module_name: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        callee_module = self.modules_by_name.get(callee)
+        if callee_module is None or len(callee_module.inputs) != arg_count or len(callee_module.outputs) != carry_count:
+            return False
+        arg_exprs = self._repeat_arg_exprs(
+            node,
+            arg_count=arg_count,
+            targets=targets,
+            loop_var=loop_var,
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        arg_operands: list[GraphOperand] = []
+        for index in range(arg_count):
+            role = self._repeat_attr_string(node, f"arg_{index}")
+            if role == "iter":
+                arg_operands.append(GraphValueRef(name=loop_var, type_expr=TypeInt(), dims=None))
+            elif role.startswith("carry:"):
+                carry_index = int(role.removeprefix("carry:"))
+                arg_operands.append(
+                    GraphValueRef(
+                        name=targets[carry_index],
+                        type_expr=node.outputs[carry_index].type_expr,
+                        dims=node.outputs[carry_index].dims,
+                    )
+                )
+            elif role.startswith("input:"):
+                input_index = int(role.removeprefix("input:"))
+                arg_operands.append(node.inputs[input_index])
+            else:
+                raise ValueError(f"invalid core.repeat arg role {role!r}")
+        inline_prefix = _py_ident(f"__loop_inline_{node.id.replace(':', '_')}")
+        subst: dict[str, GraphOperand] = {}
+        dim_name_subst: dict[str, Any] = {}
+        dim_subst = _inline_dim_subst(callee_module.inputs, tuple(arg_operands))
+        inline_local = set(local)
+        callee_required_dim_names = _module_free_dim_refs(
+            callee_module,
+            global_names=self.global_symbol_names,
+        )
+        for param, expr, operand in zip(callee_module.inputs, arg_exprs, arg_operands, strict=True):
+            temp_name = f"{inline_prefix}_{_py_ident(param.name)}"
+            lines.append(" " * indent + f"{temp_name} = {expr}")
+            inline_local.add(temp_name)
+            subst[param.name] = GraphValueRef(
+                name=temp_name,
+                type_expr=graph_operand_type(operand),
+                dims=operand.dims if isinstance(operand, GraphValueRef | GraphExpr) else None,
+            )
+            if isinstance(param.type_expr, TypeDim | TypeInt):
+                dim_name_subst[param.name] = temp_name
+            _emit_bind_nested_shape_symbols(
+                lines,
+                add=self._add,
+                type_expr=graph_operand_type(operand),
+                value_expr=temp_name,
+                local=inline_local,
+                protected=self.global_symbol_names,
+                required_names=callee_required_dim_names,
+                indent=indent,
+            )
+            formal_ref = GraphValueRef(name=temp_name, type_expr=param.type_expr, dims=param.dims)
+            if dim_subst:
+                formal_ref = substitute_graph_operand_dims(formal_ref, dim_subst)
+            _emit_bind_nested_shape_symbols(
+                lines,
+                add=self._add,
+                type_expr=formal_ref.type_expr,
+                value_expr=temp_name,
+                local=inline_local,
+                protected=self.global_symbol_names,
+                required_names=callee_required_dim_names,
+                indent=indent,
+            )
+
+        def rewrite_operand(operand: GraphOperand) -> GraphOperand:
+            if isinstance(operand, GraphValueRef):
+                return subst.get(operand.name, operand)
+            if isinstance(operand, GraphPath):
+                parts: list[str] = []
+                for part in operand.parts:
+                    rewritten_part = part
+                    for name, replacement in subst.items():
+                        if isinstance(replacement, GraphValueRef):
+                            rewritten_part = rewritten_part.replace(
+                                "{" + name + "}",
+                                "{" + replacement.name + "}",
+                            )
+                    parts.append(rewritten_part)
+                return replace(operand, parts=tuple(parts))
+            if isinstance(operand, GraphExpr):
+                return replace(
+                    operand,
+                    inputs=tuple(rewrite_operand(item) for item in operand.inputs),
+                    attrs={key: rewrite_operand(value) for key, value in operand.attrs.items()},
+                )
+            return operand
+
+        for inner_index, inner_node in enumerate(callee_module.nodes, start=1):
+            rewritten_outputs: list[GraphValue] = []
+            original_output_names = tuple(output.name for output in inner_node.outputs)
+            for output in inner_node.outputs:
+                name = f"{inline_prefix}_{inner_index}_{_py_ident(output.name)}"
+                rewritten = GraphValue(name=name, type_expr=output.type_expr, dims=output.dims, optional=output.optional)
+                rewritten_outputs.append(rewritten)
+                subst[output.name] = GraphValueRef(name=name, type_expr=output.type_expr, dims=output.dims)
+                if isinstance(output.type_expr, TypeDim | TypeInt):
+                    dim_name_subst[output.name] = name
+            rewritten_node = replace(
+                inner_node,
+                id=f"{node.id}:inline:{inner_index}",
+                inputs=tuple(rewrite_operand(item) for item in inner_node.inputs),
+                attrs={key: rewrite_operand(value) for key, value in inner_node.attrs.items()},
+                outputs=tuple(rewritten_outputs),
+                source_module=module_name,
+            )
+            if dim_subst:
+                rewritten_node = substitute_graph_node_dims(
+                    rewritten_node,
+                    dim_subst,
+                )
+            for original_name, rewritten_output in zip(
+                original_output_names,
+                rewritten_node.outputs,
+                strict=True,
+            ):
+                subst[original_name] = GraphValueRef(
+                    name=rewritten_output.name,
+                    type_expr=rewritten_output.type_expr,
+                    dims=rewritten_output.dims,
+                )
+                if isinstance(rewritten_output.type_expr, TypeDim | TypeInt):
+                    dim_name_subst[original_name] = rewritten_output.name
+            self._emit_node(
+                lines,
+                rewritten_node,
+                module_name=module_name,
+                indent=indent,
+                local=inline_local,
+                symbols_dict=symbols_dict,
+            )
+            for output in rewritten_node.outputs:
+                inline_local.add(output.name)
+                output_type = _effective_graph_value_type(output)
+                _emit_bind_nested_shape_symbols(
+                    lines,
+                    add=self._add,
+                    type_expr=output_type,
+                    value_expr=output.name,
+                    local=inline_local,
+                    protected=self.global_symbol_names,
+                    required_names=None,
+                    indent=indent,
+                )
+        output_exprs = [
+            self._operand_expr(
+                substitute_graph_operand_dims(rewrite_operand(output), dim_subst)
+                if dim_subst
+                else rewrite_operand(output),
+                local=inline_local,
+                symbols_dict=symbols_dict,
+            )
+            for output in callee_module.outputs
+        ]
+        if len(output_exprs) != len(targets):
+            return False
+        joined = ", ".join(targets)
+        rhs = output_exprs[0] if len(output_exprs) == 1 else f"({', '.join(output_exprs)})"
+        lines.append(" " * indent + f"{joined} = {rhs}")
+        for target, output in zip(targets, node.outputs, strict=True):
+            output_type = _effective_graph_value_type(output)
+            _emit_bind_nested_shape_symbols(
+                lines,
+                add=self._add,
+                type_expr=output_type,
+                value_expr=target,
+                local=inline_local,
+                protected=self.global_symbol_names,
+                required_names=None,
+                indent=indent,
+            )
+        local.update(inline_local)
+        return True
 
     def _node_expr(self, node: Any, *, local: set[str], symbols_dict: str) -> str:
         op = node.op.name
@@ -2536,26 +4281,27 @@ class _DirectTorchEmitter:
         if op == "core.tuple":
             return "(" + ", ".join(self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs) + ")"
         if op == "core.list":
-            return "[" + ", ".join(self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs) + "]"
+            items = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+            if _is_int_dim_list_type(getattr(node, "type_expr", None)):
+                return _tuple_literal_expr(items)
+            return "[" + ", ".join(items) + "]"
         if op == "core.ascribe":
             return self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
         if op == "core.select":
             cond = self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
             yes = self._operand_expr(node.inputs[1], local=local, symbols_dict=symbols_dict)
             no = self._operand_expr(node.inputs[2], local=local, symbols_dict=symbols_dict)
-            return f"({yes} if bool({cond}) else {no})"
+            cond_expr = cond if self._operand_is_bool(node.inputs[0]) else f"bool({cond})"
+            return f"({yes} if {cond_expr} else {no})"
         if op.startswith("core.binary."):
-            binop = op.removeprefix("core.binary.")
-            left = self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
-            right = self._operand_expr(node.inputs[1], local=local, symbols_dict=symbols_dict)
-            if binop == "+":
-                return f"self._binary_add({left}, {right})"
-            if binop == "-":
-                return f"self._binary_sub({left}, {right})"
-            if binop in {"*", "/", "%", "<", "<=", ">", ">=", "==", "!="}:
-                return f"self._binary_op({binop!r}, {left}, {right})"
-            pyop = {"and": "&", "or": "|"} .get(binop, binop)
-            return f"({left} {pyop} {right})"
+            return self._binary_expr(
+                op.removeprefix("core.binary."),
+                node.inputs[0],
+                node.inputs[1],
+                result_type=getattr(node, "type_expr", None),
+                local=local,
+                symbols_dict=symbols_dict,
+            )
         if op in self.method_names:
             if op in self.global_symbol_names and not node.inputs and not node.attrs:
                 return f"{symbols_dict}[{op!r}]"
@@ -2575,9 +4321,167 @@ class _DirectTorchEmitter:
         primitive = _normalize_primitive_op(op)
         return self._primitive_expr(primitive, node, local=local, symbols_dict=symbols_dict)
 
+    def _operand_may_be_tensor(self, operand: GraphOperand) -> bool:
+        type_expr = getattr(operand, "type_expr", None)
+        if isinstance(type_expr, TypeOptional):
+            type_expr = type_expr.inner
+        return isinstance(type_expr, TypeTensor)
+
+    def _operand_is_bool(self, operand: GraphOperand) -> bool:
+        type_expr = getattr(operand, "type_expr", None)
+        if isinstance(type_expr, TypeOptional):
+            type_expr = type_expr.inner
+        return isinstance(type_expr, TypeBool) or (
+            isinstance(operand, GraphLiteral) and type(operand.value) is bool
+        )
+
+    def _scalar_operand_expr(
+        self,
+        operand: GraphOperand,
+        *,
+        local: set[str],
+        symbols_dict: str,
+        expected: tuple[type, ...],
+        cast: str,
+    ) -> str:
+        expr = self._operand_expr(operand, local=local, symbols_dict=symbols_dict)
+        type_expr = getattr(operand, "type_expr", None)
+        if isinstance(type_expr, TypeOptional):
+            type_expr = type_expr.inner
+        if isinstance(type_expr, expected):
+            return expr
+        if isinstance(operand, GraphLiteral):
+            if TypeBool in expected and type(operand.value) is bool:
+                return expr
+            if (TypeInt in expected or TypeDim in expected) and type(operand.value) is int:
+                return expr
+            if TypeFloat in expected and type(operand.value) is float:
+                return expr
+        return f"{cast}({expr})"
+
+    def _binary_expr(
+        self,
+        op: str,
+        left_operand: GraphOperand,
+        right_operand: GraphOperand,
+        *,
+        result_type: Any | None = None,
+        local: set[str],
+        symbols_dict: str,
+    ) -> str:
+        left = self._operand_expr(left_operand, local=local, symbols_dict=symbols_dict)
+        right = self._operand_expr(right_operand, local=local, symbols_dict=symbols_dict)
+        left_is_null = isinstance(left_operand, GraphLiteral) and left_operand.value is None
+        right_is_null = isinstance(right_operand, GraphLiteral) and right_operand.value is None
+        if op in {"==", "!="} and (left_is_null or right_is_null):
+            other = right if left_is_null else left
+            identity_op = "is" if op == "==" else "is not"
+            return f"({other} {identity_op} None)"
+        if op == "+" and left_is_null:
+            return right
+        if op == "+" and right_is_null:
+            return left
+        if op == "-" and right_is_null:
+            return left
+        pyop = {"and": "&", "or": "|"}.get(op, op)
+        if op == "/" and isinstance(result_type, TypeDim | TypeInt):
+            pyop = "//"
+        if self.align_devices and (
+            self._operand_may_be_tensor(left_operand) or self._operand_may_be_tensor(right_operand)
+        ):
+            return f"(lambda _a, _b: (_a {pyop} _b))(*self._align_pair({left}, {right}, prefer='right'))"
+        return f"({left} {pyop} {right})"
+
     def _primitive_expr(self, primitive: str, node: Any, *, local: set[str], symbols_dict: str) -> str:
         args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
         attrs = {k: self._operand_expr(v, local=local, symbols_dict=symbols_dict) for k, v in node.attrs.items()}
+        def tuple_int_arg(index: int, fallback: str | None = None) -> str:
+            if index < len(node.inputs):
+                folded = self._static_int_tuple_expr(
+                    node.inputs[index],
+                    local=local,
+                    symbols_dict=symbols_dict,
+                )
+                if folded is not None:
+                    return folded
+                return args[index]
+            if fallback is None:
+                raise ValueError(f"{primitive} missing tuple/list argument {index}")
+            return fallback
+
+        def scalar_arg(
+            index: int,
+            fallback: str | None = None,
+            *,
+            expected: tuple[type, ...],
+            cast: str,
+        ) -> str:
+            if index < len(node.inputs):
+                return self._scalar_operand_expr(
+                    node.inputs[index],
+                    local=local,
+                    symbols_dict=symbols_dict,
+                    expected=expected,
+                    cast=cast,
+                )
+            if fallback is None:
+                raise ValueError(f"{primitive} missing scalar argument {index}")
+            return fallback
+
+        def int_arg(index: int, fallback: str | None = None) -> str:
+            return scalar_arg(index, fallback, expected=(TypeInt, TypeDim), cast="int")
+
+        def bool_arg(index: int, fallback: str | None = None) -> str:
+            return scalar_arg(index, fallback, expected=(TypeBool,), cast="bool")
+
+        def float_arg(index: int, fallback: str | None = None) -> str:
+            return scalar_arg(index, fallback, expected=(TypeFloat, TypeInt, TypeDim), cast="float")
+
+        def optional_input_expr(index: int, fallback: str = "None") -> str:
+            if index >= len(node.inputs):
+                return fallback
+            operand = node.inputs[index]
+            if isinstance(operand, GraphLiteral) and operand.value is None:
+                return "None"
+            return self._operand_expr(operand, local=local, symbols_dict=symbols_dict)
+
+        def optional_int_arg(index: int, fallback: str) -> str:
+            if index >= len(node.inputs):
+                return fallback
+            operand = node.inputs[index]
+            if isinstance(operand, GraphLiteral) and operand.value is None:
+                return fallback
+            expr = int_arg(index)
+            if (
+                isinstance(operand, GraphValueRef)
+                and operand.name not in local
+                and operand.name not in self.global_symbol_names
+            ):
+                return fallback
+            return expr
+
+        def dtype_expr(index: int, ref_expr: str, fallback: str = "None") -> str:
+            dtype_value = optional_input_expr(index, fallback)
+            if dtype_value == "None":
+                return f"{ref_expr}.dtype"
+            return f"(self._dtype_from_name({dtype_value}) or {ref_expr}.dtype)"
+
+        binary_primitives = {
+            "le": "<=",
+            "eq": "==",
+            "add": "+",
+            "mul": "*",
+            "div": "/",
+        }
+        if primitive in binary_primitives and len(node.inputs) >= 2:
+            return self._binary_expr(
+                binary_primitives[primitive],
+                node.inputs[0],
+                node.inputs[1],
+                result_type=getattr(node, "type_expr", None),
+                local=local,
+                symbols_dict=symbols_dict,
+            )
         if primitive == "tensor_size":
             static_size = self._static_tensor_size_expr(
                 node,
@@ -2586,7 +4490,7 @@ class _DirectTorchEmitter:
             )
             if static_size is not None:
                 return static_size
-            return f"{args[0]}.shape[int({args[1]})]"
+            return f"{args[0]}.shape[{int_arg(1)}]"
         if primitive == "params_param":
             return f"self._param({args[0]})"
         if primitive == "params_has_root":
@@ -2610,98 +4514,148 @@ class _DirectTorchEmitter:
                 return f"list({value})"
             return value
         if primitive == "embedding":
-            return f"(lambda _w: F.embedding(self._move_to({args[1]}, _w.device), _w))(self._param(self._compose_path({args[0]}, 'weight')))"
+            static_weight_key = self._static_param_key(node.inputs[0], "weight")
+            if static_weight_key is not None:
+                weight = f"self.state_dict_tensors[{static_weight_key!r}]"
+                x = f"self._move_to({args[1]}, {weight}.device)" if self.align_devices else args[1]
+                return f"F.embedding({x}, {weight})"
+            weight = self._param_expr_for_path(node.inputs[0], "weight", local=local, symbols_dict=symbols_dict)
+            if self.align_devices:
+                return f"(lambda _w: F.embedding(self._move_to({args[1]}, _w.device), _w))({weight})"
+            return f"F.embedding({args[1]}, {weight})"
         if primitive == "linear":
-            bias = args[3] if len(args) > 3 else "False"
-            transpose = args[4] if len(args) > 4 else "False"
+            bias = bool_arg(3, "False")
+            transpose = bool_arg(4, "False")
             expert = args[5] if len(args) > 5 else "None"
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
-            return f"self._linear({args[0]}, {args[1]}, bias=bool({bias}), transpose=bool({transpose}), expert=({expert} if {expert} is not None else None), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
+            return f"self._linear({args[0]}, {args[1]}, bias={bias}, transpose={transpose}, expert=({expert} if {expert} is not None else None), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
         if primitive == "expert_linear":
-            bias = args[4] if len(args) > 4 else "False"
-            transpose = args[5] if len(args) > 5 else "False"
+            bias = bool_arg(4, "False")
+            transpose = bool_arg(5, "False")
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
-            return f"self._expert_linear({args[0]}, {args[1]}, {args[2]}, bias=bool({bias}), transpose=bool({transpose}), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
+            return f"self._expert_linear({args[0]}, {args[1]}, {args[2]}, bias={bias}, transpose={transpose}, weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
         if primitive == "layernorm":
-            eps = args[2] if len(args) > 2 else "1e-5"
+            eps = float_arg(2, "1e-5")
             weight_leaf = args[4] if len(args) > 4 else "'weight'"
             bias = args[5] if len(args) > 5 else "True"
             bias_leaf = args[6] if len(args) > 6 else "'bias'"
-            return f"(lambda _w, _b: F.layer_norm(self._move_to({args[1]}, _w.device), ({args[1]}.shape[-1],), weight=_w, bias=(self._move_to(_b, _w.device) if _b is not None else None), eps=float({eps})))(self._param(self._compose_path({args[0]}, {weight_leaf})), (self._optional_param(self._compose_path({args[0]}, {bias_leaf})) if {bias} else None))"
+            weight = self._param_expr_for_path(
+                node.inputs[0],
+                node.inputs[4] if len(node.inputs) > 4 else "weight",
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+            bias_value = self._param_expr_for_path(
+                node.inputs[0],
+                node.inputs[6] if len(node.inputs) > 6 else "bias",
+                optional=True,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+            bias_expr = f"({bias_value} if {bias} else None)"
+            x = f"self._move_to({args[1]}, {weight}.device)" if self.align_devices else args[1]
+            moved_bias = (
+                f"(self._move_to({bias_expr}, {weight}.device) if {bias_expr} is not None else None)"
+                if self.align_devices
+                else bias_expr
+            )
+            return f"F.layer_norm({x}, ({args[1]}.shape[-1],), weight={weight}, bias={moved_bias}, eps={eps})"
         if primitive == "rmsnorm":
             x = args[0]
-            eps = args[1] if len(args) > 1 else "1e-6"
-            cast_float = args[3] if len(args) > 3 else "False"
+            eps = float_arg(1, "1e-6")
+            cast_float = bool_arg(3, "False")
             x_float = f"{x}.float()"
-            y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + float({eps})))"
-            y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + float({eps})))"
+            y_float = f"({x_float} * torch.rsqrt(torch.mean({x_float} * {x_float}, dim=-1, keepdim=True) + {eps}))"
+            y = f"({x} * torch.rsqrt(torch.mean({x} * {x}, dim=-1, keepdim=True) + {eps}))"
             return f"({y_float}.to(dtype={x}.dtype) if {cast_float} else {y})"
+        if primitive == "causal_conv1d":
+            return f"self._causal_conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]})"
+        if primitive == "mamba_scan":
+            return f"self._mamba_scan({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]})"
         if primitive == "tensor_like":
             dtype = args[2] if len(args) > 2 else "None"
             target_dtype = f"({args[1]}.dtype if self._dtype_from_name({dtype}) is None else self._dtype_from_name({dtype}))"
-            return f"({args[0]}.to(device={args[1]}.device, dtype={target_dtype}) if torch.is_tensor({args[0]}) else torch.tensor({args[0]}, device={args[1]}.device, dtype={target_dtype}))"
+            return f"self._tensor_like({args[0]}, {args[1]}, {target_dtype})"
         if primitive == "where_indices":
             return f"torch.where({args[0]})"
         if primitive == "topk":
-            return f"torch.topk({args[0]}, int({args[1]}), dim=int({args[2]}), largest=bool({args[3]}), sorted=bool({args[4]}))"
+            return f"torch.topk({args[0]}, {int_arg(1)}, dim={int_arg(2)}, largest={bool_arg(3)}, sorted={bool_arg(4)})"
         if primitive == "concat":
             if "dim" in attrs:
-                return f"self._concat({', '.join(args)}, dim={attrs['dim']})"
+                if self.align_devices:
+                    return f"self._concat({', '.join(args)}, dim={attrs['dim']})"
+                return f"torch.cat([{', '.join(args)}], dim={attrs['dim']})"
             if not args:
                 raise ValueError("concat requires at least one argument")
-            return f"self._concat({', '.join(args[:-1])}, dim={args[-1]})"
+            if self.align_devices:
+                return f"self._concat({', '.join(args[:-1])}, dim={args[-1]})"
+            return f"torch.cat([{', '.join(args[:-1])}], dim={args[-1]})"
         if primitive == "clamp":
-            min_value = args[1] if len(args) > 1 else attrs.get("min", "None")
-            max_value = args[2] if len(args) > 2 else attrs.get("max", "None")
-            return f"torch.clamp({args[0]}, min=({min_value} if {min_value} is not None else None), max=({max_value} if {max_value} is not None else None))"
+            min_value = optional_input_expr(1, attrs.get("min", "None"))
+            max_value = optional_input_expr(2, attrs.get("max", "None"))
+            return f"torch.clamp({args[0]}, min={min_value}, max={max_value})"
         simple = {
-            "reshape": lambda: f"torch.reshape({args[0]}, tuple(int(x) for x in {args[1]}))",
-            "arange": lambda: f"torch.arange(int({args[1]}), int(({args[0]}.shape[-2] if {args[2]} is None and {args[0]}.ndim >= 2 else ({args[0]}.shape[-1] if {args[2]} is None else {args[2]}))), device={args[0]}.device, dtype=torch.long)",
-            "slice": lambda: f"torch.narrow({args[0]}, int({args[1]}), int({args[2]}), int({args[3]}) - int({args[2]}))",
-            "chunk": lambda: f"torch.chunk({args[0]}, int({args[2] if len(args) > 2 else attrs.get('parts', '1')}), dim=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
-            "split": lambda: f"torch.split({args[0]}, [int(x) for x in {args[2] if len(args) > 2 else attrs.get('sizes', '[]')}], dim=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
-            "sum": lambda: f"torch.sum({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}), keepdim=bool({args[2] if len(args) > 2 else 'False'}))",
-            "expand": lambda: f"{args[0]}.expand(tuple(int(x) for x in {args[1]}))",
-            "permute": lambda: f"torch.permute({args[0]}, tuple(int(x) for x in {args[1]}))",
-            "transpose": lambda: f"torch.transpose({args[0]}, int({args[1]}), int({args[2]}))",
-            "unsqueeze": lambda: f"torch.unsqueeze({args[0]}, int({args[1]}))",
-            "repeat": lambda: f"({args[0]} if int({args[1]}) == 1 else torch.repeat_interleave({args[0]}, repeats=int({args[1]}), dim=(int({args[2]}) if int({args[2]}) >= 0 else int({args[2]}) + {args[0]}.dim())))",
-            "matmul": lambda: f"(lambda _a, _b: torch.matmul(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))",
-            "softmax": lambda: f"F.softmax({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}))",
-            "where": lambda: f"self._where({args[0]}, {args[1]}, {args[2]})",
+            "reshape": lambda: f"torch.reshape({args[0]}, {tuple_int_arg(1)})",
+            "arange": lambda: f"torch.arange({int_arg(1)}, {optional_int_arg(2, f'({args[0]}.shape[-2] if {args[0]}.ndim >= 3 else {args[0]}.shape[-1])')}, device={args[0]}.device, dtype=torch.long)",
+            "slice": lambda: f"torch.narrow({args[0]}, {int_arg(1)}, {int_arg(2)}, {int_arg(3)} - {int_arg(2)})",
+            "chunk": lambda: f"torch.chunk({args[0]}, {int_arg(2, attrs.get('parts', '1'))}, dim={int_arg(1, attrs.get('dim', '-1'))})",
+            "split": lambda: f"torch.split({args[0]}, {tuple_int_arg(2, attrs.get('sizes', '()'))}, dim={int_arg(1, attrs.get('dim', '-1'))})",
+            "sum": lambda: f"torch.sum({args[0]}, dim={int_arg(1, '-1')}, keepdim={bool_arg(2, 'False')})",
+            "expand": lambda: f"{args[0]}.expand({tuple_int_arg(1)})",
+            "permute": lambda: f"torch.permute({args[0]}, {tuple_int_arg(1)})",
+            "transpose": lambda: f"torch.transpose({args[0]}, {int_arg(1)}, {int_arg(2)})",
+            "unsqueeze": lambda: f"torch.unsqueeze({args[0]}, {int_arg(1)})",
+            "repeat": lambda: f"({args[0]} if {int_arg(1)} == 1 else torch.repeat_interleave({args[0]}, repeats={int_arg(1)}, dim=({int_arg(2)} if {int_arg(2)} >= 0 else {int_arg(2)} + {args[0]}.dim())))",
+            "matmul": lambda: (
+                f"(lambda _a, _b: torch.matmul(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
+                if self.align_devices
+                else f"torch.matmul({args[0]}, {args[1]})"
+            ),
+            "softmax": lambda: f"F.softmax({args[0]}, dim={int_arg(1, '-1')})",
+            "where": lambda: (
+                f"self._where({args[0]}, {args[1]}, {args[2]})"
+                if self.align_devices
+                else f"torch.where({args[0]}, {args[1]}, {args[2]})"
+            ),
             "require": lambda: f"self._require_value({args[0]})",
-            "gather": lambda: f"torch.gather({args[0]}, dim=int({args[2] if len(args) > 2 else '-1'}), index=self._move_to({args[1]}, {args[0]}.device))",
-            "scatter": lambda: f"(torch.scatter({args[0]}, dim=int({args[3] if len(args) > 3 else '-1'}), index=self._move_to({args[1]}, {args[0]}.device), src=self._move_to({args[2]}, {args[0]}.device)) if torch.is_tensor({args[2]}) else torch.scatter({args[0]}, dim=int({args[3] if len(args) > 3 else '-1'}), index=self._move_to({args[1]}, {args[0]}.device), value={args[2]}))",
-            "index_add": lambda: f"torch.index_add({args[0]}, dim=int({args[3] if len(args) > 3 else '0'}), index=self._move_to({args[1]}, {args[0]}.device), source=self._move_to({args[2]}, {args[0]}.device))",
-            "le": lambda: f"self._binary_op('<=', {args[0]}, {args[1]})",
-            "eq": lambda: f"self._eq({args[0]}, {args[1]})",
-            "and": lambda: f"(lambda _a, _b: torch.logical_and(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))",
-            "add": lambda: f"self._binary_add({args[0]}, {args[1]})",
-            "mul": lambda: f"self._binary_op('*', {args[0]}, {args[1]})",
-            "div": lambda: f"self._binary_op('/', {args[0]}, {args[1]})",
+            "gather": lambda: f"torch.gather({args[0]}, dim={int_arg(2, '-1')}, index=self._move_to({args[1]}, {args[0]}.device))",
+            "scatter": lambda: f"(torch.scatter({args[0]}, dim={int_arg(3, '-1')}, index=self._move_to({args[1]}, {args[0]}.device), src=self._move_to({args[2]}, {args[0]}.device)) if torch.is_tensor({args[2]}) else torch.scatter({args[0]}, dim={int_arg(3, '-1')}, index=self._move_to({args[1]}, {args[0]}.device), value={args[2]}))",
+            "index_add": lambda: f"torch.index_add({args[0]}, dim={int_arg(3, '0')}, index=self._move_to({args[1]}, {args[0]}.device), source=self._move_to({args[2]}, {args[0]}.device))",
+            "and": lambda: (
+                f"(lambda _a, _b: torch.logical_and(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
+                if self.align_devices
+                else f"torch.logical_and({args[0]}, {args[1]})"
+            ),
             "pow": lambda: f"(torch.pow({args[0]}, {args[1]}) if torch.is_tensor({args[0]}) else ({args[0]} ** {args[1]}))",
             "floor": lambda: f"torch.floor({args[0]}) if torch.is_tensor({args[0]}) else int({args[0]} // 1)",
             "sqrt": lambda: f"torch.sqrt({args[0]}) if torch.is_tensor({args[0]}) else ({args[0]} ** 0.5)",
-            "sin": lambda: f"torch.sin({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').sin(float({args[0]}))",
-            "cos": lambda: f"torch.cos({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').cos(float({args[0]}))",
-            "exp": lambda: f"torch.exp({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').exp(float({args[0]}))",
-            "log": lambda: f"torch.log({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').log(float({args[0]}))",
+            "sin": lambda: f"torch.sin({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').sin({float_arg(0)})",
+            "cos": lambda: f"torch.cos({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').cos({float_arg(0)})",
+            "exp": lambda: f"torch.exp({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').exp({float_arg(0)})",
+            "log": lambda: f"torch.log({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').log({float_arg(0)})",
             "cast": lambda: f"{args[0]}.to(dtype=getattr(torch, str({args[1]})))",
             "cast_like": lambda: f"{args[0]}.to(device={args[1]}.device, dtype={args[1]}.dtype)",
             "dtype_value": lambda: f"{{'min': torch.finfo({args[0]}.dtype).min, 'max': torch.finfo({args[0]}.dtype).max, 'eps': torch.finfo({args[0]}.dtype).eps, 'tiny': torch.finfo({args[0]}.dtype).tiny, 'inf': float('inf'), '-inf': float('-inf')}}[str({args[1]})]",
-            "cumsum": lambda: f"torch.cumsum({args[0]}, dim=int({args[1] if len(args) > 1 else '-1'}))",
+            "cumsum": lambda: f"torch.cumsum({args[0]}, dim={int_arg(1, '-1')})",
             "empty_like": lambda: f"torch.empty_like({args[0]})",
-            "fill": lambda: f"torch.full_like({args[0]}, {args[1]}, dtype=({args[0]}.dtype if self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) is None else self._dtype_from_name({args[2] if len(args) > 2 else 'None'})))",
-            "empty": lambda: f"torch.empty(tuple(int(x) for x in {args[1]}), device={args[0]}.device, dtype=((self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) if {args[2] if len(args) > 2 else 'None'} is not None else None) or {args[0]}.dtype))",
-            "zeros": lambda: f"torch.zeros(tuple(int(x) for x in {args[1]}), device={args[0]}.device, dtype=((self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) if {args[2] if len(args) > 2 else 'None'} is not None else None) or {args[0]}.dtype))",
-            "full": lambda: f"torch.full(tuple(int(x) for x in {args[1]}), {args[2]}, device={args[0]}.device, dtype=((self._dtype_from_name({args[3] if len(args) > 3 else 'None'}) if {args[3] if len(args) > 3 else 'None'} is not None else None) or {args[0]}.dtype))",
+            "fill": lambda: (
+                f"torch.full_like({args[0]}, {args[1]})"
+                if len(args) < 3 or (
+                    isinstance(node.inputs[2], GraphLiteral)
+                    and node.inputs[2].value is None
+                )
+                else f"torch.full_like({args[0]}, {args[1]}, dtype=self._dtype_from_name({args[2]}))"
+            ),
+            "empty": lambda: f"torch.empty({tuple_int_arg(1)}, device={args[0]}.device, dtype={dtype_expr(2, args[0])})",
+            "zeros": lambda: f"torch.zeros({tuple_int_arg(1)}, device={args[0]}.device, dtype={dtype_expr(2, args[0])})",
+            "full": lambda: f"torch.full({tuple_int_arg(1)}, {args[2]}, device={args[0]}.device, dtype={dtype_expr(3, args[0])})",
             "zeros_like": lambda: f"torch.zeros_like({args[0]})",
             "activations_tanh": lambda: f"torch.tanh({args[0]})",
             "activations_silu": lambda: f"F.silu({args[0]})",
             "activations_sigmoid": lambda: f"torch.sigmoid({args[0]})",
-            "l2norm": lambda: f"(({args[0]}.float() * torch.pow(torch.mean({args[0]}.float() * {args[0]}.float(), dim=-1, keepdim=True) + float({args[1] if len(args) > 1 else '1e-6'}), -0.5)).to(dtype={args[0]}.dtype))",
+            "l2norm": lambda: f"(({args[0]}.float() * torch.pow(torch.mean({args[0]}.float() * {args[0]}.float(), dim=-1, keepdim=True) + {float_arg(1, '1e-6')}, -0.5)).to(dtype={args[0]}.dtype))",
             "activations_relu": lambda: f"F.relu({args[0]})",
             "activations_relu2": lambda: f"(F.relu({args[0]}) * F.relu({args[0]}))",
             "activations_gelu": lambda: f"F.gelu({args[0]})",
@@ -2711,7 +4665,7 @@ class _DirectTorchEmitter:
             "activations_xielu": lambda: f"self._xielu({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "list_init": lambda: "[]",
             "list_append": lambda: f"([*({args[0]} or []), {args[1]}])",
-            "list_index": lambda: f"{args[0]}[int({args[1]})]",
+            "list_index": lambda: f"{args[0]}[{int_arg(1)}]",
             "shape": lambda: f"list({args[0]}.shape)",
         }
         if primitive in simple:
@@ -2734,7 +4688,113 @@ class _DirectTorchEmitter:
         dim = dims[axis]
         if isinstance(dim, str) and dim.startswith(".."):
             return None
+        dim_names = {
+            name
+            for name in dim_token_names(dim)
+            if isinstance(name, str) and name.isidentifier()
+        }
+        if any(name in self.global_symbol_names and name not in local for name in dim_names):
+            return None
         return self._dim_token_expr(dim, local=local, symbols_dict=symbols_dict)
+
+    def _static_int_tuple_expr(
+        self,
+        operand: GraphOperand,
+        *,
+        local: set[str],
+        symbols_dict: str,
+    ) -> str | None:
+        if not (
+            isinstance(operand, GraphExpr)
+            and operand.op.name == "core.list"
+            and not operand.attrs
+            and _is_int_dim_list_type(operand.type_expr)
+        ):
+            return None
+        items: list[str] = []
+        for item in operand.inputs:
+            expr: str | None = None
+            if isinstance(item, GraphLiteral) and type(item.value) is int:
+                expr = repr(item.value)
+            elif isinstance(item, GraphValueRef) and isinstance(item.type_expr, TypeDim | TypeInt):
+                expr = self._operand_expr(item, local=local, symbols_dict=symbols_dict)
+            elif isinstance(item, GraphExpr) and isinstance(item.type_expr, TypeDim | TypeInt):
+                expr = self._operand_expr(item, local=local, symbols_dict=symbols_dict)
+            if expr is None:
+                return None
+            items.append(expr)
+        return _tuple_literal_expr(items)
+
+    def _static_path_key(self, operand: Any) -> str | None:
+        if not isinstance(operand, GraphPath) or not operand.absolute:
+            return None
+        if any("{" in part or "}" in part for part in operand.parts):
+            return None
+        return ".".join(part for part in operand.parts if part)
+
+    def _literal_leaf_key(self, operand: Any) -> str | None:
+        if isinstance(operand, str):
+            return operand
+        if isinstance(operand, GraphLiteral) and isinstance(operand.value, str):
+            return operand.value
+        if isinstance(operand, GraphPath) and not any("{" in part or "}" in part for part in operand.parts):
+            prefix = "@@" if operand.absolute else "@"
+            return prefix + ".".join(part for part in operand.parts if part)
+        return None
+
+    def _static_param_key(self, base: Any, leaf: Any) -> str | None:
+        leaf_key = self._literal_leaf_key(leaf)
+        if leaf_key is None:
+            return None
+        if leaf_key.startswith("@@"):
+            return leaf_key[2:].strip(".")
+        base_key = self._static_path_key(base)
+        if base_key is None:
+            return None
+        leaf_key = leaf_key[1:].strip(".") if leaf_key.startswith("@") else leaf_key.strip(".")
+        if not leaf_key:
+            return base_key
+        if leaf_key == base_key or leaf_key.startswith(base_key + "."):
+            return leaf_key
+        return f"{base_key}.{leaf_key}"
+
+    def _param_expr_for_path(
+        self,
+        base: Any,
+        leaf: Any,
+        *,
+        optional: bool = False,
+        local: set[str],
+        symbols_dict: str,
+    ) -> str:
+        key = self._static_param_key(base, leaf)
+        if key is not None:
+            return f"self.state_dict_tensors.get({key!r})" if optional else f"self.state_dict_tensors[{key!r}]"
+        key_expr = self._param_key_expr(base, leaf, local=local, symbols_dict=symbols_dict)
+        if key_expr is not None:
+            getter = "_optional_param" if optional else "_param"
+            return f"self.{getter}({key_expr})"
+        base_expr = self._operand_expr(base, local=local, symbols_dict=symbols_dict)
+        leaf_expr = repr(leaf) if isinstance(leaf, str) else self._operand_expr(leaf, local=local, symbols_dict=symbols_dict)
+        getter = "_optional_param" if optional else "_param"
+        return f"self.{getter}(self._compose_path({base_expr}, {leaf_expr}))"
+
+    def _param_key_expr(
+        self,
+        base: Any,
+        leaf: Any,
+        *,
+        local: set[str],
+        symbols_dict: str,
+    ) -> str | None:
+        if isinstance(leaf, GraphPath) and leaf.absolute:
+            return self._path_key_expr(leaf, local=local, symbols_dict=symbols_dict)
+        if isinstance(base, GraphPath) and base.absolute and isinstance(leaf, GraphPath) and not leaf.absolute:
+            base_key = self._path_key_expr(base, local=local, symbols_dict=symbols_dict)
+            leaf_key = self._path_key_expr(leaf, local=local, symbols_dict=symbols_dict)
+            if base_key is not None and leaf_key is not None:
+                return f"({base_key} + ('.' + {leaf_key} if {leaf_key} else ''))"
+        return None
 
     def _dim_token_expr(self, dim: Any, *, local: set[str], symbols_dict: str) -> str | None:
         if isinstance(dim, bool):
@@ -2755,13 +4815,20 @@ class _DirectTorchEmitter:
             right = self._dim_token_expr(dim.right, local=local, symbols_dict=symbols_dict)
             if left is None or right is None:
                 return None
-            return f"({left} {dim.op} {right})"
+            op = "//" if dim.op == "/" else dim.op
+            return f"({left} {op} {right})"
         return repr(dim)
 
     def _operand_expr(self, operand: GraphOperand, *, local: set[str], symbols_dict: str) -> str:
         if isinstance(operand, GraphValueRef):
             name = _py_ident(operand.name)
-            return name if operand.name in local else f"{symbols_dict}[{operand.name!r}]"
+            if operand.name in local:
+                return name
+            if operand.name in self.global_symbol_names:
+                return f"{symbols_dict}[{operand.name!r}]"
+            if isinstance(operand.type_expr, TypeDim):
+                return name
+            return f"{symbols_dict}[{operand.name!r}]"
         if isinstance(operand, GraphLiteral):
             return repr(operand.value)
         if isinstance(operand, GraphPath):
@@ -2793,7 +4860,17 @@ class _DirectTorchEmitter:
                 call = f"self.{self.method_names[operand.op.name]}({', '.join(args)})"
                 module = self.modules_by_name[operand.op.name]
                 return f"{call}[0]" if len(module.outputs) == 1 else call
-            pseudo = type("_Node", (), {"op": operand.op, "inputs": operand.inputs, "attrs": operand.attrs, "outputs": ()})()
+            pseudo = type(
+                "_Node",
+                (),
+                {
+                    "op": operand.op,
+                    "inputs": operand.inputs,
+                    "attrs": operand.attrs,
+                    "outputs": (),
+                    "type_expr": operand.type_expr,
+                },
+            )()
             return self._node_expr(pseudo, local=local, symbols_dict=symbols_dict)
         if isinstance(operand, tuple):
             return "[" + ", ".join(self._operand_expr(item, local=local, symbols_dict=symbols_dict) for item in operand) + "]"
@@ -2801,26 +4878,25 @@ class _DirectTorchEmitter:
 
     def _path_expr(self, path: GraphPath, *, local: set[str], symbols_dict: str) -> str:
         prefix = "@@" if path.absolute else "@"
-        part_exprs: list[str] = []
-        has_dynamic = False
-        for part in path.parts:
-            names = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", part)
-            if not names:
-                part_exprs.append(repr(part))
-                continue
-            has_dynamic = True
-            pieces = []
-            cursor = 0
-            for match in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", part):
-                pieces.append(part[cursor:match.start()].replace("{", "{{").replace("}", "}}"))
-                name = match.group(1)
-                pieces.append("{" + (_py_ident(name) if name in local else f"{symbols_dict}[{name!r}]") + "}")
-                cursor = match.end()
-            pieces.append(part[cursor:].replace("{", "{{").replace("}", "}}"))
-            part_exprs.append("f" + repr("".join(pieces)))
-        if not has_dynamic:
-            return repr(prefix + ".".join(path.parts))
-        return f"self._render_path({prefix!r}, [{', '.join(part_exprs)}])"
+        key_expr = self._path_key_expr(path, local=local, symbols_dict=symbols_dict)
+        if key_expr is None:
+            return repr(prefix)
+        return f"({prefix!r} + {key_expr})"
+
+    def _path_key_expr(self, path: GraphPath, *, local: set[str], symbols_dict: str) -> str | None:
+        template = ".".join(part for part in path.parts if part)
+        if "{" not in template and "}" not in template:
+            return repr(template)
+        pieces: list[str] = []
+        cursor = 0
+        for match in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", template):
+            pieces.append(template[cursor:match.start()].replace("{", "{{").replace("}", "}}"))
+            name = match.group(1)
+            expr = _py_ident(name) if name in local else f"{symbols_dict}[{name!r}]"
+            pieces.append("{self._path_template_part(" + expr + ")}")
+            cursor = match.end()
+        pieces.append(template[cursor:].replace("{", "{{").replace("}", "}}"))
+        return "f" + repr("".join(pieces))
 
 
 def emit_model_code_from_graph_ir(
@@ -2828,16 +4904,26 @@ def emit_model_code_from_graph_ir(
     *,
     class_name: str = "GeneratedAxonModel",
     model_config: dict[str, Any] | None = None,
+    profile: bool = False,
+    align_devices: bool = False,
 ) -> str:
     """Emit direct Python/PyTorch model code from graph IR."""
     validate_graph_program(program)
-    emitter = _DirectTorchEmitter(program=program, class_name=class_name)
+    emitter = _DirectTorchEmitter(
+        program=program,
+        class_name=class_name,
+        profile=profile,
+        align_devices=align_devices,
+    )
     body = emitter.emit()
-    return "\n".join(
+    header = [
+        "from __future__ import annotations",
+        "",
+    ]
+    if profile:
+        header.append("import time")
+    header.extend(
         [
-            "from __future__ import annotations",
-            "",
-            "import time",
             "import torch",
             "from torch import nn",
             "from torch.nn import functional as F",
@@ -2857,6 +4943,7 @@ def emit_model_code_from_graph_ir(
             body,
         ]
     )
+    return "\n".join(header)
 
 
 def _graph_expr_payload(expr: GraphExpr) -> Any:

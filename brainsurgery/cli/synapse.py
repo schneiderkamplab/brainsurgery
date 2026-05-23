@@ -168,6 +168,85 @@ def _axon_graph_ir_to_dot(
     )
 
 
+def _checkpoint_model_dir(checkpoint: str) -> Path:
+    candidate = Path(checkpoint)
+    if candidate.exists():
+        return candidate
+    return Path("models") / checkpoint
+
+
+def _axon_codegen_dump_to_text(
+    axon_path: Path,
+    *,
+    main_module: str | None,
+    strict: bool,
+    optimize_ast: bool,
+    optimize_graph: bool,
+    backend: str,
+    class_name: str,
+    checkpoint: str | None,
+    weights: Path | None,
+    profile: bool,
+    align_devices: bool = False,
+) -> str:
+    axon_module = _axon_module()
+    resolve_fn = getattr(axon_module, "resolve_axon_program_from_path")
+    normalize_fn = getattr(axon_module, "normalize_closed_axon_file")
+    elaborate_fn = getattr(axon_module, "elaborate_closed_axon_file")
+    flatten_fn = getattr(axon_module, "flatten_closed_axon_file")
+    typecheck_fn = getattr(axon_module, "typecheck2_flat_axon_file")
+    optimize_ast_fn = getattr(axon_module, "optimize_safe_flat_typed_axon_file")
+    optimize_graph_fn = getattr(axon_module, "optimize_graph_program")
+    lower_graph_fn = getattr(axon_module, "lower_axon_program_to_graph_ir")
+
+    backend = backend.strip().lower()
+    if backend not in {"codegen2-torch", "codegen2-tinygrad"}:
+        raise typer.BadParameter("backend must be 'codegen2-torch' or 'codegen2-tinygrad'")
+    if profile and backend != "codegen2-torch":
+        raise typer.BadParameter("--profile-code is currently supported only for --backend codegen2-torch")
+
+    model_dir = weights or (_checkpoint_model_dir(checkpoint) if checkpoint is not None else None)
+    model_config = None
+    if model_dir is not None:
+        axon_test_module = importlib.import_module("brainsurgery.synapse.axon_test")
+        resolve_safetensors = getattr(axon_test_module, "_resolve_safetensors_paths")
+        load_model_config = getattr(axon_test_module, "_load_model_config")
+        augment_model_config = getattr(axon_test_module, "_augment_model_config_from_checkpoint")
+        model_dir = model_dir.resolve()
+        if not model_dir.exists():
+            raise typer.BadParameter(f"Checkpoint/weights path not found: {model_dir}")
+        model_config = augment_model_config(
+            model_dir=model_dir if model_dir.is_dir() else model_dir.parent,
+            safetensors_files=resolve_safetensors(model_dir),
+            model_config=load_model_config(model_dir if model_dir.is_dir() else model_dir.parent),
+        )
+
+    program = resolve_fn(axon_path, strict=strict).ast
+    program = normalize_fn(program, main_module=main_module)
+    program = elaborate_fn(program, main_module=main_module)
+    program = flatten_fn(program, main_module=main_module)
+    program = typecheck_fn(program, main_module=main_module)
+    if optimize_ast:
+        program = optimize_ast_fn(program, main_module=main_module)
+    graph = lower_graph_fn(program, main_module=main_module)
+    if optimize_graph:
+        graph = optimize_graph_fn(graph)
+
+    if backend == "codegen2-torch":
+        emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_torch")
+        emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
+        return emit_fn(
+            graph,
+            class_name=class_name,
+            model_config=model_config,
+            profile=profile,
+            align_devices=align_devices,
+        )
+    emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_tinygrad")
+    emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
+    return emit_fn(graph, class_name=class_name, model_config=model_config)
+
+
 def _ensure_overwrite_allowed(path: Path, *, force: bool) -> None:
     if path.exists() and not force:
         raise typer.BadParameter(
@@ -393,6 +472,104 @@ def axon_graph_ir_dot(
     typer.echo(f"Wrote Graph IR DOT to {output_path}")
 
 
+@app.command("axon-codegen-dump")
+def axon_codegen_dump(
+    axon_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Path to an Axon source file.",
+    ),
+    output_path: Path = typer.Argument(
+        ...,
+        help="Destination Python file for generated code.",
+    ),
+    main_module: str | None = typer.Option(
+        None,
+        "--main-module",
+        help="Main Axon module name (defaults to MAIN pragma or last module).",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Fail when the resolver emits warnings.",
+    ),
+    checkpoint: str | None = typer.Option(
+        None,
+        "--checkpoint",
+        help="Checkpoint id or local path used to embed model config (ids resolve below models/).",
+    ),
+    weights: Path | None = typer.Option(
+        None,
+        "--weights",
+        help="Local checkpoint directory or safetensors file used to embed model config.",
+    ),
+    backend: str = typer.Option(
+        "codegen2-torch",
+        "--backend",
+        help="Codegen backend: codegen2-torch or codegen2-tinygrad.",
+    ),
+    class_name: str = typer.Option(
+        "AxonGeneratedModel",
+        "--class-name",
+        help="Generated model class name.",
+    ),
+    optimize_ast: bool = typer.Option(
+        False,
+        "--optimize-ast/--no-optimize-ast",
+        help="Run conservative AST optimization before Graph IR lowering.",
+    ),
+    optimize_graph: bool = typer.Option(
+        False,
+        "--optimize-graph/--no-optimize-graph",
+        help="Run conservative Graph IR optimization before code generation.",
+    ),
+    profile_code: bool = typer.Option(
+        False,
+        "--profile-code/--no-profile-code",
+        help="Emit profiling code. Without this flag, generated code contains no profiling branches.",
+    ),
+    align_devices: bool = typer.Option(
+        False,
+        "--align-devices/--no-align-devices",
+        help="Emit device-aligning binary ops for pipeline/multi-device generated torch code.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite output file if it already exists.",
+    ),
+) -> None:
+    """Render generated codegen2 Python code for an Axon program."""
+    _ensure_overwrite_allowed(output_path, force=force)
+    if output_path.suffix != ".py":
+        raise typer.BadParameter("Output path must end with .py")
+    if isinstance(main_module, OptionInfo):
+        main_module = None
+    try:
+        text = _axon_codegen_dump_to_text(
+            axon_path,
+            main_module=main_module,
+            strict=strict,
+            optimize_ast=optimize_ast,
+            optimize_graph=optimize_graph,
+            backend=backend,
+            class_name=class_name,
+            checkpoint=checkpoint,
+            weights=weights,
+            profile=profile_code,
+            align_devices=align_devices,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(text, encoding="utf-8")
+    typer.echo(f"Wrote generated {backend} Python code to {output_path}")
+
+
 @app.command("axon-test")
 def axon_test(
     axon_path: Path = typer.Argument(
@@ -490,6 +667,11 @@ def axon_test(
         "--hf-align-norm-fp32/--no-hf-align-norm-fp32",
         help="When enabled, run low-precision norm ops through fp32 compute paths.",
     ),
+    hf_attn_implementation: str | None = typer.Option(
+        None,
+        "--hf-attn-implementation",
+        help="Optional HF attention implementation override (for example eager or sdpa).",
+    ),
     compile_hf: bool = typer.Option(
         False,
         "--compile-hf/--no-compile-hf",
@@ -566,6 +748,7 @@ def axon_test(
             hf_align_add_fp32_accum=hf_align_add_fp32_accum,
             hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
             hf_align_norm_fp32=hf_align_norm_fp32,
+            hf_attn_implementation=hf_attn_implementation,
             compile_hf=compile_hf,
             compile_axon=compile_axon,
             compile_backend=compile_backend,
@@ -685,6 +868,11 @@ def axon_benchmark(
         False,
         "--hf-align-norm-fp32/--no-hf-align-norm-fp32",
         help="When enabled, run low-precision norm ops through fp32 compute paths.",
+    ),
+    hf_attn_implementation: str | None = typer.Option(
+        None,
+        "--hf-attn-implementation",
+        help="Optional HF attention implementation override (for example eager or sdpa).",
     ),
     compile_hf: bool = typer.Option(
         False,
@@ -837,6 +1025,7 @@ def axon_benchmark(
             hf_align_add_fp32_accum=hf_align_add_fp32_accum,
             hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
             hf_align_norm_fp32=hf_align_norm_fp32,
+            hf_attn_implementation=hf_attn_implementation,
             compile_hf=compile_hf,
             compile_axon=compile_axon,
             compile_backend=compile_backend,

@@ -13,6 +13,13 @@ LOWERING_TYPE_SIGNATURE = {
     "returns": ("Any",),
 }
 
+PRIMITIVE_SEMANTICS = {
+    # Indexing can fail for null/non-list/out-of-range inputs. Wrappers such as
+    # Cache.index guard those cases with lazy selects, so optimization must not
+    # hoist the primitive out of the guarded branch.
+    "effect": "partial_pure",
+}
+
 
 def type_rule(
     *,
@@ -36,5 +43,6 @@ def type_rule(
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "PRIMITIVE_SEMANTICS",
     "type_rule",
 ]

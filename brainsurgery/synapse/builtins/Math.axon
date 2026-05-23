@@ -36,10 +36,10 @@ log x = _log x
 floor :: T -> T
 floor x = _floor x
 
-sin :: T -> T
+sin :: Tensor[..S] -> Tensor[..S]
 sin x = _sin x
 
-cos :: T -> T
+cos :: Tensor[..S] -> Tensor[..S]
 cos x = _cos x
 
 sqrt :: Float -> Float

@@ -27,8 +27,19 @@ Related local policies:
 
 ## LLM Wiki Policy
 
-- The `wiki/` directory is the persistent, compounding working memory for agents (adapted from the LLM-wiki pattern).
-- Store operational overviews, runbooks, and script-maintenance notes there.
+- The `wiki/` directory is the persistent, compounding working memory for agents (adapted from the LLM Wiki v2 pattern).
+- Store operational overviews, runbooks, script-maintenance notes, recurring failure classes, durable decisions, and benchmark/reporting knowledge there.
+- Treat wiki knowledge as lifecycle-managed memory, not permanent flat notes:
+  - record confidence, source/evidence, and last-confirmed dates for durable claims where practical;
+  - mark superseded or contradicted claims explicitly instead of leaving stale facts unqualified;
+  - prefer concise consolidation of repeated observations over appending duplicate notes.
+- Preserve the tier distinction:
+  - raw artifacts live in source files, tests, logs, and external references;
+  - episodic observations live in `wiki/log.md`;
+  - semantic/procedural knowledge lives in topic pages such as `wiki/scripts.md`;
+  - schema and operating rules live in `AGENTS.md` files.
+- Use typed links and relationships in prose when useful (`uses`, `depends-on`, `supersedes`, `caused-by`, `fixed-by`, `validated-by`) so future agents can traverse impact without rediscovery.
+- Filter sensitive data before writing wiki pages. Do not store API keys, credentials, private tokens, or unnecessary PII in `wiki/`.
 - Keep `scripts/` under agent control; document every maintained script in `wiki/` with purpose, CLI, inputs/outputs, and ownership.
 - `wiki/AGENTS.md` contains the concrete ingest/query/lint workflow; treat this root file as the global policy layer.
 

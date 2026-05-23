@@ -25,7 +25,16 @@ from .domain import (
     infer_main_module_domain_facts,
     validate_graph_domain_analysis,
 )
-from .effects import GraphEffect, graph_module_effect, graph_op_effect, infer_graph_module_effects
+from .effects import (
+    GraphEffect,
+    UsageClass,
+    graph_module_effect,
+    graph_module_usage,
+    graph_op_effect,
+    graph_op_usage,
+    infer_graph_module_effects,
+    infer_graph_module_usages,
+)
 from .optimize import GraphOptimizeConfig, optimize_graph_program, prune_graph_to_main
 from .render import graph_domain_definition_comments, graph_module_to_axon_definition, graph_program_to_axon_file
 
@@ -33,6 +42,7 @@ __all__ = [
     "GraphOptimizeConfig",
     "GraphAttr",
     "GraphEffect",
+    "UsageClass",
     "GraphDomainAnalysis",
     "GraphDomainFact",
     "GraphDomainInterval",
@@ -57,10 +67,13 @@ __all__ = [
     "validate_graph_program",
     "graph_module_to_axon_definition",
     "graph_module_effect",
+    "graph_module_usage",
     "graph_domain_definition_comments",
     "graph_op_effect",
+    "graph_op_usage",
     "graph_program_to_axon_file",
     "infer_graph_module_effects",
+    "infer_graph_module_usages",
     "infer_main_module_domain_facts",
     "validate_graph_domain_analysis",
 ]

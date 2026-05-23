@@ -1,13 +1,45 @@
 from __future__ import annotations
 
+from enum import Enum
+
+from ...ops import get_op_semantics
 from ..analysis import PurityEffect as GraphEffect
 from ..analysis import join_effect as join_graph_effect
 from ..analysis import op_effect
 from .core import GraphExpr, GraphLiteral, GraphModule, GraphNode, GraphOperand, GraphValueRef
 
 
+class UsageClass(str, Enum):
+    UNRESTRICTED = "unrestricted"
+    AFFINE = "affine"
+    LINEAR = "linear"
+
+
+def join_usage(left: UsageClass, right: UsageClass) -> UsageClass:
+    if UsageClass.LINEAR in {left, right}:
+        return UsageClass.LINEAR
+    if UsageClass.AFFINE in {left, right}:
+        return UsageClass.AFFINE
+    return UsageClass.UNRESTRICTED
+
+
 def graph_op_effect(op_name: str) -> GraphEffect:
     return op_effect(op_name)
+
+
+def graph_op_usage(op_name: str) -> UsageClass:
+    normalized = op_name[1:] if op_name.startswith("_") else op_name
+    semantics = get_op_semantics(normalized)
+    usage = semantics.get("usage")
+    if usage == "unrestricted":
+        return UsageClass.UNRESTRICTED
+    if usage == "affine":
+        return UsageClass.AFFINE
+    if usage == "linear":
+        return UsageClass.LINEAR
+    if op_effect(op_name) == GraphEffect.EFFECTFUL:
+        return UsageClass.LINEAR
+    return UsageClass.UNRESTRICTED
 
 
 def _graph_operand_non_null(operand: GraphOperand) -> bool:
@@ -111,6 +143,91 @@ def graph_operand_effect(
             ),
         )
     return effect
+
+
+def _graph_op_call_usage(
+    op_name: str,
+    *,
+    inputs: tuple[GraphOperand, ...],
+    attrs: dict[str, GraphOperand],
+    module_usages: dict[str, UsageClass] | None = None,
+    modules_by_name: dict[str, GraphModule] | None = None,
+    active_modules: frozenset[str] = frozenset(),
+) -> UsageClass:
+    if modules_by_name is not None and op_name in modules_by_name and op_name not in active_modules:
+        callee = modules_by_name[op_name]
+        if len(inputs) == len(callee.inputs):
+            subst = {
+                formal.name: actual
+                for formal, actual in zip(callee.inputs, inputs, strict=True)
+            }
+            return graph_module_usage(
+                callee,
+                module_usages=module_usages,
+                modules_by_name=modules_by_name,
+                active_modules=active_modules | {op_name},
+                subst=subst,
+            )
+    if module_usages is not None and op_name in module_usages:
+        return module_usages[op_name]
+    return graph_op_usage(op_name)
+
+
+def graph_operand_usage(
+    operand: GraphOperand,
+    *,
+    module_usages: dict[str, UsageClass] | None = None,
+    modules_by_name: dict[str, GraphModule] | None = None,
+    active_modules: frozenset[str] = frozenset(),
+    subst: dict[str, GraphOperand] | None = None,
+    active_refs: frozenset[str] = frozenset(),
+) -> UsageClass:
+    if isinstance(operand, GraphValueRef) and subst is not None and operand.name in subst:
+        if subst[operand.name] == operand or operand.name in active_refs:
+            return UsageClass.UNRESTRICTED
+        return graph_operand_usage(
+            subst[operand.name],
+            module_usages=module_usages,
+            modules_by_name=modules_by_name,
+            active_modules=active_modules,
+            subst=subst,
+            active_refs=active_refs | {operand.name},
+        )
+    if not isinstance(operand, GraphExpr):
+        return UsageClass.UNRESTRICTED
+    usage = _graph_op_call_usage(
+        operand.op.name,
+        inputs=operand.inputs,
+        attrs=operand.attrs,
+        module_usages=module_usages,
+        modules_by_name=modules_by_name,
+        active_modules=active_modules,
+    )
+    for item in operand.inputs:
+        usage = join_usage(
+            usage,
+            graph_operand_usage(
+                item,
+                module_usages=module_usages,
+                modules_by_name=modules_by_name,
+                active_modules=active_modules,
+                subst=subst,
+                active_refs=active_refs,
+            ),
+        )
+    for item in operand.attrs.values():
+        usage = join_usage(
+            usage,
+            graph_operand_usage(
+                item,
+                module_usages=module_usages,
+                modules_by_name=modules_by_name,
+                active_modules=active_modules,
+                subst=subst,
+                active_refs=active_refs,
+            ),
+        )
+    return usage
 
 
 def _substitute_operand(
@@ -386,20 +503,109 @@ def graph_node_effect(
     return effect
 
 
+def graph_node_usage(
+    node: GraphNode,
+    *,
+    module_usages: dict[str, UsageClass] | None = None,
+    modules_by_name: dict[str, GraphModule] | None = None,
+    active_modules: frozenset[str] = frozenset(),
+    subst: dict[str, GraphOperand] | None = None,
+) -> UsageClass:
+    def resolve_ref_operand(
+        operand: GraphOperand,
+        active_refs: frozenset[str] = frozenset(),
+    ) -> GraphOperand:
+        if subst is None or not isinstance(operand, GraphValueRef):
+            return operand
+        replacement = subst.get(operand.name)
+        if replacement is None or operand.name in active_refs:
+            return operand
+        return resolve_ref_operand(replacement, active_refs | {operand.name})
+
+    inputs = tuple(resolve_ref_operand(item) for item in node.inputs)
+    attrs = {key: resolve_ref_operand(value) for key, value in node.attrs.items()}
+    usage = _graph_op_call_usage(
+        node.op.name,
+        inputs=inputs,
+        attrs=attrs,
+        module_usages=module_usages,
+        modules_by_name=modules_by_name,
+        active_modules=active_modules,
+    )
+    for item in inputs:
+        usage = join_usage(
+            usage,
+            graph_operand_usage(
+                item,
+                module_usages=module_usages,
+                modules_by_name=modules_by_name,
+                active_modules=active_modules,
+                subst=subst,
+            ),
+        )
+    for item in attrs.values():
+        usage = join_usage(
+            usage,
+            graph_operand_usage(
+                item,
+                module_usages=module_usages,
+                modules_by_name=modules_by_name,
+                active_modules=active_modules,
+                subst=subst,
+            ),
+        )
+    return usage
+
+
+def graph_module_usage(
+    module: GraphModule,
+    *,
+    module_usages: dict[str, UsageClass] | None = None,
+    modules_by_name: dict[str, GraphModule] | None = None,
+    active_modules: frozenset[str] = frozenset(),
+    subst: dict[str, GraphOperand] | None = None,
+) -> UsageClass:
+    usage = UsageClass.UNRESTRICTED
+    for item in module.outputs:
+        usage = join_usage(
+            usage,
+            graph_operand_usage(
+                item,
+                module_usages=module_usages,
+                modules_by_name=modules_by_name,
+                active_modules=active_modules,
+                subst=subst,
+            ),
+        )
+    for node in module.nodes:
+        usage = join_usage(
+            usage,
+            graph_node_usage(
+                node,
+                module_usages=module_usages,
+                modules_by_name=modules_by_name,
+                active_modules=active_modules,
+                subst=subst,
+            ),
+        )
+    return usage
+
+
 def infer_graph_module_effects(
     modules: tuple[GraphModule, ...],
     *,
     max_iterations: int = 16,
 ) -> dict[str, GraphEffect]:
     effects = {module.name: GraphEffect.PARTIAL_PURE for module in modules}
-    modules_by_name = {module.name: module for module in modules}
     for _ in range(max_iterations):
         changed = False
         for module in modules:
+            # Summary inference must not inline callees at every call site.  The
+            # fixpoint over the previous iteration's summaries is conservative
+            # and avoids exponential re-walking of nested/inlined call graphs.
             inferred = graph_module_effect(
                 module,
                 module_effects=effects,
-                modules_by_name=modules_by_name,
                 active_modules=frozenset({module.name}),
             )
             if effects[module.name] != inferred:
@@ -410,12 +616,43 @@ def infer_graph_module_effects(
     return effects
 
 
+def infer_graph_module_usages(
+    modules: tuple[GraphModule, ...],
+    *,
+    max_iterations: int = 16,
+) -> dict[str, UsageClass]:
+    usages = {module.name: UsageClass.UNRESTRICTED for module in modules}
+    for _ in range(max_iterations):
+        changed = False
+        for module in modules:
+            # As with effects, usage summaries are inferred by fixpoint over
+            # summaries rather than by call-site expansion.
+            inferred = graph_module_usage(
+                module,
+                module_usages=usages,
+                active_modules=frozenset({module.name}),
+            )
+            if usages[module.name] != inferred:
+                usages[module.name] = inferred
+                changed = True
+        if not changed:
+            break
+    return usages
+
+
 __all__ = [
     "GraphEffect",
+    "UsageClass",
     "graph_module_effect",
+    "graph_module_usage",
     "graph_node_effect",
+    "graph_node_usage",
     "graph_op_effect",
+    "graph_op_usage",
     "graph_operand_effect",
+    "graph_operand_usage",
     "infer_graph_module_effects",
+    "infer_graph_module_usages",
     "join_graph_effect",
+    "join_usage",
 ]

@@ -144,6 +144,11 @@ def get_op_type_rule(op_name: str) -> Any | None:
     module = get_op_module(op_name)
     if module is None:
         return None
+    rules_by_op = getattr(module, "TYPE_RULES_BY_OP", None)
+    if isinstance(rules_by_op, dict):
+        rule = rules_by_op.get(op_name)
+        if callable(rule):
+            return rule
     rule = getattr(module, "type_rule", None)
     if callable(rule):
         return rule

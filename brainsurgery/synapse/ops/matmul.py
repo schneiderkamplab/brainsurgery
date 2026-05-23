@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 
-from ._broadcast import broadcast_shape
-
 OP_NAME = "matmul"
 
 
@@ -32,11 +30,14 @@ def type_rule(
         return None
     if len(left_dims) < 2 or len(right_dims) < 2:
         return None
-    batch = broadcast_shape(left_dims[:-2], right_dims[:-2])
+    batch = helpers.broadcast_tensor_dims(left_dims[:-2], right_dims[:-2])
     if batch is None:
         return None
-    if left_dims[-1] != right_dims[-2]:
-        return None
+    if not helpers.dim_equivalent(left_dims[-1], right_dims[-2]):
+        try:
+            helpers.unify_dim(left_dims[-1], right_dims[-2])
+        except ValueError:
+            return None
     return helpers.type_tensor(dims=(*batch, left_dims[-2], right_dims[-1]))
 
 

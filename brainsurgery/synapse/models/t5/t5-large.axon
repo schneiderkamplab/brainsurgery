@@ -8,7 +8,7 @@ import Activations (relu)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (bidirectional_mask, causal_mask)
+import Masking (bidirectional_mask, bidirectional_mask_for_input, causal_mask, causal_mask_for_input)
 
 import Math (sqrt)
 
@@ -30,6 +30,10 @@ L_DEC = (L_DEC_OVERRIDE > 0) ? L_DEC_OVERRIDE : L_ENC
 
 NUM_HEADS = 16
 
+HEAD_DIM = 64
+
+ATTN_DIM = NUM_HEADS * HEAD_DIM
+
 FFN = 4096
 
 EPS = 1e-06
@@ -48,9 +52,9 @@ t5_encoder_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 t5_encoder_block x attention_mask = do
   self_attn <- scope@layer.0 do
     x_norm <- NN.rmsnorm@layer_norm x eps=EPS
-    q <- NN.linear@SelfAttention.q x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-    k <- NN.linear@SelfAttention.k x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-    v <- NN.linear@SelfAttention.v x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    q <- NN.linear@SelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@SelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@SelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
     rel_bias <- relative_position_bias@@encoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=true
     keep <- bidirectional_mask q k padding_mask=attention_mask
     return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=MODEL_DIM bias=false
@@ -66,18 +70,18 @@ t5_decoder_block :: Tensor[B,SDEC,D] -> Tensor[B,SENC,D] -> ?Tensor[B,SENC] -> ?
 t5_decoder_block x enc_hidden encoder_attention_mask decoder_attention_mask = do
   self_attn <- scope@layer.0 do
     x_norm <- NN.rmsnorm@layer_norm x eps=EPS
-    q <- NN.linear@SelfAttention.q x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-    k <- NN.linear@SelfAttention.k x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-    v <- NN.linear@SelfAttention.v x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    q <- NN.linear@SelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@SelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@SelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
     rel_bias <- relative_position_bias@@decoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=false
     keep <- causal_mask q k window=1048576 padding_mask=decoder_attention_mask
     return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=MODEL_DIM bias=false
   x <- x + self_attn
   cross_attn <- scope@layer.1 do
     x_norm <- NN.rmsnorm@layer_norm x eps=EPS
-    q <- NN.linear@EncDecAttention.q x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-    k <- NN.linear@EncDecAttention.k enc_hidden dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-    v <- NN.linear@EncDecAttention.v enc_hidden dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    q <- NN.linear@EncDecAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@EncDecAttention.k enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@EncDecAttention.v enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
     keep <- bidirectional_mask q k padding_mask=encoder_attention_mask
     return attention q k v keep scale=1.0 |> merge_heads |> NN.linear@EncDecAttention.o dim=MODEL_DIM bias=false
   x <- x + cross_attn
@@ -90,15 +94,18 @@ t5_decoder_block x enc_hidden encoder_attention_mask decoder_attention_mask = do
 
 t5 :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
 t5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
+  encoder_keep <- bidirectional_mask_for_input input_ids SENC padding_mask=attention_mask
+  decoder_keep <- causal_mask_for_input decoder_input_ids SDEC padding_mask=decoder_attention_mask window=1048576
+  cross_keep <- bidirectional_mask_for_input decoder_input_ids SENC padding_mask=attention_mask
   enc_hidden <- NN.embedding@shared input_ids dim=MODEL_DIM
   enc_hidden <- for@encoder.block i <- [0..L_ENC) carry (enc_hidden) do
     self_attn <- scope@layer.0 do
       x_norm <- NN.rmsnorm@layer_norm enc_hidden eps=EPS
-      q <- NN.linear@SelfAttention.q x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-      k <- NN.linear@SelfAttention.k x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-      v <- NN.linear@SelfAttention.v x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      q <- NN.linear@SelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      k <- NN.linear@SelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      v <- NN.linear@SelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
       rel_bias <- relative_position_bias@@encoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=true
-      keep <- bidirectional_mask q k padding_mask=attention_mask
+      keep <- encoder_keep
       return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=MODEL_DIM bias=false
     enc_hidden <- enc_hidden + self_attn
     ffn <- scope@layer.1 do
@@ -112,19 +119,19 @@ t5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
   dec_hidden <- for@decoder.block i <- [0..L_DEC) carry (dec_hidden) do
     self_attn <- scope@layer.0 do
       x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS
-      q <- NN.linear@SelfAttention.q x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-      k <- NN.linear@SelfAttention.k x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-      v <- NN.linear@SelfAttention.v x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      q <- NN.linear@SelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      k <- NN.linear@SelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      v <- NN.linear@SelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
       rel_bias <- relative_position_bias@@decoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=false
-      keep <- causal_mask q k window=1048576 padding_mask=decoder_attention_mask
+      keep <- decoder_keep
       return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=MODEL_DIM bias=false
     dec_hidden <- dec_hidden + self_attn
     cross_attn <- scope@layer.1 do
       x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS
-      q <- NN.linear@EncDecAttention.q x_norm dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-      k <- NN.linear@EncDecAttention.k enc_hidden dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-      v <- NN.linear@EncDecAttention.v enc_hidden dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
-      keep <- bidirectional_mask q k padding_mask=attention_mask
+      q <- NN.linear@EncDecAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      k <- NN.linear@EncDecAttention.k enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      v <- NN.linear@EncDecAttention.v enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      keep <- cross_keep
       return attention q k v keep scale=1.0 |> merge_heads |> NN.linear@EncDecAttention.o dim=MODEL_DIM bias=false
     dec_hidden <- dec_hidden + cross_attn
     ffn <- scope@layer.2 do

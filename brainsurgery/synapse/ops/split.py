@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..axon.ast import AxonExpr, AxonExprList, TypeList, TypeTuple
+from ..axon.ast import AxonExpr, AxonExprAscribe, AxonExprList, AxonExprParen, TypeList, TypeTuple
 
 OP_NAME = "split"
 
@@ -30,11 +30,8 @@ def type_rule(
     dims = helpers.type_dims(arg_types[0])
     if dims is None:
         return None
-    dim_token = None
-    if len(args) > 1 and isinstance(args[1], AxonExpr):
-        dim_token = helpers.expr_to_dim_token(args[1])
-    elif "dim" in kwargs and isinstance(kwargs["dim"], AxonExpr):
-        dim_token = helpers.expr_to_dim_token(kwargs["dim"])
+    dim_expr = args[1] if len(args) > 1 else kwargs.get("dim")
+    dim_token = _expr_dim_token(dim_expr, helpers) if dim_expr is not None else None
     axis = -1 if dim_token is None else dim_token
     if isinstance(axis, int):
         if axis < 0:
@@ -45,10 +42,11 @@ def type_rule(
                 sizes_expr = args[2]
             elif "sizes" in kwargs:
                 sizes_expr = kwargs["sizes"]
-            if isinstance(sizes_expr, AxonExprList):
+            size_items = _list_items(sizes_expr)
+            if size_items is not None:
                 part_dims = []
-                for item in sizes_expr.items:
-                    token = helpers.expr_to_dim_token(item)
+                for item in size_items:
+                    token = _expr_dim_token(item, helpers)
                     if token is None:
                         break
                     out_dims = list(dims)
@@ -59,6 +57,20 @@ def type_rule(
                         items=tuple(helpers.type_tensor(dims=item) for item in part_dims)
                     )
     return TypeList(item=helpers.type_tensor(dims=dims))
+
+
+def _expr_dim_token(expr: Any, helpers: Any) -> Any | None:
+    while isinstance(expr, AxonExprAscribe | AxonExprParen):
+        expr = expr.expr if isinstance(expr, AxonExprAscribe) else expr.inner
+    return helpers.expr_to_dim_token(expr)
+
+
+def _list_items(expr: Any) -> tuple[Any, ...] | None:
+    if isinstance(expr, AxonExprList):
+        return tuple(expr.items)
+    if getattr(getattr(expr, "op", None), "name", None) == "core.list":
+        return tuple(getattr(expr, "inputs", ()))
+    return None
 
 __all__ = [
     "OP_NAME",

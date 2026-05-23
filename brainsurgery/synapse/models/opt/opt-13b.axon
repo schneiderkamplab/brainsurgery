@@ -8,7 +8,7 @@ import Activations (relu)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (causal_mask)
+import Masking (causal_mask_for_input)
 
 import Math (sqrt)
 
@@ -22,31 +22,44 @@ import Config
 
 import NN
 
-MODEL_DIM = 5120
+MODEL_DIM <- do
+  return 5120
 
-VOCAB_SIZE = 50272
+VOCAB_SIZE <- do
+  return 50272
 
-NUM_LAYERS = 40
+NUM_LAYERS <- do
+  return 40
 
-NUM_HEADS = 40
+NUM_HEADS <- do
+  return 40
 
-MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
+MODEL_HEAD_DIM <- do
+  return MODEL_DIM / NUM_HEADS
 
-FFN = 20480
+FFN <- do
+  return 20480
 
-EPS = 1e-05
+EPS <- do
+  return 1e-05
 
-MAX_POSITIONS = 2048
+MAX_POSITIONS <- do
+  return 2048
 
-DO_PRE_LN = true
+DO_PRE_LN <- do
+  return true
 
-ACT = "relu"
+ACT <- do
+  return "relu"
 
-ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
+ATTN_SCALE <- do
+  return 1.0 / sqrt MODEL_HEAD_DIM
 
-HAS_LM_HEAD = has_root "lm_head"
+HAS_LM_HEAD <- do
+  return has_root "lm_head"
 
-HAS_DECODER_ROOT = has_root "decoder.embed_tokens"
+HAS_DECODER_ROOT <- do
+  return has_root "decoder.embed_tokens"
 
 opt_ln :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 opt_ln@path x = NN.layernorm@path x eps=EPS
@@ -54,8 +67,8 @@ opt_ln@path x = NN.layernorm@path x eps=EPS
 opt_act :: Tensor[B,S,D] -> Tensor[B,S,D]
 opt_act x = (ACT == "relu") ? (relu x) : (relu x)
 
-opt_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
-opt_block x attn_mask past_kv = do
+opt_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
+opt_block x mask past_kv = do
   xn <- DO_PRE_LN ? (opt_ln@self_attn_layer_norm x) : x
   a, new_kv <- scope@self_attn do
     q <- NN.linear@q_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
@@ -63,7 +76,6 @@ opt_block x attn_mask past_kv = do
     k <- NN.linear@k_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
     v <- NN.linear@v_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
     k, v, new_kv <- Cache.update past_kv k v
-    mask <- causal_mask q k window=MAX_POSITIONS padding_mask=attn_mask
     a <- attention q k v mask scale=1.0 |> merge_heads |> NN.linear@out_proj dim=MODEL_DIM bias=true
     return a, new_kv
   x <- x + a
@@ -75,8 +87,8 @@ opt_block x attn_mask past_kv = do
   x <- DO_PRE_LN ? x : (opt_ln@final_layer_norm x)
   return x, new_kv
 
-opt_decode_model :: TokenIds[B,S] -> Tensor[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH])
-opt_decode_model input_ids pos_ids attn_mask past_kv use_cache = do
+opt_decode_model :: TokenIds[B,S] -> Tensor[B,S] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH])
+opt_decode_model input_ids pos_ids mask past_kv use_cache = do
   x, new_kv <- scope@model.decoder do
     tok <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     pos <- NN.embedding@embed_positions pos_ids dim=MODEL_DIM
@@ -84,15 +96,15 @@ opt_decode_model input_ids pos_ids attn_mask past_kv use_cache = do
     new_kv <- use_cache ? Cache.init : null
     x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
-      x, new_i <- opt_block x attn_mask past_i
+      x, new_i <- opt_block x mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- DO_PRE_LN ? (opt_ln@final_layer_norm x) : x
     return x, new_kv
   return x, new_kv
 
-opt_decode_decoder :: TokenIds[B,S] -> Tensor[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH])
-opt_decode_decoder input_ids pos_ids attn_mask past_kv use_cache = do
+opt_decode_decoder :: TokenIds[B,S] -> Tensor[B,S] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH])
+opt_decode_decoder input_ids pos_ids mask past_kv use_cache = do
   x, new_kv <- scope@decoder do
     tok <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     pos <- NN.embedding@embed_positions pos_ids dim=MODEL_DIM
@@ -100,7 +112,7 @@ opt_decode_decoder input_ids pos_ids attn_mask past_kv use_cache = do
     new_kv <- use_cache ? Cache.init : null
     x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
-      x, new_i <- opt_block x attn_mask past_i
+      x, new_i <- opt_block x mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- DO_PRE_LN ? (opt_ln@final_layer_norm x) : x
@@ -109,8 +121,11 @@ opt_decode_decoder input_ids pos_ids attn_mask past_kv use_cache = do
 
 opt :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,DH])
 opt input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=(-1)
+  past_length <- Cache.past_length past_kv
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=(-1)
   pos_ids <- pos_ids + 2
-  x, new_kv <- HAS_DECODER_ROOT ? (opt_decode_decoder input_ids pos_ids attn_mask past_kv use_cache) : (opt_decode_model input_ids pos_ids attn_mask past_kv use_cache)
+  key_len <- past_length + S
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  x, new_kv <- HAS_DECODER_ROOT ? (opt_decode_decoder input_ids pos_ids mask past_kv use_cache) : (opt_decode_model input_ids pos_ids mask past_kv use_cache)
   logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE bias=false) : (HAS_DECODER_ROOT ? (NN.linear@decoder.embed_tokens x dim=VOCAB_SIZE) : (NN.linear@model.decoder.embed_tokens x dim=VOCAB_SIZE))
   return logits, new_kv

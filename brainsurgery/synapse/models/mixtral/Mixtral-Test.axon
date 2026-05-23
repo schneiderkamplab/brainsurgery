@@ -1,0 +1,105 @@
+{-# CHECKPOINTS "test/Mixtral-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "mixtral" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (causal_mask_for_input)
+
+import Math (mul)
+
+import MoE (softmax_topk_router)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM = 128
+
+VOCAB_SIZE = 32000
+
+NUM_LAYERS = 4
+
+NUM_HEADS = 4
+
+KVH = 4
+
+HAS_HEAD_DIM = true
+
+MODEL_HEAD_DIM = HAS_HEAD_DIM ? (32) : (MODEL_DIM / NUM_HEADS)
+
+KVD = KVH * MODEL_HEAD_DIM
+
+FFN = 256
+
+E = 4
+
+EPT = 2
+
+EPS = 1e-05
+
+THETA = 1000000.0
+
+MAXPOS = 512
+
+HAS_SLIDING_WINDOW = true
+
+MAX_POSITIONS = HAS_SLIDING_WINDOW ? (64) : MAXPOS
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS
+
+mixtral_block :: Tensor[B,S,MODEL_DIM] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,MODEL_DIM], ?CacheLayer[B,KVH,K,DH])
+mixtral_block x rope_sin rope_cos mask past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=MODEL_DIM |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
+    return a, new_kv
+  x <- x + a
+  xn <- rms@post_attention_layernorm x
+  m <- scope@block_sparse_moe do
+    topk_scores, topk_indices <- softmax_topk_router@gate xn top_k=EPT weight=@gate.weight
+    x_sel <- Tensor.unsqueeze xn 2 |> Tensor.expand shape=[B, S, EPT, MODEL_DIM]
+    scale <- Tensor.unsqueeze topk_scores -1
+    gate <- NN.expert_linear@w1 x_sel topk_indices dim=FFN bias=false transpose=false weight_path=@experts.w1.weight
+    up <- NN.expert_linear@w3 x_sel topk_indices dim=FFN bias=false transpose=false weight_path=@experts.w3.weight
+    x_upd <- gate |> silu |> mul up |> NN.expert_linear@w2 topk_indices dim=MODEL_DIM bias=false transpose=false weight_path=@experts.w2.weight
+    return Tensor.sum (x_upd * scale) dim=2 keepdim=false
+  return x + m, new_kv
+
+mixtral :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+mixtral input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
+  key_len <- past_length + S
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    new_kv <- use_cache ? Cache.init : null
+    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
+      past_i <- Cache.index past_kv i
+      x, new_i <- mixtral_block x rope_sin rope_cos mask past_i
+      new_kv <- Cache.append new_kv new_i
+      yield x, new_kv
+    x <- rms@norm x
+    return x, new_kv
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

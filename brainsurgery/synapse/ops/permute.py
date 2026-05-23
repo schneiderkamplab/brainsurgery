@@ -23,6 +23,8 @@ def _permute_indices(expr: Any, *, rank: int, helpers: Any) -> tuple[int, ...] |
             break
         expr = resolved
     items = getattr(expr, "items", None)
+    if items is None and getattr(getattr(expr, "op", None), "name", None) == "core.list":
+        items = getattr(expr, "inputs", None)
     if not isinstance(items, tuple):
         return None
     raw: list[int] = []

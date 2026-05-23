@@ -4,7 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from ..ast import TypeOptional
+from ..ast import TypeBool, TypeOptional
 from ..codegen2_common import normalize_primitive_op
 from ..codegen2_torch.core import _DirectTorchEmitter
 from ..graph_ir import GraphProgram, validate_graph_program
@@ -238,7 +238,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "return self")
         add(lines, 4, "")
         add(lines, 4, "def setup(self):")
-        add(lines, 8, "self._materialize_expert_banks()")
+        add(lines, 8, "pass")
         add(lines, 8, "return None")
         add(lines, 4, "")
         add(lines, 4, "def to(self, device=None, *args, **kwargs):")
@@ -382,31 +382,87 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 4, "_cache_past_length = staticmethod(_common_cache_past_length)")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
+        add(lines, 8, "key = str(path).lstrip('@')")
+        add(lines, 8, "self._materialize_expert_bank_for_path(key)")
         add(lines, 8, "return _common_required_state_value(self.state_dict_tensors, path)")
         add(lines, 4, "")
         add(lines, 4, "def _optional_param(self, path):")
+        add(lines, 8, "key = str(path).lstrip('@')")
+        add(lines, 8, "self._materialize_expert_bank_for_path(key)")
         add(lines, 8, "return _common_optional_state_value(self.state_dict_tensors, path)")
         add(lines, 4, "")
-        add(lines, 4, "def _materialize_expert_banks(self):")
-        add(lines, 8, "groups = {}")
-        add(lines, 8, "for key, value in list(self.state_dict_tensors.items()):")
-        add(lines, 12, "parts = key.split('.')")
-        add(lines, 12, "for idx, part in enumerate(parts):")
-        add(lines, 16, "if part == 'experts' and idx + 2 < len(parts) and parts[idx + 1].isdigit():")
-        add(lines, 20, "expert = int(parts[idx + 1])")
-        add(lines, 20, "bank_key = '.'.join(parts[:idx + 1] + parts[idx + 2:])")
-        add(lines, 20, "groups.setdefault(bank_key, {})[expert] = value")
-        add(lines, 20, "break")
-        add(lines, 8, "for bank_key, items in groups.items():")
-        add(lines, 12, "if bank_key in self.state_dict_tensors or not items:")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _collapse_one_numeric_segment(key):")
+        add(lines, 8, "parts = str(key).split('.')")
+        add(lines, 8, "for index, part in enumerate(parts):")
+        add(lines, 12, "if part.isdigit():")
+        add(lines, 16, "return '.'.join(parts[:index] + parts[index + 1:]), int(part), index")
+        add(lines, 8, "return None")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _collapsed_numeric_segments(key):")
+        add(lines, 8, "parts = str(key).split('.')")
+        add(lines, 8, "return [('.'.join(parts[:index] + parts[index + 1:]), int(part), index) for index, part in enumerate(parts) if part.isdigit()]")
+        add(lines, 4, "")
+        add(lines, 4, "def _keys_for_collapsed_bank(self, bank_key):")
+        add(lines, 8, "items = {}")
+        add(lines, 8, "numeric_index = None")
+        add(lines, 8, "for key in self.state_dict_tensors:")
+        add(lines, 12, "for collapsed_key, expert, index in self._collapsed_numeric_segments(str(key)):")
+        add(lines, 16, "if collapsed_key != bank_key:")
+        add(lines, 20, "continue")
+        add(lines, 16, "if numeric_index is None:")
+        add(lines, 20, "numeric_index = index")
+        add(lines, 16, "elif numeric_index != index:")
+        add(lines, 20, "continue")
+        add(lines, 16, "items[expert] = str(key)")
+        add(lines, 16, "break")
+        add(lines, 8, "if not items:")
+        add(lines, 12, "return []")
+        add(lines, 8, "ordered = [items[i] for i in range(len(items)) if i in items]")
+        add(lines, 8, "return ordered if len(ordered) == len(items) else []")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _fused_gate_up_source_bank_keys(bank_key):")
+        add(lines, 8, "parts = str(bank_key).split('.')")
+        add(lines, 8, "for index, part in enumerate(parts):")
+        add(lines, 12, "if 'gate_up' not in part:")
         add(lines, 16, "continue")
-        add(lines, 12, "ordered = [items[i] for i in range(len(items)) if i in items]")
-        add(lines, 12, "if len(ordered) != len(items):")
-        add(lines, 16, "continue")
+        add(lines, 12, "gate_parts = list(parts)")
+        add(lines, 12, "up_parts = list(parts)")
+        add(lines, 12, "gate_parts[index] = part.replace('gate_up', 'gate', 1)")
+        add(lines, 12, "up_parts[index] = part.replace('gate_up', 'up', 1)")
+        add(lines, 12, "return '.'.join(gate_parts), '.'.join(up_parts)")
+        add(lines, 8, "return None")
+        add(lines, 4, "")
+        add(lines, 4, "def _materialize_expert_bank_for_path(self, bank_key):")
+        add(lines, 8, "existing = self.state_dict_tensors.get(bank_key)")
+        add(lines, 8, "if isinstance(existing, Tensor):")
+        add(lines, 12, "return existing")
+        add(lines, 8, "ordered_keys = self._keys_for_collapsed_bank(bank_key)")
+        add(lines, 8, "if ordered_keys:")
+        add(lines, 12, "ordered = [self.state_dict_tensors[key] for key in ordered_keys]")
         add(lines, 12, "first_shape = ordered[0].shape")
-        add(lines, 12, "if any(t.shape != first_shape for t in ordered):")
-        add(lines, 16, "continue")
-        add(lines, 12, "self.state_dict_tensors[bank_key] = ordered[0].stack(*ordered[1:], dim=0) if len(ordered) > 1 else ordered[0].reshape((1,) + tuple(ordered[0].shape))")
+        add(lines, 12, "if all(isinstance(t, Tensor) and t.shape == first_shape for t in ordered):")
+        add(lines, 16, "bank = ordered[0].stack(*ordered[1:], dim=0) if len(ordered) > 1 else ordered[0].reshape((1,) + tuple(ordered[0].shape))")
+        add(lines, 16, "for key in ordered_keys:")
+        add(lines, 20, "self.state_dict_tensors.pop(key, None)")
+        add(lines, 16, "self.state_dict_tensors[bank_key] = bank")
+        add(lines, 16, "return bank")
+        add(lines, 8, "fused_sources = self._fused_gate_up_source_bank_keys(bank_key)")
+        add(lines, 8, "if fused_sources is None:")
+        add(lines, 12, "return None")
+        add(lines, 8, "gate_key, up_key = fused_sources")
+        add(lines, 8, "gate = self._materialize_expert_bank_for_path(gate_key)")
+        add(lines, 8, "up = self._materialize_expert_bank_for_path(up_key)")
+        add(lines, 8, "if not isinstance(gate, Tensor) or not isinstance(up, Tensor):")
+        add(lines, 12, "return None")
+        add(lines, 8, "if gate.shape[:-2] != up.shape[:-2] or gate.shape[-1:] != up.shape[-1:]:")
+        add(lines, 12, "return None")
+        add(lines, 8, "concat_dim = -2 if len(gate.shape) >= 2 else -1")
+        add(lines, 8, "bank = gate.cat(up, dim=concat_dim)")
+        add(lines, 8, "self.state_dict_tensors[bank_key] = bank")
+        add(lines, 8, "return bank")
         add(lines, 4, "")
         add(lines, 4, "def _config(self, path, default=None):")
         add(lines, 8, "return _common_config_value(self.config, path, default)")
@@ -826,6 +882,91 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         if primitive in simple:
             return simple[primitive]()
         raise NotImplementedError(f"direct codegen2-tinygrad unsupported graph op {primitive!r}")
+
+    def _emit_linear_node(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        target: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if len(node.inputs) < 2:
+            return False
+        if len(node.inputs) > 5 and not self._literal_null_arg(node.inputs[5]):
+            return False
+        args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+        bias_expr = (
+            self._scalar_operand_expr(
+                node.inputs[3],
+                local=local,
+                symbols_dict=symbols_dict,
+                expected=(TypeBool,),
+                cast="bool",
+            )
+            if len(node.inputs) > 3
+            else "False"
+        )
+        transpose_expr = (
+            self._scalar_operand_expr(
+                node.inputs[4],
+                local=local,
+                symbols_dict=symbols_dict,
+                expected=(TypeBool,),
+                cast="bool",
+            )
+            if len(node.inputs) > 4
+            else "False"
+        )
+        bias_literal = self._literal_bool_arg(node.inputs[3]) if len(node.inputs) > 3 else False
+        transpose_literal = self._literal_bool_arg(node.inputs[4]) if len(node.inputs) > 4 else False
+        weight = self._param_expr_for_path(
+            node.inputs[0],
+            node.inputs[6] if len(node.inputs) > 6 else "weight",
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        bias_value = self._param_expr_for_path(
+            node.inputs[0],
+            node.inputs[7] if len(node.inputs) > 7 else "bias",
+            optional=True,
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        weight_name = f"{target}__weight"
+        bias_name = f"{target}__bias"
+        x_name = f"{target}__x"
+        self._add(lines, indent, f"{weight_name} = {weight}")
+        if bias_literal is False:
+            bias_arg = "None"
+        else:
+            self._emit_optional_param_bind(
+                lines,
+                target=bias_name,
+                value_expr=bias_value,
+                flag_expr=bias_expr,
+                flag_literal=bias_literal,
+                indent=indent,
+            )
+            bias_arg = bias_name
+        self._add(lines, indent, f"{x_name} = {args[1]}")
+        if transpose_literal is True:
+            op_expr = f"{x_name}.matmul({weight_name})"
+            if bias_literal is not False:
+                op_expr = f"({op_expr} + ({bias_arg} if {bias_arg} is not None else 0))"
+        elif transpose_literal is False:
+            op_expr = f"{x_name}.linear({weight_name}.transpose(-1, -2), {bias_arg})"
+        else:
+            direct = f"{x_name}.matmul({weight_name}) + ({bias_arg} if {bias_arg} is not None else 0)"
+            standard = f"{x_name}.linear({weight_name}.transpose(-1, -2), {bias_arg})"
+            op_expr = f"({direct} if {transpose_expr} else {standard})"
+        if self.profile:
+            self._add(lines, indent, f"{target} = self._profile_call({f'node:{target}:_linear'!r}, lambda: {op_expr})")
+        else:
+            self._add(lines, indent, f"{target} = {op_expr}")
+        return True
 
 
 def emit_model_code_from_graph_ir(

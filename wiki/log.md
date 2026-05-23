@@ -1,4 +1,30 @@
+---
+status: active
+last-confirmed: 2026-05-20
+owners: agents
+confidence: high
+---
+
 # Wiki Log
+
+## [2026-05-20] llmwiki v2 | lifecycle-managed memory policy
+
+- Updated root `AGENTS.md` and `wiki/AGENTS.md` to align with LLM Wiki v2 conventions: memory tiers, lifecycle, confidence/source metadata, supersession, typed relationships, quality checks, and privacy filtering.
+- Added `wiki/memory.md` as the repository-local reference for memory page metadata, relationship vocabulary, ingest rules, and maintenance checklist.
+- Updated `wiki/index.md` to include the new memory conventions page.
+
+## [2026-05-20] llmwiki v2 | stale wiki refresh from repo inspection
+
+- Treated existing wiki content as stale and regenerated the core pages from current repository state.
+- Rewrote `wiki/scripts.md` to cover all current scripts in `../scripts/`, including roundtrip scripts, benchmark reporting, checkpoint generators, materialization, targeted helpers, and legacy launch/render helpers.
+- Added `wiki/roundtrips.md` for weak/strong stage roundtrip contracts and `wiki/benchmarks.md` for canonical benchmark execution/reporting conventions.
+- Updated `wiki/index.md` and `wiki/AGENTS.md` to include the new required pages.
+
+## [2026-05-20] axon policy | no definition-name special-casing
+
+- Added `wiki/axon-compiler-policy.md` to make explicit that typecheck, optimize, lowering, codegen, runtime, and related Axon compiler stages must not special-case ordinary Axon definitions by name.
+- Clarified the allowed boundary: primitive operation semantics may be encoded on primitives, while normal definitions such as `Config.dim`, `Tensor.size`, `NN.embedding`, and `Cache.update` must be handled through generic Axon/Graph IR rules.
+- Updated `wiki/index.md` and `wiki/AGENTS.md` to include the policy page.
 
 ## [2026-04-20] init | bootstrap llmwiki structure
 

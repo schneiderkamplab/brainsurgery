@@ -388,11 +388,26 @@ def _reachable_modules(
         module = modules_by_name[name]
         calls: set[str] = set()
         for node in module.nodes:
+            repeat_callee = _core_repeat_callee(node, modules_by_name)
+            if repeat_callee is not None:
+                calls.add(repeat_callee)
             _collect_operand_calls_from_node(node, modules_by_name, calls)
         for output in module.outputs:
             _collect_operand_calls(output, modules_by_name, calls)
         stack.extend(sorted(calls - seen))
     return seen
+
+
+def _core_repeat_callee(
+    node: GraphNode,
+    modules_by_name: dict[str, GraphModule],
+) -> str | None:
+    if node.op.name != "core.repeat":
+        return None
+    callee = node.attrs.get("callee")
+    if isinstance(callee, GraphLiteral) and isinstance(callee.value, str) and callee.value in modules_by_name:
+        return callee.value
+    return None
 
 
 def _reachable_calls_by_callee(
@@ -880,9 +895,9 @@ def _numeric_interval_binary_fact(
 def _meet_domain_facts(facts: list[GraphDomainFact]) -> GraphDomainFact:
     if not facts:
         return UNKNOWN_FACT
-    first = facts[0]
-    if first.kind == GraphDomainKind.UNKNOWN:
+    if any(fact.kind == GraphDomainKind.UNKNOWN for fact in facts):
         return UNKNOWN_FACT
+    first = facts[0]
     if all(fact == first for fact in facts[1:]):
         return first
     intervals = [_fact_interval(fact) for fact in facts]

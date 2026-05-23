@@ -14,8 +14,10 @@ import Tensor (
 )
 export (
   bidirectional_mask,
+  bidirectional_mask_for_input,
   blocksparse_mask,
   causal_mask,
+  causal_mask_for_input,
 )
 
 
@@ -43,6 +45,31 @@ causal_mask q k ?padding_mask=null ?window=null ?early_exit=false = if padding_m
     causal_mask_keep q k window=window
   else
     causal_mask_masked q k padding_mask window=window
+
+
+causal_mask_for_input_keep :: Tensor[B,Q] -> Dim -> ?Dim -> Tensor[B,1,Q,K]
+causal_mask_for_input_keep x K ?window=null = do
+  row_ids <- arange x start=0 end=Q |> reshape shape=[Q, 1]
+  col_ids <- arange x start=0 end=K |> reshape shape=[1, K]
+  aligned <- row_ids + (K - Q)
+  upper <- le col_ids aligned
+  keep_window <- (window == null) ? upper : (and upper (le (aligned - window + 1) col_ids))
+  keep <- reshape keep_window shape=[1, 1, Q, K]
+  return expand keep shape=[B, 1, Q, K]
+
+
+causal_mask_for_input_masked :: Tensor[B,Q] -> Dim -> Tensor[B,K] -> ?Dim -> Tensor[B,1,Q,K]
+causal_mask_for_input_masked x K padding_mask ?window=null = do
+  keep <- causal_mask_for_input_keep x K window=window
+  pad_keep <- cast padding_mask dtype="bool" |> reshape shape=[B, 1, 1, K]
+  return and keep pad_keep
+
+
+causal_mask_for_input :: Tensor[B,Q] -> Dim -> ?Tensor[B,K] -> ?Dim -> Tensor[B,1,Q,K]
+causal_mask_for_input x K ?padding_mask=null ?window=null = if padding_mask == null then
+    causal_mask_for_input_keep x K window=window
+  else
+    causal_mask_for_input_masked x K padding_mask window=window
 
 
 -- === BIDIRECTIONAL MASK ===
@@ -77,6 +104,34 @@ bidirectional_mask q k ?padding_mask=null ?window=null = if padding_mask == null
     bidirectional_mask_keep q k window=window
   else
     bidirectional_mask_masked q k padding_mask window=window
+
+
+bidirectional_mask_for_input_keep :: Tensor[B,Q] -> Dim -> ?Dim -> Tensor[B,1,Q,K]
+bidirectional_mask_for_input_keep x K ?window=null = do
+  row_ids <- arange x start=0 end=Q |> reshape shape=[Q, 1]
+  col_ids <- arange x start=0 end=K |> reshape shape=[1, K]
+  aligned <- row_ids + (K - Q)
+  all_rows <- row_ids - row_ids
+  all_cols <- col_ids - col_ids
+  keep <- (window == null) ? eq all_rows all_cols : bidirectional_mask_keep_window aligned col_ids window
+  keep <- reshape keep shape=[1, 1, Q, K]
+  return expand keep shape=[B, 1, Q, K]
+
+
+bidirectional_mask_for_input_masked :: Tensor[B,Q] -> Dim -> Tensor[B,K] -> ?Dim -> Tensor[B,1,Q,K]
+bidirectional_mask_for_input_masked x K padding_mask ?window=null = do
+  keep <- bidirectional_mask_for_input_keep x K window=window
+  pad_keep <- slice padding_mask dim=-1 start=0 end=K |>
+    cast dtype="bool" |>
+    reshape shape=[B, 1, 1, K]
+  return and keep pad_keep
+
+
+bidirectional_mask_for_input :: Tensor[B,Q] -> Dim -> ?Tensor[B,K] -> ?Dim -> Tensor[B,1,Q,K]
+bidirectional_mask_for_input x K ?padding_mask=null ?window=null = if padding_mask == null then
+    bidirectional_mask_for_input_keep x K window=window
+  else
+    bidirectional_mask_for_input_masked x K padding_mask window=window
 
 
 -- === BLOCKSPARSE MASK ===

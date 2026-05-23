@@ -30,7 +30,9 @@ from ..ast import (
     AxonExprTyping,
     AxonFile,
     AxonParam,
+    AxonRepeat,
     AxonReturn,
+    AxonYield,
     Constraint,
     ConstraintAtom,
     ConstraintOperand,
@@ -70,7 +72,7 @@ from .domain import (
     GraphDomainKind,
     infer_main_module_domain_facts,
 )
-from .effects import GraphEffect, graph_operand_effect
+from .effects import GraphEffect, UsageClass, graph_operand_effect, graph_operand_usage
 
 
 def _arity(type_expr: TypeExpr) -> int:
@@ -287,6 +289,50 @@ def _replace_operand_refs(operand: GraphOperand, subst: dict[str, GraphOperand])
     return operand
 
 
+def _rename_render_dim_token(dim: DimToken, renames: dict[str, str]) -> DimToken:
+    if isinstance(dim, str):
+        return renames.get(dim, dim)
+    if isinstance(dim, DimExprBinary):
+        return DimExprBinary(
+            op=dim.op,
+            left=_rename_render_dim_token(dim.left, renames),
+            right=_rename_render_dim_token(dim.right, renames),
+        )
+    return dim
+
+
+def _rename_render_type_expr(type_expr: TypeExpr | None, renames: dict[str, str]) -> TypeExpr | None:
+    if isinstance(type_expr, TypeTensor):
+        return TypeTensor(
+            base=type_expr.base,
+            dims=tuple(_rename_render_dim_token(dim, renames) for dim in type_expr.dims),
+        )
+    if isinstance(type_expr, TypeNamed):
+        return TypeNamed(
+            name=type_expr.name,
+            args=tuple(_rename_render_dim_token(dim, renames) for dim in type_expr.args),
+        )
+    if isinstance(type_expr, TypeOptional):
+        return TypeOptional(_rename_render_type_expr(type_expr.inner, renames))
+    if isinstance(type_expr, TypeList):
+        return TypeList(_rename_render_type_expr(type_expr.item, renames))
+    if isinstance(type_expr, TypeTuple):
+        return TypeTuple(tuple(_rename_render_type_expr(item, renames) for item in type_expr.items))
+    return type_expr
+
+
+def _rename_render_expr_metadata(expr: AxonExpr, renames: dict[str, str]) -> AxonExpr:
+    return replace(
+        expr,
+        inferred_type=_rename_render_type_expr(expr.inferred_type, renames),
+        inferred_dims=(
+            None
+            if expr.inferred_dims is None
+            else tuple(_rename_render_dim_token(dim, renames) for dim in expr.inferred_dims)
+        ),
+    )
+
+
 def _node_inline_operand(node: GraphNode) -> GraphOperand | None:
     if len(node.outputs) != 1:
         return None
@@ -424,70 +470,139 @@ def _render_nodes_and_outputs(
 
 def _rename_render_expr(expr: AxonExpr, renames: dict[str, str]) -> AxonExpr:
     if isinstance(expr, AxonExprName):
-        return replace(expr, name=renames.get(expr.name, expr.name))
+        return _rename_render_expr_metadata(
+            replace(expr, name=renames.get(expr.name, expr.name)),
+            renames,
+        )
     if isinstance(expr, AxonExprList):
-        return replace(expr, items=tuple(_rename_render_expr(item, renames) for item in expr.items))
+        return _rename_render_expr_metadata(
+            replace(expr, items=tuple(_rename_render_expr(item, renames) for item in expr.items)),
+            renames,
+        )
     if isinstance(expr, AxonExprTuple):
-        return replace(expr, items=tuple(_rename_render_expr(item, renames) for item in expr.items))
+        return _rename_render_expr_metadata(
+            replace(expr, items=tuple(_rename_render_expr(item, renames) for item in expr.items)),
+            renames,
+        )
     if isinstance(expr, AxonExprCall):
-        return replace(
-            expr,
-            args=tuple(_rename_render_expr(arg, renames) for arg in expr.args),
-            kwargs={
-                key: _rename_render_expr(value, renames) if isinstance(value, AxonExprTyping) else value
-                for key, value in expr.kwargs.items()
-            },
+        return _rename_render_expr_metadata(
+            replace(
+                expr,
+                args=tuple(_rename_render_expr(arg, renames) for arg in expr.args),
+                kwargs={
+                    key: _rename_render_expr(value, renames) if isinstance(value, AxonExprTyping) else value
+                    for key, value in expr.kwargs.items()
+                },
+            ),
+            renames,
         )
     if isinstance(expr, AxonExprPipe):
-        return replace(
-            expr,
-            value=_rename_render_expr(expr.value, renames),
-            stages=tuple(_rename_render_expr(stage, renames) for stage in expr.stages),
+        return _rename_render_expr_metadata(
+            replace(
+                expr,
+                value=_rename_render_expr(expr.value, renames),
+                stages=tuple(_rename_render_expr(stage, renames) for stage in expr.stages),
+            ),
+            renames,
         )
     if isinstance(expr, AxonExprBind):
         body_renames = dict(renames)
         body_renames.pop(expr.var, None)
-        return replace(
-            expr,
-            value=_rename_render_expr(expr.value, renames),
-            body=_rename_render_expr(expr.body, body_renames),
+        return _rename_render_expr_metadata(
+            replace(
+                expr,
+                value=_rename_render_expr(expr.value, renames),
+                body=_rename_render_expr(expr.body, body_renames),
+            ),
+            renames,
         )
     if isinstance(expr, AxonExprIf):
-        return replace(
-            expr,
-            cond=_rename_render_expr(expr.cond, renames),
-            true_expr=_rename_render_expr(expr.true_expr, renames),
-            false_expr=_rename_render_expr(expr.false_expr, renames),
+        return _rename_render_expr_metadata(
+            replace(
+                expr,
+                cond=_rename_render_expr(expr.cond, renames),
+                true_expr=_rename_render_expr(expr.true_expr, renames),
+                false_expr=_rename_render_expr(expr.false_expr, renames),
+            ),
+            renames,
         )
     if isinstance(expr, AxonExprTernary):
-        return replace(
-            expr,
-            cond=_rename_render_expr(expr.cond, renames),
-            true_expr=_rename_render_expr(expr.true_expr, renames),
-            false_expr=_rename_render_expr(expr.false_expr, renames),
+        return _rename_render_expr_metadata(
+            replace(
+                expr,
+                cond=_rename_render_expr(expr.cond, renames),
+                true_expr=_rename_render_expr(expr.true_expr, renames),
+                false_expr=_rename_render_expr(expr.false_expr, renames),
+            ),
+            renames,
         )
     if isinstance(expr, AxonExprBinary):
-        return replace(
-            expr,
-            left=_rename_render_expr(expr.left, renames),
-            right=_rename_render_expr(expr.right, renames),
+        return _rename_render_expr_metadata(
+            replace(
+                expr,
+                left=_rename_render_expr(expr.left, renames),
+                right=_rename_render_expr(expr.right, renames),
+            ),
+            renames,
         )
     if isinstance(expr, AxonExprLambda):
         body_renames = dict(renames)
         body_renames.pop(expr.var, None)
-        return replace(expr, body=_rename_render_expr(expr.body, body_renames))
+        return _rename_render_expr_metadata(
+            replace(expr, body=_rename_render_expr(expr.body, body_renames)),
+            renames,
+        )
     if isinstance(expr, AxonExprParen):
-        return replace(expr, inner=_rename_render_expr(expr.inner, renames))
+        return _rename_render_expr_metadata(
+            replace(expr, inner=_rename_render_expr(expr.inner, renames)),
+            renames,
+        )
     if isinstance(expr, AxonExprAscribe):
-        return replace(expr, expr=_rename_render_expr(expr.expr, renames))
+        return _rename_render_expr_metadata(
+            replace(
+                expr,
+                expr=_rename_render_expr(expr.expr, renames),
+                type_expr=_rename_render_type_expr(expr.type_expr, renames),
+            ),
+            renames,
+        )
     if isinstance(expr, AxonExprDo):
-        return replace(expr, body=_canonicalize_render_value_names(expr.body))
-    return expr
+        return _rename_render_expr_metadata(
+            replace(expr, body=_canonicalize_render_value_names(expr.body)),
+            renames,
+        )
+    return _rename_render_expr_metadata(expr, renames)
+
+
+def _rename_render_stmt(
+    stmt: AxonBind | AxonRepeat | AxonReturn | AxonYield,
+    renames: dict[str, str],
+) -> AxonBind | AxonRepeat | AxonReturn | AxonYield:
+    if isinstance(stmt, AxonBind):
+        return replace(stmt, expr=_rename_render_expr(stmt.expr, renames))
+    if isinstance(stmt, AxonRepeat):
+        return replace(
+            stmt,
+            from_expr=_rename_render_expr(stmt.from_expr, renames),
+            to_expr=_rename_render_expr(stmt.to_expr, renames),
+            step_expr=_rename_render_expr(stmt.step_expr, renames),
+            body=tuple(_rename_render_stmt(item, renames) for item in stmt.body),
+            targets=tuple(renames.get(target, target) for target in stmt.targets)
+            if stmt.targets is not None
+            else None,
+            carry=tuple(renames.get(name, name) for name in stmt.carry)
+            if stmt.carry is not None
+            else None,
+        )
+    return replace(
+        stmt,
+        values=tuple(_rename_render_expr(value, renames) for value in stmt.values),
+    )
 
 
 def _canonicalize_render_value_names(
-    statements: tuple[AxonBind | AxonReturn, ...],
-) -> tuple[AxonBind | AxonReturn, ...]:
+    statements: tuple[AxonBind | AxonRepeat | AxonReturn | AxonYield, ...],
+) -> tuple[AxonBind | AxonRepeat | AxonReturn | AxonYield, ...]:
     used: set[str] = set()
     for stmt in statements:
         if isinstance(stmt, AxonBind):
@@ -496,7 +611,7 @@ def _canonicalize_render_value_names(
                     used.add(target)
     renames: dict[str, str] = {}
     next_index = 1
-    rewritten: list[AxonBind | AxonReturn] = []
+    rewritten: list[AxonBind | AxonRepeat | AxonReturn | AxonYield] = []
     for stmt in statements:
         if isinstance(stmt, AxonBind):
             expr = _rename_render_expr(stmt.expr, renames)
@@ -515,6 +630,38 @@ def _canonicalize_render_value_names(
                     used.add(target)
                     targets.append(target)
             rewritten.append(replace(stmt, targets=tuple(targets), expr=expr))
+        elif isinstance(stmt, AxonRepeat):
+            repeat_renames = dict(renames)
+            if stmt.targets is not None:
+                for target in stmt.targets:
+                    if _is_generated_render_temp_base(target):
+                        while True:
+                            candidate = f"_v{next_index}"
+                            next_index += 1
+                            if candidate not in used:
+                                break
+                        used.add(candidate)
+                        repeat_renames[target] = candidate
+                    else:
+                        used.add(target)
+            rewritten.append(
+                replace(
+                    stmt,
+                    from_expr=_rename_render_expr(stmt.from_expr, renames),
+                    to_expr=_rename_render_expr(stmt.to_expr, renames),
+                    step_expr=_rename_render_expr(stmt.step_expr, renames),
+                    body=_canonicalize_render_value_names(
+                        tuple(_rename_render_stmt(item, repeat_renames) for item in stmt.body)
+                    ),
+                    targets=tuple(repeat_renames.get(target, target) for target in stmt.targets)
+                    if stmt.targets is not None
+                    else None,
+                    carry=tuple(repeat_renames.get(name, name) for name in stmt.carry)
+                    if stmt.carry is not None
+                    else None,
+                )
+            )
+            renames.update(repeat_renames)
         else:
             rewritten.append(
                 replace(
@@ -784,13 +931,19 @@ def graph_module_to_axon_definition(
             )
         inputs: list[GraphOperand] = []
         for idx, item in enumerate(operand.inputs):
-            if isinstance(item, GraphExpr) and graph_operand_effect(item) != GraphEffect.TOTAL_PURE:
+            if isinstance(item, GraphExpr) and (
+                graph_operand_effect(item) != GraphEffect.TOTAL_PURE
+                or graph_operand_usage(item) != UsageClass.UNRESTRICTED
+            ):
                 inputs.append(item)
             else:
                 inputs.append(atomicize_operand(item, base=f"{base}_arg{idx + 1}"))
         attrs: dict[str, GraphOperand] = {}
         for key, value in operand.attrs.items():
-            if isinstance(value, GraphExpr) and graph_operand_effect(value) != GraphEffect.TOTAL_PURE:
+            if isinstance(value, GraphExpr) and (
+                graph_operand_effect(value) != GraphEffect.TOTAL_PURE
+                or graph_operand_usage(value) != UsageClass.UNRESTRICTED
+            ):
                 attrs[key] = value
             else:
                 attrs[key] = atomicize_operand(value, base=f"{base}_{key}")
@@ -806,6 +959,96 @@ def graph_module_to_axon_definition(
                 for key, value in node.attrs.items()
             },
         )
+        if rewritten_node.op.name == "core.repeat":
+            callee_attr = rewritten_node.attrs.get("callee")
+            var_attr = rewritten_node.attrs.get("var")
+            arg_count_attr = rewritten_node.attrs.get("arg_count")
+            carry_count_attr = rewritten_node.attrs.get("carry_count")
+            if (
+                not isinstance(callee_attr, GraphLiteral)
+                or not isinstance(callee_attr.value, str)
+                or not isinstance(var_attr, GraphLiteral)
+                or not isinstance(var_attr.value, str)
+                or not isinstance(arg_count_attr, GraphLiteral)
+                or type(arg_count_attr.value) is not int
+                or not isinstance(carry_count_attr, GraphLiteral)
+                or type(carry_count_attr.value) is not int
+            ):
+                raise ValueError("cannot render malformed core.repeat node")
+            arg_count = arg_count_attr.value
+            carry_count = carry_count_attr.value
+            carry_names: list[str] = []
+            for index in range(carry_count):
+                carry_attr = rewritten_node.attrs.get(f"carry_{index}")
+                if not isinstance(carry_attr, GraphLiteral) or not isinstance(carry_attr.value, str):
+                    raise ValueError("cannot render core.repeat without carry names")
+                carry_input = rewritten_node.inputs[3 + index]
+                if isinstance(carry_input, GraphValueRef):
+                    carry_names.append(carry_input.name)
+                else:
+                    carry_names.append(carry_attr.value)
+            target_names = tuple(output.name for output in rewritten_node.outputs)
+            args: list[AxonExpr] = []
+            for index in range(arg_count):
+                role_attr = rewritten_node.attrs.get(f"arg_{index}")
+                if not isinstance(role_attr, GraphLiteral) or not isinstance(role_attr.value, str):
+                    raise ValueError("cannot render malformed core.repeat arg role")
+                role = role_attr.value
+                if role == "iter":
+                    args.append(_typed(AxonExprName(var_attr.value), TypeInt(), None))
+                elif role.startswith("carry:"):
+                    carry_index = int(role.removeprefix("carry:"))
+                    args.append(
+                        _typed(
+                            AxonExprName(carry_names[carry_index]),
+                            graph_operand_type(rewritten_node.inputs[3 + carry_index]),
+                            rewritten_node.outputs[carry_index].dims
+                            if carry_index < len(rewritten_node.outputs)
+                            else None,
+                        )
+                    )
+                elif role.startswith("input:"):
+                    input_index = int(role.removeprefix("input:"))
+                    args.append(
+                        _operand_to_expr(
+                            atomicize_operand(rewritten_node.inputs[input_index], base=f"{output_base}_arg{index + 1}"),
+                            local_names=used_names,
+                            zero_arg_modules=zero_arg_modules,
+                        )
+                    )
+                else:
+                    raise ValueError(f"cannot render core.repeat arg role {role!r}")
+            yield_expr = _typed(
+                AxonExprCall(callee=callee_attr.value, args=tuple(args), kwargs={}),
+                rewritten_node.type_expr,
+                rewritten_node.dims,
+                arity=len(rewritten_node.outputs) if len(rewritten_node.outputs) > 1 else None,
+            )
+            statements.append(
+                AxonRepeat(
+                    name=None,
+                    var=var_attr.value,
+                    to_expr=_operand_to_expr(
+                        atomicize_operand(rewritten_node.inputs[1], base=f"{output_base}_to"),
+                        local_names=used_names,
+                        zero_arg_modules=zero_arg_modules,
+                    ),
+                    from_expr=_operand_to_expr(
+                        atomicize_operand(rewritten_node.inputs[0], base=f"{output_base}_from"),
+                        local_names=used_names,
+                        zero_arg_modules=zero_arg_modules,
+                    ),
+                    step_expr=_operand_to_expr(
+                        atomicize_operand(rewritten_node.inputs[2], base=f"{output_base}_step"),
+                        local_names=used_names,
+                        zero_arg_modules=zero_arg_modules,
+                    ),
+                    body=(AxonYield(values=(yield_expr,)),),
+                    targets=target_names,
+                    carry=tuple(carry_names),
+                )
+            )
+            continue
         if (
             zero_arg_modules is not None
             and rewritten_node.op.name in {"core.alias", "core.ascribe"}
@@ -1026,6 +1269,10 @@ def _module_dependency_refs(module: GraphModule, module_names: set[str]) -> set[
     for node in module.nodes:
         if node.op.name in module_names:
             refs.add(node.op.name)
+        if node.op.name == "core.repeat":
+            callee = node.attrs.get("callee")
+            if isinstance(callee, GraphLiteral) and isinstance(callee.value, str) and callee.value in module_names:
+                refs.add(callee.value)
         _type_module_refs(node.type_expr, module_names, refs)
         if node.dims is not None:
             for dim in node.dims:

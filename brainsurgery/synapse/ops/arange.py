@@ -22,6 +22,11 @@ def _dim_sub(left: Any, right: Any) -> Any:
         return 0
     if isinstance(left, int) and isinstance(right, int):
         return left - right
+    if isinstance(left, DimExprBinary) and left.op == "+":
+        if left.left == right:
+            return left.right
+        if left.right == right:
+            return left.left
     return DimExprBinary(op="-", left=left, right=right)
 
 

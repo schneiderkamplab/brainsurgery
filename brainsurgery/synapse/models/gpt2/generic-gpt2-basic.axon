@@ -3,7 +3,7 @@
 
 import Activations (gelu_new)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (causal_mask)
+import Masking (causal_mask_for_input)
 import Positions (position_ids)
 import Cache (Cache, CacheLayer)
 import Config
@@ -19,8 +19,8 @@ NUM_HEADS   = Config.dim @@n_head default=12
 VOCAB_SIZE   = Config.dim @@vocab_size default=50257
 PAD_FILL = 1
 
-gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
-gpt2_block x attn_mask past_kv = do
+gpt2_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+gpt2_block x mask past_kv = do
   x1 <- NN.layernorm@ln_1 x
   a, new_kv <- scope@attn do
     q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@c_attn x1 dim=(3 * MODEL_DIM) bias=true transpose=true) parts=3
@@ -28,7 +28,6 @@ gpt2_block x attn_mask past_kv = do
     k <- reshape_heads k_lin heads=NUM_HEADS
     v <- reshape_heads v_lin heads=NUM_HEADS
     k, v, new_kv <- Cache.update past_kv k v
-    mask <- causal_mask q k window=CONTEXT_SIZE padding_mask=attn_mask
     a <- attention q k v mask |> merge_heads |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
     return a, new_kv
   x <- x + a
@@ -39,13 +38,16 @@ gpt2_block x attn_mask past_kv = do
 
 gpt2 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
 gpt2 input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  key_len <- past_length + S
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=CONTEXT_SIZE
   tok <- NN.embedding@wte input_ids dim=MODEL_DIM
-  pos <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=PAD_FILL |> NN.embedding@wpe
+  pos <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=PAD_FILL |> NN.embedding@wpe
   x <- tok + pos
   new_kv <- use_cache ? Cache.init : null
   x, new_kv <- for@h i <- [0..NUM_LAYERS) carry (x, new_kv) do
     past_i <- Cache.index past_kv i
-    x, new_i <- gpt2_block x attn_mask past_i
+    x, new_i <- gpt2_block x mask past_i
     new_kv <- Cache.append new_kv new_i
     yield x, new_kv
   logits <- NN.layernorm@ln_f x |> NN.linear@wte

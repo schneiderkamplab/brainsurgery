@@ -7,6 +7,7 @@ from typing import cast
 from ..ast import (
     AxonBind,
     AxonExpr,
+    AxonExprAscribe,
     AxonExprBinary,
     AxonExprBind,
     AxonExprBool,
@@ -36,6 +37,7 @@ from ..ast import (
     parse_path_token,
     resolve_path_expr_to_key,
 )
+from ..ast.types import TypeDim
 from .context import MaterializeContext
 
 _NOT_EVALUABLE = object()
@@ -429,7 +431,10 @@ def _materialize_config_call(
     )
     if evaluated is _NOT_EVALUABLE:
         return materialized_call
-    return _expr_from_scalar(evaluated)
+    literal = _expr_from_scalar(evaluated)
+    if callee_base == "Config.dim":
+        return AxonExprAscribe(expr=literal, type_expr=TypeDim())
+    return literal
 
 
 def _materialize_expr(
@@ -442,6 +447,11 @@ def _materialize_expr(
     if isinstance(expr, AxonExprParen):
         return AxonExprParen(
             inner=_materialize_expr(expr.inner, env=env, ctx=ctx, resolve_names=resolve_names)
+        )
+    if isinstance(expr, AxonExprAscribe):
+        return AxonExprAscribe(
+            expr=_materialize_expr(expr.expr, env=env, ctx=ctx, resolve_names=resolve_names),
+            type_expr=expr.type_expr,
         )
     if isinstance(expr, AxonExprIf):
         return AxonExprIf(

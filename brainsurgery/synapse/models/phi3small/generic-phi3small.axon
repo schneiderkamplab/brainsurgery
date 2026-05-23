@@ -3,7 +3,7 @@
 
 import Activations (gegelu)
 import Attention (attention, merge_heads, split_qkv_grouped)
-import Masking (blocksparse_mask, causal_mask)
+import Masking (blocksparse_mask, causal_mask_for_input)
 import Params (has_root)
 import Positions (position_ids, rope_pair_base, rope_pair_longrope)
 import Cache
@@ -54,8 +54,8 @@ HAS_LM_HEAD = has_root "lm_head"
 phi3small_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 phi3small_norm@path x = NN.layernorm@path x eps=EPS
 
-phi3small_block :: Tensor[B,S,D] -> Int -> IdxTensor[B,S] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
-phi3small_block x i pos_ids attn_mask past_kv = do
+phi3small_block :: Tensor[B,S,D] -> Int -> IdxTensor[B,S] -> Tensor[B,1,S,K] -> ?Tensor[B,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+phi3small_block x i pos_ids dense_mask attn_mask past_kv = do
   xn <- phi3small_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
     qkv <- NN.linear@query_key_value xn dim=(QD + KVD + KVD) bias=true
@@ -67,8 +67,7 @@ phi3small_block x i pos_ids attn_mask past_kv = do
     dense <- (DENSE_EVERY > 0) ? (((i + 1) % DENSE_EVERY) == 0) : false
     a <- dense
       ? do
-        keep <- causal_mask q k window=WINDOW_GLOBAL padding_mask=attn_mask
-        return attention q k v keep=keep scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
+        return attention q k v keep=dense_mask scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
       : do
         add_mask <- blocksparse_mask q k padding_mask=attn_mask block_size=BS_BLOCK_SIZE local_blocks=BS_LOCAL_BLOCKS vert_stride=BS_VERT_STRIDE homo_head=false
         keep <- Tensor.eq add_mask 0.0
@@ -83,14 +82,17 @@ phi3small_block x i pos_ids attn_mask past_kv = do
 
 phi3small :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 phi3small input_ids attn_mask past_kv use_cache = do
-  pos_ids <- position_ids input_ids past_length=(Cache.past_length past_kv)
+  past_length <- Cache.past_length past_kv
+  pos_ids <- position_ids input_ids past_length=past_length
+  key_len <- past_length + S
+  dense_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WINDOW_GLOBAL
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     x <- (MUP_EMBED_MULT > 0.0) ? (x * MUP_EMBED_MULT) : x
     new_kv <- use_cache ? Cache.init : null
     x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
-      x, new_i <- phi3small_block x i pos_ids attn_mask past_i
+      x, new_i <- phi3small_block x i pos_ids dense_mask attn_mask past_i
       new_kv <- Cache.append new_kv new_i
       yield x, new_kv
     x <- phi3small_norm@final_layernorm x

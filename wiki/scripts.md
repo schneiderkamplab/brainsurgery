@@ -1,56 +1,113 @@
+---
+status: active
+last-confirmed: 2026-05-20
+owners: agents
+confidence: high
+---
+
 # Scripts Inventory
 
-This file tracks maintained scripts in `../scripts/`.
+This page is the maintained inventory for `../scripts/`.
 
-## Entries
+Validated-by: repo inspection of `scripts/` on 2026-05-20.
 
-- `path`: `scripts/create_deepseek_v4_random.py`
-- `purpose`: Create a deterministic synthetic DeepSeek V4 HF checkpoint for Axon/HF parity tests without downloading real DeepSeek V4 weights.
-- `owner`: agents
-- `inputs`: optional output directory, seed, storage dtype, and max shard size.
-- `outputs`: HF-compatible model directory with `config.json`, `model.safetensors`, tokenizer files, `README.md`, and `random_checkpoint_summary.json`.
-- `env`: run through the `brainsurgery` conda env so the installed `transformers.models.deepseek_v4` classes are available.
-- `example`: `conda run --no-capture-output -n brainsurgery python scripts/create_deepseek_v4_random.py --output models/test/DeepSeek-V4-Test`
-- `variants`: `test` is a small feature-complete decoder-stack target with sliding/HCA/CSA attention and hash/routed MoE.
-- `notes`: the helper is also imported by `scripts/create_min4_family_test_models.py` so the full min4B test-checkpoint inventory can be regenerated from one script.
-- `failure-modes`: requires the DeepSeek V4 Transformers implementation in the `brainsurgery` conda env.
+## Current Standards
 
-- `path`: `scripts/create_min4_family_test_models.py`
-- `purpose`: Create small random HF checkpoints under `models/test/` for generic Axon families whose real checkpoints are all above 4B parameters.
-- `owner`: agents
-- `inputs`: local source checkpoints, optional `--only` family-test names, seed, dtype, and output root.
-- `outputs`: HF-compatible tiny test checkpoint directories with config, tokenizer files, `model.safetensors`, and `random_checkpoint_summary.json`.
-- `env`: run through the `brainsurgery` conda env; some remote-code families may require optional HF modeling dependencies.
-- `example`: `conda run --no-capture-output -n brainsurgery python scripts/create_min4_family_test_models.py --only Qwen3-MoE-Test`
-- `failure-modes`: requires local source checkpoints under `models/`; families backed by remote-code may need source-specific config/key rewrites in this script to make the tiny checkpoint match the real checkpoint layout. `DeepSeek-V2-Test` removes stale `auto_map` remote-code hooks so HF and Axon both consume the same native DeepSeek-V2 safetensors.
+- Preferred env: `conda run --no-capture-output -n brainsurgery ...` or an activated `brainsurgery` conda env.
+- New benchmark artifacts must go under `log/<run-id>`, matching `../scripts/AGENTS.md`.
+- Older scripts that write top-level `log-*` paths are legacy convenience helpers; do not copy that output layout for new work.
+- Roundtrip scripts default to writing under `tmp/axon-stage-roundtrip-*`.
 
-- `path`: `scripts/axon_graph_ir_weak_roundtrip.py`
-- `purpose`: Verify Graph IR can render back to canonical typed flat Axon after the initial full frontend pipeline.
-- `owner`: agents
-- `inputs`: Axon files or directories; optional `--main-module`.
-- `outputs`: render generations under `tmp/axon-stage-roundtrip-graph-ir-weak` by default.
-- `env`: run through the `brainsurgery` conda env.
-- `example`: `conda run --no-capture-output -n brainsurgery python scripts/axon_graph_ir_weak_roundtrip.py brainsurgery/synapse/models/gpt2/gpt2-kv.axon`
-- `notes`: defaults to signature/type-header rendering only; pass `--show-inferred-expression-types` to also render inferred body expression ascriptions.
-- `failure-modes`: weak mode reparses/renormalizes/retypechecks rendered flat Axon without reresolving or reflattening, so failures usually point at graph-rendered Axon not satisfying the flat typed frontend contract.
+## Roundtrip Scripts
 
-- `path`: `scripts/axon_graph_ir_strong_roundtrip.py`
-- `purpose`: Verify Graph IR rendered Axon is stable when every generation reruns resolve, normalize, elaborate, flatten, typecheck2, lower-to-graph, and graph-render.
-- `owner`: agents
-- `inputs`: Axon files or directories; optional `--main-module`.
-- `outputs`: render generations under `tmp/axon-stage-roundtrip-graph-ir-strong` by default.
-- `env`: run through the `brainsurgery` conda env.
-- `example`: `conda run --no-capture-output -n brainsurgery python scripts/axon_graph_ir_strong_roundtrip.py brainsurgery/synapse/models/gpt2/gpt2-kv.axon`
-- `notes`: defaults to signature/type-header rendering only; pass `--show-inferred-expression-types` to also render inferred body expression ascriptions.
-- `failure-modes`: strong mode exposes resolver/frontend instability as well as graph-render instability; inspect `render1`, `render2`, and `render3` artifacts in the output directory.
+These scripts validate staged Axon pipeline render/reparse stability.
 
-## Entry Template
+| Script | Purpose | Default Output |
+|---|---|---|
+| `scripts/axon_parse_roundtrip.py` | Parse/render/parse stability for raw Axon ASTs. | `tmp/axon-stage-roundtrip-parse` |
+| `scripts/axon_resolve_roundtrip.py` | Load+resolve render stability across three generations. | `tmp/axon-stage-roundtrip-resolve` |
+| `scripts/axon_normalize_weak_roundtrip.py` | Reparse and renormalize without reresolve. | `tmp/axon-stage-roundtrip-normalize-weak` |
+| `scripts/axon_normalize_strong_roundtrip.py` | Reparse, reresolve, and renormalize. | `tmp/axon-stage-roundtrip-normalize-strong` |
+| `scripts/axon_normalize_roundtrip.py` | Compatibility entrypoint to strong normalize roundtrip. | same as strong |
+| `scripts/axon_elaborate_weak_roundtrip.py` | Reparse, renormalize, and reelaborate without reresolve. | `tmp/axon-stage-roundtrip-elaborate-weak` |
+| `scripts/axon_elaborate_strong_roundtrip.py` | Rerun resolve+normalize+elaborate. | `tmp/axon-stage-roundtrip-elaborate-strong` |
+| `scripts/axon_flatten_weak_roundtrip.py` | Reparse, renormalize, and reflatten without reresolve. | `tmp/axon-stage-roundtrip-flatten-weak` |
+| `scripts/axon_flatten_strong_roundtrip.py` | Rerun resolve+normalize+elaborate+flatten. | `tmp/axon-stage-roundtrip-flatten-strong` |
+| `scripts/axon_flatten_roundtrip.py` | Compatibility entrypoint to strong flatten roundtrip. | same as strong |
+| `scripts/axon_typecheck2_weak_roundtrip.py` | Reparse, renormalize, and retypecheck without reresolve/reflatten. | `tmp/axon-stage-roundtrip-typecheck2-weak` |
+| `scripts/axon_typecheck2_strong_roundtrip.py` | Rerun resolve+normalize+elaborate+flatten+typecheck2. | `tmp/axon-stage-roundtrip-typecheck2-strong` |
+| `scripts/axon_typecheck_roundtrip.py` | Typecheck roundtrip wrapper with selectable typechecker flag. | `tmp/axon-stage-roundtrip-typecheck` |
+| `scripts/axon_graph_ir_weak_roundtrip.py` | Full pipeline to graph-rendered Axon, then weak graph rerender. | `tmp/axon-stage-roundtrip-graph-ir-weak` |
+| `scripts/axon_graph_ir_strong_roundtrip.py` | Rerun resolve+normalize+elaborate+flatten+typecheck2+graph render each generation. | `tmp/axon-stage-roundtrip-graph-ir-strong` |
+| `scripts/axon_graph_optimize_weak_roundtrip.py` | Graph IR weak roundtrip with graph optimization enabled. | `tmp/axon-stage-roundtrip-graph-optimize-weak` |
+| `scripts/axon_graph_optimize_strong_roundtrip.py` | Graph IR strong roundtrip with graph optimization enabled. | `tmp/axon-stage-roundtrip-graph-optimize-strong` |
 
-- `path`:
-- `purpose`:
-- `owner`:
-- `inputs`:
-- `outputs`:
-- `env`:
-- `example`:
-- `failure-modes`:
+Common flags: `--output-dir`, `--keep-existing`, `--include-stale-cache`, stage-specific `--no-validate-*`, and for typed/graph stages `--main-module`, `--show-types`, `--show-inferred-expression-types`.
+
+Depends-on: `scripts/axon_roundtrip_common.py` for shared path discovery, generation writing, and result reporting.
+
+## Benchmark Reporting
+
+| Script | Purpose | Notes |
+|---|---|---|
+| `scripts/benchmark_report_3tables.py` | Render the standard 3 markdown tables from recursive `axon-benchmark` stream CSV logs. | Use for `report`/`status` workflows. |
+
+Example:
+
+```bash
+conda run --no-capture-output -n brainsurgery \
+  python scripts/benchmark_report_3tables.py log/<run-id> --abs-threshold 1e-3
+```
+
+Output tables: progress summary, issue rows, and generic-vs-materialized mismatch rows.
+
+## Checkpoint/Test Model Generators
+
+| Script | Purpose | Important Inputs | Outputs |
+|---|---|---|---|
+| `scripts/create_deepseek_v4_random.py` | Create deterministic DeepSeek V4 test checkpoints for Axon/HF parity tests. | `--output`, `--variant`, `--seed`, `--dtype`, `--max-shard-size`, `--tokenizer`. | HF-compatible checkpoint directory with config, tokenizer files, safetensors, README, and summary JSON. |
+| `scripts/create_min4_family_test_models.py` | Create small random test checkpoints for generic Axon families whose real checkpoints are all above 4B parameters. | `--repo-root`, `--output-root`, repeated `--only`, `--seed`, `--dtype`, `--max-shard-size`. | Tiny HF-compatible checkpoints under `models/test/` by default. |
+
+Relationship: `create_min4_family_test_models.py` uses DeepSeek V4 test-model creation logic so the min4B test inventory can be regenerated through one command.
+
+## Materialization
+
+| Script | Purpose | Notes |
+|---|---|---|
+| `scripts/rematerialize_all_generic.sh` | Bulk materialize every `generic-*.axon` under `brainsurgery/synapse/models`. | Uses `brainsurgery synapse axon-materialize`; writes summaries under `log/rematerialize/`. |
+
+Example:
+
+```bash
+PARALLEL=8 MODELS_ROOT=models scripts/rematerialize_all_generic.sh
+```
+
+## Targeted Benchmark Helpers
+
+These are narrow helpers for previously investigated benchmark clusters.
+
+| Script | Purpose | Status |
+|---|---|---|
+| `scripts/run_gemma4_affected_benchmark.sh` | Shell wrapper for the Gemma4 affected benchmark helper. | Active only for that targeted rerun. |
+| `scripts/run_gemma4_affected_benchmark_py.py` | Runs selected Gemma4/Gemma4-MoE affected rows through `run_axon_benchmark`. | Uses a default top-level `log-gemma4-*` path; prefer overriding to `log/<run-id>`. |
+| `scripts/run_gemma4_moe_g45.py` | Targeted Gemma4 MoE derived-experts benchmark. | Legacy one-off; top-level log path. |
+| `scripts/run_rope_freqscale_max10b.py` | Targeted RoPE/frequency-scaling benchmark up to 10B. | Legacy one-off; top-level log path. |
+
+## Legacy Launch/Render Helpers
+
+These helpers predate the current `log/<run-id>` convention.
+
+| Script | Purpose | Current Guidance |
+|---|---|---|
+| `scripts/launch-max20b.sh` | Launch max-20B benchmark with 6 visible GPUs. | Legacy; writes `log-max20b`. Prefer direct `axon-benchmark` with `log/<run-id>`. |
+| `scripts/launch-min20b.sh` | Launch min-20B pipeline benchmark. | Legacy; writes `log-min20b-pp4`. Prefer direct `axon-benchmark` with `log/<run-id>`. |
+| `scripts/render-max20b.sh` | Render HTML from `log-max20b/stream.csv`. | Legacy companion to `launch-max20b.sh`. |
+| `scripts/render-min20b.sh` | Render HTML from `log-min20b-pp4/stream.csv`. | Legacy companion to `launch-min20b.sh`. |
+
+## Maintenance Rule
+
+When a script is created, removed, or semantically changed:
+
+- Update this page in the same change.
+- If benchmark behavior changes, append a dated note to `wiki/log.md`.
+- If the change alters canonical execution policy, update `scripts/AGENTS.md` or root `AGENTS.md`.

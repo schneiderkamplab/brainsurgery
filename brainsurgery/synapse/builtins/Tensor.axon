@@ -42,7 +42,7 @@ export (
   zeros_like,
 )
 
-split :: Tensor[..S] -> ?Int -> ?List[Dim] -> Any
+split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..R]]
 split x ?dim=-1 ?sizes=null = _split x dim sizes
 
 chunk :: Tensor[..S] -> ?Int -> ?Dim -> List[Tensor[..R]]
@@ -134,7 +134,7 @@ where_indices x = _where_indices x
 require :: Any -> Any
 require x = _require x
 
-deinterleave_last2 :: Tensor[N,W] -> (Tensor[N,H], Tensor[N,H])
+deinterleave_last2 :: Tensor[N,W] -> (Tensor[N,W / 2], Tensor[N,W / 2])
 deinterleave_last2 x = do
   n <- size x 0
   w <- size x -1
