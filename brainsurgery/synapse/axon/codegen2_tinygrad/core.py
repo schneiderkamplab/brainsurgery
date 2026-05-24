@@ -872,6 +872,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             "list_init": lambda: "[]",
             "list_append": lambda: f"([*({args[0]} or []), {args[1]}])",
             "list_index": lambda: f"{args[0]}[int({args[1]})]",
+            "list_length": lambda: f"len({args[0]} or [])",
             "shape": lambda: f"list(self._value({args[0]}).shape)",
             "tensor_size": lambda: f"self._value({args[0]}).shape[int({args[1]})]",
         }

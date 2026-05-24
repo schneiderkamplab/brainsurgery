@@ -1,6 +1,6 @@
 ---
 status: active
-last-confirmed: 2026-05-20
+last-confirmed: 2026-05-24
 owners: agents
 confidence: high
 ---
@@ -9,7 +9,7 @@ confidence: high
 
 This page records benchmark execution and reporting conventions.
 
-Validated-by: root `AGENTS.md`, `scripts/AGENTS.md`, `scripts/benchmark_report_3tables.py`, and repo inspection on 2026-05-20.
+Validated-by: root `AGENTS.md`, `scripts/AGENTS.md`, `scripts/benchmark_report_3tables.py`, and repo inspection on 2026-05-24.
 
 ## Canonical Execution
 
@@ -44,11 +44,12 @@ Use:
 python scripts/benchmark_report_3tables.py log/<run-id>
 ```
 
-The standard report has three tables:
+The standard report has four tables:
 
-- Progress summary: completed/planned/completion/errors/elapsed/ETA/run-active.
+- Progress summary: completed/planned/completion/errors/elapsed/ETA/timed rows/Axon faster/Axon-HF >= 1.0/run-active.
 - Issue rows: `ERROR`, `masked_top1_eq != True`, or `masked_max_abs_diff >= threshold`.
 - Generic-vs-materialized mismatch rows when both variants exist.
+- Rows with `Axon/HF >= 1.0`, sorted by ratio descending.
 
 For chat/status reports, keep output concise and include the run directory.
 

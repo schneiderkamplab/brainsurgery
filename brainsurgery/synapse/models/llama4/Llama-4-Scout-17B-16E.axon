@@ -92,6 +92,9 @@ llama4_temp_scale pos_ids = do
   gain4 <- Tensor.unsqueeze gain3 dim=3
   return gain4
 
+llama4_apply_temp_scale :: Tensor[B,H,S,D] -> Tensor[B,S] -> Tensor[B,H,S,D]
+llama4_apply_temp_scale q pos_ids = q * (llama4_temp_scale pos_ids)
+
 llama4_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
 llama4_moe x = do
   shared <- scope@shared_expert do
@@ -117,7 +120,7 @@ llama4_block x i pos_ids mask_rope mask_no_rope past_kv = do
     k <- use_rope ? (llama4_rope k pos_ids) : k
     q <- (USE_QK_NORM and use_rope) ? (NN.l2norm q eps=EPS) : q
     k <- (USE_QK_NORM and use_rope) ? (NN.l2norm k eps=EPS) : k
-    q <- ((USE_TEMP_TUNING and (use_rope == false)) ? (q * (llama4_temp_scale pos_ids)) : q)
+    q <- ((USE_TEMP_TUNING and (use_rope == false)) ? (llama4_apply_temp_scale q pos_ids) : q)
     k, v, new_kv <- Cache.update past_kv k v
     k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
     v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)

@@ -51,7 +51,7 @@ Use focused scripts directly when investigating a single stage:
 
 ```bash
 conda run --no-capture-output -n brainsurgery \
-  python scripts/axon_graph_ir_weak_roundtrip.py brainsurgery/synapse/models/gpt2/gpt2-kv.axon \
+  python scripts/axon_graph_ir_weak_roundtrip.py brainsurgery/synapse/models/gpt2/gpt2.axon \
   --optimize-graph --output-dir tmp/roundtrip-debug
 ```
 

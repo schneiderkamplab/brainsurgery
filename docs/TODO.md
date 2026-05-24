@@ -11,6 +11,24 @@
 
 These should stay optional until each pass has precise preconditions, typed validation, roundtrip coverage, and model-fidelity coverage. Prefer Graph IR for rewrites that need effect information, dataflow, shape metadata, or backend lowering knowledge; keep AST-level optimization limited to semantics-preserving canonical cleanup.
 
+- Benchmark fidelity fix list from the 2026-05-24 full-opt HF sweeps:
+  - `deepseekv2`: real DeepSeek-V2-Lite/Coder-V2-Lite rows have top-1 parity
+    but large max-abs diffs (`~1.1..2.3`) in both generic and materialized
+    Axon files. Treat this as a family fidelity issue, not a materialization
+    mismatch.
+  - `deepseekv4`: `test/DeepSeek-V4-Test` still has top-1 mismatch and large
+    max-abs diff (`~0.35`). Fix the family/test fidelity before trusting the
+    real Flash/Pro path.
+  - `mt5`: mT5 rows have very large max-abs diffs, with `mt5-xl` also showing
+    top-1 mismatch in the 4B..16B sweep. Generic and materialized quality
+    match, so treat this as a model-family or shared seq2seq fidelity issue.
+  - `olmo3`: both test and real OLMo3 rows show top-1 mismatches/large
+    max-abs diffs. Generic and materialized quality match on real 7B rows, so
+    treat this as a family fidelity issue.
+  - `phi3small`: real Phi-3-small generic rows have large max-abs diffs while
+    materialized rows are good. Resolve this as a generic-vs-materialized
+    mismatch first, likely in generic Axon/materialization/config semantics,
+    before changing backend behavior.
 - Optimizer performance target ladder:
   - fast dense smoke: `openai-community/gpt2` and `google/gemma-3-270m`
   - inner MoE target: `allenai/OLMoE-1B-7B-0924`

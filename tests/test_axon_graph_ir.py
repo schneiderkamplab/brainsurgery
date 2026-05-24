@@ -1052,6 +1052,156 @@ def test_graph_ir_optimizer_refreshes_broadcast_and_slice_shape_rules() -> None:
     assert optimized.modules[0].outputs[0].type_expr == out_t
 
 
+def test_graph_ir_optimizer_forwarder_inlining_refreshes_broadcast_shape() -> None:
+    broad_t = TypeTensor("Tensor", ("B", 1, "Q", "K"))
+    narrow_t = TypeTensor("Tensor", ("B", 1, 1, "K"))
+    wrapper_result_t = TypeTensor("Tensor", ("..R",))
+    wrapper = GraphModule(
+        name="Tensor.and",
+        inputs=(GraphValue("x", broad_t), GraphValue("y", narrow_t)),
+        outputs=(GraphValueRef("out", wrapper_result_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="Tensor.and:1",
+                op=GraphOp("_and"),
+                inputs=(GraphValueRef("x", broad_t), GraphValueRef("y", narrow_t)),
+                attrs={},
+                outputs=(GraphValue("out", wrapper_result_t),),
+                source_module="Tensor.and",
+                type_expr=wrapper_result_t,
+            ),
+        ),
+        return_type_expr=wrapper_result_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("keep", broad_t), GraphValue("pad", narrow_t)),
+        outputs=(GraphValueRef("out", narrow_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("Tensor.and"),
+                inputs=(GraphValueRef("keep", broad_t), GraphValueRef("pad", narrow_t)),
+                attrs={},
+                outputs=(GraphValue("out", narrow_t),),
+                source_module="main",
+                type_expr=narrow_t,
+            ),
+        ),
+        return_type_expr=narrow_t,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(wrapper, main), main_module="main", pragmas={"main": "main"}),
+        config=GraphOptimizeConfig(
+            specialize_definitions="off",
+            constant_folding=False,
+        ),
+    )
+
+    optimized_main = {module.name: module for module in optimized.modules}["main"]
+    assert optimized_main.nodes[0].op.name == "_and"
+    assert optimized_main.nodes[0].outputs[0].type_expr == broad_t
+    assert optimized_main.outputs[0].type_expr == broad_t
+
+
+def test_graph_ir_optimizer_does_not_collapse_distinct_variadic_broadcast_rows() -> None:
+    wrapper_t = TypeTensor("Tensor", ("..R",))
+    wrapper = GraphModule(
+        name="Tensor.and",
+        inputs=(
+            GraphValue("x", TypeTensor("Tensor", ("..S",))),
+            GraphValue("y", TypeTensor("Tensor", ("..T",))),
+        ),
+        outputs=(GraphValueRef("out", wrapper_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="Tensor.and:1",
+                op=GraphOp("_and"),
+                inputs=(
+                    GraphValueRef("x", TypeTensor("Tensor", ("..S",))),
+                    GraphValueRef("y", TypeTensor("Tensor", ("..T",))),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", wrapper_t),),
+                source_module="Tensor.and",
+                type_expr=wrapper_t,
+            ),
+        ),
+        return_type_expr=wrapper_t,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(wrapper,), main_module="Tensor.and", pragmas={"main": "Tensor.and"}),
+        config=GraphOptimizeConfig(inline_safe=False, specialize_definitions="off"),
+    )
+
+    optimized_wrapper = optimized.modules[0]
+    assert optimized_wrapper.nodes[0].outputs[0].type_expr == wrapper_t
+    assert optimized_wrapper.outputs[0].type_expr == wrapper_t
+    assert optimized_wrapper.return_type_expr == wrapper_t
+
+
+def test_graph_ir_optimizer_does_not_inline_row_polymorphic_forwarder() -> None:
+    broad_t = TypeTensor("Tensor", ("B", 1, "Q", "K"))
+    narrow_t = TypeTensor("Tensor", ("B", 1, 1, "K"))
+    wrapper_t = TypeTensor("Tensor", ("..R",))
+    wrapper = GraphModule(
+        name="Tensor.and",
+        inputs=(
+            GraphValue("x", TypeTensor("Tensor", ("..S",))),
+            GraphValue("y", TypeTensor("Tensor", ("..T",))),
+        ),
+        outputs=(GraphValueRef("out", wrapper_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="Tensor.and:1",
+                op=GraphOp("_and"),
+                inputs=(
+                    GraphValueRef("x", TypeTensor("Tensor", ("..S",))),
+                    GraphValueRef("y", TypeTensor("Tensor", ("..T",))),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", wrapper_t),),
+                source_module="Tensor.and",
+                type_expr=wrapper_t,
+            ),
+        ),
+        return_type_expr=wrapper_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("keep", broad_t), GraphValue("pad", narrow_t)),
+        outputs=(GraphValueRef("out", broad_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("Tensor.and"),
+                inputs=(GraphValueRef("keep", broad_t), GraphValueRef("pad", narrow_t)),
+                attrs={},
+                outputs=(GraphValue("out", broad_t),),
+                source_module="main",
+                type_expr=broad_t,
+            ),
+        ),
+        return_type_expr=broad_t,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(wrapper, main), main_module="main", pragmas={"main": "main"}),
+        config=GraphOptimizeConfig(specialize_definitions="off", constant_folding=False),
+    )
+
+    optimized_main = {module.name: module for module in optimized.modules}["main"]
+    assert optimized_main.nodes[0].op.name == "Tensor.and"
+    assert optimized_main.nodes[0].outputs[0].type_expr == broad_t
+
+
 def test_axon_purity_treats_fresh_zero_arg_name_refs_as_total_pure() -> None:
     program = parse_axon_program(
         """
@@ -5321,7 +5471,7 @@ main cond x = do
 
 def test_graph_ir_lowers_generic_gpt2_kv_as_alternative_lowering_target() -> None:
     program = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
     ).ast
 
     graph = lower_axon_program_to_graph_ir(_typed(program, main_module="gpt2"), main_module="gpt2")
@@ -5334,7 +5484,7 @@ def test_graph_ir_lowers_generic_gpt2_kv_as_alternative_lowering_target() -> Non
 
 def test_codegen2_tinygrad_emits_gpt2_source() -> None:
     program = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
     ).ast
 
     graph = lower_axon_program_to_graph_ir(_typed(program, main_module="gpt2"), main_module="gpt2")
@@ -5688,7 +5838,7 @@ def test_codegen2_tinygrad_materializes_final_logits_bias_flat_alias() -> None:
 
 def test_graph_ir_preserves_list_destructuring_outputs() -> None:
     program = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/gpt2-kv.axon")
+        Path("brainsurgery/synapse/models/gpt2/gpt2.axon")
     ).ast
     typed = _typed(program, main_module="gpt2")
 
@@ -6082,6 +6232,94 @@ def test_graph_optimizer_simplifies_symbolic_dim_type_metadata() -> None:
     )
 
     assert optimized.modules[0].return_type_expr == TypeTensor("Tensor", ("B", "S", "D"))
+
+
+def test_graph_optimizer_does_not_substitute_later_dim_value_into_prior_rhs() -> None:
+    dim_t = TypeDim()
+    bool_t = TypeBool()
+    mask_t = TypeTensor("Tensor", ("B", 1, "S", "K"))
+    x_t = TypeTensor("Tensor", ("B", "S"))
+    attn_t = TypeTensor("Tensor", ("B", "K"))
+    masker = GraphModule(
+        name="masker",
+        inputs=(
+            GraphValue("x", x_t, x_t.dims),
+            GraphValue("K", dim_t),
+            GraphValue("seed", mask_t, mask_t.dims),
+        ),
+        outputs=(GraphValueRef("out", mask_t, mask_t.dims),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="masker:1",
+                op=GraphOp("core.alias"),
+                inputs=(GraphValueRef("seed", mask_t, mask_t.dims),),
+                attrs={},
+                outputs=(GraphValue("out", mask_t, mask_t.dims),),
+                source_module="masker",
+                type_expr=mask_t,
+                dims=mask_t.dims,
+            ),
+        ),
+        return_type_expr=mask_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(
+            GraphValue("x", x_t, x_t.dims),
+            GraphValue("attn", attn_t, attn_t.dims),
+            GraphValue("seed", mask_t, mask_t.dims),
+            GraphValue("cond", bool_t),
+            GraphValue("past_length", dim_t),
+        ),
+        outputs=(GraphValueRef("mask", mask_t, mask_t.dims),),
+        output_names=("mask",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.select"),
+                inputs=(
+                    GraphValueRef("cond", bool_t),
+                    GraphExpr(
+                        op=GraphOp("core.binary.+"),
+                        inputs=(GraphValueRef("past_length", dim_t), GraphValueRef("S", dim_t)),
+                        attrs={},
+                        type_expr=dim_t,
+                    ),
+                    GraphValueRef("K", dim_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("key_len", dim_t),),
+                source_module="main",
+                type_expr=dim_t,
+            ),
+            GraphNode(
+                id="main:2",
+                op=GraphOp("masker"),
+                inputs=(
+                    GraphValueRef("x", x_t, x_t.dims),
+                    GraphValueRef("key_len", dim_t),
+                    GraphValueRef("seed", mask_t, mask_t.dims),
+                ),
+                attrs={},
+                outputs=(GraphValue("mask", mask_t, mask_t.dims),),
+                source_module="main",
+                type_expr=mask_t,
+                dims=mask_t.dims,
+            ),
+        ),
+        return_type_expr=mask_t,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(masker, main), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(inline_safe=False, specialize_definitions="off"),
+    )
+
+    optimized_main = next(module for module in optimized.modules if module.name == "main")
+    key_len_node = next(node for node in optimized_main.nodes if node.outputs and node.outputs[0].name == "key_len")
+    assert key_len_node.op.name == "core.select"
+    assert key_len_node.inputs[2] == GraphValueRef("K", dim_t)
 
 
 def test_graph_ir_renderer_keeps_atomic_list_arguments_inline() -> None:

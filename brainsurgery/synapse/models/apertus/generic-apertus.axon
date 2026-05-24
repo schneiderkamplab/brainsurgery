@@ -17,7 +17,7 @@ VOCAB_SIZE    = Config.int @@vocab_size default=131072
 NUM_LAYERS    = Config.int @@num_hidden_layers default=32
 NUM_HEADS    = Config.int @@num_attention_heads default=32
 KVH  = Config.int @@num_key_value_heads default=8
-MODEL_HEAD_DIM   = Config.int @@head_dim default=128
+MODEL_HEAD_DIM   = Config.int @@head_dim default=(MODEL_DIM / NUM_HEADS)
 QD   = NUM_HEADS * MODEL_HEAD_DIM
 KVD  = KVH * MODEL_HEAD_DIM
 FFN  = Config.int @@intermediate_size default=21504

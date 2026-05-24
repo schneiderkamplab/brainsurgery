@@ -15,19 +15,19 @@ import Tensor
 
 
 -- GPT-OSS-20B architecture and YaRN constants.
-MODEL_DIM   = Config.int@@hidden_size default=2880                        -- residual hidden size
-VOCAB_SIZE   = Config.int@@vocab_size default=201088                       -- tokenizer vocabulary size
-NUM_LAYERS   = Config.int@@num_hidden_layers default=24                    -- decoder depth
-NUM_HEADS   = Config.int@@num_attention_heads default=64                  -- query head count
-KVH = Config.int@@num_key_value_heads default=8                   -- key/value head count
-MODEL_HEAD_DIM  = Config.int@@head_dim default=64                             -- per-head hidden size
+MODEL_DIM   = Config.dim@@hidden_size default=2880                        -- residual hidden size
+VOCAB_SIZE   = Config.dim@@vocab_size default=201088                       -- tokenizer vocabulary size
+NUM_LAYERS   = Config.dim@@num_hidden_layers default=24                    -- decoder depth
+NUM_HEADS   = Config.dim@@num_attention_heads default=64                  -- query head count
+KVH = Config.dim@@num_key_value_heads default=8                   -- key/value head count
+MODEL_HEAD_DIM  = Config.dim@@head_dim default=64                             -- per-head hidden size
 QD  = NUM_HEADS * MODEL_HEAD_DIM                                                       -- query projection width
 KVD = KVH * MODEL_HEAD_DIM                                                     -- key/value projection width
-E   = Config.int@@num_local_experts default=32                    -- total local experts
+E   = Config.dim@@num_local_experts default=32                    -- total local experts
 EPT = Config.int@@num_experts_per_tok default=4                   -- routed experts per token
-FFN = Config.int@@intermediate_size default=2880                  -- per-expert hidden size
-MAX_POSITIONS   = Config.int@@max_position_embeddings default=131072          -- max context length
-SW  = Config.int@@sliding_window default=128                      -- short-window attention size
+FFN = Config.dim@@intermediate_size default=2880                  -- per-expert hidden size
+MAX_POSITIONS   = Config.dim@@max_position_embeddings default=131072          -- max context length
+SW  = Config.dim@@sliding_window default=128                      -- short-window attention size
 EPS = Config.float@@rms_norm_eps default=1e-05                    -- RMSNorm epsilon
 THETA = Config.float@@rope_theta default=150000.0                 -- base RoPE theta
 ROPE_SCALE = Config.float @@'rope_scaling.factor' default=32.0 -- YaRN scaling factor
@@ -42,28 +42,28 @@ SWIGLU_ALPHA = Config.float@@swiglu_alpha default=1.702           -- SwiGLU slop
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-grouped_ffn_gated :: Tensor[B,T,K,W] -> Float -> Float -> Tensor[B,T,K,H]
+grouped_ffn_gated :: Tensor[B,T,TOPK,W] -> Float -> Float -> Tensor[B,T,TOPK,H]
 grouped_ffn_gated gate_up alpha limit = do
   b <- Tensor.size gate_up 0
   t <- Tensor.size gate_up 1
-  k <- Tensor.size gate_up 2
+  topk <- Tensor.size gate_up 2
   w <- Tensor.size gate_up -1
   h <- w / 2
-  pair <- Tensor.reshape gate_up shape=[b, t, k, h, 2]
-  gate <- Tensor.slice pair dim=-1 start=0 end=1 |> Tensor.reshape shape=[b, t, k, h]
-  up <- Tensor.slice pair dim=-1 start=1 end=2 |> Tensor.reshape shape=[b, t, k, h]
+  pair <- Tensor.reshape gate_up shape=[b, t, topk, h, 2]
+  gate <- Tensor.slice pair dim=-1 start=0 end=1 |> Tensor.reshape shape=[b, t, topk, h]
+  up <- Tensor.slice pair dim=-1 start=1 end=2 |> Tensor.reshape shape=[b, t, topk, h]
   gate <- clamp gate max=limit
   up <- clamp up min=(0.0 - limit) max=limit
   return (up + 1.0) * (gate * sigmoid (gate * alpha))
 
-grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> IdxTensor[B,T,K] -> ?Path -> ?Path -> ?Path -> ?Path -> ?Float -> ?Float -> ?Bool -> ?Bool -> ?Bool -> Tensor[B,T,D]
+grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,TOPK] -> IdxTensor[B,T,TOPK] -> ?Path -> ?Path -> ?Path -> ?Path -> ?Float -> ?Float -> ?Bool -> ?Bool -> ?Bool -> Tensor[B,T,D]
 grouped_ffn hidden topk_scores topk_indices ?gate_up_weight=@experts.gate_up_proj.weight ?gate_up_bias=@experts.gate_up_proj.bias ?out_weight=@experts.down_proj.weight ?out_bias=@experts.down_proj.bias ?alpha=1.702 ?limit=7.0 ?has_bias=true ?has_gate=true ?transpose=true = do
   alpha <- (alpha == null) ? 1.702 : alpha
   limit <- (limit == null) ? 7.0 : limit
   has_bias <- (has_bias == null) ? true : has_bias
   has_gate <- (has_gate == null) ? true : has_gate
   transpose <- (transpose == null) ? true : transpose
-  x_sel <- Tensor.unsqueeze hidden 2 |> Tensor.expand shape=[B, T, K, D]
+  x_sel <- Tensor.unsqueeze hidden 2 |> Tensor.expand shape=[B, T, TOPK, D]
   scale <- Tensor.unsqueeze topk_scores -1
   gate_dim <- has_gate ? (2 * FFN) : FFN
   gate_up <- NN.expert_linear@w1 x_sel topk_indices dim=gate_dim bias=has_bias transpose=transpose weight_path=gate_up_weight bias_path=gate_up_bias

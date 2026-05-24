@@ -16,6 +16,8 @@ from brainsurgery.synapse.axon.ast import (
     AxonReturn,
     Constraint,
     TypeAliasDef,
+    TypeDim,
+    TypeFloat,
     TypeInt,
     TypeNamed,
     TypeTensor,
@@ -100,6 +102,54 @@ main x = do
     assert repeat_stmts == []
 
 
+def test_typecheck2_float_dim_arithmetic_stays_float() -> None:
+    source = """
+D :: Dim
+D = 128
+
+SCALE = 1.0 / D
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- x * SCALE
+  return y
+"""
+    flat = _flat(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    scale = next(module for module in typed.modules if module.name == "SCALE")
+    assert isinstance(scale.return_type_expr, TypeFloat)
+    main = next(module for module in typed.modules if module.name == "main")
+    bind_stmt = next(
+        stmt
+        for stmt in main.statements
+        if isinstance(stmt, AxonBind) and stmt.targets == ("y",)
+    )
+    assert isinstance(bind_stmt.expr.inferred_type, TypeTensor)
+
+
+def test_typecheck2_dim_dim_arithmetic_stays_dim() -> None:
+    source = """
+D :: Dim
+D = 128
+
+H :: Dim
+H = 8
+
+WIDTH = D / H
+
+main :: Tensor[B,S,D] -> Tensor[B,S,D]
+main x = do
+  y <- x + WIDTH
+  return y
+"""
+    flat = _flat(parse_axon_program(source), main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    width = next(module for module in typed.modules if module.name == "WIDTH")
+    assert isinstance(width.return_type_expr, TypeDim)
+
+
 def test_typecheck_flat_is_rooted_at_selected_main_module() -> None:
     source = """
 main :: Int
@@ -138,7 +188,7 @@ main = do
 
 def test_typecheck_flat_unifies_embedding_dim_from_add() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
     ).ast
     flat = _flat(resolved, main_module="gpt2")
     typed = typecheck2_flat_axon_file(flat, main_module="gpt2")
@@ -284,7 +334,7 @@ main x = do
 
 def test_typecheck_flat_preserves_cache_update_shape_information() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
     ).ast
     flat = _flat(resolved, main_module="gpt2")
     typed = typecheck2_flat_axon_file(flat, main_module="gpt2")

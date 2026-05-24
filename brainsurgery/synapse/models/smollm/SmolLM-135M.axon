@@ -1,4 +1,4 @@
-{-# CHECKPOINTS ["HuggingFaceTB/SmolLM-135M", "HuggingFaceTB/SmolLM-135M-Instruct"] #-}
+{-# CHECKPOINTS "HuggingFaceTB/SmolLM-135M" #-}
 
 {-# TASK "causal_lm" #-}
 

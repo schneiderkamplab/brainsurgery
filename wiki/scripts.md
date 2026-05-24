@@ -50,7 +50,7 @@ Depends-on: `scripts/axon_roundtrip_common.py` for shared path discovery, genera
 
 | Script | Purpose | Notes |
 |---|---|---|
-| `scripts/benchmark_report_3tables.py` | Render the standard 3 markdown tables from recursive `axon-benchmark` stream CSV logs. | Use for `report`/`status` workflows. |
+| `scripts/benchmark_report_3tables.py` | Render the standard 4 markdown tables from recursive `axon-benchmark` stream CSV and result JSON logs. | Use for `report`/`status` workflows. |
 
 Example:
 
@@ -59,7 +59,7 @@ conda run --no-capture-output -n brainsurgery \
   python scripts/benchmark_report_3tables.py log/<run-id> --abs-threshold 1e-3
 ```
 
-Output tables: progress summary, issue rows, and generic-vs-materialized mismatch rows.
+Output tables: progress summary, issue rows, generic-vs-materialized mismatch rows, and Axon/HF >= 1.0 rows.
 
 ## Checkpoint/Test Model Generators
 

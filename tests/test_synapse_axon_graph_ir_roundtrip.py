@@ -14,7 +14,7 @@ def _graph_ir_roundtrip_paths() -> list[Path]:
 
 def _graph_optimize_roundtrip_paths() -> list[Path]:
     return [
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon"),
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon"),
         Path("brainsurgery/synapse/models/bert/bert-base-uncased.axon"),
         Path("brainsurgery/synapse/models/llama4/generic-llama4.axon"),
         Path("brainsurgery/synapse/models/olmoe/generic-olmoe.axon"),

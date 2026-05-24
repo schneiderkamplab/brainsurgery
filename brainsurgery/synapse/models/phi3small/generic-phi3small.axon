@@ -16,22 +16,22 @@ import Tensor
 HAS_TEXT_CONFIG = Config.has_key @@text_config
 CFG = HAS_TEXT_CONFIG ? "text_config" : ""
 
-MODEL_DIM = HAS_TEXT_CONFIG ? (Config.int @@'text_config.hidden_size' default=4096) : (Config.int @@hidden_size default=4096)
-VOCAB_SIZE = HAS_TEXT_CONFIG ? (Config.int @@'text_config.vocab_size' default=100352) : (Config.int @@vocab_size default=100352)
-NUM_LAYERS = HAS_TEXT_CONFIG ? (Config.int @@'text_config.num_hidden_layers' default=32) : (Config.int @@num_hidden_layers default=32)
-NUM_HEADS = HAS_TEXT_CONFIG ? (Config.int @@'text_config.num_attention_heads' default=32) : (Config.int @@num_attention_heads default=32)
-KVH = HAS_TEXT_CONFIG ? (Config.int @@'text_config.num_key_value_heads' default=8) : (Config.int @@num_key_value_heads default=8)
+MODEL_DIM = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.hidden_size' default=4096) : (Config.dim @@hidden_size default=4096)
+VOCAB_SIZE = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.vocab_size' default=100352) : (Config.dim @@vocab_size default=100352)
+NUM_LAYERS = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.num_hidden_layers' default=32) : (Config.dim @@num_hidden_layers default=32)
+NUM_HEADS = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.num_attention_heads' default=32) : (Config.dim @@num_attention_heads default=32)
+KVH = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.num_key_value_heads' default=8) : (Config.dim @@num_key_value_heads default=8)
 MODEL_HEAD_DIM = HAS_TEXT_CONFIG
-  ? ((Config.has_key @@'text_config.head_dim') ? (Config.int @@'text_config.head_dim' default=128) : 128)
-  : ((Config.has_key @@head_dim) ? (Config.int @@head_dim default=128) : 128)
+  ? ((Config.has_key @@'text_config.head_dim') ? (Config.dim @@'text_config.head_dim' default=(MODEL_DIM / NUM_HEADS)) : (MODEL_DIM / NUM_HEADS))
+  : ((Config.has_key @@head_dim) ? (Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)) : (MODEL_DIM / NUM_HEADS))
 QD = NUM_HEADS * MODEL_HEAD_DIM
 KVD = KVH * MODEL_HEAD_DIM
-FFN = HAS_TEXT_CONFIG ? (Config.int @@'text_config.ff_intermediate_size' default=14336) : (Config.int @@ff_intermediate_size default=14336)
+FFN = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.ff_intermediate_size' default=14336) : (Config.dim @@ff_intermediate_size default=14336)
 EPS = HAS_TEXT_CONFIG ? (Config.float @@'text_config.layer_norm_epsilon' default=1e-05) : (Config.float @@layer_norm_epsilon default=1e-05)
 THETA = HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_embedding_base' default=1000000.0) : (Config.float @@rope_embedding_base default=1000000.0)
 ROPE_MODE = Config.str @@'rope_scaling.type' default=(Config.str @@'rope_scaling.rope_type' default="default")
-ROPE_ORIGINAL_CONTEXT = Config.int @@'rope_scaling.original_max_position_embeddings' default=(HAS_TEXT_CONFIG ? (Config.int @@'text_config.original_max_position_embeddings' default=8192) : (Config.int @@original_max_position_embeddings default=8192))
-ROPE_MAX_CONTEXT = HAS_TEXT_CONFIG ? (Config.int @@'text_config.max_position_embeddings' default=8192) : (Config.int @@max_position_embeddings default=8192)
+ROPE_ORIGINAL_CONTEXT = Config.dim @@'rope_scaling.original_max_position_embeddings' default=(HAS_TEXT_CONFIG ? (Config.dim @@'text_config.original_max_position_embeddings' default=8192) : (Config.dim @@original_max_position_embeddings default=8192))
+ROPE_MAX_CONTEXT = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.max_position_embeddings' default=8192) : (Config.dim @@max_position_embeddings default=8192)
 ROPE_LONG_FACTOR = Config.list @@'rope_scaling.long_factor' default=[]
 ROPE_SHORT_FACTOR = Config.list @@'rope_scaling.short_factor' default=[]
 ROPE_LONG_MSCALE = Config.float @@'rope_scaling.long_mscale' default=-1.0
@@ -42,13 +42,13 @@ MUP_ATTN_MULT = HAS_TEXT_CONFIG ? (Config.float @@'text_config.mup_attn_multipli
 MUP_EMBED_MULT = HAS_TEXT_CONFIG ? (Config.float @@'text_config.mup_embedding_multiplier' default=10.0) : (Config.float @@mup_embedding_multiplier default=10.0)
 MUP_WIDTH_MULT = HAS_TEXT_CONFIG ? (Config.float @@'text_config.mup_width_multiplier' default=8.0) : (Config.float @@mup_width_multiplier default=8.0)
 ATTN_SCALE = MUP_ATTN_MULT / MODEL_HEAD_DIM
-BS_LOCAL_BLOCKS = HAS_TEXT_CONFIG ? (Config.int @@'text_config.blocksparse_num_local_blocks' default=16) : (Config.int @@blocksparse_num_local_blocks default=16)
-BS_BLOCK_SIZE = HAS_TEXT_CONFIG ? (Config.int @@'text_config.blocksparse_block_size' default=64) : (Config.int @@blocksparse_block_size default=64)
-BS_VERT_STRIDE = HAS_TEXT_CONFIG ? (Config.int @@'text_config.blocksparse_vert_stride' default=8) : (Config.int @@blocksparse_vert_stride default=8)
+BS_LOCAL_BLOCKS = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.blocksparse_num_local_blocks' default=16) : (Config.dim @@blocksparse_num_local_blocks default=16)
+BS_BLOCK_SIZE = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.blocksparse_block_size' default=64) : (Config.dim @@blocksparse_block_size default=64)
+BS_VERT_STRIDE = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.blocksparse_vert_stride' default=8) : (Config.dim @@blocksparse_vert_stride default=8)
 BS_HOMO_HEAD = HAS_TEXT_CONFIG ? (Config.bool @@'text_config.blocksparse_homo_head_pattern' default=false) : (Config.bool @@blocksparse_homo_head_pattern default=false)
 WINDOW_LOCAL = BS_LOCAL_BLOCKS * BS_BLOCK_SIZE
-WINDOW_GLOBAL = HAS_TEXT_CONFIG ? (Config.int @@'text_config.max_position_embeddings' default=8192) : (Config.int @@max_position_embeddings default=8192)
-DENSE_EVERY = HAS_TEXT_CONFIG ? (Config.int @@'text_config.dense_attention_every_n_layers' default=2) : (Config.int @@dense_attention_every_n_layers default=2)
+WINDOW_GLOBAL = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.max_position_embeddings' default=8192) : (Config.dim @@max_position_embeddings default=8192)
+DENSE_EVERY = HAS_TEXT_CONFIG ? (Config.dim @@'text_config.dense_attention_every_n_layers' default=2) : (Config.dim @@dense_attention_every_n_layers default=2)
 HAS_LM_HEAD = has_root "lm_head"
 
 phi3small_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]

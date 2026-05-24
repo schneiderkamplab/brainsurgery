@@ -291,7 +291,7 @@ main x = x |> Math.exp
 
 
 def test_parse_render_parse_roundtrip_gpt2_ast_equal(tmp_path: Path) -> None:
-    src = Path("brainsurgery/synapse/models/gpt2/gpt2-kv.axon")
+    src = Path("brainsurgery/synapse/models/gpt2/gpt2.axon")
     original = parse_axon_program_from_path(src)
     rendered_path = tmp_path / "gpt2-roundtrip.axon"
     rendered_path.write_text(render_axon_file(original), encoding="utf-8")

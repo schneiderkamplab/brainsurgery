@@ -148,6 +148,10 @@ def _mutate_config(config: Any, *, vocab_size: int) -> None:
             if target.rope_scaling.get("type") == "default":
                 target.rope_scaling["type"] = "linear"
             target.rope_scaling.setdefault("factor", 1.0)
+        if getattr(target, "model_type", None) == "apertus":
+            # Apertus configs may omit head_dim even though the model Axon and
+            # weights use it explicitly for q/k normalization and RoPE.
+            setattr(target, "head_dim", hidden // heads)
             if target.rope_scaling.get("type") not in {None, "default"}:
                 target.rope_scaling["original_max_position_embeddings"] = min(
                     int(target.rope_scaling.get("original_max_position_embeddings", 512)),
@@ -187,6 +191,7 @@ def _apply_family_adjustments(config: Any, spec_name: str) -> None:
 
     if spec_name == "GPT-J-Test":
         set_all("rotary_dim", 32)
+        set_all("n_positions", 2048)
 
     if spec_name.startswith("Gemma4-"):
         set_all("global_head_dim", 32)
@@ -440,6 +445,12 @@ def _patch_saved_config(output: Path, *, spec_name: str) -> None:
         if isinstance(text_config, dict):
             text_config["top_k_experts"] = 2
             text_config["sliding_window_pattern"] = 2
+    if spec_name == "Llama4-Test":
+        text_config = config.get("text_config")
+        if isinstance(text_config, dict) and "rope_scaling" not in text_config:
+            rope_parameters = text_config.get("rope_parameters")
+            if isinstance(rope_parameters, dict):
+                text_config["rope_scaling"] = dict(rope_parameters)
     if spec_name == "Nemotron-H-Test":
         config["use_cache"] = False
         config["mamba_num_heads"] = 4

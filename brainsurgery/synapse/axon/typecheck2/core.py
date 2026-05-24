@@ -1113,6 +1113,10 @@ def _binary_arithmetic_type(left: TypeExpr, right: TypeExpr, state: _Tc2) -> Typ
         return _apply_subst(left, ctx)
     if isinstance(right_expanded, TypeVar | TypeAny) and _is_scalar_numeric_type(left_expanded):
         return _apply_subst(right, ctx)
+    if isinstance(left_expanded, TypeFloat) or isinstance(right_expanded, TypeFloat):
+        _unify(left, TypeFloat(), ctx)
+        _unify(right, TypeFloat(), ctx)
+        return TypeFloat()
     if isinstance(left_expanded, TypeDim) or isinstance(right_expanded, TypeDim):
         _unify(left, TypeDim(), ctx)
         _unify(right, TypeDim(), ctx)
@@ -1123,10 +1127,6 @@ def _binary_arithmetic_type(left: TypeExpr, right: TypeExpr, state: _Tc2) -> Typ
         return _apply_subst(right, ctx)
     if isinstance(left_expanded, TypeVar | TypeAny) and isinstance(right_expanded, TypeVar | TypeAny):
         return _apply_subst(left, ctx)
-    if isinstance(left_expanded, TypeFloat) or isinstance(right_expanded, TypeFloat):
-        _unify(left, TypeFloat(), ctx)
-        _unify(right, TypeFloat(), ctx)
-        return TypeFloat()
     if isinstance(left_expanded, TypeInt) and isinstance(right_expanded, TypeInt):
         _unify(left, TypeInt(), ctx)
         _unify(right, TypeInt(), ctx)
@@ -3006,6 +3006,17 @@ def _tc_expr(
             freshen_generics=False,
             preserve_dim_names=_env_dim_names(env),
         )
+        inner_expanded = _expand_alias(_apply_subst(inner_tp, state.ctx), state.ctx)
+        ascribed_expanded = _expand_alias(_apply_subst(tp, state.ctx), state.ctx)
+        if isinstance(inner_expanded, TypeOptional) and not isinstance(ascribed_expanded, TypeOptional):
+            try:
+                tp = _unify_return_type(inner_expanded.inner, tp, state, _env_dim_names(env))
+            except ValueError as exc:
+                raise ValueError(
+                    "Axon typecheck2 failed: type ascription mismatch "
+                    f"inner={inner_tp!r} ascribed={tp!r}"
+                ) from exc
+            return _annotate(state.ctx, replace(expr, expr=typed_inner), tp), tp
         try:
             tp = _unify_return_type(inner_tp, tp, state, _env_dim_names(env))
         except ValueError as exc:

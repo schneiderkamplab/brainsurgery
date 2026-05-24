@@ -146,13 +146,13 @@ deepseek_v4_rope_apply_inverse x pos_ids layer_type = (layer_type == "sliding_at
   ? (rope_apply_trailing_inverse x pos_ids THETA ROPE_HEAD_DIM interleaved=true)
   : (rope_apply_trailing_yarn_inverse x pos_ids COMPRESS_THETA ROPE_HEAD_DIM COMPRESS_ROPE_FACTOR COMPRESS_ROPE_BETA_FAST COMPRESS_ROPE_BETA_SLOW COMPRESS_ORIGINAL_CONTEXT attention_factor=COMPRESS_ROPE_ATTENTION_FACTOR interleaved=true)
 
-deepseek_v4_attention_hca_kv :: Path -> Tensor[B,NUM_HEADS,S,HEAD_DIM] -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S] -> (Tensor[B,NUM_HEADS,T,HEAD_DIM], Tensor[B,1,S,T])
+deepseek_v4_attention_hca_kv :: Path -> Tensor[B,NUM_HEADS,S,HEAD_DIM] -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S] -> (Tensor[B,NUM_HEADS,S + T,HEAD_DIM], Tensor[B,1,S,T])
 deepseek_v4_attention_hca_kv@path base_kv hidden_states pos_ids = do
   compressed, comp_keep <- deepseek_v4_hca_compress@path hidden_states pos_ids
   compressed <- Tensor.repeat compressed repeats=NUM_HEADS dim=1
   return Tensor.concat base_kv compressed dim=2, comp_keep
 
-deepseek_v4_attention_csa_kv :: Path -> Tensor[B,NUM_HEADS,S,HEAD_DIM] -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,Q_LORA_RANK] -> Tensor[B,S] -> (Tensor[B,NUM_HEADS,T,HEAD_DIM], Tensor[B,1,S,T])
+deepseek_v4_attention_csa_kv :: Path -> Tensor[B,NUM_HEADS,S,HEAD_DIM] -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,Q_LORA_RANK] -> Tensor[B,S] -> (Tensor[B,NUM_HEADS,S + T,HEAD_DIM], Tensor[B,1,S,T])
 deepseek_v4_attention_csa_kv@path base_kv hidden_states q_res pos_ids = do
   compressed, comp_keep <- deepseek_v4_csa_compress@path hidden_states q_res pos_ids
   compressed <- Tensor.repeat compressed repeats=NUM_HEADS dim=1
@@ -228,14 +228,14 @@ deepseek_v4_csa_compress@path hidden_states q_res pos_ids = do
   gate <- Tensor.reshape gate shape=[B, nwin, 4, (2 * HEAD_DIM)]
   pb <- param @position_bias |> Tensor.reshape shape=[1, 1, 4, (2 * HEAD_DIM)]
   gate <- gate + pb
-  cur_kv <- Tensor.slice kv dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM)
-  cur_gate <- Tensor.slice gate dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM)
-  prev_kv <- Tensor.slice kv dim=-1 start=0 end=HEAD_DIM
-  prev_gate <- Tensor.slice gate dim=-1 start=0 end=HEAD_DIM
+  cur_kv <- Tensor.slice kv dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM) |> Tensor.reshape shape=[B, nwin, 4, HEAD_DIM]
+  cur_gate <- Tensor.slice gate dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM) |> Tensor.reshape shape=[B, nwin, 4, HEAD_DIM]
+  prev_kv <- Tensor.slice kv dim=-1 start=0 end=HEAD_DIM |> Tensor.reshape shape=[B, nwin, 4, HEAD_DIM]
+  prev_gate <- Tensor.slice gate dim=-1 start=0 end=HEAD_DIM |> Tensor.reshape shape=[B, nwin, 4, HEAD_DIM]
   zero_kv <- Tensor.zeros cur_kv shape=[B, 1, 4, HEAD_DIM]
   neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, HEAD_DIM] value=(Tensor.dtype_value cur_gate "min")
-  prev_kv_shift <- Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
-  prev_gate_shift <- Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
+  prev_kv_shift <- (nwin == 0) ? cur_kv : Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
+  prev_gate_shift <- (nwin == 0) ? cur_gate : Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
   new_kv <- Tensor.concat prev_kv_shift cur_kv dim=2
   new_gate <- Tensor.concat prev_gate_shift cur_gate dim=2
   weights <- Tensor.softmax new_gate dim=2 dtype="float32"
@@ -267,14 +267,14 @@ deepseek_v4_csa_index@path hidden_states q_res pos_ids = do
   gate <- Tensor.reshape gate shape=[B, nwin, 4, (2 * INDEX_HEAD_DIM)]
   pb <- param @position_bias |> Tensor.reshape shape=[1, 1, 4, (2 * INDEX_HEAD_DIM)]
   gate <- gate + pb
-  cur_kv <- Tensor.slice kv dim=-1 start=INDEX_HEAD_DIM end=(2 * INDEX_HEAD_DIM)
-  cur_gate <- Tensor.slice gate dim=-1 start=INDEX_HEAD_DIM end=(2 * INDEX_HEAD_DIM)
-  prev_kv <- Tensor.slice kv dim=-1 start=0 end=INDEX_HEAD_DIM
-  prev_gate <- Tensor.slice gate dim=-1 start=0 end=INDEX_HEAD_DIM
+  cur_kv <- Tensor.slice kv dim=-1 start=INDEX_HEAD_DIM end=(2 * INDEX_HEAD_DIM) |> Tensor.reshape shape=[B, nwin, 4, INDEX_HEAD_DIM]
+  cur_gate <- Tensor.slice gate dim=-1 start=INDEX_HEAD_DIM end=(2 * INDEX_HEAD_DIM) |> Tensor.reshape shape=[B, nwin, 4, INDEX_HEAD_DIM]
+  prev_kv <- Tensor.slice kv dim=-1 start=0 end=INDEX_HEAD_DIM |> Tensor.reshape shape=[B, nwin, 4, INDEX_HEAD_DIM]
+  prev_gate <- Tensor.slice gate dim=-1 start=0 end=INDEX_HEAD_DIM |> Tensor.reshape shape=[B, nwin, 4, INDEX_HEAD_DIM]
   zero_kv <- Tensor.zeros cur_kv shape=[B, 1, 4, INDEX_HEAD_DIM]
   neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, INDEX_HEAD_DIM] value=(Tensor.dtype_value cur_gate "min")
-  prev_kv_shift <- (nwin == 0) ? zero_kv : Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
-  prev_gate_shift <- (nwin == 0) ? neg_gate : Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
+  prev_kv_shift <- (nwin == 0) ? cur_kv : Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
+  prev_gate_shift <- (nwin == 0) ? cur_gate : Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
   new_kv <- Tensor.concat prev_kv_shift cur_kv dim=2
   new_gate <- Tensor.concat prev_gate_shift cur_gate dim=2
   weights <- Tensor.softmax new_gate dim=2 dtype="float32"
@@ -386,7 +386,7 @@ deepseek_v4 input_ids attn_mask past_kv use_cache = do
   x <- deepseek_v4_embed input_ids
   x <- Tensor.unsqueeze x dim=2
   x <- Tensor.expand x shape=[B, S, HC_MULT, MODEL_DIM]
-  pos_ids <- position_ids input_ids past_length=0
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=0
   x <- for i <- [0..NUM_LAYERS) carry (x) do
     layer_type <- deepseek_v4_layer_type i
     mlp_type <- deepseek_v4_mlp_type i

@@ -26,23 +26,23 @@ HAS_TEXT_CONFIG = false
 
 CFG = HAS_TEXT_CONFIG ? "text_config" : ""
 
-MODEL_DIM = HAS_TEXT_CONFIG ? (4096) : (128)
+MODEL_DIM = HAS_TEXT_CONFIG ? (4096 :: Dim) : (128 :: Dim)
 
-VOCAB_SIZE = HAS_TEXT_CONFIG ? (100352) : (100352)
+VOCAB_SIZE = HAS_TEXT_CONFIG ? (100352 :: Dim) : (100352 :: Dim)
 
-NUM_LAYERS = HAS_TEXT_CONFIG ? (32) : (4)
+NUM_LAYERS = HAS_TEXT_CONFIG ? (32 :: Dim) : (4 :: Dim)
 
-NUM_HEADS = HAS_TEXT_CONFIG ? (32) : (4)
+NUM_HEADS = HAS_TEXT_CONFIG ? (32 :: Dim) : (4 :: Dim)
 
-KVH = HAS_TEXT_CONFIG ? (8) : (2)
+KVH = HAS_TEXT_CONFIG ? (8 :: Dim) : (2 :: Dim)
 
-MODEL_HEAD_DIM = HAS_TEXT_CONFIG ? ((false) ? (128) : 128) : ((false) ? (128) : 128)
+MODEL_HEAD_DIM = HAS_TEXT_CONFIG ? ((false) ? (Config.dim @@text_config.head_dim default=(MODEL_DIM / NUM_HEADS)) : (MODEL_DIM / NUM_HEADS)) : ((false) ? (Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)) : (MODEL_DIM / NUM_HEADS))
 
 QD = NUM_HEADS * MODEL_HEAD_DIM
 
 KVD = KVH * MODEL_HEAD_DIM
 
-FFN = HAS_TEXT_CONFIG ? (14336) : (14336)
+FFN = HAS_TEXT_CONFIG ? (14336 :: Dim) : (14336 :: Dim)
 
 EPS = HAS_TEXT_CONFIG ? (1e-05) : (1e-05)
 
@@ -50,9 +50,9 @@ THETA = HAS_TEXT_CONFIG ? (1000000.0) : (1000000.0)
 
 ROPE_MODE = "default"
 
-ROPE_ORIGINAL_CONTEXT = 8192
+ROPE_ORIGINAL_CONTEXT = Config.dim @@rope_scaling.original_max_position_embeddings default=(HAS_TEXT_CONFIG ? (8192 :: Dim) : (8192 :: Dim))
 
-ROPE_MAX_CONTEXT = HAS_TEXT_CONFIG ? (8192) : (512)
+ROPE_MAX_CONTEXT = HAS_TEXT_CONFIG ? (8192 :: Dim) : (512 :: Dim)
 
 ROPE_LONG_FACTOR = []
 
@@ -74,19 +74,19 @@ MUP_WIDTH_MULT = HAS_TEXT_CONFIG ? (8.0) : (8.0)
 
 ATTN_SCALE = MUP_ATTN_MULT / MODEL_HEAD_DIM
 
-BS_LOCAL_BLOCKS = HAS_TEXT_CONFIG ? (16) : (16)
+BS_LOCAL_BLOCKS = HAS_TEXT_CONFIG ? (16 :: Dim) : (16 :: Dim)
 
-BS_BLOCK_SIZE = HAS_TEXT_CONFIG ? (64) : (64)
+BS_BLOCK_SIZE = HAS_TEXT_CONFIG ? (64 :: Dim) : (64 :: Dim)
 
-BS_VERT_STRIDE = HAS_TEXT_CONFIG ? (8) : (8)
+BS_VERT_STRIDE = HAS_TEXT_CONFIG ? (8 :: Dim) : (8 :: Dim)
 
 BS_HOMO_HEAD = HAS_TEXT_CONFIG ? (false) : (false)
 
 WINDOW_LOCAL = BS_LOCAL_BLOCKS * BS_BLOCK_SIZE
 
-WINDOW_GLOBAL = HAS_TEXT_CONFIG ? (8192) : (512)
+WINDOW_GLOBAL = HAS_TEXT_CONFIG ? (8192 :: Dim) : (512 :: Dim)
 
-DENSE_EVERY = HAS_TEXT_CONFIG ? (2) : (2)
+DENSE_EVERY = HAS_TEXT_CONFIG ? (2 :: Dim) : (2 :: Dim)
 
 HAS_LM_HEAD = has_root "lm_head"
 

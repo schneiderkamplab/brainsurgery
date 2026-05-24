@@ -53,13 +53,13 @@ init_kv :: CacheKV[B,H,T,DK,DV]
 init_kv = List.init
 
 index :: ?Cache[B,H,T,DH] -> Int -> ?CacheLayer[B,H,T,DH]
-index values i = (values == null) ? null : List.index values i
+index values i = (values == null) ? null : (((List.length (values :: Cache[B,H,T,DH])) == 0) ? null : List.index (values :: Cache[B,H,T,DH]) i)
 
 index_any :: ?CacheAny -> Int -> ?(Any, Any)
-index_any values i = (values == null) ? null : List.index values i
+index_any values i = (values == null) ? null : (((List.length (values :: CacheAny)) == 0) ? null : List.index (values :: CacheAny) i)
 
 index_kv :: ?CacheKV[B,H,T,DK,DV] -> Int -> ?CacheLayerKV[B,H,T,DK,DV]
-index_kv values i = (values == null) ? null : List.index values i
+index_kv values i = (values == null) ? null : (((List.length (values :: CacheKV[B,H,T,DK,DV])) == 0) ? null : List.index (values :: CacheKV[B,H,T,DK,DV]) i)
 
 append :: ?Cache[B,H,T,DH] -> ?CacheLayer[B,H,T,DH] -> ?Cache[B,H,T,DH]
 append values value = (values == null) ? null : ((value == null) ? values : List.append values value)
@@ -71,12 +71,19 @@ append_kv :: ?CacheKV[B,H,T,DK,DV] -> ?CacheLayerKV[B,H,T,DK,DV] -> ?CacheKV[B,H
 append_kv values value = (values == null) ? null : ((value == null) ? values : List.append values value)
 
 past_length :: ?Cache[B,H,T,DH] -> Dim
-past_length cache = (cache == null) ? 0 : T
+past_length cache = (cache == null) ? 0 : (((List.length (cache :: Cache[B,H,T,DH])) == 0) ? 0 : do
+  k, _ <- List.index (cache :: Cache[B,H,T,DH]) 0
+  return Tensor.size k -2
+)
 
 past_length_any :: ?CacheAny -> Dim
-past_length_any cache = (cache == null) ? 0 : do
-  k, _ <- List.index cache 0
+past_length_any cache = (cache == null) ? 0 : (((List.length (cache :: CacheAny)) == 0) ? 0 : do
+  k, _ <- List.index (cache :: CacheAny) 0
   return Tensor.size k -2
+)
 
 past_length_kv :: ?CacheKV[B,H,T,DK,DV] -> Dim
-past_length_kv cache = (cache == null) ? 0 : T
+past_length_kv cache = (cache == null) ? 0 : (((List.length (cache :: CacheKV[B,H,T,DK,DV])) == 0) ? 0 : do
+  k, _ <- List.index (cache :: CacheKV[B,H,T,DK,DV]) 0
+  return Tensor.size k -2
+)

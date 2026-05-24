@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import subprocess
 from collections import defaultdict
@@ -28,6 +29,44 @@ def _load_rows(log_root: Path) -> list[dict[str, str]]:
             for row in reader:
                 row["_stream_path"] = str(csv_path)
                 rows.append(row)
+    rows.extend(_load_result_json_rows(log_root))
+    return rows
+
+
+def _load_result_json_rows(log_root: Path) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+
+    def value(*names: str) -> str:
+        for name in names:
+            if name in data and data[name] is not None:
+                return str(data[name])
+        return ""
+
+    for path in sorted(log_root.glob("**/*.result.json")):
+        if not path.exists() or path.stat().st_size == 0:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        axon = data.get("axon_file") or data.get("axon") or data.get("axon_path")
+        checkpoint = data.get("checkpoint_id") or data.get("checkpoint")
+        if not axon or not checkpoint:
+            continue
+        row = {
+            "axon": str(axon),
+            "checkpoint": str(checkpoint),
+            "model_dir": value("hf_model_dir", "model_dir"),
+            "fallback": value("fallback"),
+            "masked_top1_eq": value("masked_top1_eq"),
+            "masked_max_abs_diff": value("masked_max_diff", "masked_max_abs_diff"),
+            "masked_max_rel_diff": value("masked_max_rel_diff"),
+            "hf_time": value("hf_time", "hf_time_s"),
+            "axon_time": value("axon_time", "axon_time_s"),
+            "speed_ratio_axon_over_hf": value("speed_ratio_axon_over_hf"),
+            "_result_json_path": str(path),
+        }
+        rows.append(row)
     return rows
 
 
@@ -103,6 +142,47 @@ def _fmt_pct(numerator: int, denominator: int) -> str:
     if denominator <= 0:
         return "0.00%"
     return f"{(100.0 * numerator / denominator):.2f}%"
+
+
+def _to_float(raw: str) -> float | None:
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if value >= 0 and value < float("inf"):
+        return value
+    return None
+
+
+def _timing_values(row: dict[str, str]) -> tuple[float, float, float] | None:
+    ratio = _to_float(
+        _get(
+            row,
+            "speed_ratio_axon_over_hf",
+            "axon_over_hf",
+            "Axon/HF",
+        )
+    )
+    hf_time = _to_float(_get(row, "hf_time", "hf_time_s", "HF time", "hf"))
+    axon_time = _to_float(_get(row, "axon_time", "axon_time_s", "Axon time", "axon_elapsed"))
+    if ratio is None and hf_time is not None and axon_time is not None and hf_time > 0:
+        ratio = axon_time / hf_time
+    if ratio is None or hf_time is None or axon_time is None:
+        return None
+    return hf_time, axon_time, ratio
+
+
+def _timed_rows(rows: list[dict[str, str]]) -> list[tuple[dict[str, str], float, float, float]]:
+    out: list[tuple[dict[str, str], float, float, float]] = []
+    for row in rows:
+        values = _timing_values(row)
+        if values is None:
+            continue
+        hf_time, axon_time, ratio = values
+        out.append((row, hf_time, axon_time, ratio))
+    return out
 
 
 def _normalize_axon_path(raw: str) -> str:
@@ -192,7 +272,7 @@ def _print_markdown_table(headers: list[str], rows: list[list[str]]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Render 3 markdown tables for axon-benchmark stream CSV logs."
+        description="Render 4 markdown tables for axon-benchmark stream CSV/result logs."
     )
     parser.add_argument(
         "log_root",
@@ -250,6 +330,10 @@ def main() -> int:
             except ValueError:
                 abs_bad += 1
     healthy = max(completed - len(issue_rows), 0)
+    timed = _timed_rows(rows)
+    timed_count = len(timed)
+    axon_faster = sum(1 for _row, _hf, _axon, ratio in timed if ratio < 1.0)
+    axon_slower = sum(1 for _row, _hf, _axon, ratio in timed if ratio >= 1.0)
 
     progress_rows = [
         [
@@ -263,6 +347,9 @@ def main() -> int:
             str(error_rows),
             str(top1_bad),
             str(abs_bad),
+            str(timed_count),
+            str(axon_faster),
+            str(axon_slower),
             run_active,
         ]
     ]
@@ -278,6 +365,9 @@ def main() -> int:
             "Error rows",
             "masked_top1_eq != True",
             "masked_max_abs_diff >= 1e-3",
+            "Timed",
+            "Axon faster",
+            "Axon/HF >= 1.0",
             "Run active",
         ],
         progress_rows,
@@ -353,6 +443,40 @@ def main() -> int:
             "Same quality?",
         ],
         mismatch_rows,
+    )
+    print()
+
+    slower_rows = sorted(
+        (item for item in timed if item[3] >= 1.0),
+        key=lambda item: item[3],
+        reverse=True,
+    )
+    slower_table_rows: list[list[str]] = []
+    for row, hf_time, axon_time, ratio in slower_rows[: args.max_rows]:
+        slower_table_rows.append(
+            [
+                _normalize_axon_path(_get(row, "axon")),
+                _get(row, "checkpoint"),
+                f"{hf_time:.4f}s",
+                f"{axon_time:.4f}s",
+                f"{ratio:.3f}",
+                _get(row, "masked_top1_eq", "masked top-1 eq"),
+                _get(row, "masked_max_abs_diff", "masked max abs diff"),
+            ]
+        )
+    if not slower_table_rows:
+        slower_table_rows = [["(none)", "", "", "", "", "", ""]]
+    _print_markdown_table(
+        [
+            "Axon",
+            "Checkpoint",
+            "HF time",
+            "Axon time",
+            "Axon/HF",
+            "masked_top1_eq",
+            "masked_max_abs_diff",
+        ],
+        slower_table_rows,
     )
     return 0
 

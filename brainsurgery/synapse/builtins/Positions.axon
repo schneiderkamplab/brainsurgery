@@ -245,7 +245,7 @@ rope_base_factors position_ids rotary_dim ?theta=10000.0 ?interleaved=false ?sca
   position_ids <- (scale_factor == null) ? position_ids : (position_ids_scale position_ids scale_factor)
   ref <- zeros position_ids shape=[B, S, rotary_dim] dtype="float32"
   emb <- sinusoidal_positions ref position_ids theta=theta offset=0 padding_idx=null mode="rope"
-  half <- floor (rotary_dim / 2)
+  half <- ((floor (rotary_dim / 2)) :: Dim)
   sin_half <- slice emb dim=-1 start=0 end=half
   cos_half <- slice emb dim=-1 start=half end=rotary_dim
   sin_half <- reshape sin_half shape=[B, 1, S, half]
@@ -346,7 +346,7 @@ rope_apply_trailing_inverse x position_ids theta rot ?interleaved=false = do
 
 rope_apply_with_partial :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> Float -> ?Bool -> Tensor[B,H,S,HD]
 rope_apply_with_partial x position_ids theta partial_rotary_factor ?interleaved=false = do
-  rot <- floor (HD * partial_rotary_factor)
+  rot <- ((floor (HD * partial_rotary_factor)) :: Dim)
   rot <- (rot < 0) ? 0 : rot
   rot <- (rot > HD) ? HD : rot
   return (rot <= 0) ? x : (
@@ -413,7 +413,7 @@ rope_pair_base_split_interleaved q k position_ids ?theta=10000.0 ?scale_factor=n
 rope_apply_proportional :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> Tensor[B,H,S,HD]
 rope_apply_proportional x position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false = do
   idx <- arange x start=0 end=(HD / 2) |> cast dtype="float32"
-  rot_half <- floor ((HD * partial_rotary_factor) / 2)
+  rot_half <- ((floor ((HD * partial_rotary_factor) / 2)) :: Dim)
   keep <- le idx (rot_half - 1)
   inv <- exp (0 - ((log theta) * ((2.0 * idx) / HD)))
   inv <- (scale_factor == null) ? inv : (inv / scale_factor)
@@ -430,7 +430,7 @@ rope_apply_proportional x position_ids ?theta=10000.0 ?scale_factor=null ?partia
 rope_proportional_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,1,S,head_dim], Tensor[B,1,S,head_dim])
 rope_proportional_factors position_ids head_dim ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false = do
   idx <- arange position_ids start=0 end=(head_dim / 2) |> cast dtype="float32"
-  rot_half <- floor ((head_dim * partial_rotary_factor) / 2)
+  rot_half <- ((floor ((head_dim * partial_rotary_factor) / 2)) :: Dim)
   keep <- le idx (rot_half - 1)
   inv <- exp (0 - ((log theta) * ((2.0 * idx) / head_dim)))
   inv <- (scale_factor == null) ? inv : (inv / scale_factor)
@@ -526,7 +526,7 @@ rope_apply_inv_freq_prefix x pos_ids inv_freq dtype_ref rot attention_factor ?in
 rope_apply_inv_freq_with_partial :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Tensor[rot / 2] -> Tensor[..D] -> Float -> Any -> ?Bool -> Tensor[B,H,S,HD]
 rope_apply_inv_freq_with_partial x pos_ids inv_freq dtype_ref partial_rotary_factor attention_factor ?interleaved=false = do
   hd <- size x dim=-1
-  rot <- floor (hd * partial_rotary_factor)
+  rot <- ((floor (hd * partial_rotary_factor)) :: Dim)
   rot <- (rot < 0) ? 0 : rot
   rot <- (rot > hd) ? hd : rot
   return (rot <= 0)
@@ -566,7 +566,7 @@ rope_longrope_use_long pos_ids original_context = do
 rope_inv_freq_longrope :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Dim -> Any -> Any -> ?Float -> Tensor[HD / 2]
 rope_inv_freq_longrope q pos_ids theta original_context long_factor short_factor ?partial_rotary_factor=null = do
   hd <- size q dim=-1
-  rot <- (partial_rotary_factor == null) ? hd : floor (hd * partial_rotary_factor)
+  rot <- (partial_rotary_factor == null) ? hd : ((floor (hd * partial_rotary_factor)) :: Dim)
   rot <- (rot < 0) ? 0 : rot
   rot <- (rot > hd) ? hd : rot
   long_f <- tensor_like long_factor q dtype="float32" |> reshape shape=[(rot / 2)]

@@ -804,7 +804,7 @@ Status:
   roundtrip.
 - `scripts/axon_graph_optimize_strong_roundtrip.py` runs the strong optimized
   Graph IR roundtrip.
-- A focused weak pytest covers `generic-gpt2-kv.axon` with graph optimization.
+- A focused weak pytest covers `generic-gpt2.axon` with graph optimization.
 - A focused weak pytest covers `generic-llama4.axon` with graph optimization.
 - Graph IR now treats path-template placeholders such as `{CFG}` as first-class
   dependencies for validation, DCE liveness, and pruning.
@@ -838,11 +838,11 @@ The flags are wired but not validated on full model families.
 
 Status:
 
-- `--optimize-ast` smoke passed on `generic-gpt2-kv.axon` with
+- `--optimize-ast` smoke passed on `generic-gpt2.axon` with
   `openai-community/gpt2`: `masked_top1_eq=True`, max abs diff
   `0.0001068115234375`.
 - Historical broad AST optimizer smokes passed on:
-  - `generic-gpt2-kv.axon` with `openai-community/gpt2`:
+  - `generic-gpt2.axon` with `openai-community/gpt2`:
     `masked_top1_eq=True`, max abs diff `0.0001068115234375`
   - `bert-base-uncased.axon` with `google-bert/bert-base-uncased`:
     `masked_top1_eq=True`, max abs diff `2.956390380859375e-05`
@@ -856,12 +856,12 @@ Status:
 
 Status:
 
-- `--optimize-graph` smoke passed on `generic-gpt2-kv.axon` with
+- `--optimize-graph` smoke passed on `generic-gpt2.axon` with
   `openai-community/gpt2`: `masked_top1_eq=True`, max abs diff
   `0.0001068115234375`. Latest log:
   `log/gpt2-kv-global-backend-smoke/run.log`.
 - combined `--optimize-ast --optimize-graph` smoke passed on
-  `generic-gpt2-kv.axon` with `openai-community/gpt2`: `masked_top1_eq=True`,
+  `generic-gpt2.axon` with `openai-community/gpt2`: `masked_top1_eq=True`,
   max abs diff `3.0517578125e-05`. Log:
   `log/smoke-optimize-flags-20260511`.
 - all-file combined optimized weak Graph IR roundtrip is now covered as a

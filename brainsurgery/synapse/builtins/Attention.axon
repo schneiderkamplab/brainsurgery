@@ -83,7 +83,10 @@ attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null 
   mask <- mask_to_additive scores keep
   probs_in <- scores + mask
   probs_in <- (rel_bias == null) ? probs_in : (probs_in + rel_bias)
-  probs_in <- (sink_logits == null) ? probs_in : concat probs_in sink_logits dim=-1
+  probs_in <- (sink_logits == null) ? probs_in : do
+    combined <- concat probs_in sink_logits dim=-1
+    row_max, _ <- Tensor.topk combined 1 dim=-1 largest=true sorted=false
+    return combined - row_max
   probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
   K <- Tensor.size v dim=-2
   probs <- slice probs dim=-1 start=0 end=K
@@ -106,7 +109,10 @@ attention_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sink_lo
     return squashed * softcap_val
   probs_in <- scores + mask
   probs_in <- (rel_bias == null) ? probs_in : (probs_in + rel_bias)
-  probs_in <- (sink_logits == null) ? probs_in : concat probs_in sink_logits dim=-1
+  probs_in <- (sink_logits == null) ? probs_in : do
+    combined <- concat probs_in sink_logits dim=-1
+    row_max, _ <- Tensor.topk combined 1 dim=-1 largest=true sorted=false
+    return combined - row_max
   probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
   K <- Tensor.size v dim=-2
   probs <- slice probs dim=-1 start=0 end=K
@@ -135,7 +141,10 @@ attention_gqa_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sin
   mask_g <- Tensor.reshape mask shape=[B, KVH, groups, Q, K]
   probs_in <- scores + mask_g
   probs_in <- (rel_bias == null) ? probs_in : (probs_in + (Tensor.reshape rel_bias shape=[B, KVH, groups, Q, K]))
-  probs_in <- (sink_logits == null) ? probs_in : (concat probs_in (Tensor.reshape sink_logits shape=[B, KVH, groups, Q, 1]) dim=-1)
+  probs_in <- (sink_logits == null) ? probs_in : do
+    combined <- concat probs_in (Tensor.reshape sink_logits shape=[B, KVH, groups, Q, 1]) dim=-1
+    row_max, _ <- Tensor.topk combined 1 dim=-1 largest=true sorted=false
+    return combined - row_max
   probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
   K <- Tensor.size v dim=-2
   probs <- slice probs dim=-1 start=0 end=K

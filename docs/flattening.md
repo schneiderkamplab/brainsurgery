@@ -39,7 +39,7 @@ This avoids runtime ambient-scope heuristics while still supporting loops withou
    - loop-dependent -> `@@...{i}...` template tokens in IR
 4. Lower/codegen substitutes loop indices where needed.
 
-## Flattened gpt2-kv Example
+## Flattened gpt2 Example
 
 ```axon
 {-# CHECKPOINTS "openai-community/gpt2" #-}

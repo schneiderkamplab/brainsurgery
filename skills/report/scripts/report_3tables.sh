@@ -9,4 +9,4 @@ fi
 LOG_DIR="$1"
 shift || true
 
-conda run -n brainsurgery python /work/training/brainsurgery/scripts/benchmark_report_3tables.py "$LOG_DIR" "$@"
+conda run -n brainsurgery python /work/dfm/brainsurgery/scripts/benchmark_report_3tables.py "$LOG_DIR" "$@"

@@ -76,7 +76,7 @@ def lookup_config(config: Any, key: str) -> tuple[bool, Any]:
 
 
 def config_value(config: Any, path: Any, default: Any = None) -> Any:
-    key = str(path).lstrip("@")
+    key = str(path).lstrip("@").strip(".")
     found, value = lookup_config(config, key)
     if not found or value is None:
         return default
@@ -84,7 +84,7 @@ def config_value(config: Any, path: Any, default: Any = None) -> Any:
 
 
 def has_config_value(config: Any, path: Any) -> bool:
-    key = str(path).lstrip("@")
+    key = str(path).lstrip("@").strip(".")
     found, value = lookup_config(config, key)
     return found and value is not None
 

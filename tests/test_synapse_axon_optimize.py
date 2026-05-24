@@ -20,7 +20,7 @@ from brainsurgery.synapse.axon.validate import validate_typed_axon_file
 
 def _representative_model_paths() -> tuple[Path, ...]:
     return (
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon"),
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon"),
         Path("brainsurgery/synapse/models/bert/bert-base-uncased.axon"),
         Path("brainsurgery/synapse/models/llama4/generic-llama4.axon"),
         Path("brainsurgery/synapse/models/olmoe/generic-olmoe.axon"),
@@ -405,7 +405,7 @@ def test_optimize_rewrites_list_destructuring_to_index_binds() -> None:
 
 def test_optimize_reapplies_structural_passes_until_fixpoint_on_generic_gpt2() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
     ).ast
     normalized = normalize_closed_axon_file(resolved, main_module="gpt2")
     elaborated = elaborate_closed_axon_file(normalized, main_module="gpt2")

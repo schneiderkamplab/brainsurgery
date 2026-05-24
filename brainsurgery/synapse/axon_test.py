@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import html
+import inspect
 import importlib.machinery
 import importlib.util
 import json
@@ -2621,6 +2622,26 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
     return out, dt
 
 
+def _call_generate_compatible(model: Any, **kwargs: Any) -> Any:
+    """Call HF/reference generate with only supported keyword arguments."""
+
+    generate = model.generate
+    try:
+        signature = inspect.signature(generate)
+    except (TypeError, ValueError):
+        return generate(**kwargs)
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return generate(**kwargs)
+    accepted = {
+        name
+        for name, param in signature.parameters.items()
+        if name != "self"
+        and param.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    return generate(**{key: value for key, value in kwargs.items() if key in accepted})
+
+
 def _print_axon_profile_summary(rows: Sequence[Mapping[str, Any]]) -> None:
     if not rows:
         print("Axon profile: no recorded regions")
@@ -3735,7 +3756,8 @@ def _run_axon_test_single(
                                 else:
                                     sample_inputs[key] = value
                             generated.append(
-                                model.generate(
+                                _call_generate_compatible(
+                                    model,
                                     **sample_inputs,
                                     max_new_tokens=hf_max_new_tokens,
                                     eos_token_id=tokenizer_obj.eos_token_id,
@@ -3755,7 +3777,8 @@ def _run_axon_test_single(
                             for item in generated
                         ]
                         return torch.stack(padded, dim=0)
-                    return model.generate(
+                    return _call_generate_compatible(
+                        model,
                         **io["hf_generate_inputs"],
                         max_new_tokens=hf_max_new_tokens,
                         eos_token_id=tokenizer_obj.eos_token_id,

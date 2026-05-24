@@ -13,15 +13,15 @@ import Tensor
 
 
 
-MODEL_DIM = Config.int@@hidden_size default=4096
-VOCAB_SIZE = Config.int@@vocab_size default=32000
-NUM_LAYERS = Config.int@@num_hidden_layers default=32
-NUM_HEADS = Config.int@@num_attention_heads default=32
-KVH = Config.int@@num_key_value_heads default=8
-MODEL_HEAD_DIM = Config.int@@head_dim default=64
+MODEL_DIM = Config.dim@@hidden_size default=4096
+VOCAB_SIZE = Config.dim@@vocab_size default=32000
+NUM_LAYERS = Config.dim@@num_hidden_layers default=32
+NUM_HEADS = Config.dim@@num_attention_heads default=32
+KVH = Config.dim@@num_key_value_heads default=8
+MODEL_HEAD_DIM = Config.dim@@head_dim default=64
 KVD = KVH * MODEL_HEAD_DIM
-FFN = Config.int@@intermediate_size default=11008
-E = Config.int@@num_local_experts default=8
+FFN = Config.dim@@intermediate_size default=11008
+E = Config.dim@@num_local_experts default=8
 EPT = Config.int@@num_experts_per_tok default=2
 EPS = Config.float@@rms_norm_eps default=1e-06
 THETA = Config.float @@'rope_parameters.rope_theta' default=10000.0

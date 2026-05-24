@@ -111,4 +111,4 @@ When starting a benchmark, state:
 - size/checkpoint selection
 - process/GPU plan
 
-When reporting, give the standard three tables via the `report` skill.
+When reporting, give the standard four tables via the `report` skill.

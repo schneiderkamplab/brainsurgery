@@ -295,7 +295,7 @@ main x = do
 
 def test_flatten_threads_loop_scope_into_called_module_paths() -> None:
     resolved = resolve_axon_program_from_path(
-        Path("brainsurgery/synapse/models/gpt2/generic-gpt2-kv.axon")
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
     ).ast
     flat = _flatten(resolved, main_module="gpt2")
     validate_flat_axon_file(flat, main_module="gpt2")

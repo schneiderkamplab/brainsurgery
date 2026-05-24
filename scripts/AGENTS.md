@@ -27,15 +27,16 @@ Wiki memory for scripts: `../wiki/AGENTS.md` and `../wiki/scripts.md`
 
 ## Reporting Conventions
 
-- Reusable 3-table benchmark status report:
+- Reusable 4-table benchmark status report:
   - `python scripts/benchmark_report_3tables.py log/<run-id>`
 - Expected input:
   - `log/<run-id>` contains per-run/per-family `stream.csv` files (recursive scan).
   - Optional `manifest.csv` at `log/<run-id>/manifest.csv` for planned group count.
 - Output tables:
-  - progress summary (completed/planned/completion/rows/run-active)
+  - progress summary (completed/planned/completion/rows/timing counts/run-active)
   - issue rows (`ERROR`, `masked_top1_eq != True`, or `masked_max_abs_diff >= threshold`)
   - generic vs materialized mismatch rows
+  - Axon/HF >= 1.0 rows sorted by ratio descending
 - Useful flags:
   - `--abs-threshold` (default `1e-3`)
   - `--max-rows` (default `200`)

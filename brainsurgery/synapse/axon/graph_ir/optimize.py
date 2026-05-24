@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -256,8 +257,16 @@ def _validate_optimizer_module_metadata(
     modules_by_name: Mapping[str, GraphModule],
 ) -> None:
     dim_values: dict[str, DimToken] = {}
+    local_value_types: dict[str, TypeExpr] = {value.name: value.type_expr for value in module.inputs}
+    for node in module.nodes:
+        local_value_types.update({value.name: value.type_expr for value in node.outputs})
     for value in module.inputs:
         _require_value_dims_match_type(value, context=f"module {module.name!r} input")
+        _validate_type_dim_value_refs(
+            value.type_expr,
+            local_value_types=local_value_types,
+            context=f"module {module.name!r} input {value.name!r}",
+        )
     for node in module.nodes:
         if (
             isinstance(node.type_expr, TypeTensor)
@@ -268,10 +277,24 @@ def _validate_optimizer_module_metadata(
                 f"node {node.id!r} has stale dims metadata: "
                 f"type has {node.type_expr.dims!r}, dims has {node.dims!r}"
             )
+        _validate_type_dim_value_refs(
+            node.type_expr,
+            local_value_types=local_value_types,
+            context=f"node {node.id!r} type",
+        )
         for output in node.outputs:
             _require_value_dims_match_type(output, context=f"node {node.id!r} output")
+            _validate_type_dim_value_refs(
+                output.type_expr,
+                local_value_types=local_value_types,
+                context=f"node {node.id!r} output {output.name!r}",
+            )
         for operand in (*node.inputs, *node.attrs.values()):
-            _validate_optimizer_operand_metadata(operand, context=f"node {node.id!r} operand")
+            _validate_optimizer_operand_metadata(
+                operand,
+                context=f"node {node.id!r} operand",
+                local_value_types=local_value_types,
+            )
             _validate_optimizer_nested_call_results(
                 operand,
                 modules_by_name=modules_by_name,
@@ -298,7 +321,11 @@ def _validate_optimizer_module_metadata(
             if dim is not None:
                 dim_values[node.outputs[0].name] = dim
     for output in module.outputs:
-        _validate_optimizer_operand_metadata(output, context=f"module {module.name!r} return")
+        _validate_optimizer_operand_metadata(
+            output,
+            context=f"module {module.name!r} return",
+            local_value_types=local_value_types,
+        )
         _validate_optimizer_nested_call_results(
             output,
             modules_by_name=modules_by_name,
@@ -306,6 +333,38 @@ def _validate_optimizer_module_metadata(
             context=f"module {module.name!r} return",
         )
     _validate_optimizer_constraints(module, modules_by_name=modules_by_name)
+
+
+def _is_dim_value_type(type_expr: TypeExpr) -> bool:
+    if isinstance(type_expr, TypeOptional):
+        return _is_dim_value_type(type_expr.inner)
+    return isinstance(type_expr, TypeDim | TypeInt)
+
+
+def _validate_type_dim_value_refs(
+    type_expr: TypeExpr | None,
+    *,
+    local_value_types: Mapping[str, TypeExpr],
+    context: str,
+) -> None:
+    for name in _type_dim_refs(type_expr):
+        if not isinstance(name, str):
+            continue
+        value_type = local_value_types.get(name)
+        if value_type is None or _is_dim_value_type(value_type):
+            continue
+        # Some hand-written Axon currently passes shape values as term
+        # parameters without precise Dim/Int annotations. Do not reject those
+        # legacy imprecise formals here. The dangerous case for graph
+        # optimization is generated/local temporaries captured as type-level
+        # dimensions, because subsequent refresh passes can then substitute an
+        # unrelated tensor/float value name into shape metadata.
+        if not _is_generated_value_name(name):
+            continue
+        raise ValueError(
+            f"{context} uses local non-dim value {name!r} as a type dimension "
+            f"(local type {value_type!r})"
+        )
 
 
 def _require_value_dims_match_type(value: GraphValue, *, context: str) -> None:
@@ -320,7 +379,12 @@ def _require_value_dims_match_type(value: GraphValue, *, context: str) -> None:
         )
 
 
-def _validate_optimizer_operand_metadata(operand: GraphOperand, *, context: str) -> None:
+def _validate_optimizer_operand_metadata(
+    operand: GraphOperand,
+    *,
+    context: str,
+    local_value_types: Mapping[str, TypeExpr],
+) -> None:
     if isinstance(operand, GraphValueRef):
         if (
             isinstance(operand.type_expr, TypeTensor)
@@ -331,6 +395,11 @@ def _validate_optimizer_operand_metadata(operand: GraphOperand, *, context: str)
                 f"{context} ref {operand.name!r} has stale dims metadata: "
                 f"type has {operand.type_expr.dims!r}, dims has {operand.dims!r}"
             )
+        _validate_type_dim_value_refs(
+            operand.type_expr,
+            local_value_types=local_value_types,
+            context=f"{context} ref {operand.name!r}",
+        )
         return
     if isinstance(operand, GraphExpr):
         if (
@@ -342,10 +411,23 @@ def _validate_optimizer_operand_metadata(operand: GraphOperand, *, context: str)
                 f"{context} expr {operand.op.name!r} has stale dims metadata: "
                 f"type has {operand.type_expr.dims!r}, dims has {operand.dims!r}"
             )
+        _validate_type_dim_value_refs(
+            operand.type_expr,
+            local_value_types=local_value_types,
+            context=f"{context} expr {operand.op.name!r}",
+        )
         for item in operand.inputs:
-            _validate_optimizer_operand_metadata(item, context=f"{context} input")
+            _validate_optimizer_operand_metadata(
+                item,
+                context=f"{context} input",
+                local_value_types=local_value_types,
+            )
         for key, item in operand.attrs.items():
-            _validate_optimizer_operand_metadata(item, context=f"{context} attr {key!r}")
+            _validate_optimizer_operand_metadata(
+                item,
+                context=f"{context} attr {key!r}",
+                local_value_types=local_value_types,
+            )
 
 
 def _validate_optimizer_nested_call_results(
@@ -451,6 +533,132 @@ def _sanitize_graph_constraints(graph: GraphProgram) -> GraphProgram:
             for module in graph.modules
         ),
     )
+
+
+def _fresh_type_dim_name(base: str, used: set[str]) -> str:
+    candidate = f"{base}__dim"
+    if candidate not in used:
+        used.add(candidate)
+        return candidate
+    index = 1
+    while True:
+        candidate = f"{base}__dim{index}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        index += 1
+
+
+def _rename_type_dims_in_value(value: GraphValue, renames: Mapping[str, str]) -> GraphValue:
+    if not renames:
+        return value
+    return replace(
+        value,
+        type_expr=_rename_module_type_expr(value.type_expr, renames),
+        dims=(
+            None
+            if value.dims is None
+            else tuple(_rename_module_dim_token(dim, renames) for dim in value.dims)
+        ),
+    )
+
+
+def _rename_type_dims_in_operand(operand: GraphOperand, renames: Mapping[str, str]) -> GraphOperand:
+    if not renames:
+        return operand
+    if isinstance(operand, GraphValueRef):
+        return replace(
+            operand,
+            type_expr=_rename_module_type_expr(operand.type_expr, renames),
+            dims=(
+                None
+                if operand.dims is None
+                else tuple(_rename_module_dim_token(dim, renames) for dim in operand.dims)
+            ),
+        )
+    if isinstance(operand, GraphLiteral):
+        return replace(operand, type_expr=_rename_module_type_expr(operand.type_expr, renames))
+    if isinstance(operand, GraphExpr):
+        return replace(
+            operand,
+            inputs=tuple(_rename_type_dims_in_operand(item, renames) for item in operand.inputs),
+            attrs={key: _rename_type_dims_in_operand(value, renames) for key, value in operand.attrs.items()},
+            type_expr=_rename_module_type_expr(operand.type_expr, renames),
+            dims=(
+                None
+                if operand.dims is None
+                else tuple(_rename_module_dim_token(dim, renames) for dim in operand.dims)
+            ),
+        )
+    return operand
+
+
+def _alpha_rename_shadowed_type_dims_in_module(module: GraphModule) -> GraphModule:
+    """Keep term-value binders and type-level dimension symbols lexically distinct.
+
+    Graph IR stores term values and type dimensions as names. If a non-dim term
+    value named `K` exists in a module, a type annotation `Tensor[B,K]` must not
+    silently resolve to that term value. Rename the type-level symbol instead,
+    preserving ordinary term references and path templates.
+    """
+
+    local_value_types: dict[str, TypeExpr] = {value.name: value.type_expr for value in module.inputs}
+    for node in module.nodes:
+        local_value_types.update({value.name: value.type_expr for value in node.outputs})
+    shadowing_values = {
+        name
+        for name, type_expr in local_value_types.items()
+        if not _is_dim_value_type(type_expr)
+    }
+    dim_refs = _module_dim_refs(module)
+    conflicts = sorted(name for name in (dim_refs & shadowing_values) if _is_plain_dim_symbol(name))
+    if not conflicts:
+        return module
+    used = set(local_value_types) | dim_refs
+    renames: dict[str, str] = {}
+    for name in conflicts:
+        prefix = f"{name}__dim"
+        existing = sorted(
+            candidate
+            for candidate in dim_refs
+            if isinstance(candidate, str)
+            and (candidate == prefix or (candidate.startswith(prefix) and candidate[len(prefix):].isdigit()))
+            and candidate not in local_value_types
+        )
+        if existing:
+            renames[name] = existing[0]
+            continue
+        renames[name] = _fresh_type_dim_name(name, used)
+    return replace(
+        module,
+        inputs=tuple(_rename_type_dims_in_value(value, renames) for value in module.inputs),
+        outputs=tuple(_rename_type_dims_in_operand(output, renames) for output in module.outputs),
+        nodes=tuple(
+            replace(
+                node,
+                inputs=tuple(_rename_type_dims_in_operand(item, renames) for item in node.inputs),
+                attrs={key: _rename_type_dims_in_operand(value, renames) for key, value in node.attrs.items()},
+                outputs=tuple(_rename_type_dims_in_value(output, renames) for output in node.outputs),
+                type_expr=_rename_module_type_expr(node.type_expr, renames),
+                dims=(
+                    None
+                    if node.dims is None
+                    else tuple(_rename_module_dim_token(dim, renames) for dim in node.dims)
+                ),
+            )
+            for node in module.nodes
+        ),
+        return_type_expr=(
+            None
+            if module.return_type_expr is None
+            else _rename_module_type_expr(module.return_type_expr, renames)
+        ),
+    )
+
+
+def _alpha_rename_shadowed_type_dims(graph: GraphProgram) -> GraphProgram:
+    modules = tuple(_alpha_rename_shadowed_type_dims_in_module(module) for module in graph.modules)
+    return graph if modules == graph.modules else replace(graph, modules=modules)
 
 
 def _sanitize_module_constraints(
@@ -1135,6 +1343,33 @@ def _call_dim_subst(
     return dim_map
 
 
+def _call_node_dim_subst(
+    callee: GraphModule,
+    node: GraphNode,
+    *,
+    dim_values: Mapping[str, DimToken] | None = None,
+) -> dict[str, DimToken]:
+    dim_map = _call_dim_subst(callee, node.inputs, dim_values=dim_values)
+    formal_return = _return_type_expr_from_outputs(callee.outputs)
+    actual_return = _return_type_expr_from_outputs(
+        tuple(
+            GraphValueRef(
+                name=output.name,
+                type_expr=output.type_expr,
+                dims=output.dims,
+            )
+            for output in node.outputs
+        )
+    )
+    _bind_type_dim_map(
+        formal_return,
+        actual_return,
+        dim_map,
+        bind_singleton_plain_dims=False,
+    )
+    return dim_map
+
+
 def _call_type_substitutions(
     callee: GraphModule,
     actuals: tuple[GraphOperand, ...],
@@ -1340,6 +1575,8 @@ def _broadcast_graph_dim(left: DimToken, right: DimToken) -> DimToken | None:
         return right
     if right == 1:
         return left
+    if isinstance(left, str) and left.startswith("..") and isinstance(right, str) and right.startswith(".."):
+        return None
     if isinstance(left, str) and left.startswith(".."):
         return right
     if isinstance(right, str) and right.startswith(".."):
@@ -1478,19 +1715,56 @@ def _select_result_type(existing: TypeExpr, true_type: TypeExpr, false_type: Typ
         return TypeOptional(false_type) if not isinstance(false_type, TypeOptional) else false_type
     if isinstance(false_type, TypeNull):
         return TypeOptional(true_type) if not isinstance(true_type, TypeOptional) else true_type
+    if isinstance(true_type, TypeOptional) and isinstance(false_type, TypeOptional):
+        return TypeOptional(_select_result_type(true_type.inner, true_type.inner, false_type.inner))
+    if isinstance(true_type, TypeOptional):
+        return TypeOptional(_select_result_type(true_type.inner, true_type.inner, false_type))
+    if isinstance(false_type, TypeOptional):
+        return TypeOptional(_select_result_type(false_type.inner, true_type, false_type.inner))
     if (
         isinstance(true_type, TypeTensor)
         and isinstance(false_type, TypeTensor)
         and true_type.base == false_type.base
     ):
-        dims = _broadcast_graph_dims(true_type.dims, false_type.dims)
-        if dims is not None:
-            return TypeTensor(true_type.base, dims)
+        if len(true_type.dims) != len(false_type.dims):
+            return true_type
+        return TypeTensor(
+            true_type.base,
+            tuple(
+                _select_result_dim(left_dim, right_dim)
+                for left_dim, right_dim in zip(true_type.dims, false_type.dims, strict=True)
+            ),
+        )
+    if isinstance(true_type, TypeTuple) and isinstance(false_type, TypeTuple):
+        if len(true_type.items) != len(false_type.items):
+            return true_type
+        return TypeTuple(
+            tuple(
+                _select_result_type(left_item, left_item, right_item)
+                for left_item, right_item in zip(true_type.items, false_type.items, strict=True)
+            )
+        )
+    if isinstance(true_type, TypeList) and isinstance(false_type, TypeList):
+        return TypeList(_select_result_type(true_type.item, true_type.item, false_type.item))
     if graph_type_compatible(true_type, false_type):
         return _more_specific_compatible_type(true_type, false_type)
     if graph_type_compatible(false_type, true_type):
         return _more_specific_compatible_type(false_type, true_type)
     return true_type
+
+
+def _stable_join_dim_name(left: DimToken, right: DimToken) -> str:
+    payload = repr((substitute_dim_token(left, {}), substitute_dim_token(right, {}))).encode("utf-8")
+    digest = hashlib.sha1(payload).hexdigest()[:10]
+    return f"__join_{digest}"
+
+
+def _select_result_dim(left: DimToken, right: DimToken) -> DimToken:
+    left = substitute_dim_token(left, {})
+    right = substitute_dim_token(right, {})
+    if left == right:
+        return left
+    return _stable_join_dim_name(left, right)
 
 
 def _primitive_semantics(op_name: str) -> dict[str, object]:
@@ -2140,6 +2414,13 @@ def _refresh_graph_module_types(
         for output in node.outputs:
             used_type = use_types.get(output.name)
             if used_type is None:
+                refined_outputs.append(output)
+                continue
+            if _type_has_non_dim_local_dim_ref(
+                used_type,
+                env=env,
+                globals_env=globals_env,
+            ):
                 refined_outputs.append(output)
                 continue
             refined_type = _refined_compatible_type(output.type_expr, used_type)
@@ -3420,45 +3701,63 @@ def _fresh_canonical_value_name(used: set[str], next_index: int) -> tuple[str, i
         index += 1
 
 
-def _rename_value(value: GraphValue, renames: Mapping[str, str]) -> GraphValue:
+def _rename_value(
+    value: GraphValue,
+    renames: Mapping[str, str],
+    *,
+    type_renames: Mapping[str, str] | None = None,
+) -> GraphValue:
+    type_renames = renames if type_renames is None else type_renames
     return replace(
         value,
         name=renames.get(value.name, value.name),
-        type_expr=_rename_module_type_expr(value.type_expr, renames),
+        type_expr=_rename_module_type_expr(value.type_expr, type_renames),
         dims=(
             None
             if value.dims is None
-            else tuple(_rename_module_dim_token(dim, renames) for dim in value.dims)
+            else tuple(_rename_module_dim_token(dim, type_renames) for dim in value.dims)
         ),
     )
 
 
-def _rename_value_operand(operand: GraphOperand, renames: Mapping[str, str]) -> GraphOperand:
+def _rename_value_operand(
+    operand: GraphOperand,
+    renames: Mapping[str, str],
+    *,
+    type_renames: Mapping[str, str] | None = None,
+) -> GraphOperand:
+    type_renames = renames if type_renames is None else type_renames
     if isinstance(operand, GraphValueRef):
         return replace(
             operand,
             name=renames.get(operand.name, operand.name),
-            type_expr=_rename_module_type_expr(operand.type_expr, renames),
+            type_expr=_rename_module_type_expr(operand.type_expr, type_renames),
             dims=(
                 None
                 if operand.dims is None
-                else tuple(_rename_module_dim_token(dim, renames) for dim in operand.dims)
+                else tuple(_rename_module_dim_token(dim, type_renames) for dim in operand.dims)
             ),
         )
     if isinstance(operand, GraphLiteral):
-        return replace(operand, type_expr=_rename_module_type_expr(operand.type_expr, renames))
+        return replace(operand, type_expr=_rename_module_type_expr(operand.type_expr, type_renames))
     if isinstance(operand, GraphPath):
         return rename_operand(operand, renames)
     if isinstance(operand, GraphExpr):
         return replace(
             operand,
-            inputs=tuple(_rename_value_operand(item, renames) for item in operand.inputs),
-            attrs={key: _rename_value_operand(value, renames) for key, value in operand.attrs.items()},
-            type_expr=_rename_module_type_expr(operand.type_expr, renames),
+            inputs=tuple(
+                _rename_value_operand(item, renames, type_renames=type_renames)
+                for item in operand.inputs
+            ),
+            attrs={
+                key: _rename_value_operand(value, renames, type_renames=type_renames)
+                for key, value in operand.attrs.items()
+            },
+            type_expr=_rename_module_type_expr(operand.type_expr, type_renames),
             dims=(
                 None
                 if operand.dims is None
-                else tuple(_rename_module_dim_token(dim, renames) for dim in operand.dims)
+                else tuple(_rename_module_dim_token(dim, type_renames) for dim in operand.dims)
             ),
         )
     return operand
@@ -3513,13 +3812,53 @@ def _fresh_hidden_global_value_name(used: set[str], next_index: int) -> tuple[st
         index += 1
 
 
+def _collect_dim_value_ref_names(operand: GraphOperand, out: set[str]) -> None:
+    if isinstance(operand, GraphValueRef):
+        if isinstance(operand.type_expr, TypeDim | TypeInt):
+            out.add(operand.name)
+        return
+    if isinstance(operand, GraphPath):
+        out.update(graph_path_template_names(operand))
+        return
+    if isinstance(operand, GraphExpr):
+        for item in operand.inputs:
+            _collect_dim_value_ref_names(item, out)
+        for item in operand.attrs.values():
+            _collect_dim_value_ref_names(item, out)
+
+
+def _module_unbound_dim_value_ref_names(module: GraphModule) -> set[str]:
+    defined = {value.name for value in module.inputs}
+    for node in module.nodes:
+        defined.update(value.name for value in node.outputs)
+    refs: set[str] = set()
+    for node in module.nodes:
+        for operand in node.inputs:
+            _collect_dim_value_ref_names(operand, refs)
+        for operand in node.attrs.values():
+            _collect_dim_value_ref_names(operand, refs)
+    for output in module.outputs:
+        _collect_dim_value_ref_names(output, refs)
+    return refs - defined
+
+
+def _is_canonical_hidden_global_value_name(name: str) -> bool:
+    return name.startswith("__global_") and name.removeprefix("__global_").isdigit()
+
+
+def _is_canonical_local_value_name(name: str) -> bool:
+    return name.startswith("_v") and name[2:].isdigit()
+
+
 def _canonicalize_generated_value_names_in_module(
     module: GraphModule,
     *,
     global_symbol_names: set[str],
 ) -> GraphModule:
     renames: dict[str, str] = {}
-    used = {value.name for value in module.inputs}
+    # Dim symbols are first-class in graph IR. A value name must not capture a
+    # type-dim symbol or an intentionally unbound dim term reference.
+    used = {value.name for value in module.inputs} | _module_unbound_dim_value_ref_names(module)
     for name in module.output_names:
         if not _is_generated_value_name(name):
             used.add(name)
@@ -3532,10 +3871,10 @@ def _canonicalize_generated_value_names_in_module(
         if not _is_zero_arg_global_call_node(node, global_symbol_names=global_symbol_names):
             continue
         output = node.outputs[0]
-        target, next_hidden_global_index = _fresh_hidden_global_value_name(
-            used,
-            next_hidden_global_index,
-        )
+        if _is_canonical_hidden_global_value_name(output.name) and output.name not in used:
+            used.add(output.name)
+            continue
+        target, next_hidden_global_index = _fresh_hidden_global_value_name(used, next_hidden_global_index)
         if target != output.name:
             renames[output.name] = target
     next_index = 1
@@ -3545,27 +3884,50 @@ def _canonicalize_generated_value_names_in_module(
         for output in node.outputs:
             if not _is_generated_value_name(output.name):
                 continue
+            if _is_canonical_local_value_name(output.name) and output.name not in used:
+                used.add(output.name)
+                continue
             target, next_index = _fresh_canonical_value_name(used, next_index)
             if target != output.name:
                 renames[output.name] = target
     if not renames:
         return module
+    local_value_types = {value.name: value.type_expr for value in module.inputs}
+    for node in module.nodes:
+        local_value_types.update({value.name: value.type_expr for value in node.outputs})
+    type_renames = {
+        old: new
+        for old, new in renames.items()
+        if _is_dim_value_type(local_value_types.get(old, TypeAny()))
+    }
     return replace(
         module,
-        inputs=tuple(_rename_value(value, renames) for value in module.inputs),
-        outputs=tuple(_rename_value_operand(output, renames) for output in module.outputs),
+        inputs=tuple(_rename_value(value, renames, type_renames=type_renames) for value in module.inputs),
+        outputs=tuple(
+            _rename_value_operand(output, renames, type_renames=type_renames)
+            for output in module.outputs
+        ),
         output_names=tuple(renames.get(name, name) for name in module.output_names),
         nodes=tuple(
             replace(
                 node,
-                inputs=tuple(_rename_value_operand(item, renames) for item in node.inputs),
-                attrs={key: _rename_value_operand(value, renames) for key, value in node.attrs.items()},
-                outputs=tuple(_rename_value(output, renames) for output in node.outputs),
-                type_expr=_rename_module_type_expr(node.type_expr, renames),
+                inputs=tuple(
+                    _rename_value_operand(item, renames, type_renames=type_renames)
+                    for item in node.inputs
+                ),
+                attrs={
+                    key: _rename_value_operand(value, renames, type_renames=type_renames)
+                    for key, value in node.attrs.items()
+                },
+                outputs=tuple(
+                    _rename_value(output, renames, type_renames=type_renames)
+                    for output in node.outputs
+                ),
+                type_expr=_rename_module_type_expr(node.type_expr, type_renames),
                 dims=(
                     None
                     if node.dims is None
-                    else tuple(_rename_module_dim_token(dim, renames) for dim in node.dims)
+                    else tuple(_rename_module_dim_token(dim, type_renames) for dim in node.dims)
                 ),
             )
             for node in module.nodes
@@ -3573,7 +3935,7 @@ def _canonicalize_generated_value_names_in_module(
         return_type_expr=(
             None
             if module.return_type_expr is None
-            else _rename_module_type_expr(module.return_type_expr, renames)
+            else _rename_module_type_expr(module.return_type_expr, type_renames)
         ),
         constraints=tuple(_rename_value_constraint(item, renames) for item in module.constraints),
     )
@@ -3594,8 +3956,15 @@ def _canonicalize_generated_value_names(graph: GraphProgram) -> GraphProgram:
     )
     if modules == graph.modules:
         return graph
-    renamed = replace(graph, modules=modules)
-    _validate_optimizer_graph(renamed, phase="canonicalize_value_names")
+    renamed = _alpha_rename_shadowed_type_dims(replace(graph, modules=modules))
+    try:
+        _validate_optimizer_graph(renamed, phase="canonicalize_value_names")
+    except ValueError:
+        # Value-name canonicalization is a readability-only transform. If a
+        # generated value name is also used as a type-level dimension symbol,
+        # renaming can create accidental term/type capture in rare stale-type
+        # cases. Keep the already-valid graph instead of changing semantics.
+        return graph
     return renamed
 
 
@@ -4006,12 +4375,12 @@ def _literal_select_selected_node(
     )
 
 
-def _call_output_dim_value_subst(
-    module: GraphModule,
+def _call_node_output_dim_value_subst(
+    node: GraphNode,
     *,
     modules_by_name: Mapping[str, GraphModule],
+    local_names: set[str],
 ) -> dict[str, GraphOperand]:
-    local_names = _module_value_names(module)
     candidates: dict[str, GraphOperand] = {}
     conflicts: set[str] = set()
 
@@ -4069,23 +4438,22 @@ def _call_output_dim_value_subst(
             for formal_item, actual_item in zip(formal_type.items, actual_type.items, strict=True):
                 collect_from_type(formal_item, actual_item, formal_dim_values)
 
-    for node in module.nodes:
-        callee = modules_by_name.get(node.op.name)
-        if callee is None or len(node.inputs) != len(callee.inputs):
+    callee = modules_by_name.get(node.op.name)
+    if callee is None or len(node.inputs) != len(callee.inputs):
+        return {}
+    formal_dim_values: dict[str, GraphOperand] = {}
+    for formal, actual in zip(callee.inputs, node.inputs, strict=True):
+        if not isinstance(formal.type_expr, TypeDim | TypeInt):
             continue
-        formal_dim_values: dict[str, GraphOperand] = {}
-        for formal, actual in zip(callee.inputs, node.inputs, strict=True):
-            if not isinstance(formal.type_expr, TypeDim | TypeInt):
-                continue
-            if isinstance(actual, GraphValueRef) and isinstance(actual.type_expr, TypeDim | TypeInt):
-                formal_dim_values[formal.name] = actual
-            elif isinstance(actual, GraphLiteral) and type(actual.value) is int:
-                formal_dim_values[formal.name] = actual
-        if not formal_dim_values:
-            continue
-        formal_output_types = _module_output_types_for_arity(callee, len(node.outputs))
-        for formal_type, output in zip(formal_output_types, node.outputs, strict=True):
-            collect_from_type(formal_type, output.type_expr, formal_dim_values)
+        if isinstance(actual, GraphValueRef) and isinstance(actual.type_expr, TypeDim | TypeInt):
+            formal_dim_values[formal.name] = actual
+        elif isinstance(actual, GraphLiteral) and type(actual.value) is int:
+            formal_dim_values[formal.name] = actual
+    if not formal_dim_values:
+        return {}
+    formal_output_types = _module_output_types_for_arity(callee, len(node.outputs))
+    for formal_type, output in zip(formal_output_types, node.outputs, strict=True):
+        collect_from_type(formal_type, output.type_expr, formal_dim_values)
     for name in conflicts:
         candidates.pop(name, None)
     return candidates
@@ -4111,10 +4479,8 @@ def _optimize_module_local(
         if not global_module.inputs and len(global_module.outputs) == 1
     }
     shadowed_global_dim_names = shadowed_dim_names & global_symbol_names
-    subst: dict[str, GraphOperand] = _call_output_dim_value_subst(
-        module,
-        modules_by_name=modules_by_name,
-    )
+    subst: dict[str, GraphOperand] = {}
+    local_names = _module_value_names(module)
     stable_shape_values = {value.name for value in module.inputs}
     dim_values: dict[str, DimToken] = {
         name: value
@@ -4259,6 +4625,13 @@ def _optimize_module_local(
             )
             if dim_expr is not None:
                 dim_values[rewritten.outputs[0].name] = dim_expr
+        subst.update(
+            _call_node_output_dim_value_subst(
+                rewritten,
+                modules_by_name=modules_by_name,
+                local_names=local_names,
+            )
+        )
     outputs = tuple(
         _replace_operand_refs(
             item,
@@ -4413,6 +4786,47 @@ def _inlineable_single_use_expr_node(node: GraphNode) -> bool:
     return False
 
 
+def _safe_inline_single_use_expr_node(
+    node: GraphNode,
+    *,
+    module_effects: Mapping[str, GraphEffect],
+    module_usages: Mapping[str, UsageClass],
+) -> bool:
+    if graph_node_effect(
+        node,
+        module_effects=dict(module_effects),
+    ) == GraphEffect.TOTAL_PURE:
+        return _is_unrestricted_node(node, module_usages)
+    if node.op.name in {"core.alias", "core.ascribe"}:
+        return (
+            len(node.inputs) == 1
+            and not node.attrs
+            and _is_atomic_operand(node.inputs[0])
+            and _is_unrestricted_operand(node.inputs[0], module_usages)
+        )
+    if node.op.name in {"core.list", "core.tuple"}:
+        return (
+            not node.attrs
+            and all(_is_atomic_operand(item) for item in node.inputs)
+            and all(_is_unrestricted_operand(item, module_usages) for item in node.inputs)
+        )
+    return False
+
+
+def _safe_duplicate_atomic_container_node(
+    node: GraphNode,
+    *,
+    module_usages: Mapping[str, UsageClass],
+) -> bool:
+    return (
+        len(node.outputs) == 1
+        and node.op.name in {"core.list", "core.tuple"}
+        and not node.attrs
+        and all(_is_atomic_operand(item) for item in node.inputs)
+        and all(_is_unrestricted_operand(item, module_usages) for item in node.inputs)
+    )
+
+
 def _inline_single_use_total_pure_exprs_module(
     module: GraphModule,
     *,
@@ -4441,7 +4855,9 @@ def _inline_single_use_total_pure_exprs_module(
         )
         _operand_refs(output, output_refs)
 
-    blocked_refs = path_template_refs | output_refs | _collect_module_free_symbols(module).type_dim_refs
+    hard_blocked_refs = path_template_refs | output_refs
+    type_dim_refs = _collect_module_free_symbols(module).type_dim_refs
+    blocked_refs = hard_blocked_refs | type_dim_refs
     subst: dict[str, GraphOperand] = {}
     nodes: list[GraphNode] = []
     changed = False
@@ -4457,7 +4873,18 @@ def _inline_single_use_total_pure_exprs_module(
             nodes.append(rewritten)
             continue
         output = rewritten.outputs[0]
-        if output.name in blocked_refs or counts[output.name] != 1:
+        can_duplicate_container = _safe_duplicate_atomic_container_node(
+            rewritten,
+            module_usages=module_usages,
+        )
+        if (
+            output.name in hard_blocked_refs
+            or (
+                output.name in blocked_refs
+                and not can_duplicate_container
+            )
+            or (counts[output.name] != 1 and not can_duplicate_container)
+        ):
             nodes.append(rewritten)
             continue
         replacement = GraphExpr(
@@ -4473,13 +4900,11 @@ def _inline_single_use_total_pure_exprs_module(
         ) is None:
             nodes.append(rewritten)
             continue
-        if graph_node_effect(
+        if not _safe_inline_single_use_expr_node(
             rewritten,
-            module_effects=dict(module_effects),
-        ) != GraphEffect.TOTAL_PURE:
-            nodes.append(rewritten)
-            continue
-        if not _is_unrestricted_node(rewritten, module_usages):
+            module_effects=module_effects,
+            module_usages=module_usages,
+        ):
             nodes.append(rewritten)
             continue
         subst[output.name] = replacement
@@ -6606,6 +7031,8 @@ def _can_inline_module(
         return False
     if module.name in recursive_modules:
         return False
+    if _module_signature_has_variadic_rows(module):
+        return False
     forwarding = _forwarding_node(module)
     if forwarding is not None:
         if forwarding.op.name == "core.select" and not allow_control_select:
@@ -6622,6 +7049,27 @@ def _can_inline_module(
         if not allow_control_select:
             return False
     return _is_non_effectful(module_effects.get(module.name))
+
+
+def _module_signature_has_variadic_rows(module: GraphModule) -> bool:
+    def has_variadic(type_expr: TypeExpr | None) -> bool:
+        if isinstance(type_expr, TypeTensor):
+            return any(isinstance(dim, str) and dim.startswith("..") for dim in type_expr.dims)
+        if isinstance(type_expr, TypeOptional):
+            return has_variadic(type_expr.inner)
+        if isinstance(type_expr, TypeList):
+            return has_variadic(type_expr.item)
+        if isinstance(type_expr, TypeTuple):
+            return any(has_variadic(item) for item in type_expr.items)
+        if isinstance(type_expr, TypeNamed):
+            return any(isinstance(dim, str) and dim.startswith("..") for dim in type_expr.args)
+        return False
+
+    return (
+        any(has_variadic(value.type_expr) for value in module.inputs)
+        or has_variadic(module.return_type_expr)
+        or any(has_variadic(graph_operand_type(output)) for output in module.outputs)
+    )
 
 
 def _is_small_inline_candidate(module: GraphModule, counts: Counter[str]) -> bool:
@@ -6818,14 +7266,21 @@ def _can_inline_forwarded_call_node(node: GraphNode, callee: GraphModule, inner:
             continue
         if not graph_type_compatible(graph_operand_type(actual), formal.type_expr):
             return False
+    forwarded = _rewrite_forwarded_call_node(node, callee, inner, fold=True)
+    # A forwarded one-op module can have a surface signature that is less
+    # precise than the primitive/type rule it forwards to.  In that case the
+    # call node's existing metadata may already be stale (for example a
+    # broadcast wrapper preserving Tensor[B,1,1,K] instead of the primitive's
+    # Tensor[B,1,Q,K]).  Trust the rewritten forwarded op and let the graph type
+    # refresh propagate its inferred output types.
+    forwarded_output_types = _forwarded_node_output_types(forwarded, len(node.outputs))
+    if forwarded_output_types is not None and len(forwarded_output_types) == len(node.outputs):
+        return _inline_call_substitution_is_closed(callee, node.inputs)
     expected_output_types = _instantiate_call_output_types(
         callee,
         node.inputs,
         len(node.outputs),
     )
-    forwarded = _rewrite_forwarded_call_node(node, callee, inner, fold=True)
-    if not _forwarded_node_outputs_compatible(forwarded, node.outputs):
-        return False
     if len(expected_output_types) == len(node.outputs) and all(
         graph_type_compatible(expected, output.type_expr)
         or graph_type_compatible(output.type_expr, expected)
@@ -7078,7 +7533,7 @@ def _rewrite_forwarded_call_node(
         formal.name: actual
         for formal, actual in zip(callee.inputs, node.inputs, strict=True)
     }
-    dim_subst = _call_dim_subst(callee, node.inputs)
+    dim_subst = _call_node_dim_subst(callee, node)
     rewritten = replace(
         node,
         op=inner.op,
@@ -7160,7 +7615,7 @@ def _rewrite_forwarded_expr_call_node(
         formal.name: actual
         for formal, actual in zip(callee.inputs, node.inputs, strict=True)
     }
-    dim_subst = _call_dim_subst(callee, node.inputs)
+    dim_subst = _call_node_dim_subst(callee, node)
     rewritten_expr = _replace_operand_refs(expr, formal_subst, fold=fold)
     rewritten_expr = substitute_graph_operand_dims(rewritten_expr, dim_subst) if dim_subst else rewritten_expr
     if not isinstance(rewritten_expr, GraphExpr):
@@ -7567,7 +8022,7 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 nodes.append(node)
                 continue
             formal_subst = {formal.name: actual for formal, actual in zip(callee.inputs, node.inputs, strict=True)}
-            dim_subst = _call_dim_subst(callee, node.inputs)
+            dim_subst = _call_node_dim_subst(callee, node)
             renames: dict[str, str] = {}
             for inner in callee.nodes:
                 for output in inner.outputs:
@@ -7662,8 +8117,9 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 constraints=tuple(constraints),
             )
         )
-    inlined = replace(graph, modules=tuple(rewritten_modules))
+    inlined = _alpha_rename_shadowed_type_dims(replace(graph, modules=tuple(rewritten_modules)))
     inlined = _refresh_graph_program_types(inlined)
+    inlined = _alpha_rename_shadowed_type_dims(inlined)
     inlined = _sanitize_graph_constraints(inlined)
     try:
         _validate_optimizer_graph(inlined, phase="inline.candidate")
@@ -7677,8 +8133,9 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 continue
             candidate_modules = list(accepted)
             candidate_modules[index] = rewritten_module
-            candidate = replace(graph, modules=tuple(candidate_modules))
+            candidate = _alpha_rename_shadowed_type_dims(replace(graph, modules=tuple(candidate_modules)))
             candidate = _refresh_graph_program_types(candidate)
+            candidate = _alpha_rename_shadowed_type_dims(candidate)
             candidate = _sanitize_graph_constraints(candidate)
             try:
                 _validate_optimizer_graph(candidate, phase="inline.candidate.module")
@@ -7688,8 +8145,9 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
             changed = True
         if not changed:
             return graph
-        inlined = replace(graph, modules=tuple(accepted))
+        inlined = _alpha_rename_shadowed_type_dims(replace(graph, modules=tuple(accepted)))
     inlined = prune_graph_to_main(inlined)
+    inlined = _alpha_rename_shadowed_type_dims(inlined)
     inlined = _sanitize_graph_constraints(inlined)
     _validate_optimizer_graph(inlined, phase="inline")
     return inlined
@@ -7701,17 +8159,22 @@ def optimize_graph_program(
     config: GraphOptimizeConfig | None = None,
 ) -> GraphProgram:
     config = config or GraphOptimizeConfig()
+    graph = _alpha_rename_shadowed_type_dims(graph)
     graph = _sanitize_graph_constraints(graph)
     _validate_optimizer_graph(graph, phase="input")
     current = prune_graph_to_main(graph) if config.prune_to_main else graph
+    current = _alpha_rename_shadowed_type_dims(current)
     _validate_optimizer_graph(current, phase="initial_prune" if config.prune_to_main else "initial")
     for _ in range(config.max_iterations):
+        current = _alpha_rename_shadowed_type_dims(current)
         before = current
         if config.constant_dim_substitution:
             current = _substitute_atomic_constant_dims_local(current)
+            current = _alpha_rename_shadowed_type_dims(current)
             _validate_optimizer_graph(current, phase="constant_dim_substitution")
         if config.constant_folding:
             current = _simplify_symbolic_graph_dims(current)
+            current = _alpha_rename_shadowed_type_dims(current)
         module_effects = infer_graph_module_effects(current.modules)
         module_usages = infer_graph_module_usages(current.modules)
         current = _promote_total_pure_zero_arg_modules_to_globals(
@@ -7719,13 +8182,16 @@ def optimize_graph_program(
             module_effects=module_effects,
             module_usages=module_usages,
         )
+        current = _alpha_rename_shadowed_type_dims(current)
         _validate_optimizer_graph(current, phase="promote_zero_arg_globals")
         current = _optimize_modules_local_with_fresh_domain_facts(
             current,
             config=config,
             phase="local_cleanup",
         )
+        current = _alpha_rename_shadowed_type_dims(current)
         current = _prune_dead_formals(current)
+        current = _alpha_rename_shadowed_type_dims(current)
         if config.constant_folding:
             module_effects = infer_graph_module_effects(current.modules)
             module_usages = infer_graph_module_usages(current.modules)
@@ -7741,6 +8207,7 @@ def optimize_graph_program(
             )
             candidate = replace(current, modules=pre_refresh_modules)
             candidate = _refresh_graph_program_types(candidate)
+            candidate = _alpha_rename_shadowed_type_dims(candidate)
             candidate = replace(
                 candidate,
                 modules=_preserve_unchanged_module_types(
@@ -7750,6 +8217,7 @@ def optimize_graph_program(
                     main_module=current.main_module,
                 ),
             )
+            candidate = _alpha_rename_shadowed_type_dims(candidate)
             candidate = _sanitize_graph_constraints(candidate)
             try:
                 _validate_optimizer_graph(candidate, phase="inline_single_use_exprs")
@@ -7773,6 +8241,7 @@ def optimize_graph_program(
                 ),
             )
             candidate = _refresh_graph_program_types(candidate)
+            candidate = _alpha_rename_shadowed_type_dims(candidate)
             candidate = _sanitize_graph_constraints(candidate)
             try:
                 _validate_optimizer_graph(candidate, phase="common_subexpression_elimination")
@@ -7781,9 +8250,11 @@ def optimize_graph_program(
             else:
                 current = candidate
         current = _specialize_definitions_to_fixpoint(current, config=config)
+        current = _alpha_rename_shadowed_type_dims(current)
         _validate_optimizer_graph(current, phase="specialize")
         if config.inline_safe:
             current = _inline_safe_modules(current, config=config)
+            current = _alpha_rename_shadowed_type_dims(current)
             _validate_optimizer_graph(current, phase="inline")
             if config.common_subexpression_elimination:
                 module_effects = infer_graph_module_effects(current.modules)
@@ -7801,6 +8272,7 @@ def optimize_graph_program(
                     ),
                 )
                 candidate = _refresh_graph_program_types(candidate)
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 try:
                     _validate_optimizer_graph(candidate, phase="post_inline_cse")
@@ -7817,6 +8289,7 @@ def optimize_graph_program(
                 module_usages=module_usages,
             )
             hoist_candidate = _refresh_graph_program_types(hoist_candidate)
+            hoist_candidate = _alpha_rename_shadowed_type_dims(hoist_candidate)
             hoist_candidate = _sanitize_graph_constraints(hoist_candidate)
             try:
                 _validate_optimizer_graph(hoist_candidate, phase="hoist_eager_nested_exprs")
@@ -7838,6 +8311,7 @@ def optimize_graph_program(
             )
             candidate = replace(current, modules=pre_refresh_modules)
             candidate = _refresh_graph_program_types(candidate)
+            candidate = _alpha_rename_shadowed_type_dims(candidate)
             candidate = replace(
                 candidate,
                 modules=_preserve_unchanged_module_types(
@@ -7847,6 +8321,7 @@ def optimize_graph_program(
                     main_module=current.main_module,
                 ),
             )
+            candidate = _alpha_rename_shadowed_type_dims(candidate)
             candidate = _sanitize_graph_constraints(candidate)
             try:
                 _validate_optimizer_graph(candidate, phase="post_hoist_inline_single_use_exprs")
@@ -7856,10 +8331,13 @@ def optimize_graph_program(
                 current = candidate
         if config.prune_to_main:
             current = prune_graph_to_main(current)
+            current = _alpha_rename_shadowed_type_dims(current)
             _validate_optimizer_graph(current, phase="prune")
         current = _canonicalize_generated_module_names(current)
+        current = _alpha_rename_shadowed_type_dims(current)
         _validate_optimizer_graph(current, phase="canonicalize_module_names")
         current = _canonicalize_generated_value_names(current)
+        current = _alpha_rename_shadowed_type_dims(current)
         _validate_optimizer_graph(current, phase="canonicalize_value_names")
         _validate_optimizer_graph(current, phase="iteration")
         if current == before:

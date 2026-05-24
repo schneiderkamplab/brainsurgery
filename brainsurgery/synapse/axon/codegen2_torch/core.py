@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
@@ -42,7 +43,9 @@ from ..graph_ir import (
     GraphLiteral,
     GraphExpr,
     GraphModule,
+    GraphNode,
     GraphOperand,
+    GraphOp,
     GraphPath,
     GraphProgram,
     GraphValue,
@@ -51,7 +54,13 @@ from ..graph_ir import (
     graph_path_template_names,
     validate_graph_program,
 )
-from ..graph_ir.effects import GraphEffect, UsageClass, infer_graph_module_effects, infer_graph_module_usages
+from ..graph_ir.effects import (
+    GraphEffect,
+    UsageClass,
+    graph_node_effect,
+    infer_graph_module_effects,
+    infer_graph_module_usages,
+)
 from ..graph_ir.substitute import substitute_graph_node_dims, substitute_graph_operand_dims
 
 
@@ -198,48 +207,98 @@ def _tensor_dims_from_type(type_expr: Any) -> tuple[Any, ...] | None:
     return None
 
 
-def _bind_inline_dim_subst(formal: Any, actual: Any, subst: dict[str, Any]) -> None:
+def _fresh_inline_dim(name: str, *, prefix: str) -> str:
+    return f"{prefix}__dim_{_py_ident(name).lstrip('_')}"
+
+
+def _bind_inline_dim_subst(
+    formal: Any,
+    actual: Any,
+    subst: dict[str, Any],
+    *,
+    fresh_prefix: str,
+    protected: set[str],
+) -> None:
     if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor):
-        if len(formal.dims) != len(actual.dims):
-            return
-        for formal_dim, actual_dim in zip(formal.dims, actual.dims, strict=True):
+        # Tensor shape formals are runtime facts about the actual value. During
+        # codegen inlining, binding them from the actual tensor's `.shape` is
+        # safer than substituting symbolic annotations that may be less precise
+        # or stale after earlier specialization. Freshen the formal names so an
+        # inlined callee cannot capture same-named dimensions in its caller.
+        for formal_dim in formal.dims:
+            for name in dim_token_names(formal_dim):
+                if (
+                    isinstance(name, str)
+                    and name.isidentifier()
+                    and not name.startswith("..")
+                    and name not in protected
+                ):
+                    subst.setdefault(name, _fresh_inline_dim(name, prefix=fresh_prefix))
+        return
+    if isinstance(formal, TypeOptional):
+        _bind_inline_dim_subst(
+            formal.inner,
+            actual.inner if isinstance(actual, TypeOptional) else actual,
+            subst,
+            fresh_prefix=fresh_prefix,
+            protected=protected,
+        )
+        return
+    if isinstance(actual, TypeOptional):
+        _bind_inline_dim_subst(
+            formal,
+            actual.inner,
+            subst,
+            fresh_prefix=fresh_prefix,
+            protected=protected,
+        )
+        return
+    if isinstance(formal, TypeList) and isinstance(actual, TypeList):
+        _bind_inline_dim_subst(
+            formal.item,
+            actual.item,
+            subst,
+            fresh_prefix=fresh_prefix,
+            protected=protected,
+        )
+        return
+    if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple):
+        for formal_item, actual_item in zip(formal.items, actual.items, strict=False):
+            _bind_inline_dim_subst(
+                formal_item,
+                actual_item,
+                subst,
+                fresh_prefix=fresh_prefix,
+                protected=protected,
+            )
+        return
+    if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed) and len(formal.args) == len(actual.args):
+        for formal_dim, actual_dim in zip(formal.args, actual.args, strict=True):
             if (
                 isinstance(formal_dim, str)
                 and formal_dim.isidentifier()
                 and not formal_dim.startswith("..")
-                and not any(
-                    isinstance(name, str) and name.startswith("..")
-                    for name in dim_token_names(actual_dim)
-                )
+                and formal_dim not in protected
             ):
-                subst.setdefault(formal_dim, actual_dim)
-        return
-    if isinstance(formal, TypeOptional):
-        _bind_inline_dim_subst(formal.inner, actual.inner if isinstance(actual, TypeOptional) else actual, subst)
-        return
-    if isinstance(actual, TypeOptional):
-        _bind_inline_dim_subst(formal, actual.inner, subst)
-        return
-    if isinstance(formal, TypeList) and isinstance(actual, TypeList):
-        _bind_inline_dim_subst(formal.item, actual.item, subst)
-        return
-    if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple):
-        for formal_item, actual_item in zip(formal.items, actual.items, strict=False):
-            _bind_inline_dim_subst(formal_item, actual_item, subst)
-        return
-    if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed) and len(formal.args) == len(actual.args):
-        for formal_dim, actual_dim in zip(formal.args, actual.args, strict=True):
-            if isinstance(formal_dim, str) and formal_dim.isidentifier() and not formal_dim.startswith(".."):
                 subst.setdefault(formal_dim, actual_dim)
 
 
 def _inline_dim_subst(
     params: tuple[GraphValue, ...],
     arg_operands: tuple[GraphOperand, ...],
+    *,
+    fresh_prefix: str,
+    protected: set[str],
 ) -> dict[str, Any]:
     subst: dict[str, Any] = {}
     for param, operand in zip(params, arg_operands, strict=False):
-        _bind_inline_dim_subst(param.type_expr, graph_operand_type(operand), subst)
+        _bind_inline_dim_subst(
+            param.type_expr,
+            graph_operand_type(operand),
+            subst,
+            fresh_prefix=fresh_prefix,
+            protected=protected,
+        )
     return {name: dim for name, dim in subst.items() if dim != name}
 
 
@@ -579,6 +638,64 @@ def _module_free_dim_refs(module: GraphModule, *, global_names: set[str]) -> set
     return out
 
 
+def _collect_term_dim_ref_names(operand: GraphOperand, out: set[str]) -> None:
+    if isinstance(operand, GraphValueRef):
+        operand_type = operand.type_expr
+        if isinstance(operand_type, TypeOptional):
+            operand_type = operand_type.inner
+        if isinstance(operand_type, TypeDim | TypeInt):
+            out.add(operand.name)
+        return
+    if isinstance(operand, GraphExpr):
+        for item in operand.inputs:
+            _collect_term_dim_ref_names(item, out)
+        for item in operand.attrs.values():
+            _collect_term_dim_ref_names(item, out)
+        return
+    if isinstance(operand, tuple):
+        for item in operand:
+            _collect_term_dim_ref_names(item, out)
+
+
+def _operand_may_be_none(operand: GraphOperand) -> bool:
+    if isinstance(operand, GraphLiteral):
+        return operand.value is None
+    operand_type = graph_operand_type(operand)
+    return isinstance(operand_type, TypeOptional)
+
+
+def _module_value_required_shape_dim_names(
+    module: GraphModule,
+    *,
+    global_names: set[str],
+) -> dict[str, set[str]]:
+    """Map each value to shape dim names required by later type annotations.
+
+    Codegen only needs to bind symbolic dimensions from a value's runtime shape
+    when those symbols are referenced later. Binding every name from every
+    output type can turn stale or intentionally local type variables into Python
+    locals, and can create bogus code for inlined helpers whose formal dim names
+    are no longer in caller scope.
+    """
+
+    required_term_dims: set[str] = set()
+    required: dict[str, set[str]] = {}
+    for output in module.outputs:
+        _collect_term_dim_ref_names(output, required_term_dims)
+    for node in module.nodes:
+        for operand in (*node.inputs, *node.attrs.values()):
+            _collect_term_dim_ref_names(operand, required_term_dims)
+    required_term_dims = {name for name in required_term_dims if name not in global_names}
+    for node in module.nodes:
+        for output in node.outputs:
+            required[output.name] = _type_dim_names(output.type_expr) & required_term_dims
+    for value in module.inputs:
+        names = _type_dim_names(value.type_expr) & required_term_dims
+        if names:
+            required[value.name] = names
+    return required
+
+
 def _set_dim_symbol_runtime(
     symbols: dict[str, Any],
     name: str,
@@ -737,7 +854,7 @@ def _emit_bind_dim_expr(
             and dim not in local
             and (required_names is None or dim in required_names)
         ):
-            add(lines, indent, f"{dim} = {actual_expr}")
+            add(lines, indent, f"{_dim_ident(dim)} = {actual_expr}")
             local.add(dim)
         return
     if not isinstance(dim, DimExprBinary):
@@ -754,7 +871,7 @@ def _emit_bind_dim_expr(
             and isinstance(right, str)
             and right in local
         ):
-            add(lines, indent, f"{left} = {actual_expr} - {right}")
+            add(lines, indent, f"{_dim_ident(left)} = {actual_expr} - {_local_dim_ref(right, local)}")
             local.add(left)
         if (
             isinstance(right, str)
@@ -765,7 +882,7 @@ def _emit_bind_dim_expr(
             and isinstance(left, str)
             and left in local
         ):
-            add(lines, indent, f"{right} = {actual_expr} - {left}")
+            add(lines, indent, f"{_dim_ident(right)} = {actual_expr} - {_local_dim_ref(left, local)}")
             local.add(right)
         return
     if dim.op == "-":
@@ -778,7 +895,7 @@ def _emit_bind_dim_expr(
             and isinstance(right, str)
             and right in local
         ):
-            add(lines, indent, f"{left} = {actual_expr} + {right}")
+            add(lines, indent, f"{_dim_ident(left)} = {actual_expr} + {_local_dim_ref(right, local)}")
             local.add(left)
         if (
             isinstance(right, str)
@@ -789,7 +906,7 @@ def _emit_bind_dim_expr(
             and isinstance(left, str)
             and left in local
         ):
-            add(lines, indent, f"{right} = {left} - {actual_expr}")
+            add(lines, indent, f"{_dim_ident(right)} = {_local_dim_ref(left, local)} - {actual_expr}")
             local.add(right)
         return
     if dim.op == "*":
@@ -802,7 +919,7 @@ def _emit_bind_dim_expr(
             and isinstance(right, str)
             and right in local
         ):
-            add(lines, indent, f"{left} = {actual_expr} // {right}")
+            add(lines, indent, f"{_dim_ident(left)} = {actual_expr} // {_local_dim_ref(right, local)}")
             local.add(left)
         if (
             isinstance(right, str)
@@ -813,7 +930,7 @@ def _emit_bind_dim_expr(
             and isinstance(left, str)
             and left in local
         ):
-            add(lines, indent, f"{right} = {actual_expr} // {left}")
+            add(lines, indent, f"{_dim_ident(right)} = {actual_expr} // {_local_dim_ref(left, local)}")
             local.add(right)
         return
     if dim.op == "/":
@@ -826,7 +943,7 @@ def _emit_bind_dim_expr(
             and isinstance(right, str)
             and right in local
         ):
-            add(lines, indent, f"{left} = {actual_expr} * {right}")
+            add(lines, indent, f"{_dim_ident(left)} = {actual_expr} * {_local_dim_ref(right, local)}")
             local.add(left)
         if (
             isinstance(right, str)
@@ -837,7 +954,7 @@ def _emit_bind_dim_expr(
             and isinstance(left, str)
             and left in local
         ):
-            add(lines, indent, f"{right} = {left} // {actual_expr}")
+            add(lines, indent, f"{_dim_ident(right)} = {_local_dim_ref(left, local)} // {actual_expr}")
             local.add(right)
 
 
@@ -864,24 +981,11 @@ def _emit_bind_nested_shape_symbols(
             protected=protected,
             required_names=required_names,
             indent=indent + 4,
-            guaranteed=False,
+            guaranteed=True,
         )
         if nested_lines:
             add(lines, indent, f"if {value_expr} is not None:")
             lines.extend(nested_lines)
-            zero_names = sorted(
-                name
-                for name in _type_dim_names(type_expr.inner)
-                if name.isidentifier()
-                and name not in protected
-                and name not in local
-                and (required_names is None or name in required_names)
-            )
-            if zero_names:
-                add(lines, indent, "else:")
-                for name in zero_names:
-                    add(lines, indent + 4, f"{name} = 0")
-                nested_local.update(zero_names)
             local.update(nested_local)
         return
     _emit_bind_nested_shape_symbols_inner(
@@ -921,25 +1025,12 @@ def _emit_bind_nested_shape_symbols_inner(
             protected=protected,
             required_names=required_names,
             indent=indent + 4,
-            guaranteed=False,
+            guaranteed=True,
         )
         if nested_lines:
             add(lines, indent, f"if {value_expr} is not None:")
             lines.extend(nested_lines)
             if guaranteed:
-                zero_names = sorted(
-                    name
-                    for name in _type_dim_names(type_expr.inner)
-                    if name.isidentifier()
-                    and name not in protected
-                    and name not in local
-                    and (required_names is None or name in required_names)
-                )
-                if zero_names:
-                    add(lines, indent, "else:")
-                    for name in zero_names:
-                        add(lines, indent + 4, f"{name} = 0")
-                    nested_local.update(zero_names)
                 local.update(nested_local)
         return
     if isinstance(type_expr, TypeList):
@@ -959,35 +1050,26 @@ def _emit_bind_nested_shape_symbols_inner(
         if nested_lines:
             add(lines, indent, f"if isinstance({value_expr}, (list, tuple)) and {value_expr}:")
             lines.extend(nested_lines)
-            if guaranteed:
-                zero_names = sorted(
-                    name
-                    for name in _type_dim_names(type_expr.item)
-                    if name.isidentifier()
-                    and name not in protected
-                    and name not in local
-                    and (required_names is None or name in required_names)
-                )
-                if zero_names:
-                    add(lines, indent, "else:")
-                    for name in zero_names:
-                        add(lines, indent + 4, f"{name} = 0")
-                    nested_local.update(zero_names)
-                local.update(nested_local)
         return
     if isinstance(type_expr, TypeTuple):
+        nested_lines: list[str] = []
+        nested_local = set(local)
         for idx, item_type in enumerate(type_expr.items):
             _emit_bind_nested_shape_symbols_inner(
-                lines,
+                nested_lines,
                 add=add,
                 type_expr=item_type,
                 value_expr=f"{value_expr}[{idx}]",
-                local=local,
+                local=nested_local,
                 protected=protected,
                 required_names=required_names,
-                indent=indent,
+                indent=indent + 4,
                 guaranteed=guaranteed,
             )
+        if nested_lines:
+            add(lines, indent, f"if {value_expr} is not None:")
+            lines.extend(nested_lines)
+            local.update(nested_local)
         return
     if isinstance(type_expr, TypeTensor):
         for idx, dim in enumerate(type_expr.dims):
@@ -1127,6 +1209,39 @@ class Codegen2GraphModel(nn.Module):
             dilation=int(dilation),
             groups=int(groups),
         )
+
+    @staticmethod
+    def _assign_unit_slice(
+        x: torch.Tensor,
+        dim: Any,
+        index: Any,
+        src: torch.Tensor,
+    ) -> torch.Tensor:
+        dim = int(dim)
+        if dim < 0:
+            dim += x.dim()
+        index = int(index)
+        sl = [slice(None)] * x.dim()
+        sl[dim] = slice(index, index + 1)
+        if src.device != x.device:
+            src = src.to(device=x.device)
+        if x.is_floating_point() and src.is_floating_point() and src.dtype != x.dtype:
+            src = src.to(dtype=x.dtype)
+        x[tuple(sl)] = src
+        return x
+
+    def _scatter(self, x: torch.Tensor, index: torch.Tensor, src: Any, dim: Any) -> torch.Tensor:
+        dim = int(dim)
+        if torch.is_tensor(src):
+            index = self._move_to(index, x.device)
+            src = self._move_to(src, x.device)
+            if index.shape == src.shape and index.numel() > 0:
+                first = index.reshape(-1)[0]
+                if bool(torch.all(index == first).item()):
+                    return self._assign_unit_slice(x, dim, first.item(), src)
+            return torch.scatter(x, dim=dim, index=index, src=src)
+        index = self._move_to(index, x.device)
+        return torch.scatter(x, dim=dim, index=index, value=src)
 
     def _state_key_alternatives(self, key: str, *, limit: int = 8) -> list[str]:
         if not isinstance(key, str) or not key:
@@ -1725,7 +1840,9 @@ class Codegen2GraphModel(nn.Module):
                 raise ValueError("arange expects reference, start, end")
             ref, start, end = args[:3]
             device = ref.device if torch.is_tensor(ref) else None
-            out(torch.arange(int(start), int(end), device=device))
+            if end is None:
+                end = ref.shape[-2] if torch.is_tensor(ref) and ref.ndim >= 3 else ref.shape[-1]
+            out(torch.arange(int(start), int(end), device=device, dtype=torch.long))
             return True
         if primitive == "slice":
             x, dim, start, end = args[:4]
@@ -1810,10 +1927,7 @@ class Codegen2GraphModel(nn.Module):
             return True
         if primitive == "scatter":
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else -1
-            if torch.is_tensor(args[2]):
-                out(torch.scatter(args[0], dim=dim, index=args[1], src=args[2]))
-            else:
-                out(torch.scatter(args[0], dim=dim, index=args[1], value=args[2]))
+            out(self._scatter(args[0], args[1], args[2], dim))
             return True
         if primitive == "index_add":
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else 0
@@ -2221,7 +2335,26 @@ def _py_ident(name: str) -> str:
     out = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
     if not out or out[0].isdigit():
         out = "_" + out
+    if out.startswith("__"):
+        out = "_" + out.lstrip("_")
     return out
+
+
+def _dim_ident(name: str) -> str:
+    ident = _py_ident(name)
+    if re.fullmatch(r"_v\d+", ident) or ident.startswith("__"):
+        return f"_dim_{ident.lstrip('_')}"
+    return ident
+
+
+def _local_dim_ref(name: str, local: set[str]) -> str:
+    return _py_ident(name) if name in local else _dim_ident(name)
+
+
+def _value_ident(value: GraphValueRef) -> str:
+    if isinstance(value.type_expr, TypeDim):
+        return _dim_ident(value.name)
+    return _py_ident(value.name)
 
 
 class _DirectTorchEmitter:
@@ -2248,6 +2381,8 @@ class _DirectTorchEmitter:
         self.emitted_module_names = self._emitted_module_names()
         self.needs_expert_banks = _graph_uses_expert_linear(program)
         self._inline_stack: set[str] = set()
+        self._emitted_defs_stack: list[dict[str, Any]] = []
+        self._emitted_aliases_stack: list[dict[str, GraphOperand]] = []
 
     def emit(self) -> str:
         lines: list[str] = [f"class {self.class_name}(nn.Module):"]
@@ -2279,6 +2414,196 @@ class _DirectTorchEmitter:
             callee_module is not None
             and len(callee_module.inputs) == arg_count
             and len(callee_module.outputs) == carry_count
+        )
+
+    def _current_emitted_defs(self) -> dict[str, Any]:
+        if not self._emitted_defs_stack:
+            return {}
+        return self._emitted_defs_stack[-1]
+
+    def _record_emitted_node_defs(self, node: Any) -> None:
+        if not self._emitted_defs_stack:
+            return
+        defs = self._emitted_defs_stack[-1]
+        for output in getattr(node, "outputs", ()):
+            defs[output.name] = node
+
+    def _record_emitted_alias(self, name: str, operand: GraphOperand) -> None:
+        if not self._emitted_aliases_stack:
+            return
+        self._emitted_aliases_stack[-1][name] = operand
+
+    def _resolve_emitted_alias_operand(self, operand: GraphOperand, *, depth: int = 8) -> GraphOperand:
+        current = operand
+        defs = self._current_emitted_defs()
+        for _ in range(depth):
+            if not isinstance(current, GraphValueRef):
+                return current
+            if self._emitted_aliases_stack and current.name in self._emitted_aliases_stack[-1]:
+                current = self._emitted_aliases_stack[-1][current.name]
+                continue
+            node = defs.get(current.name)
+            if node is None or node.op.name not in {"core.alias", "core.ascribe"} or len(node.inputs) != 1:
+                return current
+            current = node.inputs[0]
+        return current
+
+    def _forwarded_single_primitive_name(self, module_name: str) -> str | None:
+        module = self.modules_by_name.get(module_name)
+        if module is None or len(module.nodes) != 1 or len(module.outputs) != 1:
+            return None
+        node = module.nodes[0]
+        if len(node.outputs) != 1:
+            return None
+        output = module.outputs[0]
+        if not isinstance(output, GraphValueRef) or output.name != node.outputs[0].name:
+            return None
+        primitive = _normalize_primitive_op(node.op.name)
+        return primitive if primitive != node.op.name or node.op.name.startswith("_") else None
+
+    def _node_primitive_or_forwarded_name(self, node: Any) -> str:
+        primitive = _normalize_primitive_op(node.op.name)
+        if primitive != node.op.name or node.op.name.startswith("_"):
+            return primitive
+        return self._forwarded_single_primitive_name(node.op.name) or node.op.name
+
+    def _operand_ref_name(self, operand: GraphOperand) -> str | None:
+        return operand.name if isinstance(operand, GraphValueRef) else None
+
+    def _operand_uses_value_name(self, operand: GraphOperand, name: str) -> bool:
+        if isinstance(operand, GraphValueRef):
+            return operand.name == name
+        if isinstance(operand, GraphExpr):
+            return any(self._operand_uses_value_name(item, name) for item in operand.inputs) or any(
+                self._operand_uses_value_name(item, name) for item in operand.attrs.values()
+            )
+        if isinstance(operand, tuple):
+            return any(self._operand_uses_value_name(item, name) for item in operand)
+        return False
+
+    def _dummy_fill_index_outputs(self, module: GraphModule) -> set[str]:
+        fill_sources: dict[str, str] = {}
+        for node in module.nodes:
+            if (
+                self._node_primitive_or_forwarded_name(node) == "fill"
+                and len(node.outputs) == 1
+                and len(node.inputs) >= 2
+            ):
+                source_name = self._operand_ref_name(node.inputs[0])
+                if source_name is not None:
+                    fill_sources[node.outputs[0].name] = source_name
+        if not fill_sources:
+            return set()
+        safe: set[str] = set(fill_sources)
+        for output in module.outputs:
+            if isinstance(output, GraphValueRef) and output.name in safe:
+                safe.discard(output.name)
+            else:
+                for name in tuple(safe):
+                    if self._operand_uses_value_name(output, name):
+                        safe.discard(name)
+        for node in module.nodes:
+            scatter = self._node_primitive_or_forwarded_name(node) == "scatter"
+            for index, operand in enumerate(node.inputs):
+                for name, fill_source in tuple(fill_sources.items()):
+                    if not self._operand_uses_value_name(operand, name):
+                        continue
+                    if (
+                        scatter
+                        and index == 1
+                        and len(node.inputs) >= 3
+                        and self._operand_ref_name(node.inputs[2]) == fill_source
+                    ):
+                        continue
+                    safe.discard(name)
+            for operand in node.attrs.values():
+                for name in tuple(safe):
+                    if self._operand_uses_value_name(operand, name):
+                        safe.discard(name)
+        return safe
+
+    def _emit_dummy_fill_index_node(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        indent: int,
+    ) -> bool:
+        if self._node_primitive_or_forwarded_name(node) != "fill" or len(node.outputs) != 1:
+            return False
+        self._add(lines, indent, f"{_py_ident(node.outputs[0].name)} = None")
+        return True
+
+    def _collect_inline_value_use_counts(self, module: GraphModule) -> Counter[str]:
+        counts: Counter[str] = Counter()
+        for node in module.nodes:
+            for operand in (*node.inputs, *node.attrs.values()):
+                for name in self._value_ref_names(operand):
+                    counts[name] += 1
+        for output in module.outputs:
+            for name in self._value_ref_names(output):
+                counts[name] += 1
+        return counts
+
+    def _value_ref_names(self, operand: GraphOperand) -> tuple[str, ...]:
+        names: list[str] = []
+
+        def visit(item: GraphOperand) -> None:
+            if isinstance(item, GraphValueRef):
+                names.append(item.name)
+                return
+            if isinstance(item, GraphExpr):
+                for child in item.inputs:
+                    visit(child)
+                for child in item.attrs.values():
+                    visit(child)
+                return
+            if isinstance(item, tuple):
+                for child in item:
+                    visit(child)
+
+        visit(operand)
+        return tuple(names)
+
+    def _inline_body_node_as_expr(
+        self,
+        node: Any,
+        *,
+        original_output_names: tuple[str, ...],
+        use_counts: Counter[str],
+        dummy_fill_outputs: set[str],
+        module_effects: Mapping[str, GraphEffect],
+    ) -> GraphExpr | None:
+        if len(node.outputs) != 1 or len(original_output_names) != 1:
+            return None
+        original_name = original_output_names[0]
+        if original_name in dummy_fill_outputs or use_counts[original_name] != 1:
+            return None
+        if graph_node_effect(node, module_effects=dict(module_effects)) != GraphEffect.TOTAL_PURE:
+            return None
+        primitive = self._node_primitive_or_forwarded_name(node)
+        if not (
+            node.op.name in {"core.alias", "core.ascribe"}
+            or node.op.name.startswith("core.binary.")
+            or primitive in {
+                "exp",
+                "log",
+                "matmul",
+                "mul",
+                "add",
+                "sub",
+                "unsqueeze",
+                "reshape",
+                "activations_silu",
+            }
+        ):
+            return None
+        return GraphExpr(
+            op=node.op,
+            inputs=node.inputs,
+            attrs=node.attrs,
+            type_expr=node.outputs[0].type_expr,
+            dims=node.outputs[0].dims,
         )
 
     def _collect_codegen_module_refs(
@@ -2604,6 +2929,34 @@ class _DirectTorchEmitter:
         add(lines, 12, "x = F.pad(x, (left, right))")
         add(lines, 8, "return F.conv1d(x, weight, bias=bias, stride=int(stride), dilation=int(dilation), groups=int(groups))")
         add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _assign_unit_slice(x, dim, index, src):")
+        add(lines, 8, "dim = int(dim)")
+        add(lines, 8, "if dim < 0:")
+        add(lines, 12, "dim += x.dim()")
+        add(lines, 8, "index = int(index)")
+        add(lines, 8, "sl = [slice(None)] * x.dim()")
+        add(lines, 8, "sl[dim] = slice(index, index + 1)")
+        add(lines, 8, "if src.device != x.device:")
+        add(lines, 12, "src = src.to(device=x.device)")
+        add(lines, 8, "if x.is_floating_point() and src.is_floating_point() and x.dtype != src.dtype:")
+        add(lines, 12, "src = src.to(dtype=x.dtype)")
+        add(lines, 8, "x[tuple(sl)] = src")
+        add(lines, 8, "return x")
+        add(lines, 4, "")
+        add(lines, 4, "def _scatter(self, x, index, src, dim):")
+        add(lines, 8, "dim = int(dim)")
+        add(lines, 8, "if torch.is_tensor(src):")
+        add(lines, 12, "index = self._move_to(index, x.device)")
+        add(lines, 12, "src = self._move_to(src, x.device)")
+        add(lines, 12, "if index.shape == src.shape and index.numel() > 0:")
+        add(lines, 16, "first = index.reshape(-1)[0]")
+        add(lines, 16, "if bool(torch.all(index == first).item()):")
+        add(lines, 20, "return self._assign_unit_slice(x, dim, first.item(), src)")
+        add(lines, 12, "return torch.scatter(x, dim=dim, index=index, src=src)")
+        add(lines, 8, "index = self._move_to(index, x.device)")
+        add(lines, 8, "return torch.scatter(x, dim=dim, index=index, value=src)")
+        add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
         add(lines, 8, "value, _ = self._linear_param(path, None, field='param')")
         add(lines, 8, "return value")
@@ -2916,11 +3269,11 @@ class _DirectTorchEmitter:
         # cannot express that positionally, so generated internal helpers give
         # every parameter a default while public forward() still validates
         # required model inputs.
-        params = ", ".join(f"{value.name}=None" for value in module.inputs)
+        params = ", ".join(f"{_py_ident(value.name)}=None" for value in module.inputs)
         if params:
             params = ", " + params
         method_name = self.method_names[module.name]
-        arg_names = ", ".join(value.name for value in module.inputs)
+        arg_names = ", ".join(_py_ident(value.name) for value in module.inputs)
         body_name = method_name
         if self.profile:
             impl_name = f"{method_name}__impl"
@@ -2933,15 +3286,19 @@ class _DirectTorchEmitter:
         local = {value.name for value in module.inputs}
         required_dim_names = _module_free_dim_refs(module, global_names=self.global_symbol_names)
         required_dim_names.update(_tensor_size_static_dim_names(module))
+        required_shape_dims_by_value = _module_value_required_shape_dim_names(
+            module,
+            global_names=self.global_symbol_names,
+        )
         for value in module.inputs:
             _emit_bind_nested_shape_symbols(
                 lines,
                 add=add,
                 type_expr=_effective_graph_value_type(value),
-                value_expr=value.name,
+                value_expr=_py_ident(value.name),
                 local=local,
                 protected=self.global_symbol_names,
-                required_names=required_dim_names,
+                required_names=required_dim_names | required_shape_dims_by_value.get(value.name, set()),
             )
         dim_params = [
             value.name
@@ -2954,33 +3311,48 @@ class _DirectTorchEmitter:
             if name not in local
         )
         if len(dim_params) == 1:
-            source = _py_ident(dim_params[0])
+            source = _dim_ident(dim_params[0])
             for name in free_dim_refs:
-                target = _py_ident(name)
+                target = _dim_ident(name)
                 add(lines, 8, f"{target} = {source}")
                 local.add(name)
-        for node in module.nodes:
-            self._emit_node(lines, node, module_name=module.name, indent=8, local=local, symbols_dict="self._symbols")
-            for output in node.outputs:
-                local.add(output.name)
-                output_type = _effective_graph_value_type(output)
-                # Node outputs can introduce local symbolic dimensions that are
-                # consumed later in the same module, e.g. Tensor[N] from
-                # _where_indices followed by Tensor[N,D] gathers. These symbols
-                # are not necessarily module-free dims, so bind all local
-                # output shape names. If type inference assigned a name that
-                # collides with a model-global constant, codegen must not
-                # create a Python local with that name: Python would shadow the
-                # global symbol expression throughout the function.
-                _emit_bind_nested_shape_symbols(
-                    lines,
-                    add=add,
-                    type_expr=output_type,
-                    value_expr=output.name,
-                    local=local,
-                    protected=self.global_symbol_names,
-                    required_names=None,
-                )
+        dummy_fill_outputs = self._dummy_fill_index_outputs(module)
+        self._emitted_defs_stack.append({})
+        self._emitted_aliases_stack.append({})
+        try:
+            for node in module.nodes:
+                if (
+                    len(node.outputs) == 1
+                    and node.outputs[0].name in dummy_fill_outputs
+                    and self._emit_dummy_fill_index_node(lines, node, indent=8)
+                ):
+                    pass
+                else:
+                    self._emit_node(lines, node, module_name=module.name, indent=8, local=local, symbols_dict="self._symbols")
+                self._record_emitted_node_defs(node)
+                for output in node.outputs:
+                    local.add(output.name)
+                    output_type = _effective_graph_value_type(output)
+                    # Node outputs can introduce local symbolic dimensions that are
+                    # consumed later in the same module, e.g. Tensor[N] from
+                    # _where_indices followed by Tensor[N,D] gathers. These symbols
+                    # are not necessarily module-free dims, so bind all local
+                    # output shape names. If type inference assigned a name that
+                    # collides with a model-global constant, codegen must not
+                    # create a Python local with that name: Python would shadow the
+                    # global symbol expression throughout the function.
+                    _emit_bind_nested_shape_symbols(
+                        lines,
+                        add=add,
+                        type_expr=output_type,
+                        value_expr=output.name,
+                        local=local,
+                        protected=self.global_symbol_names,
+                        required_names=required_shape_dims_by_value.get(output.name, set()),
+                    )
+        finally:
+            self._emitted_defs_stack.pop()
+            self._emitted_aliases_stack.pop()
         outs = ", ".join(self._operand_expr(item, local=local, symbols_dict="self._symbols") for item in module.outputs)
         if len(module.outputs) == 1:
             add(lines, 8, f"return ({outs},)")
@@ -3202,7 +3574,7 @@ class _DirectTorchEmitter:
                 symbols_dict=symbols_dict,
             )
             return
-        targets = tuple(_py_ident(value.name) for value in node.outputs)
+        targets = tuple(_value_ident(value) for value in node.outputs)
         target_names = tuple(value.name for value in node.outputs)
         if (
             self._emit_direct_module_call_node(
@@ -3268,6 +3640,19 @@ class _DirectTorchEmitter:
             )
         ):
             return
+        if (
+            len(targets) == 1
+            and _normalize_primitive_op(op) == "scatter"
+            and self._emit_scalar_fill_scatter_node(
+                lines,
+                node,
+                target=targets[0],
+                indent=indent,
+                local=local,
+                symbols_dict=symbols_dict,
+            )
+        ):
+            return
         expr = self._node_expr(node, local=local, symbols_dict=symbols_dict)
         label = f"node:{module_name}:{','.join(target_names) or '_'}:{op}"
         if len(targets) == 1:
@@ -3281,6 +3666,73 @@ class _DirectTorchEmitter:
                 add(lines, indent, f"{joined} = self._profile_call({label!r}, lambda: {expr})")
             else:
                 add(lines, indent, f"{joined} = {expr}")
+
+    def _scalar_fill_value_for_scatter(
+        self,
+        index_operand: GraphOperand,
+        src_operand: GraphOperand,
+    ) -> GraphOperand | None:
+        index_operand = self._resolve_emitted_alias_operand(index_operand)
+        src_operand = self._resolve_emitted_alias_operand(src_operand)
+        fill_node: Any | None = None
+        if isinstance(index_operand, GraphExpr):
+            forwarded = self._forwarded_single_primitive_name(index_operand.op.name)
+            if _normalize_primitive_op(index_operand.op.name) != "fill" and forwarded != "fill":
+                return None
+            if len(index_operand.inputs) < 2:
+                return None
+            fill_inputs = index_operand.inputs
+        elif isinstance(index_operand, GraphValueRef):
+            fill_node = self._current_emitted_defs().get(index_operand.name)
+            forwarded = (
+                self._forwarded_single_primitive_name(fill_node.op.name)
+                if fill_node is not None
+                else None
+            )
+            if fill_node is None or (
+                _normalize_primitive_op(fill_node.op.name) != "fill"
+                and forwarded != "fill"
+            ):
+                return None
+            if len(fill_node.inputs) < 2:
+                return None
+            fill_inputs = fill_node.inputs
+        else:
+            return None
+        fill_base, fill_value = fill_inputs[:2]
+        fill_base = self._resolve_emitted_alias_operand(fill_base)
+        if (
+            isinstance(fill_base, GraphValueRef)
+            and isinstance(src_operand, GraphValueRef)
+            and fill_base.name == src_operand.name
+        ):
+            return fill_value
+        if fill_base == src_operand:
+            return fill_value
+        return None
+
+    def _emit_scalar_fill_scatter_node(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        target: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if len(node.inputs) < 4:
+            return False
+        base_operand, index_operand, src_operand, dim_operand = node.inputs[:4]
+        fill_value = self._scalar_fill_value_for_scatter(index_operand, src_operand)
+        if fill_value is None:
+            return False
+        base = self._operand_expr(base_operand, local=local, symbols_dict=symbols_dict)
+        dim = self._operand_expr(dim_operand, local=local, symbols_dict=symbols_dict)
+        index = self._operand_expr(fill_value, local=local, symbols_dict=symbols_dict)
+        src = self._operand_expr(src_operand, local=local, symbols_dict=symbols_dict)
+        self._add(lines, indent, f"{target} = self._assign_unit_slice({base}, {dim}, {index}, {src})")
+        return True
 
     def _literal_bool_arg(self, operand: GraphOperand) -> bool | None:
         if isinstance(operand, GraphLiteral) and type(operand.value) is bool:
@@ -3537,17 +3989,31 @@ class _DirectTorchEmitter:
         subst: dict[str, GraphOperand] = {}
         dim_name_subst: dict[str, Any] = {}
         inline_local = set(local)
-        dim_subst = _inline_dim_subst(callee_module.inputs, arg_operands)
         callee_required_dim_names = _module_free_dim_refs(
+            callee_module,
+            global_names=self.global_symbol_names,
+        )
+        callee_required_shape_dims_by_value = _module_value_required_shape_dim_names(
+            callee_module,
+            global_names=self.global_symbol_names,
+        )
+        callee_required_shape_dims_by_value = _module_value_required_shape_dim_names(
             callee_module,
             global_names=self.global_symbol_names,
         )
         try:
             safe_prefix = _py_ident(inline_prefix)
+            dim_subst = _inline_dim_subst(
+                callee_module.inputs,
+                arg_operands,
+                fresh_prefix=safe_prefix,
+                protected=self.global_symbol_names,
+            )
             for param, operand in zip(callee_module.inputs, arg_operands, strict=True):
                 temp_name = f"{safe_prefix}_{_py_ident(param.name)}"
                 expr = self._operand_expr(operand, local=local, symbols_dict=symbols_dict)
                 self._add(lines, indent, f"{temp_name} = {expr}")
+                self._record_emitted_alias(temp_name, operand)
                 inline_local.add(temp_name)
                 subst[param.name] = GraphValueRef(
                     name=temp_name,
@@ -3569,20 +4035,33 @@ class _DirectTorchEmitter:
                 formal_ref = GraphValueRef(name=temp_name, type_expr=param.type_expr, dims=param.dims)
                 if dim_subst:
                     formal_ref = substitute_graph_operand_dims(formal_ref, dim_subst)
+                formal_type = formal_ref.type_expr
+                if _operand_may_be_none(operand) and not isinstance(formal_type, TypeOptional):
+                    formal_type = TypeOptional(formal_type)
                 _emit_bind_nested_shape_symbols(
                     lines,
                     add=self._add,
-                    type_expr=formal_ref.type_expr,
+                    type_expr=formal_type,
                     value_expr=temp_name,
                     local=inline_local,
                     protected=self.global_symbol_names,
-                    required_names=callee_required_dim_names,
+                    required_names=None,
                     indent=indent,
                 )
 
             def rewrite_operand(operand: GraphOperand) -> GraphOperand:
                 if isinstance(operand, GraphValueRef):
-                    return subst.get(operand.name, operand)
+                    if operand.name in subst:
+                        return subst[operand.name]
+                    if isinstance(operand.type_expr, TypeDim | TypeInt) and operand.name in dim_subst:
+                        replacement = dim_subst[operand.name]
+                        if isinstance(replacement, str):
+                            return GraphValueRef(
+                                name=replacement,
+                                type_expr=operand.type_expr,
+                                dims=operand.dims,
+                            )
+                    return operand
                 if isinstance(operand, GraphPath):
                     parts: list[str] = []
                     for part in operand.parts:
@@ -3603,12 +4082,36 @@ class _DirectTorchEmitter:
                     )
                 return operand
 
+            dummy_fill_outputs = self._dummy_fill_index_outputs(callee_module)
+            inline_use_counts = self._collect_inline_value_use_counts(callee_module)
+            module_effects = infer_graph_module_effects(self.program.modules)
             for inner_index, inner_node in enumerate(callee_module.nodes, start=1):
                 rewritten_outputs: list[GraphValue] = []
                 original_output_names = tuple(output.name for output in inner_node.outputs)
+                pre_node_dim_subst = dict(dim_subst)
+                pre_node_dim_subst.update(dim_name_subst)
                 for output in inner_node.outputs:
                     name = f"{safe_prefix}_{inner_index}_{_py_ident(output.name)}"
-                    rewritten = GraphValue(name=name, type_expr=output.type_expr, dims=output.dims, optional=output.optional)
+                    rewritten = GraphValue(
+                        name=name,
+                        type_expr=output.type_expr,
+                        dims=output.dims,
+                        optional=output.optional,
+                    )
+                    if pre_node_dim_subst:
+                        rewritten = substitute_graph_node_dims(
+                            GraphNode(
+                                id="__tmp",
+                                op=GraphOp("core.alias"),
+                                inputs=(),
+                                attrs={},
+                                outputs=(rewritten,),
+                                source_module=module_name,
+                                type_expr=rewritten.type_expr,
+                                dims=rewritten.dims,
+                            ),
+                            pre_node_dim_subst,
+                        ).outputs[0]
                     rewritten_outputs.append(rewritten)
                     subst[output.name] = GraphValueRef(name=name, type_expr=output.type_expr, dims=output.dims)
                     if isinstance(output.type_expr, TypeDim | TypeInt):
@@ -3621,10 +4124,10 @@ class _DirectTorchEmitter:
                     outputs=tuple(rewritten_outputs),
                     source_module=module_name,
                 )
-                if dim_subst:
+                if pre_node_dim_subst:
                     rewritten_node = substitute_graph_node_dims(
                         rewritten_node,
-                        dim_subst,
+                        pre_node_dim_subst,
                     )
                 for original_name, rewritten_output in zip(
                     original_output_names,
@@ -3638,15 +4141,38 @@ class _DirectTorchEmitter:
                     )
                     if isinstance(rewritten_output.type_expr, TypeDim | TypeInt):
                         dim_name_subst[original_name] = rewritten_output.name
-                self._emit_node(
-                    lines,
+                inline_expr = self._inline_body_node_as_expr(
                     rewritten_node,
-                    module_name=module_name,
-                    indent=indent,
-                    local=inline_local,
-                    symbols_dict=symbols_dict,
+                    original_output_names=original_output_names,
+                    use_counts=inline_use_counts,
+                    dummy_fill_outputs=dummy_fill_outputs,
+                    module_effects=module_effects,
                 )
-                for output in rewritten_node.outputs:
+                if inline_expr is not None:
+                    subst[original_output_names[0]] = inline_expr
+                    self._record_emitted_alias(rewritten_node.outputs[0].name, inline_expr)
+                    continue
+                if (
+                    len(original_output_names) == 1
+                    and original_output_names[0] in dummy_fill_outputs
+                    and self._emit_dummy_fill_index_node(lines, rewritten_node, indent=indent)
+                ):
+                    pass
+                else:
+                    self._emit_node(
+                        lines,
+                        rewritten_node,
+                        module_name=module_name,
+                        indent=indent,
+                        local=inline_local,
+                        symbols_dict=symbols_dict,
+                    )
+                self._record_emitted_node_defs(rewritten_node)
+                for original_name, output in zip(
+                    original_output_names,
+                    rewritten_node.outputs,
+                    strict=True,
+                ):
                     inline_local.add(output.name)
                     output_type = _effective_graph_value_type(output)
                     _emit_bind_nested_shape_symbols(
@@ -3656,13 +4182,13 @@ class _DirectTorchEmitter:
                         value_expr=output.name,
                         local=inline_local,
                         protected=self.global_symbol_names,
-                        required_names=None,
+                        required_names=callee_required_shape_dims_by_value.get(original_name, set()),
                         indent=indent,
                     )
             output_exprs = [
                 self._operand_expr(
-                    substitute_graph_operand_dims(rewrite_operand(output), dim_subst)
-                    if dim_subst
+                    substitute_graph_operand_dims(rewrite_operand(output), {**dim_subst, **dim_name_subst})
+                    if dim_subst or dim_name_subst
                     else rewrite_operand(output),
                     local=inline_local,
                     symbols_dict=symbols_dict,
@@ -3694,7 +4220,7 @@ class _DirectTorchEmitter:
                         value_expr=target,
                         local=inline_local,
                         protected=self.global_symbol_names,
-                        required_names=None,
+                        required_names=set(),
                         indent=indent,
                     )
                 local.update(inline_local)
@@ -3891,7 +4417,7 @@ class _DirectTorchEmitter:
             raise ValueError(f"core.repeat references unknown callee {callee!r}")
         if len(node.inputs) < 3 + carry_count:
             raise ValueError("core.repeat missing carry inputs")
-        targets = tuple(_py_ident(value.name) for value in node.outputs)
+        targets = tuple(_value_ident(value) for value in node.outputs)
         for index, target in enumerate(targets):
             init_expr = self._operand_expr(node.inputs[3 + index], local=local, symbols_dict=symbols_dict)
             add(lines, indent, f"{target} = {init_expr}")
@@ -4027,15 +4553,25 @@ class _DirectTorchEmitter:
         inline_prefix = _py_ident(f"__loop_inline_{node.id.replace(':', '_')}")
         subst: dict[str, GraphOperand] = {}
         dim_name_subst: dict[str, Any] = {}
-        dim_subst = _inline_dim_subst(callee_module.inputs, tuple(arg_operands))
         inline_local = set(local)
+        dim_subst = _inline_dim_subst(
+            callee_module.inputs,
+            tuple(arg_operands),
+            fresh_prefix=inline_prefix,
+            protected=self.global_symbol_names,
+        )
         callee_required_dim_names = _module_free_dim_refs(
+            callee_module,
+            global_names=self.global_symbol_names,
+        )
+        callee_required_shape_dims_by_value = _module_value_required_shape_dim_names(
             callee_module,
             global_names=self.global_symbol_names,
         )
         for param, expr, operand in zip(callee_module.inputs, arg_exprs, arg_operands, strict=True):
             temp_name = f"{inline_prefix}_{_py_ident(param.name)}"
             lines.append(" " * indent + f"{temp_name} = {expr}")
+            self._record_emitted_alias(temp_name, operand)
             inline_local.add(temp_name)
             subst[param.name] = GraphValueRef(
                 name=temp_name,
@@ -4057,20 +4593,33 @@ class _DirectTorchEmitter:
             formal_ref = GraphValueRef(name=temp_name, type_expr=param.type_expr, dims=param.dims)
             if dim_subst:
                 formal_ref = substitute_graph_operand_dims(formal_ref, dim_subst)
+            formal_type = formal_ref.type_expr
+            if _operand_may_be_none(operand) and not isinstance(formal_type, TypeOptional):
+                formal_type = TypeOptional(formal_type)
             _emit_bind_nested_shape_symbols(
                 lines,
                 add=self._add,
-                type_expr=formal_ref.type_expr,
+                type_expr=formal_type,
                 value_expr=temp_name,
                 local=inline_local,
                 protected=self.global_symbol_names,
-                required_names=callee_required_dim_names,
+                required_names=None,
                 indent=indent,
             )
 
         def rewrite_operand(operand: GraphOperand) -> GraphOperand:
             if isinstance(operand, GraphValueRef):
-                return subst.get(operand.name, operand)
+                if operand.name in subst:
+                    return subst[operand.name]
+                if isinstance(operand.type_expr, TypeDim | TypeInt) and operand.name in dim_subst:
+                    replacement = dim_subst[operand.name]
+                    if isinstance(replacement, str):
+                        return GraphValueRef(
+                            name=replacement,
+                            type_expr=operand.type_expr,
+                            dims=operand.dims,
+                        )
+                return operand
             if isinstance(operand, GraphPath):
                 parts: list[str] = []
                 for part in operand.parts:
@@ -4091,12 +4640,31 @@ class _DirectTorchEmitter:
                 )
             return operand
 
+        dummy_fill_outputs = self._dummy_fill_index_outputs(callee_module)
+        inline_use_counts = self._collect_inline_value_use_counts(callee_module)
+        module_effects = infer_graph_module_effects(self.program.modules)
         for inner_index, inner_node in enumerate(callee_module.nodes, start=1):
             rewritten_outputs: list[GraphValue] = []
             original_output_names = tuple(output.name for output in inner_node.outputs)
+            pre_node_dim_subst = dict(dim_subst)
+            pre_node_dim_subst.update(dim_name_subst)
             for output in inner_node.outputs:
                 name = f"{inline_prefix}_{inner_index}_{_py_ident(output.name)}"
                 rewritten = GraphValue(name=name, type_expr=output.type_expr, dims=output.dims, optional=output.optional)
+                if pre_node_dim_subst:
+                    rewritten = substitute_graph_node_dims(
+                        GraphNode(
+                            id="__tmp",
+                            op=GraphOp("core.alias"),
+                            inputs=(),
+                            attrs={},
+                            outputs=(rewritten,),
+                            source_module=module_name,
+                            type_expr=rewritten.type_expr,
+                            dims=rewritten.dims,
+                        ),
+                        pre_node_dim_subst,
+                    ).outputs[0]
                 rewritten_outputs.append(rewritten)
                 subst[output.name] = GraphValueRef(name=name, type_expr=output.type_expr, dims=output.dims)
                 if isinstance(output.type_expr, TypeDim | TypeInt):
@@ -4109,10 +4677,10 @@ class _DirectTorchEmitter:
                 outputs=tuple(rewritten_outputs),
                 source_module=module_name,
             )
-            if dim_subst:
+            if pre_node_dim_subst:
                 rewritten_node = substitute_graph_node_dims(
                     rewritten_node,
-                    dim_subst,
+                    pre_node_dim_subst,
                 )
             for original_name, rewritten_output in zip(
                 original_output_names,
@@ -4126,15 +4694,38 @@ class _DirectTorchEmitter:
                 )
                 if isinstance(rewritten_output.type_expr, TypeDim | TypeInt):
                     dim_name_subst[original_name] = rewritten_output.name
-            self._emit_node(
-                lines,
+            inline_expr = self._inline_body_node_as_expr(
                 rewritten_node,
-                module_name=module_name,
-                indent=indent,
-                local=inline_local,
-                symbols_dict=symbols_dict,
+                original_output_names=original_output_names,
+                use_counts=inline_use_counts,
+                dummy_fill_outputs=dummy_fill_outputs,
+                module_effects=module_effects,
             )
-            for output in rewritten_node.outputs:
+            if inline_expr is not None:
+                subst[original_output_names[0]] = inline_expr
+                self._record_emitted_alias(rewritten_node.outputs[0].name, inline_expr)
+                continue
+            if (
+                len(original_output_names) == 1
+                and original_output_names[0] in dummy_fill_outputs
+                and self._emit_dummy_fill_index_node(lines, rewritten_node, indent=indent)
+            ):
+                pass
+            else:
+                self._emit_node(
+                    lines,
+                    rewritten_node,
+                    module_name=module_name,
+                    indent=indent,
+                    local=inline_local,
+                    symbols_dict=symbols_dict,
+                )
+            self._record_emitted_node_defs(rewritten_node)
+            for original_name, output in zip(
+                original_output_names,
+                rewritten_node.outputs,
+                strict=True,
+            ):
                 inline_local.add(output.name)
                 output_type = _effective_graph_value_type(output)
                 _emit_bind_nested_shape_symbols(
@@ -4144,13 +4735,13 @@ class _DirectTorchEmitter:
                     value_expr=output.name,
                     local=inline_local,
                     protected=self.global_symbol_names,
-                    required_names=None,
+                    required_names=callee_required_shape_dims_by_value.get(original_name, set()),
                     indent=indent,
                 )
         output_exprs = [
             self._operand_expr(
-                substitute_graph_operand_dims(rewrite_operand(output), dim_subst)
-                if dim_subst
+                substitute_graph_operand_dims(rewrite_operand(output), {**dim_subst, **dim_name_subst})
+                if dim_subst or dim_name_subst
                 else rewrite_operand(output),
                 local=inline_local,
                 symbols_dict=symbols_dict,
@@ -4162,6 +4753,15 @@ class _DirectTorchEmitter:
         joined = ", ".join(targets)
         rhs = output_exprs[0] if len(output_exprs) == 1 else f"({', '.join(output_exprs)})"
         lines.append(" " * indent + f"{joined} = {rhs}")
+        rewritten_outputs = [
+            substitute_graph_operand_dims(rewrite_operand(output), dim_subst)
+            if dim_subst
+            else rewrite_operand(output)
+            for output in callee_module.outputs
+        ]
+        for target, rewritten_output in zip(targets, rewritten_outputs, strict=True):
+            if isinstance(rewritten_output, GraphValueRef | GraphExpr):
+                self._record_emitted_alias(target, rewritten_output)
         for target, output in zip(targets, node.outputs, strict=True):
             output_type = _effective_graph_value_type(output)
             _emit_bind_nested_shape_symbols(
@@ -4171,7 +4771,7 @@ class _DirectTorchEmitter:
                 value_expr=target,
                 local=inline_local,
                 protected=self.global_symbol_names,
-                required_names=None,
+                required_names=set(),
                 indent=indent,
             )
         local.update(inline_local)
@@ -4354,6 +4954,9 @@ class _DirectTorchEmitter:
             operand = node.inputs[index]
             if isinstance(operand, GraphLiteral) and operand.value is None:
                 return fallback
+            if _operand_may_be_none(operand) or isinstance(operand, GraphValueRef):
+                raw = self._operand_expr(operand, local=local, symbols_dict=symbols_dict)
+                return f"({fallback} if {raw} is None else int({raw}))"
             expr = int_arg(index)
             if (
                 isinstance(operand, GraphValueRef)
@@ -4475,6 +5078,14 @@ class _DirectTorchEmitter:
             return f"({y_float}.to(dtype={x}.dtype) if {cast_float} else {y})"
         if primitive == "conv1d":
             return f"self._conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]})"
+        if primitive == "scatter" and len(node.inputs) >= 4:
+            fill_value = self._scalar_fill_value_for_scatter(node.inputs[1], node.inputs[2])
+            if fill_value is not None:
+                base = self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
+                dim = self._operand_expr(node.inputs[3], local=local, symbols_dict=symbols_dict)
+                index = self._operand_expr(fill_value, local=local, symbols_dict=symbols_dict)
+                src = self._operand_expr(node.inputs[2], local=local, symbols_dict=symbols_dict)
+                return f"self._assign_unit_slice({base}, {dim}, {index}, {src})"
         if primitive == "tensor_like":
             dtype = args[2] if len(args) > 2 else "None"
             target_dtype = f"({args[1]}.dtype if self._dtype_from_name({dtype}) is None else self._dtype_from_name({dtype}))"
@@ -4522,7 +5133,7 @@ class _DirectTorchEmitter:
             ),
             "require": lambda: f"self._require_value({args[0]})",
             "gather": lambda: f"torch.gather({args[0]}, dim={int_arg(2, '-1')}, index=self._move_to({args[1]}, {args[0]}.device))",
-            "scatter": lambda: f"(torch.scatter({args[0]}, dim={int_arg(3, '-1')}, index=self._move_to({args[1]}, {args[0]}.device), src=self._move_to({args[2]}, {args[0]}.device)) if torch.is_tensor({args[2]}) else torch.scatter({args[0]}, dim={int_arg(3, '-1')}, index=self._move_to({args[1]}, {args[0]}.device), value={args[2]}))",
+            "scatter": lambda: f"self._scatter({args[0]}, {args[1]}, {args[2]}, {int_arg(3, '-1')})",
             "index_add": lambda: f"torch.index_add({args[0]}, dim={int_arg(3, '0')}, index=self._move_to({args[1]}, {args[0]}.device), source=self._move_to({args[2]}, {args[0]}.device))",
             "and": lambda: (
                 f"(lambda _a, _b: torch.logical_and(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
@@ -4535,7 +5146,7 @@ class _DirectTorchEmitter:
             "sin": lambda: f"torch.sin({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').sin({float_arg(0)})",
             "cos": lambda: f"torch.cos({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').cos({float_arg(0)})",
             "exp": lambda: f"torch.exp({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').exp({float_arg(0)})",
-            "log": lambda: f"torch.log({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').log({float_arg(0)})",
+            "log": lambda: f"(torch.log({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').log(float({args[0]})))",
             "cast": lambda: f"{args[0]}.to(dtype=getattr(torch, str({args[1]})))",
             "cast_like": lambda: f"{args[0]}.to(device={args[1]}.device, dtype={args[1]}.dtype)",
             "dtype_value": lambda: f"{{'min': torch.finfo({args[0]}.dtype).min, 'max': torch.finfo({args[0]}.dtype).max, 'eps': torch.finfo({args[0]}.dtype).eps, 'tiny': torch.finfo({args[0]}.dtype).tiny, 'inf': float('inf'), '-inf': float('-inf')}}[str({args[1]})]",
@@ -4567,6 +5178,7 @@ class _DirectTorchEmitter:
             "list_init": lambda: "[]",
             "list_append": lambda: f"([*({args[0]} or []), {args[1]}])",
             "list_index": lambda: f"{args[0]}[{int_arg(1)}]",
+            "list_length": lambda: f"len({args[0]} or [])",
             "shape": lambda: f"list({args[0]}.shape)",
         }
         if primitive in simple:
@@ -4705,7 +5317,7 @@ class _DirectTorchEmitter:
         if isinstance(dim, str):
             if dim.startswith(".."):
                 return None
-            name = _py_ident(dim)
+            name = _dim_ident(dim)
             if dim in local:
                 return name
             if dim in self.global_symbol_names:
@@ -4722,7 +5334,7 @@ class _DirectTorchEmitter:
 
     def _operand_expr(self, operand: GraphOperand, *, local: set[str], symbols_dict: str) -> str:
         if isinstance(operand, GraphValueRef):
-            name = _py_ident(operand.name)
+            name = _dim_ident(operand.name) if isinstance(operand.type_expr, TypeDim) else _py_ident(operand.name)
             if operand.name in local:
                 return name
             if operand.name in self.global_symbol_names:
