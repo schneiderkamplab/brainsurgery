@@ -15,6 +15,7 @@ import sys
 import time
 from copy import deepcopy
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType
@@ -34,6 +35,7 @@ from transformers import (
     AutoModelForMaskedLM,
     AutoModelForSeq2SeqLM,
 )
+from transformers.generation import GenerationConfig, GenerationMixin
 from transformers.utils import import_utils as transformers_import_utils
 from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Config
 
@@ -1326,6 +1328,32 @@ def _should_trust_remote_code(
     return has_local_artifacts
 
 
+_GENERATION_MIXIN_CLASS_CACHE: dict[type[Any], type[Any]] = {}
+
+
+def _ensure_hf_generation_mixin(model: Any) -> bool:
+    added = False
+    if not hasattr(model, "generate"):
+        if not hasattr(model, "prepare_inputs_for_generation"):
+            return False
+        cls = model.__class__
+        mixed_cls = _GENERATION_MIXIN_CLASS_CACHE.get(cls)
+        if mixed_cls is None:
+            mixed_cls = type(
+                f"{cls.__name__}WithGenerationMixin",
+                (cls, GenerationMixin),
+                {"__module__": cls.__module__},
+            )
+            _GENERATION_MIXIN_CLASS_CACHE[cls] = mixed_cls
+        model.__class__ = mixed_cls
+        added = True
+    if not hasattr(model, "generation_config") or model.generation_config is None:
+        config = getattr(model, "config", None)
+        if config is not None:
+            model.generation_config = GenerationConfig.from_model_config(config)
+    return added
+
+
 def _normalize_rope_numeric_fields(config: Any) -> Any:
     def _normalize_dict(mapping: Any) -> None:
         if not isinstance(mapping, dict):
@@ -1439,16 +1467,126 @@ def _patch_mistral4_config_compat(config: Any) -> Any:
     return config
 
 
+def _get_nested_attr(obj: Any, path: str) -> Any:
+    cur = obj
+    for part in path.split("."):
+        cur = getattr(cur, part, None)
+        if cur is None:
+            return None
+    return cur
+
+
+def _iter_hf_layer_stack_candidates(model: Any) -> list[Any]:
+    stacks: list[Any] = []
+    for path in (
+        "model.layers",
+        "language_model.model.layers",
+        "language_model.layers",
+        "transformer.h",
+        "gpt_neox.layers",
+        "encoder.layers",
+        "encoder.block",
+        "decoder.layers",
+        "decoder.block",
+    ):
+        layers = _get_nested_attr(model, path)
+        if layers is not None:
+            stacks.append(layers)
+    return stacks
+
+
 def _patch_hf_shared_modules_for_device_map(model: Any) -> list[Any]:
     handles: list[Any] = []
-    inner_model = getattr(model, "model", None)
-    layers = getattr(inner_model, "layers", None)
-    rotary = getattr(inner_model, "rotary_emb", None)
-    if layers is None or rotary is None:
-        return handles
-    try:
-        layer_iter = list(layers)
-    except Exception:
+    seen_modules: set[int] = set()
+    for module in model.modules():
+        if not isinstance(module, torch.nn.Embedding):
+            continue
+        weight = getattr(module, "weight", None)
+        hook = getattr(module, "_hf_hook", None)
+        if torch.is_tensor(weight) and hook is not None and hasattr(hook, "execution_device"):
+            with suppress(Exception):
+                hook.execution_device = weight.device
+
+        def _move_embedding_input(
+            module: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            weight = getattr(module, "weight", None)
+            if not torch.is_tensor(weight):
+                return args, kwargs
+            args_out = args
+            kwargs_out = kwargs
+            if args and torch.is_tensor(args[0]) and args[0].device != weight.device:
+                args_out = (args[0].to(device=weight.device), *args[1:])
+            input_value = kwargs.get("input")
+            if torch.is_tensor(input_value) and input_value.device != weight.device:
+                kwargs_out = dict(kwargs)
+                kwargs_out["input"] = input_value.to(device=weight.device)
+            return args_out, kwargs_out
+
+        handles.append(module.register_forward_pre_hook(_move_embedding_input, with_kwargs=True))
+
+    for path in ("model.encoder", "model.decoder", "encoder", "decoder"):
+        module = _get_nested_attr(model, path)
+        if module is None or id(module) in seen_modules:
+            continue
+        seen_modules.add(id(module))
+        target_device: torch.device | None = None
+        embed_tokens = getattr(module, "embed_tokens", None)
+        target_device = _module_parameter_device(embed_tokens)
+        if target_device is None:
+            target_device = _module_parameter_device(module)
+        if target_device is None:
+            continue
+
+        def _move_stack_inputs(
+            module: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+            *,
+            _target_device: torch.device = target_device,
+        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            del module
+            args_out = args
+            if args and torch.is_tensor(args[0]) and args[0].device != _target_device:
+                args_out = (args[0].to(device=_target_device), *args[1:])
+            kwargs_out = kwargs
+            for key in (
+                "input_ids",
+                "attention_mask",
+                "decoder_attention_mask",
+                "position_ids",
+                "cache_position",
+            ):
+                value = kwargs_out.get(key)
+                if torch.is_tensor(value) and value.device != _target_device:
+                    if kwargs_out is kwargs:
+                        kwargs_out = dict(kwargs)
+                    kwargs_out[key] = value.to(device=_target_device)
+            encoder_hidden_states = kwargs_out.get("encoder_hidden_states")
+            encoder_attention_mask = kwargs_out.get("encoder_attention_mask")
+            if (
+                torch.is_tensor(encoder_hidden_states)
+                and torch.is_tensor(encoder_attention_mask)
+                and encoder_attention_mask.device != encoder_hidden_states.device
+            ):
+                if kwargs_out is kwargs:
+                    kwargs_out = dict(kwargs)
+                kwargs_out["encoder_attention_mask"] = encoder_attention_mask.to(
+                    device=encoder_hidden_states.device
+                )
+            return args_out, kwargs_out
+
+        handles.append(module.register_forward_pre_hook(_move_stack_inputs, with_kwargs=True))
+
+    layer_iter: list[Any] = []
+    for layers in _iter_hf_layer_stack_candidates(model):
+        try:
+            layer_iter.extend(list(layers))
+        except Exception:
+            continue
+    if not layer_iter:
         return handles
 
     for layer in layer_iter:
@@ -1520,6 +1658,139 @@ def _patch_hf_shared_modules_for_device_map(model: Any) -> list[Any]:
 
         handles.append(layer.register_forward_pre_hook(_move_shared_kwargs, with_kwargs=True))
     return handles
+
+
+@contextmanager
+def _patch_transformers_mask_device_map_inputs(enabled: bool) -> Any:
+    if not enabled:
+        yield
+        return
+    try:
+        import transformers.masking_utils as masking_utils
+    except Exception:
+        yield
+        return
+    original = getattr(masking_utils, "create_bidirectional_mask", None)
+    original_preprocess = getattr(masking_utils, "_preprocess_mask_arguments", None)
+    if not callable(original):
+        yield
+        return
+
+    def _create_bidirectional_mask_device_safe(*args: Any, **kwargs: Any) -> Any:
+        inputs_embeds = kwargs.get("inputs_embeds")
+        if inputs_embeds is None and len(args) >= 2:
+            inputs_embeds = args[1]
+        encoder_hidden_states = kwargs.get("encoder_hidden_states")
+        if encoder_hidden_states is None and len(args) >= 4:
+            encoder_hidden_states = args[3]
+        attention_mask = kwargs.get("attention_mask")
+        attention_mask_arg_index: int | None = None
+        if attention_mask is None and len(args) >= 3:
+            attention_mask = args[2]
+            attention_mask_arg_index = 2
+        reference = encoder_hidden_states if torch.is_tensor(encoder_hidden_states) else inputs_embeds
+        if torch.is_tensor(attention_mask) and torch.is_tensor(reference):
+            # Transformers' SDPA mask helpers close over 2D padding masks and index
+            # them with helper tensors allocated from a separate reference device.
+            # CPU padding masks are valid for indexing from any device and avoid
+            # device-map splits leaking into the closure.
+            target_device = (
+                torch.device("cpu")
+                if attention_mask.ndim == 2
+                else reference.device
+            )
+            moved_attention_mask = (
+                attention_mask.to(device=target_device)
+                if attention_mask.device != target_device
+                else attention_mask
+            )
+        else:
+            moved_attention_mask = attention_mask
+        if moved_attention_mask is not attention_mask:
+            if attention_mask_arg_index is not None:
+                args_list = list(args)
+                args_list[attention_mask_arg_index] = moved_attention_mask
+                args = tuple(args_list)
+            else:
+                kwargs = dict(kwargs)
+                kwargs["attention_mask"] = moved_attention_mask
+        return original(*args, **kwargs)
+
+    patched: list[tuple[Any, str, Any]] = []
+    if callable(original_preprocess):
+
+        def _preprocess_mask_arguments_device_safe(*args: Any, **kwargs: Any) -> Any:
+            result = original_preprocess(*args, **kwargs)
+            if not (
+                isinstance(result, tuple)
+                and len(result) >= 2
+                and torch.is_tensor(result[1])
+                and result[1].ndim == 2
+            ):
+                return result
+            encoder_hidden_states = kwargs.get("encoder_hidden_states")
+            if encoder_hidden_states is None and len(args) >= 7:
+                encoder_hidden_states = args[6]
+            if (
+                torch.is_tensor(encoder_hidden_states)
+                and result[1].device != encoder_hidden_states.device
+            ):
+                result_list = list(result)
+                result_list[1] = result[1].to(device=encoder_hidden_states.device)
+                return tuple(result_list)
+            return result
+
+        try:
+            setattr(
+                masking_utils,
+                "_preprocess_mask_arguments",
+                _preprocess_mask_arguments_device_safe,
+            )
+            patched.append((masking_utils, "_preprocess_mask_arguments", original_preprocess))
+        except Exception:
+            pass
+    for module in tuple(sys.modules.values()):
+        if module is None:
+            continue
+        module_dict = getattr(module, "__dict__", None)
+        if not isinstance(module_dict, dict):
+            continue
+        value = module_dict.get("create_bidirectional_mask")
+        if value is original:
+            try:
+                setattr(module, "create_bidirectional_mask", _create_bidirectional_mask_device_safe)
+            except Exception:
+                continue
+            patched.append((module, "create_bidirectional_mask", original))
+    try:
+        yield
+    finally:
+        for module, name, value in patched:
+            with suppress(Exception):
+                setattr(module, name, value)
+
+
+@contextmanager
+def _patch_torch_equal_for_cross_device_hf_load(enabled: bool) -> Any:
+    if not enabled:
+        yield
+        return
+    original_equal = torch.equal
+
+    def _equal_device_safe(left: Any, right: Any) -> bool:
+        if (
+            torch.is_tensor(left)
+            and torch.is_tensor(right)
+            and left.device != right.device
+        ):
+            return bool(original_equal(left.detach().cpu(), right.detach().cpu()))
+        return bool(original_equal(left, right))
+
+    torch.equal = _equal_device_safe  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        torch.equal = original_equal  # type: ignore[assignment]
 
 
 def _force_model_floating_dtype(model: Any, *, target_dtype: torch.dtype) -> tuple[int, int]:
@@ -2642,6 +2913,119 @@ def _call_generate_compatible(model: Any, **kwargs: Any) -> Any:
     return generate(**{key: value for key, value in kwargs.items() if key in accepted})
 
 
+def _module_parameter_device(module: Any) -> torch.device | None:
+    if module is None:
+        return None
+    try:
+        for value in module.parameters(recurse=False):
+            return value.device
+    except Exception:
+        return None
+    return None
+
+
+def _hf_input_embedding_device(model: Any) -> torch.device | None:
+    get_embeddings = getattr(model, "get_input_embeddings", None)
+    if callable(get_embeddings):
+        device = _module_parameter_device(get_embeddings())
+        if device is not None:
+            return device
+    for path in (
+        "model.encoder.embed_tokens",
+        "encoder.embed_tokens",
+        "model.embed_tokens",
+        "embed_tokens",
+    ):
+        device = _module_parameter_device(_get_nested_attr(model, path))
+        if device is not None:
+            return device
+    return None
+
+
+def _hf_decoder_embedding_device(model: Any) -> torch.device | None:
+    get_decoder = getattr(model, "get_decoder", None)
+    decoder = get_decoder() if callable(get_decoder) else getattr(model, "decoder", None)
+    if decoder is not None:
+        get_embeddings = getattr(decoder, "get_input_embeddings", None)
+        if callable(get_embeddings):
+            device = _module_parameter_device(get_embeddings())
+            if device is not None:
+                return device
+        embed_tokens = getattr(decoder, "embed_tokens", None)
+        device = _module_parameter_device(embed_tokens)
+        if device is not None:
+            return device
+    for path in (
+        "model.decoder.embed_tokens",
+        "decoder.embed_tokens",
+        "model.embed_tokens",
+        "embed_tokens",
+    ):
+        device = _module_parameter_device(_get_nested_attr(model, path))
+        if device is not None:
+            return device
+    return _hf_input_embedding_device(model)
+
+
+def _move_hf_token_inputs_to_embedding_devices(
+    model: Any, kwargs: Mapping[str, Any]
+) -> dict[str, Any]:
+    out = dict(kwargs)
+    input_device = _hf_input_embedding_device(model)
+    if input_device is not None and torch.is_tensor(out.get("input_ids")):
+        out["input_ids"] = out["input_ids"].to(device=input_device)
+    decoder_device = _hf_decoder_embedding_device(model)
+    if decoder_device is not None and torch.is_tensor(out.get("decoder_input_ids")):
+        out["decoder_input_ids"] = out["decoder_input_ids"].to(device=decoder_device)
+    return out
+
+
+def _normalize_hf_experts_implementation(token: str | None) -> str | None:
+    if token is None:
+        return None
+    normalized = str(token).strip()
+    if not normalized:
+        raise ValueError("--hf-experts-implementation must not be empty")
+    return normalized
+
+
+def _apply_hf_experts_implementation(config: Any | None, token: str | None) -> None:
+    if config is None or token is None:
+        return
+    setattr(config, "_experts_implementation", token)
+
+
+@contextmanager
+def _preserve_requested_hf_experts_during_generate(model: Any, token: str | None) -> Any:
+    if token is None:
+        yield
+        return
+    set_impl = getattr(model, "set_experts_implementation", None)
+    if callable(set_impl):
+        set_impl(token)
+    original_decode_opt = getattr(model, "_optimize_model_for_decode", None)
+    if not callable(original_decode_opt):
+        yield
+        return
+
+    def _no_decode_expert_rewrite(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+
+        @contextmanager
+        def _ctx() -> Any:
+            yield
+
+        return _ctx()
+
+    setattr(model, "_optimize_model_for_decode", _no_decode_expert_rewrite)
+    try:
+        yield
+    finally:
+        setattr(model, "_optimize_model_for_decode", original_decode_opt)
+        if callable(set_impl):
+            set_impl(token)
+
+
 def _print_axon_profile_summary(rows: Sequence[Mapping[str, Any]]) -> None:
     if not rows:
         print("Axon profile: no recorded regions")
@@ -2857,6 +3241,7 @@ def _run_axon_test_single(
     hf_align_linear_fp32_accum: bool = False,
     hf_align_norm_fp32: bool = False,
     hf_attn_implementation: str | None = None,
+    hf_experts_implementation: str | None = None,
     compile_hf: bool = False,
     compile_axon: bool = False,
     compile_backend: str | None = None,
@@ -2878,6 +3263,9 @@ def _run_axon_test_single(
     resolved_dtype = _resolve_dtype(dtype)
     resolved_model_task = _resolve_model_task(model_task)
     resolved_benchmark_mode = _resolve_benchmark_mode(benchmark_mode)
+    resolved_hf_experts_implementation = _normalize_hf_experts_implementation(
+        hf_experts_implementation
+    )
     align_mask_contract = bool(hf_align_bf16_profile or hf_align_mask_contract)
     align_position_ids = bool(hf_align_bf16_profile or hf_align_position_ids)
     align_add_fp32 = bool(hf_align_bf16_profile or hf_align_add_fp32_accum)
@@ -3104,6 +3492,7 @@ def _run_axon_test_single(
         if (
             hf_config is None
             and hf_attn_implementation is None
+            and resolved_hf_experts_implementation is None
             and axon_backend == "pipeline2-torch"
             and resolved_model_task in {"causal_lm", "seq2seq_lm"}
             and not skip_hf
@@ -3123,6 +3512,13 @@ def _run_axon_test_single(
                     trust_remote_code=effective_trust_remote_code,
                 )
             setattr(hf_config, "_attn_implementation", token)
+        if resolved_hf_experts_implementation is not None:
+            if hf_config is None:
+                hf_config = _load_auto_config_with_compat_fallback(
+                    resolved_hf_model_dir,
+                    trust_remote_code=effective_trust_remote_code,
+                )
+            _apply_hf_experts_implementation(hf_config, resolved_hf_experts_implementation)
         exec_device_str = str(resolved_device)
         tokenizer_obj, input_ids_cpu, attention_mask_cpu = tokenize_prompts(
             prompts=prompts,
@@ -3395,15 +3791,25 @@ def _run_axon_test_single(
                 hf_model = hf
             elif resolved_model_task == "seq2seq_lm":
                 _ensure_transformers_import_compat()
-                hf_model = AutoModelForSeq2SeqLM.from_pretrained(
-                    str(resolved_hf_model_dir),
-                    local_files_only=True,
-                    torch_dtype=resolved_dtype,
-                    config=hf_config,
-                    quantization_config=from_pretrained_quant_config,
-                    trust_remote_code=effective_trust_remote_code,
-                    device_map=hf_device_map,
-                )
+                seq2seq_kwargs: dict[str, Any] = {
+                    "local_files_only": True,
+                    "torch_dtype": resolved_dtype,
+                    "config": hf_config,
+                    "quantization_config": from_pretrained_quant_config,
+                    "trust_remote_code": effective_trust_remote_code,
+                    "device_map": hf_device_map,
+                }
+                if resolved_hf_experts_implementation is not None:
+                    seq2seq_kwargs["experts_implementation"] = (
+                        resolved_hf_experts_implementation
+                    )
+                with _patch_torch_equal_for_cross_device_hf_load(
+                    enabled=hf_device_map is not None
+                ):
+                    hf_model = AutoModelForSeq2SeqLM.from_pretrained(
+                        str(resolved_hf_model_dir),
+                        **seq2seq_kwargs,
+                    )
                 hf = (
                     hf_model.eval()
                     if hf_device_map is not None
@@ -3472,10 +3878,17 @@ def _run_axon_test_single(
                             causal_kwargs["quantization_config"] = from_pretrained_quant_config
                         if hf_device_map is not None:
                             causal_kwargs["device_map"] = hf_device_map
-                        hf_model = AutoModelForCausalLM.from_pretrained(
-                            str(resolved_hf_model_dir),
-                            **causal_kwargs,
-                        )
+                        if resolved_hf_experts_implementation is not None:
+                            causal_kwargs["experts_implementation"] = (
+                                resolved_hf_experts_implementation
+                            )
+                        with _patch_torch_equal_for_cross_device_hf_load(
+                            enabled=hf_device_map is not None
+                        ):
+                            hf_model = AutoModelForCausalLM.from_pretrained(
+                                str(resolved_hf_model_dir),
+                                **causal_kwargs,
+                            )
                     hf = (
                         cast(Any, hf_model).eval()
                         if hf_device_map is not None
@@ -3520,15 +3933,18 @@ def _run_axon_test_single(
                             # then can be promoted to fp32 when strict float32 is requested.
                             if resolved_dtype == torch.float32:
                                 load_dtype = torch.bfloat16
-                        hf_model = AutoModelForImageTextToText.from_pretrained(
-                            str(resolved_hf_model_dir),
-                            local_files_only=True,
-                            torch_dtype=load_dtype,
-                            config=hf_config,
-                            trust_remote_code=effective_trust_remote_code,
-                            device_map=multimodal_device_map,
-                            key_mapping=mistral4_key_mapping,
-                        )
+                        with _patch_torch_equal_for_cross_device_hf_load(
+                            enabled=multimodal_device_map is not None
+                        ):
+                            hf_model = AutoModelForImageTextToText.from_pretrained(
+                                str(resolved_hf_model_dir),
+                                local_files_only=True,
+                                torch_dtype=load_dtype,
+                                config=hf_config,
+                                trust_remote_code=effective_trust_remote_code,
+                                device_map=multimodal_device_map,
+                                key_mapping=mistral4_key_mapping,
+                            )
                         hf_base = (
                             cast(Any, hf_model).eval()
                             if multimodal_device_map is not None
@@ -3591,6 +4007,16 @@ def _run_axon_test_single(
                     )
             if _rebuild_hf_dummy_tokens_mask_from_config(hf):
                 print("HF: rebuilt dummy_tokens_mask from config")
+            if resolved_model_task == "causal_lm" and _ensure_hf_generation_mixin(hf):
+                print("HF: added GenerationMixin to custom causal LM class")
+            if resolved_hf_experts_implementation is not None:
+                set_experts = getattr(hf, "set_experts_implementation", None)
+                if callable(set_experts):
+                    set_experts(resolved_hf_experts_implementation)
+                print(
+                    "HF experts implementation:",
+                    resolved_hf_experts_implementation,
+                )
             patched_mistral4_experts = _patch_hf_mistral4_experts_from_checkpoint(
                 hf,
                 config=hf_config,
@@ -3653,7 +4079,9 @@ def _run_axon_test_single(
                         hf_hook_handles.append(layer.register_forward_hook(_hf_post_hook))
 
             def _run_hf_forward(model: Any) -> torch.Tensor:
-                hf_forward_kwargs = dict(io["hf_forward_inputs"])
+                hf_forward_kwargs = _move_hf_token_inputs_to_embedding_devices(
+                    model, io["hf_forward_inputs"]
+                )
                 if resolved_model_task in {"causal_lm", "seq2seq_lm"}:
                     hf_forward_kwargs["use_cache"] = False
                 if _is_deepseek_family_model_type(resolved_model_type):
@@ -3683,112 +4111,118 @@ def _run_axon_test_single(
 
             hf_gen: torch.Tensor | None = None
             hf_time = 0.0
-            if not run_generate_benchmark:
-                hf_t0 = time.perf_counter()
-                with timing(message="HF"), torch.no_grad():
-                    hf_logits = _run_hf_forward(hf)
-                hf_time = time.perf_counter() - hf_t0
-            else:
-                hf_forward_time = 0.0
-                with torch.no_grad():
+            with _patch_transformers_mask_device_map_inputs(enabled=hf_device_map is not None):
+                if not run_generate_benchmark:
                     hf_t0 = time.perf_counter()
-                    hf_logits = _run_hf_forward(hf)
-                    hf_forward_time = time.perf_counter() - hf_t0
-                    if _is_deepseek_family_model_type(resolved_model_type) and not bool(
-                        torch.isfinite(hf_logits).all()
-                    ):
-                        print(
-                            "HF logits contained non-finite values for DeepSeek; "
-                            "retrying prompt-by-prompt HF forward"
-                        )
-                        batch_size = int(io["input_ids"].shape[0])
-                        if batch_size > 1:
-                            hf_logits_parts: list[torch.Tensor] = []
-                            for batch_idx in range(batch_size):
-                                sample_kwargs: dict[str, Any] = {}
-                                for key, value in io["hf_forward_inputs"].items():
-                                    if (
-                                        torch.is_tensor(value)
-                                        and value.ndim > 0
-                                        and int(value.shape[0]) == batch_size
-                                    ):
-                                        sample_kwargs[key] = value[batch_idx : batch_idx + 1]
-                                    else:
-                                        sample_kwargs[key] = value
-                                sample_kwargs["use_cache"] = False
-                                hf_logits_parts.append(_extract_logits(hf(**sample_kwargs)))
-                            if hf_logits_parts:
-                                hf_logits = torch.cat(hf_logits_parts, dim=0)
-                        if not bool(torch.isfinite(hf_logits).all()):
+                    with timing(message="HF"), torch.no_grad():
+                        hf_logits = _run_hf_forward(hf)
+                    hf_time = time.perf_counter() - hf_t0
+                else:
+                    hf_forward_time = 0.0
+                    with torch.no_grad():
+                        hf_t0 = time.perf_counter()
+                        hf_logits = _run_hf_forward(hf)
+                        hf_forward_time = time.perf_counter() - hf_t0
+                        if _is_deepseek_family_model_type(resolved_model_type) and not bool(
+                            torch.isfinite(hf_logits).all()
+                        ):
                             print(
-                                "DeepSeek HF logits still non-finite after per-prompt retry; "
-                                "retrying one additional full forward pass"
+                                "HF logits contained non-finite values for DeepSeek; "
+                                "retrying prompt-by-prompt HF forward"
                             )
-                            hf_t0 = time.perf_counter()
-                            hf_logits = _run_hf_forward(hf)
-                            hf_forward_time = time.perf_counter() - hf_t0
+                            batch_size = int(io["input_ids"].shape[0])
+                            if batch_size > 1:
+                                hf_logits_parts: list[torch.Tensor] = []
+                                for batch_idx in range(batch_size):
+                                    sample_kwargs: dict[str, Any] = {}
+                                    for key, value in io["hf_forward_inputs"].items():
+                                        if (
+                                            torch.is_tensor(value)
+                                            and value.ndim > 0
+                                            and int(value.shape[0]) == batch_size
+                                        ):
+                                            sample_kwargs[key] = value[batch_idx : batch_idx + 1]
+                                        else:
+                                            sample_kwargs[key] = value
+                                    sample_kwargs["use_cache"] = False
+                                    hf_logits_parts.append(_extract_logits(hf(**sample_kwargs)))
+                                if hf_logits_parts:
+                                    hf_logits = torch.cat(hf_logits_parts, dim=0)
+                            if not bool(torch.isfinite(hf_logits).all()):
+                                print(
+                                    "DeepSeek HF logits still non-finite after per-prompt retry; "
+                                    "retrying one additional full forward pass"
+                                )
+                                hf_t0 = time.perf_counter()
+                                hf_logits = _run_hf_forward(hf)
+                                hf_forward_time = time.perf_counter() - hf_t0
 
-                hf_max_new_tokens = (
-                    max(1, max_len)
-                    if resolved_model_task == "seq2seq_lm"
-                    else max(1, max_len - int(io["input_ids"].shape[1]))
-                )
-
-                def _run_hf_generate(model: Any) -> torch.Tensor:
-                    if _is_deepseek_family_model_type(resolved_model_type):
-                        pad_id = tokenizer_obj.eos_token_id
-                        generated: list[torch.Tensor] = []
-                        batch_size = int(io["input_ids"].shape[0])
-                        for batch_idx in range(batch_size):
-                            sample_inputs: dict[str, Any] = {}
-                            for key, value in io["hf_generate_inputs"].items():
-                                if (
-                                    torch.is_tensor(value)
-                                    and value.ndim > 0
-                                    and int(value.shape[0]) == batch_size
-                                ):
-                                    sample_value = value[batch_idx : batch_idx + 1]
-                                    if key in {"input_ids", "attention_mask"}:
-                                        mask = io["attention_mask"][batch_idx : batch_idx + 1]
-                                        keep = mask.to(dtype=torch.bool)[0]
-                                        sample_value = sample_value[:, keep]
-                                    sample_inputs[key] = sample_value
-                                else:
-                                    sample_inputs[key] = value
-                            generated.append(
-                                _call_generate_compatible(
-                                    model,
-                                    **sample_inputs,
-                                    max_new_tokens=hf_max_new_tokens,
-                                    eos_token_id=tokenizer_obj.eos_token_id,
-                                    pad_token_id=pad_id,
-                                    num_beams=1,
-                                    do_sample=False,
-                                    use_cache=False,
-                                )[0]
-                            )
-                        max_out = max(int(item.shape[0]) for item in generated)
-                        padded = [
-                            torch.nn.functional.pad(
-                                item,
-                                (0, max_out - int(item.shape[0])),
-                                value=int(pad_id if pad_id is not None else 0),
-                            )
-                            for item in generated
-                        ]
-                        return torch.stack(padded, dim=0)
-                    return _call_generate_compatible(
-                        model,
-                        **io["hf_generate_inputs"],
-                        max_new_tokens=hf_max_new_tokens,
-                        eos_token_id=tokenizer_obj.eos_token_id,
-                        pad_token_id=tokenizer_obj.eos_token_id,
-                        num_beams=1,
-                        do_sample=False,
-                        use_cache=False,
+                    hf_max_new_tokens = (
+                        max(1, max_len)
+                        if resolved_model_task == "seq2seq_lm"
+                        else max(1, max_len - int(io["input_ids"].shape[1]))
                     )
 
-                hf_gen, hf_time = _time_generate("HF", lambda model=hf: _run_hf_generate(model))
+                    def _run_hf_generate(model: Any) -> torch.Tensor:
+                        with _preserve_requested_hf_experts_during_generate(
+                            model, resolved_hf_experts_implementation
+                        ):
+                            if _is_deepseek_family_model_type(resolved_model_type):
+                                pad_id = tokenizer_obj.eos_token_id
+                                generated: list[torch.Tensor] = []
+                                batch_size = int(io["input_ids"].shape[0])
+                                for batch_idx in range(batch_size):
+                                    sample_inputs: dict[str, Any] = {}
+                                    for key, value in io["hf_generate_inputs"].items():
+                                        if (
+                                            torch.is_tensor(value)
+                                            and value.ndim > 0
+                                            and int(value.shape[0]) == batch_size
+                                        ):
+                                            sample_value = value[batch_idx : batch_idx + 1]
+                                            if key in {"input_ids", "attention_mask"}:
+                                                mask = io["attention_mask"][batch_idx : batch_idx + 1]
+                                                keep = mask.to(dtype=torch.bool)[0]
+                                                sample_value = sample_value[:, keep]
+                                            sample_inputs[key] = sample_value
+                                        else:
+                                            sample_inputs[key] = value
+                                    generated.append(
+                                        _call_generate_compatible(
+                                            model,
+                                            **sample_inputs,
+                                            max_new_tokens=hf_max_new_tokens,
+                                            eos_token_id=tokenizer_obj.eos_token_id,
+                                            pad_token_id=pad_id,
+                                            num_beams=1,
+                                            do_sample=False,
+                                            use_cache=False,
+                                        )[0]
+                                    )
+                                max_out = max(int(item.shape[0]) for item in generated)
+                                padded = [
+                                    torch.nn.functional.pad(
+                                        item,
+                                        (0, max_out - int(item.shape[0])),
+                                        value=int(pad_id if pad_id is not None else 0),
+                                    )
+                                    for item in generated
+                                ]
+                                return torch.stack(padded, dim=0)
+                            return _call_generate_compatible(
+                                model,
+                                **_move_hf_token_inputs_to_embedding_devices(
+                                    model, io["hf_generate_inputs"]
+                                ),
+                                max_new_tokens=hf_max_new_tokens,
+                                eos_token_id=tokenizer_obj.eos_token_id,
+                                pad_token_id=tokenizer_obj.eos_token_id,
+                                num_beams=1,
+                                do_sample=False,
+                                use_cache=False,
+                            )
+
+                    hf_gen, hf_time = _time_generate("HF", lambda model=hf: _run_hf_generate(model))
             hf_logits_cpu = hf_logits.detach().cpu()
             hf_gen_cpu = None if hf_gen is None else hf_gen.detach().cpu()
             dummy_mask = _build_phi3small_dummy_vocab_mask(
@@ -4467,6 +4901,7 @@ def run_axon_test(
     hf_align_linear_fp32_accum: bool = False,
     hf_align_norm_fp32: bool = False,
     hf_attn_implementation: str | None = None,
+    hf_experts_implementation: str | None = None,
     compile_hf: bool = False,
     compile_axon: bool = False,
     compile_backend: str | None = None,
@@ -4503,6 +4938,7 @@ def run_axon_test(
         hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
         hf_align_norm_fp32=hf_align_norm_fp32,
         hf_attn_implementation=hf_attn_implementation,
+        hf_experts_implementation=hf_experts_implementation,
         compile_hf=compile_hf,
         compile_axon=compile_axon,
         compile_backend=compile_backend,

@@ -46,9 +46,9 @@ THETA = 10000.0
 
 MAX_POSITIONS = 512
 
-PROPE = 0.5
+PROPE <- 0.5
 
-ROTARY_DIM = (floor (((MODEL_HEAD_DIM * PROPE) :: Dim)))
+ROTARY_DIM <- floor (MODEL_HEAD_DIM * PROPE)
 
 ATTN_BIAS = true
 

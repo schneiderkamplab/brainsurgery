@@ -21,6 +21,7 @@ from brainsurgery.synapse.axon.ast import (
     TypeInt,
     TypeNamed,
     TypeTensor,
+    TypeTuple,
     TypeVar,
 )
 from brainsurgery.synapse.axon.ast.render import render_axon_file
@@ -530,6 +531,61 @@ main x y = do
     module = next(module for module in typed.modules if module.name == "main")
     bind = next(stmt for stmt in module.statements if isinstance(stmt, AxonBind))
     assert bind.expr.inferred_type == TypeTensor(base="Tensor", dims=("B", "S", 2))
+
+
+def test_longrope_factors_preserve_explicit_rotary_dim(tmp_path: Path) -> None:
+    source = """
+import Positions (rope_longrope_factors)
+
+main :: Tensor[B,S] -> (Tensor[B,1,S,96], Tensor[B,1,S,96])
+main pos_ids = do
+  sin, cos <- rope_longrope_factors pos_ids 96 10000.0 4096 [1.0] [1.0] attention_factor=1.0
+  return sin, cos
+"""
+    path = tmp_path / "longrope_factors.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    module = next(module for module in typed.modules if module.name == "main")
+    assert module.return_type_expr == TypeTuple(
+        items=(
+            TypeTensor(base="Tensor", dims=("B", 1, "S", 96)),
+            TypeTensor(base="Tensor", dims=("B", 1, "S", 96)),
+        )
+    )
+
+
+def test_floor_returns_int(tmp_path: Path) -> None:
+    source = """
+import Math (floor)
+
+main :: Float -> Int
+main x = floor x
+"""
+    path = tmp_path / "floor_returns_int.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    module = next(module for module in typed.modules if module.name == "main")
+    assert module.return_type_expr == TypeInt()
+
+
+def test_floor_preserves_tensor_shape(tmp_path: Path) -> None:
+    source = """
+import Math (floor)
+
+main :: Tensor[B,S] -> Tensor[B,S]
+main x = floor x
+"""
+    path = tmp_path / "floor_tensor.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    module = next(module for module in typed.modules if module.name == "main")
+    assert module.return_type_expr == TypeTensor(base="Tensor", dims=("B", "S"))
 
 
 def test_typecheck2_lowers_generic_mamba_without_shape_growth() -> None:

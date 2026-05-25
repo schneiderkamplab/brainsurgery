@@ -25,8 +25,8 @@ FFN  = Config.int @@intermediate_size default=13696
 EPS  = Config.float @@rms_norm_eps default=1e-05
 THETA = Config.float @@rope_theta default=10000.0
 MAX_POSITIONS    = Config.int @@max_position_embeddings default=32768
-PROPE = Config.float @@partial_rotary_factor default=0.5
-ROTARY_DIM = (floor (MODEL_HEAD_DIM * PROPE) :: Dim)
+PROPE <- Config.float @@partial_rotary_factor default=0.5
+ROTARY_DIM <- floor (MODEL_HEAD_DIM * PROPE)
 ATTN_BIAS = Config.bool @@attention_bias default=true
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]

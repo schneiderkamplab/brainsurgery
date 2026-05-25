@@ -672,6 +672,14 @@ def axon_test(
         "--hf-attn-implementation",
         help="Optional HF attention implementation override (for example eager or sdpa).",
     ),
+    hf_experts_implementation: str | None = typer.Option(
+        None,
+        "--hf-experts-implementation",
+        help=(
+            "Optional HF MoE experts implementation override "
+            "(for example grouped_mm, batched_mm, or eager). When set, generation preserves it."
+        ),
+    ),
     compile_hf: bool = typer.Option(
         False,
         "--compile-hf/--no-compile-hf",
@@ -749,6 +757,7 @@ def axon_test(
             hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
             hf_align_norm_fp32=hf_align_norm_fp32,
             hf_attn_implementation=hf_attn_implementation,
+            hf_experts_implementation=hf_experts_implementation,
             compile_hf=compile_hf,
             compile_axon=compile_axon,
             compile_backend=compile_backend,
@@ -873,6 +882,14 @@ def axon_benchmark(
         None,
         "--hf-attn-implementation",
         help="Optional HF attention implementation override (for example eager or sdpa).",
+    ),
+    hf_experts_implementation: str | None = typer.Option(
+        None,
+        "--hf-experts-implementation",
+        help=(
+            "Optional HF MoE experts implementation override "
+            "(for example grouped_mm, batched_mm, or eager). When set, generation preserves it."
+        ),
     ),
     compile_hf: bool = typer.Option(
         False,
@@ -1026,6 +1043,7 @@ def axon_benchmark(
             hf_align_linear_fp32_accum=hf_align_linear_fp32_accum,
             hf_align_norm_fp32=hf_align_norm_fp32,
             hf_attn_implementation=hf_attn_implementation,
+            hf_experts_implementation=hf_experts_implementation,
             compile_hf=compile_hf,
             compile_axon=compile_axon,
             compile_backend=compile_backend,

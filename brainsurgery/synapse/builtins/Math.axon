@@ -33,7 +33,7 @@ exp x = _exp x
 log :: T -> T
 log x = _log x
 
-floor :: T -> T
+floor :: Any -> Any
 floor x = _floor x
 
 sin :: Tensor[..S] -> Tensor[..S]

@@ -16,6 +16,7 @@ from ...ops import get_op_semantics
 from ..ast import (
     AxonExprPath,
     DimExprBinary,
+    TypeAny,
     TypeBool,
     TypeDim,
     TypeFloat,
@@ -1632,6 +1633,15 @@ class Codegen2GraphModel(nn.Module):
             return [cls._move_to(item, device) for item in value]
         return value
 
+    @classmethod
+    def _align_pair(cls, left: Any, right: Any, *, prefer: str = "right") -> tuple[Any, Any]:
+        left_tensor = torch.is_tensor(left)
+        right_tensor = torch.is_tensor(right)
+        if not left_tensor or not right_tensor or left.device == right.device:
+            return left, right
+        device = right.device if prefer == "right" else left.device
+        return cls._move_to(left, device), cls._move_to(right, device)
+
     @staticmethod
     def _dtype_from_name(value: Any) -> torch.dtype:
         if value is None:
@@ -1709,7 +1719,7 @@ class Codegen2GraphModel(nn.Module):
             base, x = args[0], args[1]
             weight = self._required_param(self._compose_path(base, "@weight"), field="embedding.weight")
             if weight.device != x.device:
-                weight = weight.to(device=x.device)
+                x = self._move_to(x, weight.device)
             out(F.embedding(x, weight))
             return True
 
@@ -1889,7 +1899,8 @@ class Codegen2GraphModel(nn.Module):
             out(torch.unsqueeze(args[0], int(args[1])))
             return True
         if primitive == "matmul":
-            out(torch.matmul(args[0], args[1]))
+            left, right = self._align_pair(args[0], args[1], prefer="right")
+            out(torch.matmul(left, right))
             return True
         if primitive == "softmax":
             x = args[0]
@@ -1919,7 +1930,10 @@ class Codegen2GraphModel(nn.Module):
             out(x_gelu * torch.sigmoid(1.702 * x_gelu) * (x_linear + 1.0))
             return True
         if primitive == "where":
-            out(torch.where(args[0], args[1], args[2]) if torch.is_tensor(args[0]) else (args[1] if args[0] else args[2]))
+            if torch.is_tensor(args[0]):
+                out(self._where(args[0], args[1], args[2]))
+            else:
+                out(args[1] if args[0] else args[2])
             return True
         if primitive == "gather":
             dim = int(args[2]) if len(args) > 2 and not self._is_null(args[2]) else -1
@@ -1942,26 +1956,36 @@ class Codegen2GraphModel(nn.Module):
             out(torch.clamp(x, min=min_value, max=max_value))
             return True
         if primitive == "le":
-            out(args[0] <= args[1])
+            left, right = self._align_pair(args[0], args[1], prefer="right")
+            out(left <= right)
             return True
         if primitive == "eq":
             left, right = args[0], args[1]
-            out(torch.eq(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left == right)
+            if left is None or right is None:
+                out(left is right)
+            else:
+                left, right = self._align_pair(left, right, prefer="right")
+                out(torch.eq(left, right) if torch.is_tensor(left) or torch.is_tensor(right) else left == right)
             return True
         if primitive == "and":
-            out(torch.logical_and(args[0], args[1]))
+            left, right = self._align_pair(args[0], args[1], prefer="right")
+            out(torch.logical_and(left, right))
             return True
         if primitive == "add":
-            out(args[0] + args[1])
+            left, right = self._align_pair(args[0], args[1], prefer="right")
+            out(left + right)
             return True
         if primitive == "mul":
-            out(args[0] * args[1])
+            left, right = self._align_pair(args[0], args[1], prefer="right")
+            out(left * right)
             return True
         if primitive == "pow":
-            out(torch.pow(args[0], args[1]) if torch.is_tensor(args[0]) else args[0] ** args[1])
+            left, right = self._align_pair(args[0], args[1], prefer="right")
+            out(torch.pow(left, right) if torch.is_tensor(left) else left ** right)
             return True
         if primitive == "div":
-            out(args[0] / args[1])
+            left, right = self._align_pair(args[0], args[1], prefer="right")
+            out(left / right)
             return True
         if primitive == "floor":
             out(torch.floor(args[0]) if torch.is_tensor(args[0]) else int(args[0] // 1))
@@ -2294,39 +2318,60 @@ class Codegen2GraphModel(nn.Module):
                 overwrite=True,
             )
 
-    @staticmethod
-    def _eval_binary(op: str, left: Any, right: Any) -> Any:
+    @classmethod
+    def _eval_binary(cls, op: str, left: Any, right: Any) -> Any:
         if op == "+":
             if left is None:
                 return right
             if right is None:
                 return left
+            left, right = cls._align_pair(left, right, prefer="right")
             return left + right
         if op == "-":
             if right is None:
                 return left
+            left, right = cls._align_pair(left, right, prefer="right")
             return left - right
         if op == "*":
+            left, right = cls._align_pair(left, right, prefer="right")
             return left * right
         if op == "/":
+            left, right = cls._align_pair(left, right, prefer="right")
             return left / right
         if op == "%":
+            left, right = cls._align_pair(left, right, prefer="right")
             return left % right
         if op == "==":
+            if left is None or right is None:
+                return left is right
+            left, right = cls._align_pair(left, right, prefer="right")
             return left == right
         if op == "!=":
+            if left is None or right is None:
+                return left is not right
+            left, right = cls._align_pair(left, right, prefer="right")
             return left != right
         if op == "<":
+            left, right = cls._align_pair(left, right, prefer="right")
             return left < right
         if op == "<=":
+            left, right = cls._align_pair(left, right, prefer="right")
             return left <= right
         if op == ">":
+            left, right = cls._align_pair(left, right, prefer="right")
             return left > right
         if op == ">=":
+            left, right = cls._align_pair(left, right, prefer="right")
             return left >= right
         if op == "and":
+            if torch.is_tensor(left) or torch.is_tensor(right):
+                left, right = cls._align_pair(left, right, prefer="right")
+                return torch.logical_and(left, right)
             return bool(left) and bool(right)
         if op == "or":
+            if torch.is_tensor(left) or torch.is_tensor(right):
+                left, right = cls._align_pair(left, right, prefer="right")
+                return torch.logical_or(left, right)
             return bool(left) or bool(right)
         raise NotImplementedError(f"unsupported codegen2-torch binary op {op!r}")
 
@@ -3866,6 +3911,15 @@ class _DirectTorchEmitter:
         local: set[str],
         symbols_dict: str,
     ) -> bool:
+        if self._emit_attention_gqa_sdpa_node(
+            lines,
+            node,
+            targets=targets,
+            indent=indent,
+            local=local,
+            symbols_dict=symbols_dict,
+        ):
+            return True
         if (
             not targets
             or not self._can_inline_direct_module_call(
@@ -3890,6 +3944,69 @@ class _DirectTorchEmitter:
             symbols_dict=symbols_dict,
             inline_prefix=f"__call_inline_{node.id.replace(':', '_')}",
         )
+
+    def _emit_attention_gqa_sdpa_node(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        targets: tuple[str, ...],
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        """Lower the canonical GQA additive-mask attention helper to Torch SDPA.
+
+        This is deliberately narrow: it only accepts the fully elaborated
+        Attention.attention_gqa_with_additive_mask signature and the option set
+        used by Codestral/Mistral-style GQA. Unsupported option combinations
+        fall back to ordinary module inlining.
+        """
+        if node.op.name != "Attention.attention_gqa_with_additive_mask":
+            return False
+        if len(targets) != 1 or len(node.inputs) != 11 or node.attrs:
+            return False
+        (
+            q_operand,
+            k_operand,
+            v_operand,
+            additive_mask_operand,
+            _keep_operand,
+            rel_bias_operand,
+            scale_operand,
+            sink_logits_operand,
+            softcap_operand,
+            zero_masked_operand,
+            fp32_operand,
+        ) = node.inputs
+        if not (
+            self._literal_null_arg(rel_bias_operand)
+            and self._literal_null_arg(sink_logits_operand)
+            and self._literal_null_arg(softcap_operand)
+            and self._literal_bool_arg(zero_masked_operand) is True
+            and self._literal_bool_arg(fp32_operand) is False
+        ):
+            return False
+        q = self._operand_expr(q_operand, local=local, symbols_dict=symbols_dict)
+        k = self._operand_expr(k_operand, local=local, symbols_dict=symbols_dict)
+        v = self._operand_expr(v_operand, local=local, symbols_dict=symbols_dict)
+        additive_mask = self._operand_expr(
+            additive_mask_operand,
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        if self._literal_null_arg(scale_operand):
+            scale = "None"
+        else:
+            scale = self._operand_expr(scale_operand, local=local, symbols_dict=symbols_dict)
+        self._add(
+            lines,
+            indent,
+            f"{targets[0]} = F.scaled_dot_product_attention({q}, {k}, {v}, "
+            f"attn_mask={additive_mask}, dropout_p=0.0, is_causal=False, "
+            f"scale={scale}, enable_gqa=True)",
+        )
+        return True
 
     def _emit_select_branch(
         self,
@@ -4828,7 +4945,7 @@ class _DirectTorchEmitter:
         type_expr = getattr(operand, "type_expr", None)
         if isinstance(type_expr, TypeOptional):
             type_expr = type_expr.inner
-        return isinstance(type_expr, TypeTensor)
+        return isinstance(type_expr, TypeTensor | TypeAny)
 
     def _operand_is_bool(self, operand: GraphOperand) -> bool:
         type_expr = getattr(operand, "type_expr", None)

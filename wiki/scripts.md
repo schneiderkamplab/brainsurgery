@@ -51,6 +51,9 @@ Depends-on: `scripts/axon_roundtrip_common.py` for shared path discovery, genera
 | Script | Purpose | Notes |
 |---|---|---|
 | `scripts/benchmark_report_3tables.py` | Render the standard 4 markdown tables from recursive `axon-benchmark` stream CSV and result JSON logs. | Use for `report`/`status` workflows. |
+| `scripts/merge_benchmark_results.py` | Merge one or more `axon-benchmark` log directories into a latest-row CSV keyed by Axon file plus checkpoint. | Pass log dirs in precedence order; later logs overwrite stale rows from earlier logs. Adds `*_norm128` columns by dividing 1024-token timings by 8. |
+| `scripts/plot_axon_speedup_scatter.py` | Render an SVG log-log scatter plot of HF time vs Axon time from recursive `axon-benchmark` result JSON logs or a merged CSV. | Uses task color, model-kind marker, generic-vs-materialized fill/outline, a `y=x` parity line, and labels only outliers. Use `--normalized-128` with merged CSVs to plot `*_norm128` timing columns. |
+| `scripts/plot_axon_ratio_distributions.py` | Render SVG box and violin plots of Axon/HF runtime ratios from a merged benchmark CSV. | Groups by task, model kind, and generic/materialized source. Use `--normalized-128` with merged CSVs to plot `speed_ratio_axon_over_hf_norm128`. |
 
 Example:
 
@@ -60,6 +63,33 @@ conda run --no-capture-output -n brainsurgery \
 ```
 
 Output tables: progress summary, issue rows, generic-vs-materialized mismatch rows, and Axon/HF >= 1.0 rows.
+
+Example merged CSV:
+
+```bash
+conda run --no-capture-output -n brainsurgery \
+  python scripts/merge_benchmark_results.py \
+  log/<base-run> log/<targeted-rerun> \
+  --output log/<merged-run>/results.csv
+```
+
+Example speedup scatter:
+
+```bash
+conda run --no-capture-output -n brainsurgery \
+  python scripts/plot_axon_speedup_scatter.py log/<run-id> \
+  --output tmp/axon-speedup-scatter.svg
+```
+
+Example grouped ratio distributions:
+
+```bash
+conda run --no-capture-output -n brainsurgery \
+  python scripts/plot_axon_ratio_distributions.py log/<merged-run>/results.csv \
+  --box-output log/<merged-run>/axon-hf-boxplot.svg \
+  --violin-output log/<merged-run>/axon-hf-violin.svg \
+  --normalized-128
+```
 
 ## Checkpoint/Test Model Generators
 

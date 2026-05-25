@@ -47,8 +47,7 @@ THETA <- do
 ROTARY_PCT <- do
   return (0.25)
 
-ROTARY_DIM <- do
-  return (floor (((MODEL_HEAD_DIM * ROTARY_PCT) :: Dim)))
+ROTARY_DIM <- floor (MODEL_HEAD_DIM * ROTARY_PCT)
 
 MAX_POSITIONS <- do
   return (2048)
