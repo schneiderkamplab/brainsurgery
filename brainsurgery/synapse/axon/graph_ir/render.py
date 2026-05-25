@@ -73,6 +73,12 @@ from .domain import (
     infer_main_module_domain_facts,
 )
 from .effects import GraphEffect, UsageClass, graph_operand_effect, graph_operand_usage
+from .provenance import (
+    GraphProvenance,
+    format_derived_provenance_fact,
+    format_graph_provenance,
+    infer_graph_provenance,
+)
 
 
 def _arity(type_expr: TypeExpr) -> int:
@@ -1479,8 +1485,73 @@ def graph_domain_definition_comments(program: GraphProgram) -> dict[str, tuple[s
     return comments
 
 
+def _format_provenance_binding(name: str, provenance: GraphProvenance) -> str:
+    return f"{name}={format_graph_provenance(provenance)}"
+
+
+def graph_provenance_definition_comments(program: GraphProgram) -> dict[str, tuple[str, ...]]:
+    analysis = infer_graph_provenance(program)
+    comments: dict[str, tuple[str, ...]] = {}
+    for module in program.modules:
+        parts: list[str] = []
+        input_provenance = analysis.module_input_provenance.get(module.name, {})
+        input_facts = analysis.module_input_facts.get(module.name, {})
+        input_parts = [
+            _format_provenance_binding(name, prov)
+            for name, prov in sorted(input_provenance.items())
+            if prov.kind not in {"unknown", "input"}
+        ]
+        input_fact_parts = [
+            f"{name}.{format_derived_provenance_fact(fact)}"
+            for name, facts in sorted(input_facts.items())
+            for fact in facts
+        ]
+        if input_parts:
+            parts.append("inputs " + ", ".join(input_parts[:12]))
+        if input_fact_parts:
+            parts.append("input-facts " + ", ".join(input_fact_parts[:12]))
+        local_provenance = analysis.module_local_provenance.get(module.name, {})
+        local_facts = analysis.module_local_facts.get(module.name, {})
+        input_names = set(input_provenance)
+        local_parts = [
+            _format_provenance_binding(name, prov)
+            for name, prov in sorted(local_provenance.items())
+            if name not in input_names and prov.kind != "unknown"
+        ]
+        local_fact_parts = [
+            f"{name}.{format_derived_provenance_fact(fact)}"
+            for name, facts in sorted(local_facts.items())
+            if name not in input_names
+            for fact in facts
+        ]
+        if local_parts:
+            parts.append("locals " + ", ".join(local_parts[:16]))
+        if local_fact_parts:
+            parts.append("local-facts " + ", ".join(local_fact_parts[:16]))
+        output_provenance = analysis.module_output_provenance.get(module.name, ())
+        output_facts = analysis.module_output_facts.get(module.name, ())
+        output_parts = [
+            f"out{index}={format_graph_provenance(prov)}"
+            for index, prov in enumerate(output_provenance)
+            if prov.kind != "unknown"
+        ]
+        output_fact_parts = [
+            f"out{index}.{format_derived_provenance_fact(fact)}"
+            for index, facts in enumerate(output_facts)
+            for fact in facts
+        ]
+        if output_parts:
+            parts.append("outputs " + ", ".join(output_parts[:8]))
+        if output_fact_parts:
+            parts.append("output-facts " + ", ".join(output_fact_parts[:8]))
+        if parts:
+            comments[module.name] = tuple(f"provenance: {part}" for part in parts)
+    return comments
+
+
 __all__ = [
     "graph_domain_definition_comments",
     "graph_module_to_axon_definition",
     "graph_program_to_axon_file",
+    "graph_provenance_definition_comments",
 ]

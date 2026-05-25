@@ -76,6 +76,54 @@ Top optimizer strengthening priorities:
   should remain as calls unless a flat-safe branch is eliminated first.
 - Keep path/template symbols and model-global bindings first-class through all
   rewrites; do not turn them into string substitutions or definition aliases.
+- Backend-specific intrinsics are opt-in only. Graph optimization may introduce
+  names of the form `__<backend>_<name>` only when the caller explicitly selects
+  a compatible backend target, and backend-neutral optimization must never emit
+  them. The first such intrinsic is `__torch_sdpa`, derived from provenance facts
+  for a GQA attention subgraph plus additive-mask provenance. This rewrite
+  currently assumes the attention keep mask has no fully masked rows; the future
+  hardening target is a provenance/domain proof for nonempty keep rows before the
+  rewrite can be made generally safe.
+- Backend-specific intrinsic rewrites must not infer semantics from ordinary
+  Axon definition names. Definition names may identify a callee for graph
+  traversal, but the semantic proof must come from the callee body provenance or
+  from already-inlined primitive provenance. The current Torch RoPE intrinsic
+  follows this rule: it derives a `rope_apply_factors` provenance fact from the
+  primitive DAG `x*cos + rotate_half(x)*sin`, then rewrites eligible one-output
+  or pair-output callsites to `__torch_rope_apply_factors` /
+  `__torch_rope_pair_apply_factors` only when `--graph-backend-intrinsics
+  codegen2-torch` is selected.
+
+## Codegen Lowering Tricks To Move Toward Graph Rewrites
+
+The codegen2-torch backend still contains several local recognizers that are
+useful but would be cleaner as validated Graph IR rewrites:
+
+- Static `Tensor.size` lowering: direct codegen can turn `_tensor_size(x, dim)`
+  into a shape-symbol expression from type metadata. Prefer a graph-level
+  rewrite/fact that replaces proven static shape queries before codegen.
+- Single-primitive forwarder detection: codegen treats one-node definitions that
+  forward to primitives as primitive-like. Prefer graph inlining or provenance
+  rewriting so codegen only sees the primitive or an explicit intrinsic.
+- Fill/scatter unit-slice lowering: codegen recognizes `_fill` feeding
+  `_scatter` and emits a direct indexed assignment. Prefer a provenance-backed
+  graph intrinsic or canonical graph op for this update pattern.
+- List append/list construction shortcuts: codegen emits direct Python list
+  operations for `_list_append`, `_list_init`, and cache append-like patterns.
+  A graph-level cache representation pass would make this explicit and would
+  also address KV-cache concat overhead.
+- Static parameter-key fast paths for embedding/layernorm/linear: codegen
+  bypasses generic path composition when a path is statically absolute. This is
+  mostly a backend concern, but graph/path metadata could expose resolved
+  static parameter keys explicitly to reduce ad-hoc path checks.
+- Path-derived expert bank handling for `_expert_linear`: codegen can map
+  split expert parameter paths to banked tensors. This should remain generic
+  path metadata, but the graph could eventually carry an explicit banked-param
+  access node.
+- Backend intrinsics already implemented in graph optimize:
+  `__torch_sdpa`, `__torch_rope_apply_factors`, and
+  `__torch_rope_pair_apply_factors`. These are the target style for future
+  backend-specific fusions.
 
 `optimize_flat_typed_axon_file` currently mixes several categories:
 

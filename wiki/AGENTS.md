@@ -102,6 +102,21 @@ confidence: high|medium|low
 - If a wiki claim changes how agents should work, update the nearest applicable `AGENTS.md` too.
 - Do not store secrets, private tokens, credentials, or unnecessary PII.
 
+## Axon Semantic Attribution
+
+- Do not infer Axon semantics from definition/module names such as
+  `Attention.*`, `Positions.*`, or `Cache.*`. Axon definitions are ordinary
+  user definitions unless they lower to explicit primitives or validated graph
+  intrinsics.
+- Compiler/runtime optimizations must prove semantics from typed AST/Graph IR
+  structure, primitive operations, provenance facts, constraints, and domain
+  facts. Names may be used for display, diagnostics, and import resolution, but
+  not as semantic evidence.
+- Backend-specific graph intrinsics such as `__torch_*` must be introduced only
+  by opt-in graph optimization for a compatible backend, and only after a
+  provenance/structure proof over actual primitive computations. Backend-neutral
+  graph optimization must not emit backend-specific intrinsics.
+
 ## Benchmark Reporting Standard
 
 - Use the repository standard 3-table format for benchmark updates:

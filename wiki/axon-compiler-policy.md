@@ -1,6 +1,6 @@
 ---
 status: active
-last-confirmed: 2026-05-20
+last-confirmed: 2026-05-25
 owners: agents
 confidence: high
 ---
@@ -9,7 +9,8 @@ confidence: high
 
 This page records non-negotiable compiler/runtime policy for Axon stages.
 
-Validated-by: root `AGENTS.md` and project direction as of 2026-05-20.
+Validated-by: root `AGENTS.md`, `wiki/AGENTS.md`, and project direction as of
+2026-05-25.
 
 ## No Definition-Name Special-Casing
 
@@ -53,6 +54,23 @@ Allowed examples:
 - primitive lowering/codegen implementations.
 
 Constraint: primitive rules must be generic and operation-level. They must not branch on model family, checkpoint namespace, or a normal Axon wrapper definition.
+
+## Backend Intrinsics
+
+Backend-specific graph intrinsics use names such as `__torch_sdpa` or
+`__torch_rope_apply_factors`. They are not ordinary Axon definitions and must
+not appear in backend-neutral Graph IR.
+
+Rules:
+
+- Intrinsics are opt-in through backend-targeted graph optimization.
+- The rewrite must prove the pattern from typed Graph IR, primitive operations,
+  provenance facts, constraints, and/or domain facts.
+- Matching an ordinary definition name such as `Attention.attention` or
+  `Positions.rope_apply_factors` is not sufficient. A renamed but equivalent
+  Axon definition should still be eligible if it lowers to the same primitive
+  provenance.
+- False negatives are acceptable. False positives are not.
 
 ## Model-Specific Handling Boundary
 

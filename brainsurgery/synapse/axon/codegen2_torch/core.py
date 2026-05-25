@@ -1642,6 +1642,17 @@ class Codegen2GraphModel(nn.Module):
         device = right.device if prefer == "right" else left.device
         return cls._move_to(left, device), cls._move_to(right, device)
 
+    @classmethod
+    def _rope_apply_factors(cls, x: Any, sin: Any, cos: Any, interleaved: bool = False) -> Any:
+        if interleaved:
+            raise NotImplementedError("__torch_rope_apply_factors only supports non-interleaved RoPE")
+        if torch.is_tensor(x):
+            sin = cls._move_to(sin, x.device)
+            cos = cls._move_to(cos, x.device)
+        half = x.shape[-1] // 2
+        rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+        return (x * cos) + (rotated * sin)
+
     @staticmethod
     def _dtype_from_name(value: Any) -> torch.dtype:
         if value is None:
@@ -2223,6 +2234,56 @@ class Codegen2GraphModel(nn.Module):
             left = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
             right = self._eval_graph_operand(node.inputs[1], env=env, symbols=symbols)
             assign(self._eval_binary(operator, left, right))
+            return
+        if op == "__torch_sdpa":
+            if len(node.inputs) < 6:
+                raise ValueError("__torch_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
+            q = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
+            k = self._eval_graph_operand(node.inputs[1], env=env, symbols=symbols)
+            v = self._eval_graph_operand(node.inputs[2], env=env, symbols=symbols)
+            additive_mask = self._eval_graph_operand(node.inputs[3], env=env, symbols=symbols)
+            scale = self._eval_graph_operand(node.inputs[4], env=env, symbols=symbols)
+            enable_gqa = bool(self._eval_graph_operand(node.inputs[5], env=env, symbols=symbols))
+            if torch.is_tensor(q):
+                k = self._move_to(k, q.device)
+                v = self._move_to(v, q.device)
+                additive_mask = self._move_to(additive_mask, q.device)
+            assign(
+                F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    attn_mask=additive_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=None if scale is None else float(scale),
+                    enable_gqa=enable_gqa,
+                )
+            )
+            return
+        if op == "__torch_rope_apply_factors":
+            if len(node.inputs) < 4:
+                raise ValueError("__torch_rope_apply_factors expects x, sin, cos, interleaved")
+            x = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
+            sin = self._eval_graph_operand(node.inputs[1], env=env, symbols=symbols)
+            cos = self._eval_graph_operand(node.inputs[2], env=env, symbols=symbols)
+            interleaved = bool(self._eval_graph_operand(node.inputs[3], env=env, symbols=symbols))
+            assign(self._rope_apply_factors(x, sin, cos, interleaved))
+            return
+        if op == "__torch_rope_pair_apply_factors":
+            if len(node.inputs) < 5:
+                raise ValueError("__torch_rope_pair_apply_factors expects q, k, sin, cos, interleaved")
+            q = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
+            k = self._eval_graph_operand(node.inputs[1], env=env, symbols=symbols)
+            sin = self._eval_graph_operand(node.inputs[2], env=env, symbols=symbols)
+            cos = self._eval_graph_operand(node.inputs[3], env=env, symbols=symbols)
+            interleaved = bool(self._eval_graph_operand(node.inputs[4], env=env, symbols=symbols))
+            assign(
+                (
+                    self._rope_apply_factors(q, sin, cos, interleaved),
+                    self._rope_apply_factors(k, sin, cos, interleaved),
+                )
+            )
             return
         if op in {"Cache.past_length", "Cache.past_length_kv"}:
             if len(node.inputs) != 1:
@@ -2946,6 +3007,17 @@ class _DirectTorchEmitter:
             add(lines, 8, "device = right.device if prefer == 'right' else left.device")
             add(lines, 8, "return cls._move_to(left, device), cls._move_to(right, device)")
             add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _rope_apply_factors(cls, x, sin, cos, interleaved=False):")
+        add(lines, 8, "if interleaved:")
+        add(lines, 12, "raise NotImplementedError('__torch_rope_apply_factors only supports non-interleaved RoPE')")
+        add(lines, 8, "if torch.is_tensor(x):")
+        add(lines, 12, "sin = cls._move_to(sin, x.device)")
+        add(lines, 12, "cos = cls._move_to(cos, x.device)")
+        add(lines, 8, "half = x.shape[-1] // 2")
+        add(lines, 8, "rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)")
+        add(lines, 8, "return (x * cos) + (rotated * sin)")
+        add(lines, 4, "")
         add(lines, 4, "_compose_path = staticmethod(_common_compose_path)")
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
@@ -3911,15 +3983,6 @@ class _DirectTorchEmitter:
         local: set[str],
         symbols_dict: str,
     ) -> bool:
-        if self._emit_attention_gqa_sdpa_node(
-            lines,
-            node,
-            targets=targets,
-            indent=indent,
-            local=local,
-            symbols_dict=symbols_dict,
-        ):
-            return True
         if (
             not targets
             or not self._can_inline_direct_module_call(
@@ -3944,69 +4007,6 @@ class _DirectTorchEmitter:
             symbols_dict=symbols_dict,
             inline_prefix=f"__call_inline_{node.id.replace(':', '_')}",
         )
-
-    def _emit_attention_gqa_sdpa_node(
-        self,
-        lines: list[str],
-        node: Any,
-        *,
-        targets: tuple[str, ...],
-        indent: int,
-        local: set[str],
-        symbols_dict: str,
-    ) -> bool:
-        """Lower the canonical GQA additive-mask attention helper to Torch SDPA.
-
-        This is deliberately narrow: it only accepts the fully elaborated
-        Attention.attention_gqa_with_additive_mask signature and the option set
-        used by Codestral/Mistral-style GQA. Unsupported option combinations
-        fall back to ordinary module inlining.
-        """
-        if node.op.name != "Attention.attention_gqa_with_additive_mask":
-            return False
-        if len(targets) != 1 or len(node.inputs) != 11 or node.attrs:
-            return False
-        (
-            q_operand,
-            k_operand,
-            v_operand,
-            additive_mask_operand,
-            _keep_operand,
-            rel_bias_operand,
-            scale_operand,
-            sink_logits_operand,
-            softcap_operand,
-            zero_masked_operand,
-            fp32_operand,
-        ) = node.inputs
-        if not (
-            self._literal_null_arg(rel_bias_operand)
-            and self._literal_null_arg(sink_logits_operand)
-            and self._literal_null_arg(softcap_operand)
-            and self._literal_bool_arg(zero_masked_operand) is True
-            and self._literal_bool_arg(fp32_operand) is False
-        ):
-            return False
-        q = self._operand_expr(q_operand, local=local, symbols_dict=symbols_dict)
-        k = self._operand_expr(k_operand, local=local, symbols_dict=symbols_dict)
-        v = self._operand_expr(v_operand, local=local, symbols_dict=symbols_dict)
-        additive_mask = self._operand_expr(
-            additive_mask_operand,
-            local=local,
-            symbols_dict=symbols_dict,
-        )
-        if self._literal_null_arg(scale_operand):
-            scale = "None"
-        else:
-            scale = self._operand_expr(scale_operand, local=local, symbols_dict=symbols_dict)
-        self._add(
-            lines,
-            indent,
-            f"{targets[0]} = F.scaled_dot_product_attention({q}, {k}, {v}, "
-            f"attn_mask={additive_mask}, dropout_p=0.0, is_causal=False, "
-            f"scale={scale}, enable_gqa=True)",
-        )
-        return True
 
     def _emit_select_branch(
         self,
@@ -5096,6 +5096,29 @@ class _DirectTorchEmitter:
             "mul": "*",
             "div": "/",
         }
+        if primitive == "_torch_sdpa":
+            if len(args) < 6:
+                raise ValueError("__torch_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
+            scale = "None" if isinstance(node.inputs[4], GraphLiteral) and node.inputs[4].value is None else f"({args[4]} if {args[4]} is None else float({args[4]}))"
+            return (
+                f"(lambda _q, _k, _v, _mask: F.scaled_dot_product_attention("
+                f"_q, self._move_to(_k, _q.device), self._move_to(_v, _q.device), "
+                f"attn_mask=self._move_to(_mask, _q.device), dropout_p=0.0, is_causal=False, "
+                f"scale={scale}, "
+                f"enable_gqa={bool_arg(5)}))({args[0]}, {args[1]}, {args[2]}, {args[3]})"
+            )
+        if primitive == "_torch_rope_apply_factors":
+            if len(args) < 4:
+                raise ValueError("__torch_rope_apply_factors expects x, sin, cos, interleaved")
+            return f"self._rope_apply_factors({args[0]}, {args[1]}, {args[2]}, {bool_arg(3)})"
+        if primitive == "_torch_rope_pair_apply_factors":
+            if len(args) < 5:
+                raise ValueError("__torch_rope_pair_apply_factors expects q, k, sin, cos, interleaved")
+            interleaved = bool_arg(4)
+            return (
+                f"(self._rope_apply_factors({args[0]}, {args[2]}, {args[3]}, {interleaved}), "
+                f"self._rope_apply_factors({args[1]}, {args[2]}, {args[3]}, {interleaved}))"
+            )
         if primitive in binary_primitives and len(node.inputs) >= 2:
             return self._binary_expr(
                 binary_primitives[primitive],

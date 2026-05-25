@@ -3253,6 +3253,7 @@ def _run_axon_test_single(
     axon_typechecker: str = "typecheck2",
     optimize_ast: bool = False,
     optimize_graph: bool = False,
+    graph_backend_intrinsics: str | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
@@ -3396,7 +3397,12 @@ def _run_axon_test_single(
             typed_axon = optimize_safe_flat_typed_axon_file(typed_axon)
         graph_program = lower_axon_program_to_graph_ir(typed_axon)
         if optimize_graph:
-            graph_program = optimize_graph_program(graph_program)
+            from .axon import GraphOptimizeConfig
+
+            graph_program = optimize_graph_program(
+                graph_program,
+                config=GraphOptimizeConfig(backend_intrinsics=graph_backend_intrinsics),
+            )
         main_graph_module = next(
             module for module in graph_program.modules if module.name == graph_program.main_module
         )
@@ -4913,6 +4919,7 @@ def run_axon_test(
     axon_typechecker: str = "typecheck2",
     optimize_ast: bool = False,
     optimize_graph: bool = False,
+    graph_backend_intrinsics: str | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     profile_axon: bool = False,
@@ -4950,6 +4957,7 @@ def run_axon_test(
         axon_typechecker=axon_typechecker,
         optimize_ast=optimize_ast,
         optimize_graph=optimize_graph,
+        graph_backend_intrinsics=graph_backend_intrinsics,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
         profile_axon=profile_axon,

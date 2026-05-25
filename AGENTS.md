@@ -24,6 +24,14 @@ Related local policies:
   - (and explicit future additions approved in review)
 - Runtime/compiler layers (`brainsurgery/synapse/axon/*`, `runtime.py`, `pipeline_*`, `codegen.py`, `builtins/*.axon`) must not carry HF namespace quirks or model-family routing.
 - Builtins must not use model-specific absolute default paths (`@@...`) in signatures.
+- Do not infer Axon semantics from ordinary definition names in compiler,
+  optimizer, lowering, codegen, runtime, or core builtins. Definition names are
+  not semantic evidence; optimizations must use typed AST/Graph IR structure,
+  primitive operations, provenance, constraints, or domain facts.
+- Backend-specific `__<backend>_*` graph intrinsics may be introduced only by
+  explicit opt-in graph optimization for that backend, and only from validated
+  primitive-level provenance/structure. Backend-neutral paths must not emit
+  backend-specific intrinsics.
 
 ## LLM Wiki Policy
 

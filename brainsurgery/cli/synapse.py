@@ -62,6 +62,8 @@ def _dump_axon_stage_to_text(
     show_types: bool,
     show_purity: bool,
     show_domain: bool,
+    show_provenance: bool,
+    graph_backend_intrinsics: str | None,
 ) -> str:
     module = _axon_module()
     parse_fn = getattr(module, "parse_axon_program_from_path")
@@ -73,8 +75,10 @@ def _dump_axon_stage_to_text(
     lower_graph_fn = getattr(module, "lower_axon_program_to_graph_ir")
     graph_to_axon_fn = getattr(module, "graph_program_to_axon_file")
     graph_domain_comments_fn = getattr(module, "graph_domain_definition_comments")
+    graph_provenance_comments_fn = getattr(module, "graph_provenance_definition_comments")
     optimize_ast_fn = getattr(module, "optimize_safe_flat_typed_axon_file")
     optimize_graph_fn = getattr(module, "optimize_graph_program")
+    graph_optimize_config_cls = getattr(module, "GraphOptimizeConfig")
     render_fn = getattr(module, "render_axon_file")
 
     if stage not in _AXON_DUMP_STAGES:
@@ -86,6 +90,10 @@ def _dump_axon_stage_to_text(
         raise typer.BadParameter("--show-purity requires flatten or a later typed/lowered stage")
     if show_domain and stage not in {"graph-ir", "graph-ir-axon", "final"}:
         raise typer.BadParameter("--show-domain requires graph-ir, graph-ir-axon, or final stage")
+    if show_provenance and stage not in {"graph-ir", "graph-ir-axon", "final"}:
+        raise typer.BadParameter("--show-provenance requires graph-ir, graph-ir-axon, or final stage")
+    if graph_backend_intrinsics and not optimize_graph:
+        raise typer.BadParameter("--graph-backend-intrinsics requires --optimize-graph")
 
     if stage == "parse":
         return render_fn(parse_fn(axon_path), show_types=show_types, show_purity=show_purity)
@@ -116,13 +124,29 @@ def _dump_axon_stage_to_text(
     if stage in {"graph-ir", "graph-ir-axon"} or optimize_graph:
         graph_program = lower_graph_fn(program, main_module=main_module)
         if optimize_graph:
-            graph_program = optimize_graph_fn(graph_program)
+            graph_program = optimize_graph_fn(
+                graph_program,
+                config=graph_optimize_config_cls(backend_intrinsics=graph_backend_intrinsics),
+            )
         graph_axon = graph_to_axon_fn(graph_program)
+        definition_comments: dict[str, tuple[str, ...]] = {}
+        if show_domain:
+            definition_comments.update(graph_domain_comments_fn(graph_program))
+        if show_provenance:
+            provenance_comments = graph_provenance_comments_fn(graph_program)
+            definition_comments = {
+                name: tuple((*definition_comments.get(name, ()), *comments))
+                for name, comments in provenance_comments.items()
+            } | {
+                name: comments
+                for name, comments in definition_comments.items()
+                if name not in provenance_comments
+            }
         return render_fn(
             graph_axon,
             show_types=show_types,
             show_purity=show_purity,
-            definition_comments=graph_domain_comments_fn(graph_program) if show_domain else None,
+            definition_comments=definition_comments or None,
         )
 
     return render_fn(program, show_types=show_types, show_purity=show_purity)
@@ -135,6 +159,7 @@ def _axon_graph_ir_to_dot(
     strict: bool,
     optimize_ast: bool,
     optimize_graph: bool,
+    graph_backend_intrinsics: str | None,
     direction: str,
     show_data_labels: bool,
     show_control_flow: bool,
@@ -147,6 +172,7 @@ def _axon_graph_ir_to_dot(
     typecheck_fn = getattr(module, "typecheck2_flat_axon_file")
     optimize_ast_fn = getattr(module, "optimize_safe_flat_typed_axon_file")
     optimize_graph_fn = getattr(module, "optimize_graph_program")
+    graph_optimize_config_cls = getattr(module, "GraphOptimizeConfig")
     lower_graph_fn = getattr(module, "lower_axon_program_to_graph_ir")
     render_dot_fn = getattr(module, "render_graph_program_to_dot")
 
@@ -159,7 +185,10 @@ def _axon_graph_ir_to_dot(
         program = optimize_ast_fn(program, main_module=main_module)
     graph = lower_graph_fn(program, main_module=main_module)
     if optimize_graph:
-        graph = optimize_graph_fn(graph)
+        graph = optimize_graph_fn(
+            graph,
+            config=graph_optimize_config_cls(backend_intrinsics=graph_backend_intrinsics),
+        )
     return render_dot_fn(
         graph,
         direction=direction,
@@ -182,6 +211,7 @@ def _axon_codegen_dump_to_text(
     strict: bool,
     optimize_ast: bool,
     optimize_graph: bool,
+    graph_backend_intrinsics: str | None,
     backend: str,
     class_name: str,
     checkpoint: str | None,
@@ -197,6 +227,7 @@ def _axon_codegen_dump_to_text(
     typecheck_fn = getattr(axon_module, "typecheck2_flat_axon_file")
     optimize_ast_fn = getattr(axon_module, "optimize_safe_flat_typed_axon_file")
     optimize_graph_fn = getattr(axon_module, "optimize_graph_program")
+    graph_optimize_config_cls = getattr(axon_module, "GraphOptimizeConfig")
     lower_graph_fn = getattr(axon_module, "lower_axon_program_to_graph_ir")
 
     backend = backend.strip().lower()
@@ -230,7 +261,10 @@ def _axon_codegen_dump_to_text(
         program = optimize_ast_fn(program, main_module=main_module)
     graph = lower_graph_fn(program, main_module=main_module)
     if optimize_graph:
-        graph = optimize_graph_fn(graph)
+        graph = optimize_graph_fn(
+            graph,
+            config=graph_optimize_config_cls(backend_intrinsics=graph_backend_intrinsics),
+        )
 
     if backend == "codegen2-torch":
         emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_torch")
@@ -343,6 +377,14 @@ def axon_stage_dump(
         "--optimize-graph/--no-optimize-graph",
         help="Run conservative Graph IR optimization before graph-rendered Axon output.",
     ),
+    graph_backend_intrinsics: str | None = typer.Option(
+        None,
+        "--graph-backend-intrinsics",
+        help=(
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
+            "(currently: codegen2-torch). Default keeps Graph IR backend-neutral."
+        ),
+    ),
     show_types: bool = typer.Option(
         False,
         "--show-types/--no-show-types",
@@ -357,6 +399,11 @@ def axon_stage_dump(
         False,
         "--show-domain/--no-show-domain",
         help="Render Graph IR domain-analysis comments before each definition.",
+    ),
+    show_provenance: bool = typer.Option(
+        False,
+        "--show-provenance/--no-show-provenance",
+        help="Render Graph IR provenance-analysis comments before each definition.",
     ),
     force: bool = typer.Option(
         False,
@@ -380,9 +427,11 @@ def axon_stage_dump(
             strict=strict,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
+            graph_backend_intrinsics=graph_backend_intrinsics,
             show_types=show_types,
             show_purity=show_purity,
             show_domain=show_domain,
+            show_provenance=show_provenance,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -426,6 +475,14 @@ def axon_graph_ir_dot(
         "--optimize-graph/--no-optimize-graph",
         help="Run conservative Graph IR optimization before DOT rendering.",
     ),
+    graph_backend_intrinsics: str | None = typer.Option(
+        None,
+        "--graph-backend-intrinsics",
+        help=(
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
+            "(currently: codegen2-torch). Default keeps Graph IR backend-neutral."
+        ),
+    ),
     direction: str = typer.Option(
         "top-down",
         "--direction",
@@ -461,6 +518,7 @@ def axon_graph_ir_dot(
             strict=strict,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
+            graph_backend_intrinsics=graph_backend_intrinsics,
             direction=direction,
             show_data_labels=show_data_labels,
             show_control_flow=show_control_flow,
@@ -526,6 +584,14 @@ def axon_codegen_dump(
         "--optimize-graph/--no-optimize-graph",
         help="Run conservative Graph IR optimization before code generation.",
     ),
+    graph_backend_intrinsics: str | None = typer.Option(
+        None,
+        "--graph-backend-intrinsics",
+        help=(
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
+            "(currently: codegen2-torch). Default keeps Graph IR backend-neutral."
+        ),
+    ),
     profile_code: bool = typer.Option(
         False,
         "--profile-code/--no-profile-code",
@@ -556,6 +622,7 @@ def axon_codegen_dump(
             strict=strict,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
+            graph_backend_intrinsics=graph_backend_intrinsics,
             backend=backend,
             class_name=class_name,
             checkpoint=checkpoint,
@@ -730,6 +797,14 @@ def axon_test(
         "--optimize-graph/--no-optimize-graph",
         help="Enable conservative Graph IR optimization before codegen/runtime.",
     ),
+    graph_backend_intrinsics: str | None = typer.Option(
+        None,
+        "--graph-backend-intrinsics",
+        help=(
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
+            "(currently: codegen2-torch)."
+        ),
+    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -767,6 +842,7 @@ def axon_test(
             hf_strict_dtype=hf_strict_dtype,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
+            graph_backend_intrinsics=graph_backend_intrinsics,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -953,6 +1029,14 @@ def axon_benchmark(
         "--optimize-graph/--no-optimize-graph",
         help="Enable conservative Graph IR optimization before codegen/runtime.",
     ),
+    graph_backend_intrinsics: str | None = typer.Option(
+        None,
+        "--graph-backend-intrinsics",
+        help=(
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
+            "(currently: codegen2-torch)."
+        ),
+    ),
     skip_hf: bool = typer.Option(
         False,
         "--skip-hf/--no-skip-hf",
@@ -1055,6 +1139,7 @@ def axon_benchmark(
             pipeline_parallel_size=pipeline_parallel_size,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
+            graph_backend_intrinsics=graph_backend_intrinsics,
             skip_hf=skip_hf,
             hf_strict_dtype=hf_strict_dtype,
             oom_cpu_fallback=oom_cpu_fallback,

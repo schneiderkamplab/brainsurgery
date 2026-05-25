@@ -58,6 +58,13 @@ from .effects import (
     infer_graph_module_effects,
     infer_graph_module_usages,
 )
+from .provenance import (
+    GraphProvenance,
+    GraphRopeApplyFactorsFact,
+    GraphSdpaGqaFact,
+    graph_provenance_facts,
+    infer_graph_provenance,
+)
 from .substitute import (
     UnsupportedConstraintSubstitution,
     replace_constraint_refs,
@@ -81,10 +88,12 @@ class GraphOptimizeConfig:
     common_subexpression_elimination: bool = True
     specialize_definitions: str = "single-callsite"
     inline_safe: bool = True
+    backend_intrinsics: str | None = None
     max_iterations: int = 64
 
 
 _SPECIALIZE_MODES = {"off", "single-callsite", "monomorphize"}
+_BACKEND_INTRINSIC_TARGETS = {None, "codegen2-torch"}
 _SMALL_INLINE_NODE_LIMIT = 4
 
 
@@ -136,6 +145,387 @@ def _is_safe_shared_specialization_operand(
         and not operand.inputs
         and not operand.attrs
     )
+
+
+def _graph_value_ref_provenance(
+    operand: GraphOperand,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+) -> GraphProvenance | None:
+    if isinstance(operand, GraphValueRef):
+        return local_provenance.get(operand.name)
+    return None
+
+
+def _has_additive_mask_from_keep_fact(
+    provenance: GraphProvenance | None,
+    keep_provenance: GraphProvenance | None,
+) -> bool:
+    if provenance is None or keep_provenance is None:
+        return False
+    return any(
+        fact.kind == "additive_mask_from_keep" and fact.value == keep_provenance
+        for fact in graph_provenance_facts(provenance)
+    )
+
+
+def _maybe_rewrite_node_to_torch_sdpa(
+    node: GraphNode,
+    *,
+    module: GraphModule,
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+) -> GraphNode | None:
+    if len(node.outputs) != 1 or node.attrs or node.op.name not in modules_by_name:
+        return None
+    callee = modules_by_name[node.op.name]
+    if len(node.inputs) != len(callee.inputs):
+        return None
+    output_facts = tuple(
+        graph_provenance_facts(item)
+        for item in provenance.module_summary_provenance.get(callee.name, ())
+    )
+    if not output_facts:
+        return None
+    sdpa_facts = [
+        fact.value
+        for fact in output_facts[0]
+        if fact.kind == "sdpa_gqa" and isinstance(fact.value, GraphSdpaGqaFact)
+    ]
+    if not sdpa_facts:
+        return None
+    formal_to_actual = {
+        formal.name: actual
+        for formal, actual in zip(callee.inputs, node.inputs, strict=False)
+    }
+    local_provenance = provenance.module_local_provenance.get(module.name, {})
+    for fact in sdpa_facts:
+        try:
+            q = formal_to_actual[fact.q]
+            k = formal_to_actual[fact.k]
+            v = formal_to_actual[fact.v]
+            additive_mask = formal_to_actual[fact.additive_mask]
+            keep = formal_to_actual[fact.keep]
+        except KeyError:
+            continue
+        additive_prov = _graph_value_ref_provenance(
+            additive_mask,
+            local_provenance=local_provenance,
+        )
+        keep_prov = _graph_value_ref_provenance(keep, local_provenance=local_provenance)
+        if not _has_additive_mask_from_keep_fact(additive_prov, keep_prov):
+            continue
+        return replace(
+            node,
+            op=GraphOp("__torch_sdpa"),
+            inputs=(
+                q,
+                k,
+                v,
+                additive_mask,
+                GraphLiteral(value=None, type_expr=TypeNull()),
+                GraphLiteral(value=True, type_expr=TypeBool()),
+            ),
+            attrs={},
+        )
+    return None
+
+
+def _maybe_rewrite_node_to_torch_rope_apply_factors(
+    node: GraphNode,
+    *,
+    module: GraphModule,
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+) -> GraphNode | None:
+    call_rewrite = _maybe_rewrite_call_to_torch_rope_apply_factors(
+        node,
+        modules_by_name=modules_by_name,
+        provenance=provenance,
+    )
+    if call_rewrite is not None:
+        return call_rewrite
+    if len(node.outputs) != 1:
+        return None
+    local_provenance = provenance.module_local_provenance.get(module.name, {})
+    output_provenance = local_provenance.get(node.outputs[0].name)
+    if output_provenance is None:
+        return None
+    if not any(
+        fact.kind == "rope_apply_factors"
+        and isinstance(fact.value, GraphRopeApplyFactorsFact)
+        and not fact.value.interleaved
+        for fact in graph_provenance_facts(output_provenance)
+    ):
+        return None
+    operands = _match_rope_apply_factors_operands(node)
+    if operands is None:
+        return None
+    x, sin, cos = operands
+    return replace(
+        node,
+        op=GraphOp("__torch_rope_apply_factors"),
+        inputs=(
+            x,
+            sin,
+            cos,
+            GraphLiteral(value=False, type_expr=TypeBool()),
+        ),
+        attrs={},
+    )
+
+
+def _maybe_rewrite_call_to_torch_rope_apply_factors(
+    node: GraphNode,
+    *,
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+) -> GraphNode | None:
+    callee = modules_by_name.get(node.op.name)
+    if callee is None or node.attrs or len(node.inputs) != len(callee.inputs):
+        return None
+    output_facts = [
+        _single_rope_apply_fact(graph_provenance_facts(item))
+        for item in provenance.module_summary_provenance.get(callee.name, ())
+    ]
+    if len(node.outputs) == 1 and len(output_facts) >= 1 and output_facts[0] is not None:
+        fact = output_facts[0]
+        assert fact is not None
+        actuals = _rope_fact_actuals(fact, callee=callee, node=node)
+        if actuals is None:
+            return None
+        x, sin, cos = actuals
+        return replace(
+            node,
+            op=GraphOp("__torch_rope_apply_factors"),
+            inputs=(
+                x,
+                sin,
+                cos,
+                GraphLiteral(value=False, type_expr=TypeBool()),
+            ),
+            attrs={},
+        )
+    if len(node.outputs) == 2 and len(output_facts) >= 2:
+        first, second = output_facts[:2]
+        if first is None or second is None:
+            return None
+        first_actuals = _rope_fact_actuals(first, callee=callee, node=node)
+        second_actuals = _rope_fact_actuals(second, callee=callee, node=node)
+        if first_actuals is None or second_actuals is None:
+            return None
+        q, sin_a, cos_a = first_actuals
+        k, sin_b, cos_b = second_actuals
+        if sin_a != sin_b or cos_a != cos_b:
+            return None
+        return replace(
+            node,
+            op=GraphOp("__torch_rope_pair_apply_factors"),
+            inputs=(
+                q,
+                k,
+                sin_a,
+                cos_a,
+                GraphLiteral(value=False, type_expr=TypeBool()),
+            ),
+            attrs={},
+        )
+    return None
+
+
+def _single_rope_apply_fact(
+    facts,
+) -> GraphRopeApplyFactorsFact | None:
+    matches = [
+        fact.value
+        for fact in facts
+        if fact.kind == "rope_apply_factors"
+        and isinstance(fact.value, GraphRopeApplyFactorsFact)
+        and not fact.value.interleaved
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _rope_fact_actuals(
+    fact: GraphRopeApplyFactorsFact,
+    *,
+    callee: GraphModule,
+    node: GraphNode,
+) -> tuple[GraphOperand, GraphOperand, GraphOperand] | None:
+    formal_to_actual = {
+        formal.name: actual
+        for formal, actual in zip(callee.inputs, node.inputs, strict=False)
+    }
+    names = tuple(_input_provenance_name(item) for item in (fact.x, fact.sin, fact.cos))
+    if any(name is None for name in names):
+        return None
+    try:
+        return tuple(formal_to_actual[name] for name in names if name is not None)  # type: ignore[return-value]
+    except KeyError:
+        return None
+
+
+def _input_provenance_name(provenance: GraphProvenance) -> str | None:
+    return provenance.name if provenance.kind == "input" else None
+
+
+def _rewrite_torch_rope_intrinsics(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    modules_by_name = {module.name: module for module in graph.modules}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            rewritten = _maybe_rewrite_node_to_torch_rope_apply_factors(
+                node,
+                module=module,
+                modules_by_name=modules_by_name,
+                provenance=provenance,
+            )
+            if rewritten is None:
+                new_nodes.append(node)
+            else:
+                changed = True
+                new_nodes.append(rewritten)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _match_rope_apply_factors_operands(
+    node: GraphNode,
+) -> tuple[GraphOperand, GraphOperand, GraphOperand] | None:
+    if node.attrs:
+        return None
+    left, right = _match_graph_binary(node.op.name, node.inputs, "core.binary.+")
+    if left is None or right is None:
+        return None
+    first = _match_rope_scaled_operand(left)
+    second = _match_rope_scaled_operand(right)
+    if first is None or second is None:
+        return None
+    x_a, factor_a, rotated_a = first
+    x_b, factor_b, rotated_b = second
+    if not rotated_a and rotated_b and x_a == x_b:
+        return x_a, factor_b, factor_a
+    if not rotated_b and rotated_a and x_a == x_b:
+        return x_a, factor_a, factor_b
+    return None
+
+
+def _match_rope_scaled_operand(
+    operand: GraphOperand,
+) -> tuple[GraphOperand, GraphOperand, bool] | None:
+    left, right = _match_graph_expr_binary(operand, "core.binary.*")
+    if left is None or right is None:
+        return None
+    left_rot = _match_rope_rotate_half_noninterleaved_operand(left)
+    if left_rot is not None:
+        return left_rot, right, True
+    right_rot = _match_rope_rotate_half_noninterleaved_operand(right)
+    if right_rot is not None:
+        return right_rot, left, True
+    if _is_expand_operand(right):
+        return left, right, False
+    if _is_expand_operand(left):
+        return right, left, False
+    return None
+
+
+def _match_rope_rotate_half_noninterleaved_operand(
+    operand: GraphOperand,
+) -> GraphOperand | None:
+    if not isinstance(operand, GraphExpr):
+        return None
+    if operand.op.name != "_concat" or len(operand.inputs) < 3 or operand.attrs:
+        return None
+    first, second, dim = operand.inputs[:3]
+    if not _is_literal_value(dim, -1):
+        return None
+    negated = _match_negated_slice_operand(first)
+    plain = _match_slice_operand(second)
+    if negated is None or plain is None:
+        return None
+    x_hi, hi_dim, hi_start, _hi_end = negated
+    x_lo, lo_dim, lo_start, lo_end = plain
+    if x_hi != x_lo:
+        return None
+    if not _is_literal_value(hi_dim, -1) or not _is_literal_value(lo_dim, -1):
+        return None
+    if not _is_literal_value(lo_start, 0):
+        return None
+    if hi_start != lo_end:
+        return None
+    return x_hi
+
+
+def _match_negated_slice_operand(
+    operand: GraphOperand,
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    left, right = _match_graph_expr_binary(operand, "core.binary.-")
+    if not _is_literal_value(left, 0) or right is None:
+        return None
+    return _match_slice_operand(right)
+
+
+def _match_slice_operand(
+    operand: GraphOperand,
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    if not isinstance(operand, GraphExpr):
+        return None
+    if operand.op.name != "_slice" or len(operand.inputs) < 4:
+        return None
+    return operand.inputs[0], operand.inputs[1], operand.inputs[2], operand.inputs[3]
+
+
+def _is_expand_operand(operand: GraphOperand) -> bool:
+    return isinstance(operand, GraphExpr) and operand.op.name == "_expand" and bool(operand.inputs)
+
+
+def _match_graph_expr_binary(
+    operand: GraphOperand,
+    op_name: str,
+) -> tuple[GraphOperand | None, GraphOperand | None]:
+    if not isinstance(operand, GraphExpr):
+        return None, None
+    return _match_graph_binary(operand.op.name, operand.inputs, op_name)
+
+
+def _match_graph_binary(
+    actual_op: str,
+    inputs: tuple[GraphOperand, ...],
+    op_name: str,
+) -> tuple[GraphOperand | None, GraphOperand | None]:
+    if actual_op == op_name and len(inputs) == 2:
+        return inputs[0], inputs[1]
+    return None, None
+
+
+def _is_literal_value(operand: GraphOperand | None, value: object) -> bool:
+    return isinstance(operand, GraphLiteral) and operand.value == value
+
+
+def _rewrite_torch_sdpa_intrinsics(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    modules_by_name = {module.name: module for module in graph.modules}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            rewritten = _maybe_rewrite_node_to_torch_sdpa(
+                node,
+                module=module,
+                modules_by_name=modules_by_name,
+                provenance=provenance,
+            )
+            if rewritten is None:
+                new_nodes.append(node)
+            else:
+                changed = True
+                new_nodes.append(rewritten)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
 def _canonical_specialization_operand(
@@ -8159,6 +8549,14 @@ def optimize_graph_program(
     config: GraphOptimizeConfig | None = None,
 ) -> GraphProgram:
     config = config or GraphOptimizeConfig()
+    if config.specialize_definitions not in _SPECIALIZE_MODES:
+        raise ValueError(
+            "GraphOptimizeConfig.specialize_definitions must be one of: "
+            + ", ".join(sorted(_SPECIALIZE_MODES))
+        )
+    if config.backend_intrinsics not in _BACKEND_INTRINSIC_TARGETS:
+        allowed = ", ".join(sorted(item for item in _BACKEND_INTRINSIC_TARGETS if item))
+        raise ValueError(f"unsupported graph backend intrinsics target {config.backend_intrinsics!r}; expected one of: {allowed}")
     graph = _alpha_rename_shadowed_type_dims(graph)
     graph = _sanitize_graph_constraints(graph)
     _validate_optimizer_graph(graph, phase="input")
@@ -8280,6 +8678,19 @@ def optimize_graph_program(
                     pass
                 else:
                     current = candidate
+        if config.backend_intrinsics == "codegen2-torch":
+            candidate = _rewrite_torch_rope_intrinsics(current)
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_rope_intrinsics")
+                current = candidate
+            candidate = _rewrite_torch_sdpa_intrinsics(current)
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_sdpa_intrinsics")
+                current = candidate
         if config.constant_folding:
             module_effects = infer_graph_module_effects(current.modules)
             module_usages = infer_graph_module_usages(current.modules)

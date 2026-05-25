@@ -36,7 +36,20 @@ from .effects import (
     infer_graph_module_usages,
 )
 from .optimize import GraphOptimizeConfig, optimize_graph_program, prune_graph_to_main
-from .render import graph_domain_definition_comments, graph_module_to_axon_definition, graph_program_to_axon_file
+from .render import (
+    graph_domain_definition_comments,
+    graph_module_to_axon_definition,
+    graph_program_to_axon_file,
+    graph_provenance_definition_comments,
+)
+from .provenance import (
+    GraphDerivedProvenanceFact,
+    GraphProvenance,
+    GraphProvenanceAnalysis,
+    format_derived_provenance_fact,
+    format_graph_provenance,
+    infer_graph_provenance,
+)
 
 __all__ = [
     "GraphOptimizeConfig",
@@ -69,11 +82,18 @@ __all__ = [
     "graph_module_effect",
     "graph_module_usage",
     "graph_domain_definition_comments",
+    "graph_provenance_definition_comments",
     "graph_op_effect",
     "graph_op_usage",
     "graph_program_to_axon_file",
+    "GraphDerivedProvenanceFact",
+    "GraphProvenance",
+    "GraphProvenanceAnalysis",
+    "format_derived_provenance_fact",
+    "format_graph_provenance",
     "infer_graph_module_effects",
     "infer_graph_module_usages",
+    "infer_graph_provenance",
     "infer_main_module_domain_facts",
     "validate_graph_domain_analysis",
 ]
