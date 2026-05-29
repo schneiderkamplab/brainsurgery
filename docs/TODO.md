@@ -80,19 +80,24 @@ These should stay optional until each pass has precise preconditions, typed vali
   test rows. Remaining work is clean real 16B/v2-lite/v3 reruns on idle GPUs.
   Keep changes model-file/generic-builtin only; avoid checkpoint-family routing
   or codegen special cases.
-- High priority: add a generic fused selected-expert FFN path for MoE models.
-  GPT-OSS 20B still spends most Axon time in the two `_expert_linear` calls even
-  after RoPE/mask/GQA cleanup. The safe next step is a typed Graph IR/codegen
-  pattern for selected-expert FFN:
+- High priority: continue generic fused selected-expert FFN paths for MoE models.
+  Graph IR now has provenance-backed Torch selected-expert intrinsics for direct
+  grouped packed SwiGLU, direct grouped separate-gate/up SwiGLU, and GPT-OSS-style
+  packed GeGLU:
   `expert_linear(gate_up) -> alpha/limit-aware gated activation -> expert_linear(down) -> scale/sum`.
-  This must preserve configurable GPT-OSS `SWIGLU_ALPHA` semantics, avoid
-  model-family branches, and validate on GPT-OSS plus existing direct
-  `NN.expert_linear` users such as Mixtral and GraniteMoE. Also audit the current
+  The GeGLU rewrite preserves configurable `alpha`, avoids model-family branches,
+  and has a smoke benchmark on `test/GPT-OSS-Test`. Also audit the current
   codegen2-torch expert-bank materialization helpers: GPT-OSS checkpoints
   already expose `gate_up_proj_*` aliases after MXFP4 materialization, so any
   extra `gate_proj/up_proj -> gate_up_proj` synthesis should be proven useful
   for other generic MoE layouts or moved to explicit load/config adaptation
   rather than staying as unexplained core codegen scaffolding.
+- High priority: add QKV packing as a graph-level parameter-packing rewrite.
+  Detect compatible same-input Q/K/V projections by provenance, prove their
+  weight and bias parameters are not read elsewhere, emit one packed projection
+  followed by `_chunk`, and materialize the packed tensor through existing
+  parameter-join metadata. This should be generic over dense attention layouts
+  and must not depend on model-family names.
 - High priority: add an incremental/cache-aware Mamba selective-scan execution
   path. `SSM.causal_conv1d_full` now uses the generic `_conv1d` primitive, and
   `mamba_scan_full` is expressed as an Axon loop over `mamba_scan_step`. Decoder
@@ -104,6 +109,21 @@ These should stay optional until each pass has precise preconditions, typed vali
   reintroducing a permanent high-level `_mamba_scan` primitive. Avoid
   model-family branches; validate on `BlackMamba-2.8B`, `mamba-2.8b-hf`, and
   Jamba/Mamba2-style users separately.
+- Possible graph rewrite: broaden SDPA recognition. Current Torch SDPA lowering
+  is intentionally conservative. Future work should recognize more
+  provenance-proven attention score/mask/softmax/value subgraphs, including GQA
+  and additive-mask variants, while checking type/shape compatibility and
+  documenting any assumptions such as no fully masked rows.
+- Possible graph rewrite: cache/list region optimization. `_list_init`,
+  `_list_append`, `_list_index`, and `_list_length` are normal primitive
+  lowerings today. If profiling still shows cache-list overhead, introduce an
+  explicit affine/in-place cache update region only when usage and alias analysis
+  prove the list value is not shared in a way that would change Axon semantics.
+- Possible graph rewrite: backend buffer hoisting. Once Axon has first-class
+  buffer syntax, hoist reusable model-global/config-derived tensors such as
+  causal masks and RoPE factors into backend setup/buffers. Until then, keep
+  this as a backend-aware graph-planning candidate rather than string/path
+  caching in codegen.
 - High priority: implement main-module-anchored intra- and inter-procedural
   domain analysis over the pruned reachable Graph IR. It should infer facts that
   hold on all non-dead paths from `MAIN`, including null/non-null, boolean,

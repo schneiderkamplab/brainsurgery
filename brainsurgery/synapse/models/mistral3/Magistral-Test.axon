@@ -38,6 +38,8 @@ KVH = 2
 
 MODEL_HEAD_DIM = 32
 
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
 KVD = KVH * MODEL_HEAD_DIM
 
 FFN = 256
@@ -57,7 +59,7 @@ magistral_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor
 magistral_block x rope_sin rope_cos mask additive_mask past_kv = do
   xn <- magistral_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
-    q <- NN.linear@q_proj xn dim=MODEL_DIM |> reshape_heads heads=NUM_HEADS
+    q <- NN.linear@q_proj xn dim=QD |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
     v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
     q, k <- rope_pair_base_factors q k rope_sin rope_cos

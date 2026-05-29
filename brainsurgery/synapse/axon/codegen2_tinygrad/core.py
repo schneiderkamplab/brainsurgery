@@ -379,7 +379,6 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 4, "_compose_path = staticmethod(_common_compose_path)")
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
-        add(lines, 4, "_cache_past_length = staticmethod(_common_cache_past_length)")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
         add(lines, 8, "key = str(path).lstrip('@')")
@@ -998,7 +997,6 @@ def emit_model_code_from_graph_ir(
             "from tinygrad import Tensor, dtypes",
             "from tinygrad.nn import state as tiny_state",
             "from brainsurgery.synapse.axon.codegen2_common import (",
-            "    cache_past_length as _common_cache_past_length,",
             "    compose_path as _common_compose_path,",
             "    config_value as _common_config_value,",
             "    has_config_value as _common_has_config_value,",

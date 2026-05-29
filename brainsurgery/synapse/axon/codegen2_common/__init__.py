@@ -1,5 +1,4 @@
 from .core import (
-    cache_past_length,
     config_value,
     compose_path,
     execute_common_primitive,
@@ -16,7 +15,6 @@ from .core import (
 )
 
 __all__ = [
-    "cache_past_length",
     "config_value",
     "compose_path",
     "execute_common_primitive",

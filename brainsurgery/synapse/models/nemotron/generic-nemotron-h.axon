@@ -52,8 +52,8 @@ expert_ffn x = do
 
 shared_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
 shared_ffn x = do
-  up <- NN.linear@shared_experts.up_proj x dim=SFFN bias=false
-  return up |> relu2 |> NN.linear@shared_experts.down_proj dim=MODEL_D bias=false
+  up <- NN.linear@up_proj x dim=SFFN bias=false
+  return up |> relu2 |> NN.linear@down_proj dim=MODEL_D bias=false
 
 shared_relu2_moe :: Path -> Tensor[B,S,D] -> Int -> Int -> Int -> Float -> Bool -> Tensor[B,S,D]
 shared_relu2_moe@path hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob = do
@@ -64,13 +64,13 @@ shared_relu2_moe@path hidden top_k n_group topk_group routed_scaling_factor norm
   routed <- Tensor.zeros_like hidden
   routed <- for@experts e <- [0..experts) carry (routed) do
     x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
-    up <- NN.linear@up_proj x_sel dim=null bias=false
-    x_upd <- up |> relu2 |> NN.linear@down_proj dim=null bias=false
+    up <- NN.linear@up_proj x_sel dim=FFN bias=false
+    x_upd <- up |> relu2 |> NN.linear@down_proj dim=MODEL_D bias=false
     routed <- scatter_add routed token_idx x_upd sel_scores
     yield routed
   shared <- scope@shared_experts do
-    up <- NN.linear@up_proj hidden dim=null bias=false
-    return up |> relu2 |> NN.linear@down_proj dim=null bias=false
+    up <- NN.linear@up_proj hidden dim=SFFN bias=false
+    return up |> relu2 |> NN.linear@down_proj dim=MODEL_D bias=false
   return routed + shared
 
 nemotron_h_is_attention :: Int -> Bool

@@ -91,6 +91,11 @@ def substitute_dim_token(
                 if _cache is not None:
                     _cache[cache_key] = result
                 return result
+            if isinstance(right, DimExprBinary) and right.op == "-" and right.left == left:
+                result = right.right
+                if _cache is not None:
+                    _cache[cache_key] = result
+                return result
             if isinstance(left, DimExprBinary) and left.op == "+":
                 if left.left == right:
                     result = left.right

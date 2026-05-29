@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -32,7 +32,6 @@ from ..ast import (
 from ..ast.types import dim_token_names
 from ..ast.path import path_expr_to_runtime_value, resolve_path_expr_to_key
 from ..codegen2_common import (
-    cache_past_length,
     compose_path,
     execute_common_primitive,
     is_null,
@@ -47,6 +46,7 @@ from ..graph_ir import (
     GraphNode,
     GraphOperand,
     GraphOp,
+    GraphPackedParameter,
     GraphPath,
     GraphProgram,
     GraphValue,
@@ -77,6 +77,125 @@ def _graph_path_token(path: GraphPath, env: Mapping[str, Any]) -> str:
     return ("@@" if path.absolute else "@") + key
 
 
+def _graph_path_pattern_key(path: GraphPath) -> str:
+    return ".".join(part for part in path.parts if part)
+
+
+def _packed_parameter_spec_payload(packed: GraphPackedParameter) -> dict[str, Any]:
+    return {
+        "output": _graph_path_pattern_key(packed.output),
+        "inputs": tuple(_graph_path_pattern_key(item) for item in packed.inputs),
+        "dim": int(packed.dim),
+        "mode": "cat",
+        "remove_inputs": bool(packed.remove_inputs),
+    }
+
+
+def _path_pattern_regex(pattern: str) -> re.Pattern[str]:
+    pieces: list[str] = []
+    cursor = 0
+    used: set[str] = set()
+    for match in re.finditer(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", pattern):
+        pieces.append(re.escape(pattern[cursor : match.start()]))
+        name = match.group(1)
+        if name in used:
+            pieces.append(f"(?P={name})")
+        else:
+            pieces.append(f"(?P<{name}>[^.]+)")
+            used.add(name)
+        cursor = match.end()
+    pieces.append(re.escape(pattern[cursor:]))
+    return re.compile("^" + "".join(pieces) + "$")
+
+
+def _format_path_pattern(pattern: str, values: Mapping[str, str]) -> str:
+    out = pattern
+    for key, value in values.items():
+        out = out.replace("{" + key + "}", str(value))
+    return out
+
+
+def _materialize_joined_parameter(
+    state: dict[str, torch.Tensor],
+    output_key: str,
+    input_keys: Sequence[str],
+    *,
+    dim: int,
+    mode: str,
+    remove_inputs: bool = True,
+) -> torch.Tensor | None:
+    existing = state.get(output_key)
+    if torch.is_tensor(existing):
+        return existing
+    tensors = [state.get(key) for key in input_keys]
+    if not tensors or not all(torch.is_tensor(item) for item in tensors):
+        return None
+    if mode == "cat":
+        joined = torch.cat(tensors, dim=int(dim))  # type: ignore[arg-type]
+    elif mode == "stack":
+        joined = torch.stack(tensors, dim=int(dim))  # type: ignore[arg-type]
+    else:
+        raise ValueError(f"unknown parameter join mode {mode!r}")
+    state[output_key] = joined
+    if remove_inputs:
+        for key in input_keys:
+            state.pop(key, None)
+    return joined
+
+
+def _materialize_packed_parameters(
+    state: dict[str, torch.Tensor],
+    specs: tuple[dict[str, Any], ...],
+    *,
+    target_key: str | None = None,
+) -> None:
+    for spec in specs:
+        output_pattern = str(spec["output"])
+        regex = _path_pattern_regex(output_pattern)
+        candidates: list[tuple[str, dict[str, str]]] = []
+        if target_key is not None:
+            match = regex.match(str(target_key))
+            if match is not None:
+                candidates.append((str(target_key), match.groupdict()))
+        else:
+            literal = "{" not in output_pattern
+            if literal:
+                candidates.append((output_pattern, {}))
+            else:
+                keys = list(state)
+                for key in keys:
+                    match = regex.match(str(key))
+                    if match is not None:
+                        candidates.append((str(key), match.groupdict()))
+                input_patterns = tuple(str(item) for item in spec["inputs"])
+                if input_patterns:
+                    input_regex = _path_pattern_regex(input_patterns[0])
+                    for key in keys:
+                        match = input_regex.match(str(key))
+                        if match is None:
+                            continue
+                        values = match.groupdict()
+                        output_key = _format_path_pattern(output_pattern, values)
+                        candidates.append((output_key, values))
+        seen: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+        for output_key, values in candidates:
+            candidate_key = (output_key, tuple(sorted(values.items())))
+            if candidate_key in seen:
+                continue
+            seen.add(candidate_key)
+            if torch.is_tensor(state.get(output_key)):
+                continue
+            input_keys = [_format_path_pattern(str(item), values) for item in spec["inputs"]]
+            _materialize_joined_parameter(
+                state,
+                output_key,
+                input_keys,
+                dim=int(spec["dim"]),
+                mode=str(spec.get("mode", "cat")),
+                remove_inputs=bool(spec.get("remove_inputs", True)),
+            )
+
+
 def _operand_payload(operand: GraphOperand) -> Any:
     if isinstance(operand, GraphValueRef):
         return operand.name
@@ -97,7 +216,15 @@ def _normalize_primitive_op(name: str) -> str:
 
 def _operand_uses_expert_linear(operand: GraphOperand) -> bool:
     if isinstance(operand, GraphExpr):
-        if _normalize_primitive_op(operand.op.name) == "expert_linear":
+        if _normalize_primitive_op(operand.op.name) == "expert_linear" or operand.op.name in {
+            "__torch_expert_swiglu_ffn",
+            "__torch_expert_packed_swiglu_ffn",
+            "__torch_selected_expert_swiglu_ffn",
+            "__torch_selected_expert_packed_swiglu_ffn",
+            "__torch_selected_expert_clamped_packed_swiglu_ffn",
+            "__torch_selected_expert_packed_gegelu_ffn",
+            "__torch_selected_expert_relu2_ffn",
+        }:
             return True
         return any(_operand_uses_expert_linear(item) for item in operand.inputs) or any(
             _operand_uses_expert_linear(item) for item in operand.attrs.values()
@@ -108,7 +235,15 @@ def _operand_uses_expert_linear(operand: GraphOperand) -> bool:
 def _graph_uses_expert_linear(program: GraphProgram) -> bool:
     for module in program.modules:
         for node in module.nodes:
-            if _normalize_primitive_op(node.op.name) == "expert_linear":
+            if _normalize_primitive_op(node.op.name) == "expert_linear" or node.op.name in {
+                "__torch_expert_swiglu_ffn",
+                "__torch_expert_packed_swiglu_ffn",
+                "__torch_selected_expert_swiglu_ffn",
+                "__torch_selected_expert_packed_swiglu_ffn",
+                "__torch_selected_expert_clamped_packed_swiglu_ffn",
+                "__torch_selected_expert_packed_gegelu_ffn",
+                "__torch_selected_expert_relu2_ffn",
+            }:
                 return True
             if any(_operand_uses_expert_linear(item) for item in node.inputs):
                 return True
@@ -373,9 +508,14 @@ def _materialize_expert_bank_for_path(state: dict[str, torch.Tensor], bank_key: 
         first = state[ordered_keys[0]]
         first_shape = tuple(first.shape)
         if all(torch.is_tensor(state[key]) and tuple(state[key].shape) == first_shape for key in ordered_keys):
-            bank = torch.stack([state.pop(key) for key in ordered_keys], dim=0)
-            state[bank_key] = bank
-            return bank
+            return _materialize_joined_parameter(
+                state,
+                bank_key,
+                ordered_keys,
+                dim=0,
+                mode="stack",
+                remove_inputs=True,
+            )
     fused_sources = _fused_gate_up_source_bank_keys(bank_key)
     if fused_sources is None:
         return None
@@ -387,9 +527,14 @@ def _materialize_expert_bank_for_path(state: dict[str, torch.Tensor], bank_key: 
     if gate.shape[:-2] != up.shape[:-2] or gate.shape[-1:] != up.shape[-1:]:
         return None
     concat_dim = -2 if gate.ndim >= 2 else -1
-    bank = torch.cat([gate, up], dim=concat_dim)
-    state[bank_key] = bank
-    return bank
+    return _materialize_joined_parameter(
+        state,
+        bank_key,
+        (gate_key, up_key),
+        dim=concat_dim,
+        mode="cat",
+        remove_inputs=True,
+    )
 
 
 def _expert_bank_lookup_from_state(state: dict[str, torch.Tensor], path: str) -> tuple[str, int] | None:
@@ -541,6 +686,8 @@ def _state_key_filter_prefixes(program: GraphProgram) -> tuple[str, ...]:
                 _walk_graph_operands(operand, operands)
         for operand in module.outputs:
             _walk_graph_operands(operand, operands)
+    for packed in program.packed_parameters:
+        operands.extend(packed.inputs)
     for operand in operands:
         if not isinstance(operand, GraphPath):
             continue
@@ -987,7 +1134,6 @@ def _emit_bind_nested_shape_symbols(
         if nested_lines:
             add(lines, indent, f"if {value_expr} is not None:")
             lines.extend(nested_lines)
-            local.update(nested_local)
         return
     _emit_bind_nested_shape_symbols_inner(
         lines,
@@ -1031,8 +1177,6 @@ def _emit_bind_nested_shape_symbols_inner(
         if nested_lines:
             add(lines, indent, f"if {value_expr} is not None:")
             lines.extend(nested_lines)
-            if guaranteed:
-                local.update(nested_local)
         return
     if isinstance(type_expr, TypeList):
         nested_lines: list[str] = []
@@ -1143,6 +1287,10 @@ class Codegen2GraphModel(nn.Module):
     def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:
         loaded = dict(state_dict)
         materialize_mxfp4_aliases(loaded, drop_packed=True)
+        _materialize_packed_parameters(
+            loaded,
+            tuple(_packed_parameter_spec_payload(item) for item in self.graph.packed_parameters),
+        )
         self._state = loaded
 
     def _prepare_env(
@@ -1236,10 +1384,6 @@ class Codegen2GraphModel(nn.Module):
         if torch.is_tensor(src):
             index = self._move_to(index, x.device)
             src = self._move_to(src, x.device)
-            if index.shape == src.shape and index.numel() > 0:
-                first = index.reshape(-1)[0]
-                if bool(torch.all(index == first).item()):
-                    return self._assign_unit_slice(x, dim, first.item(), src)
             return torch.scatter(x, dim=dim, index=index, src=src)
         index = self._move_to(index, x.device)
         return torch.scatter(x, dim=dim, index=index, value=src)
@@ -1597,10 +1741,6 @@ class Codegen2GraphModel(nn.Module):
         return is_null(value)
 
     @staticmethod
-    def _cache_past_length(cache: Any) -> int:
-        return cache_past_length(cache)
-
-    @staticmethod
     def _path_parts(value: Any) -> tuple[bool, str]:
         return path_parts(value)
 
@@ -1654,6 +1794,18 @@ class Codegen2GraphModel(nn.Module):
         return (x * cos) + (rotated * sin)
 
     @staticmethod
+    def _gegelu(x: torch.Tensor, limit: Any = None, alpha: Any = 1.702) -> torch.Tensor:
+        if x.shape[-1] % 2 != 0:
+            raise ValueError("gegelu requires even last dimension")
+        x_gelu = x[..., ::2]
+        x_linear = x[..., 1::2]
+        if limit is not None:
+            limit = float(limit)
+            x_gelu = torch.where(torch.isinf(x_gelu), x_gelu, x_gelu.clamp(max=limit))
+            x_linear = torch.where(torch.isinf(x_linear), x_linear, x_linear.clamp(min=-limit, max=limit))
+        return x_gelu * torch.sigmoid(float(alpha) * x_gelu) * (x_linear + 1.0)
+
+    @staticmethod
     def _dtype_from_name(value: Any) -> torch.dtype:
         if value is None:
             raise ValueError("dtype name is null")
@@ -1680,6 +1832,218 @@ class Codegen2GraphModel(nn.Module):
         if isinstance(value, (list, tuple)):
             return torch.as_tensor(value, device=ref.device, dtype=target_dtype)
         return torch.full_like(ref, value, dtype=target_dtype)
+
+    @staticmethod
+    def _fused_linear_pair_weight_path(gate_weight_path: Any, up_weight_path: Any) -> str:
+        return "__fused_gate_up__." + str(gate_weight_path).lstrip("@") + "||" + str(up_weight_path).lstrip("@")
+
+    @staticmethod
+    def _fused_linear_pair_bias_path(gate_bias_path: Any, up_bias_path: Any) -> str:
+        return "__fused_gate_up_bias__." + str(gate_bias_path).lstrip("@") + "||" + str(up_bias_path).lstrip("@")
+
+    def _swiglu_ffn(
+        self,
+        x: Any,
+        gate_weight_path: Any,
+        up_weight_path: Any,
+        down_weight_path: Any,
+        gate_bias_path: Any = "bias",
+        up_bias_path: Any = "bias",
+        down_bias_path: Any = "bias",
+    ) -> Any:
+        del down_bias_path
+        gate, up = self._primitive_gate_up_linear_pair(
+            x,
+            gate_weight_path,
+            up_weight_path,
+            gate_bias_path=gate_bias_path,
+            up_bias_path=up_bias_path,
+            bias=False,
+            transpose=False,
+        )
+        hidden = F.silu(gate) * up
+        down_weight = self._required_param(str(down_weight_path), field="swiglu_ffn.down.weight")
+        hidden = self._move_to(hidden, down_weight.device)
+        return F.linear(hidden, down_weight, None)
+
+    def _expert_swiglu_ffn(
+        self,
+        x: Any,
+        expert_idx: Any,
+        gate_weight_path: Any,
+        up_weight_path: Any,
+        down_weight_path: Any,
+    ) -> Any:
+        gate_weight = self._required_param(str(gate_weight_path), field="expert_swiglu_ffn.gate.weight")
+        up_weight = self._required_param(str(up_weight_path), field="expert_swiglu_ffn.up.weight")
+        down_weight = self._required_param(str(down_weight_path), field="expert_swiglu_ffn.down.weight")
+        gate = _grouped_expert_linear_torch(x, gate_weight, expert_idx, None, transpose=False)
+        up = _grouped_expert_linear_torch(x, up_weight, expert_idx, None, transpose=False)
+        hidden = F.silu(gate) * up
+        return _grouped_expert_linear_torch(hidden, down_weight, expert_idx, None, transpose=False)
+
+    def _expert_packed_swiglu_ffn(
+        self,
+        x: Any,
+        expert_idx: Any,
+        gate_up_weight_path: Any,
+        down_weight_path: Any,
+        transpose: bool = False,
+    ) -> Any:
+        gate_up_weight = self._required_param(str(gate_up_weight_path), field="expert_packed_swiglu_ffn.gate_up.weight")
+        down_weight = self._required_param(str(down_weight_path), field="expert_packed_swiglu_ffn.down.weight")
+        gate_up = _grouped_expert_linear_torch(x, gate_up_weight, expert_idx, None, transpose=transpose)
+        gate, up = torch.chunk(gate_up, 2, dim=-1)
+        hidden = F.silu(gate) * up
+        return _grouped_expert_linear_torch(hidden, down_weight, expert_idx, None, transpose=transpose)
+
+    def _selected_expert_packed_swiglu_ffn(
+        self,
+        x: Any,
+        topk_scores: Any,
+        topk_indices: Any,
+        gate_up_weight_path: Any,
+        down_weight_path: Any,
+        transpose: bool = False,
+    ) -> Any:
+        topk_indices = topk_indices.to(dtype=torch.long)
+        expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))
+        values = self._expert_packed_swiglu_ffn(
+            expanded,
+            topk_indices,
+            gate_up_weight_path,
+            down_weight_path,
+            transpose=transpose,
+        )
+        weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)
+        return torch.sum(values * weights, dim=2, keepdim=False)
+
+    def _selected_expert_swiglu_ffn(
+        self,
+        x: Any,
+        topk_scores: Any,
+        topk_indices: Any,
+        gate_weight_path: Any,
+        up_weight_path: Any,
+        down_weight_path: Any,
+        transpose: bool = False,
+    ) -> Any:
+        topk_indices = topk_indices.to(dtype=torch.long)
+        expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))
+        gate_weight = self._required_param(str(gate_weight_path), field="selected_expert_swiglu_ffn.gate.weight")
+        up_weight = self._required_param(str(up_weight_path), field="selected_expert_swiglu_ffn.up.weight")
+        down_weight = self._required_param(str(down_weight_path), field="selected_expert_swiglu_ffn.down.weight")
+        gate = _grouped_expert_linear_torch(expanded, gate_weight, topk_indices, None, transpose=transpose)
+        up = _grouped_expert_linear_torch(expanded, up_weight, topk_indices, None, transpose=transpose)
+        hidden = F.silu(gate) * up
+        values = _grouped_expert_linear_torch(hidden, down_weight, topk_indices, None, transpose=transpose)
+        weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)
+        return torch.sum(values * weights, dim=2, keepdim=False)
+
+    def _selected_expert_packed_gegelu_ffn(
+        self,
+        x: Any,
+        topk_scores: Any,
+        topk_indices: Any,
+        gate_up_weight_path: Any,
+        gate_up_bias_path: Any,
+        down_weight_path: Any,
+        down_bias_path: Any,
+        limit: Any,
+        alpha: Any = 1.702,
+        bias: bool = False,
+        transpose: bool = False,
+    ) -> Any:
+        topk_indices = topk_indices.to(dtype=torch.long)
+        expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))
+        gate_up_weight = self._required_param(str(gate_up_weight_path), field="selected_expert_packed_gegelu_ffn.gate_up.weight")
+        gate_up_bias = self._required_param(str(gate_up_bias_path), field="selected_expert_packed_gegelu_ffn.gate_up.bias") if bias else None
+        down_weight = self._required_param(str(down_weight_path), field="selected_expert_packed_gegelu_ffn.down.weight")
+        down_bias = self._required_param(str(down_bias_path), field="selected_expert_packed_gegelu_ffn.down.bias") if bias else None
+        gate_up = _grouped_expert_linear_torch(expanded, gate_up_weight, topk_indices, gate_up_bias, transpose=transpose)
+        hidden = self._gegelu(gate_up, limit, alpha)
+        values = _grouped_expert_linear_torch(hidden, down_weight, topk_indices, down_bias, transpose=transpose)
+        weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)
+        return torch.sum(values * weights, dim=2, keepdim=False)
+
+    def _selected_expert_clamped_packed_swiglu_ffn(
+        self,
+        x: Any,
+        topk_scores: Any,
+        topk_indices: Any,
+        gate_up_weight_path: Any,
+        down_weight_path: Any,
+        limit: Any,
+        transpose: bool = False,
+    ) -> Any:
+        topk_indices = topk_indices.to(dtype=torch.long)
+        expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))
+        gate_up_weight = self._required_param(str(gate_up_weight_path), field="selected_expert_clamped_packed_swiglu_ffn.gate_up.weight")
+        down_weight = self._required_param(str(down_weight_path), field="selected_expert_clamped_packed_swiglu_ffn.down.weight")
+        gate_up = _grouped_expert_linear_torch(expanded, gate_up_weight, topk_indices, None, transpose=transpose)
+        gate, up = torch.chunk(gate_up, 2, dim=-1)
+        limit = float(limit)
+        gate = torch.where(torch.isinf(gate), gate, gate.clamp(max=limit))
+        up = torch.where(torch.isinf(up), up, up.clamp(min=-limit, max=limit))
+        hidden = F.silu(gate) * up
+        values = _grouped_expert_linear_torch(hidden, down_weight, topk_indices, None, transpose=transpose)
+        weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)
+        return torch.sum(values * weights, dim=2, keepdim=False)
+
+    def _selected_expert_relu2_ffn(
+        self,
+        x: Any,
+        topk_scores: Any,
+        topk_indices: Any,
+        up_weight_path: Any,
+        down_weight_path: Any,
+        transpose: bool = False,
+    ) -> Any:
+        topk_indices = topk_indices.to(dtype=torch.long)
+        expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))
+        up_weight = self._required_param(str(up_weight_path), field="selected_expert_relu2_ffn.up.weight")
+        down_weight = self._required_param(str(down_weight_path), field="selected_expert_relu2_ffn.down.weight")
+        up = _grouped_expert_linear_torch(expanded, up_weight, topk_indices, None, transpose=transpose)
+        hidden = F.relu(up) * F.relu(up)
+        values = _grouped_expert_linear_torch(hidden, down_weight, topk_indices, None, transpose=transpose)
+        weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)
+        return torch.sum(values * weights, dim=2, keepdim=False)
+
+    def _primitive_gate_up_linear_pair(
+        self,
+        x: Any,
+        gate_weight_path: Any,
+        up_weight_path: Any,
+        *,
+        gate_bias_path: Any = "bias",
+        up_bias_path: Any = "bias",
+        bias: bool = False,
+        transpose: bool = False,
+    ) -> tuple[Any, Any]:
+        fused_weight_path = self._fused_linear_pair_weight_path(gate_weight_path, up_weight_path)
+        fused_bias_path = self._fused_linear_pair_bias_path(gate_bias_path, up_bias_path)
+        fused_weight = self.state_dict_tensors.get(fused_weight_path)
+        fused_bias = self.state_dict_tensors.get(fused_bias_path)
+        if not torch.is_tensor(fused_weight):
+            gate_key = str(gate_weight_path).lstrip("@")
+            up_key = str(up_weight_path).lstrip("@")
+            gate_weight = self.state_dict_tensors.pop(gate_key)
+            up_weight = self.state_dict_tensors.pop(up_key)
+            concat_dim = -1 if transpose else -2
+            fused_weight = torch.cat([gate_weight, up_weight], dim=concat_dim)
+            self.state_dict_tensors[fused_weight_path] = fused_weight
+            fused_bias = None
+            if bias:
+                gate_bias = self.state_dict_tensors.pop(str(gate_bias_path).lstrip("@"), None)
+                up_bias = self.state_dict_tensors.pop(str(up_bias_path).lstrip("@"), None)
+                if torch.is_tensor(gate_bias) and torch.is_tensor(up_bias):
+                    fused_bias = torch.cat([gate_bias, up_bias], dim=-1)
+                    self.state_dict_tensors[fused_bias_path] = fused_bias
+        x = self._move_to(x, fused_weight.device)
+        weight_run = fused_weight.to(dtype=x.dtype) if x.is_floating_point() and fused_weight.is_floating_point() and x.dtype != fused_weight.dtype else fused_weight
+        bias_run = fused_bias.to(dtype=x.dtype) if fused_bias is not None and x.is_floating_point() and fused_bias.is_floating_point() and x.dtype != fused_bias.dtype else fused_bias
+        combined = torch.matmul(x, weight_run) + (bias_run if bias_run is not None else 0) if transpose else F.linear(x, weight_run, bias_run)
+        return torch.chunk(combined, 2, dim=-1)
 
     def _read_config_key(self, path: Any, *, env: Mapping[str, Any], symbols: Mapping[str, Any]) -> str:
         if isinstance(path, GraphPath):
@@ -1771,6 +2135,138 @@ class Codegen2GraphModel(nn.Module):
                 out(torch.matmul(x, weight_run) + (bias_run if bias_run is not None else 0))
             else:
                 out(F.linear(x, weight_run, bias_run))
+            return True
+
+        if primitive == "_torch_gate_up_linear_pair":
+            if len(args) < 7:
+                raise ValueError("__torch_gate_up_linear_pair expects input, gate/up weight paths, gate/up bias paths, bias, and transpose")
+            out(
+                self._primitive_gate_up_linear_pair(
+                    args[0],
+                    args[1],
+                    args[2],
+                    gate_bias_path=args[3],
+                    up_bias_path=args[4],
+                    bias=bool(args[5]),
+                    transpose=bool(args[6]),
+                )
+            )
+            return True
+
+        if primitive == "_torch_swiglu_ffn":
+            if len(args) < 7:
+                raise ValueError("__torch_swiglu_ffn expects input, gate/up/down weight paths, and gate/up/down bias paths")
+            out(self._swiglu_ffn(args[0], args[1], args[2], args[3], args[4], args[5], args[6]))
+            return True
+
+        if primitive == "_torch_expert_swiglu_ffn":
+            if len(args) < 5:
+                raise ValueError("__torch_expert_swiglu_ffn expects input, expert indices, and gate/up/down weight paths")
+            out(self._expert_swiglu_ffn(args[0], args[1], args[2], args[3], args[4]))
+            return True
+
+        if primitive == "_torch_expert_packed_swiglu_ffn":
+            if len(args) < 5:
+                raise ValueError("__torch_expert_packed_swiglu_ffn expects input, expert indices, gate-up/down weight paths, and transpose")
+            out(self._expert_packed_swiglu_ffn(args[0], args[1], args[2], args[3], transpose=bool(args[4])))
+            return True
+
+        if primitive == "_torch_selected_expert_packed_swiglu_ffn":
+            if len(args) < 6:
+                raise ValueError("__torch_selected_expert_packed_swiglu_ffn expects input, top-k scores/indices, gate-up/down weight paths, and transpose")
+            out(
+                self._selected_expert_packed_swiglu_ffn(
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    transpose=bool(args[5]),
+                )
+            )
+            return True
+
+        if primitive == "_torch_selected_expert_swiglu_ffn":
+            if len(args) < 7:
+                raise ValueError("__torch_selected_expert_swiglu_ffn expects input, top-k scores/indices, gate/up/down weight paths, and transpose")
+            out(
+                self._selected_expert_swiglu_ffn(
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    transpose=bool(args[6]),
+                )
+            )
+            return True
+
+        if primitive == "_torch_selected_expert_packed_gegelu_ffn":
+            if len(args) < 10:
+                raise ValueError("__torch_selected_expert_packed_gegelu_ffn expects input, top-k scores/indices, gate-up/down weight/bias paths, limit, optional alpha, bias, and transpose")
+            alpha = args[8] if len(args) >= 11 else 1.702
+            bias = args[9] if len(args) >= 11 else args[8]
+            transpose = args[10] if len(args) >= 11 else args[9]
+            out(
+                self._selected_expert_packed_gegelu_ffn(
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                    alpha=alpha,
+                    bias=bool(bias),
+                    transpose=bool(transpose),
+                )
+            )
+            return True
+
+        if primitive == "_torch_selected_expert_clamped_packed_swiglu_ffn":
+            if len(args) < 7:
+                raise ValueError("__torch_selected_expert_clamped_packed_swiglu_ffn expects input, top-k scores/indices, gate-up/down weight paths, limit, and transpose")
+            out(
+                self._selected_expert_clamped_packed_swiglu_ffn(
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    transpose=bool(args[6]),
+                )
+            )
+            return True
+
+        if primitive == "_torch_selected_expert_relu2_ffn":
+            if len(args) < 6:
+                raise ValueError("__torch_selected_expert_relu2_ffn expects input, top-k scores/indices, up/down weight paths, and transpose")
+            out(
+                self._selected_expert_relu2_ffn(
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    transpose=bool(args[5]),
+                )
+            )
+            return True
+
+        if primitive == "_torch_weighted_topk_sum":
+            if len(args) < 2:
+                raise ValueError("__torch_weighted_topk_sum expects expert values and top-k scores")
+            out(torch.sum(args[0] * torch.unsqueeze(args[1].to(device=args[0].device, dtype=args[0].dtype), -1), dim=2, keepdim=False))
+            return True
+
+        if primitive == "_torch_topk_normalize":
+            if len(args) < 2:
+                raise ValueError("__torch_topk_normalize expects top-k weights and a dtype reference")
+            normalized = args[0] / torch.sum(args[0], dim=-1, keepdim=True)
+            out(normalized.to(dtype=args[1].dtype))
             return True
 
         if primitive == "expert_linear":
@@ -1927,18 +2423,8 @@ class Codegen2GraphModel(nn.Module):
             return True
         if primitive == "activations_gegelu":
             x = args[0]
-            if x.shape[-1] % 2 != 0:
-                raise ValueError("gegelu requires even last dimension")
-            x_gelu = x[..., ::2]
-            x_linear = x[..., 1::2]
             limit = args[1] if len(args) > 1 and not self._is_null(args[1]) else None
-            if limit is not None:
-                limit = float(limit)
-                x_gelu = torch.where(torch.isinf(x_gelu), x_gelu, x_gelu.clamp(max=limit))
-                x_linear = torch.where(
-                    torch.isinf(x_linear), x_linear, x_linear.clamp(min=-limit, max=limit)
-                )
-            out(x_gelu * torch.sigmoid(1.702 * x_gelu) * (x_linear + 1.0))
+            out(self._gegelu(x, limit))
             return True
         if primitive == "where":
             if torch.is_tensor(args[0]):
@@ -1953,6 +2439,11 @@ class Codegen2GraphModel(nn.Module):
         if primitive == "scatter":
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else -1
             out(self._scatter(args[0], args[1], args[2], dim))
+            return True
+        if primitive == "assign_unit_slice":
+            if len(args) < 4:
+                raise ValueError("_assign_unit_slice expects x, dim, index, src")
+            out(self._assign_unit_slice(args[0], args[1], args[2], args[3]))
             return True
         if primitive == "index_add":
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else 0
@@ -2285,12 +2776,6 @@ class Codegen2GraphModel(nn.Module):
                 )
             )
             return
-        if op in {"Cache.past_length", "Cache.past_length_kv"}:
-            if len(node.inputs) != 1:
-                raise ValueError(f"{op} expects one argument")
-            cache = self._eval_graph_operand(node.inputs[0], env=env, symbols=symbols)
-            assign(self._cache_past_length(cache))
-            return
         if op in self.modules_by_name:
             if (
                 op in self.cached_global_symbol_names
@@ -2554,25 +3039,6 @@ class _DirectTorchEmitter:
             current = node.inputs[0]
         return current
 
-    def _forwarded_single_primitive_name(self, module_name: str) -> str | None:
-        module = self.modules_by_name.get(module_name)
-        if module is None or len(module.nodes) != 1 or len(module.outputs) != 1:
-            return None
-        node = module.nodes[0]
-        if len(node.outputs) != 1:
-            return None
-        output = module.outputs[0]
-        if not isinstance(output, GraphValueRef) or output.name != node.outputs[0].name:
-            return None
-        primitive = _normalize_primitive_op(node.op.name)
-        return primitive if primitive != node.op.name or node.op.name.startswith("_") else None
-
-    def _node_primitive_or_forwarded_name(self, node: Any) -> str:
-        primitive = _normalize_primitive_op(node.op.name)
-        if primitive != node.op.name or node.op.name.startswith("_"):
-            return primitive
-        return self._forwarded_single_primitive_name(node.op.name) or node.op.name
-
     def _operand_ref_name(self, operand: GraphOperand) -> str | None:
         return operand.name if isinstance(operand, GraphValueRef) else None
 
@@ -2586,59 +3052,6 @@ class _DirectTorchEmitter:
         if isinstance(operand, tuple):
             return any(self._operand_uses_value_name(item, name) for item in operand)
         return False
-
-    def _dummy_fill_index_outputs(self, module: GraphModule) -> set[str]:
-        fill_sources: dict[str, str] = {}
-        for node in module.nodes:
-            if (
-                self._node_primitive_or_forwarded_name(node) == "fill"
-                and len(node.outputs) == 1
-                and len(node.inputs) >= 2
-            ):
-                source_name = self._operand_ref_name(node.inputs[0])
-                if source_name is not None:
-                    fill_sources[node.outputs[0].name] = source_name
-        if not fill_sources:
-            return set()
-        safe: set[str] = set(fill_sources)
-        for output in module.outputs:
-            if isinstance(output, GraphValueRef) and output.name in safe:
-                safe.discard(output.name)
-            else:
-                for name in tuple(safe):
-                    if self._operand_uses_value_name(output, name):
-                        safe.discard(name)
-        for node in module.nodes:
-            scatter = self._node_primitive_or_forwarded_name(node) == "scatter"
-            for index, operand in enumerate(node.inputs):
-                for name, fill_source in tuple(fill_sources.items()):
-                    if not self._operand_uses_value_name(operand, name):
-                        continue
-                    if (
-                        scatter
-                        and index == 1
-                        and len(node.inputs) >= 3
-                        and self._operand_ref_name(node.inputs[2]) == fill_source
-                    ):
-                        continue
-                    safe.discard(name)
-            for operand in node.attrs.values():
-                for name in tuple(safe):
-                    if self._operand_uses_value_name(operand, name):
-                        safe.discard(name)
-        return safe
-
-    def _emit_dummy_fill_index_node(
-        self,
-        lines: list[str],
-        node: Any,
-        *,
-        indent: int,
-    ) -> bool:
-        if self._node_primitive_or_forwarded_name(node) != "fill" or len(node.outputs) != 1:
-            return False
-        self._add(lines, indent, f"{_py_ident(node.outputs[0].name)} = None")
-        return True
 
     def _collect_inline_value_use_counts(self, module: GraphModule) -> Counter[str]:
         counts: Counter[str] = Counter()
@@ -2677,17 +3090,16 @@ class _DirectTorchEmitter:
         *,
         original_output_names: tuple[str, ...],
         use_counts: Counter[str],
-        dummy_fill_outputs: set[str],
         module_effects: Mapping[str, GraphEffect],
     ) -> GraphExpr | None:
         if len(node.outputs) != 1 or len(original_output_names) != 1:
             return None
         original_name = original_output_names[0]
-        if original_name in dummy_fill_outputs or use_counts[original_name] != 1:
+        if use_counts[original_name] != 1:
             return None
         if graph_node_effect(node, module_effects=dict(module_effects)) != GraphEffect.TOTAL_PURE:
             return None
-        primitive = self._node_primitive_or_forwarded_name(node)
+        primitive = _normalize_primitive_op(node.op.name)
         if not (
             node.op.name in {"core.alias", "core.ascribe"}
             or node.op.name.startswith("core.binary.")
@@ -2911,7 +3323,9 @@ class _DirectTorchEmitter:
         add(lines, 4, "def load_state_dict(self, state_dict, strict=True):")
         add(lines, 8, "del strict")
         add(lines, 8, "state_dict = self._filter_state_dict(state_dict)")
-        add(lines, 8, "self.state_dict_tensors = self._place_state_dict(dict(state_dict), self.param_devices)")
+        add(lines, 8, "state = dict(state_dict)")
+        add(lines, 8, "_materialize_packed_parameters(state, self._PACKED_PARAMETER_SPECS)")
+        add(lines, 8, "self.state_dict_tensors = self._place_state_dict(state, self.param_devices)")
         add(lines, 8, "self.setup()")
         add(lines, 8, "self._symbols = self._eval_symbols()")
         add(lines, 8, "return self")
@@ -2949,6 +3363,7 @@ class _DirectTorchEmitter:
         add(lines, 8, "return plan")
         add(lines, 4, "")
         add(lines, 4, f"_STATE_KEY_FILTER_PREFIXES = {self.state_key_filter_prefixes!r}")
+        add(lines, 4, f"_PACKED_PARAMETER_SPECS = {tuple(_packed_parameter_spec_payload(item) for item in self.program.packed_parameters)!r}")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _keep_state_key(cls, key):")
@@ -3066,10 +3481,6 @@ class _DirectTorchEmitter:
         add(lines, 8, "if torch.is_tensor(src):")
         add(lines, 12, "index = self._move_to(index, x.device)")
         add(lines, 12, "src = self._move_to(src, x.device)")
-        add(lines, 12, "if index.shape == src.shape and index.numel() > 0:")
-        add(lines, 16, "first = index.reshape(-1)[0]")
-        add(lines, 16, "if bool(torch.all(index == first).item()):")
-        add(lines, 20, "return self._assign_unit_slice(x, dim, first.item(), src)")
         add(lines, 12, "return torch.scatter(x, dim=dim, index=index, src=src)")
         add(lines, 8, "index = self._move_to(index, x.device)")
         add(lines, 8, "return torch.scatter(x, dim=dim, index=index, value=src)")
@@ -3137,9 +3548,7 @@ class _DirectTorchEmitter:
         add(lines, 12, "first = state[ordered_keys[0]]")
         add(lines, 12, "first_shape = tuple(first.shape)")
         add(lines, 12, "if all(torch.is_tensor(state[key]) and tuple(state[key].shape) == first_shape for key in ordered_keys):")
-        add(lines, 16, "bank = torch.stack([state.pop(key) for key in ordered_keys], dim=0)")
-        add(lines, 16, "state[bank_key] = bank")
-        add(lines, 16, "return bank")
+        add(lines, 16, "return _materialize_joined_parameter(state, bank_key, ordered_keys, dim=0, mode='stack', remove_inputs=True)")
         add(lines, 8, "fused_sources = cls._fused_gate_up_source_bank_keys(bank_key)")
         add(lines, 8, "if fused_sources is None:")
         add(lines, 12, "return None")
@@ -3151,9 +3560,7 @@ class _DirectTorchEmitter:
         add(lines, 8, "if gate.shape[:-2] != up.shape[:-2] or gate.shape[-1:] != up.shape[-1:]:")
         add(lines, 12, "return None")
         add(lines, 8, "concat_dim = -2 if gate.ndim >= 2 else -1")
-        add(lines, 8, "bank = torch.cat([gate, up], dim=concat_dim)")
-        add(lines, 8, "state[bank_key] = bank")
-        add(lines, 8, "return bank")
+        add(lines, 8, "return _materialize_joined_parameter(state, bank_key, (gate_key, up_key), dim=concat_dim, mode='cat', remove_inputs=True)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _expert_bank_lookup(cls, state, path):")
@@ -3203,6 +3610,149 @@ class _DirectTorchEmitter:
         add(lines, 12, "return torch.matmul(x, weight_run) + (bias_run if bias_run is not None else 0)")
         add(lines, 8, "return F.linear(x, weight_run, bias_run)")
         add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _fused_linear_pair_weight_path(gate_weight_path, up_weight_path):")
+        add(lines, 8, "return '__fused_gate_up__.' + str(gate_weight_path).lstrip('@') + '||' + str(up_weight_path).lstrip('@')")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _fused_linear_pair_bias_path(gate_bias_path, up_bias_path):")
+        add(lines, 8, "return '__fused_gate_up_bias__.' + str(gate_bias_path).lstrip('@') + '||' + str(up_bias_path).lstrip('@')")
+        add(lines, 4, "")
+        add(lines, 4, "def _gate_up_linear_pair(self, x, gate_weight_path, up_weight_path, gate_bias_path='bias', up_bias_path='bias', bias=False, transpose=False):")
+        add(lines, 8, "fused_weight_path = self._fused_linear_pair_weight_path(gate_weight_path, up_weight_path)")
+        add(lines, 8, "fused_bias_path = self._fused_linear_pair_bias_path(gate_bias_path, up_bias_path)")
+        add(lines, 8, "fused_weight = self.state_dict_tensors.get(fused_weight_path)")
+        add(lines, 8, "fused_bias = self.state_dict_tensors.get(fused_bias_path)")
+        add(lines, 8, "if not torch.is_tensor(fused_weight):")
+        add(lines, 12, "gate_key = str(gate_weight_path).lstrip('@')")
+        add(lines, 12, "up_key = str(up_weight_path).lstrip('@')")
+        add(lines, 12, "gate_weight = self.state_dict_tensors.pop(gate_key)")
+        add(lines, 12, "up_weight = self.state_dict_tensors.pop(up_key)")
+        add(lines, 12, "concat_dim = -1 if transpose else -2")
+        add(lines, 12, "fused_weight = torch.cat([gate_weight, up_weight], dim=concat_dim)")
+        add(lines, 12, "self.state_dict_tensors[fused_weight_path] = fused_weight")
+        add(lines, 12, "if bias:")
+        add(lines, 16, "gate_bias = self.state_dict_tensors.pop(str(gate_bias_path).lstrip('@'), None)")
+        add(lines, 16, "up_bias = self.state_dict_tensors.pop(str(up_bias_path).lstrip('@'), None)")
+        add(lines, 16, "if torch.is_tensor(gate_bias) and torch.is_tensor(up_bias):")
+        add(lines, 20, "fused_bias = torch.cat([gate_bias, up_bias], dim=-1)")
+        add(lines, 20, "self.state_dict_tensors[fused_bias_path] = fused_bias")
+        add(lines, 8, "x = self._move_to(x, fused_weight.device)")
+        add(lines, 8, "weight_run = fused_weight.to(dtype=x.dtype) if x.is_floating_point() and fused_weight.is_floating_point() and x.dtype != fused_weight.dtype else fused_weight")
+        add(lines, 8, "bias_run = fused_bias.to(dtype=x.dtype) if fused_bias is not None and x.is_floating_point() and fused_bias.is_floating_point() and x.dtype != fused_bias.dtype else fused_bias")
+        add(lines, 8, "combined = torch.matmul(x, weight_run) + (bias_run if bias_run is not None else 0) if transpose else F.linear(x, weight_run, bias_run)")
+        add(lines, 8, "return torch.chunk(combined, 2, dim=-1)")
+        add(lines, 4, "")
+        add(lines, 4, "def _swiglu_ffn(self, x, gate_weight_path, up_weight_path, down_weight_path, gate_bias_path='bias', up_bias_path='bias', down_bias_path='bias'):")
+        add(lines, 8, "gate, up = self._gate_up_linear_pair(x, gate_weight_path, up_weight_path, gate_bias_path=gate_bias_path, up_bias_path=up_bias_path, bias=False, transpose=False)")
+        add(lines, 8, "hidden = F.silu(gate) * up")
+        add(lines, 8, "down_weight = self._param(down_weight_path)")
+        add(lines, 8, "hidden = self._move_to(hidden, down_weight.device)")
+        add(lines, 8, "return F.linear(hidden, down_weight, None)")
+        add(lines, 4, "")
+        add(lines, 4, "def _expert_linear_weight(self, x, expert_idx, weight_path, bias_value=None, transpose=False):")
+        add(lines, 8, "weight = self._param(weight_path)")
+        add(lines, 8, "x = self._move_to(x, weight.device)")
+        add(lines, 8, "expert_idx = self._move_to(expert_idx, weight.device).long()")
+        add(lines, 8, "if bias_value is not None:")
+        add(lines, 12, "bias_value = self._move_to(bias_value, weight.device)")
+        add(lines, 8, "out_dim = int(weight.shape[-1] if transpose else weight.shape[-2])")
+        add(lines, 8, "out = x.new_empty((*x.shape[:-1], out_dim))")
+        add(lines, 8, "if x.numel() == 0:")
+        add(lines, 12, "return out")
+        add(lines, 8, "flat_x = x.reshape(-1, x.shape[-1])")
+        add(lines, 8, "flat_idx = expert_idx.reshape(-1)")
+        add(lines, 8, "if flat_idx.numel() != flat_x.shape[0]:")
+        add(lines, 12, "raise ValueError(f'expert_idx shape {tuple(expert_idx.shape)} is incompatible with input shape {tuple(x.shape)}')")
+        add(lines, 8, "grouped_weight = weight if transpose else weight.transpose(-2, -1)")
+        add(lines, 8, "expert_ids_g, perm = torch.sort(flat_idx)")
+        add(lines, 8, "x_g = flat_x.index_select(0, perm)")
+        add(lines, 8, "x_run = x_g.to(dtype=grouped_weight.dtype) if x_g.is_floating_point() and grouped_weight.is_floating_point() and x_g.dtype != grouped_weight.dtype else x_g")
+        add(lines, 8, "histc_input = expert_ids_g.float() if weight.device.type in ('cpu', 'mps') else expert_ids_g.int()")
+        add(lines, 8, "tokens_per_expert = torch.histc(histc_input, bins=weight.shape[0], min=0, max=weight.shape[0] - 1)")
+        add(lines, 8, "offsets = torch.cumsum(tokens_per_expert, dim=0, dtype=torch.int32)")
+        add(lines, 8, "if hasattr(torch.nn.functional, 'grouped_mm') and weight.device.type == 'cuda':")
+        add(lines, 12, "y_g = torch.nn.functional.grouped_mm(x_run, grouped_weight, offs=offsets)")
+        add(lines, 8, "elif hasattr(torch, '_grouped_mm') and weight.device.type == 'cuda':")
+        add(lines, 12, "y_g = torch._grouped_mm(x_run, grouped_weight, offs=offsets)")
+        add(lines, 8, "else:")
+        add(lines, 12, "y_g = x_run.new_empty((x_run.shape[0], out_dim))")
+        add(lines, 12, "start = 0")
+        add(lines, 12, "for expert, end in enumerate(offsets.tolist()):")
+        add(lines, 16, "if start != end:")
+        add(lines, 20, "torch.mm(x_run[start:end], grouped_weight[expert], out=y_g[start:end])")
+        add(lines, 16, "start = end")
+        add(lines, 8, "y_g = y_g.to(dtype=x.dtype) if x.is_floating_point() and y_g.is_floating_point() and y_g.dtype != x.dtype else y_g")
+        add(lines, 8, "if bias_value is not None:")
+        add(lines, 12, "bias_g = bias_value.index_select(0, expert_ids_g)")
+        add(lines, 12, "bias_g = bias_g.to(dtype=x.dtype) if x.is_floating_point() and bias_g.is_floating_point() and bias_g.dtype != x.dtype else bias_g")
+        add(lines, 12, "y_g = y_g + bias_g")
+        add(lines, 8, "inv_perm = torch.empty_like(perm)")
+        add(lines, 8, "inv_perm[perm] = torch.arange(perm.numel(), device=perm.device)")
+        add(lines, 8, "return y_g.index_select(0, inv_perm).reshape_as(out)")
+        add(lines, 4, "")
+        add(lines, 4, "def _expert_swiglu_ffn(self, x, expert_idx, gate_weight_path, up_weight_path, down_weight_path):")
+        add(lines, 8, "gate = self._expert_linear_weight(x, expert_idx, gate_weight_path)")
+        add(lines, 8, "up = self._expert_linear_weight(x, expert_idx, up_weight_path)")
+        add(lines, 8, "hidden = F.silu(gate) * up")
+        add(lines, 8, "return self._expert_linear_weight(hidden, expert_idx, down_weight_path)")
+        add(lines, 4, "")
+        add(lines, 4, "def _expert_packed_swiglu_ffn(self, x, expert_idx, gate_up_weight_path, down_weight_path, transpose=False):")
+        add(lines, 8, "gate_up = self._expert_linear_weight(x, expert_idx, gate_up_weight_path, transpose=transpose)")
+        add(lines, 8, "gate, up = torch.chunk(gate_up, 2, dim=-1)")
+        add(lines, 8, "hidden = F.silu(gate) * up")
+        add(lines, 8, "return self._expert_linear_weight(hidden, expert_idx, down_weight_path, transpose=transpose)")
+        add(lines, 4, "")
+        add(lines, 4, "def _selected_expert_packed_swiglu_ffn(self, x, topk_scores, topk_indices, gate_up_weight_path, down_weight_path, transpose=False):")
+        add(lines, 8, "topk_indices = topk_indices.long()")
+        add(lines, 8, "expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))")
+        add(lines, 8, "values = self._expert_packed_swiglu_ffn(expanded, topk_indices, gate_up_weight_path, down_weight_path, transpose=transpose)")
+        add(lines, 8, "weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)")
+        add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
+        add(lines, 4, "")
+        add(lines, 4, "def _selected_expert_swiglu_ffn(self, x, topk_scores, topk_indices, gate_weight_path, up_weight_path, down_weight_path, transpose=False):")
+        add(lines, 8, "topk_indices = topk_indices.long()")
+        add(lines, 8, "expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))")
+        add(lines, 8, "gate = self._expert_linear_weight(expanded, topk_indices, gate_weight_path, transpose=transpose)")
+        add(lines, 8, "up = self._expert_linear_weight(expanded, topk_indices, up_weight_path, transpose=transpose)")
+        add(lines, 8, "hidden = F.silu(gate) * up")
+        add(lines, 8, "values = self._expert_linear_weight(hidden, topk_indices, down_weight_path, transpose=transpose)")
+        add(lines, 8, "weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)")
+        add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
+        add(lines, 4, "")
+        add(lines, 4, "def _selected_expert_packed_gegelu_ffn(self, x, topk_scores, topk_indices, gate_up_weight_path, gate_up_bias_path, down_weight_path, down_bias_path, limit, alpha=1.702, bias=False, transpose=False):")
+        add(lines, 8, "topk_indices = topk_indices.long()")
+        add(lines, 8, "expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))")
+        add(lines, 8, "gate_up_bias = self._param(gate_up_bias_path) if bias else None")
+        add(lines, 8, "gate_up = self._expert_linear_weight(expanded, topk_indices, gate_up_weight_path, bias_value=gate_up_bias, transpose=transpose)")
+        add(lines, 8, "hidden = self._gegelu(gate_up, limit, alpha)")
+        add(lines, 8, "down_bias = self._param(down_bias_path) if bias else None")
+        add(lines, 8, "values = self._expert_linear_weight(hidden, topk_indices, down_weight_path, bias_value=down_bias, transpose=transpose)")
+        add(lines, 8, "weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)")
+        add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
+        add(lines, 4, "")
+        add(lines, 4, "def _selected_expert_clamped_packed_swiglu_ffn(self, x, topk_scores, topk_indices, gate_up_weight_path, down_weight_path, limit, transpose=False):")
+        add(lines, 8, "topk_indices = topk_indices.long()")
+        add(lines, 8, "expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))")
+        add(lines, 8, "gate_up = self._expert_linear_weight(expanded, topk_indices, gate_up_weight_path, transpose=transpose)")
+        add(lines, 8, "gate, up = torch.chunk(gate_up, 2, dim=-1)")
+        add(lines, 8, "limit = float(limit)")
+        add(lines, 8, "gate = torch.where(torch.isinf(gate), gate, gate.clamp(max=limit))")
+        add(lines, 8, "up = torch.where(torch.isinf(up), up, up.clamp(min=-limit, max=limit))")
+        add(lines, 8, "hidden = F.silu(gate) * up")
+        add(lines, 8, "values = self._expert_linear_weight(hidden, topk_indices, down_weight_path, transpose=transpose)")
+        add(lines, 8, "weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)")
+        add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
+        add(lines, 4, "")
+        add(lines, 4, "def _selected_expert_relu2_ffn(self, x, topk_scores, topk_indices, up_weight_path, down_weight_path, transpose=False):")
+        add(lines, 8, "topk_indices = topk_indices.long()")
+        add(lines, 8, "expanded = torch.unsqueeze(x, 2).expand((*topk_indices.shape, x.shape[-1]))")
+        add(lines, 8, "up = self._expert_linear_weight(expanded, topk_indices, up_weight_path, transpose=transpose)")
+        add(lines, 8, "hidden = F.relu(up) * F.relu(up)")
+        add(lines, 8, "values = self._expert_linear_weight(hidden, topk_indices, down_weight_path, transpose=transpose)")
+        add(lines, 8, "weights = torch.unsqueeze(topk_scores.to(device=values.device, dtype=values.dtype), -1)")
+        add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
+        add(lines, 4, "")
         add(lines, 4, "def _expert_linear(self, base, x, expert_idx, bias=False, transpose=False, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "weight = self._param(self._compose_path(base, weight_leaf))")
         add(lines, 8, "x = self._move_to(x, weight.device)")
@@ -3246,7 +3796,7 @@ class _DirectTorchEmitter:
         add(lines, 8, "return y_g.index_select(0, inv_perm).reshape_as(out)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _gegelu(x, limit=None):")
+        add(lines, 4, "def _gegelu(x, limit=None, alpha=1.702):")
         add(lines, 8, "if x.shape[-1] % 2 != 0:")
         add(lines, 12, "raise ValueError('gegelu requires even last dimension')")
         add(lines, 8, "x_gelu = x[..., ::2]")
@@ -3255,7 +3805,7 @@ class _DirectTorchEmitter:
         add(lines, 12, "limit = float(limit)")
         add(lines, 12, "x_gelu = torch.where(torch.isinf(x_gelu), x_gelu, x_gelu.clamp(max=limit))")
         add(lines, 12, "x_linear = torch.where(torch.isinf(x_linear), x_linear, x_linear.clamp(min=-limit, max=limit))")
-        add(lines, 8, "return x_gelu * torch.sigmoid(1.702 * x_gelu) * (x_linear + 1.0)")
+        add(lines, 8, "return x_gelu * torch.sigmoid(float(alpha) * x_gelu) * (x_linear + 1.0)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _xielu(x, alpha_p_raw, alpha_n_raw, beta_raw, eps_raw):")
@@ -3313,8 +3863,6 @@ class _DirectTorchEmitter:
         add(lines, 8, "yes = cls._move_to(yes, device) if torch.is_tensor(yes) else yes")
         add(lines, 8, "no = cls._move_to(no, device) if torch.is_tensor(no) else no")
         add(lines, 8, "return torch.where(cond, yes, no)")
-        add(lines, 4, "")
-        add(lines, 4, "_cache_past_length = staticmethod(_common_cache_past_length)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _concat(cls, *args, dim=None):")
@@ -3433,19 +3981,11 @@ class _DirectTorchEmitter:
                 target = _dim_ident(name)
                 add(lines, 8, f"{target} = {source}")
                 local.add(name)
-        dummy_fill_outputs = self._dummy_fill_index_outputs(module)
         self._emitted_defs_stack.append({})
         self._emitted_aliases_stack.append({})
         try:
             for node in module.nodes:
-                if (
-                    len(node.outputs) == 1
-                    and node.outputs[0].name in dummy_fill_outputs
-                    and self._emit_dummy_fill_index_node(lines, node, indent=8)
-                ):
-                    pass
-                else:
-                    self._emit_node(lines, node, module_name=module.name, indent=8, local=local, symbols_dict="self._symbols")
+                self._emit_node(lines, node, module_name=module.name, indent=8, local=local, symbols_dict="self._symbols")
                 self._record_emitted_node_defs(node)
                 for output in node.outputs:
                     local.add(output.name)
@@ -3720,19 +4260,6 @@ class _DirectTorchEmitter:
             return
         if (
             len(targets) == 1
-            and _normalize_primitive_op(op) == "list_append"
-            and self._emit_list_append_node(
-                lines,
-                node,
-                target=targets[0],
-                indent=indent,
-                local=local,
-                symbols_dict=symbols_dict,
-            )
-        ):
-            return
-        if (
-            len(targets) == 1
             and _normalize_primitive_op(op) == "linear"
             and self._emit_linear_node(
                 lines,
@@ -3757,19 +4284,6 @@ class _DirectTorchEmitter:
             )
         ):
             return
-        if (
-            len(targets) == 1
-            and _normalize_primitive_op(op) == "scatter"
-            and self._emit_scalar_fill_scatter_node(
-                lines,
-                node,
-                target=targets[0],
-                indent=indent,
-                local=local,
-                symbols_dict=symbols_dict,
-            )
-        ):
-            return
         expr = self._node_expr(node, local=local, symbols_dict=symbols_dict)
         label = f"node:{module_name}:{','.join(target_names) or '_'}:{op}"
         if len(targets) == 1:
@@ -3783,73 +4297,6 @@ class _DirectTorchEmitter:
                 add(lines, indent, f"{joined} = self._profile_call({label!r}, lambda: {expr})")
             else:
                 add(lines, indent, f"{joined} = {expr}")
-
-    def _scalar_fill_value_for_scatter(
-        self,
-        index_operand: GraphOperand,
-        src_operand: GraphOperand,
-    ) -> GraphOperand | None:
-        index_operand = self._resolve_emitted_alias_operand(index_operand)
-        src_operand = self._resolve_emitted_alias_operand(src_operand)
-        fill_node: Any | None = None
-        if isinstance(index_operand, GraphExpr):
-            forwarded = self._forwarded_single_primitive_name(index_operand.op.name)
-            if _normalize_primitive_op(index_operand.op.name) != "fill" and forwarded != "fill":
-                return None
-            if len(index_operand.inputs) < 2:
-                return None
-            fill_inputs = index_operand.inputs
-        elif isinstance(index_operand, GraphValueRef):
-            fill_node = self._current_emitted_defs().get(index_operand.name)
-            forwarded = (
-                self._forwarded_single_primitive_name(fill_node.op.name)
-                if fill_node is not None
-                else None
-            )
-            if fill_node is None or (
-                _normalize_primitive_op(fill_node.op.name) != "fill"
-                and forwarded != "fill"
-            ):
-                return None
-            if len(fill_node.inputs) < 2:
-                return None
-            fill_inputs = fill_node.inputs
-        else:
-            return None
-        fill_base, fill_value = fill_inputs[:2]
-        fill_base = self._resolve_emitted_alias_operand(fill_base)
-        if (
-            isinstance(fill_base, GraphValueRef)
-            and isinstance(src_operand, GraphValueRef)
-            and fill_base.name == src_operand.name
-        ):
-            return fill_value
-        if fill_base == src_operand:
-            return fill_value
-        return None
-
-    def _emit_scalar_fill_scatter_node(
-        self,
-        lines: list[str],
-        node: Any,
-        *,
-        target: str,
-        indent: int,
-        local: set[str],
-        symbols_dict: str,
-    ) -> bool:
-        if len(node.inputs) < 4:
-            return False
-        base_operand, index_operand, src_operand, dim_operand = node.inputs[:4]
-        fill_value = self._scalar_fill_value_for_scatter(index_operand, src_operand)
-        if fill_value is None:
-            return False
-        base = self._operand_expr(base_operand, local=local, symbols_dict=symbols_dict)
-        dim = self._operand_expr(dim_operand, local=local, symbols_dict=symbols_dict)
-        index = self._operand_expr(fill_value, local=local, symbols_dict=symbols_dict)
-        src = self._operand_expr(src_operand, local=local, symbols_dict=symbols_dict)
-        self._add(lines, indent, f"{target} = self._assign_unit_slice({base}, {dim}, {index}, {src})")
-        return True
 
     def _literal_bool_arg(self, operand: GraphOperand) -> bool | None:
         if isinstance(operand, GraphLiteral) and type(operand.value) is bool:
@@ -3875,46 +4322,6 @@ class _DirectTorchEmitter:
             self._add(lines, indent, f"{target} = None")
         else:
             self._add(lines, indent, f"{target} = ({value_expr} if {flag_expr} else None)")
-
-    def _emit_list_append_node(
-        self,
-        lines: list[str],
-        node: Any,
-        *,
-        target: str,
-        indent: int,
-        local: set[str],
-        symbols_dict: str,
-    ) -> bool:
-        if len(node.inputs) != 2:
-            return False
-        values = self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
-        value = self._operand_expr(node.inputs[1], local=local, symbols_dict=symbols_dict)
-        self._add(lines, indent, f"{target} = {values}")
-        self._add(lines, indent, f"if {target} is None:")
-        self._add(lines, indent + 4, f"{target} = []")
-        self._add(lines, indent, f"{target}.append({value})")
-        return True
-
-    def _emit_list_append_expr(
-        self,
-        lines: list[str],
-        expr: GraphExpr,
-        *,
-        target: str,
-        indent: int,
-        local: set[str],
-        symbols_dict: str,
-    ) -> bool:
-        if _normalize_primitive_op(expr.op.name) != "list_append" or len(expr.inputs) != 2:
-            return False
-        values = self._operand_expr(expr.inputs[0], local=local, symbols_dict=symbols_dict)
-        value = self._operand_expr(expr.inputs[1], local=local, symbols_dict=symbols_dict)
-        self._add(lines, indent, f"{target} = {values}")
-        self._add(lines, indent, f"if {target} is None:")
-        self._add(lines, indent + 4, f"{target} = []")
-        self._add(lines, indent, f"{target}.append({value})")
-        return True
 
     def _emit_select_node_as_control(
         self,
@@ -3962,8 +4369,6 @@ class _DirectTorchEmitter:
         return True
 
     def _branch_benefits_from_control_inline(self, operand: GraphOperand, *, module_name: str) -> bool:
-        if isinstance(operand, GraphExpr) and _normalize_primitive_op(operand.op.name) == "list_append":
-            return True
         return (
             isinstance(operand, GraphExpr)
             and operand.op.name in self.modules_by_name
@@ -4020,19 +4425,6 @@ class _DirectTorchEmitter:
         symbols_dict: str,
         inline_prefix: str,
     ) -> None:
-        if (
-            len(targets) == 1
-            and isinstance(operand, GraphExpr)
-            and self._emit_list_append_expr(
-                lines,
-                operand,
-                target=targets[0],
-                indent=indent,
-                local=local,
-                symbols_dict=symbols_dict,
-            )
-        ):
-            return
         if isinstance(operand, GraphExpr) and self._emit_inline_call_expr(
             lines,
             operand,
@@ -4199,7 +4591,6 @@ class _DirectTorchEmitter:
                     )
                 return operand
 
-            dummy_fill_outputs = self._dummy_fill_index_outputs(callee_module)
             inline_use_counts = self._collect_inline_value_use_counts(callee_module)
             module_effects = infer_graph_module_effects(self.program.modules)
             for inner_index, inner_node in enumerate(callee_module.nodes, start=1):
@@ -4262,28 +4653,20 @@ class _DirectTorchEmitter:
                     rewritten_node,
                     original_output_names=original_output_names,
                     use_counts=inline_use_counts,
-                    dummy_fill_outputs=dummy_fill_outputs,
                     module_effects=module_effects,
                 )
                 if inline_expr is not None:
                     subst[original_output_names[0]] = inline_expr
                     self._record_emitted_alias(rewritten_node.outputs[0].name, inline_expr)
                     continue
-                if (
-                    len(original_output_names) == 1
-                    and original_output_names[0] in dummy_fill_outputs
-                    and self._emit_dummy_fill_index_node(lines, rewritten_node, indent=indent)
-                ):
-                    pass
-                else:
-                    self._emit_node(
-                        lines,
-                        rewritten_node,
-                        module_name=module_name,
-                        indent=indent,
-                        local=inline_local,
-                        symbols_dict=symbols_dict,
-                    )
+                self._emit_node(
+                    lines,
+                    rewritten_node,
+                    module_name=module_name,
+                    indent=indent,
+                    local=inline_local,
+                    symbols_dict=symbols_dict,
+                )
                 self._record_emitted_node_defs(rewritten_node)
                 for original_name, output in zip(
                     original_output_names,
@@ -4757,7 +5140,6 @@ class _DirectTorchEmitter:
                 )
             return operand
 
-        dummy_fill_outputs = self._dummy_fill_index_outputs(callee_module)
         inline_use_counts = self._collect_inline_value_use_counts(callee_module)
         module_effects = infer_graph_module_effects(self.program.modules)
         for inner_index, inner_node in enumerate(callee_module.nodes, start=1):
@@ -4815,28 +5197,20 @@ class _DirectTorchEmitter:
                 rewritten_node,
                 original_output_names=original_output_names,
                 use_counts=inline_use_counts,
-                dummy_fill_outputs=dummy_fill_outputs,
                 module_effects=module_effects,
             )
             if inline_expr is not None:
                 subst[original_output_names[0]] = inline_expr
                 self._record_emitted_alias(rewritten_node.outputs[0].name, inline_expr)
                 continue
-            if (
-                len(original_output_names) == 1
-                and original_output_names[0] in dummy_fill_outputs
-                and self._emit_dummy_fill_index_node(lines, rewritten_node, indent=indent)
-            ):
-                pass
-            else:
-                self._emit_node(
-                    lines,
-                    rewritten_node,
-                    module_name=module_name,
-                    indent=indent,
-                    local=inline_local,
-                    symbols_dict=symbols_dict,
-                )
+            self._emit_node(
+                lines,
+                rewritten_node,
+                module_name=module_name,
+                indent=indent,
+                local=inline_local,
+                symbols_dict=symbols_dict,
+            )
             self._record_emitted_node_defs(rewritten_node)
             for original_name, output in zip(
                 original_output_names,
@@ -4925,14 +5299,6 @@ class _DirectTorchEmitter:
         if op in self.method_names:
             if op in self.global_symbol_names and not node.inputs and not node.attrs:
                 return f"{symbols_dict}[{op!r}]"
-            if op in {"Cache.past_length", "Cache.past_length_kv"}:
-                args = [
-                    self._operand_expr(x, local=local, symbols_dict=symbols_dict)
-                    for x in node.inputs
-                ]
-                if len(args) != 1:
-                    raise ValueError(f"{op} expects one argument")
-                return f"self._cache_past_length({args[0]})"
             args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
             args.extend(f"{key}={self._operand_expr(value, local=local, symbols_dict=symbols_dict)}" for key, value in node.attrs.items())
             call = f"self.{self.method_names[op]}({', '.join(args)})"
@@ -4991,6 +5357,10 @@ class _DirectTorchEmitter:
     ) -> str:
         left = self._operand_expr(left_operand, local=local, symbols_dict=symbols_dict)
         right = self._operand_expr(right_operand, local=local, symbols_dict=symbols_dict)
+        if isinstance(left_operand, GraphExpr):
+            left = f"({left})"
+        if isinstance(right_operand, GraphExpr):
+            right = f"({right})"
         left_is_null = isinstance(left_operand, GraphLiteral) and left_operand.value is None
         right_is_null = isinstance(right_operand, GraphLiteral) and right_operand.value is None
         if op in {"==", "!="} and (left_is_null or right_is_null):
@@ -5119,6 +5489,81 @@ class _DirectTorchEmitter:
                 f"(self._rope_apply_factors({args[0]}, {args[2]}, {args[3]}, {interleaved}), "
                 f"self._rope_apply_factors({args[1]}, {args[2]}, {args[3]}, {interleaved}))"
             )
+        if primitive == "assign_unit_slice":
+            if len(args) < 4:
+                raise ValueError("_assign_unit_slice expects x, dim, index, src")
+            return f"self._assign_unit_slice({args[0]}, {args[1]}, {args[2]}, {args[3]})"
+        if primitive == "_torch_gate_up_linear_pair":
+            if len(args) < 7:
+                raise ValueError("__torch_gate_up_linear_pair expects input, gate/up weight paths, gate/up bias paths, bias, and transpose")
+            return (
+                f"self._gate_up_linear_pair({args[0]}, {args[1]}, {args[2]}, "
+                f"gate_bias_path={args[3]}, up_bias_path={args[4]}, "
+                f"bias={bool_arg(5)}, transpose={bool_arg(6)})"
+            )
+        if primitive == "_torch_swiglu_ffn":
+            if len(args) < 7:
+                raise ValueError("__torch_swiglu_ffn expects input, gate/up/down weight paths, and gate/up/down bias paths")
+            return (
+                f"self._swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, "
+                f"gate_bias_path={args[4]}, up_bias_path={args[5]}, down_bias_path={args[6]})"
+            )
+        if primitive == "_torch_expert_swiglu_ffn":
+            if len(args) < 5:
+                raise ValueError("__torch_expert_swiglu_ffn expects input, expert indices, and gate/up/down weight paths")
+            return f"self._expert_swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})"
+        if primitive == "_torch_expert_packed_swiglu_ffn":
+            if len(args) < 5:
+                raise ValueError("__torch_expert_packed_swiglu_ffn expects input, expert indices, gate-up/down weight paths, and transpose")
+            return f"self._expert_packed_swiglu_ffn({args[0]}, {args[1]}, {args[2]}, {args[3]}, transpose={bool_arg(4)})"
+        if primitive == "_torch_selected_expert_packed_swiglu_ffn":
+            if len(args) < 6:
+                raise ValueError("__torch_selected_expert_packed_swiglu_ffn expects input, top-k scores/indices, gate-up/down weight paths, and transpose")
+            return (
+                f"self._selected_expert_packed_swiglu_ffn("
+                f"{args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, transpose={bool_arg(5)})"
+            )
+        if primitive == "_torch_selected_expert_swiglu_ffn":
+            if len(args) < 7:
+                raise ValueError("__torch_selected_expert_swiglu_ffn expects input, top-k scores/indices, gate/up/down weight paths, and transpose")
+            return (
+                f"self._selected_expert_swiglu_ffn("
+                f"{args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, transpose={bool_arg(6)})"
+            )
+        if primitive == "_torch_selected_expert_packed_gegelu_ffn":
+            if len(args) < 10:
+                raise ValueError("__torch_selected_expert_packed_gegelu_ffn expects input, top-k scores/indices, gate-up/down weight/bias paths, limit, optional alpha, bias, and transpose")
+            alpha_arg = args[8] if len(args) >= 11 else "1.702"
+            bias_idx = 9 if len(args) >= 11 else 8
+            transpose_idx = 10 if len(args) >= 11 else 9
+            return (
+                f"self._selected_expert_packed_gegelu_ffn("
+                f"{args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]}, "
+                f"alpha={alpha_arg}, bias={bool_arg(bias_idx)}, transpose={bool_arg(transpose_idx)})"
+            )
+        if primitive == "_torch_selected_expert_clamped_packed_swiglu_ffn":
+            if len(args) < 7:
+                raise ValueError("__torch_selected_expert_clamped_packed_swiglu_ffn expects input, top-k scores/indices, gate-up/down weight paths, limit, and transpose")
+            return (
+                f"self._selected_expert_clamped_packed_swiglu_ffn("
+                f"{args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, transpose={bool_arg(6)})"
+            )
+        if primitive == "_torch_selected_expert_relu2_ffn":
+            if len(args) < 6:
+                raise ValueError("__torch_selected_expert_relu2_ffn expects input, top-k scores/indices, up/down weight paths, and transpose")
+            return (
+                f"self._selected_expert_relu2_ffn("
+                f"{args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, transpose={bool_arg(5)})"
+            )
+        if primitive == "_torch_weighted_topk_sum":
+            if len(args) < 2:
+                raise ValueError("__torch_weighted_topk_sum expects expert values and top-k scores")
+            return f"torch.sum({args[0]} * torch.unsqueeze({args[1]}.to(device={args[0]}.device, dtype={args[0]}.dtype), -1), dim=2, keepdim=False)"
+        if primitive == "_torch_topk_normalize":
+            if len(args) < 2:
+                raise ValueError("__torch_topk_normalize expects top-k weights and a dtype reference")
+            normalized = f"({args[0]} / torch.sum({args[0]}, dim=-1, keepdim=True))"
+            return f"{normalized}.to(device={args[1]}.device, dtype={args[1]}.dtype)"
         if primitive in binary_primitives and len(node.inputs) >= 2:
             return self._binary_expr(
                 binary_primitives[primitive],
@@ -5129,13 +5574,6 @@ class _DirectTorchEmitter:
                 symbols_dict=symbols_dict,
             )
         if primitive == "tensor_size":
-            static_size = self._static_tensor_size_expr(
-                node,
-                local=local,
-                symbols_dict=symbols_dict,
-            )
-            if static_size is not None:
-                return static_size
             return f"{args[0]}.shape[{int_arg(1)}]"
         if primitive == "params_param":
             return f"self._param({args[0]})"
@@ -5218,14 +5656,6 @@ class _DirectTorchEmitter:
             return f"({y_float}.to(dtype={x}.dtype) if {cast_float} else {y})"
         if primitive == "conv1d":
             return f"self._conv1d({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]}, {args[5]}, {args[6]}, {args[7]})"
-        if primitive == "scatter" and len(node.inputs) >= 4:
-            fill_value = self._scalar_fill_value_for_scatter(node.inputs[1], node.inputs[2])
-            if fill_value is not None:
-                base = self._operand_expr(node.inputs[0], local=local, symbols_dict=symbols_dict)
-                dim = self._operand_expr(node.inputs[3], local=local, symbols_dict=symbols_dict)
-                index = self._operand_expr(fill_value, local=local, symbols_dict=symbols_dict)
-                src = self._operand_expr(node.inputs[2], local=local, symbols_dict=symbols_dict)
-                return f"self._assign_unit_slice({base}, {dim}, {index}, {src})"
         if primitive == "tensor_like":
             dtype = args[2] if len(args) > 2 else "None"
             target_dtype = f"({args[1]}.dtype if self._dtype_from_name({dtype}) is None else self._dtype_from_name({dtype}))"
@@ -5274,6 +5704,7 @@ class _DirectTorchEmitter:
             "require": lambda: f"self._require_value({args[0]})",
             "gather": lambda: f"torch.gather({args[0]}, dim={int_arg(2, '-1')}, index=self._move_to({args[1]}, {args[0]}.device))",
             "scatter": lambda: f"self._scatter({args[0]}, {args[1]}, {args[2]}, {int_arg(3, '-1')})",
+            "assign_unit_slice": lambda: f"self._assign_unit_slice({args[0]}, {args[1]}, {args[2]}, {args[3]})",
             "index_add": lambda: f"torch.index_add({args[0]}, dim={int_arg(3, '0')}, index=self._move_to({args[1]}, {args[0]}.device), source=self._move_to({args[2]}, {args[0]}.device))",
             "and": lambda: (
                 f"(lambda _a, _b: torch.logical_and(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
@@ -5324,31 +5755,6 @@ class _DirectTorchEmitter:
         if primitive in simple:
             return simple[primitive]()
         raise NotImplementedError(f"direct codegen2-torch unsupported graph op {primitive!r}")
-
-    def _static_tensor_size_expr(self, node: Any, *, local: set[str], symbols_dict: str) -> str | None:
-        if len(node.inputs) != 2:
-            return None
-        tensor_operand = node.inputs[0]
-        dim_operand = node.inputs[1]
-        if not isinstance(dim_operand, GraphLiteral) or not isinstance(dim_operand.value, int):
-            return None
-        dims = _tensor_dims_from_type(getattr(tensor_operand, "type_expr", None))
-        if dims is None:
-            return None
-        axis = dim_operand.value if dim_operand.value >= 0 else len(dims) + dim_operand.value
-        if axis < 0 or axis >= len(dims):
-            return None
-        dim = dims[axis]
-        if isinstance(dim, str) and dim.startswith(".."):
-            return None
-        dim_names = {
-            name
-            for name in dim_token_names(dim)
-            if isinstance(name, str) and name.isidentifier()
-        }
-        if any(name in self.global_symbol_names and name not in local for name in dim_names):
-            return None
-        return self._dim_token_expr(dim, local=local, symbols_dict=symbols_dict)
 
     def _static_int_tuple_expr(
         self,
@@ -5493,14 +5899,6 @@ class _DirectTorchEmitter:
                 and not operand.attrs
             ):
                 return f"{symbols_dict}[{operand.op.name!r}]"
-            if operand.op.name in {"Cache.past_length", "Cache.past_length_kv"}:
-                args = [
-                    self._operand_expr(item, local=local, symbols_dict=symbols_dict)
-                    for item in operand.inputs
-                ]
-                if len(args) != 1:
-                    raise ValueError(f"{operand.op.name} expects one argument")
-                return f"self._cache_past_length({args[0]})"
             if operand.op.name in self.method_names:
                 args = [
                     self._operand_expr(item, local=local, symbols_dict=symbols_dict)
@@ -5580,8 +5978,8 @@ def emit_model_code_from_graph_ir(
             "import torch",
             "from torch import nn",
             "from torch.nn import functional as F",
+            "from brainsurgery.synapse.axon.codegen2_torch.core import _materialize_joined_parameter, _materialize_packed_parameters",
             "from brainsurgery.synapse.axon.codegen2_common import (",
-            "    cache_past_length as _common_cache_past_length,",
             "    compose_path as _common_compose_path,",
             "    config_value as _common_config_value,",
             "    has_config_value as _common_has_config_value,",

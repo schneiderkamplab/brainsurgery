@@ -131,10 +131,19 @@ class GraphModule:
 
 
 @dataclass(frozen=True)
+class GraphPackedParameter:
+    output: GraphPath
+    inputs: tuple[GraphPath, ...]
+    dim: int
+    remove_inputs: bool = True
+
+
+@dataclass(frozen=True)
 class GraphProgram:
     modules: tuple[GraphModule, ...]
     main_module: str
     pragmas: dict[str, object]
+    packed_parameters: tuple[GraphPackedParameter, ...] = ()
 
 
 @dataclass

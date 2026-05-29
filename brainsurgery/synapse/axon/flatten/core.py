@@ -1546,6 +1546,7 @@ def _extract_cond_branch_helper_expr(
     ctx: _FlattenCtx,
     globals_by_name: set[str],
     known_types: Mapping[str, TypeExpr],
+    branch_non_null_names: set[str],
     branch_stmts: tuple[AxonStatement, ...],
     branch_expr: AxonExpr,
     helper_suffix: str,
@@ -1575,7 +1576,11 @@ def _extract_cond_branch_helper_expr(
             local_bound.update(name for name in stmt.targets if name != "_")
 
     helper_params = tuple(
-        AxonParam(name=name, type_expr=known_types.get(name, ctx.fresh_type_var()))
+        _helper_param_for_free_name(
+            name,
+            known_types.get(name, ctx.fresh_type_var()),
+            force_non_null=name in branch_non_null_names,
+        )
         for name in free_names
     )
     helper_return_expr: AxonExpr
@@ -1675,6 +1680,41 @@ def _extract_cond_branch_helper_expr(
     return helper_call, helper_module
 
 
+def _helper_param_for_free_name(name: str, type_expr: TypeExpr, *, force_non_null: bool = False) -> AxonParam:
+    if isinstance(type_expr, TypeOptional) and force_non_null:
+        return AxonParam(name=name, type_expr=type_expr.inner)
+    if isinstance(type_expr, TypeOptional):
+        return AxonParam(name=name, optional=True, type_expr=type_expr.inner)
+    return AxonParam(name=name, type_expr=type_expr)
+
+
+def _condition_non_null_names_for_branch(
+    condition: AxonExpr,
+    *,
+    branch_value: bool,
+    conditions: Mapping[str, AxonExpr],
+) -> set[str]:
+    if isinstance(condition, AxonExprName):
+        condition = conditions.get(condition.name, condition)
+    if isinstance(condition, AxonExprAscribe | AxonExprParen):
+        return _condition_non_null_names_for_branch(
+            condition.inner if isinstance(condition, AxonExprParen) else condition.expr,
+            branch_value=branch_value,
+            conditions=conditions,
+        )
+    if not isinstance(condition, AxonExprBinary) or condition.op not in {"==", "!="}:
+        return set()
+    equality_branch = branch_value if condition.op == "==" else not branch_value
+    if equality_branch:
+        return set()
+    names: set[str] = set()
+    if isinstance(condition.left, AxonExprName) and isinstance(condition.right, AxonExprNull):
+        names.add(condition.left.name)
+    if isinstance(condition.right, AxonExprName) and isinstance(condition.left, AxonExprNull):
+        names.add(condition.right.name)
+    return names
+
+
 def _extract_cond_helpers_from_statements(
     statements: tuple[AxonStatement, ...],
     *,
@@ -1683,12 +1723,24 @@ def _extract_cond_helpers_from_statements(
     globals_by_name: set[str],
     local_bound_names: set[str],
     known_types: Mapping[str, TypeExpr],
+    conditions: Mapping[str, AxonExpr] | None = None,
 ) -> tuple[tuple[AxonStatement, ...], tuple[AxonDefinition, ...]]:
     out: list[AxonStatement] = []
     helpers: list[AxonDefinition] = []
     local = set(local_bound_names)
+    local_conditions = dict(conditions or {})
     for stmt in statements:
         if isinstance(stmt, AxonBind) and isinstance(stmt.expr, AxonExprTernary):
+            true_non_null = _condition_non_null_names_for_branch(
+                stmt.expr.cond,
+                branch_value=True,
+                conditions=local_conditions,
+            )
+            false_non_null = _condition_non_null_names_for_branch(
+                stmt.expr.cond,
+                branch_value=False,
+                conditions=local_conditions,
+            )
             true_payload = _extract_cond_branch_expr_payload(stmt.expr.true_expr)
             false_payload = _extract_cond_branch_expr_payload(stmt.expr.false_expr)
             if true_payload is not None and false_payload is not None:
@@ -1699,6 +1751,7 @@ def _extract_cond_helpers_from_statements(
                     ctx=ctx,
                     globals_by_name=globals_by_name,
                     known_types=known_types,
+                    branch_non_null_names=true_non_null,
                     branch_stmts=true_pre,
                     branch_expr=true_expr_payload,
                     helper_suffix="true",
@@ -1708,6 +1761,7 @@ def _extract_cond_helpers_from_statements(
                     ctx=ctx,
                     globals_by_name=globals_by_name,
                     known_types=known_types,
+                    branch_non_null_names=false_non_null,
                     branch_stmts=false_pre,
                     branch_expr=false_expr_payload,
                     helper_suffix="else",
@@ -1729,6 +1783,16 @@ def _extract_cond_helpers_from_statements(
                 local.update(name for name in stmt.targets if name != "_")
                 continue
         if isinstance(stmt, AxonCond):
+            true_non_null = _condition_non_null_names_for_branch(
+                stmt.cond,
+                branch_value=True,
+                conditions=local_conditions,
+            )
+            false_non_null = _condition_non_null_names_for_branch(
+                stmt.cond,
+                branch_value=False,
+                conditions=local_conditions,
+            )
             true_body, true_helpers = _extract_cond_helpers_from_statements(
                 stmt.true_body,
                 module_name=module_name,
@@ -1736,6 +1800,7 @@ def _extract_cond_helpers_from_statements(
                 globals_by_name=globals_by_name,
                 local_bound_names=local,
                 known_types=known_types,
+                conditions=local_conditions,
             )
             false_body, false_helpers = _extract_cond_helpers_from_statements(
                 stmt.false_body,
@@ -1744,6 +1809,7 @@ def _extract_cond_helpers_from_statements(
                 globals_by_name=globals_by_name,
                 local_bound_names=local,
                 known_types=known_types,
+                conditions=local_conditions,
             )
             helpers.extend(true_helpers)
             helpers.extend(false_helpers)
@@ -1761,6 +1827,7 @@ def _extract_cond_helpers_from_statements(
                     ctx=ctx,
                     globals_by_name=globals_by_name,
                     known_types=known_types,
+                    branch_non_null_names=true_non_null,
                     branch_stmts=true_binding[1],
                     branch_expr=true_binding[2],
                     helper_suffix="true",
@@ -1770,6 +1837,7 @@ def _extract_cond_helpers_from_statements(
                     ctx=ctx,
                     globals_by_name=globals_by_name,
                     known_types=known_types,
+                    branch_non_null_names=false_non_null,
                     branch_stmts=false_binding[1],
                     branch_expr=false_binding[2],
                     helper_suffix="else",
@@ -1814,6 +1882,7 @@ def _extract_cond_helpers_from_statements(
                     ctx=ctx,
                     globals_by_name=globals_by_name,
                     known_types=known_types,
+                    branch_non_null_names=true_non_null,
                     branch_stmts=true_pre,
                     branch_expr=true_values_expr,
                     helper_suffix="true",
@@ -1823,6 +1892,7 @@ def _extract_cond_helpers_from_statements(
                     ctx=ctx,
                     globals_by_name=globals_by_name,
                     known_types=known_types,
+                    branch_non_null_names=false_non_null,
                     branch_stmts=false_pre,
                     branch_expr=false_values_expr,
                     helper_suffix="else",
@@ -1900,6 +1970,14 @@ def _extract_cond_helpers_from_statements(
             local.update(name for name in (stmt.targets or ()) if name != "_")
             local.update(name for name in (stmt.carry or ()) if name != "_")
             continue
+        if (
+            isinstance(stmt, AxonBind)
+            and len(stmt.targets) == 1
+            and stmt.targets[0] != "_"
+            and isinstance(stmt.expr, AxonExprBinary)
+            and stmt.expr.op in {"==", "!="}
+        ):
+            local_conditions[stmt.targets[0]] = stmt.expr
         out.append(stmt)
         if isinstance(stmt, AxonBind):
             local.update(name for name in stmt.targets if name != "_")
@@ -2402,7 +2480,11 @@ def _flatten_module(
         known_types[module.path_param] = TypePath()
     for param in expanded_params:
         if param.type_expr is not None:
-            known_types[param.name] = param.type_expr
+            known_types[param.name] = (
+                TypeOptional(param.type_expr)
+                if param.optional and not isinstance(param.type_expr, TypeOptional)
+                else param.type_expr
+            )
     statements = _flatten_statements(
         _module_body_statements(module),
         ctx,

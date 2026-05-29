@@ -917,6 +917,7 @@ def _run_benchmark_jobs_parallel(
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
     active_processes: dict[int, Any] = {}
+    active_worker_specs: dict[int, int] = {}
     retry_counts: dict[int, int] = {}
     results_by_index: list[dict[str, Any] | None] = [None] * len(pairs)
     progress = tqdm(total=len(pairs), desc="synapse axon-benchmark", unit="pair")
@@ -932,11 +933,24 @@ def _run_benchmark_jobs_parallel(
         f"max_concurrent={len(resolved_worker_specs)}"
     )
 
-    def _spawn_next_pair(pair_index: int) -> None:
+    def _next_free_worker_spec_index() -> int | None:
         nonlocal next_device_index
+        active_spec_indices = set(active_worker_specs.values())
+        if len(active_spec_indices) >= len(resolved_worker_specs):
+            return None
+        for offset in range(len(resolved_worker_specs)):
+            spec_index = (next_device_index + offset) % len(resolved_worker_specs)
+            if spec_index not in active_spec_indices:
+                next_device_index = (spec_index + 1) % len(resolved_worker_specs)
+                return spec_index
+        return None
+
+    def _spawn_next_pair(pair_index: int) -> bool:
         pair = pairs[pair_index]
-        worker_spec = resolved_worker_specs[next_device_index % len(resolved_worker_specs)]
-        next_device_index += 1
+        worker_spec_index = _next_free_worker_spec_index()
+        if worker_spec_index is None:
+            return False
+        worker_spec = resolved_worker_specs[worker_spec_index]
         process = ctx.Process(
             target=_run_benchmark_worker_loop,
             args=(
@@ -952,12 +966,14 @@ def _run_benchmark_jobs_parallel(
         )
         process.start()
         active_processes[pair_index] = process
+        active_worker_specs[pair_index] = worker_spec_index
         parent_logger.log(
             "child_start "
             f"pair_index={pair_index} pid={process.pid} device={worker_spec.label or worker_spec.run_device} "
             f"axon={pair.axon_file.name} checkpoint={pair.checkpoint_id} model_dir={pair.model_dir} "
             f"log_path={worker_log_display_path(log_dir, axon_name=pair.axon_file.stem.replace(' ', '_'), model_name=pair.model_dir.name.replace(' ', '_'), pid=process.pid)}"
         )
+        return True
 
     def _requeue_pair(pair_index: int, *, reason: str) -> bool:
         retry_count = retry_counts.get(pair_index, 0)
@@ -977,7 +993,10 @@ def _run_benchmark_jobs_parallel(
     try:
         while pending_indices or active_processes:
             while pending_indices and len(active_processes) < len(resolved_worker_specs):
-                _spawn_next_pair(pending_indices.pop(0))
+                next_pair_index = pending_indices.pop(0)
+                if not _spawn_next_pair(next_pair_index):
+                    pending_indices.insert(0, next_pair_index)
+                    break
 
             try:
                 pair_index, result, error, captured_output, log_path = result_queue.get(timeout=1.0)
@@ -993,6 +1012,7 @@ def _run_benchmark_jobs_parallel(
                     published_result = _read_worker_result_file(actual_log_path)
                     if published_result is not None:
                         active_processes.pop(active_pair_index, None)
+                        active_worker_specs.pop(active_pair_index, None)
                         process.join(timeout=1.0)
                         if process.is_alive():
                             process.terminate()
@@ -1026,6 +1046,7 @@ def _run_benchmark_jobs_parallel(
                         f"model_dir={pair.model_dir} log_path={log_path}"
                     )
                     active_processes.pop(active_pair_index, None)
+                    active_worker_specs.pop(active_pair_index, None)
                     reason = (
                         (
                             f"worker exited abnormally with exit code {dead_exitcode}"
@@ -1054,6 +1075,7 @@ def _run_benchmark_jobs_parallel(
 
             pair = pairs[int(pair_index)]
             process = active_processes.pop(int(pair_index), None)
+            active_worker_specs.pop(int(pair_index), None)
             exitcode: int | None = None
             if process is not None:
                 process.join(timeout=5.0)

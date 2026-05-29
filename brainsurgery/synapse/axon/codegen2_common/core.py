@@ -127,13 +127,6 @@ def read_config_value(
     return value
 
 
-def cache_past_length(cache: Any) -> int:
-    if cache is None:
-        return 0
-    key, _ = cache[0]
-    return int(key.shape[-2])
-
-
 def execute_common_primitive(
     *,
     primitive: str,
@@ -183,7 +176,6 @@ def execute_common_primitive(
 
 
 __all__ = [
-    "cache_past_length",
     "config_value",
     "compose_path",
     "execute_common_primitive",

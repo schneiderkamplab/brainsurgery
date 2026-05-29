@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
+from weakref import WeakValueDictionary
 
 from .core import (
     GraphExpr,
@@ -18,13 +19,112 @@ from .core import (
 ProvenanceKind = Literal["unknown", "input", "literal", "path", "global", "op", "tuple"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class GraphProvenance:
     kind: ProvenanceKind
     name: str | None = None
     value: object | None = None
     op: str | None = None
     args: tuple["GraphProvenance", ...] = ()
+
+    def __hash__(self) -> int:
+        return _provenance_hash(self)
+
+    def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, GraphProvenance):
+            return False
+        return _provenance_equal(self, other)
+
+
+_PROVENANCE_INTERN: WeakValueDictionary[tuple[object, ...], GraphProvenance] = WeakValueDictionary()
+_SUBST_CACHE: dict[tuple[GraphProvenance, tuple[tuple[str, GraphProvenance], ...]], GraphProvenance] = {}
+
+
+def _make_provenance(
+    kind: ProvenanceKind,
+    *,
+    name: str | None = None,
+    value: object | None = None,
+    op: str | None = None,
+    args: tuple[GraphProvenance, ...] = (),
+) -> GraphProvenance:
+    key = (kind, name, _hashable_value(value), op, tuple(id(arg) for arg in args))
+    cached = _PROVENANCE_INTERN.get(key)
+    if cached is not None:
+        return cached
+    provenance = GraphProvenance(kind, name=name, value=value, op=op, args=args)
+    _PROVENANCE_INTERN[key] = provenance
+    return provenance
+
+
+def _hashable_value(value: object | None) -> object:
+    if isinstance(value, list):
+        return tuple(_hashable_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_hashable_value(item) for item in value)
+    if isinstance(value, dict):
+        return tuple(sorted((_hashable_value(key), _hashable_value(item)) for key, item in value.items()))
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
+
+def _provenance_hash(provenance: GraphProvenance) -> int:
+    cached = getattr(provenance, "_hash_cache", None)
+    if cached is not None:
+        return cached
+    value = hash((
+        provenance.kind,
+        provenance.name,
+        _hashable_value(provenance.value),
+        provenance.op,
+        tuple(_provenance_hash(arg) for arg in provenance.args),
+    ))
+    object.__setattr__(provenance, "_hash_cache", value)
+    return value
+
+
+def _provenance_equal(left: GraphProvenance, right: GraphProvenance) -> bool:
+    if _provenance_hash(left) != _provenance_hash(right):
+        return False
+    if (
+        left.kind != right.kind
+        or left.name != right.name
+        or _hashable_value(left.value) != _hashable_value(right.value)
+        or left.op != right.op
+        or len(left.args) != len(right.args)
+    ):
+        return False
+    return all(_provenance_equal(left_arg, right_arg) for left_arg, right_arg in zip(left.args, right.args))
+
+
+def _provenance_mapping_fingerprint(
+    values: dict[str, dict[str, GraphProvenance]] | dict[str, tuple[GraphProvenance, ...]],
+) -> tuple[tuple[object, ...], ...]:
+    items: list[tuple[object, ...]] = []
+    for module_name, module_values in sorted(values.items()):
+        if isinstance(module_values, dict):
+            items.append(
+                (
+                    module_name,
+                    tuple(
+                        (name, _provenance_hash(provenance))
+                        for name, provenance in sorted(module_values.items())
+                    ),
+                )
+            )
+        else:
+            items.append(
+                (
+                    module_name,
+                    tuple(_provenance_hash(provenance) for provenance in module_values),
+                )
+            )
+    return tuple(items)
 
 
 @dataclass(frozen=True)
@@ -67,7 +167,7 @@ class GraphProvenanceAnalysis:
     module_output_facts: dict[str, tuple[tuple[GraphDerivedProvenanceFact, ...], ...]]
 
 
-UNKNOWN_PROVENANCE = GraphProvenance("unknown")
+UNKNOWN_PROVENANCE = _make_provenance("unknown")
 
 
 def infer_graph_provenance(program: GraphProgram) -> GraphProvenanceAnalysis:
@@ -88,7 +188,7 @@ def infer_graph_provenance(program: GraphProgram) -> GraphProvenanceAnalysis:
             return ()
         visiting.add(module_name)
         input_prov = {
-            value.name: GraphProvenance("input", name=value.name)
+            value.name: _make_provenance("input", name=value.name)
             for value in module.inputs
         }
         local = _infer_module_local_provenance(
@@ -119,7 +219,7 @@ def infer_graph_provenance(program: GraphProgram) -> GraphProvenanceAnalysis:
     input_prov: dict[str, dict[str, GraphProvenance]] = {
         name: {
             value.name: (
-                GraphProvenance("input", name=value.name)
+                _make_provenance("input", name=value.name)
                 if name == program.main_module
                 else UNKNOWN_PROVENANCE
             )
@@ -148,13 +248,16 @@ def infer_graph_provenance(program: GraphProgram) -> GraphProvenanceAnalysis:
         module_summary=module_summary,
         global_names=global_names,
     )
+    input_fp = _provenance_mapping_fingerprint(input_prov)
+    local_fp = _provenance_mapping_fingerprint(local_prov)
+    output_fp = _provenance_mapping_fingerprint(output_prov)
     for _ in range(64):
         next_input = {}
         for module_name in reachable:
             module = modules_by_name[module_name]
             if module_name == program.main_module:
                 next_input[module_name] = {
-                    value.name: GraphProvenance("input", name=value.name)
+                    value.name: _make_provenance("input", name=value.name)
                     for value in module.inputs
                 }
                 continue
@@ -185,11 +288,10 @@ def infer_graph_provenance(program: GraphProgram) -> GraphProvenanceAnalysis:
             module_summary=module_summary,
             global_names=global_names,
         )
-        if (
-            next_input == input_prov
-            and next_local == local_prov
-            and next_output == output_prov
-        ):
+        next_input_fp = _provenance_mapping_fingerprint(next_input)
+        next_local_fp = _provenance_mapping_fingerprint(next_local)
+        next_output_fp = _provenance_mapping_fingerprint(next_output)
+        if next_input_fp == input_fp and next_local_fp == local_fp and next_output_fp == output_fp:
             input_prov = next_input
             local_prov = next_local
             output_prov = next_output
@@ -198,6 +300,9 @@ def infer_graph_provenance(program: GraphProgram) -> GraphProvenanceAnalysis:
         local_prov = next_local
         output_prov = next_output
         callsites = next_calls
+        input_fp = next_input_fp
+        local_fp = next_local_fp
+        output_fp = next_output_fp
     else:
         raise RuntimeError("graph provenance analysis did not converge after 64 iterations")
 
@@ -396,10 +501,34 @@ def _infer_module_local_provenance(
             global_names=global_names,
         )
         if len(outputs) != len(node.outputs):
+            outputs = _expand_destructured_output_provenance(outputs, output_count=len(node.outputs))
+        if len(outputs) != len(node.outputs):
             outputs = tuple(UNKNOWN_PROVENANCE for _ in node.outputs)
         for value, prov in zip(node.outputs, outputs, strict=True):
             local[value.name] = prov
     return local
+
+
+def _expand_destructured_output_provenance(
+    outputs: tuple[GraphProvenance, ...],
+    *,
+    output_count: int,
+) -> tuple[GraphProvenance, ...]:
+    if output_count <= 1 or len(outputs) != 1:
+        return outputs
+    provenance = outputs[0]
+    if provenance.kind == "tuple" and len(provenance.args) == output_count:
+        return provenance.args
+    if provenance.kind == "op" and provenance.op is not None:
+        return tuple(
+            _make_provenance(
+                "op",
+                op=f"{provenance.op}[{index}]",
+                args=provenance.args,
+            )
+            for index in range(output_count)
+        )
+    return outputs
 
 
 def _node_output_provenance(
@@ -412,7 +541,7 @@ def _node_output_provenance(
 ) -> tuple[GraphProvenance, ...]:
     if node.op.name == "core.repeat":
         return tuple(
-            GraphProvenance(
+            _make_provenance(
                 "op",
                 op="core.repeat",
                 args=tuple(
@@ -446,7 +575,7 @@ def _node_output_provenance(
         )
     if len(node.outputs) == 1:
         return (
-            GraphProvenance(
+            _make_provenance(
                 "op",
                 op=node.op.name,
                 args=tuple(
@@ -462,7 +591,7 @@ def _node_output_provenance(
             ),
         )
     return tuple(
-        GraphProvenance(
+        _make_provenance(
             "op",
             op=f"{node.op.name}[{index}]",
             args=tuple(
@@ -492,13 +621,13 @@ def _operand_provenance(
         if operand.name in local_provenance:
             return local_provenance[operand.name]
         if operand.name in global_names:
-            return GraphProvenance("global", name=operand.name)
-        return GraphProvenance("input", name=operand.name)
+            return _make_provenance("global", name=operand.name)
+        return _make_provenance("input", name=operand.name)
     if isinstance(operand, GraphLiteral):
-        return GraphProvenance("literal", value=operand.value)
+        return _make_provenance("literal", value=operand.value)
     if isinstance(operand, GraphPath):
         prefix = "@@" if operand.absolute else "@"
-        return GraphProvenance("path", value=prefix + ".".join(operand.parts))
+        return _make_provenance("path", value=prefix + ".".join(operand.parts))
     if isinstance(operand, GraphExpr):
         actuals = tuple(
             _operand_provenance(
@@ -515,7 +644,7 @@ def _operand_provenance(
             outputs = _instantiate_summary(modules_by_name[operand.op.name], summary, actuals)
             if len(outputs) == 1:
                 return outputs[0]
-        return GraphProvenance("op", op=operand.op.name, args=actuals)
+        return _make_provenance("op", op=operand.op.name, args=actuals)
     return UNKNOWN_PROVENANCE
 
 
@@ -530,24 +659,69 @@ def _instantiate_summary(
         formal.name: actual
         for formal, actual in zip(module.inputs, actuals, strict=False)
     }
-    return tuple(_subst_provenance(item, subst) for item in summary)
+    subst_key = _subst_key(subst)
+    return tuple(_subst_provenance(item, subst, subst_key) for item in summary)
+
+
+def _subst_key(subst: dict[str, GraphProvenance]) -> tuple[tuple[str, GraphProvenance], ...]:
+    return tuple(sorted(subst.items()))
 
 
 def _subst_provenance(
     provenance: GraphProvenance,
     subst: dict[str, GraphProvenance],
+    subst_key: tuple[tuple[str, GraphProvenance], ...],
 ) -> GraphProvenance:
+    cache_key = (provenance, subst_key)
+    cached = _SUBST_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     if provenance.kind == "input" and provenance.name in subst:
-        return subst[provenance.name]
+        result = subst[provenance.name]
+        _SUBST_CACHE[cache_key] = result
+        return result
+    if provenance.kind == "path" and isinstance(provenance.value, str):
+        replaced = _subst_path_provenance_value(provenance.value, subst)
+        if isinstance(replaced, GraphProvenance):
+            _SUBST_CACHE[cache_key] = replaced
+            return replaced
+        if replaced != provenance.value:
+            result = _make_provenance("path", value=replaced)
+            _SUBST_CACHE[cache_key] = result
+            return result
     if not provenance.args:
+        _SUBST_CACHE[cache_key] = provenance
         return provenance
-    return GraphProvenance(
+    result = _make_provenance(
         provenance.kind,
         name=provenance.name,
         value=provenance.value,
         op=provenance.op,
-        args=tuple(_subst_provenance(arg, subst) for arg in provenance.args),
+        args=tuple(_subst_provenance(arg, subst, subst_key) for arg in provenance.args),
     )
+    _SUBST_CACHE[cache_key] = result
+    return result
+
+
+def _subst_path_provenance_value(
+    value: str,
+    subst: dict[str, GraphProvenance],
+) -> str | GraphProvenance:
+    for name, replacement in subst.items():
+        placeholder = "{" + name + "}"
+        if placeholder not in value:
+            continue
+        if replacement.kind != "path" or not isinstance(replacement.value, str):
+            continue
+        if value in {"@@" + placeholder, "@" + placeholder}:
+            return replacement
+        replacement_text = replacement.value
+        if replacement_text.startswith("@@"):
+            replacement_text = replacement_text[2:]
+        elif replacement_text.startswith("@"):
+            replacement_text = replacement_text[1:]
+        value = value.replace(placeholder, replacement_text)
+    return value
 
 
 def _reachable_call_actuals(
@@ -666,7 +840,7 @@ def _repeat_actuals(
             return None
         text = role.value
         if text == "iter":
-            actuals.append(GraphProvenance("op", op="core.repeat.iter"))
+            actuals.append(_make_provenance("op", op="core.repeat.iter"))
         elif text.startswith("input:"):
             input_index = int(text.removeprefix("input:"))
             if input_index >= len(node.inputs):
@@ -686,7 +860,7 @@ def _repeat_actuals(
             if input_index >= len(node.inputs):
                 return None
             actuals.append(
-                GraphProvenance(
+                _make_provenance(
                     "op",
                     op="core.repeat.carry",
                     args=(
@@ -766,7 +940,7 @@ def _is_dtype_min_tensor_for(
         and value.op == "_dtype_value"
         and len(value.args) >= 2
         and value.args[0] == zero
-        and value.args[1] == GraphProvenance("literal", value="min")
+        and value.args[1] == _make_provenance("literal", value="min")
     )
 
 
@@ -819,7 +993,7 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     if probs_masked.kind != "op" or probs_masked.op != "_where" or len(probs_masked.args) != 3:
         return None
     keep_g, probs, zero = probs_masked.args
-    if zero != GraphProvenance("literal", value=0):
+    if zero != _make_provenance("literal", value=0):
         return None
     keep_name = _match_gqa_keep_expand(keep_g)
     if keep_name is None:
@@ -894,7 +1068,7 @@ def _match_reshape_input(provenance: GraphProvenance) -> str | None:
 def _match_unsqueeze_input(provenance: GraphProvenance, *, dim: int) -> str | None:
     if provenance.kind != "op" or provenance.op != "_unsqueeze" or len(provenance.args) < 2:
         return None
-    if provenance.args[1] != GraphProvenance("literal", value=dim):
+    if provenance.args[1] != _make_provenance("literal", value=dim):
         return None
     return _input_name(provenance.args[0])
 
@@ -907,7 +1081,7 @@ def _is_default_scale(provenance: GraphProvenance) -> bool:
     if provenance.kind != "op" or provenance.op != "core.binary./" or len(provenance.args) != 2:
         return False
     numerator, denominator = provenance.args
-    if numerator != GraphProvenance("literal", value=1.0):
+    if numerator != _make_provenance("literal", value=1.0):
         return False
     return denominator.kind == "op" and denominator.op == "_sqrt" and len(denominator.args) == 1
 
@@ -974,7 +1148,7 @@ def _match_rope_rotate_half_noninterleaved(
     if provenance.kind != "op" or provenance.op != "_concat" or len(provenance.args) < 3:
         return None
     first, second, dim = provenance.args[:3]
-    if dim != GraphProvenance("literal", value=-1):
+    if dim != _make_provenance("literal", value=-1):
         return None
     negated = _match_negated_slice(first)
     plain = _match_slice(second)
@@ -984,9 +1158,9 @@ def _match_rope_rotate_half_noninterleaved(
     x_lo, lo_dim, lo_start, lo_end = plain
     if x_hi != x_lo:
         return None
-    if hi_dim != GraphProvenance("literal", value=-1) or lo_dim != GraphProvenance("literal", value=-1):
+    if hi_dim != _make_provenance("literal", value=-1) or lo_dim != _make_provenance("literal", value=-1):
         return None
-    if lo_start != GraphProvenance("literal", value=0):
+    if lo_start != _make_provenance("literal", value=0):
         return None
     if hi_start != lo_end:
         return None
@@ -998,7 +1172,7 @@ def _match_negated_slice(
     provenance: GraphProvenance,
 ) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance, GraphProvenance] | None:
     left, right = _match_binary_op(provenance, "core.binary.-")
-    if left != GraphProvenance("literal", value=0) or right is None:
+    if left != _make_provenance("literal", value=0) or right is None:
         return None
     return _match_slice(right)
 

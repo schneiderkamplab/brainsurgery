@@ -211,6 +211,32 @@ def _dedupe_outlier_labels(points: list[Point]) -> list[Point]:
     return selected
 
 
+def _spread_label_positions(
+    labels: list[tuple[Point, float, float]],
+    *,
+    min_gap: float,
+    top: float,
+    bottom: float,
+) -> dict[Point, float]:
+    if not labels:
+        return {}
+    ordered = sorted(labels, key=lambda item: item[2])
+    ys: list[float] = []
+    for _, _, y in ordered:
+        ys.append(max(y, top))
+    for i in range(1, len(ys)):
+        ys[i] = max(ys[i], ys[i - 1] + min_gap)
+    overflow = ys[-1] - bottom
+    if overflow > 0:
+        ys = [y - overflow for y in ys]
+        for i in range(len(ys) - 2, -1, -1):
+            ys[i] = min(ys[i], ys[i + 1] - min_gap)
+    underflow = top - ys[0]
+    if underflow > 0:
+        ys = [y + underflow for y in ys]
+    return {point: y for (point, _, _), y in zip(ordered, ys)}
+
+
 def _svg_marker(kind: str, x: float, y: float, size: float, fill: str, stroke: str, stroke_width: float) -> str:
     marker = KIND_MARKERS.get(kind, "square")
     if marker == "circle":
@@ -308,12 +334,29 @@ def render_svg(
         out.append(f"<g><title>{escape(_label(p))}: Axon/HF={p.ratio:.3f}, HF={p.hf_time:.4g}s, Axon={p.axon_time:.4g}s</title>")
         out.append(_svg_marker(p.kind, x, y, 5.2, fill, stroke, stroke_width))
         out.append("</g>")
+    left_labels: list[tuple[Point, float, float]] = []
+    right_labels: list[tuple[Point, float, float]] = []
     for idx, p in enumerate(sorted(outliers, key=lambda item: item.ratio, reverse=True)):
         x = sx(p.hf_time)
         y = sy(p.axon_time)
         dy = -10 if idx % 2 == 0 else 16
+        if p.ratio >= label_slow:
+            left_labels.append((p, x, y))
+        else:
+            right_labels.append((p, x, y + dy))
+    label_top = top + 16
+    label_bottom = top + plot_h - 10
+    left_y = _spread_label_positions(left_labels, min_gap=15, top=label_top, bottom=label_bottom)
+    right_y = _spread_label_positions(right_labels, min_gap=15, top=label_top, bottom=label_bottom)
+    for p, x, _ in left_labels:
+            label = f"{_short_checkpoint_label(p)}: {p.ratio:.3f}x"
+            out.append(
+                f'<text class="small" x="{x - 16:.2f}" y="{left_y[p]:.2f}" '
+                f'text-anchor="end">{escape(label)}</text>'
+            )
+    for p, x, _ in right_labels:
         label = f"{_short_checkpoint_label(p)}: {1.0 / p.ratio:.2f}x"
-        out.append(f'<text class="small" x="{x + 8:.2f}" y="{y + dy:.2f}">{escape(label)}</text>')
+        out.append(f'<text class="small" x="{x + 8:.2f}" y="{right_y[p]:.2f}">{escape(label)}</text>')
 
     legend_x = left + plot_w + 35
     legend_y = top + 10
@@ -363,6 +406,32 @@ def _select_near_parity_real(points: list[Point], *, threshold: float, max_label
     return candidates[:max_labels]
 
 
+KNOWN_MODEL_LABEL_PATTERNS = (
+    r"google-bert/bert-base-uncased$",
+    r"openai-community/gpt2$",
+    r"meta-llama/Meta-Llama-3-8B$",
+    r"Qwen/Qwen3-14B$",
+    r"mistralai/Mistral-7B-v0\.1$",
+    r"google/gemma-4-E2B$",
+    r"google-t5/t5-small$",
+    r"google/gemma-7b$",
+    r"Qwen/Qwen2\.5-14B$",
+    r"bigscience/bloom-7b1$",
+)
+
+
+def _select_known_model_points(points: list[Point]) -> list[Point]:
+    selected: list[Point] = []
+    for pattern in KNOWN_MODEL_LABEL_PATTERNS:
+        regex = re.compile(pattern)
+        candidates = [point for point in points if regex.search(point.checkpoint)]
+        if not candidates:
+            continue
+        generic = [point for point in candidates if point.is_generic]
+        selected.append(min(generic or candidates, key=lambda point: point.ratio))
+    return selected
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render HF-vs-Axon timing scatter plot from axon-benchmark result JSON logs or a merged CSV.")
     parser.add_argument("input", type=Path, help="Benchmark log directory containing *.result.json files, or a merged CSV.")
@@ -371,6 +440,7 @@ def main() -> None:
     parser.add_argument("--label-slow", type=float, default=1.25, help="Label rows with Axon/HF at or above this ratio.")
     parser.add_argument("--label-fast", type=float, default=4.0, help="Label rows where HF/Axon is at or above this speedup.")
     parser.add_argument("--label-near-parity-real", action="store_true", help="Label real non-test rows closest to/slower than the parity line.")
+    parser.add_argument("--label-known-models", action="store_true", help="Label a fixed set of well-known representative checkpoints.")
     parser.add_argument("--near-parity-threshold", type=float, default=0.85, help="Minimum Axon/HF ratio for --label-near-parity-real.")
     parser.add_argument("--max-near-parity-labels", type=int, default=12, help="Maximum labels for --label-near-parity-real.")
     parser.add_argument("--normalized-128", action="store_true", help="For merged CSV input, plot *_norm128 timing columns when present.")
@@ -386,6 +456,8 @@ def main() -> None:
                 max_labels=args.max_near_parity_labels,
             )
         )
+    if args.label_known_models:
+        extra_label_points.update(_select_known_model_points(points))
     svg = render_svg(
         points,
         title=args.title,

@@ -59,6 +59,7 @@ from brainsurgery.synapse.axon.graph_ir import (
     graph_module_effect,
     graph_module_usage,
     graph_domain_definition_comments,
+    infer_graph_provenance,
     infer_graph_module_effects,
     infer_graph_module_usages,
     infer_main_module_domain_facts,
@@ -1939,11 +1940,140 @@ def test_graph_optimizer_refines_optional_refs_in_non_null_select_branch() -> No
     assert false_call.inputs[0].type_expr == int_t
 
 
+def test_graph_optimizer_inlines_forwarder_in_non_null_select_branch() -> None:
+    int_t = TypeInt()
+    null_t = TypeNull()
+    bool_t = TypeBool()
+    list_int_t = TypeList(int_t)
+    maybe_list_int_t = TypeOptional(list_int_t)
+    helper = GraphModule(
+        name="append_value",
+        inputs=(GraphValue("values", list_int_t), GraphValue("value", int_t)),
+        outputs=(
+            GraphExpr(
+                op=GraphOp("_list_append"),
+                inputs=(GraphValueRef("values", list_int_t), GraphValueRef("value", int_t)),
+                attrs={},
+                type_expr=list_int_t,
+            ),
+        ),
+        output_names=("out",),
+        nodes=(),
+        return_type_expr=list_int_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("maybe_values", list_int_t, optional=True), GraphValue("value", int_t)),
+        outputs=(GraphValueRef("out", maybe_list_int_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.binary.=="),
+                inputs=(GraphValueRef("maybe_values", maybe_list_int_t), GraphLiteral(None, null_t)),
+                attrs={},
+                outputs=(GraphValue("is_null", bool_t),),
+                source_module="main",
+                type_expr=bool_t,
+            ),
+            GraphNode(
+                id="main:2",
+                op=GraphOp("core.select"),
+                inputs=(
+                    GraphValueRef("is_null", bool_t),
+                    GraphLiteral(None, null_t),
+                    GraphExpr(
+                        op=GraphOp("append_value"),
+                        inputs=(GraphValueRef("maybe_values", maybe_list_int_t), GraphValueRef("value", int_t)),
+                        attrs={},
+                        type_expr=list_int_t,
+                    ),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", maybe_list_int_t),),
+                source_module="main",
+                type_expr=maybe_list_int_t,
+            ),
+        ),
+        return_type_expr=maybe_list_int_t,
+    )
+    graph = GraphProgram(modules=(helper, main), main_module="main", pragmas={})
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(
+            specialize_definitions="off",
+            constant_dim_substitution=False,
+            common_subexpression_elimination=False,
+            dead_temp_elimination=False,
+        ),
+    )
+
+    main_module = next(module for module in optimized.modules if module.name == "main")
+    select = main_module.nodes[0]
+    false_branch = select.inputs[2]
+    assert isinstance(false_branch, GraphExpr)
+    assert false_branch.op.name == "_list_append"
+    values_operand = false_branch.inputs[0]
+    assert isinstance(values_operand, GraphValueRef)
+    assert values_operand.type_expr == list_int_t
+
+
+def test_graph_domain_does_not_treat_non_optional_expression_type_as_non_null_fact() -> None:
+    int_t = TypeInt()
+    null_t = TypeNull()
+    bool_t = TypeBool()
+    list_int_t = TypeList(int_t)
+    maybe_list_int_t = TypeOptional(list_int_t)
+    module = GraphModule(
+        name="main",
+        inputs=(GraphValue("values", list_int_t), GraphValue("value", int_t)),
+        outputs=(GraphValueRef("is_null", bool_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("core.binary.=="),
+                inputs=(
+                    GraphExpr(
+                        op=GraphOp("_list_append"),
+                        inputs=(GraphValueRef("values", list_int_t), GraphValueRef("value", int_t)),
+                        attrs={},
+                        type_expr=list_int_t,
+                    ),
+                    GraphLiteral(None, null_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("is_null", bool_t),),
+                source_module="main",
+                type_expr=bool_t,
+            ),
+        ),
+        return_type_expr=bool_t,
+    )
+    graph = GraphProgram(modules=(module,), main_module="main", pragmas={})
+
+    analysis = infer_main_module_domain_facts(graph)
+
+    fact = analysis.module_local_facts["main"]["is_null"]
+    assert fact.kind == GraphDomainKind.UNKNOWN
+
+
 def test_graph_dim_simplifies_add_then_subtract_same_symbol() -> None:
     dim = DimExprBinary(
         op="-",
         left=DimExprBinary(op="+", left="past_length", right="S"),
         right="past_length",
+    )
+
+    assert substitute_dim_token(dim, {}) == "S"
+
+
+def test_graph_dim_simplifies_symbol_minus_symbol_minus_dim() -> None:
+    dim = DimExprBinary(
+        op="-",
+        left="K",
+        right=DimExprBinary(op="-", left="K", right="S"),
     )
 
     assert substitute_dim_token(dim, {}) == "S"
@@ -4563,8 +4693,10 @@ def test_graph_ir_optimizer_folds_global_value_null_comparison() -> None:
 
 
 def test_graph_ir_optimizer_canonicalizes_generated_value_names() -> None:
-    tensor_t = TypeTensor(base="Tensor", dims=("__flat_8__inl_6_mask__inl_6___flat_2",))
-    renamed_tensor_t = TypeTensor(base="Tensor", dims=("_v1",))
+    generated_dim = "__flat_8__inl_6_mask__inl_6___flat_2"
+    renamed_dim = f"{generated_dim}__dim"
+    tensor_t = TypeTensor(base="Tensor", dims=(generated_dim,))
+    renamed_tensor_t = TypeTensor(base="Tensor", dims=(renamed_dim,))
     main = GraphModule(
         name="main",
         inputs=(GraphValue("x", tensor_t),),
@@ -5669,6 +5801,2212 @@ def test_codegen2_torch_generated_expert_linear_groups_transpose() -> None:
     assert torch.allclose(actual, expected)
 
 
+def test_codegen2_torch_generated_list_append_does_not_mutate_input() -> None:
+    int_t = TypeInt()
+    list_t = TypeList(int_t)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("values", list_t), GraphValue("value", int_t)),
+                outputs=(GraphValueRef("out", list_t),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_list_append"),
+                        inputs=(GraphValueRef("values", list_t), GraphValueRef("value", int_t)),
+                        attrs={},
+                        outputs=(GraphValue("out", list_t),),
+                        source_module="main",
+                        type_expr=list_t,
+                    ),
+                ),
+                return_type_expr=list_t,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+    namespace: dict[str, object] = {}
+    code = emit_model_code_from_graph_ir(graph)
+    assert "out = ([*(values or []), value])" in code
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    model = model_cls.from_state_dict({})
+
+    values = [1]
+    actual = model.forward(values=values, value=2)
+
+    assert actual == [1, 2]
+    assert values == [1]
+
+
+def test_graph_optimizer_rewrites_dense_gate_up_linear_pair_for_torch() -> None:
+    x_type = _tensor("B", "S", "D")
+    out_type = _tensor("B", "S", 5)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(
+                    GraphValueRef("gate", out_type, dims=out_type.dims),
+                    GraphValueRef("up", out_type, dims=out_type.dims),
+                ),
+                output_names=("gate", "up"),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("gate",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("up",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("up", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=TypeTuple((out_type, out_type)),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(
+            backend_intrinsics="codegen2-torch",
+            common_subexpression_elimination=False,
+        ),
+    )
+    render_axon_file(graph_program_to_axon_file(optimized), show_types=True)
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert [node.op.name for node in main.nodes] == ["_linear", "_split"]
+    assert len(optimized.packed_parameters) == 1
+
+    code = emit_model_code_from_graph_ir(optimized)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    gate_weight = torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3) / 11.0
+    up_weight = torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3) / 7.0
+    model = model_cls.from_state_dict(
+        {
+            "gate.weight": gate_weight,
+            "up.weight": up_weight,
+        }
+    )
+    x = torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(2, 4, 3) / 5.0
+    actual = model.forward(x=x)
+    gate = actual["gate"]
+    up = actual["up"]
+
+    assert torch.allclose(gate, torch.nn.functional.linear(x, gate_weight))
+    assert torch.allclose(up, torch.nn.functional.linear(x, up_weight))
+    assert "gate.weight" not in model.state_dict_tensors
+    assert "up.weight" not in model.state_dict_tensors
+    fused_keys = [
+        key for key in model.state_dict_tensors
+        if str(key).startswith("__packed.linear_pack.")
+    ]
+    assert len(fused_keys) == 1
+
+
+def test_graph_optimizer_rewrites_non_adjacent_qkv_linear_pack_with_provenance_safety() -> None:
+    x_type = _tensor("B", "S", 3)
+    q_type = _tensor("B", "S", 5)
+    k_type = _tensor("B", "S", 2)
+    v_type = _tensor("B", "S", 2)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(
+                    GraphValueRef("q", q_type, dims=q_type.dims),
+                    GraphValueRef("k", k_type, dims=k_type.dims),
+                    GraphValueRef("v", v_type, dims=v_type.dims),
+                ),
+                output_names=("q", "k", "v"),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("q_proj",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("q", q_type, dims=q_type.dims),),
+                        source_module="main",
+                        type_expr=q_type,
+                        dims=q_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:between",
+                        op=GraphOp("core.alias"),
+                        inputs=(GraphValueRef("q", q_type, dims=q_type.dims),),
+                        attrs={},
+                        outputs=(GraphValue("q_alias", q_type, dims=q_type.dims),),
+                        source_module="main",
+                        type_expr=q_type,
+                        dims=q_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("k_proj",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(2, TypeDim()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("k", k_type, dims=k_type.dims),),
+                        source_module="main",
+                        type_expr=k_type,
+                        dims=k_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("v_proj",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(2, TypeDim()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("v", v_type, dims=v_type.dims),),
+                        source_module="main",
+                        type_expr=v_type,
+                        dims=v_type.dims,
+                    ),
+                ),
+                return_type_expr=TypeTuple((q_type, k_type, v_type)),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(graph, config=GraphOptimizeConfig())
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert [node.op.name for node in main.nodes[:2]] == ["_linear", "_split"]
+    assert len(optimized.packed_parameters) == 2
+
+    code = emit_model_code_from_graph_ir(optimized)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    q_weight = torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3) / 11.0
+    k_weight = torch.arange(2 * 3, dtype=torch.float32).reshape(2, 3) / 7.0
+    v_weight = torch.arange(2 * 3, dtype=torch.float32).reshape(2, 3) / 5.0
+    q_bias = torch.arange(5, dtype=torch.float32) / 13.0
+    k_bias = torch.arange(2, dtype=torch.float32) / 17.0
+    v_bias = torch.arange(2, dtype=torch.float32) / 19.0
+    model = model_cls.from_state_dict(
+        {
+            "q_proj.weight": q_weight,
+            "k_proj.weight": k_weight,
+            "v_proj.weight": v_weight,
+            "q_proj.bias": q_bias,
+            "k_proj.bias": k_bias,
+            "v_proj.bias": v_bias,
+        }
+    )
+    x = torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(2, 4, 3) / 5.0
+    actual = model.forward(x=x)
+
+    assert torch.allclose(actual["q"], torch.nn.functional.linear(x, q_weight, q_bias))
+    assert torch.allclose(actual["k"], torch.nn.functional.linear(x, k_weight, k_bias))
+    assert torch.allclose(actual["v"], torch.nn.functional.linear(x, v_weight, v_bias))
+    assert "q_proj.weight" not in model.state_dict_tensors
+    assert "k_proj.weight" not in model.state_dict_tensors
+    assert "v_proj.weight" not in model.state_dict_tensors
+
+
+def test_graph_optimizer_does_not_pack_qkv_when_parameter_used_elsewhere() -> None:
+    x_type = _tensor("B", "S", 3)
+    q_type = _tensor("B", "S", 5)
+    k_type = _tensor("B", "S", 2)
+    v_type = _tensor("B", "S", 2)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(
+                    GraphValueRef("q", q_type, dims=q_type.dims),
+                    GraphValueRef("k", k_type, dims=k_type.dims),
+                    GraphValueRef("v", v_type, dims=v_type.dims),
+                    GraphValueRef("k_weight", TypeAny()),
+                ),
+                output_names=("q", "k", "v", "k_weight"),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("q_proj",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("q", q_type, dims=q_type.dims),),
+                        source_module="main",
+                        type_expr=q_type,
+                        dims=q_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("k_proj",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(2, TypeDim()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("k", k_type, dims=k_type.dims),),
+                        source_module="main",
+                        type_expr=k_type,
+                        dims=k_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("v_proj",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(2, TypeDim()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("v", v_type, dims=v_type.dims),),
+                        source_module="main",
+                        type_expr=v_type,
+                        dims=v_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:4",
+                        op=GraphOp("_params_param"),
+                        inputs=(GraphPath(True, ("k_proj", "weight")),),
+                        attrs={},
+                        outputs=(GraphValue("k_weight", TypeAny()),),
+                        source_module="main",
+                        type_expr=TypeAny(),
+                    ),
+                ),
+                return_type_expr=TypeTuple((q_type, k_type, v_type, TypeAny())),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(graph, config=GraphOptimizeConfig())
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert [node.op.name for node in main.nodes[:3]] == ["_linear", "_linear", "_linear"]
+    assert not optimized.packed_parameters
+
+
+def test_graph_optimizer_materializes_templated_qkv_pack_at_load_time() -> None:
+    int_t = TypeInt()
+    x_type = _tensor("B", "S", 3)
+    q_type = _tensor("B", "S", 5)
+    k_type = _tensor("B", "S", 2)
+    v_type = _tensor("B", "S", 2)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("i", int_t),
+                    GraphValue("x", x_type, dims=x_type.dims),
+                ),
+                outputs=(
+                    GraphValueRef("q", q_type, dims=q_type.dims),
+                    GraphValueRef("k", k_type, dims=k_type.dims),
+                    GraphValueRef("v", v_type, dims=v_type.dims),
+                ),
+                output_names=("q", "k", "v"),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("layers", "{i}", "q_proj")),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("q", q_type, dims=q_type.dims),),
+                        source_module="main",
+                        type_expr=q_type,
+                        dims=q_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("layers", "{i}", "k_proj")),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(2, TypeDim()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("k", k_type, dims=k_type.dims),),
+                        source_module="main",
+                        type_expr=k_type,
+                        dims=k_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("layers", "{i}", "v_proj")),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(2, TypeDim()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("v", v_type, dims=v_type.dims),),
+                        source_module="main",
+                        type_expr=v_type,
+                        dims=v_type.dims,
+                    ),
+                ),
+                return_type_expr=TypeTuple((q_type, k_type, v_type)),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(graph, config=GraphOptimizeConfig())
+    assert len(optimized.packed_parameters) == 2
+    code = emit_model_code_from_graph_ir(optimized)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    q_weight = torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3) / 11.0
+    k_weight = torch.arange(2 * 3, dtype=torch.float32).reshape(2, 3) / 7.0
+    v_weight = torch.arange(2 * 3, dtype=torch.float32).reshape(2, 3) / 5.0
+    q_bias = torch.arange(5, dtype=torch.float32) / 13.0
+    k_bias = torch.arange(2, dtype=torch.float32) / 17.0
+    v_bias = torch.arange(2, dtype=torch.float32) / 19.0
+
+    model = model_cls.from_state_dict(
+        {
+            "layers.0.q_proj.weight": q_weight,
+            "layers.0.k_proj.weight": k_weight,
+            "layers.0.v_proj.weight": v_weight,
+            "layers.0.q_proj.bias": q_bias,
+            "layers.0.k_proj.bias": k_bias,
+            "layers.0.v_proj.bias": v_bias,
+        }
+    )
+
+    assert "layers.0.q_proj.weight" not in model.state_dict_tensors
+    assert "layers.0.k_proj.weight" not in model.state_dict_tensors
+    assert "layers.0.v_proj.weight" not in model.state_dict_tensors
+    assert any(str(key).startswith("__packed.linear_pack.") for key in model.state_dict_tensors)
+
+    x = torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(2, 4, 3) / 5.0
+    actual = model.forward(i=0, x=x)
+
+    assert torch.allclose(actual["q"], torch.nn.functional.linear(x, q_weight, q_bias))
+    assert torch.allclose(actual["k"], torch.nn.functional.linear(x, k_weight, k_bias))
+    assert torch.allclose(actual["v"], torch.nn.functional.linear(x, v_weight, v_bias))
+
+
+def test_graph_optimizer_does_not_rewrite_gate_up_pair_when_weight_reused() -> None:
+    x_type = _tensor("B", "S", "D")
+    out_type = _tensor("B", "S", 5)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(
+                    GraphValueRef("gate", out_type, dims=out_type.dims),
+                    GraphValueRef("up", out_type, dims=out_type.dims),
+                    GraphValueRef("gate_again", out_type, dims=out_type.dims),
+                ),
+                output_names=("gate", "up", "gate_again"),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("gate",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("up",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("up", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("gate",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate_again", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=TypeTuple((out_type, out_type, out_type)),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(
+            backend_intrinsics="codegen2-torch",
+            common_subexpression_elimination=False,
+        ),
+    )
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert "__torch_gate_up_linear_pair" not in [node.op.name for node in main.nodes]
+
+
+def test_graph_optimizer_does_not_rewrite_gate_up_pair_when_weight_used_by_other_primitive() -> None:
+    x_type = _tensor("B", "S", "D")
+    out_type = _tensor("B", "S", 5)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(
+                    GraphValueRef("gate", out_type, dims=out_type.dims),
+                    GraphValueRef("up", out_type, dims=out_type.dims),
+                    GraphValueRef("gate_weight", TypeAny()),
+                ),
+                output_names=("gate", "up", "gate_weight"),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("gate",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("up",)),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("up", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_params_param"),
+                        inputs=(GraphPath(True, ("gate", "weight")),),
+                        attrs={},
+                        outputs=(GraphValue("gate_weight", TypeAny()),),
+                        source_module="main",
+                        type_expr=TypeAny(),
+                    ),
+                ),
+                return_type_expr=TypeTuple((out_type, out_type, TypeAny())),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    not_selected = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(backend_intrinsics="codegen2-torch:sdpa"),
+    )
+    not_selected_main = next(module for module in not_selected.modules if module.name == "main")
+    assert "__torch_selected_expert_packed_swiglu_ffn" not in [node.op.name for node in not_selected_main.nodes]
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(backend_intrinsics="codegen2-torch:selected_expert_packed_swiglu_ffn"),
+    )
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert "__torch_gate_up_linear_pair" not in [node.op.name for node in main.nodes]
+
+
+def test_graph_optimizer_rewrites_dense_swiglu_ffn_for_torch() -> None:
+    x_type = _tensor("B", "S", 3)
+    hidden_type = _tensor("B", "S", 5)
+    out_type = _tensor("B", "S", 2)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(GraphValueRef("y", out_type, dims=out_type.dims),),
+                output_names=("y",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("__torch_gate_up_linear_pair"),
+                        inputs=(
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphPath(True, ("gate", "weight")),
+                            GraphPath(True, ("up", "weight")),
+                            GraphPath(True, ("gate", "bias")),
+                            GraphPath(True, ("up", "bias")),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                        ),
+                        attrs={},
+                        outputs=(
+                            GraphValue("gate", hidden_type, dims=hidden_type.dims),
+                            GraphValue("up", hidden_type, dims=hidden_type.dims),
+                        ),
+                        source_module="main",
+                        type_expr=TypeTuple((hidden_type, hidden_type)),
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_activations_silu"),
+                        inputs=(GraphValueRef("gate", hidden_type, dims=hidden_type.dims),),
+                        attrs={},
+                        outputs=(GraphValue("gate_act", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_mul"),
+                        inputs=(
+                            GraphValueRef("gate_act", hidden_type, dims=hidden_type.dims),
+                            GraphValueRef("up", hidden_type, dims=hidden_type.dims),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("hidden", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:4",
+                        op=GraphOp("_linear"),
+                        inputs=(
+                            GraphPath(True, ("down",)),
+                            GraphValueRef("hidden", hidden_type, dims=hidden_type.dims),
+                            GraphLiteral(2, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(None, TypeNull()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("y", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=out_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(backend_intrinsics="codegen2-torch"),
+    )
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert [node.op.name for node in main.nodes] == ["__torch_swiglu_ffn"]
+
+    code = emit_model_code_from_graph_ir(optimized)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    gate_weight = torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3) / 11.0
+    up_weight = torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3) / 7.0
+    down_weight = torch.arange(2 * 5, dtype=torch.float32).reshape(2, 5) / 13.0
+    model = model_cls.from_state_dict(
+        {
+            "gate.weight": gate_weight,
+            "up.weight": up_weight,
+            "down.weight": down_weight,
+        }
+    )
+    x = torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(2, 4, 3) / 5.0
+    actual = model.forward(x=x)
+    expected = torch.nn.functional.linear(
+        torch.nn.functional.silu(torch.nn.functional.linear(x, gate_weight))
+        * torch.nn.functional.linear(x, up_weight),
+        down_weight,
+    )
+
+    assert torch.allclose(actual, expected)
+    assert "gate.weight" not in model.state_dict_tensors
+    assert "up.weight" not in model.state_dict_tensors
+    assert "down.weight" in model.state_dict_tensors
+
+
+def test_graph_optimizer_rewrites_expert_swiglu_ffn_for_torch() -> None:
+    x_type = _tensor("B", "T", "K", 3)
+    idx_type = TypeTensor("IdxTensor", ("B", "T", "K"))
+    hidden_type = _tensor("B", "T", "K", 5)
+    out_type = _tensor("B", "T", "K", 2)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("x", x_type, dims=x_type.dims),
+                    GraphValue("expert_idx", idx_type, dims=idx_type.dims),
+                ),
+                outputs=(GraphValueRef("y", out_type, dims=out_type.dims),),
+                output_names=("y",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_expert_linear"),
+                        inputs=(
+                            GraphPath(True, ("experts", "w1")),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphValueRef("expert_idx", idx_type, dims=idx_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_expert_linear"),
+                        inputs=(
+                            GraphPath(True, ("experts", "w3")),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphValueRef("expert_idx", idx_type, dims=idx_type.dims),
+                            GraphLiteral(5, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("up", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_activations_silu"),
+                        inputs=(GraphValueRef("gate", hidden_type, dims=hidden_type.dims),),
+                        attrs={},
+                        outputs=(GraphValue("gate_act", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:4",
+                        op=GraphOp("_mul"),
+                        inputs=(
+                            GraphValueRef("gate_act", hidden_type, dims=hidden_type.dims),
+                            GraphValueRef("up", hidden_type, dims=hidden_type.dims),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("hidden", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:5",
+                        op=GraphOp("_expert_linear"),
+                        inputs=(
+                            GraphPath(True, ("experts", "w2")),
+                            GraphValueRef("hidden", hidden_type, dims=hidden_type.dims),
+                            GraphValueRef("expert_idx", idx_type, dims=idx_type.dims),
+                            GraphLiteral(2, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("y", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=out_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(backend_intrinsics="codegen2-torch"),
+    )
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert [node.op.name for node in main.nodes] == ["__torch_expert_swiglu_ffn"]
+
+    code = emit_model_code_from_graph_ir(optimized)
+    assert "_expert_swiglu_ffn" in code
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    gate_weight = torch.arange(3 * 5 * 3, dtype=torch.float32).reshape(3, 5, 3) / 11.0
+    up_weight = torch.arange(3 * 5 * 3, dtype=torch.float32).reshape(3, 5, 3) / 7.0
+    down_weight = torch.arange(3 * 2 * 5, dtype=torch.float32).reshape(3, 2, 5) / 13.0
+    model = model_cls.from_state_dict(
+        {
+            "experts.w1.weight": gate_weight,
+            "experts.w3.weight": up_weight,
+            "experts.w2.weight": down_weight,
+        }
+    )
+    x = torch.arange(2 * 2 * 2 * 3, dtype=torch.float32).reshape(2, 2, 2, 3) / 5.0
+    expert_idx = torch.tensor([[[0, 1], [2, 0]], [[1, 2], [0, 1]]], dtype=torch.long)
+
+    actual = model.forward(x=x, expert_idx=expert_idx)
+    gate = torch.matmul(x.unsqueeze(-2), gate_weight[expert_idx].transpose(-1, -2)).squeeze(-2)
+    up = torch.matmul(x.unsqueeze(-2), up_weight[expert_idx].transpose(-1, -2)).squeeze(-2)
+    expected = torch.matmul(
+        (torch.nn.functional.silu(gate) * up).unsqueeze(-2),
+        down_weight[expert_idx].transpose(-1, -2),
+    ).squeeze(-2)
+
+    assert torch.allclose(actual, expected)
+
+
+def test_graph_optimizer_rewrites_expert_packed_swiglu_ffn_for_torch() -> None:
+    x_type = _tensor("B", "T", "K", 3)
+    idx_type = TypeTensor("IdxTensor", ("B", "T", "K"))
+    packed_type = _tensor("B", "T", "K", 10)
+    hidden_type = _tensor("B", "T", "K", 5)
+    out_type = _tensor("B", "T", "K", 2)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("x", x_type, dims=x_type.dims),
+                    GraphValue("expert_idx", idx_type, dims=idx_type.dims),
+                ),
+                outputs=(GraphValueRef("y", out_type, dims=out_type.dims),),
+                output_names=("y",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_expert_linear"),
+                        inputs=(
+                            GraphPath(True, ("experts", "gate_up")),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphValueRef("expert_idx", idx_type, dims=idx_type.dims),
+                            GraphLiteral(10, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate_up", packed_type, dims=packed_type.dims),),
+                        source_module="main",
+                        type_expr=packed_type,
+                        dims=packed_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_chunk"),
+                        inputs=(
+                            GraphValueRef("gate_up", packed_type, dims=packed_type.dims),
+                            GraphLiteral(-1, TypeInt()),
+                            GraphLiteral(2, TypeDim()),
+                        ),
+                        attrs={},
+                        outputs=(
+                            GraphValue("gate", hidden_type, dims=hidden_type.dims),
+                            GraphValue("up", hidden_type, dims=hidden_type.dims),
+                        ),
+                        source_module="main",
+                        type_expr=TypeTuple((hidden_type, hidden_type)),
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_activations_silu"),
+                        inputs=(GraphValueRef("gate", hidden_type, dims=hidden_type.dims),),
+                        attrs={},
+                        outputs=(GraphValue("gate_act", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:4",
+                        op=GraphOp("_mul"),
+                        inputs=(
+                            GraphValueRef("gate_act", hidden_type, dims=hidden_type.dims),
+                            GraphValueRef("up", hidden_type, dims=hidden_type.dims),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("hidden", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:5",
+                        op=GraphOp("_expert_linear"),
+                        inputs=(
+                            GraphPath(True, ("experts", "down")),
+                            GraphValueRef("hidden", hidden_type, dims=hidden_type.dims),
+                            GraphValueRef("expert_idx", idx_type, dims=idx_type.dims),
+                            GraphLiteral(2, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("y", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=out_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(backend_intrinsics="codegen2-torch"),
+    )
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert [node.op.name for node in main.nodes] == ["__torch_expert_packed_swiglu_ffn"]
+
+    code = emit_model_code_from_graph_ir(optimized)
+    assert "_expert_packed_swiglu_ffn" in code
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    gate_up_weight = torch.arange(3 * 10 * 3, dtype=torch.float32).reshape(3, 10, 3) / 11.0
+    down_weight = torch.arange(3 * 2 * 5, dtype=torch.float32).reshape(3, 2, 5) / 13.0
+    model = model_cls.from_state_dict(
+        {
+            "experts.gate_up.weight": gate_up_weight,
+            "experts.down.weight": down_weight,
+        }
+    )
+    x = torch.arange(2 * 2 * 2 * 3, dtype=torch.float32).reshape(2, 2, 2, 3) / 5.0
+    expert_idx = torch.tensor([[[0, 1], [2, 0]], [[1, 2], [0, 1]]], dtype=torch.long)
+
+    actual = model.forward(x=x, expert_idx=expert_idx)
+    gate_up = torch.matmul(
+        x.unsqueeze(-2),
+        gate_up_weight[expert_idx].transpose(-1, -2),
+    ).squeeze(-2)
+    gate, up = torch.chunk(gate_up, 2, dim=-1)
+    hidden = torch.nn.functional.silu(gate) * up
+    expected = torch.matmul(
+        hidden.unsqueeze(-2),
+        down_weight[expert_idx].transpose(-1, -2),
+    ).squeeze(-2)
+
+    assert torch.allclose(actual, expected)
+
+
+def test_graph_optimizer_rewrites_direct_selected_expert_packed_swiglu_ffn_for_torch() -> None:
+    x_type = _tensor("B", "T", "D")
+    scores_type = _tensor("B", "T", "K")
+    idx_type = _tensor("B", "T", "K")
+    expanded_type = _tensor("B", "T", "K", "D")
+    gate_up_type = _tensor("B", "T", "K", "F")
+    hidden_type = _tensor("B", "T", "K", "H")
+    values_type = _tensor("B", "T", "K", "D")
+    output_type = _tensor("B", "T", "D")
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("x", x_type, dims=x_type.dims),
+                    GraphValue("topk_scores", scores_type, dims=scores_type.dims),
+                    GraphValue("topk_indices", idx_type, dims=idx_type.dims),
+                ),
+                outputs=(GraphValueRef("out", output_type, dims=output_type.dims),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_unsqueeze"),
+                        inputs=(GraphValueRef("x", x_type, dims=x_type.dims), GraphLiteral(2, TypeInt())),
+                        attrs={},
+                        outputs=(GraphValue("x_unsq", _tensor("B", "T", "1", "D"), dims=("B", "T", "1", "D")),),
+                        source_module="main",
+                        type_expr=_tensor("B", "T", "1", "D"),
+                        dims=("B", "T", "1", "D"),
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_expand"),
+                        inputs=(
+                            GraphValueRef("x_unsq", _tensor("B", "T", "1", "D"), dims=("B", "T", "1", "D")),
+                            GraphExpr(
+                                op=GraphOp("core.list"),
+                                inputs=(
+                                    GraphLiteral("B", TypeDim()),
+                                    GraphLiteral("T", TypeDim()),
+                                    GraphLiteral("K", TypeDim()),
+                                    GraphLiteral("D", TypeDim()),
+                                ),
+                                attrs={},
+                                type_expr=TypeList(TypeDim()),
+                            ),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("x_sel", expanded_type, dims=expanded_type.dims),),
+                        source_module="main",
+                        type_expr=expanded_type,
+                        dims=expanded_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_expert_linear"),
+                        inputs=(
+                            GraphPath(True, ("experts", "gate_up")),
+                            GraphValueRef("x_sel", expanded_type, dims=expanded_type.dims),
+                            GraphValueRef("topk_indices", idx_type, dims=idx_type.dims),
+                            GraphLiteral(10, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate_up", gate_up_type, dims=gate_up_type.dims),),
+                        source_module="main",
+                        type_expr=gate_up_type,
+                        dims=gate_up_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:4",
+                        op=GraphOp("_chunk"),
+                        inputs=(
+                            GraphValueRef("gate_up", gate_up_type, dims=gate_up_type.dims),
+                            GraphLiteral(-1, TypeInt()),
+                            GraphLiteral(2, TypeDim()),
+                        ),
+                        attrs={},
+                        outputs=(
+                            GraphValue("gate", hidden_type, dims=hidden_type.dims),
+                            GraphValue("up", hidden_type, dims=hidden_type.dims),
+                        ),
+                        source_module="main",
+                        type_expr=TypeTuple((hidden_type, hidden_type)),
+                    ),
+                    GraphNode(
+                        id="main:5",
+                        op=GraphOp("_activations_silu"),
+                        inputs=(GraphValueRef("gate", hidden_type, dims=hidden_type.dims),),
+                        attrs={},
+                        outputs=(GraphValue("gate_act", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:6",
+                        op=GraphOp("_mul"),
+                        inputs=(
+                            GraphValueRef("gate_act", hidden_type, dims=hidden_type.dims),
+                            GraphValueRef("up", hidden_type, dims=hidden_type.dims),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("hidden", hidden_type, dims=hidden_type.dims),),
+                        source_module="main",
+                        type_expr=hidden_type,
+                        dims=hidden_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:7",
+                        op=GraphOp("_expert_linear"),
+                        inputs=(
+                            GraphPath(True, ("experts", "down")),
+                            GraphValueRef("hidden", hidden_type, dims=hidden_type.dims),
+                            GraphValueRef("topk_indices", idx_type, dims=idx_type.dims),
+                            GraphLiteral(3, TypeDim()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                            GraphLiteral("weight", TypeString()),
+                            GraphLiteral("bias", TypeString()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("values", values_type, dims=values_type.dims),),
+                        source_module="main",
+                        type_expr=values_type,
+                        dims=values_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:8",
+                        op=GraphOp("_unsqueeze"),
+                        inputs=(GraphValueRef("topk_scores", scores_type, dims=scores_type.dims), GraphLiteral(-1, TypeInt())),
+                        attrs={},
+                        outputs=(GraphValue("scale", _tensor("B", "T", "K", "1"), dims=("B", "T", "K", "1")),),
+                        source_module="main",
+                        type_expr=_tensor("B", "T", "K", "1"),
+                        dims=("B", "T", "K", "1"),
+                    ),
+                    GraphNode(
+                        id="main:9",
+                        op=GraphOp("_mul"),
+                        inputs=(
+                            GraphValueRef("values", values_type, dims=values_type.dims),
+                            GraphValueRef("scale", _tensor("B", "T", "K", "1"), dims=("B", "T", "K", "1")),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("weighted", values_type, dims=values_type.dims),),
+                        source_module="main",
+                        type_expr=values_type,
+                        dims=values_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:10",
+                        op=GraphOp("_sum"),
+                        inputs=(
+                            GraphValueRef("weighted", values_type, dims=values_type.dims),
+                            GraphLiteral(2, TypeInt()),
+                            GraphLiteral(False, TypeBool()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("out", output_type, dims=output_type.dims),),
+                        source_module="main",
+                        type_expr=output_type,
+                        dims=output_type.dims,
+                    ),
+                ),
+                return_type_expr=output_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(backend_intrinsics="codegen2-torch"),
+    )
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert [node.op.name for node in main.nodes] == ["__torch_selected_expert_packed_swiglu_ffn"]
+
+    code = emit_model_code_from_graph_ir(optimized)
+    assert "_selected_expert_packed_swiglu_ffn" in code
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    gate_up_weight = torch.arange(3 * 10 * 3, dtype=torch.float32).reshape(3, 10, 3) / 11.0
+    down_weight = torch.arange(3 * 3 * 5, dtype=torch.float32).reshape(3, 3, 5) / 13.0
+    model = model_cls.from_state_dict(
+        {
+            "experts.gate_up.weight": gate_up_weight,
+            "experts.down.weight": down_weight,
+        }
+    )
+    x = torch.arange(2 * 2 * 3, dtype=torch.float32).reshape(2, 2, 3) / 5.0
+    topk_scores = torch.tensor([[[0.75, 0.25], [0.4, 0.6]], [[0.2, 0.8], [0.55, 0.45]]], dtype=torch.float32)
+    topk_indices = torch.tensor([[[0, 1], [2, 0]], [[1, 2], [0, 1]]], dtype=torch.long)
+
+    actual = model.forward(x=x, topk_scores=topk_scores, topk_indices=topk_indices)
+    expanded = x.unsqueeze(2).expand((*topk_indices.shape, x.shape[-1]))
+    gate_up = torch.matmul(
+        expanded.unsqueeze(-2),
+        gate_up_weight[topk_indices].transpose(-1, -2),
+    ).squeeze(-2)
+    gate, up = torch.chunk(gate_up, 2, dim=-1)
+    hidden = torch.nn.functional.silu(gate) * up
+    values = torch.matmul(
+        hidden.unsqueeze(-2),
+        down_weight[topk_indices].transpose(-1, -2),
+    ).squeeze(-2)
+    expected = torch.sum(values * topk_scores.unsqueeze(-1), dim=2, keepdim=False)
+
+    assert torch.allclose(actual, expected)
+
+
+def test_graph_optimizer_rewrites_weighted_topk_sum_for_torch() -> None:
+    values_type = _tensor("B", "T", "K", "D")
+    scores_type = _tensor("B", "T", "K")
+    output_type = _tensor("B", "T", "D")
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("values", values_type, dims=values_type.dims),
+                    GraphValue("scores", scores_type, dims=scores_type.dims),
+                ),
+                outputs=(GraphValueRef("out", output_type, dims=output_type.dims),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_unsqueeze"),
+                        inputs=(
+                            GraphValueRef("scores", scores_type, dims=scores_type.dims),
+                            GraphLiteral(-1, TypeInt()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("scale", _tensor("B", "T", "K", 1), dims=("B", "T", "K", 1)),),
+                        source_module="main",
+                        type_expr=_tensor("B", "T", "K", 1),
+                        dims=("B", "T", "K", 1),
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_mul"),
+                        inputs=(
+                            GraphValueRef("values", values_type, dims=values_type.dims),
+                            GraphValueRef("scale", _tensor("B", "T", "K", 1), dims=("B", "T", "K", 1)),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("weighted", values_type, dims=values_type.dims),),
+                        source_module="main",
+                        type_expr=values_type,
+                        dims=values_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_sum"),
+                        inputs=(
+                            GraphValueRef("weighted", values_type, dims=values_type.dims),
+                            GraphLiteral(2, TypeInt()),
+                            GraphLiteral(False, TypeBool()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("out", output_type, dims=output_type.dims),),
+                        source_module="main",
+                        type_expr=output_type,
+                        dims=output_type.dims,
+                    ),
+                ),
+                return_type_expr=output_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(backend_intrinsics="codegen2-torch"),
+    )
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert [node.op.name for node in main.nodes] == ["__torch_weighted_topk_sum"]
+
+    code = emit_model_code_from_graph_ir(optimized)
+    assert "__torch_weighted_topk_sum" not in code
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    model = model_cls.from_state_dict({})
+    values = torch.arange(2 * 3 * 4 * 5, dtype=torch.float32).reshape(2, 3, 4, 5) / 11.0
+    scores = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4) / 7.0
+    actual = model.forward(values=values, scores=scores)
+    expected = torch.sum(values * scores.unsqueeze(-1), dim=2, keepdim=False)
+    assert torch.allclose(actual, expected)
+
+
+def test_codegen2_torch_selected_expert_packed_swiglu_ffn() -> None:
+    x_type = _tensor("B", "T", 3)
+    scores_type = _tensor("B", "T", 2)
+    idx_type = TypeTensor("IdxTensor", ("B", "T", 2))
+    out_type = _tensor("B", "T", 4)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("x", x_type, dims=x_type.dims),
+                    GraphValue("scores", scores_type, dims=scores_type.dims),
+                    GraphValue("indices", idx_type, dims=idx_type.dims),
+                ),
+                outputs=(GraphValueRef("out", out_type, dims=out_type.dims),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("__torch_selected_expert_packed_swiglu_ffn"),
+                        inputs=(
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphValueRef("scores", scores_type, dims=scores_type.dims),
+                            GraphValueRef("indices", idx_type, dims=idx_type.dims),
+                            GraphPath(True, ("experts", "gate_up", "weight")),
+                            GraphPath(True, ("experts", "down", "weight")),
+                            GraphLiteral(False, TypeBool()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("out", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=out_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    code = emit_model_code_from_graph_ir(graph)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    gate_up_weight = torch.arange(3 * 10 * 3, dtype=torch.float32).reshape(3, 10, 3) / 11.0
+    down_weight = torch.arange(3 * 4 * 5, dtype=torch.float32).reshape(3, 4, 5) / 13.0
+    model = model_cls.from_state_dict(
+        {
+            "experts.gate_up.weight": gate_up_weight,
+            "experts.down.weight": down_weight,
+        }
+    )
+    x = torch.arange(2 * 3 * 3, dtype=torch.float32).reshape(2, 3, 3) / 5.0
+    scores = torch.tensor(
+        [[[0.8, 0.2], [0.3, 0.7], [1.0, 0.0]], [[0.4, 0.6], [0.5, 0.5], [0.9, 0.1]]],
+        dtype=torch.float32,
+    )
+    indices = torch.tensor([[[0, 1], [2, 0], [1, 2]], [[2, 1], [0, 2], [1, 0]]], dtype=torch.long)
+
+    actual = model.forward(x=x, scores=scores, indices=indices)
+    expanded = x.unsqueeze(2).expand((*indices.shape, x.shape[-1]))
+    gate_up = torch.matmul(expanded.unsqueeze(-2), gate_up_weight[indices].transpose(-1, -2)).squeeze(-2)
+    gate, up = torch.chunk(gate_up, 2, dim=-1)
+    hidden = torch.nn.functional.silu(gate) * up
+    values = torch.matmul(hidden.unsqueeze(-2), down_weight[indices].transpose(-1, -2)).squeeze(-2)
+    expected = torch.sum(values * scores.unsqueeze(-1), dim=2)
+
+    assert torch.allclose(actual, expected)
+
+
+def test_codegen2_torch_selected_expert_swiglu_ffn() -> None:
+    x_type = _tensor("B", "T", 3)
+    scores_type = _tensor("B", "T", 2)
+    idx_type = TypeTensor("IdxTensor", ("B", "T", 2))
+    out_type = _tensor("B", "T", 4)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("x", x_type, dims=x_type.dims),
+                    GraphValue("scores", scores_type, dims=scores_type.dims),
+                    GraphValue("indices", idx_type, dims=idx_type.dims),
+                ),
+                outputs=(GraphValueRef("out", out_type, dims=out_type.dims),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("__torch_selected_expert_swiglu_ffn"),
+                        inputs=(
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphValueRef("scores", scores_type, dims=scores_type.dims),
+                            GraphValueRef("indices", idx_type, dims=idx_type.dims),
+                            GraphPath(True, ("experts", "gate", "weight")),
+                            GraphPath(True, ("experts", "up", "weight")),
+                            GraphPath(True, ("experts", "down", "weight")),
+                            GraphLiteral(False, TypeBool()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("out", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=out_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    code = emit_model_code_from_graph_ir(graph)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    gate_weight = torch.arange(3 * 5 * 3, dtype=torch.float32).reshape(3, 5, 3) / 11.0
+    up_weight = torch.arange(3 * 5 * 3, dtype=torch.float32).reshape(3, 5, 3) / 17.0
+    down_weight = torch.arange(3 * 4 * 5, dtype=torch.float32).reshape(3, 4, 5) / 13.0
+    model = model_cls.from_state_dict(
+        {
+            "experts.gate.weight": gate_weight,
+            "experts.up.weight": up_weight,
+            "experts.down.weight": down_weight,
+        }
+    )
+    x = torch.arange(2 * 3 * 3, dtype=torch.float32).reshape(2, 3, 3) / 5.0
+    scores = torch.tensor(
+        [[[0.8, 0.2], [0.3, 0.7], [1.0, 0.0]], [[0.4, 0.6], [0.5, 0.5], [0.9, 0.1]]],
+        dtype=torch.float32,
+    )
+    indices = torch.tensor([[[0, 1], [2, 0], [1, 2]], [[2, 1], [0, 2], [1, 0]]], dtype=torch.long)
+
+    actual = model.forward(x=x, scores=scores, indices=indices)
+    expanded = x.unsqueeze(2).expand((*indices.shape, x.shape[-1]))
+    gate = torch.matmul(expanded.unsqueeze(-2), gate_weight[indices].transpose(-1, -2)).squeeze(-2)
+    up = torch.matmul(expanded.unsqueeze(-2), up_weight[indices].transpose(-1, -2)).squeeze(-2)
+    hidden = torch.nn.functional.silu(gate) * up
+    values = torch.matmul(hidden.unsqueeze(-2), down_weight[indices].transpose(-1, -2)).squeeze(-2)
+    expected = torch.sum(values * scores.unsqueeze(-1), dim=2)
+
+    assert torch.allclose(actual, expected)
+
+
+def test_codegen2_torch_selected_expert_relu2_ffn() -> None:
+    x_type = _tensor("B", "T", 3)
+    scores_type = _tensor("B", "T", 2)
+    idx_type = TypeTensor("IdxTensor", ("B", "T", 2))
+    out_type = _tensor("B", "T", 4)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("x", x_type, dims=x_type.dims),
+                    GraphValue("scores", scores_type, dims=scores_type.dims),
+                    GraphValue("indices", idx_type, dims=idx_type.dims),
+                ),
+                outputs=(GraphValueRef("out", out_type, dims=out_type.dims),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("__torch_selected_expert_relu2_ffn"),
+                        inputs=(
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphValueRef("scores", scores_type, dims=scores_type.dims),
+                            GraphValueRef("indices", idx_type, dims=idx_type.dims),
+                            GraphPath(True, ("experts", "up", "weight")),
+                            GraphPath(True, ("experts", "down", "weight")),
+                            GraphLiteral(False, TypeBool()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("out", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=out_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    code = emit_model_code_from_graph_ir(graph)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    up_weight = torch.arange(3 * 5 * 3, dtype=torch.float32).reshape(3, 5, 3) / 11.0
+    down_weight = torch.arange(3 * 4 * 5, dtype=torch.float32).reshape(3, 4, 5) / 13.0
+    model = model_cls.from_state_dict(
+        {
+            "experts.up.weight": up_weight,
+            "experts.down.weight": down_weight,
+        }
+    )
+    x = torch.arange(2 * 3 * 3, dtype=torch.float32).reshape(2, 3, 3) / 5.0
+    scores = torch.tensor(
+        [[[0.8, 0.2], [0.3, 0.7], [1.0, 0.0]], [[0.4, 0.6], [0.5, 0.5], [0.9, 0.1]]],
+        dtype=torch.float32,
+    )
+    indices = torch.tensor([[[0, 1], [2, 0], [1, 2]], [[2, 1], [0, 2], [1, 0]]], dtype=torch.long)
+
+    actual = model.forward(x=x, scores=scores, indices=indices)
+    expanded = x.unsqueeze(2).expand((*indices.shape, x.shape[-1]))
+    up = torch.matmul(expanded.unsqueeze(-2), up_weight[indices].transpose(-1, -2)).squeeze(-2)
+    hidden = torch.relu(up) * torch.relu(up)
+    values = torch.matmul(hidden.unsqueeze(-2), down_weight[indices].transpose(-1, -2)).squeeze(-2)
+    expected = torch.sum(values * scores.unsqueeze(-1), dim=2)
+
+    assert torch.allclose(actual, expected)
+
+
+def test_codegen2_torch_selected_expert_packed_gegelu_ffn() -> None:
+    x_type = _tensor("B", "T", 3)
+    scores_type = _tensor("B", "T", 2)
+    idx_type = TypeTensor("IdxTensor", ("B", "T", 2))
+    out_type = _tensor("B", "T", 4)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("x", x_type, dims=x_type.dims),
+                    GraphValue("scores", scores_type, dims=scores_type.dims),
+                    GraphValue("indices", idx_type, dims=idx_type.dims),
+                ),
+                outputs=(GraphValueRef("out", out_type, dims=out_type.dims),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("__torch_selected_expert_packed_gegelu_ffn"),
+                        inputs=(
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphValueRef("scores", scores_type, dims=scores_type.dims),
+                            GraphValueRef("indices", idx_type, dims=idx_type.dims),
+                            GraphPath(True, ("experts", "gate_up", "weight")),
+                            GraphPath(True, ("experts", "gate_up", "bias")),
+                            GraphPath(True, ("experts", "down", "weight")),
+                            GraphPath(True, ("experts", "down", "bias")),
+                            GraphLiteral(7.0, TypeFloat()),
+                            GraphLiteral(1.3, TypeFloat()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("out", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=out_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    code = emit_model_code_from_graph_ir(graph)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    gate_up_weight = torch.arange(3 * 10 * 3, dtype=torch.float32).reshape(3, 10, 3) / 11.0
+    gate_up_bias = torch.arange(3 * 10, dtype=torch.float32).reshape(3, 10) / 17.0
+    down_weight = torch.arange(3 * 4 * 5, dtype=torch.float32).reshape(3, 4, 5) / 13.0
+    down_bias = torch.arange(3 * 4, dtype=torch.float32).reshape(3, 4) / 19.0
+    model = model_cls.from_state_dict(
+        {
+            "experts.gate_up.weight": gate_up_weight,
+            "experts.gate_up.bias": gate_up_bias,
+            "experts.down.weight": down_weight,
+            "experts.down.bias": down_bias,
+        }
+    )
+    x = torch.arange(2 * 3 * 3, dtype=torch.float32).reshape(2, 3, 3) / 5.0
+    scores = torch.tensor(
+        [[[0.8, 0.2], [0.3, 0.7], [1.0, 0.0]], [[0.4, 0.6], [0.5, 0.5], [0.9, 0.1]]],
+        dtype=torch.float32,
+    )
+    indices = torch.tensor([[[0, 1], [2, 0], [1, 2]], [[2, 1], [0, 2], [1, 0]]], dtype=torch.long)
+
+    actual = model.forward(x=x, scores=scores, indices=indices)
+    expanded = x.unsqueeze(2).expand((*indices.shape, x.shape[-1]))
+    gate_up = torch.matmul(expanded.unsqueeze(-2), gate_up_weight[indices].transpose(-1, -2)).squeeze(-2)
+    gate_up = gate_up + gate_up_bias[indices]
+    gate = gate_up[..., ::2]
+    up = gate_up[..., 1::2]
+    gate = torch.clamp(gate, max=7.0)
+    up = torch.clamp(up, min=-7.0, max=7.0)
+    hidden = gate * torch.sigmoid(1.3 * gate) * (up + 1)
+    values = torch.matmul(hidden.unsqueeze(-2), down_weight[indices].transpose(-1, -2)).squeeze(-2)
+    values = values + down_bias[indices]
+    expected = torch.sum(values * scores.unsqueeze(-1), dim=2)
+
+    assert torch.allclose(actual, expected)
+
+
+def test_codegen2_torch_selected_expert_clamped_packed_swiglu_ffn() -> None:
+    x_type = _tensor("B", "T", 3)
+    scores_type = _tensor("B", "T", 2)
+    idx_type = TypeTensor("IdxTensor", ("B", "T", 2))
+    out_type = _tensor("B", "T", 4)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("x", x_type, dims=x_type.dims),
+                    GraphValue("scores", scores_type, dims=scores_type.dims),
+                    GraphValue("indices", idx_type, dims=idx_type.dims),
+                ),
+                outputs=(GraphValueRef("out", out_type, dims=out_type.dims),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("__torch_selected_expert_clamped_packed_swiglu_ffn"),
+                        inputs=(
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphValueRef("scores", scores_type, dims=scores_type.dims),
+                            GraphValueRef("indices", idx_type, dims=idx_type.dims),
+                            GraphPath(True, ("experts", "gate_up", "weight")),
+                            GraphPath(True, ("experts", "down", "weight")),
+                            GraphLiteral(7.0, TypeFloat()),
+                            GraphLiteral(False, TypeBool()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("out", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=out_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    code = emit_model_code_from_graph_ir(graph)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    gate_up_weight = torch.arange(3 * 10 * 3, dtype=torch.float32).reshape(3, 10, 3) / 11.0
+    down_weight = torch.arange(3 * 4 * 5, dtype=torch.float32).reshape(3, 4, 5) / 13.0
+    model = model_cls.from_state_dict(
+        {
+            "experts.gate_up.weight": gate_up_weight,
+            "experts.down.weight": down_weight,
+        }
+    )
+    x = torch.arange(2 * 3 * 3, dtype=torch.float32).reshape(2, 3, 3) / 5.0
+    scores = torch.tensor(
+        [[[0.8, 0.2], [0.3, 0.7], [1.0, 0.0]], [[0.4, 0.6], [0.5, 0.5], [0.9, 0.1]]],
+        dtype=torch.float32,
+    )
+    indices = torch.tensor([[[0, 1], [2, 0], [1, 2]], [[2, 1], [0, 2], [1, 0]]], dtype=torch.long)
+
+    actual = model.forward(x=x, scores=scores, indices=indices)
+    expanded = x.unsqueeze(2).expand((*indices.shape, x.shape[-1]))
+    gate_up = torch.matmul(expanded.unsqueeze(-2), gate_up_weight[indices].transpose(-1, -2)).squeeze(-2)
+    gate, up = torch.chunk(gate_up, 2, dim=-1)
+    gate = torch.clamp(gate, max=7.0)
+    up = torch.clamp(up, min=-7.0, max=7.0)
+    hidden = torch.nn.functional.silu(gate) * up
+    values = torch.matmul(hidden.unsqueeze(-2), down_weight[indices].transpose(-1, -2)).squeeze(-2)
+    expected = torch.sum(values * scores.unsqueeze(-1), dim=2)
+
+    assert torch.allclose(actual, expected)
+
+
+def test_graph_optimizer_rewrites_topk_normalize_for_torch() -> None:
+    probs_type = _tensor("B", "T", "E")
+    weights_type = _tensor("B", "T", 4)
+    denom_type = _tensor("B", "T", 1)
+    idx_type = TypeTensor("IdxTensor", ("B", "T", 4))
+    x_type = _tensor("B", "T", "D")
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("probs", probs_type, dims=probs_type.dims),
+                    GraphValue("x", x_type, dims=x_type.dims),
+                ),
+                outputs=(
+                    GraphValueRef("out", weights_type, dims=weights_type.dims),
+                    GraphValueRef("topk_indices", idx_type, dims=idx_type.dims),
+                ),
+                output_names=("out", "topk_indices"),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_topk"),
+                        inputs=(
+                            GraphValueRef("probs", probs_type, dims=probs_type.dims),
+                            GraphLiteral(4, TypeDim()),
+                            GraphLiteral(-1, TypeInt()),
+                            GraphLiteral(True, TypeBool()),
+                            GraphLiteral(False, TypeBool()),
+                        ),
+                        attrs={},
+                        outputs=(
+                            GraphValue("topk_weights", weights_type, dims=weights_type.dims),
+                            GraphValue("topk_indices", idx_type, dims=idx_type.dims),
+                        ),
+                        source_module="main",
+                        type_expr=TypeTuple((weights_type, idx_type)),
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("core.binary.-"),
+                        inputs=(GraphLiteral(4, TypeDim()), GraphLiteral(1, TypeInt())),
+                        attrs={},
+                        outputs=(GraphValue("last_start", TypeDim()),),
+                        source_module="main",
+                        type_expr=TypeDim(),
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_cumsum"),
+                        inputs=(
+                            GraphValueRef("topk_weights", weights_type, dims=weights_type.dims),
+                            GraphLiteral(-1, TypeInt()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("running", weights_type, dims=weights_type.dims),),
+                        source_module="main",
+                        type_expr=weights_type,
+                        dims=weights_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:4",
+                        op=GraphOp("_slice"),
+                        inputs=(
+                            GraphValueRef("running", weights_type, dims=weights_type.dims),
+                            GraphLiteral(-1, TypeInt()),
+                            GraphValueRef("last_start", TypeDim()),
+                            GraphLiteral(4, TypeDim()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("denom", denom_type, dims=denom_type.dims),),
+                        source_module="main",
+                        type_expr=denom_type,
+                        dims=denom_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:5",
+                        op=GraphOp("core.binary./"),
+                        inputs=(
+                            GraphValueRef("topk_weights", weights_type, dims=weights_type.dims),
+                            GraphValueRef("denom", denom_type, dims=denom_type.dims),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("normalized", weights_type, dims=weights_type.dims),),
+                        source_module="main",
+                        type_expr=weights_type,
+                        dims=weights_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:6",
+                        op=GraphOp("_cast_like"),
+                        inputs=(
+                            GraphValueRef("normalized", weights_type, dims=weights_type.dims),
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("out", weights_type, dims=weights_type.dims),),
+                        source_module="main",
+                        type_expr=weights_type,
+                        dims=weights_type.dims,
+                    ),
+                ),
+                return_type_expr=TypeTuple((weights_type, idx_type)),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        graph,
+        config=GraphOptimizeConfig(backend_intrinsics="codegen2-torch"),
+    )
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert any(node.op.name == "__torch_topk_normalize" for node in main.nodes)
+    assert not any(node.op.name in {"_cumsum", "_slice"} for node in main.nodes)
+
+    code = emit_model_code_from_graph_ir(optimized)
+    assert "__torch_topk_normalize" not in code
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    model = model_cls.from_state_dict({})
+    probs = torch.softmax(torch.arange(2 * 3 * 7, dtype=torch.float32).reshape(2, 3, 7) / 13.0, dim=-1)
+    x = torch.zeros((2, 3, 5), dtype=torch.float16)
+    result = model.forward(probs=probs, x=x)
+    actual = result["out"] if isinstance(result, dict) else result[0]
+    indices = result["topk_indices"] if isinstance(result, dict) else result[1]
+    topk_weights, expected_indices = torch.topk(probs, 4, dim=-1, largest=True, sorted=False)
+    expected = (topk_weights / topk_weights.sum(dim=-1, keepdim=True)).to(dtype=x.dtype)
+    assert torch.equal(indices, expected_indices)
+    assert torch.allclose(actual, expected)
+
+
+def test_graph_provenance_preserves_destructured_tuple_wrapper_outputs() -> None:
+    tensor_t = _tensor("B", "S", "E")
+    weights_t = _tensor("B", "S", "K")
+    indices_t = TypeTensor("IdxTensor", ("B", "S", "K"))
+    wrapper = GraphModule(
+        name="Wrapper.topk",
+        inputs=(GraphValue("x", tensor_t, dims=tensor_t.dims),),
+        outputs=(GraphValueRef("out", TypeTuple((weights_t, indices_t))),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="Wrapper.topk:1",
+                op=GraphOp("_topk"),
+                inputs=(
+                    GraphValueRef("x", tensor_t, dims=tensor_t.dims),
+                    GraphLiteral("K", TypeDim()),
+                    GraphLiteral(-1, TypeInt()),
+                    GraphLiteral(True, TypeBool()),
+                    GraphLiteral(False, TypeBool()),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", TypeTuple((weights_t, indices_t))),),
+                source_module="Wrapper.topk",
+                type_expr=TypeTuple((weights_t, indices_t)),
+            ),
+        ),
+        return_type_expr=TypeTuple((weights_t, indices_t)),
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("x", tensor_t, dims=tensor_t.dims),),
+        outputs=(GraphValueRef("weights", weights_t, dims=weights_t.dims),),
+        output_names=("weights",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("Wrapper.topk"),
+                inputs=(GraphValueRef("x", tensor_t, dims=tensor_t.dims),),
+                attrs={},
+                outputs=(
+                    GraphValue("weights", weights_t, dims=weights_t.dims),
+                    GraphValue("indices", indices_t, dims=indices_t.dims),
+                ),
+                source_module="main",
+                type_expr=TypeTuple((weights_t, indices_t)),
+            ),
+        ),
+        return_type_expr=weights_t,
+    )
+
+    provenance = infer_graph_provenance(
+        GraphProgram(modules=(wrapper, main), main_module="main", pragmas={"main": "main"})
+    )
+    local = provenance.module_local_provenance["main"]
+    assert local["weights"].kind == "op"
+    assert local["weights"].op == "_topk[0]"
+    assert local["indices"].kind == "op"
+    assert local["indices"].op == "_topk[1]"
+
+
+def test_graph_optimizer_preserves_expanded_packed_gegelu_internals() -> None:
+    x_type = _tensor("B", "T", "K", 10)
+    pair_type = _tensor("B", "T", "K", 5, 2)
+    one_type = _tensor("B", "T", "K", 5, 1)
+    out_type = _tensor("B", "T", "K", 5)
+    shape_pair = GraphLiteral((2, 3, 4, 5, 2), TypeList(TypeDim()))
+    shape_out = GraphLiteral((2, 3, 4, 5), TypeList(TypeDim()))
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(
+                    GraphValue("x", x_type, dims=x_type.dims),
+                    GraphValue("limit", TypeFloat()),
+                ),
+                outputs=(GraphValueRef("y", out_type, dims=out_type.dims),),
+                output_names=("y",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_reshape"),
+                        inputs=(GraphValueRef("x", x_type, dims=x_type.dims), shape_pair),
+                        attrs={},
+                        outputs=(GraphValue("pair", pair_type, dims=pair_type.dims),),
+                        source_module="main",
+                        type_expr=pair_type,
+                        dims=pair_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_slice"),
+                        inputs=(
+                            GraphValueRef("pair", pair_type, dims=pair_type.dims),
+                            GraphLiteral(-1, TypeInt()),
+                            GraphLiteral(0, TypeDim()),
+                            GraphLiteral(1, TypeDim()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate_slice", one_type, dims=one_type.dims),),
+                        source_module="main",
+                        type_expr=one_type,
+                        dims=one_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:3",
+                        op=GraphOp("_reshape"),
+                        inputs=(GraphValueRef("gate_slice", one_type, dims=one_type.dims), shape_out),
+                        attrs={},
+                        outputs=(GraphValue("gate", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:4",
+                        op=GraphOp("_slice"),
+                        inputs=(
+                            GraphValueRef("pair", pair_type, dims=pair_type.dims),
+                            GraphLiteral(-1, TypeInt()),
+                            GraphLiteral(1, TypeDim()),
+                            GraphLiteral(2, TypeDim()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("up_slice", one_type, dims=one_type.dims),),
+                        source_module="main",
+                        type_expr=one_type,
+                        dims=one_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:5",
+                        op=GraphOp("_reshape"),
+                        inputs=(GraphValueRef("up_slice", one_type, dims=one_type.dims), shape_out),
+                        attrs={},
+                        outputs=(GraphValue("up", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:6",
+                        op=GraphOp("_clamp"),
+                        inputs=(
+                            GraphValueRef("gate", out_type, dims=out_type.dims),
+                            GraphLiteral(None, TypeNull()),
+                            GraphValueRef("limit", TypeFloat()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate_c", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:7",
+                        op=GraphOp("core.binary.-"),
+                        inputs=(GraphLiteral(0.0, TypeFloat()), GraphValueRef("limit", TypeFloat())),
+                        attrs={},
+                        outputs=(GraphValue("neg_limit", TypeFloat()),),
+                        source_module="main",
+                        type_expr=TypeFloat(),
+                    ),
+                    GraphNode(
+                        id="main:8",
+                        op=GraphOp("_clamp"),
+                        inputs=(
+                            GraphValueRef("up", out_type, dims=out_type.dims),
+                            GraphValueRef("neg_limit", TypeFloat()),
+                            GraphValueRef("limit", TypeFloat()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("up_c", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:9",
+                        op=GraphOp("core.binary.*"),
+                        inputs=(GraphValueRef("gate_c", out_type, dims=out_type.dims), GraphLiteral(1.702, TypeFloat())),
+                        attrs={},
+                        outputs=(GraphValue("gate_alpha", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:10",
+                        op=GraphOp("_activations_sigmoid"),
+                        inputs=(GraphValueRef("gate_alpha", out_type, dims=out_type.dims),),
+                        attrs={},
+                        outputs=(GraphValue("sigmoid", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:11",
+                        op=GraphOp("core.binary.*"),
+                        inputs=(
+                            GraphValueRef("gate_c", out_type, dims=out_type.dims),
+                            GraphValueRef("sigmoid", out_type, dims=out_type.dims),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("gate_term", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:12",
+                        op=GraphOp("core.binary.+"),
+                        inputs=(GraphValueRef("up_c", out_type, dims=out_type.dims), GraphLiteral(1.0, TypeFloat())),
+                        attrs={},
+                        outputs=(GraphValue("up_plus", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                    GraphNode(
+                        id="main:13",
+                        op=GraphOp("core.binary.*"),
+                        inputs=(
+                            GraphValueRef("up_plus", out_type, dims=out_type.dims),
+                            GraphValueRef("gate_term", out_type, dims=out_type.dims),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("y", out_type, dims=out_type.dims),),
+                        source_module="main",
+                        type_expr=out_type,
+                        dims=out_type.dims,
+                    ),
+                ),
+                return_type_expr=out_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(graph, config=GraphOptimizeConfig())
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert not any(node.op.name == "_activations_gegelu" for node in main.nodes)
+    assert any(node.op.name == "_activations_sigmoid" for node in main.nodes)
+    assert any(node.op.name == "_clamp" for node in main.nodes)
+
+    code = emit_model_code_from_graph_ir(optimized)
+    namespace: dict[str, object] = {}
+    exec(code, namespace)
+    model_cls = namespace["GeneratedAxonModel"]
+    model = model_cls.from_state_dict({})
+    x = torch.linspace(-2.0, 2.0, steps=2 * 3 * 4 * 10).reshape(2, 3, 4, 10)
+    actual = model.forward(x=x, limit=1.5)
+    pair = x.reshape(2, 3, 4, 5, 2)
+    gate = pair[..., 0].clamp(max=1.5)
+    up = pair[..., 1].clamp(min=-1.5, max=1.5)
+    expected = (up + 1.0) * (gate * torch.sigmoid(gate * 1.702))
+    assert torch.allclose(actual, expected)
+
+
+def test_codegen2_static_embedding_param_key_uses_graph_path_metadata_only() -> None:
+    x_type = _tensor("B", "S")
+    y_type = _tensor("B", "S", "D")
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(GraphValueRef("y", y_type, dims=y_type.dims),),
+                output_names=("y",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_embedding"),
+                        inputs=(GraphPath(True, ("wte",)), GraphValueRef("x", x_type, dims=x_type.dims), GraphLiteral(None, TypeNull())),
+                        attrs={},
+                        outputs=(GraphValue("y", y_type, dims=y_type.dims),),
+                        source_module="main",
+                        type_expr=y_type,
+                        dims=y_type.dims,
+                    ),
+                ),
+                return_type_expr=y_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    code = emit_model_code_from_graph_ir(graph)
+
+    assert "y = F.embedding(x, self.state_dict_tensors['wte.weight'])" in code
+
+
+def test_codegen2_templated_embedding_param_key_keeps_dynamic_path_resolution() -> None:
+    int_t = TypeInt()
+    x_type = _tensor("B", "S")
+    y_type = _tensor("B", "S", "D")
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("i", int_t), GraphValue("x", x_type, dims=x_type.dims)),
+                outputs=(GraphValueRef("y", y_type, dims=y_type.dims),),
+                output_names=("y",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_embedding"),
+                        inputs=(GraphPath(True, ("h.{i}",)), GraphValueRef("x", x_type, dims=x_type.dims), GraphLiteral(None, TypeNull())),
+                        attrs={},
+                        outputs=(GraphValue("y", y_type, dims=y_type.dims),),
+                        source_module="main",
+                        type_expr=y_type,
+                        dims=y_type.dims,
+                    ),
+                ),
+                return_type_expr=y_type,
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    code = emit_model_code_from_graph_ir(graph)
+
+    assert "self.state_dict_tensors['h.{i}.weight']" not in code
+    assert "y = F.embedding(x, self._param(" in code
+    assert "_path_template_part(i)" in code
+
+
 def test_codegen2_tinygrad_generated_expert_linear_matches_torch() -> None:
     pytest.importorskip("tinygrad")
     if not torch.cuda.is_available() and shutil.which("clang") is None:
@@ -5877,7 +8215,7 @@ def _toy_program(inputs: tuple[GraphValue, ...], output_names: tuple[str, ...]) 
     )
 
 
-def test_codegen2_tensor_size_uses_static_type_dim_when_available() -> None:
+def test_codegen2_tensor_size_uses_runtime_shape_without_graph_optimization() -> None:
     x_type = _tensor("B", "S")
     program = GraphProgram(
         modules=(
@@ -5908,8 +8246,7 @@ def test_codegen2_tensor_size_uses_static_type_dim_when_available() -> None:
 
     code = emit_model_code_from_graph_ir(program)
 
-    assert "s = S" in code
-    assert ".shape[int(1)]" not in code
+    assert "s = x.shape[1]" in code
 
 
 def test_codegen2_tensor_size_uses_runtime_shape_for_unbound_result_dim() -> None:
@@ -5964,6 +8301,178 @@ def test_codegen2_tensor_size_uses_runtime_shape_for_unbound_result_dim() -> Non
 
     assert "n = self._symbols['N']" not in code
     assert "n = token_idx.shape[0]" in code
+
+
+def test_graph_optimizer_folds_tensor_size_of_stable_module_input() -> None:
+    x_type = _tensor("B", "S")
+    program = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(GraphValueRef("s", TypeDim()),),
+                output_names=("s",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_tensor_size"),
+                        inputs=(
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(1, TypeInt()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("s", TypeDim()),),
+                        source_module="main",
+                        type_expr=TypeDim(),
+                    ),
+                ),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        program,
+        config=GraphOptimizeConfig(
+            atomic_alias_cleanup=True,
+            dead_temp_elimination=True,
+            constant_folding=True,
+            constant_dim_substitution=False,
+            common_subexpression_elimination=False,
+            specialize_definitions="off",
+            inline_safe=False,
+        ),
+    )
+
+    main = optimized.modules[0]
+    assert not main.nodes
+    assert main.outputs == (GraphValueRef("S", TypeDim()),)
+
+
+def test_graph_optimizer_folds_structural_tensor_size_forwarder_without_name_special_case() -> None:
+    x_type = _tensor("B", "S")
+    program = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("x", x_type, dims=x_type.dims),),
+                outputs=(GraphValueRef("s", TypeDim()),),
+                output_names=("s",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("Arbitrary.forwarder"),
+                        inputs=(
+                            GraphValueRef("x", x_type, dims=x_type.dims),
+                            GraphLiteral(1, TypeInt()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("s", TypeDim()),),
+                        source_module="main",
+                        type_expr=TypeDim(),
+                    ),
+                ),
+            ),
+            GraphModule(
+                name="Arbitrary.forwarder",
+                inputs=(GraphValue("value", x_type, dims=x_type.dims), GraphValue("axis", TypeInt())),
+                outputs=(GraphValueRef("out", TypeDim()),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="Arbitrary.forwarder:1",
+                        op=GraphOp("_tensor_size"),
+                        inputs=(GraphValueRef("value", x_type, dims=x_type.dims), GraphValueRef("axis", TypeInt())),
+                        attrs={},
+                        outputs=(GraphValue("out", TypeDim()),),
+                        source_module="Arbitrary.forwarder",
+                        type_expr=TypeDim(),
+                    ),
+                ),
+                return_type_expr=TypeDim(),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        program,
+        config=GraphOptimizeConfig(
+            atomic_alias_cleanup=True,
+            dead_temp_elimination=True,
+            constant_folding=True,
+            constant_dim_substitution=False,
+            common_subexpression_elimination=False,
+            specialize_definitions="off",
+            inline_safe=False,
+        ),
+    )
+
+    main = next(module for module in optimized.modules if module.name == "main")
+    assert not main.nodes
+    assert main.outputs == (GraphValueRef("S", TypeDim()),)
+
+
+def test_graph_optimizer_does_not_fold_tensor_size_of_value_dependent_intermediate() -> None:
+    mask_type = _tensor(2, "BT")
+    stale_idx_type = _tensor(16)
+    program = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(GraphValue("mask", mask_type, dims=mask_type.dims),),
+                outputs=(GraphValueRef("n", TypeDim()),),
+                output_names=("n",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_where_indices"),
+                        inputs=(GraphValueRef("mask", mask_type, dims=mask_type.dims),),
+                        attrs={},
+                        outputs=(
+                            GraphValue("topk_pos", stale_idx_type, dims=stale_idx_type.dims),
+                            GraphValue("token_idx", stale_idx_type, dims=stale_idx_type.dims),
+                        ),
+                        source_module="main",
+                        type_expr=TypeTuple((stale_idx_type, stale_idx_type)),
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_tensor_size"),
+                        inputs=(
+                            GraphValueRef("token_idx", stale_idx_type, dims=stale_idx_type.dims),
+                            GraphLiteral(0, TypeInt()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("n", TypeDim()),),
+                        source_module="main",
+                        type_expr=TypeDim(),
+                    ),
+                ),
+            ),
+        ),
+        main_module="main",
+        pragmas={"main": "main"},
+    )
+
+    optimized = optimize_graph_program(
+        program,
+        config=GraphOptimizeConfig(
+            atomic_alias_cleanup=True,
+            dead_temp_elimination=True,
+            constant_folding=True,
+            constant_dim_substitution=False,
+            common_subexpression_elimination=False,
+            specialize_definitions="off",
+            inline_safe=False,
+        ),
+    )
+
+    main = optimized.modules[0]
+    assert any(node.op.name == "_tensor_size" for node in main.nodes)
+    assert main.outputs == (GraphValueRef("n", TypeDim()),)
 
 
 def test_graph_optimizer_preserves_value_dependent_primitive_dims() -> None:
@@ -6387,3 +8896,128 @@ def test_graph_ir_renderer_keeps_atomic_return_tuple_inline() -> None:
 
     assert "return (a, b)" in rendered
     assert "<- (a, b)" not in rendered
+
+
+def test_graph_ir_optimizer_rewrites_fill_scatter_unit_slice_for_torch_backend() -> None:
+    dim_t = TypeDim()
+    int_t = TypeInt()
+    string_t = TypeString()
+    tensor_t = TypeTensor("Tensor", ("B", "S", "D"))
+    step_t = TypeTensor("Tensor", ("B", 1, "D"))
+    fill = GraphModule(
+        name="Tensor.fill",
+        inputs=(
+            GraphValue("x", step_t),
+            GraphValue("value", int_t),
+            GraphValue("dtype", string_t),
+        ),
+        outputs=(GraphValueRef("out", step_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="Tensor.fill:1",
+                op=GraphOp("_fill"),
+                inputs=(
+                    GraphValueRef("x", step_t),
+                    GraphValueRef("value", int_t),
+                    GraphValueRef("dtype", string_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", step_t),),
+                source_module="Tensor.fill",
+                type_expr=step_t,
+                dims=step_t.dims,
+            ),
+        ),
+        return_type_expr=step_t,
+    )
+    scatter = GraphModule(
+        name="Tensor.scatter",
+        inputs=(
+            GraphValue("x", tensor_t),
+            GraphValue("index", step_t),
+            GraphValue("src", step_t),
+            GraphValue("dim", dim_t),
+        ),
+        outputs=(GraphValueRef("out", tensor_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="Tensor.scatter:1",
+                op=GraphOp("_scatter"),
+                inputs=(
+                    GraphValueRef("x", tensor_t),
+                    GraphValueRef("index", step_t),
+                    GraphValueRef("src", step_t),
+                    GraphValueRef("dim", dim_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", tensor_t),),
+                source_module="Tensor.scatter",
+                type_expr=tensor_t,
+                dims=tensor_t.dims,
+            ),
+        ),
+        return_type_expr=tensor_t,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("y_all", tensor_t), GraphValue("y_step", step_t), GraphValue("t", TypeInt())),
+        outputs=(GraphValueRef("out", tensor_t),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("Tensor.fill"),
+                inputs=(
+                    GraphValueRef("y_step", step_t),
+                    GraphValueRef("t", TypeInt()),
+                    GraphLiteral("long", TypeString()),
+                ),
+                attrs={},
+                outputs=(GraphValue("idx", step_t),),
+                source_module="main",
+                type_expr=step_t,
+                dims=step_t.dims,
+            ),
+            GraphNode(
+                id="main:2",
+                op=GraphOp("Tensor.scatter"),
+                inputs=(
+                    GraphValueRef("y_all", tensor_t),
+                    GraphValueRef("idx", step_t),
+                    GraphValueRef("y_step", step_t),
+                    GraphLiteral(1, dim_t),
+                ),
+                attrs={},
+                outputs=(GraphValue("out", tensor_t),),
+                source_module="main",
+                type_expr=tensor_t,
+                dims=tensor_t.dims,
+            ),
+        ),
+        return_type_expr=tensor_t,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(fill, scatter, main), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(
+            backend_intrinsics="codegen2-torch",
+            specialize_definitions="off",
+            inline_safe=False,
+            common_subexpression_elimination=False,
+        ),
+    )
+
+    optimized_main = next(module for module in optimized.modules if module.name == "main")
+    ops = [node.op.name for node in optimized_main.nodes]
+    assert "_fill" not in ops
+    assert "Tensor.scatter" not in ops
+    assert "_assign_unit_slice" in ops
+    assign = next(node for node in optimized_main.nodes if node.op.name == "_assign_unit_slice")
+    assert assign.inputs == (
+        GraphValueRef("y_all", tensor_t),
+        GraphLiteral(1, dim_t),
+        GraphValueRef("t", TypeInt()),
+        GraphValueRef("y_step", step_t),
+    )

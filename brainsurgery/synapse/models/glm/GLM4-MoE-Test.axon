@@ -89,7 +89,7 @@ glm4_moe_attn x rope_sin rope_cos mask past_kv = do
     v <- NN.linear@v_proj xn dim=KVD bias=true
     v <- (v :: Tensor[B,S,KVD])
     v <- reshape_heads v heads=KVH
-    q, k <- rope_pair_proportional_factors q k rope_sin rope_cos
+    q, k <- rope_pair_proportional_factors q k rope_sin rope_cos prefix_only=true
     k, v, new_kv <- Cache.update past_kv k v
     k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
     v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
@@ -120,8 +120,8 @@ glm4_moe_sparse_block x rope_sin rope_cos mask past_kv = do
 glm4_moe :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
 glm4_moe input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
-  rope_sin, rope_cos <- rope_proportional_factors pos_ids MODEL_HEAD_DIM theta=THETA partial_rotary_factor=0.5
+  pos_ids <- position_ids input_ids past_length=past_length
+  rope_sin, rope_cos <- rope_proportional_factors pos_ids MODEL_HEAD_DIM theta=THETA partial_rotary_factor=0.5 prefix_only=true
   key_len <- past_length + S
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
   x, new_kv <- scope@model do

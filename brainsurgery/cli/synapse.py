@@ -381,8 +381,10 @@ def axon_stage_dump(
         None,
         "--graph-backend-intrinsics",
         help=(
-            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
-            "(currently: codegen2-torch). Default keeps Graph IR backend-neutral."
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
+            "Use codegen2-torch for all Torch intrinsics, or "
+            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list. "
+            "Default keeps Graph IR backend-neutral."
         ),
     ),
     show_types: bool = typer.Option(
@@ -479,8 +481,10 @@ def axon_graph_ir_dot(
         None,
         "--graph-backend-intrinsics",
         help=(
-            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
-            "(currently: codegen2-torch). Default keeps Graph IR backend-neutral."
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
+            "Use codegen2-torch for all Torch intrinsics, or "
+            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list. "
+            "Default keeps Graph IR backend-neutral."
         ),
     ),
     direction: str = typer.Option(
@@ -588,8 +592,10 @@ def axon_codegen_dump(
         None,
         "--graph-backend-intrinsics",
         help=(
-            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
-            "(currently: codegen2-torch). Default keeps Graph IR backend-neutral."
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
+            "Use codegen2-torch for all Torch intrinsics, or "
+            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list. "
+            "Default keeps Graph IR backend-neutral."
         ),
     ),
     profile_code: bool = typer.Option(
@@ -801,8 +807,9 @@ def axon_test(
         None,
         "--graph-backend-intrinsics",
         help=(
-            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
-            "(currently: codegen2-torch)."
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
+            "Use codegen2-torch for all Torch intrinsics, or "
+            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list."
         ),
     ),
 ) -> None:
@@ -1033,8 +1040,9 @@ def axon_benchmark(
         None,
         "--graph-backend-intrinsics",
         help=(
-            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph "
-            "(currently: codegen2-torch)."
+            "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
+            "Use codegen2-torch for all Torch intrinsics, or "
+            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list."
         ),
     ),
     skip_hf: bool = typer.Option(

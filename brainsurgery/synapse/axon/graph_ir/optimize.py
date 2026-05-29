@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import hashlib
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
 from ...ops import get_op_semantics, get_op_type_rule
@@ -25,6 +25,7 @@ from ..ast import (
     TypeOptional,
     TypeTensor,
     TypeTuple,
+    TypeString,
     TypeVar,
     dim_token_names,
 )
@@ -36,6 +37,7 @@ from .core import (
     GraphNode,
     GraphOperand,
     GraphOp,
+    GraphPackedParameter,
     GraphPath,
     GraphProgram,
     GraphValue,
@@ -46,7 +48,12 @@ from .core import (
     validate_graph_program,
     _value_ref_type,
 )
-from .domain import GraphDomainFact, GraphDomainKind, infer_main_module_domain_facts
+from .domain import (
+    GraphDomainFact,
+    GraphDomainKind,
+    infer_main_module_domain_facts,
+    refine_graph_domain_facts_for_branch,
+)
 from .effects import (
     GraphEffect,
     UsageClass,
@@ -93,8 +100,69 @@ class GraphOptimizeConfig:
 
 
 _SPECIALIZE_MODES = {"off", "single-callsite", "monomorphize"}
+_TORCH_BACKEND_INTRINSICS = frozenset(
+    {
+        "__torch_expert_packed_swiglu_ffn",
+        "__torch_expert_swiglu_ffn",
+        "__torch_rope_apply_factors",
+        "__torch_rope_pair_apply_factors",
+        "__torch_sdpa",
+        "__torch_selected_expert_clamped_packed_swiglu_ffn",
+        "__torch_selected_expert_packed_gegelu_ffn",
+        "__torch_selected_expert_packed_swiglu_ffn",
+        "__torch_selected_expert_relu2_ffn",
+        "__torch_selected_expert_swiglu_ffn",
+        "__torch_swiglu_ffn",
+        "__torch_topk_normalize",
+        "__torch_weighted_topk_sum",
+    }
+)
 _BACKEND_INTRINSIC_TARGETS = {None, "codegen2-torch"}
 _SMALL_INLINE_NODE_LIMIT = 4
+
+
+def _normalize_backend_intrinsic_name(name: str) -> str:
+    token = name.strip()
+    if not token:
+        raise ValueError("empty backend intrinsic selector")
+    if token in {"*", "all"}:
+        return token
+    if token.startswith("_torch_"):
+        token = "_" + token
+    elif not token.startswith("__torch_"):
+        token = "__torch_" + token
+    if token not in _TORCH_BACKEND_INTRINSICS:
+        allowed = ", ".join(sorted(_TORCH_BACKEND_INTRINSICS))
+        raise ValueError(f"unknown codegen2-torch graph intrinsic {name!r}; expected one of: {allowed}")
+    return token
+
+
+def _parse_backend_intrinsics(value: str | None) -> tuple[str | None, frozenset[str]]:
+    if value is None:
+        return None, frozenset()
+    raw = str(value).strip()
+    if not raw:
+        return None, frozenset()
+    target, sep, selector_text = raw.partition(":")
+    target = target.strip()
+    if target not in _BACKEND_INTRINSIC_TARGETS or target is None:
+        allowed = ", ".join(sorted(item for item in _BACKEND_INTRINSIC_TARGETS if item is not None))
+        raise ValueError(
+            f"unsupported graph backend intrinsics target {value!r}; expected {allowed!r} "
+            "or target:intrinsic[,intrinsic...]"
+        )
+    if target != "codegen2-torch":
+        return target, frozenset()
+    if not sep or selector_text.strip() in {"", "*", "all"}:
+        return target, _TORCH_BACKEND_INTRINSICS
+    selected = {_normalize_backend_intrinsic_name(item) for item in selector_text.split(",")}
+    if "*" in selected or "all" in selected:
+        return target, _TORCH_BACKEND_INTRINSICS
+    return target, frozenset(selected)
+
+
+def _backend_intrinsic_enabled(enabled: frozenset[str], name: str) -> bool:
+    return name in enabled
 
 
 def _is_atomic_operand(operand: GraphOperand) -> bool:
@@ -288,7 +356,12 @@ def _maybe_rewrite_call_to_torch_rope_apply_factors(
         _single_rope_apply_fact(graph_provenance_facts(item))
         for item in provenance.module_summary_provenance.get(callee.name, ())
     ]
-    if len(node.outputs) == 1 and len(output_facts) >= 1 and output_facts[0] is not None:
+    if (
+        len(node.outputs) == 1
+        and len(output_facts) >= 1
+        and output_facts[0] is not None
+        and not isinstance(node.outputs[0].type_expr, TypeTuple)
+    ):
         fact = output_facts[0]
         assert fact is not None
         actuals = _rope_fact_actuals(fact, callee=callee, node=node)
@@ -333,6 +406,4271 @@ def _maybe_rewrite_call_to_torch_rope_apply_factors(
     return None
 
 
+def _maybe_rewrite_node_to_assign_unit_slice(
+    node: GraphNode,
+    *,
+    module: GraphModule,
+    provenance,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> GraphNode | None:
+    if len(node.outputs) != 1:
+        return None
+    local_provenance = provenance.module_local_provenance.get(module.name, {})
+    output_provenance = local_provenance.get(node.outputs[0].name)
+    if (
+        output_provenance is None
+        or output_provenance.kind != "op"
+        or output_provenance.op != "_scatter"
+        or len(output_provenance.args) < 4
+    ):
+        return None
+    base_prov, index_prov, src_prov, dim_prov = output_provenance.args[:4]
+    if index_prov.kind != "op" or index_prov.op != "_fill" or len(index_prov.args) < 2:
+        return None
+    fill_base_prov, fill_value_prov = index_prov.args[:2]
+    if fill_base_prov != src_prov:
+        return None
+    base = _provenance_to_graph_operand(base_prov, provenance_to_operand=provenance_to_operand)
+    dim = _provenance_to_graph_operand(dim_prov, provenance_to_operand=provenance_to_operand)
+    fill_value = _provenance_to_graph_operand(fill_value_prov, provenance_to_operand=provenance_to_operand)
+    src = _provenance_to_graph_operand(src_prov, provenance_to_operand=provenance_to_operand)
+    if base is None or dim is None or fill_value is None or src is None:
+        return None
+    base_type = getattr(base, "type_expr", None)
+    if base_type is None or not graph_type_compatible(node.outputs[0].type_expr, base_type):
+        return None
+    src_type = getattr(src, "type_expr", None)
+    if not isinstance(src_type, TypeTensor):
+        return None
+    return replace(
+        node,
+        op=GraphOp("_assign_unit_slice"),
+        inputs=(base, dim, fill_value, src),
+        attrs={},
+    )
+
+
+def _linear_provenance_args(
+    output_provenance: GraphProvenance | None,
+    *,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    if output_provenance is None:
+        return None
+    if output_provenance.kind != "op" or output_provenance.op != "_linear":
+        return None
+    if len(output_provenance.args) < 8:
+        return None
+    converted = tuple(
+        _provenance_to_graph_operand(item, provenance_to_operand=provenance_to_operand)
+        for item in output_provenance.args[:8]
+    )
+    if any(item is None for item in converted):
+        return None
+    return converted  # type: ignore[return-value]
+
+
+def _expert_linear_provenance_args(
+    output_provenance: GraphProvenance | None,
+    *,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    if output_provenance is None:
+        return None
+    if output_provenance.kind != "op" or output_provenance.op != "_expert_linear":
+        return None
+    if len(output_provenance.args) < 8:
+        return None
+    converted = tuple(
+        _provenance_to_graph_operand(item, provenance_to_operand=provenance_to_operand)
+        for item in output_provenance.args[:8]
+    )
+    if any(item is None for item in converted):
+        return None
+    return converted  # type: ignore[return-value]
+
+
+def _is_literal_provenance_value(provenance: GraphProvenance, value: object) -> bool:
+    return provenance.kind == "literal" and provenance.value == value
+
+
+def _graph_bool_literal_operand(operand: GraphOperand) -> GraphLiteral | None:
+    if isinstance(operand, GraphLiteral) and isinstance(operand.value, bool):
+        return operand
+    if isinstance(operand, GraphLiteral) and operand.value in {0, 1}:
+        return GraphLiteral(bool(operand.value), TypeBool())
+    return None
+
+
+def _is_literal_number_provenance_value(
+    provenance: GraphProvenance,
+    value: float,
+    *,
+    tolerance: float = 1e-12,
+) -> bool:
+    return provenance.kind == "literal" and isinstance(provenance.value, int | float) and math.isclose(
+        float(provenance.value),
+        value,
+        rel_tol=0.0,
+        abs_tol=tolerance,
+    )
+
+
+def _provenance_binary_args(
+    provenance: GraphProvenance,
+    *op_names: str,
+) -> tuple[GraphProvenance, GraphProvenance] | None:
+    if provenance.kind != "op" or len(provenance.args) != 2:
+        return None
+    if provenance.op not in op_names:
+        return None
+    return provenance.args[0], provenance.args[1]
+
+
+def _match_commutative_provenance_binary(
+    provenance: GraphProvenance,
+    op_name: str,
+    *,
+    left_predicate: Callable[[GraphProvenance], bool],
+    right_predicate: Callable[[GraphProvenance], bool],
+) -> tuple[GraphProvenance, GraphProvenance] | None:
+    args = _provenance_binary_args(provenance, op_name)
+    if args is None:
+        return None
+    left, right = args
+    if left_predicate(left) and right_predicate(right):
+        return left, right
+    if left_predicate(right) and right_predicate(left):
+        return right, left
+    return None
+
+
+def _path_parts_from_token(value: str) -> tuple[bool, tuple[str, ...]]:
+    token = value.strip()
+    if token.startswith("@@"):
+        return True, tuple(part for part in token[2:].split(".") if part)
+    if token.startswith("@"):
+        return False, tuple(part for part in token[1:].split(".") if part)
+    return False, tuple(part for part in token.split(".") if part)
+
+
+def _compose_graph_path_operand(base: GraphOperand, leaf: GraphOperand) -> GraphOperand | None:
+    if isinstance(leaf, GraphPath) and leaf.absolute:
+        return leaf
+    if isinstance(base, GraphPath):
+        if isinstance(leaf, GraphPath):
+            return GraphPath(base.absolute, base.parts + leaf.parts)
+        if isinstance(leaf, GraphLiteral) and isinstance(leaf.value, str):
+            absolute, parts = _path_parts_from_token(leaf.value)
+            if absolute:
+                return GraphPath(True, parts)
+            return GraphPath(base.absolute, base.parts + parts)
+    if isinstance(leaf, GraphLiteral) and isinstance(leaf.value, str):
+        absolute, parts = _path_parts_from_token(leaf.value)
+        if absolute:
+            return GraphPath(True, parts)
+    return None
+
+
+def _graph_path_key(path: GraphPath) -> str:
+    return ("@@" if path.absolute else "@") + ".".join(path.parts)
+
+
+def _operand_local_provenance(
+    operand: GraphOperand,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+) -> GraphProvenance | None:
+    if isinstance(operand, GraphValueRef):
+        return local_provenance.get(operand.name)
+    if isinstance(operand, GraphLiteral):
+        return GraphProvenance("literal", value=operand.value)
+    if isinstance(operand, GraphPath):
+        prefix = "@@" if operand.absolute else "@"
+        return GraphProvenance("path", value=prefix + ".".join(operand.parts))
+    if isinstance(operand, GraphExpr):
+        args = tuple(
+            _operand_local_provenance(item, local_provenance=local_provenance) or GraphProvenance("unknown")
+            for item in (*operand.inputs, *operand.attrs.values())
+        )
+        return GraphProvenance("op", op=operand.op.name, args=args)
+    return None
+
+
+def _node_operand_for_provenance(
+    node: GraphNode,
+    provenance: GraphProvenance,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> GraphOperand | None:
+    matches: list[GraphOperand] = []
+    for operand in (*node.inputs, *node.attrs.values()):
+        operand_provenance = _operand_local_provenance(
+            operand,
+            local_provenance=local_provenance,
+        )
+        if operand_provenance == provenance:
+            matches.append(operand)
+    if len(matches) == 1:
+        return matches[0]
+    return _provenance_to_graph_operand(
+        provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+
+
+def _path_key_from_provenance(
+    provenance: GraphProvenance,
+    *,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> str | None:
+    operand = _provenance_to_graph_operand(
+        provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if isinstance(operand, GraphPath):
+        return _graph_path_key(operand)
+    if isinstance(operand, GraphLiteral) and isinstance(operand.value, str):
+        absolute, parts = _path_parts_from_token(operand.value)
+        return ("@@" if absolute else "@") + ".".join(parts)
+    return None
+
+
+def _literal_bool_provenance_value(provenance: GraphProvenance, default: bool = False) -> bool:
+    if provenance.kind == "literal":
+        if provenance.value is None:
+            return default
+        return bool(provenance.value)
+    return default
+
+
+def _collect_parameter_path_keys_from_provenance(
+    provenance: GraphProvenance,
+    *,
+    skip_provenances: frozenset[GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+    out: Counter[str],
+    memo: dict[tuple[GraphProvenance, frozenset[GraphProvenance]], Counter[str]],
+) -> None:
+    if provenance in skip_provenances:
+        return
+    memo_key = (provenance, skip_provenances)
+    cached = memo.get(memo_key)
+    if cached is not None:
+        out.update(cached)
+        return
+    local: Counter[str] = Counter()
+    if provenance.kind == "op":
+        if provenance.op is not None and provenance.op.startswith("__torch_gate_up_linear_pair") and len(provenance.args) >= 7:
+            gate_key = _path_key_from_provenance(
+                provenance.args[1],
+                provenance_to_operand=provenance_to_operand,
+            )
+            up_key = _path_key_from_provenance(
+                provenance.args[2],
+                provenance_to_operand=provenance_to_operand,
+            )
+            if gate_key is not None:
+                local[gate_key] += 1
+            if up_key is not None:
+                local[up_key] += 1
+            if _literal_bool_provenance_value(provenance.args[5], default=False):
+                gate_bias_key = _path_key_from_provenance(
+                    provenance.args[3],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                up_bias_key = _path_key_from_provenance(
+                    provenance.args[4],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                if gate_bias_key is not None:
+                    local[gate_bias_key] += 1
+                if up_bias_key is not None:
+                    local[up_bias_key] += 1
+            memo[memo_key] = local
+            out.update(local)
+            return
+        if provenance.op is not None and provenance.op.startswith("__torch_swiglu_ffn") and len(provenance.args) >= 7:
+            for index in (1, 2, 3):
+                key = _path_key_from_provenance(
+                    provenance.args[index],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                if key is not None:
+                    local[key] += 1
+            memo[memo_key] = local
+            out.update(local)
+            return
+        if provenance.op == "_params_param" and provenance.args:
+            key = _path_key_from_provenance(
+                provenance.args[0],
+                provenance_to_operand=provenance_to_operand,
+            )
+            if key is not None:
+                local[key] += 1
+            memo[memo_key] = local
+            out.update(local)
+            return
+        if provenance.op == "_embedding" and provenance.args:
+            base = _provenance_to_graph_operand(
+                provenance.args[0],
+                provenance_to_operand=provenance_to_operand,
+            )
+            weight_path = _compose_graph_path_operand(base, GraphPath(False, ("weight",)))
+            if isinstance(weight_path, GraphPath):
+                local[_graph_path_key(weight_path)] += 1
+            memo[memo_key] = local
+            out.update(local)
+            return
+        if provenance.op == "_linear" and len(provenance.args) >= 8:
+            base = _provenance_to_graph_operand(
+                provenance.args[0],
+                provenance_to_operand=provenance_to_operand,
+            )
+            weight_leaf = _provenance_to_graph_operand(
+                provenance.args[6],
+                provenance_to_operand=provenance_to_operand,
+            )
+            weight_path = _compose_graph_path_operand(base, weight_leaf)
+            if isinstance(weight_path, GraphPath):
+                local[_graph_path_key(weight_path)] += 1
+            if _literal_bool_provenance_value(provenance.args[3], default=False):
+                bias_leaf = _provenance_to_graph_operand(
+                    provenance.args[7],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                bias_path = _compose_graph_path_operand(base, bias_leaf)
+                if isinstance(bias_path, GraphPath):
+                    local[_graph_path_key(bias_path)] += 1
+            memo[memo_key] = local
+            out.update(local)
+            return
+        if provenance.op == "_expert_linear" and len(provenance.args) >= 8:
+            base = _provenance_to_graph_operand(
+                provenance.args[0],
+                provenance_to_operand=provenance_to_operand,
+            )
+            weight_leaf = _provenance_to_graph_operand(
+                provenance.args[6],
+                provenance_to_operand=provenance_to_operand,
+            )
+            weight_path = _compose_graph_path_operand(base, weight_leaf)
+            if isinstance(weight_path, GraphPath):
+                local[_graph_path_key(weight_path)] += 1
+            if _literal_bool_provenance_value(provenance.args[4], default=False):
+                bias_leaf = _provenance_to_graph_operand(
+                    provenance.args[7],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                bias_path = _compose_graph_path_operand(base, bias_leaf)
+                if isinstance(bias_path, GraphPath):
+                    local[_graph_path_key(bias_path)] += 1
+            memo[memo_key] = local
+            out.update(local)
+            return
+        if provenance.op == "_layernorm" and len(provenance.args) >= 7:
+            base = _provenance_to_graph_operand(
+                provenance.args[0],
+                provenance_to_operand=provenance_to_operand,
+            )
+            weight_leaf = _provenance_to_graph_operand(
+                provenance.args[4],
+                provenance_to_operand=provenance_to_operand,
+            )
+            weight_path = _compose_graph_path_operand(base, weight_leaf)
+            if isinstance(weight_path, GraphPath):
+                local[_graph_path_key(weight_path)] += 1
+            if _literal_bool_provenance_value(provenance.args[5], default=True):
+                bias_leaf = _provenance_to_graph_operand(
+                    provenance.args[6],
+                    provenance_to_operand=provenance_to_operand,
+                )
+                bias_path = _compose_graph_path_operand(base, bias_leaf)
+                if isinstance(bias_path, GraphPath):
+                    local[_graph_path_key(bias_path)] += 1
+            memo[memo_key] = local
+            out.update(local)
+            return
+    for arg in provenance.args:
+        _collect_parameter_path_keys_from_provenance(
+            arg,
+            skip_provenances=skip_provenances,
+            provenance_to_operand=provenance_to_operand,
+            out=local,
+            memo=memo,
+        )
+    memo[memo_key] = local
+    out.update(local)
+
+
+def _semantic_parameter_path_counts(
+    module: GraphModule,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    memo: dict[tuple[GraphProvenance, frozenset[GraphProvenance]], Counter[str]] = {}
+    for node in module.nodes:
+        if node.op.name == "__torch_gate_up_linear_pair" and len(node.inputs) >= 7:
+            for operand in (node.inputs[1], node.inputs[2]):
+                if isinstance(operand, GraphPath):
+                    counts[_graph_path_key(operand)] += 1
+            if isinstance(node.inputs[5], GraphLiteral) and bool(node.inputs[5].value):
+                for operand in (node.inputs[3], node.inputs[4]):
+                    if isinstance(operand, GraphPath):
+                        counts[_graph_path_key(operand)] += 1
+            continue
+        if node.op.name == "__torch_swiglu_ffn" and len(node.inputs) >= 7:
+            for operand in (node.inputs[1], node.inputs[2], node.inputs[3]):
+                if isinstance(operand, GraphPath):
+                    counts[_graph_path_key(operand)] += 1
+            continue
+        input_provenances = frozenset(
+            item
+            for operand in (*node.inputs, *node.attrs.values())
+            if (item := _operand_local_provenance(operand, local_provenance=local_provenance)) is not None
+        )
+        for output in node.outputs:
+            output_provenance = local_provenance.get(output.name)
+            if output_provenance is None:
+                continue
+            _collect_parameter_path_keys_from_provenance(
+                output_provenance,
+                skip_provenances=input_provenances,
+                provenance_to_operand=provenance_to_operand,
+                out=counts,
+                memo=memo,
+            )
+    return counts
+
+def _module_provenance_to_operand_map(
+    module: GraphModule,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+) -> dict[GraphProvenance, GraphOperand]:
+    provenance_to_operand: dict[GraphProvenance, GraphOperand] = {}
+    for value in module.inputs:
+        value_provenance = local_provenance.get(value.name)
+        if value_provenance is not None:
+            provenance_to_operand.setdefault(
+                value_provenance,
+                GraphValueRef(value.name, value.type_expr, value.dims),
+            )
+    for node in module.nodes:
+        for operand in (*node.inputs, *node.attrs.values()):
+            _collect_literal_path_provenance_operands(operand, provenance_to_operand)
+            operand_provenance = _operand_local_provenance(
+                operand,
+                local_provenance=local_provenance,
+            )
+            if operand_provenance is not None:
+                provenance_to_operand.setdefault(operand_provenance, operand)
+        for output in node.outputs:
+            value_provenance = local_provenance.get(output.name)
+            if value_provenance is not None:
+                provenance_to_operand.setdefault(
+                    value_provenance,
+                    GraphValueRef(output.name, output.type_expr, output.dims),
+                )
+    return provenance_to_operand
+
+
+def _linear_pair_is_dense_gate_up_candidate(
+    first: GraphNode,
+    second: GraphNode,
+    *,
+    parameter_path_counts: Mapping[str, int],
+) -> tuple[GraphOperand, ...] | None:
+    if first.op.name != "_linear" or second.op.name != "_linear":
+        return None
+    if len(first.outputs) != 1 or len(second.outputs) != 1:
+        return None
+    if len(first.inputs) < 8 or len(second.inputs) < 8:
+        return None
+    first_path, first_x, first_dim, first_bias, first_transpose, first_expert, first_weight_path, first_bias_path = first.inputs[:8]
+    second_path, second_x, second_dim, second_bias, second_transpose, second_expert, second_weight_path, second_bias_path = second.inputs[:8]
+    if first_x != second_x:
+        return None
+    if not (
+        isinstance(first_bias, GraphLiteral)
+        and first_bias.value is False
+        and isinstance(second_bias, GraphLiteral)
+        and second_bias.value is False
+        and isinstance(first_transpose, GraphLiteral)
+        and first_transpose.value is False
+        and isinstance(second_transpose, GraphLiteral)
+        and second_transpose.value is False
+        and isinstance(first_expert, GraphLiteral)
+        and first_expert.value is None
+        and isinstance(second_expert, GraphLiteral)
+        and second_expert.value is None
+    ):
+        return None
+    if not graph_type_compatible(first.outputs[0].type_expr, second.outputs[0].type_expr):
+        return None
+    gate_weight_path = _compose_graph_path_operand(first_path, first_weight_path)
+    up_weight_path = _compose_graph_path_operand(second_path, second_weight_path)
+    gate_bias_path = _compose_graph_path_operand(first_path, first_bias_path)
+    up_bias_path = _compose_graph_path_operand(second_path, second_bias_path)
+    if (
+        gate_weight_path is None
+        or up_weight_path is None
+        or gate_bias_path is None
+        or up_bias_path is None
+    ):
+        return None
+    if not isinstance(gate_weight_path, GraphPath) or not isinstance(up_weight_path, GraphPath):
+        return None
+    if parameter_path_counts.get(_graph_path_key(gate_weight_path), 0) != 1:
+        return None
+    if parameter_path_counts.get(_graph_path_key(up_weight_path), 0) != 1:
+        return None
+    del first_dim, second_dim
+    return (
+        first_x,
+        gate_weight_path,
+        up_weight_path,
+        gate_bias_path,
+        up_bias_path,
+        first_bias,
+        first_transpose,
+    )
+
+
+def _packed_gate_up_path(module_name: str, node: GraphNode, gate_path: GraphPath, up_path: GraphPath) -> GraphPath:
+    base = "".join(ch if ch.isalnum() else "_" for ch in module_name).strip("_") or "module"
+    node_id = "".join(ch if ch.isalnum() else "_" for ch in node.id).strip("_") or "node"
+    return GraphPath(
+        True,
+        (
+            "__packed",
+            "linear_pair",
+            base,
+            node_id,
+            "gate",
+            *gate_path.parts,
+            "up",
+            *up_path.parts,
+        ),
+    )
+
+
+def _double_last_tensor_dim(type_expr: TypeExpr) -> tuple[TypeExpr, tuple[DimToken, ...] | None] | None:
+    if not isinstance(type_expr, TypeTensor) or not type_expr.dims:
+        return None
+    dims = tuple(type_expr.dims[:-1]) + (DimExprBinary("*", 2, type_expr.dims[-1]),)
+    return TypeTensor(type_expr.base, dims), dims
+
+
+def _sum_dim_tokens(tokens: tuple[DimToken, ...]) -> DimToken | None:
+    if not tokens:
+        return None
+    total = tokens[0]
+    for token in tokens[1:]:
+        total = substitute_dim_token(DimExprBinary("+", total, token), {})
+    return total
+
+
+def _linear_pack_path(
+    module_name: str,
+    nodes: tuple[GraphNode, ...],
+    paths: tuple[GraphPath, ...],
+    *,
+    leaf: str,
+) -> GraphPath:
+    base = "".join(ch if ch.isalnum() else "_" for ch in module_name).strip("_") or "module"
+    node_ids = "_".join("".join(ch if ch.isalnum() else "_" for ch in node.id).strip("_") for node in nodes)
+    path_parts: list[str] = ["__packed", "linear_pack", base, node_ids or "nodes"]
+    for index, path in enumerate(paths, start=1):
+        path_parts.append(f"p{index}")
+        source_parts = path.parts[:-1] if path.parts and path.parts[-1] in {"weight", "bias"} else path.parts
+        path_parts.extend(source_parts)
+    path_parts.append(leaf)
+    return GraphPath(True, tuple(path_parts))
+
+
+def _linear_pack_leafs(path: GraphPath) -> tuple[GraphPath, GraphPath] | None:
+    if not path.parts:
+        return None
+    return (
+        GraphPath(path.absolute, path.parts[:-1]),
+        GraphPath(False, (path.parts[-1],)),
+    )
+
+
+def _linear_pack_type(outputs: tuple[GraphValue, ...]) -> tuple[TypeExpr, tuple[DimToken, ...], DimToken] | None:
+    if not outputs:
+        return None
+    output_types = tuple(output.type_expr for output in outputs)
+    if not all(isinstance(tp, TypeTensor) and tp.dims for tp in output_types):
+        return None
+    tensor_types = tuple(tp for tp in output_types if isinstance(tp, TypeTensor))
+    prefix = tensor_types[0].dims[:-1]
+    if any(tp.base != tensor_types[0].base or tp.dims[:-1] != prefix for tp in tensor_types):
+        return None
+    last_dims = tuple(tp.dims[-1] for tp in tensor_types)
+    total_dim = _sum_dim_tokens(last_dims)
+    if total_dim is None:
+        return None
+    dims = (*prefix, total_dim)
+    return TypeTensor(tensor_types[0].base, dims), dims, total_dim
+
+
+def _linear_weight_pack_dim(transpose: GraphOperand) -> int:
+    transpose_literal = _graph_bool_literal_operand(transpose)
+    return -1 if transpose_literal is not None and bool(transpose_literal.value) else -2
+
+
+def _linear_pack_candidate(
+    module: GraphModule,
+    start_index: int,
+    *,
+    parameter_path_counts: Mapping[str, int],
+) -> tuple[tuple[int, ...], tuple[GraphOperand, GraphOperand, GraphOperand, GraphLiteral | None, tuple[GraphValue, ...], tuple[GraphPath, ...], tuple[GraphPath, ...] | None]] | None:
+    first = module.nodes[start_index]
+    if first.op.name != "_linear" or len(first.outputs) != 1 or len(first.inputs) < 8:
+        return None
+    first_path, first_x, _first_dim, first_bias, first_transpose, first_expert, first_weight_leaf, first_bias_leaf = first.inputs[:8]
+    if not (
+        isinstance(first_transpose, GraphLiteral)
+        and first_transpose.value is False
+        and isinstance(first_expert, GraphLiteral)
+        and first_expert.value is None
+    ):
+        return None
+    first_weight_path = _compose_graph_path_operand(first_path, first_weight_leaf)
+    first_bias_path = _compose_graph_path_operand(first_path, first_bias_leaf)
+    if not isinstance(first_weight_path, GraphPath):
+        return None
+    if parameter_path_counts.get(_graph_path_key(first_weight_path), 0) != 1:
+        return None
+    bias_enabled = isinstance(first_bias, GraphLiteral) and bool(first_bias.value)
+    if bias_enabled:
+        if not isinstance(first_bias_path, GraphPath):
+            return None
+        if parameter_path_counts.get(_graph_path_key(first_bias_path), 0) != 1:
+            return None
+    nodes: list[GraphNode] = [first]
+    indexes: list[int] = [start_index]
+    weight_paths: list[GraphPath] = [first_weight_path]
+    bias_paths: list[GraphPath] = [first_bias_path] if bias_enabled and isinstance(first_bias_path, GraphPath) else []
+    for index in range(start_index + 1, len(module.nodes)):
+        node = module.nodes[index]
+        if node.op.name != "_linear" or len(node.outputs) != 1 or len(node.inputs) < 8:
+            continue
+        path, x, _dim, bias, transpose, expert, weight_leaf, bias_leaf = node.inputs[:8]
+        if x != first_x or bias != first_bias or transpose != first_transpose or expert != first_expert:
+            continue
+        if not (
+            isinstance(transpose, GraphLiteral)
+            and transpose.value is False
+            and isinstance(expert, GraphLiteral)
+            and expert.value is None
+        ):
+            continue
+        weight_path = _compose_graph_path_operand(path, weight_leaf)
+        bias_path = _compose_graph_path_operand(path, bias_leaf)
+        if not isinstance(weight_path, GraphPath):
+            continue
+        if weight_path in weight_paths:
+            continue
+        if parameter_path_counts.get(_graph_path_key(weight_path), 0) != 1:
+            # This is a projection in the same candidate run, but its parameter
+            # tensor has another semantic read. Do not pack around it.
+            break
+        if bias_enabled:
+            if not isinstance(bias_path, GraphPath):
+                continue
+            if bias_path in bias_paths:
+                continue
+            if parameter_path_counts.get(_graph_path_key(bias_path), 0) != 1:
+                # Same as for weights: a reused bias blocks the whole pack.
+                break
+        nodes.append(node)
+        indexes.append(index)
+        weight_paths.append(weight_path)
+        if bias_enabled and isinstance(bias_path, GraphPath):
+            bias_paths.append(bias_path)
+        if len(nodes) == 3:
+            break
+    if len(nodes) < 2:
+        return None
+    outputs = tuple(node.outputs[0] for node in nodes)
+    if _linear_pack_type(outputs) is None:
+        return None
+    return (
+        tuple(indexes),
+        (
+            first_x,
+            first_bias,
+            first_transpose,
+            first_expert,
+            outputs,
+            tuple(weight_paths),
+            tuple(bias_paths) if bias_enabled else None,
+        ),
+    )
+
+
+def _collect_direct_graph_path_keys(operand: GraphOperand, counts: Counter[str]) -> None:
+    if isinstance(operand, GraphPath):
+        counts[_graph_path_key(operand)] += 1
+        return
+    if isinstance(operand, GraphExpr):
+        for item in operand.inputs:
+            _collect_direct_graph_path_keys(item, counts)
+        for item in operand.attrs.values():
+            _collect_direct_graph_path_keys(item, counts)
+
+
+def _direct_parameter_path_counts(graph: GraphProgram) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for module in graph.modules:
+        for node in module.nodes:
+            for operand in (*node.inputs, *node.attrs.values()):
+                _collect_direct_graph_path_keys(operand, counts)
+            if node.op.name == "_linear" and len(node.inputs) >= 8:
+                base, _x, _dim, bias, _transpose, _expert, weight_leaf, bias_leaf = node.inputs[:8]
+                weight_path = _compose_graph_path_operand(base, weight_leaf)
+                if isinstance(weight_path, GraphPath):
+                    counts[_graph_path_key(weight_path)] += 1
+                if isinstance(bias, GraphLiteral) and bool(bias.value):
+                    bias_path = _compose_graph_path_operand(base, bias_leaf)
+                    if isinstance(bias_path, GraphPath):
+                        counts[_graph_path_key(bias_path)] += 1
+            elif node.op.name == "_layernorm" and len(node.inputs) >= 7:
+                base, _x, _eps, _dim, weight_leaf, bias, bias_leaf = node.inputs[:7]
+                weight_path = _compose_graph_path_operand(base, weight_leaf)
+                if isinstance(weight_path, GraphPath):
+                    counts[_graph_path_key(weight_path)] += 1
+                if isinstance(bias, GraphLiteral) and bool(bias.value):
+                    bias_path = _compose_graph_path_operand(base, bias_leaf)
+                    if isinstance(bias_path, GraphPath):
+                        counts[_graph_path_key(bias_path)] += 1
+    return counts
+
+
+def _rewrite_linear_projection_packs(graph: GraphProgram) -> GraphProgram:
+    parameter_path_counts = _direct_parameter_path_counts(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    packed_parameters: list[GraphPackedParameter] = []
+    for module in graph.modules:
+        replacement_by_start: dict[int, tuple[tuple[int, ...], tuple[GraphNode, GraphNode], tuple[GraphPackedParameter, ...]]] = {}
+        consumed: set[int] = set()
+        for index in range(len(module.nodes)):
+            if index in consumed:
+                continue
+            candidate = _linear_pack_candidate(
+                module,
+                index,
+                parameter_path_counts=parameter_path_counts,
+            )
+            if candidate is None:
+                continue
+            indexes, (x, bias, transpose, expert, outputs, weight_paths, bias_paths) = candidate
+            pack_type = _linear_pack_type(outputs)
+            if pack_type is None:
+                continue
+            combined_type_expr, combined_dims, total_dim = pack_type
+            packed_weight_path = _linear_pack_path(
+                module.name,
+                tuple(module.nodes[i] for i in indexes),
+                weight_paths,
+                leaf="weight",
+            )
+            leafs = _linear_pack_leafs(packed_weight_path)
+            if leafs is None:
+                continue
+            packed_base_path, packed_weight_leaf = leafs
+            packed_bias_leaf: GraphOperand = GraphLiteral(value=None, type_expr=TypeNull())
+            specs = [
+                GraphPackedParameter(
+                    output=packed_weight_path,
+                    inputs=weight_paths,
+                    dim=_linear_weight_pack_dim(transpose),
+                    remove_inputs=True,
+                )
+            ]
+            if bias_paths is not None:
+                packed_bias_path = _linear_pack_path(
+                    module.name,
+                    tuple(module.nodes[i] for i in indexes),
+                    bias_paths,
+                    leaf="bias",
+                )
+                bias_leafs = _linear_pack_leafs(packed_bias_path)
+                if bias_leafs is None:
+                    continue
+                bias_base, packed_bias_leaf = bias_leafs
+                if bias_base != packed_base_path:
+                    continue
+                specs.append(
+                    GraphPackedParameter(
+                        output=packed_bias_path,
+                        inputs=bias_paths,
+                        dim=-1,
+                        remove_inputs=True,
+                    )
+                )
+            combined_output = GraphValue(
+                name=f"{outputs[0].name}__linear_pack",
+                type_expr=combined_type_expr,
+                dims=combined_dims,
+            )
+            linear_node = replace(
+                module.nodes[indexes[0]],
+                op=GraphOp("_linear"),
+                inputs=(
+                    packed_base_path,
+                    x,
+                    _dim_token_operand(total_dim, TypeDim()),
+                    bias,
+                    transpose,
+                    expert,
+                    packed_weight_leaf,
+                    packed_bias_leaf,
+                ),
+                attrs={},
+                outputs=(combined_output,),
+                type_expr=combined_type_expr,
+                dims=combined_dims,
+            )
+            sizes = GraphExpr(
+                op=GraphOp("core.list"),
+                inputs=tuple(_dim_token_operand(output.dims[-1], TypeDim()) for output in outputs if output.dims),
+                attrs={},
+                type_expr=TypeList(TypeDim()),
+            )
+            if len(sizes.inputs) != len(outputs):
+                continue
+            split_node = replace(
+                module.nodes[indexes[0]],
+                id=f"{module.nodes[indexes[0]].id}:linear_pack_split",
+                op=GraphOp("_split"),
+                inputs=(
+                    GraphValueRef(combined_output.name, combined_output.type_expr, combined_output.dims),
+                    GraphLiteral(value=-1, type_expr=TypeInt()),
+                    sizes,
+                ),
+                attrs={},
+                outputs=outputs,
+                type_expr=TypeTuple(tuple(output.type_expr for output in outputs)),
+                dims=None,
+            )
+            replacement_by_start[indexes[0]] = (indexes, (linear_node, split_node), tuple(specs))
+            consumed.update(indexes[1:])
+        if not replacement_by_start:
+            new_modules.append(module)
+            continue
+        changed = True
+        nodes: list[GraphNode] = []
+        for index, node in enumerate(module.nodes):
+            replacement = replacement_by_start.get(index)
+            if replacement is not None:
+                _indexes, replacement_nodes, specs = replacement
+                nodes.extend(replacement_nodes)
+                packed_parameters.extend(specs)
+                continue
+            if index in consumed:
+                continue
+            nodes.append(node)
+        new_modules.append(replace(module, nodes=tuple(nodes)))
+    if not changed:
+        return graph
+    return replace(
+        graph,
+        modules=tuple(new_modules),
+        packed_parameters=tuple((*graph.packed_parameters, *packed_parameters)),
+    )
+
+
+def _rewrite_dense_gate_up_linear_pairs(graph: GraphProgram) -> GraphProgram:
+    parameter_path_counts = _direct_parameter_path_counts(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    packed_parameters: list[GraphPackedParameter] = []
+    for module in graph.modules:
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            node = module.nodes[index]
+            if index + 1 >= len(module.nodes):
+                new_nodes.append(node)
+                index += 1
+                continue
+            next_node = module.nodes[index + 1]
+            inputs = _linear_pair_is_dense_gate_up_candidate(
+                node,
+                next_node,
+                parameter_path_counts=parameter_path_counts,
+            )
+            if inputs is None:
+                new_nodes.append(node)
+                index += 1
+                continue
+            x, gate_weight_path, up_weight_path, gate_bias_path, up_bias_path, bias, transpose = inputs
+            del gate_bias_path, up_bias_path
+            if not isinstance(gate_weight_path, GraphPath) or not isinstance(up_weight_path, GraphPath):
+                new_nodes.append(node)
+                index += 1
+                continue
+            combined_type = _double_last_tensor_dim(node.outputs[0].type_expr)
+            if combined_type is None:
+                new_nodes.append(node)
+                index += 1
+                continue
+            combined_type_expr, combined_dims = combined_type
+            combined_dim_arg = (
+                _dim_token_operand(combined_dims[-1], TypeDim())
+                if combined_dims
+                else GraphLiteral(value=None, type_expr=TypeNull())
+            )
+            packed_weight_path = _packed_gate_up_path(module.name, node, gate_weight_path, up_weight_path)
+            combined_output = GraphValue(
+                name=f"{node.outputs[0].name}__gate_up",
+                type_expr=combined_type_expr,
+                dims=combined_dims,
+            )
+            if not packed_weight_path.parts:
+                new_nodes.append(node)
+                index += 1
+                continue
+            packed_base_path = GraphPath(
+                packed_weight_path.absolute,
+                packed_weight_path.parts[:-1],
+            )
+            packed_weight_leaf = GraphPath(False, (packed_weight_path.parts[-1],))
+            chunk_type = TypeTuple((node.outputs[0].type_expr, next_node.outputs[0].type_expr))
+            changed = True
+            packed_parameters.append(
+                GraphPackedParameter(
+                    output=packed_weight_path,
+                    inputs=(gate_weight_path, up_weight_path),
+                    dim=_linear_weight_pack_dim(transpose),
+                    remove_inputs=True,
+                )
+            )
+            new_nodes.append(
+                replace(
+                    node,
+                    op=GraphOp("_linear"),
+                    inputs=(
+                        packed_base_path,
+                        x,
+                        combined_dim_arg,
+                        bias,
+                        transpose,
+                        GraphLiteral(value=None, type_expr=TypeNull()),
+                        packed_weight_leaf,
+                        GraphLiteral(value=None, type_expr=TypeNull()),
+                    ),
+                    attrs={},
+                    outputs=(combined_output,),
+                    type_expr=combined_type_expr,
+                    dims=combined_dims,
+                )
+            )
+            new_nodes.append(
+                replace(
+                    next_node,
+                    op=GraphOp("_chunk"),
+                    inputs=(
+                        GraphValueRef(combined_output.name, combined_output.type_expr, combined_output.dims),
+                        GraphLiteral(value=-1, type_expr=TypeInt()),
+                        GraphLiteral(value=2, type_expr=TypeDim()),
+                    ),
+                    attrs={},
+                    outputs=(node.outputs[0], next_node.outputs[0]),
+                    type_expr=chunk_type,
+                    dims=None,
+                )
+            )
+            index += 2
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    if not changed:
+        return graph
+    return replace(
+        graph,
+        modules=tuple(new_modules),
+        packed_parameters=tuple((*graph.packed_parameters, *packed_parameters)),
+    )
+
+
+def _value_ref_name(operand: GraphOperand) -> str | None:
+    return operand.name if isinstance(operand, GraphValueRef) else None
+
+
+def _module_value_ref_counts(module: GraphModule) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    path_template_refs: set[str] = set()
+    for node in module.nodes:
+        for operand in (*node.inputs, *node.attrs.values()):
+            _collect_value_ref_counts(
+                operand,
+                counts=counts,
+                path_template_refs=path_template_refs,
+            )
+    for output in module.outputs:
+        _collect_value_ref_counts(
+            output,
+            counts=counts,
+            path_template_refs=path_template_refs,
+        )
+    return counts
+
+
+def _torch_swiglu_ffn_candidate(
+    gate_up_node: GraphNode,
+    silu_node: GraphNode,
+    mul_node: GraphNode,
+    down_node: GraphNode,
+    *,
+    value_ref_counts: Mapping[str, int],
+    parameter_path_counts: Mapping[str, int],
+) -> tuple[GraphOperand, ...] | None:
+    if gate_up_node.op.name != "__torch_gate_up_linear_pair":
+        return None
+    if silu_node.op.name != "_activations_silu":
+        return None
+    if mul_node.op.name not in {"_mul", "core.binary.*"}:
+        return None
+    if down_node.op.name != "_linear":
+        return None
+    if len(gate_up_node.outputs) != 2 or len(silu_node.outputs) != 1 or len(mul_node.outputs) != 1 or len(down_node.outputs) != 1:
+        return None
+    if len(silu_node.inputs) != 1 or len(mul_node.inputs) != 2 or len(down_node.inputs) < 8:
+        return None
+    gate_name = gate_up_node.outputs[0].name
+    up_name = gate_up_node.outputs[1].name
+    silu_name = silu_node.outputs[0].name
+    mul_name = mul_node.outputs[0].name
+    if value_ref_counts.get(gate_name, 0) != 1:
+        return None
+    if value_ref_counts.get(up_name, 0) != 1:
+        return None
+    if value_ref_counts.get(silu_name, 0) != 1:
+        return None
+    if value_ref_counts.get(mul_name, 0) != 1:
+        return None
+    gate_ref = GraphValueRef(gate_name, gate_up_node.outputs[0].type_expr, gate_up_node.outputs[0].dims)
+    up_ref = GraphValueRef(up_name, gate_up_node.outputs[1].type_expr, gate_up_node.outputs[1].dims)
+    silu_ref = GraphValueRef(silu_name, silu_node.outputs[0].type_expr, silu_node.outputs[0].dims)
+    if silu_node.inputs[0] != gate_ref:
+        return None
+    if not ((mul_node.inputs[0] == silu_ref and mul_node.inputs[1] == up_ref) or (mul_node.inputs[1] == silu_ref and mul_node.inputs[0] == up_ref)):
+        return None
+    mul_ref = GraphValueRef(mul_name, mul_node.outputs[0].type_expr, mul_node.outputs[0].dims)
+    down_base, down_x, _down_dim, down_bias, down_transpose, down_expert, down_weight_leaf, down_bias_leaf = down_node.inputs[:8]
+    if down_x != mul_ref:
+        return None
+    if not (
+        isinstance(down_bias, GraphLiteral)
+        and down_bias.value is False
+        and isinstance(down_transpose, GraphLiteral)
+        and down_transpose.value is False
+        and isinstance(down_expert, GraphLiteral)
+        and down_expert.value is None
+    ):
+        return None
+    if len(gate_up_node.inputs) < 7:
+        return None
+    gate_weight_path = gate_up_node.inputs[1]
+    up_weight_path = gate_up_node.inputs[2]
+    if not isinstance(gate_weight_path, GraphPath) or not isinstance(up_weight_path, GraphPath):
+        return None
+    if parameter_path_counts.get(_graph_path_key(gate_weight_path), 0) != 1:
+        return None
+    if parameter_path_counts.get(_graph_path_key(up_weight_path), 0) != 1:
+        return None
+    down_weight_path = _compose_graph_path_operand(down_base, down_weight_leaf)
+    down_bias_path = _compose_graph_path_operand(down_base, down_bias_leaf)
+    if not isinstance(down_weight_path, GraphPath) or not isinstance(down_bias_path, GraphPath):
+        return None
+    del down_bias, down_transpose, down_expert
+    return (
+        gate_up_node.inputs[0],
+        gate_weight_path,
+        up_weight_path,
+        down_weight_path,
+        gate_up_node.inputs[3],
+        gate_up_node.inputs[4],
+        down_bias_path,
+    )
+
+
+def _rewrite_torch_swiglu_ffn_intrinsics(graph: GraphProgram) -> GraphProgram:
+    parameter_path_counts = _direct_parameter_path_counts(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        value_ref_counts = _module_value_ref_counts(module)
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            if index + 3 >= len(module.nodes):
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            inputs = _torch_swiglu_ffn_candidate(
+                module.nodes[index],
+                module.nodes[index + 1],
+                module.nodes[index + 2],
+                module.nodes[index + 3],
+                value_ref_counts=value_ref_counts,
+                parameter_path_counts=parameter_path_counts,
+            )
+            if inputs is None:
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            down_node = module.nodes[index + 3]
+            changed = True
+            new_nodes.append(
+                replace(
+                    down_node,
+                    op=GraphOp("__torch_swiglu_ffn"),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 4
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _torch_expert_swiglu_ffn_candidate(
+    gate_node: GraphNode,
+    up_node: GraphNode,
+    silu_node: GraphNode,
+    mul_node: GraphNode,
+    down_node: GraphNode,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+    value_ref_counts: Mapping[str, int],
+) -> tuple[GraphOperand, ...] | None:
+    if (
+        len(gate_node.outputs) != 1
+        or len(up_node.outputs) != 1
+        or len(silu_node.outputs) != 1
+        or len(mul_node.outputs) != 1
+        or len(down_node.outputs) != 1
+    ):
+        return None
+    gate_name = gate_node.outputs[0].name
+    up_name = up_node.outputs[0].name
+    silu_name = silu_node.outputs[0].name
+    mul_name = mul_node.outputs[0].name
+    if value_ref_counts.get(gate_name, 0) != 1:
+        return None
+    if value_ref_counts.get(up_name, 0) != 1:
+        return None
+    if value_ref_counts.get(silu_name, 0) != 1:
+        return None
+    if value_ref_counts.get(mul_name, 0) != 1:
+        return None
+    gate_prov = local_provenance.get(gate_name)
+    up_prov = local_provenance.get(up_name)
+    gate_args = _expert_linear_provenance_args(
+        gate_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    up_args = _expert_linear_provenance_args(
+        up_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if gate_args is None or up_args is None or gate_prov is None or up_prov is None:
+        return None
+    gate_base, gate_x, gate_expert_idx, _gate_dim, gate_bias, gate_transpose, gate_weight_leaf, _gate_bias_leaf = gate_args
+    up_base, up_x, up_expert_idx, _up_dim, up_bias, up_transpose, up_weight_leaf, _up_bias_leaf = up_args
+    gate_x_hint = _node_operand_for_provenance(
+        gate_node,
+        gate_prov.args[1],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    gate_expert_idx_hint = _node_operand_for_provenance(
+        gate_node,
+        gate_prov.args[2],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    gate_base_hint = _node_operand_for_provenance(
+        gate_node,
+        gate_prov.args[0],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    gate_weight_leaf_hint = _node_operand_for_provenance(
+        gate_node,
+        gate_prov.args[6],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    up_base_hint = _node_operand_for_provenance(
+        up_node,
+        up_prov.args[0],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    up_x_hint = _node_operand_for_provenance(
+        up_node,
+        up_prov.args[1],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    up_expert_idx_hint = _node_operand_for_provenance(
+        up_node,
+        up_prov.args[2],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    up_weight_leaf_hint = _node_operand_for_provenance(
+        up_node,
+        up_prov.args[6],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    gate_x = gate_x_hint if gate_x_hint is not None else gate_x
+    gate_expert_idx = gate_expert_idx_hint if gate_expert_idx_hint is not None else gate_expert_idx
+    gate_base = gate_base_hint if gate_base_hint is not None else gate_base
+    gate_weight_leaf = gate_weight_leaf_hint if gate_weight_leaf_hint is not None else gate_weight_leaf
+    up_base = up_base_hint if up_base_hint is not None else up_base
+    up_x = up_x_hint if up_x_hint is not None else up_x
+    up_expert_idx = up_expert_idx_hint if up_expert_idx_hint is not None else up_expert_idx
+    up_weight_leaf = up_weight_leaf_hint if up_weight_leaf_hint is not None else up_weight_leaf
+    if gate_x != up_x or gate_expert_idx != up_expert_idx:
+        return None
+    gate_prov_args = gate_prov.args[:8]
+    up_prov_args = up_prov.args[:8]
+    if not (
+        _is_literal_provenance_value(gate_prov_args[4], False)
+        and _is_literal_provenance_value(up_prov_args[4], False)
+        and _is_literal_provenance_value(gate_prov_args[5], False)
+        and _is_literal_provenance_value(up_prov_args[5], False)
+    ):
+        return None
+    if not graph_type_compatible(gate_node.outputs[0].type_expr, up_node.outputs[0].type_expr):
+        return None
+    silu_prov = local_provenance.get(silu_name)
+    if (
+        silu_prov is None
+        or silu_prov.kind != "op"
+        or silu_prov.op != "_activations_silu"
+        or len(silu_prov.args) != 1
+        or silu_prov.args[0] != gate_prov
+    ):
+        return None
+    mul_prov = local_provenance.get(mul_name)
+    if mul_prov is None or mul_prov.kind != "op" or mul_prov.op not in {"_mul", "core.binary.*"} or len(mul_prov.args) != 2:
+        return None
+    if not (
+        (mul_prov.args[0] == silu_prov and mul_prov.args[1] == up_prov)
+        or (mul_prov.args[1] == silu_prov and mul_prov.args[0] == up_prov)
+    ):
+        return None
+    down_prov = local_provenance.get(down_node.outputs[0].name)
+    down_args = _expert_linear_provenance_args(
+        down_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if down_args is None or down_prov is None:
+        return None
+    down_base, _down_x, down_expert_idx, _down_dim, down_bias, down_transpose, down_weight_leaf, _down_bias_leaf = down_args
+    down_base_hint = _node_operand_for_provenance(
+        down_node,
+        down_prov.args[0],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    down_weight_leaf_hint = _node_operand_for_provenance(
+        down_node,
+        down_prov.args[6],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    down_expert_idx_hint = _node_operand_for_provenance(
+        down_node,
+        down_prov.args[2],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    down_base = down_base_hint if down_base_hint is not None else down_base
+    down_weight_leaf = down_weight_leaf_hint if down_weight_leaf_hint is not None else down_weight_leaf
+    down_expert_idx = down_expert_idx_hint if down_expert_idx_hint is not None else down_expert_idx
+    if len(down_prov.args) < 3 or down_prov.args[1] != mul_prov or down_prov.args[2] != gate_prov.args[2]:
+        return None
+    if down_expert_idx != gate_expert_idx:
+        return None
+    down_prov_args = down_prov.args[:8]
+    if not (
+        _is_literal_provenance_value(down_prov_args[4], False)
+        and _is_literal_provenance_value(down_prov_args[5], False)
+    ):
+        return None
+    gate_weight_path = _compose_graph_path_operand(gate_base, gate_weight_leaf)
+    up_weight_path = _compose_graph_path_operand(up_base, up_weight_leaf)
+    down_weight_path = _compose_graph_path_operand(down_base, down_weight_leaf)
+    if (
+        not isinstance(gate_weight_path, GraphPath)
+        or not isinstance(up_weight_path, GraphPath)
+        or not isinstance(down_weight_path, GraphPath)
+    ):
+        return None
+    del gate_bias, gate_transpose, up_bias, up_transpose, down_bias, down_transpose
+    return (
+        gate_x,
+        gate_expert_idx,
+        gate_weight_path,
+        up_weight_path,
+        down_weight_path,
+    )
+
+
+def _rewrite_torch_expert_swiglu_ffn_intrinsics(graph: GraphProgram) -> GraphProgram:
+    if not any(node.op.name == "_expert_linear" for module in graph.modules for node in module.nodes):
+        return graph
+    provenance = infer_graph_provenance(graph)
+    module_provenance_to_operand: dict[str, dict[GraphProvenance, GraphOperand]] = {}
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        module_provenance_to_operand[module.name] = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = module_provenance_to_operand.get(module.name, {})
+        value_ref_counts = _module_value_ref_counts(module)
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            if index + 4 >= len(module.nodes):
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            inputs = _torch_expert_swiglu_ffn_candidate(
+                module.nodes[index],
+                module.nodes[index + 1],
+                module.nodes[index + 2],
+                module.nodes[index + 3],
+                module.nodes[index + 4],
+                local_provenance=local_provenance,
+                provenance_to_operand=provenance_to_operand,
+                value_ref_counts=value_ref_counts,
+            )
+            if inputs is None:
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            down_node = module.nodes[index + 4]
+            changed = True
+            new_nodes.append(
+                replace(
+                    down_node,
+                    op=GraphOp("__torch_expert_swiglu_ffn"),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 5
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _match_chunk_output_pair(
+    gate: GraphProvenance,
+    up: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance] | None:
+    if gate.kind != "op" or up.kind != "op":
+        return None
+    if gate.op == "_split[0]" and up.op == "_split[1]":
+        if len(gate.args) < 3 or len(up.args) < 3:
+            return None
+        if gate.args != up.args:
+            return None
+        source, dim, parts = gate.args[:3]
+        if not _is_literal_provenance_value(dim, -1):
+            return None
+        if parts.kind != "op" or parts.op != "core.list" or len(parts.args) != 2:
+            return None
+        if parts.args[0] != parts.args[1]:
+            return None
+        return source, parts
+    if gate.op != "_chunk[0]" or up.op != "_chunk[1]":
+        return None
+    if len(gate.args) < 3 or len(up.args) < 3:
+        return None
+    if gate.args != up.args:
+        return None
+    source, dim, parts = gate.args[:3]
+    if not _is_literal_provenance_value(dim, -1):
+        return None
+    if not _is_literal_provenance_value(parts, 2):
+        return None
+    return source, parts
+
+
+def _torch_expert_packed_swiglu_ffn_candidate(
+    gate_up_node: GraphNode,
+    chunk_node: GraphNode,
+    silu_node: GraphNode,
+    mul_node: GraphNode,
+    down_node: GraphNode,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+    value_ref_counts: Mapping[str, int],
+) -> tuple[GraphOperand, ...] | None:
+    if (
+        len(gate_up_node.outputs) != 1
+        or len(chunk_node.outputs) != 2
+        or len(silu_node.outputs) != 1
+        or len(mul_node.outputs) != 1
+        or len(down_node.outputs) != 1
+    ):
+        return None
+    gate_up_name = gate_up_node.outputs[0].name
+    gate_name = chunk_node.outputs[0].name
+    up_name = chunk_node.outputs[1].name
+    silu_name = silu_node.outputs[0].name
+    mul_name = mul_node.outputs[0].name
+    if value_ref_counts.get(gate_up_name, 0) != 1:
+        return None
+    if value_ref_counts.get(gate_name, 0) != 1:
+        return None
+    if value_ref_counts.get(up_name, 0) != 1:
+        return None
+    if value_ref_counts.get(silu_name, 0) != 1:
+        return None
+    if value_ref_counts.get(mul_name, 0) != 1:
+        return None
+    gate_up_prov = local_provenance.get(gate_up_name)
+    gate_up_args = _expert_linear_provenance_args(
+        gate_up_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if gate_up_args is None or gate_up_prov is None:
+        return None
+    gate_up_base, gate_up_x, gate_up_expert_idx, _gate_up_dim, gate_up_bias, gate_up_transpose, gate_up_weight_leaf, _gate_up_bias_leaf = gate_up_args
+    gate_up_prov_args = gate_up_prov.args[:8]
+    if not _is_literal_provenance_value(gate_up_prov_args[4], False):
+        return None
+    if not (
+        _is_literal_provenance_value(gate_up_prov_args[5], False)
+        or _is_literal_provenance_value(gate_up_prov_args[5], True)
+    ):
+        return None
+    gate_up_x_hint = _node_operand_for_provenance(
+        gate_up_node,
+        gate_up_prov.args[1],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    gate_up_expert_idx_hint = _node_operand_for_provenance(
+        gate_up_node,
+        gate_up_prov.args[2],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    gate_up_base_hint = _node_operand_for_provenance(
+        gate_up_node,
+        gate_up_prov.args[0],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    gate_up_weight_leaf_hint = _node_operand_for_provenance(
+        gate_up_node,
+        gate_up_prov.args[6],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    gate_up_transpose_hint = _node_operand_for_provenance(
+        gate_up_node,
+        gate_up_prov.args[5],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    gate_up_x = gate_up_x_hint if gate_up_x_hint is not None else gate_up_x
+    gate_up_expert_idx = gate_up_expert_idx_hint if gate_up_expert_idx_hint is not None else gate_up_expert_idx
+    gate_up_base = gate_up_base_hint if gate_up_base_hint is not None else gate_up_base
+    gate_up_weight_leaf = gate_up_weight_leaf_hint if gate_up_weight_leaf_hint is not None else gate_up_weight_leaf
+    gate_up_transpose = gate_up_transpose_hint if gate_up_transpose_hint is not None else gate_up_transpose
+    gate_prov = local_provenance.get(gate_name)
+    up_prov = local_provenance.get(up_name)
+    if gate_prov is None or up_prov is None:
+        return None
+    chunk_match = _match_chunk_output_pair(gate_prov, up_prov)
+    if chunk_match is None:
+        return None
+    chunk_source, _parts = chunk_match
+    if chunk_source != gate_up_prov:
+        return None
+    silu_prov = local_provenance.get(silu_name)
+    if (
+        silu_prov is None
+        or silu_prov.kind != "op"
+        or silu_prov.op != "_activations_silu"
+        or len(silu_prov.args) != 1
+        or silu_prov.args[0] != gate_prov
+    ):
+        return None
+    mul_prov = local_provenance.get(mul_name)
+    if mul_prov is None or mul_prov.kind != "op" or mul_prov.op not in {"_mul", "core.binary.*"} or len(mul_prov.args) != 2:
+        return None
+    if not (
+        (mul_prov.args[0] == silu_prov and mul_prov.args[1] == up_prov)
+        or (mul_prov.args[1] == silu_prov and mul_prov.args[0] == up_prov)
+    ):
+        return None
+    down_prov = local_provenance.get(down_node.outputs[0].name)
+    down_args = _expert_linear_provenance_args(
+        down_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if down_args is None or down_prov is None:
+        return None
+    down_base, _down_x, down_expert_idx, _down_dim, down_bias, down_transpose, down_weight_leaf, _down_bias_leaf = down_args
+    if len(down_prov.args) < 3 or down_prov.args[1] != mul_prov or down_prov.args[2] != gate_up_prov.args[2]:
+        return None
+    down_prov_args = down_prov.args[:8]
+    if not _is_literal_provenance_value(down_prov_args[4], False):
+        return None
+    if down_prov_args[5] != gate_up_prov_args[5]:
+        return None
+    down_base_hint = _node_operand_for_provenance(
+        down_node,
+        down_prov.args[0],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    down_expert_idx_hint = _node_operand_for_provenance(
+        down_node,
+        down_prov.args[2],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    down_weight_leaf_hint = _node_operand_for_provenance(
+        down_node,
+        down_prov.args[6],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    down_base = down_base_hint if down_base_hint is not None else down_base
+    down_expert_idx = down_expert_idx_hint if down_expert_idx_hint is not None else down_expert_idx
+    down_weight_leaf = down_weight_leaf_hint if down_weight_leaf_hint is not None else down_weight_leaf
+    if down_expert_idx != gate_up_expert_idx:
+        return None
+    gate_up_weight_path = _compose_graph_path_operand(gate_up_base, gate_up_weight_leaf)
+    down_weight_path = _compose_graph_path_operand(down_base, down_weight_leaf)
+    if not isinstance(gate_up_weight_path, GraphPath) or not isinstance(down_weight_path, GraphPath):
+        return None
+    del gate_up_bias, down_bias, down_transpose
+    return (
+        gate_up_x,
+        gate_up_expert_idx,
+        gate_up_weight_path,
+        down_weight_path,
+        gate_up_transpose,
+    )
+
+
+def _match_expand_unsqueeze_hidden_provenance(
+    provenance: GraphProvenance,
+) -> GraphProvenance | None:
+    if provenance.kind != "op" or provenance.op != "_expand" or len(provenance.args) < 1:
+        return None
+    unsqueezed = provenance.args[0]
+    if unsqueezed.kind != "op" or unsqueezed.op != "_unsqueeze" or len(unsqueezed.args) < 2:
+        return None
+    if not _is_literal_provenance_value(unsqueezed.args[1], 2):
+        return None
+    return unsqueezed.args[0]
+
+
+def _tensor_has_rank_or_variadic(tensor_type: TypeTensor, rank: int) -> bool:
+    if len(tensor_type.dims) == rank:
+        return True
+    return len(tensor_type.dims) == 1 and isinstance(tensor_type.dims[0], str) and tensor_type.dims[0].startswith("..")
+
+
+def _tensor_prefix_dims_match(left: TypeTensor, right: TypeTensor, count: int) -> bool:
+    if len(left.dims) < count or len(right.dims) < count:
+        return True
+    return tuple(left.dims[:count]) == tuple(right.dims[:count])
+
+
+def _torch_direct_selected_expert_packed_swiglu_candidate(
+    sum_node: GraphNode,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+    producer_by_output: Mapping[str, GraphNode] | None = None,
+) -> tuple[GraphOperand, ...] | None:
+    if sum_node.op.name == "__torch_weighted_topk_sum" and len(sum_node.inputs) >= 2:
+        values_operand, topk_scores = sum_node.inputs[:2]
+        if isinstance(values_operand, GraphValueRef) and producer_by_output is not None:
+            values_node = producer_by_output.get(values_operand.name)
+            if (
+                values_node is not None
+                and values_node.op.name == "__torch_expert_packed_swiglu_ffn"
+                and len(values_node.inputs) >= 5
+            ):
+                x_sel, topk_indices, gate_up_weight, down_weight, transpose = values_node.inputs[:5]
+                if isinstance(x_sel, GraphValueRef):
+                    expand_node = producer_by_output.get(x_sel.name)
+                else:
+                    expand_node = None
+                if (
+                    expand_node is not None
+                    and expand_node.op.name == "_expand"
+                    and expand_node.inputs
+                    and isinstance(expand_node.inputs[0], GraphValueRef)
+                ):
+                    unsqueeze_node = producer_by_output.get(expand_node.inputs[0].name)
+                else:
+                    unsqueeze_node = None
+                if (
+                    unsqueeze_node is not None
+                    and unsqueeze_node.op.name == "_unsqueeze"
+                    and len(unsqueeze_node.inputs) >= 2
+                    and _is_literal_value(unsqueeze_node.inputs[1], 2)
+                    and isinstance(gate_up_weight, GraphPath)
+                    and isinstance(down_weight, GraphPath)
+                    and isinstance(transpose, GraphLiteral)
+                    and isinstance(transpose.value, bool)
+                ):
+                    hidden = unsqueeze_node.inputs[0]
+                    hidden_type = graph_operand_type(hidden)
+                    scores_type = graph_operand_type(topk_scores)
+                    indices_type = graph_operand_type(topk_indices)
+                    output_type = sum_node.outputs[0].type_expr if sum_node.outputs else TypeAny()
+                    if (
+                        isinstance(hidden_type, TypeTensor)
+                        and isinstance(scores_type, TypeTensor)
+                        and isinstance(indices_type, TypeTensor)
+                        and isinstance(output_type, TypeTensor)
+                        and _tensor_has_rank_or_variadic(hidden_type, 3)
+                        and _tensor_has_rank_or_variadic(scores_type, 3)
+                        and _tensor_has_rank_or_variadic(indices_type, 3)
+                        and _tensor_has_rank_or_variadic(output_type, 3)
+                        and (tuple(scores_type.dims) == tuple(indices_type.dims) or len(scores_type.dims) == 1 or len(indices_type.dims) == 1)
+                        and _tensor_prefix_dims_match(scores_type, hidden_type, 2)
+                        and _tensor_prefix_dims_match(output_type, hidden_type, 2)
+                    ):
+                        return (
+                            hidden,
+                            topk_scores,
+                            topk_indices,
+                            gate_up_weight,
+                            down_weight,
+                            transpose,
+                        )
+        values_prov = _operand_local_provenance(values_operand, local_provenance=local_provenance)
+        if (
+            values_prov is None
+            or values_prov.kind != "op"
+            or values_prov.op != "__torch_expert_packed_swiglu_ffn"
+            or len(values_prov.args) < 5
+        ):
+            return None
+        hidden_prov = _match_expand_unsqueeze_hidden_provenance(values_prov.args[0])
+        if hidden_prov is None:
+            return None
+        hidden = _provenance_to_graph_operand(
+            hidden_prov,
+            provenance_to_operand=provenance_to_operand,
+        )
+        topk_indices = _provenance_to_graph_operand(
+            values_prov.args[1],
+            provenance_to_operand=provenance_to_operand,
+        )
+        gate_up_weight = _provenance_to_graph_operand(
+            values_prov.args[2],
+            provenance_to_operand=provenance_to_operand,
+        )
+        down_weight = _provenance_to_graph_operand(
+            values_prov.args[3],
+            provenance_to_operand=provenance_to_operand,
+        )
+        transpose = _provenance_to_graph_operand(
+            values_prov.args[4],
+            provenance_to_operand=provenance_to_operand,
+        )
+        if not (
+            hidden is not None
+            and topk_indices is not None
+            and isinstance(gate_up_weight, GraphPath)
+            and isinstance(down_weight, GraphPath)
+            and isinstance(transpose, GraphLiteral)
+            and isinstance(transpose.value, bool)
+        ):
+            return None
+        hidden_type = graph_operand_type(hidden)
+        scores_type = graph_operand_type(topk_scores)
+        indices_type = graph_operand_type(topk_indices)
+        output_type = sum_node.outputs[0].type_expr if sum_node.outputs else TypeAny()
+        if not (
+            isinstance(hidden_type, TypeTensor)
+            and isinstance(scores_type, TypeTensor)
+            and isinstance(indices_type, TypeTensor)
+            and isinstance(output_type, TypeTensor)
+        ):
+            return None
+        if len(hidden_type.dims) != 3 or len(scores_type.dims) != 3 or len(indices_type.dims) != 3 or len(output_type.dims) != 3:
+            return None
+        if tuple(scores_type.dims) != tuple(indices_type.dims):
+            return None
+        if tuple(output_type.dims) != tuple(hidden_type.dims):
+            return None
+        if tuple(scores_type.dims[:2]) != tuple(hidden_type.dims[:2]):
+            return None
+        return (
+            hidden,
+            topk_scores,
+            topk_indices,
+            gate_up_weight,
+            down_weight,
+            transpose,
+        )
+
+    if len(sum_node.outputs) != 1:
+        return None
+    sum_prov = local_provenance.get(sum_node.outputs[0].name)
+    if sum_prov is None or sum_prov.kind != "op" or sum_prov.op != "_sum" or len(sum_prov.args) < 3:
+        return None
+    if not _is_literal_provenance_value(sum_prov.args[1], 2):
+        return None
+    if not _is_literal_provenance_value(sum_prov.args[2], False):
+        return None
+    weighted_prov = sum_prov.args[0]
+    if weighted_prov.kind != "op" or weighted_prov.op not in {"_mul", "core.binary.*"} or len(weighted_prov.args) != 2:
+        return None
+    left, right = weighted_prov.args
+    if left.kind == "op" and left.op == "_unsqueeze" and len(left.args) >= 2 and _is_literal_provenance_value(left.args[1], -1):
+        scale_prov = left
+        values_prov = right
+    elif right.kind == "op" and right.op == "_unsqueeze" and len(right.args) >= 2 and _is_literal_provenance_value(right.args[1], -1):
+        scale_prov = right
+        values_prov = left
+    else:
+        return None
+    topk_scores = _provenance_to_graph_operand(
+        scale_prov.args[0],
+        provenance_to_operand=provenance_to_operand,
+    )
+    if topk_scores is None:
+        return None
+
+    down_args = _expert_linear_provenance_args(
+        values_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if down_args is None:
+        return None
+    down_base, _down_x, down_expert_idx, _down_dim, _down_bias, down_transpose, down_weight_leaf, _down_bias_leaf = down_args
+    if len(values_prov.args) < 8:
+        return None
+    if not _is_literal_provenance_value(values_prov.args[4], False):
+        return None
+    ff_prov = values_prov.args[1]
+    topk_indices_prov = values_prov.args[2]
+
+    if ff_prov.kind != "op" or ff_prov.op not in {"_mul", "core.binary.*"} or len(ff_prov.args) != 2:
+        return None
+    ff_left, ff_right = ff_prov.args
+    if ff_left.kind == "op" and ff_left.op == "_activations_silu" and len(ff_left.args) == 1:
+        silu_prov = ff_left
+        up_prov = ff_right
+    elif ff_right.kind == "op" and ff_right.op == "_activations_silu" and len(ff_right.args) == 1:
+        silu_prov = ff_right
+        up_prov = ff_left
+    else:
+        return None
+    gate_prov = silu_prov.args[0]
+    chunk_match = _match_chunk_output_pair(gate_prov, up_prov)
+    if chunk_match is None:
+        return None
+    gate_up_prov, _parts = chunk_match
+    gate_up_args = _expert_linear_provenance_args(
+        gate_up_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if gate_up_args is None:
+        return None
+    gate_up_base, _gate_up_x, gate_up_expert_idx, _gate_up_dim, _gate_up_bias, gate_up_transpose, gate_up_weight_leaf, _gate_up_bias_leaf = gate_up_args
+    if len(gate_up_prov.args) < 8:
+        return None
+    if not _is_literal_provenance_value(gate_up_prov.args[4], False):
+        return None
+    if gate_up_prov.args[2] != topk_indices_prov or values_prov.args[2] != topk_indices_prov:
+        return None
+    if gate_up_prov.args[5] != values_prov.args[5]:
+        return None
+    hidden_prov = _match_expand_unsqueeze_hidden_provenance(gate_up_prov.args[1])
+    if hidden_prov is None:
+        return None
+
+    hidden = _provenance_to_graph_operand(
+        hidden_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    topk_indices = _provenance_to_graph_operand(
+        topk_indices_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if hidden is None or topk_indices is None:
+        return None
+    if topk_indices != gate_up_expert_idx or topk_indices != down_expert_idx:
+        return None
+    gate_up_weight_path = _compose_graph_path_operand(gate_up_base, gate_up_weight_leaf)
+    down_weight_path = _compose_graph_path_operand(down_base, down_weight_leaf)
+    if not isinstance(gate_up_weight_path, GraphPath) or not isinstance(down_weight_path, GraphPath):
+        return None
+    if not isinstance(gate_up_transpose, GraphLiteral) or not isinstance(down_transpose, GraphLiteral):
+        return None
+    if gate_up_transpose.value != down_transpose.value or not isinstance(gate_up_transpose.value, bool):
+        return None
+
+    hidden_type = graph_operand_type(hidden)
+    scores_type = graph_operand_type(topk_scores)
+    indices_type = graph_operand_type(topk_indices)
+    output_type = sum_node.outputs[0].type_expr
+    if not (
+        isinstance(hidden_type, TypeTensor)
+        and isinstance(scores_type, TypeTensor)
+        and isinstance(indices_type, TypeTensor)
+        and isinstance(output_type, TypeTensor)
+    ):
+        return None
+    if not (
+        _tensor_has_rank_or_variadic(hidden_type, 3)
+        and _tensor_has_rank_or_variadic(scores_type, 3)
+        and _tensor_has_rank_or_variadic(indices_type, 3)
+        and _tensor_has_rank_or_variadic(output_type, 3)
+    ):
+        return None
+    if tuple(scores_type.dims) != tuple(indices_type.dims) and len(scores_type.dims) != 1 and len(indices_type.dims) != 1:
+        return None
+    if not _tensor_prefix_dims_match(scores_type, hidden_type, 2):
+        return None
+    if not _tensor_prefix_dims_match(output_type, hidden_type, 2):
+        return None
+
+    return (
+        hidden,
+        topk_scores,
+        topk_indices,
+        gate_up_weight_path,
+        down_weight_path,
+        gate_up_transpose,
+    )
+
+
+def _torch_direct_selected_expert_swiglu_candidate(
+    sum_node: GraphNode,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand, ...] | None:
+    if len(sum_node.outputs) != 1:
+        return None
+    sum_prov = local_provenance.get(sum_node.outputs[0].name)
+    if sum_prov is None or sum_prov.kind != "op" or sum_prov.op != "_sum" or len(sum_prov.args) < 3:
+        return None
+    if not _is_literal_provenance_value(sum_prov.args[1], 2) or not _is_literal_provenance_value(sum_prov.args[2], False):
+        return None
+    weighted_prov = sum_prov.args[0]
+    if weighted_prov.kind != "op" or weighted_prov.op not in {"_mul", "core.binary.*"} or len(weighted_prov.args) != 2:
+        return None
+    left, right = weighted_prov.args
+    if left.kind == "op" and left.op == "_unsqueeze" and len(left.args) >= 2 and _is_literal_provenance_value(left.args[1], -1):
+        scale_prov = left
+        values_prov = right
+    elif right.kind == "op" and right.op == "_unsqueeze" and len(right.args) >= 2 and _is_literal_provenance_value(right.args[1], -1):
+        scale_prov = right
+        values_prov = left
+    else:
+        return None
+    topk_scores = _provenance_to_graph_operand(scale_prov.args[0], provenance_to_operand=provenance_to_operand)
+    if topk_scores is None or len(values_prov.args) < 8:
+        return None
+    if not _is_literal_provenance_value(values_prov.args[4], False):
+        return None
+    down_base = _provenance_to_graph_operand(values_prov.args[0], provenance_to_operand=provenance_to_operand)
+    down_expert_idx = _provenance_to_graph_operand(values_prov.args[2], provenance_to_operand=provenance_to_operand)
+    down_transpose = _provenance_to_graph_operand(values_prov.args[5], provenance_to_operand=provenance_to_operand)
+    down_weight_leaf = _provenance_to_graph_operand(values_prov.args[6], provenance_to_operand=provenance_to_operand)
+    if down_base is None or down_expert_idx is None or down_transpose is None or down_weight_leaf is None:
+        return None
+    ff_prov = values_prov.args[1]
+    topk_indices_prov = values_prov.args[2]
+    if ff_prov.kind != "op" or ff_prov.op not in {"_mul", "core.binary.*"} or len(ff_prov.args) != 2:
+        return None
+    ff_left, ff_right = ff_prov.args
+    if ff_left.kind == "op" and ff_left.op == "_activations_silu" and len(ff_left.args) == 1:
+        silu_prov = ff_left
+        up_prov = ff_right
+    elif ff_right.kind == "op" and ff_right.op == "_activations_silu" and len(ff_right.args) == 1:
+        silu_prov = ff_right
+        up_prov = ff_left
+    else:
+        return None
+    gate_prov = silu_prov.args[0]
+    if len(gate_prov.args) < 8 or len(up_prov.args) < 8:
+        return None
+    gate_base = _provenance_to_graph_operand(gate_prov.args[0], provenance_to_operand=provenance_to_operand)
+    gate_expert_idx = _provenance_to_graph_operand(gate_prov.args[2], provenance_to_operand=provenance_to_operand)
+    gate_transpose = _provenance_to_graph_operand(gate_prov.args[5], provenance_to_operand=provenance_to_operand)
+    gate_weight_leaf = _provenance_to_graph_operand(gate_prov.args[6], provenance_to_operand=provenance_to_operand)
+    up_base = _provenance_to_graph_operand(up_prov.args[0], provenance_to_operand=provenance_to_operand)
+    up_expert_idx = _provenance_to_graph_operand(up_prov.args[2], provenance_to_operand=provenance_to_operand)
+    up_transpose = _provenance_to_graph_operand(up_prov.args[5], provenance_to_operand=provenance_to_operand)
+    up_weight_leaf = _provenance_to_graph_operand(up_prov.args[6], provenance_to_operand=provenance_to_operand)
+    if (
+        gate_base is None
+        or gate_expert_idx is None
+        or gate_transpose is None
+        or gate_weight_leaf is None
+        or up_base is None
+        or up_expert_idx is None
+        or up_transpose is None
+        or up_weight_leaf is None
+    ):
+        return None
+    if not (
+        _is_literal_provenance_value(gate_prov.args[4], False)
+        and _is_literal_provenance_value(up_prov.args[4], False)
+        and gate_prov.args[1] == up_prov.args[1]
+        and gate_prov.args[2] == topk_indices_prov
+        and up_prov.args[2] == topk_indices_prov
+        and values_prov.args[2] == topk_indices_prov
+        and gate_prov.args[5] == up_prov.args[5]
+        and gate_prov.args[5] == values_prov.args[5]
+    ):
+        return None
+    hidden_prov = _match_expand_unsqueeze_hidden_provenance(gate_prov.args[1])
+    if hidden_prov is None:
+        return None
+    hidden = _provenance_to_graph_operand(hidden_prov, provenance_to_operand=provenance_to_operand)
+    topk_indices = _provenance_to_graph_operand(topk_indices_prov, provenance_to_operand=provenance_to_operand)
+    if hidden is None or topk_indices is None:
+        return None
+    if topk_indices != gate_expert_idx or topk_indices != up_expert_idx or topk_indices != down_expert_idx:
+        return None
+    gate_weight_path = _compose_graph_path_operand(gate_base, gate_weight_leaf)
+    up_weight_path = _compose_graph_path_operand(up_base, up_weight_leaf)
+    down_weight_path = _compose_graph_path_operand(down_base, down_weight_leaf)
+    if (
+        not isinstance(gate_weight_path, GraphPath)
+        or not isinstance(up_weight_path, GraphPath)
+        or not isinstance(down_weight_path, GraphPath)
+    ):
+        return None
+    gate_transpose_bool = _graph_bool_literal_operand(gate_transpose)
+    up_transpose_bool = _graph_bool_literal_operand(up_transpose)
+    down_transpose_bool = _graph_bool_literal_operand(down_transpose)
+    if (
+        gate_transpose_bool is None
+        or up_transpose_bool is None
+        or down_transpose_bool is None
+        or gate_transpose_bool.value != up_transpose_bool.value
+        or gate_transpose_bool.value != down_transpose_bool.value
+    ):
+        return None
+    hidden_type = graph_operand_type(hidden)
+    scores_type = graph_operand_type(topk_scores)
+    indices_type = graph_operand_type(topk_indices)
+    output_type = sum_node.outputs[0].type_expr
+    if not (
+        isinstance(hidden_type, TypeTensor)
+        and isinstance(scores_type, TypeTensor)
+        and isinstance(indices_type, TypeTensor)
+        and isinstance(output_type, TypeTensor)
+        and _tensor_has_rank_or_variadic(hidden_type, 3)
+        and _tensor_has_rank_or_variadic(scores_type, 3)
+        and _tensor_has_rank_or_variadic(indices_type, 3)
+        and _tensor_has_rank_or_variadic(output_type, 3)
+        and (tuple(scores_type.dims) == tuple(indices_type.dims) or len(scores_type.dims) == 1 or len(indices_type.dims) == 1)
+        and _tensor_prefix_dims_match(scores_type, hidden_type, 2)
+        and _tensor_prefix_dims_match(output_type, hidden_type, 2)
+    ):
+        return None
+    return (
+        hidden,
+        topk_scores,
+        topk_indices,
+        gate_weight_path,
+        up_weight_path,
+        down_weight_path,
+        gate_transpose_bool,
+    )
+
+
+def _rewrite_torch_expert_packed_swiglu_ffn_intrinsics(graph: GraphProgram) -> GraphProgram:
+    if not any(node.op.name == "_expert_linear" for module in graph.modules for node in module.nodes):
+        return graph
+    provenance = infer_graph_provenance(graph)
+    module_provenance_to_operand: dict[str, dict[GraphProvenance, GraphOperand]] = {}
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        module_provenance_to_operand[module.name] = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = module_provenance_to_operand.get(module.name, {})
+        value_ref_counts = _module_value_ref_counts(module)
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            if index + 4 >= len(module.nodes):
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            inputs = _torch_expert_packed_swiglu_ffn_candidate(
+                module.nodes[index],
+                module.nodes[index + 1],
+                module.nodes[index + 2],
+                module.nodes[index + 3],
+                module.nodes[index + 4],
+                local_provenance=local_provenance,
+                provenance_to_operand=provenance_to_operand,
+                value_ref_counts=value_ref_counts,
+            )
+            if inputs is None:
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            down_node = module.nodes[index + 4]
+            changed = True
+            new_nodes.append(
+                replace(
+                    down_node,
+                    op=GraphOp("__torch_expert_packed_swiglu_ffn"),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 5
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _torch_weighted_topk_sum_candidate(
+    scale_node: GraphNode,
+    mul_node: GraphNode,
+    sum_node: GraphNode,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+    value_ref_counts: Mapping[str, int],
+) -> tuple[GraphOperand, ...] | None:
+    if len(scale_node.outputs) != 1 or len(mul_node.outputs) != 1 or len(sum_node.outputs) != 1:
+        return None
+    if scale_node.op.name == "_unsqueeze" and mul_node.op.name in {"_mul", "core.binary.*"} and sum_node.op.name == "_sum":
+        if len(scale_node.inputs) >= 2 and len(mul_node.inputs) == 2 and len(sum_node.inputs) >= 3:
+            scale_ref = GraphValueRef(
+                scale_node.outputs[0].name,
+                scale_node.outputs[0].type_expr,
+                scale_node.outputs[0].dims,
+            )
+            mul_ref = GraphValueRef(
+                mul_node.outputs[0].name,
+                mul_node.outputs[0].type_expr,
+                mul_node.outputs[0].dims,
+            )
+            if (
+                _is_literal_value(scale_node.inputs[1], -1)
+                and sum_node.inputs[0] == mul_ref
+                and _is_literal_value(sum_node.inputs[1], 2)
+                and _is_literal_value(sum_node.inputs[2], False)
+                and value_ref_counts.get(scale_node.outputs[0].name, 0) == 1
+                and value_ref_counts.get(mul_node.outputs[0].name, 0) == 1
+            ):
+                if mul_node.inputs[0] == scale_ref:
+                    values_operand = mul_node.inputs[1]
+                elif mul_node.inputs[1] == scale_ref:
+                    values_operand = mul_node.inputs[0]
+                else:
+                    values_operand = None
+                scores_operand = scale_node.inputs[0]
+                values_type = graph_operand_type(values_operand) if values_operand is not None else None
+                scores_type = graph_operand_type(scores_operand)
+                output_type = sum_node.outputs[0].type_expr
+                if (
+                    isinstance(values_type, TypeTensor)
+                    and isinstance(scores_type, TypeTensor)
+                    and isinstance(output_type, TypeTensor)
+                    and len(values_type.dims) == 4
+                    and len(scores_type.dims) == 3
+                    and len(output_type.dims) == 3
+                    and tuple(scores_type.dims) == tuple(values_type.dims[:3])
+                    and tuple(output_type.dims) == (values_type.dims[0], values_type.dims[1], values_type.dims[3])
+                ):
+                    return values_operand, scores_operand
+    scale_name = scale_node.outputs[0].name
+    mul_name = mul_node.outputs[0].name
+    if value_ref_counts.get(scale_name, 0) != 1:
+        return None
+    if value_ref_counts.get(mul_name, 0) != 1:
+        return None
+    scale_prov = local_provenance.get(scale_name)
+    if scale_prov is None or scale_prov.kind != "op" or scale_prov.op != "_unsqueeze" or len(scale_prov.args) < 2:
+        return None
+    if not _is_literal_provenance_value(scale_prov.args[1], -1):
+        return None
+    scores_operand = _node_operand_for_provenance(
+        scale_node,
+        scale_prov.args[0],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if scores_operand is None:
+        return None
+    mul_prov = local_provenance.get(mul_name)
+    if mul_prov is None or mul_prov.kind != "op" or mul_prov.op not in {"_mul", "core.binary.*"} or len(mul_prov.args) != 2:
+        return None
+    if mul_prov.args[0] == scale_prov:
+        values_provenance = mul_prov.args[1]
+    elif mul_prov.args[1] == scale_prov:
+        values_provenance = mul_prov.args[0]
+    else:
+        return None
+    values_operand = _provenance_to_graph_operand(
+        values_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if values_operand is None:
+        return None
+    sum_prov = local_provenance.get(sum_node.outputs[0].name)
+    if sum_prov is None or sum_prov.kind != "op" or sum_prov.op != "_sum" or len(sum_prov.args) < 3:
+        return None
+    if sum_prov.args[0] != mul_prov:
+        return None
+    if not _is_literal_provenance_value(sum_prov.args[1], 2):
+        return None
+    if not _is_literal_provenance_value(sum_prov.args[2], False):
+        return None
+    values_type = graph_operand_type(values_operand)
+    scores_type = graph_operand_type(scores_operand)
+    output_type = sum_node.outputs[0].type_expr
+    if not (
+        isinstance(values_type, TypeTensor)
+        and isinstance(scores_type, TypeTensor)
+        and isinstance(output_type, TypeTensor)
+    ):
+        return None
+    if len(values_type.dims) != 4 or len(scores_type.dims) != 3 or len(output_type.dims) != 3:
+        return None
+    if tuple(scores_type.dims) != tuple(values_type.dims[:3]):
+        return None
+    if tuple(output_type.dims) != (values_type.dims[0], values_type.dims[1], values_type.dims[3]):
+        return None
+    return values_operand, scores_operand
+
+
+def _is_topk_last_slice_bounds(
+    start_provenance: GraphProvenance,
+    end_provenance: GraphProvenance,
+    top_k_provenance: GraphProvenance,
+) -> bool:
+    if end_provenance != top_k_provenance:
+        return False
+    expected_start = GraphProvenance(
+        "op",
+        op="core.binary.-",
+        args=(top_k_provenance, GraphProvenance("literal", value=1)),
+    )
+    if start_provenance == expected_start:
+        return True
+    if (
+        start_provenance.kind == "literal"
+        and end_provenance.kind == "literal"
+        and isinstance(start_provenance.value, int)
+        and isinstance(end_provenance.value, int)
+    ):
+        return start_provenance.value == end_provenance.value - 1
+    return False
+
+
+def _torch_topk_normalize_inputs_from_provenance(
+    *,
+    cumsum_prov: GraphProvenance,
+    slice_prov: GraphProvenance,
+    div_prov: GraphProvenance,
+    cast_prov: GraphProvenance,
+    cast_node: GraphNode,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> tuple[GraphOperand, ...] | None:
+    if cumsum_prov.kind != "op" or cumsum_prov.op != "_cumsum" or len(cumsum_prov.args) < 2:
+        return None
+    if not _is_literal_provenance_value(cumsum_prov.args[1], -1):
+        return None
+    topk_weights_prov = cumsum_prov.args[0]
+    if topk_weights_prov.kind != "op" or topk_weights_prov.op not in {"_topk", "_topk[0]"} or len(topk_weights_prov.args) < 5:
+        return None
+    if not (
+        _is_literal_provenance_value(topk_weights_prov.args[2], -1)
+        and _is_literal_provenance_value(topk_weights_prov.args[3], True)
+        and _is_literal_provenance_value(topk_weights_prov.args[4], False)
+    ):
+        return None
+    if slice_prov.kind != "op" or slice_prov.op != "_slice" or len(slice_prov.args) < 4:
+        return None
+    if slice_prov.args[0] != cumsum_prov:
+        return None
+    if not _is_literal_provenance_value(slice_prov.args[1], -1):
+        return None
+    if not _is_topk_last_slice_bounds(slice_prov.args[2], slice_prov.args[3], topk_weights_prov.args[1]):
+        return None
+    if div_prov.kind != "op" or div_prov.op not in {"_div", "core.binary./"} or len(div_prov.args) != 2:
+        return None
+    if div_prov.args[0] != topk_weights_prov or div_prov.args[1] != slice_prov:
+        return None
+    if cast_prov.kind != "op" or cast_prov.op != "_cast_like" or len(cast_prov.args) < 2:
+        return None
+    if cast_prov.args[0] != div_prov:
+        return None
+    weights_operand = _provenance_to_graph_operand(
+        topk_weights_prov,
+        provenance_to_operand=provenance_to_operand,
+    )
+    ref_operand = _node_operand_for_provenance(
+        cast_node,
+        cast_prov.args[1],
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if weights_operand is None or ref_operand is None:
+        return None
+    weights_type = graph_operand_type(weights_operand)
+    output_type = cast_node.outputs[0].type_expr
+    if not isinstance(weights_type, TypeTensor) or not isinstance(output_type, TypeTensor):
+        return None
+    if tuple(weights_type.dims) != tuple(output_type.dims):
+        return None
+    return weights_operand, ref_operand
+
+
+def _provenance_contains(
+    root: GraphProvenance,
+    target: GraphProvenance,
+    memo: dict[tuple[str, int, object], object] | None = None,
+) -> bool:
+    key = ("contains", id(root), id(target))
+    if memo is not None and key in memo:
+        cached = memo[key]
+        return bool(cached) if isinstance(cached, bool) else False
+    if root == target:
+        if memo is not None:
+            memo[key] = True
+        return True
+    if memo is not None:
+        memo[key] = "in_progress"
+    result = any(_provenance_contains(arg, target, memo) for arg in root.args)
+    if memo is not None:
+        memo[key] = result
+    return result
+
+
+def _find_op_provenance(
+    root: GraphProvenance,
+    op_name: str,
+    memo: dict[tuple[str, int, object], object] | None = None,
+) -> GraphProvenance | None:
+    key = ("find_op", id(root), op_name)
+    if memo is not None and key in memo:
+        found = memo[key]
+        return found if isinstance(found, GraphProvenance) else None
+    if root.kind == "op" and root.op == op_name:
+        if memo is not None:
+            memo[key] = root
+        return root
+    if memo is not None:
+        memo[key] = "in_progress"
+    for arg in root.args:
+        found = _find_op_provenance(arg, op_name, memo)
+        if found is not None:
+            if memo is not None:
+                memo[key] = found
+            return found
+    if memo is not None:
+        memo[key] = None
+    return None
+
+
+def _match_packed_swiglu_linear_provenance(
+    provenance: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance] | None:
+    if provenance.kind != "op" or provenance.op != "_linear" or len(provenance.args) < 8:
+        return None
+    hidden = provenance.args[1]
+    if hidden.kind != "op" or hidden.op not in {"_mul", "core.binary.*"} or len(hidden.args) != 2:
+        return None
+    left, right = hidden.args
+    if left.kind == "op" and left.op == "_activations_silu" and len(left.args) == 1:
+        gate, up = left.args[0], right
+    elif right.kind == "op" and right.op == "_activations_silu" and len(right.args) == 1:
+        gate, up = right.args[0], left
+    else:
+        return None
+    chunk_match = _match_chunk_output_pair(gate, up)
+    if chunk_match is None:
+        return None
+    gate_up, _parts = chunk_match
+    if gate_up.kind != "op" or gate_up.op != "_linear" or len(gate_up.args) < 8:
+        return None
+    if not (
+        _is_literal_provenance_value(gate_up.args[3], False)
+        and _is_literal_provenance_value(provenance.args[3], False)
+        and (
+            _is_literal_provenance_value(gate_up.args[4], False)
+            or _is_literal_provenance_value(gate_up.args[4], True)
+        )
+        and gate_up.args[4] == provenance.args[4]
+        and _is_literal_provenance_value(gate_up.args[5], None)
+        and _is_literal_provenance_value(provenance.args[5], None)
+    ):
+        return None
+    return gate_up, gate_up.args[1], provenance
+
+
+def _find_packed_swiglu_linear_provenance(
+    provenance: GraphProvenance,
+    memo: dict[tuple[str, int, object], object] | None = None,
+) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance] | None:
+    key = ("find_packed_swiglu", id(provenance), None)
+    if memo is not None and key in memo:
+        found = memo[key]
+        return found if isinstance(found, tuple) else None
+    matched = _match_packed_swiglu_linear_provenance(provenance)
+    if matched is not None:
+        if memo is not None:
+            memo[key] = matched
+        return matched
+    if memo is not None:
+        memo[key] = "in_progress"
+    for arg in provenance.args:
+        matched = _find_packed_swiglu_linear_provenance(arg, memo)
+        if matched is not None:
+            if memo is not None:
+                memo[key] = matched
+            return matched
+    if memo is not None:
+        memo[key] = None
+    return None
+
+
+def _match_clamped_packed_swiglu_linear_provenance(
+    provenance: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance, GraphProvenance] | None:
+    if provenance.kind != "op" or provenance.op != "_linear" or len(provenance.args) < 8:
+        return None
+    hidden = provenance.args[1]
+    if hidden.kind != "op" or hidden.op not in {"_mul", "core.binary.*"} or len(hidden.args) != 2:
+        return None
+    for left, right in (hidden.args, hidden.args[::-1]):
+        if left.kind != "op" or left.op != "_activations_silu" or len(left.args) != 1:
+            continue
+        gate = left.args[0]
+        up = right
+        if gate.kind != "op" or gate.op != "_clamp" or len(gate.args) < 3:
+            continue
+        if up.kind != "op" or up.op != "_clamp" or len(up.args) < 3:
+            continue
+        gate_raw, gate_min, gate_max = gate.args[:3]
+        up_raw, up_min, up_max = up.args[:3]
+        if not _is_literal_provenance_value(gate_min, None):
+            continue
+        if gate_max != up_max or not _match_limit_negation(up_min, gate_max):
+            continue
+        chunk_match = _match_chunk_output_pair(gate_raw, up_raw)
+        if chunk_match is None:
+            continue
+        gate_up, _parts = chunk_match
+        if gate_up.kind != "op" or gate_up.op != "_linear" or len(gate_up.args) < 8:
+            continue
+        if not (
+            _is_literal_provenance_value(gate_up.args[3], False)
+            and _is_literal_provenance_value(provenance.args[3], False)
+            and (
+                _is_literal_provenance_value(gate_up.args[4], False)
+                or _is_literal_provenance_value(gate_up.args[4], True)
+            )
+            and gate_up.args[4] == provenance.args[4]
+            and _is_literal_provenance_value(gate_up.args[5], None)
+            and _is_literal_provenance_value(provenance.args[5], None)
+        ):
+            continue
+        return gate_up, gate_up.args[1], provenance, gate_max
+    return None
+
+
+def _find_clamped_packed_swiglu_linear_provenance(
+    provenance: GraphProvenance,
+    memo: dict[tuple[str, int, object], object] | None = None,
+) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance, GraphProvenance] | None:
+    key = ("find_clamped_packed_swiglu", id(provenance), None)
+    if memo is not None and key in memo:
+        found = memo[key]
+        return found if isinstance(found, tuple) else None
+    matched = _match_clamped_packed_swiglu_linear_provenance(provenance)
+    if matched is not None:
+        if memo is not None:
+            memo[key] = matched
+        return matched
+    if memo is not None:
+        memo[key] = "in_progress"
+    for arg in provenance.args:
+        matched = _find_clamped_packed_swiglu_linear_provenance(arg, memo)
+        if matched is not None:
+            if memo is not None:
+                memo[key] = matched
+            return matched
+    if memo is not None:
+        memo[key] = None
+    return None
+
+
+def _match_packed_gegelu_linear_provenance(
+    provenance: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance, GraphProvenance] | None:
+    if provenance.kind != "op" or provenance.op != "_linear" or len(provenance.args) < 8:
+        return None
+    hidden = provenance.args[1]
+    if hidden.kind != "op" or hidden.op != "_activations_gegelu" or len(hidden.args) < 2:
+        return None
+    gate_up = hidden.args[0]
+    if gate_up.kind != "op" or gate_up.op != "_linear" or len(gate_up.args) < 8:
+        return None
+    if not (
+        (
+            _is_literal_provenance_value(gate_up.args[3], False)
+            or _is_literal_provenance_value(gate_up.args[3], True)
+        )
+        and gate_up.args[3] == provenance.args[3]
+        and (
+            _is_literal_provenance_value(gate_up.args[4], False)
+            or _is_literal_provenance_value(gate_up.args[4], True)
+        )
+        and gate_up.args[4] == provenance.args[4]
+        and gate_up.args[5] == provenance.args[5]
+    ):
+        return None
+    return gate_up, gate_up.args[1], provenance, hidden.args[1]
+
+
+def _find_packed_gegelu_linear_provenance(
+    provenance: GraphProvenance,
+    memo: dict[tuple[str, int, object], object] | None = None,
+) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance, GraphProvenance] | None:
+    key = ("find_packed_gegelu", id(provenance), None)
+    if memo is not None and key in memo:
+        found = memo[key]
+        return found if isinstance(found, tuple) else None
+    matched = _match_packed_gegelu_linear_provenance(provenance)
+    if matched is not None:
+        if memo is not None:
+            memo[key] = matched
+        return matched
+    if memo is not None:
+        memo[key] = "in_progress"
+    for arg in provenance.args:
+        matched = _find_packed_gegelu_linear_provenance(arg, memo)
+        if matched is not None:
+            if memo is not None:
+                memo[key] = matched
+            return matched
+    if memo is not None:
+        memo[key] = None
+    return None
+
+
+def _match_relu2_linear_provenance(
+    provenance: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance] | None:
+    if provenance.kind != "op" or provenance.op != "_linear" or len(provenance.args) < 8:
+        return None
+    relu2 = provenance.args[1]
+    if relu2.kind != "op" or relu2.op != "_activations_relu2" or len(relu2.args) != 1:
+        return None
+    up = relu2.args[0]
+    if up.kind != "op" or up.op != "_linear" or len(up.args) < 8:
+        return None
+    if not (
+        _is_literal_provenance_value(up.args[3], False)
+        and _is_literal_provenance_value(provenance.args[3], False)
+        and (
+            _is_literal_provenance_value(up.args[4], False)
+            or _is_literal_provenance_value(up.args[4], True)
+        )
+        and up.args[4] == provenance.args[4]
+        and _is_literal_provenance_value(up.args[5], None)
+        and _is_literal_provenance_value(provenance.args[5], None)
+    ):
+        return None
+    return up, up.args[1], provenance
+
+
+def _find_relu2_linear_provenance(
+    provenance: GraphProvenance,
+    memo: dict[tuple[str, int, object], object] | None = None,
+) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance] | None:
+    key = ("find_relu2", id(provenance), None)
+    if memo is not None and key in memo:
+        found = memo[key]
+        return found if isinstance(found, tuple) else None
+    matched = _match_relu2_linear_provenance(provenance)
+    if matched is not None:
+        if memo is not None:
+            memo[key] = matched
+        return matched
+    if memo is not None:
+        memo[key] = "in_progress"
+    for arg in provenance.args:
+        matched = _find_relu2_linear_provenance(arg, memo)
+        if matched is not None:
+            if memo is not None:
+                memo[key] = matched
+            return matched
+    if memo is not None:
+        memo[key] = None
+    return None
+
+
+def _find_weighted_update_unsqueeze_provenance(
+    root: GraphProvenance,
+    update_provenance: GraphProvenance,
+    memo: dict[tuple[str, int, object], object] | None = None,
+) -> GraphProvenance | None:
+    key = ("find_weighted_unsqueeze", id(root), id(update_provenance))
+    if memo is not None and key in memo:
+        found = memo[key]
+        return found if isinstance(found, GraphProvenance) else None
+    if root.kind == "op" and root.op in {"_mul", "core.binary.*"} and len(root.args) == 2:
+        left, right = root.args
+        if _provenance_contains(left, update_provenance, memo) and right.kind == "op" and right.op == "_unsqueeze":
+            if memo is not None:
+                memo[key] = right
+            return right
+        if _provenance_contains(right, update_provenance, memo) and left.kind == "op" and left.op == "_unsqueeze":
+            if memo is not None:
+                memo[key] = left
+            return left
+    if memo is not None:
+        memo[key] = "in_progress"
+    for arg in root.args:
+        found = _find_weighted_update_unsqueeze_provenance(arg, update_provenance, memo)
+        if found is not None:
+            if memo is not None:
+                memo[key] = found
+            return found
+    if memo is not None:
+        memo[key] = None
+    return None
+
+
+def _selected_hidden_source_provenance(
+    selected_provenance: GraphProvenance,
+    token_index_provenance: GraphProvenance,
+    memo: dict[tuple[str, int, object], object] | None = None,
+) -> GraphProvenance | None:
+    if selected_provenance.kind != "op" or selected_provenance.op != "_gather" or len(selected_provenance.args) < 3:
+        return None
+    if not _is_literal_provenance_value(selected_provenance.args[2], 0):
+        return None
+    if not _provenance_contains(selected_provenance.args[1], token_index_provenance, memo):
+        return None
+    reshaped = selected_provenance.args[0]
+    if reshaped.kind != "op" or reshaped.op != "_reshape" or not reshaped.args:
+        return None
+    return reshaped.args[0]
+
+
+def _selected_scores_source_provenance(
+    scores_provenance: GraphProvenance,
+    token_index_provenance: GraphProvenance,
+    topk_pos_provenance: GraphProvenance,
+    memo: dict[tuple[str, int, object], object] | None = None,
+) -> GraphProvenance | None:
+    if scores_provenance.kind == "op" and scores_provenance.op == "_reshape" and scores_provenance.args:
+        return _selected_scores_source_provenance(
+            scores_provenance.args[0],
+            token_index_provenance,
+            topk_pos_provenance,
+            memo,
+        )
+    if scores_provenance.kind != "op" or scores_provenance.op != "_gather" or len(scores_provenance.args) < 3:
+        return None
+    if not _provenance_contains(scores_provenance.args[1], topk_pos_provenance, memo):
+        return None
+    first_gather = scores_provenance.args[0]
+    if first_gather.kind != "op" or first_gather.op != "_gather" or len(first_gather.args) < 3:
+        return None
+    if not _provenance_contains(first_gather.args[1], token_index_provenance, memo):
+        return None
+    reshaped = first_gather.args[0]
+    if reshaped.kind != "op" or reshaped.op != "_reshape" or not reshaped.args:
+        return None
+    return reshaped.args[0]
+
+
+def _path_without_repeat_iter_segment(
+    provenance: GraphProvenance,
+    *,
+    repeat_var: str,
+) -> GraphPath | None:
+    if provenance.kind != "path" or not isinstance(provenance.value, str):
+        return None
+    absolute, parts = _path_parts_from_token(provenance.value)
+    iter_segment = "{" + repeat_var + "}"
+    new_parts = tuple(part for part in parts if part != iter_segment)
+    if new_parts == parts or not new_parts:
+        return None
+    return GraphPath(absolute, new_parts)
+
+
+def _repeat_actual_operands_by_formal(
+    repeat_node: GraphNode,
+    callee_module: GraphModule,
+) -> dict[str, GraphOperand]:
+    if len(repeat_node.inputs) < 3:
+        return {}
+    out: dict[str, GraphOperand] = {}
+    for index, formal in enumerate(callee_module.inputs):
+        role_operand = repeat_node.attrs.get(f"arg_{index}")
+        if not isinstance(role_operand, GraphLiteral) or not isinstance(role_operand.value, str):
+            continue
+        role = role_operand.value
+        if role.startswith("input:"):
+            try:
+                input_index = int(role.split(":", 1)[1])
+            except ValueError:
+                continue
+            if 0 <= input_index < len(repeat_node.inputs):
+                out[formal.name] = repeat_node.inputs[input_index]
+        elif role.startswith("carry:"):
+            try:
+                carry_index = int(role.split(":", 1)[1])
+            except ValueError:
+                continue
+            input_index = 3 + carry_index
+            if 0 <= input_index < len(repeat_node.inputs):
+                out[formal.name] = repeat_node.inputs[input_index]
+        elif role == "iter":
+            out[formal.name] = GraphValueRef(
+                formal.name,
+                formal.type_expr,
+                formal.dims,
+            )
+    return out
+
+
+def _actual_operand_for_callee_provenance(
+    target: GraphProvenance,
+    *,
+    callee_module: GraphModule,
+    callee_local_provenance: Mapping[str, GraphProvenance],
+    actual_by_formal: Mapping[str, GraphOperand],
+) -> GraphOperand | None:
+    matches: list[GraphOperand] = []
+    for formal in callee_module.inputs:
+        if callee_local_provenance.get(formal.name) == target and formal.name in actual_by_formal:
+            matches.append(actual_by_formal[formal.name])
+    return matches[0] if len(matches) == 1 else None
+
+
+def _call_actual_operands_by_formal(
+    call_node: GraphNode,
+    callee_module: GraphModule,
+) -> dict[str, GraphOperand]:
+    if len(call_node.inputs) != len(callee_module.inputs):
+        return {}
+    return {
+        formal.name: actual
+        for formal, actual in zip(callee_module.inputs, call_node.inputs, strict=True)
+    }
+
+
+def _torch_direct_selected_expert_packed_swiglu_call_candidate(
+    call_node: GraphNode,
+    *,
+    callee_module: GraphModule,
+    callee_local_provenance: Mapping[str, GraphProvenance],
+) -> tuple[GraphOperand, ...] | None:
+    if len(call_node.outputs) != 1 or len(callee_module.outputs) != 1:
+        return None
+    output = callee_module.outputs[0]
+    if not isinstance(output, GraphValueRef):
+        return None
+    output_prov = callee_local_provenance.get(output.name)
+    if output_prov is None or output_prov.kind != "op" or output_prov.op != "_sum" or len(output_prov.args) < 3:
+        return None
+    if not _is_literal_provenance_value(output_prov.args[1], 2) or not _is_literal_provenance_value(output_prov.args[2], False):
+        return None
+    weighted_prov = output_prov.args[0]
+    if weighted_prov.kind != "op" or weighted_prov.op not in {"_mul", "core.binary.*"} or len(weighted_prov.args) != 2:
+        return None
+    left, right = weighted_prov.args
+    if left.kind == "op" and left.op == "_unsqueeze" and len(left.args) >= 2 and _is_literal_provenance_value(left.args[1], -1):
+        scale_prov = left
+        values_prov = right
+    elif right.kind == "op" and right.op == "_unsqueeze" and len(right.args) >= 2 and _is_literal_provenance_value(right.args[1], -1):
+        scale_prov = right
+        values_prov = left
+    else:
+        return None
+    if values_prov.kind != "op" or values_prov.op != "_expert_linear" or len(values_prov.args) < 8:
+        return None
+    if not _is_literal_provenance_value(values_prov.args[4], False):
+        return None
+    ff_prov = values_prov.args[1]
+    topk_indices_prov = values_prov.args[2]
+    if ff_prov.kind != "op" or ff_prov.op not in {"_mul", "core.binary.*"} or len(ff_prov.args) != 2:
+        return None
+    ff_left, ff_right = ff_prov.args
+    if ff_left.kind == "op" and ff_left.op == "_activations_silu" and len(ff_left.args) == 1:
+        silu_prov = ff_left
+        up_prov = ff_right
+    elif ff_right.kind == "op" and ff_right.op == "_activations_silu" and len(ff_right.args) == 1:
+        silu_prov = ff_right
+        up_prov = ff_left
+    else:
+        return None
+    chunk_match = _match_chunk_output_pair(silu_prov.args[0], up_prov)
+    if chunk_match is None:
+        return None
+    gate_up_prov, _parts = chunk_match
+    if gate_up_prov.kind != "op" or gate_up_prov.op != "_expert_linear" or len(gate_up_prov.args) < 8:
+        return None
+    if not _is_literal_provenance_value(gate_up_prov.args[4], False):
+        return None
+    if gate_up_prov.args[2] != topk_indices_prov or values_prov.args[2] != topk_indices_prov:
+        return None
+    if gate_up_prov.args[5] != values_prov.args[5]:
+        return None
+    hidden_prov = _match_expand_unsqueeze_hidden_provenance(gate_up_prov.args[1])
+    if hidden_prov is None:
+        return None
+    actual_by_formal = _call_actual_operands_by_formal(call_node, callee_module)
+    hidden = _actual_operand_for_callee_provenance(
+        hidden_prov,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_scores = _actual_operand_for_callee_provenance(
+        scale_prov.args[0],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_indices = _actual_operand_for_callee_provenance(
+        topk_indices_prov,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    gate_up_weight = _actual_operand_for_callee_provenance(
+        gate_up_prov.args[6],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    down_weight = _actual_operand_for_callee_provenance(
+        values_prov.args[6],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    transpose = _actual_operand_for_callee_provenance(
+        gate_up_prov.args[5],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    if transpose is None:
+        transpose = _provenance_to_graph_operand(
+            gate_up_prov.args[5],
+            provenance_to_operand={
+                GraphProvenance("literal", value=True): GraphLiteral(True, TypeBool()),
+                GraphProvenance("literal", value=False): GraphLiteral(False, TypeBool()),
+            },
+        )
+    if not (
+        hidden is not None
+        and topk_scores is not None
+        and topk_indices is not None
+        and isinstance(gate_up_weight, GraphPath)
+        and isinstance(down_weight, GraphPath)
+        and isinstance(transpose, GraphLiteral)
+        and isinstance(transpose.value, bool)
+    ):
+        return None
+    hidden_type = graph_operand_type(hidden)
+    output_type = call_node.outputs[0].type_expr
+    if not isinstance(hidden_type, TypeTensor) or not isinstance(output_type, TypeTensor):
+        return None
+    if not _tensor_prefix_dims_match(output_type, hidden_type, 2):
+        return None
+    return hidden, topk_scores, topk_indices, gate_up_weight, down_weight, transpose
+
+
+def _torch_direct_selected_expert_swiglu_call_candidate(
+    call_node: GraphNode,
+    *,
+    callee_module: GraphModule,
+    callee_local_provenance: Mapping[str, GraphProvenance],
+) -> tuple[GraphOperand, ...] | None:
+    if len(call_node.outputs) != 1 or len(callee_module.outputs) != 1:
+        return None
+    output = callee_module.outputs[0]
+    if not isinstance(output, GraphValueRef):
+        return None
+    output_prov = callee_local_provenance.get(output.name)
+    if output_prov is None or output_prov.kind != "op" or output_prov.op != "_sum" or len(output_prov.args) < 3:
+        return None
+    if not _is_literal_provenance_value(output_prov.args[1], 2) or not _is_literal_provenance_value(output_prov.args[2], False):
+        return None
+    weighted_prov = output_prov.args[0]
+    if weighted_prov.kind != "op" or weighted_prov.op not in {"_mul", "core.binary.*"} or len(weighted_prov.args) != 2:
+        return None
+    left, right = weighted_prov.args
+    if left.kind == "op" and left.op == "_unsqueeze" and len(left.args) >= 2 and _is_literal_provenance_value(left.args[1], -1):
+        scale_prov = left
+        values_prov = right
+    elif right.kind == "op" and right.op == "_unsqueeze" and len(right.args) >= 2 and _is_literal_provenance_value(right.args[1], -1):
+        scale_prov = right
+        values_prov = left
+    else:
+        return None
+    if values_prov.kind != "op" or values_prov.op != "_expert_linear" or len(values_prov.args) < 8:
+        return None
+    if not _is_literal_provenance_value(values_prov.args[4], False):
+        return None
+    ff_prov = values_prov.args[1]
+    topk_indices_prov = values_prov.args[2]
+    if ff_prov.kind != "op" or ff_prov.op not in {"_mul", "core.binary.*"} or len(ff_prov.args) != 2:
+        return None
+    ff_left, ff_right = ff_prov.args
+    if ff_left.kind == "op" and ff_left.op == "_activations_silu" and len(ff_left.args) == 1:
+        silu_prov = ff_left
+        up_prov = ff_right
+    elif ff_right.kind == "op" and ff_right.op == "_activations_silu" and len(ff_right.args) == 1:
+        silu_prov = ff_right
+        up_prov = ff_left
+    else:
+        return None
+    gate_prov = silu_prov.args[0]
+    if (
+        gate_prov.kind != "op"
+        or gate_prov.op != "_expert_linear"
+        or len(gate_prov.args) < 8
+        or up_prov.kind != "op"
+        or up_prov.op != "_expert_linear"
+        or len(up_prov.args) < 8
+    ):
+        return None
+    if not (
+        _is_literal_provenance_value(gate_prov.args[4], False)
+        and _is_literal_provenance_value(up_prov.args[4], False)
+        and gate_prov.args[1] == up_prov.args[1]
+        and gate_prov.args[2] == topk_indices_prov
+        and up_prov.args[2] == topk_indices_prov
+        and values_prov.args[2] == topk_indices_prov
+        and gate_prov.args[5] == up_prov.args[5]
+        and gate_prov.args[5] == values_prov.args[5]
+    ):
+        return None
+    hidden_prov = _match_expand_unsqueeze_hidden_provenance(gate_prov.args[1])
+    if hidden_prov is None:
+        return None
+    actual_by_formal = _call_actual_operands_by_formal(call_node, callee_module)
+    hidden = _actual_operand_for_callee_provenance(
+        hidden_prov,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_scores = _actual_operand_for_callee_provenance(
+        scale_prov.args[0],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_indices = _actual_operand_for_callee_provenance(
+        topk_indices_prov,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    gate_weight = _actual_operand_for_callee_provenance(
+        gate_prov.args[6],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    up_weight = _actual_operand_for_callee_provenance(
+        up_prov.args[6],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    down_weight = _actual_operand_for_callee_provenance(
+        values_prov.args[6],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    transpose = _actual_operand_for_callee_provenance(
+        gate_prov.args[5],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    if transpose is None:
+        transpose = _provenance_to_graph_operand(
+            gate_prov.args[5],
+            provenance_to_operand={
+                GraphProvenance("literal", value=True): GraphLiteral(True, TypeBool()),
+                GraphProvenance("literal", value=False): GraphLiteral(False, TypeBool()),
+            },
+        )
+    if not (
+        hidden is not None
+        and topk_scores is not None
+        and topk_indices is not None
+        and isinstance(gate_weight, GraphPath)
+        and isinstance(up_weight, GraphPath)
+        and isinstance(down_weight, GraphPath)
+        and isinstance(transpose, GraphLiteral)
+        and isinstance(transpose.value, bool)
+    ):
+        return None
+    hidden_type = graph_operand_type(hidden)
+    output_type = call_node.outputs[0].type_expr
+    if not isinstance(hidden_type, TypeTensor) or not isinstance(output_type, TypeTensor):
+        return None
+    if not _tensor_prefix_dims_match(output_type, hidden_type, 2):
+        return None
+    return hidden, topk_scores, topk_indices, gate_weight, up_weight, down_weight, transpose
+
+
+def _torch_direct_selected_expert_packed_gegelu_call_candidate(
+    call_node: GraphNode,
+    *,
+    callee_module: GraphModule,
+    callee_local_provenance: Mapping[str, GraphProvenance],
+) -> tuple[GraphOperand, ...] | None:
+    if len(call_node.outputs) != 1 or len(callee_module.outputs) != 1:
+        return None
+    output = callee_module.outputs[0]
+    if not isinstance(output, GraphValueRef):
+        return None
+    output_prov = callee_local_provenance.get(output.name)
+    if output_prov is None or output_prov.kind != "op" or output_prov.op != "_sum" or len(output_prov.args) < 3:
+        return None
+    if not _is_literal_provenance_value(output_prov.args[1], 2) or not _is_literal_provenance_value(output_prov.args[2], False):
+        return None
+    weighted_prov = output_prov.args[0]
+    if weighted_prov.kind != "op" or weighted_prov.op not in {"_mul", "core.binary.*"} or len(weighted_prov.args) != 2:
+        return None
+    left, right = weighted_prov.args
+    if left.kind == "op" and left.op == "_unsqueeze" and len(left.args) >= 2 and _is_literal_provenance_value(left.args[1], -1):
+        scale_prov = left
+        values_prov = right
+    elif right.kind == "op" and right.op == "_unsqueeze" and len(right.args) >= 2 and _is_literal_provenance_value(right.args[1], -1):
+        scale_prov = right
+        values_prov = left
+    else:
+        return None
+    if values_prov.kind != "op" or values_prov.op != "_expert_linear" or len(values_prov.args) < 8:
+        return None
+    activation_match = _match_packed_gegelu_activation_with_alpha(values_prov.args[1])
+    if activation_match is None:
+        return None
+    gate_up_prov, limit_prov, alpha_prov = activation_match
+    if gate_up_prov.kind != "op" or gate_up_prov.op != "_expert_linear" or len(gate_up_prov.args) < 8:
+        return None
+    topk_indices_prov = values_prov.args[2]
+    if not (
+        gate_up_prov.args[2] == topk_indices_prov
+        and values_prov.args[2] == topk_indices_prov
+        and gate_up_prov.args[4] == values_prov.args[4]
+        and gate_up_prov.args[5] == values_prov.args[5]
+    ):
+        return None
+    hidden_prov = _match_expand_unsqueeze_hidden_provenance(gate_up_prov.args[1])
+    if hidden_prov is None:
+        return None
+    actual_by_formal = _call_actual_operands_by_formal(call_node, callee_module)
+    hidden = _actual_operand_for_callee_provenance(
+        hidden_prov,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_scores = _actual_operand_for_callee_provenance(
+        scale_prov.args[0],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_indices = _actual_operand_for_callee_provenance(
+        topk_indices_prov,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    gate_up_weight = _actual_operand_for_callee_provenance(
+        gate_up_prov.args[6],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    gate_up_bias = _actual_operand_for_callee_provenance(
+        gate_up_prov.args[7],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    down_weight = _actual_operand_for_callee_provenance(
+        values_prov.args[6],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    down_bias = _actual_operand_for_callee_provenance(
+        values_prov.args[7],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    limit = _actual_operand_for_callee_provenance(
+        limit_prov,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    if limit is None:
+        limit = _provenance_to_graph_operand(limit_prov, provenance_to_operand={})
+    alpha = _actual_operand_for_callee_provenance(
+        alpha_prov,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    if alpha is None:
+        alpha = _provenance_to_graph_operand(alpha_prov, provenance_to_operand={})
+    bias = _actual_operand_for_callee_provenance(
+        gate_up_prov.args[4],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    if bias is None:
+        bias = _provenance_to_graph_operand(
+            gate_up_prov.args[4],
+            provenance_to_operand={
+                GraphProvenance("literal", value=True): GraphLiteral(True, TypeBool()),
+                GraphProvenance("literal", value=False): GraphLiteral(False, TypeBool()),
+            },
+        )
+    transpose = _actual_operand_for_callee_provenance(
+        gate_up_prov.args[5],
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    if transpose is None:
+        transpose = _provenance_to_graph_operand(
+            gate_up_prov.args[5],
+            provenance_to_operand={
+                GraphProvenance("literal", value=True): GraphLiteral(True, TypeBool()),
+                GraphProvenance("literal", value=False): GraphLiteral(False, TypeBool()),
+            },
+        )
+    bias_bool = _graph_bool_literal_operand(bias) if bias is not None else None
+    transpose_bool = _graph_bool_literal_operand(transpose) if transpose is not None else None
+    if not (
+        hidden is not None
+        and topk_scores is not None
+        and topk_indices is not None
+        and isinstance(gate_up_weight, GraphPath)
+        and isinstance(gate_up_bias, GraphPath)
+        and isinstance(down_weight, GraphPath)
+        and isinstance(down_bias, GraphPath)
+        and limit is not None
+        and alpha is not None
+        and bias_bool is not None
+        and transpose_bool is not None
+    ):
+        return None
+    hidden_type = graph_operand_type(hidden)
+    output_type = call_node.outputs[0].type_expr
+    if not isinstance(hidden_type, TypeTensor) or not isinstance(output_type, TypeTensor):
+        return None
+    if not _tensor_prefix_dims_match(output_type, hidden_type, 2):
+        return None
+    return (
+        hidden,
+        topk_scores,
+        topk_indices,
+        gate_up_weight,
+        gate_up_bias,
+        down_weight,
+        down_bias,
+        limit,
+        alpha,
+        bias_bool,
+        transpose_bool,
+    )
+
+
+def _torch_selected_expert_packed_swiglu_candidate(
+    repeat_node: GraphNode,
+    *,
+    callee_module: GraphModule,
+    callee_local_provenance: Mapping[str, GraphProvenance],
+    provenance_search_memo: dict[tuple[str, int, object], object],
+) -> tuple[GraphOperand, ...] | None:
+    if repeat_node.op.name != "core.repeat" or len(repeat_node.outputs) != 1:
+        return None
+    if len(repeat_node.inputs) < 4:
+        return None
+    if not _is_literal_value(repeat_node.inputs[2], 1):
+        return None
+    var_operand = repeat_node.attrs.get("var")
+    if not isinstance(var_operand, GraphLiteral) or not isinstance(var_operand.value, str):
+        return None
+    repeat_var = var_operand.value
+    if len(callee_module.outputs) != 1:
+        return None
+    output = callee_module.outputs[0]
+    if not isinstance(output, GraphValueRef):
+        return None
+    output_provenance = callee_local_provenance.get(output.name)
+    if output_provenance is None:
+        return None
+    packed_match = _find_packed_swiglu_linear_provenance(output_provenance, provenance_search_memo)
+    if packed_match is None:
+        return None
+    gate_up_provenance, selected_input_provenance, down_provenance = packed_match
+    token_index_provenance = _find_op_provenance(output_provenance, "_where_indices[1]", provenance_search_memo)
+    topk_pos_provenance = _find_op_provenance(output_provenance, "_where_indices[0]", provenance_search_memo)
+    if token_index_provenance is None or topk_pos_provenance is None:
+        return None
+    hidden_provenance = _selected_hidden_source_provenance(selected_input_provenance, token_index_provenance, provenance_search_memo)
+    if hidden_provenance is None:
+        return None
+    unsqueeze_provenance = _find_weighted_update_unsqueeze_provenance(output_provenance, down_provenance, provenance_search_memo)
+    if unsqueeze_provenance is None or not unsqueeze_provenance.args:
+        return None
+    topk_scores_provenance = _selected_scores_source_provenance(
+        unsqueeze_provenance.args[0],
+        token_index_provenance,
+        topk_pos_provenance,
+        provenance_search_memo,
+    )
+    if topk_scores_provenance is None:
+        return None
+    topk_indices_provenance = None
+    if token_index_provenance.args:
+        transpose = token_index_provenance.args[0]
+        if transpose.kind == "op" and transpose.op == "_transpose" and transpose.args:
+            eq = transpose.args[0]
+            if eq.kind == "op" and eq.op == "_eq" and eq.args:
+                reshaped = eq.args[0]
+                if reshaped.kind == "op" and reshaped.op == "_reshape" and reshaped.args:
+                    topk_indices_provenance = reshaped.args[0]
+    if topk_indices_provenance is None:
+        return None
+    iter_provenance = GraphProvenance("op", op="core.repeat.iter")
+    if not (
+        _provenance_contains(token_index_provenance, iter_provenance, provenance_search_memo)
+        and _provenance_contains(selected_input_provenance, token_index_provenance, provenance_search_memo)
+        and _provenance_contains(unsqueeze_provenance, topk_pos_provenance, provenance_search_memo)
+    ):
+        return None
+    actual_by_formal = _repeat_actual_operands_by_formal(repeat_node, callee_module)
+    hidden = _actual_operand_for_callee_provenance(
+        hidden_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_scores = _actual_operand_for_callee_provenance(
+        topk_scores_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_indices = _actual_operand_for_callee_provenance(
+        topk_indices_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    if hidden is None or topk_scores is None or topk_indices is None:
+        return None
+    gate_up_weight = _path_without_repeat_iter_segment(gate_up_provenance.args[6], repeat_var=repeat_var)
+    down_weight = _path_without_repeat_iter_segment(down_provenance.args[6], repeat_var=repeat_var)
+    if gate_up_weight is None or down_weight is None:
+        return None
+    transpose = _provenance_to_graph_operand(
+        gate_up_provenance.args[4],
+        provenance_to_operand={
+            GraphProvenance("literal", value=True): GraphLiteral(True, TypeBool()),
+            GraphProvenance("literal", value=False): GraphLiteral(False, TypeBool()),
+        },
+    )
+    if not isinstance(transpose, GraphLiteral) or not isinstance(transpose.value, bool):
+        return None
+    return (
+        hidden,
+        topk_scores,
+        topk_indices,
+        gate_up_weight,
+        down_weight,
+        transpose,
+    )
+
+
+def _torch_selected_expert_packed_gegelu_candidate(
+    repeat_node: GraphNode,
+    *,
+    callee_module: GraphModule,
+    callee_local_provenance: Mapping[str, GraphProvenance],
+    provenance_search_memo: dict[tuple[str, int, object], object],
+) -> tuple[GraphOperand, ...] | None:
+    if repeat_node.op.name != "core.repeat" or len(repeat_node.outputs) != 1:
+        return None
+    if len(repeat_node.inputs) < 4:
+        return None
+    if not _is_literal_value(repeat_node.inputs[2], 1):
+        return None
+    var_operand = repeat_node.attrs.get("var")
+    if not isinstance(var_operand, GraphLiteral) or not isinstance(var_operand.value, str):
+        return None
+    repeat_var = var_operand.value
+    if len(callee_module.outputs) != 1:
+        return None
+    output = callee_module.outputs[0]
+    if not isinstance(output, GraphValueRef):
+        return None
+    output_provenance = callee_local_provenance.get(output.name)
+    if output_provenance is None:
+        return None
+    gegelu_match = _find_packed_gegelu_linear_provenance(output_provenance, provenance_search_memo)
+    if gegelu_match is None:
+        return None
+    gate_up_provenance, selected_input_provenance, down_provenance, limit_provenance = gegelu_match
+    token_index_provenance = _find_op_provenance(output_provenance, "_where_indices[1]", provenance_search_memo)
+    topk_pos_provenance = _find_op_provenance(output_provenance, "_where_indices[0]", provenance_search_memo)
+    if token_index_provenance is None or topk_pos_provenance is None:
+        return None
+    hidden_provenance = _selected_hidden_source_provenance(selected_input_provenance, token_index_provenance, provenance_search_memo)
+    if hidden_provenance is None:
+        return None
+    unsqueeze_provenance = _find_weighted_update_unsqueeze_provenance(output_provenance, down_provenance, provenance_search_memo)
+    if unsqueeze_provenance is None or not unsqueeze_provenance.args:
+        return None
+    topk_scores_provenance = _selected_scores_source_provenance(
+        unsqueeze_provenance.args[0],
+        token_index_provenance,
+        topk_pos_provenance,
+        provenance_search_memo,
+    )
+    if topk_scores_provenance is None:
+        return None
+    topk_indices_provenance = None
+    if token_index_provenance.args:
+        transpose = token_index_provenance.args[0]
+        if transpose.kind == "op" and transpose.op == "_transpose" and transpose.args:
+            eq = transpose.args[0]
+            if eq.kind == "op" and eq.op == "_eq" and eq.args:
+                reshaped = eq.args[0]
+                if reshaped.kind == "op" and reshaped.op == "_reshape" and reshaped.args:
+                    topk_indices_provenance = reshaped.args[0]
+    if topk_indices_provenance is None:
+        return None
+    iter_provenance = GraphProvenance("op", op="core.repeat.iter")
+    if not (
+        _provenance_contains(token_index_provenance, iter_provenance, provenance_search_memo)
+        and _provenance_contains(selected_input_provenance, token_index_provenance, provenance_search_memo)
+        and _provenance_contains(unsqueeze_provenance, topk_pos_provenance, provenance_search_memo)
+    ):
+        return None
+    actual_by_formal = _repeat_actual_operands_by_formal(repeat_node, callee_module)
+    hidden = _actual_operand_for_callee_provenance(
+        hidden_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_scores = _actual_operand_for_callee_provenance(
+        topk_scores_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_indices = _actual_operand_for_callee_provenance(
+        topk_indices_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    provenance_to_operand = _module_provenance_to_operand_map(
+        callee_module,
+        local_provenance=callee_local_provenance,
+    )
+    limit = _provenance_to_graph_operand(
+        limit_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if hidden is None or topk_scores is None or topk_indices is None or limit is None:
+        return None
+    gate_up_weight = _path_without_repeat_iter_segment(gate_up_provenance.args[6], repeat_var=repeat_var)
+    down_weight = _path_without_repeat_iter_segment(down_provenance.args[6], repeat_var=repeat_var)
+    if gate_up_weight is None or down_weight is None:
+        return None
+    bias = _provenance_to_graph_operand(
+        gate_up_provenance.args[3],
+        provenance_to_operand={
+            GraphProvenance("literal", value=True): GraphLiteral(True, TypeBool()),
+            GraphProvenance("literal", value=False): GraphLiteral(False, TypeBool()),
+        },
+    )
+    transpose = _provenance_to_graph_operand(
+        gate_up_provenance.args[4],
+        provenance_to_operand={
+            GraphProvenance("literal", value=True): GraphLiteral(True, TypeBool()),
+            GraphProvenance("literal", value=False): GraphLiteral(False, TypeBool()),
+        },
+    )
+    if not isinstance(bias, GraphLiteral) or not isinstance(bias.value, bool):
+        return None
+    if not isinstance(transpose, GraphLiteral) or not isinstance(transpose.value, bool):
+        return None
+    gate_up_bias: GraphOperand = GraphLiteral(None, TypeNull())
+    down_bias: GraphOperand = GraphLiteral(None, TypeNull())
+    if bias.value:
+        gate_up_bias_path = _path_without_repeat_iter_segment(gate_up_provenance.args[7], repeat_var=repeat_var)
+        down_bias_path = _path_without_repeat_iter_segment(down_provenance.args[7], repeat_var=repeat_var)
+        if gate_up_bias_path is None or down_bias_path is None:
+            return None
+        gate_up_bias = gate_up_bias_path
+        down_bias = down_bias_path
+    return (
+        hidden,
+        topk_scores,
+        topk_indices,
+        gate_up_weight,
+        gate_up_bias,
+        down_weight,
+        down_bias,
+        limit,
+        bias,
+        transpose,
+    )
+
+
+def _torch_selected_expert_clamped_packed_swiglu_candidate(
+    repeat_node: GraphNode,
+    *,
+    callee_module: GraphModule,
+    callee_local_provenance: Mapping[str, GraphProvenance],
+    provenance_search_memo: dict[tuple[str, int, object], object],
+) -> tuple[GraphOperand, ...] | None:
+    if repeat_node.op.name != "core.repeat" or len(repeat_node.outputs) != 1:
+        return None
+    if len(repeat_node.inputs) < 4:
+        return None
+    if not _is_literal_value(repeat_node.inputs[2], 1):
+        return None
+    var_operand = repeat_node.attrs.get("var")
+    if not isinstance(var_operand, GraphLiteral) or not isinstance(var_operand.value, str):
+        return None
+    repeat_var = var_operand.value
+    if len(callee_module.outputs) != 1:
+        return None
+    output = callee_module.outputs[0]
+    if not isinstance(output, GraphValueRef):
+        return None
+    output_provenance = callee_local_provenance.get(output.name)
+    if output_provenance is None:
+        return None
+    swiglu_match = _find_clamped_packed_swiglu_linear_provenance(output_provenance, provenance_search_memo)
+    if swiglu_match is None:
+        return None
+    gate_up_provenance, selected_input_provenance, down_provenance, limit_provenance = swiglu_match
+    token_index_provenance = _find_op_provenance(output_provenance, "_where_indices[1]", provenance_search_memo)
+    topk_pos_provenance = _find_op_provenance(output_provenance, "_where_indices[0]", provenance_search_memo)
+    if token_index_provenance is None or topk_pos_provenance is None:
+        return None
+    hidden_provenance = _selected_hidden_source_provenance(selected_input_provenance, token_index_provenance, provenance_search_memo)
+    if hidden_provenance is None:
+        return None
+    unsqueeze_provenance = _find_weighted_update_unsqueeze_provenance(output_provenance, down_provenance, provenance_search_memo)
+    if unsqueeze_provenance is None or not unsqueeze_provenance.args:
+        return None
+    topk_scores_provenance = _selected_scores_source_provenance(
+        unsqueeze_provenance.args[0],
+        token_index_provenance,
+        topk_pos_provenance,
+        provenance_search_memo,
+    )
+    if topk_scores_provenance is None:
+        return None
+    topk_indices_provenance = None
+    if token_index_provenance.args:
+        transpose = token_index_provenance.args[0]
+        if transpose.kind == "op" and transpose.op == "_transpose" and transpose.args:
+            eq = transpose.args[0]
+            if eq.kind == "op" and eq.op == "_eq" and eq.args:
+                reshaped = eq.args[0]
+                if reshaped.kind == "op" and reshaped.op == "_reshape" and reshaped.args:
+                    topk_indices_provenance = reshaped.args[0]
+    if topk_indices_provenance is None:
+        return None
+    iter_provenance = GraphProvenance("op", op="core.repeat.iter")
+    if not (
+        _provenance_contains(token_index_provenance, iter_provenance, provenance_search_memo)
+        and _provenance_contains(selected_input_provenance, token_index_provenance, provenance_search_memo)
+        and _provenance_contains(unsqueeze_provenance, topk_pos_provenance, provenance_search_memo)
+    ):
+        return None
+    actual_by_formal = _repeat_actual_operands_by_formal(repeat_node, callee_module)
+    hidden = _actual_operand_for_callee_provenance(
+        hidden_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_scores = _actual_operand_for_callee_provenance(
+        topk_scores_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_indices = _actual_operand_for_callee_provenance(
+        topk_indices_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    provenance_to_operand = _module_provenance_to_operand_map(
+        callee_module,
+        local_provenance=callee_local_provenance,
+    )
+    limit = _provenance_to_graph_operand(
+        limit_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+    if hidden is None or topk_scores is None or topk_indices is None or limit is None:
+        return None
+    gate_up_weight = _path_without_repeat_iter_segment(gate_up_provenance.args[6], repeat_var=repeat_var)
+    down_weight = _path_without_repeat_iter_segment(down_provenance.args[6], repeat_var=repeat_var)
+    if gate_up_weight is None or down_weight is None:
+        return None
+    transpose = _provenance_to_graph_operand(
+        gate_up_provenance.args[4],
+        provenance_to_operand={
+            GraphProvenance("literal", value=True): GraphLiteral(True, TypeBool()),
+            GraphProvenance("literal", value=False): GraphLiteral(False, TypeBool()),
+        },
+    )
+    if not isinstance(transpose, GraphLiteral) or not isinstance(transpose.value, bool):
+        return None
+    return (
+        hidden,
+        topk_scores,
+        topk_indices,
+        gate_up_weight,
+        down_weight,
+        limit,
+        transpose,
+    )
+
+
+def _torch_selected_expert_relu2_candidate(
+    repeat_node: GraphNode,
+    *,
+    callee_module: GraphModule,
+    callee_local_provenance: Mapping[str, GraphProvenance],
+    provenance_search_memo: dict[tuple[str, int, object], object],
+) -> tuple[GraphOperand, ...] | None:
+    if repeat_node.op.name != "core.repeat" or len(repeat_node.outputs) != 1:
+        return None
+    if len(repeat_node.inputs) < 4:
+        return None
+    if not _is_literal_value(repeat_node.inputs[2], 1):
+        return None
+    var_operand = repeat_node.attrs.get("var")
+    if not isinstance(var_operand, GraphLiteral) or not isinstance(var_operand.value, str):
+        return None
+    repeat_var = var_operand.value
+    if len(callee_module.outputs) != 1:
+        return None
+    output = callee_module.outputs[0]
+    if not isinstance(output, GraphValueRef):
+        return None
+    output_provenance = callee_local_provenance.get(output.name)
+    if output_provenance is None:
+        return None
+    relu2_match = _find_relu2_linear_provenance(output_provenance, provenance_search_memo)
+    if relu2_match is None:
+        return None
+    up_provenance, selected_input_provenance, down_provenance = relu2_match
+    token_index_provenance = _find_op_provenance(output_provenance, "_where_indices[1]", provenance_search_memo)
+    topk_pos_provenance = _find_op_provenance(output_provenance, "_where_indices[0]", provenance_search_memo)
+    if token_index_provenance is None or topk_pos_provenance is None:
+        return None
+    hidden_provenance = _selected_hidden_source_provenance(selected_input_provenance, token_index_provenance, provenance_search_memo)
+    if hidden_provenance is None:
+        return None
+    unsqueeze_provenance = _find_weighted_update_unsqueeze_provenance(output_provenance, down_provenance, provenance_search_memo)
+    if unsqueeze_provenance is None or not unsqueeze_provenance.args:
+        return None
+    topk_scores_provenance = _selected_scores_source_provenance(
+        unsqueeze_provenance.args[0],
+        token_index_provenance,
+        topk_pos_provenance,
+        provenance_search_memo,
+    )
+    if topk_scores_provenance is None:
+        return None
+    topk_indices_provenance = None
+    if token_index_provenance.args:
+        transpose = token_index_provenance.args[0]
+        if transpose.kind == "op" and transpose.op == "_transpose" and transpose.args:
+            eq = transpose.args[0]
+            if eq.kind == "op" and eq.op == "_eq" and eq.args:
+                reshaped = eq.args[0]
+                if reshaped.kind == "op" and reshaped.op == "_reshape" and reshaped.args:
+                    topk_indices_provenance = reshaped.args[0]
+    if topk_indices_provenance is None:
+        return None
+    iter_provenance = GraphProvenance("op", op="core.repeat.iter")
+    if not (
+        _provenance_contains(token_index_provenance, iter_provenance, provenance_search_memo)
+        and _provenance_contains(selected_input_provenance, token_index_provenance, provenance_search_memo)
+        and _provenance_contains(unsqueeze_provenance, topk_pos_provenance, provenance_search_memo)
+    ):
+        return None
+    actual_by_formal = _repeat_actual_operands_by_formal(repeat_node, callee_module)
+    hidden = _actual_operand_for_callee_provenance(
+        hidden_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_scores = _actual_operand_for_callee_provenance(
+        topk_scores_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    topk_indices = _actual_operand_for_callee_provenance(
+        topk_indices_provenance,
+        callee_module=callee_module,
+        callee_local_provenance=callee_local_provenance,
+        actual_by_formal=actual_by_formal,
+    )
+    if hidden is None or topk_scores is None or topk_indices is None:
+        return None
+    up_weight = _path_without_repeat_iter_segment(up_provenance.args[6], repeat_var=repeat_var)
+    down_weight = _path_without_repeat_iter_segment(down_provenance.args[6], repeat_var=repeat_var)
+    if up_weight is None or down_weight is None:
+        return None
+    transpose = _provenance_to_graph_operand(
+        up_provenance.args[4],
+        provenance_to_operand={
+            GraphProvenance("literal", value=True): GraphLiteral(True, TypeBool()),
+            GraphProvenance("literal", value=False): GraphLiteral(False, TypeBool()),
+        },
+    )
+    if not isinstance(transpose, GraphLiteral) or not isinstance(transpose.value, bool):
+        return None
+    return (
+        hidden,
+        topk_scores,
+        topk_indices,
+        up_weight,
+        down_weight,
+        transpose,
+    )
+
+
+def _has_torch_selected_expert_intrinsic_candidates(graph: GraphProgram) -> bool:
+    op_names = {node.op.name for module in graph.modules for node in module.nodes}
+    if "_expert_linear" in op_names or "__torch_expert_packed_swiglu_ffn" in op_names:
+        return True
+    if "_where_indices" not in op_names:
+        return False
+    if "core.repeat" not in op_names:
+        return False
+    # Repeat-based selected-expert rewrites need an expert loop body with linear
+    # projections and a token-selection primitive.  This is only a prefilter:
+    # the provenance matcher below remains the semantic gate.
+    modules_by_name = {module.name: module for module in graph.modules}
+    for module in graph.modules:
+        for node in module.nodes:
+            if node.op.name != "core.repeat":
+                continue
+            callee_operand = node.attrs.get("callee")
+            if not isinstance(callee_operand, GraphLiteral) or not isinstance(callee_operand.value, str):
+                continue
+            callee = modules_by_name.get(callee_operand.value)
+            if callee is None:
+                continue
+            callee_op_names = {callee_node.op.name for callee_node in callee.nodes}
+            if "_where_indices" in callee_op_names and (
+                "_expert_linear" in callee_op_names
+                or "__torch_expert_packed_swiglu_ffn" in callee_op_names
+            ):
+                return True
+            called_module_names = {callee_node.op.name for callee_node in callee.nodes}
+            for called_module_name in called_module_names:
+                called_module = modules_by_name.get(called_module_name)
+                if called_module is None:
+                    continue
+                nested_op_names = {nested_node.op.name for nested_node in called_module.nodes}
+                if "_where_indices" in nested_op_names or "_expert_linear" in nested_op_names:
+                    combined = callee_op_names | nested_op_names
+                    if "_where_indices" in combined and (
+                        "_expert_linear" in combined or "__torch_expert_packed_swiglu_ffn" in combined
+                    ):
+                        return True
+    return False
+
+
+def _rewrite_torch_selected_expert_intrinsics(
+    graph: GraphProgram,
+    *,
+    enabled_intrinsics: frozenset[str],
+) -> GraphProgram:
+    if not _has_torch_selected_expert_intrinsic_candidates(graph):
+        return graph
+    modules_by_name = {module.name: module for module in graph.modules}
+    provenance = infer_graph_provenance(graph)
+    module_provenance_to_operand: dict[str, dict[GraphProvenance, GraphOperand]] = {}
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        module_provenance_to_operand[module.name] = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+    provenance_search_memo: dict[tuple[str, int, object], object] = {}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = module_provenance_to_operand.get(module.name, {})
+        producer_by_output = {output.name: node for node in module.nodes for output in node.outputs}
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            callee = modules_by_name.get(node.op.name)
+            if callee is not None:
+                inputs = _torch_direct_selected_expert_packed_gegelu_call_candidate(
+                    node,
+                    callee_module=callee,
+                    callee_local_provenance=provenance.module_local_provenance.get(callee.name, {}),
+                )
+                if inputs is not None:
+                    op_name = "__torch_selected_expert_packed_gegelu_ffn"
+                    if _backend_intrinsic_enabled(enabled_intrinsics, op_name):
+                        changed = True
+                        new_nodes.append(
+                            replace(
+                                node,
+                                op=GraphOp(op_name),
+                                inputs=inputs,
+                                attrs={},
+                            )
+                        )
+                        continue
+                inputs = _torch_direct_selected_expert_swiglu_call_candidate(
+                    node,
+                    callee_module=callee,
+                    callee_local_provenance=provenance.module_local_provenance.get(callee.name, {}),
+                )
+                if inputs is not None:
+                    op_name = "__torch_selected_expert_swiglu_ffn"
+                    if _backend_intrinsic_enabled(enabled_intrinsics, op_name):
+                        changed = True
+                        new_nodes.append(
+                            replace(
+                                node,
+                                op=GraphOp(op_name),
+                                inputs=inputs,
+                                attrs={},
+                            )
+                        )
+                        continue
+                inputs = _torch_direct_selected_expert_packed_swiglu_call_candidate(
+                    node,
+                    callee_module=callee,
+                    callee_local_provenance=provenance.module_local_provenance.get(callee.name, {}),
+                )
+                if inputs is not None:
+                    op_name = "__torch_selected_expert_packed_swiglu_ffn"
+                    if _backend_intrinsic_enabled(enabled_intrinsics, op_name):
+                        changed = True
+                        new_nodes.append(
+                            replace(
+                                node,
+                                op=GraphOp(op_name),
+                                inputs=inputs,
+                                attrs={},
+                            )
+                        )
+                        continue
+            inputs = _torch_direct_selected_expert_swiglu_candidate(
+                node,
+                local_provenance=local_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if inputs is not None:
+                op_name = "__torch_selected_expert_swiglu_ffn"
+                if _backend_intrinsic_enabled(enabled_intrinsics, op_name):
+                    changed = True
+                    new_nodes.append(
+                        replace(
+                            node,
+                            op=GraphOp(op_name),
+                            inputs=inputs,
+                            attrs={},
+                        )
+                    )
+                    continue
+            inputs = _torch_direct_selected_expert_packed_swiglu_candidate(
+                node,
+                local_provenance=local_provenance,
+                provenance_to_operand=provenance_to_operand,
+                producer_by_output=producer_by_output,
+            )
+            if inputs is not None:
+                op_name = "__torch_selected_expert_packed_swiglu_ffn"
+                if _backend_intrinsic_enabled(enabled_intrinsics, op_name):
+                    changed = True
+                    new_nodes.append(
+                        replace(
+                            node,
+                            op=GraphOp(op_name),
+                            inputs=inputs,
+                            attrs={},
+                        )
+                    )
+                    continue
+            if node.op.name != "core.repeat":
+                new_nodes.append(node)
+                continue
+            callee_operand = node.attrs.get("callee")
+            if not isinstance(callee_operand, GraphLiteral) or not isinstance(callee_operand.value, str):
+                new_nodes.append(node)
+                continue
+            callee = modules_by_name.get(callee_operand.value)
+            if callee is None:
+                new_nodes.append(node)
+                continue
+            inputs = _torch_selected_expert_packed_swiglu_candidate(
+                node,
+                callee_module=callee,
+                callee_local_provenance=provenance.module_local_provenance.get(callee.name, {}),
+                provenance_search_memo=provenance_search_memo,
+            )
+            op_name = "__torch_selected_expert_packed_swiglu_ffn"
+            if inputs is None:
+                inputs = _torch_selected_expert_packed_gegelu_candidate(
+                    node,
+                    callee_module=callee,
+                    callee_local_provenance=provenance.module_local_provenance.get(callee.name, {}),
+                    provenance_search_memo=provenance_search_memo,
+                )
+                op_name = "__torch_selected_expert_packed_gegelu_ffn"
+            if inputs is None:
+                inputs = _torch_selected_expert_clamped_packed_swiglu_candidate(
+                    node,
+                    callee_module=callee,
+                    callee_local_provenance=provenance.module_local_provenance.get(callee.name, {}),
+                    provenance_search_memo=provenance_search_memo,
+                )
+                op_name = "__torch_selected_expert_clamped_packed_swiglu_ffn"
+            if inputs is None:
+                inputs = _torch_selected_expert_relu2_candidate(
+                    node,
+                    callee_module=callee,
+                    callee_local_provenance=provenance.module_local_provenance.get(callee.name, {}),
+                    provenance_search_memo=provenance_search_memo,
+                )
+                op_name = "__torch_selected_expert_relu2_ffn"
+            if inputs is None:
+                new_nodes.append(node)
+                continue
+            if not _backend_intrinsic_enabled(enabled_intrinsics, op_name):
+                new_nodes.append(node)
+                continue
+            changed = True
+            new_nodes.append(
+                replace(
+                    node,
+                    op=GraphOp(op_name),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_torch_weighted_topk_sum_intrinsics(graph: GraphProgram) -> GraphProgram:
+    has_candidate_shape = False
+    for module in graph.modules:
+        names = [node.op.name for node in module.nodes]
+        for index in range(len(names) - 2):
+            if names[index] == "_unsqueeze" and names[index + 1] in {"_mul", "core.binary.*"} and names[index + 2] == "_sum":
+                has_candidate_shape = True
+                break
+        if has_candidate_shape:
+            break
+    if not has_candidate_shape:
+        return graph
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        value_ref_counts = _module_value_ref_counts(module)
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            if index + 2 >= len(module.nodes):
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            inputs = _torch_weighted_topk_sum_candidate(
+                module.nodes[index],
+                module.nodes[index + 1],
+                module.nodes[index + 2],
+                local_provenance={},
+                provenance_to_operand={},
+                value_ref_counts=value_ref_counts,
+            )
+            if inputs is None:
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            sum_node = module.nodes[index + 2]
+            changed = True
+            new_nodes.append(
+                replace(
+                    sum_node,
+                    op=GraphOp("__torch_weighted_topk_sum"),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 3
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _torch_topk_normalize_candidate(
+    cumsum_node: GraphNode,
+    slice_node: GraphNode,
+    div_node: GraphNode,
+    cast_node: GraphNode,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+    value_ref_counts: Mapping[str, int],
+) -> tuple[GraphOperand, ...] | None:
+    if (
+        len(cumsum_node.outputs) != 1
+        or len(slice_node.outputs) != 1
+        or len(div_node.outputs) != 1
+        or len(cast_node.outputs) != 1
+    ):
+        return None
+    cumsum_name = cumsum_node.outputs[0].name
+    slice_name = slice_node.outputs[0].name
+    div_name = div_node.outputs[0].name
+    if value_ref_counts.get(cumsum_name, 0) != 1:
+        return None
+    if value_ref_counts.get(slice_name, 0) != 1:
+        return None
+    if value_ref_counts.get(div_name, 0) != 1:
+        return None
+    cumsum_prov = local_provenance.get(cumsum_name)
+    slice_prov = local_provenance.get(slice_name)
+    div_prov = local_provenance.get(div_name)
+    cast_prov = local_provenance.get(cast_node.outputs[0].name)
+    if cumsum_prov is None or slice_prov is None or div_prov is None or cast_prov is None:
+        return None
+    return _torch_topk_normalize_inputs_from_provenance(
+        cumsum_prov=cumsum_prov,
+        slice_prov=slice_prov,
+        div_prov=div_prov,
+        cast_prov=cast_prov,
+        cast_node=cast_node,
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+
+
+def _torch_topk_normalize_nested_candidate(
+    cumsum_node: GraphNode,
+    slice_node: GraphNode,
+    cast_node: GraphNode,
+    *,
+    local_provenance: Mapping[str, GraphProvenance],
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+    value_ref_counts: Mapping[str, int],
+) -> tuple[GraphOperand, ...] | None:
+    if len(cumsum_node.outputs) != 1 or len(slice_node.outputs) != 1 or len(cast_node.outputs) != 1:
+        return None
+    cumsum_name = cumsum_node.outputs[0].name
+    slice_name = slice_node.outputs[0].name
+    if value_ref_counts.get(cumsum_name, 0) != 1:
+        return None
+    if value_ref_counts.get(slice_name, 0) != 1:
+        return None
+    cumsum_prov = local_provenance.get(cumsum_name)
+    slice_prov = local_provenance.get(slice_name)
+    cast_prov = local_provenance.get(cast_node.outputs[0].name)
+    if cumsum_prov is None or slice_prov is None or cast_prov is None:
+        return None
+    if cast_prov.kind != "op" or cast_prov.op != "_cast_like" or len(cast_prov.args) < 1:
+        return None
+    div_prov = cast_prov.args[0]
+    return _torch_topk_normalize_inputs_from_provenance(
+        cumsum_prov=cumsum_prov,
+        slice_prov=slice_prov,
+        div_prov=div_prov,
+        cast_prov=cast_prov,
+        cast_node=cast_node,
+        local_provenance=local_provenance,
+        provenance_to_operand=provenance_to_operand,
+    )
+
+
+def _rewrite_torch_topk_normalize_intrinsics(graph: GraphProgram) -> GraphProgram:
+    has_candidate_shape = False
+    for module in graph.modules:
+        names = [node.op.name for node in module.nodes]
+        for index in range(len(names)):
+            if names[index : index + 4] == ["_cumsum", "_slice", "core.binary./", "_cast_like"]:
+                has_candidate_shape = True
+                break
+            if names[index : index + 4] == ["_cumsum", "_slice", "_div", "_cast_like"]:
+                has_candidate_shape = True
+                break
+            if names[index : index + 3] == ["_cumsum", "_slice", "_cast_like"]:
+                has_candidate_shape = True
+                break
+        if has_candidate_shape:
+            break
+    if not has_candidate_shape:
+        return graph
+    provenance = infer_graph_provenance(graph)
+    module_provenance_to_operand: dict[str, dict[GraphProvenance, GraphOperand]] = {}
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        module_provenance_to_operand[module.name] = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = module_provenance_to_operand.get(module.name, {})
+        value_ref_counts = _module_value_ref_counts(module)
+        new_nodes: list[GraphNode] = []
+        index = 0
+        while index < len(module.nodes):
+            if index + 2 >= len(module.nodes):
+                new_nodes.append(module.nodes[index])
+                index += 1
+                continue
+            inputs = None
+            if index + 3 < len(module.nodes):
+                inputs = _torch_topk_normalize_candidate(
+                    module.nodes[index],
+                    module.nodes[index + 1],
+                    module.nodes[index + 2],
+                    module.nodes[index + 3],
+                    local_provenance=local_provenance,
+                    provenance_to_operand=provenance_to_operand,
+                    value_ref_counts=value_ref_counts,
+                )
+            if inputs is None:
+                nested_inputs = _torch_topk_normalize_nested_candidate(
+                    module.nodes[index],
+                    module.nodes[index + 1],
+                    module.nodes[index + 2],
+                    local_provenance=local_provenance,
+                    provenance_to_operand=provenance_to_operand,
+                    value_ref_counts=value_ref_counts,
+                )
+                if nested_inputs is None:
+                    new_nodes.append(module.nodes[index])
+                    index += 1
+                    continue
+                cast_node = module.nodes[index + 2]
+                changed = True
+                new_nodes.append(
+                    replace(
+                        cast_node,
+                        op=GraphOp("__torch_topk_normalize"),
+                        inputs=nested_inputs,
+                        attrs={},
+                    )
+                )
+                index += 3
+                continue
+            cast_node = module.nodes[index + 3]
+            changed = True
+            new_nodes.append(
+                replace(
+                    cast_node,
+                    op=GraphOp("__torch_topk_normalize"),
+                    inputs=inputs,
+                    attrs={},
+                )
+            )
+            index += 4
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _match_packed_gegelu_channel(
+    provenance: GraphProvenance,
+    *,
+    start: int,
+    end: int,
+) -> tuple[GraphProvenance, GraphProvenance] | None:
+    if provenance.kind != "op" or provenance.op != "_reshape" or len(provenance.args) < 1:
+        return None
+    sliced = provenance.args[0]
+    if sliced.kind != "op" or sliced.op != "_slice" or len(sliced.args) < 4:
+        return None
+    pair, dim_prov, start_prov, end_prov = sliced.args[:4]
+    if not _is_literal_provenance_value(dim_prov, -1):
+        return None
+    if not _is_literal_provenance_value(start_prov, start):
+        return None
+    if not _is_literal_provenance_value(end_prov, end):
+        return None
+    if pair.kind != "op" or pair.op != "_reshape" or len(pair.args) < 1:
+        return None
+    return pair.args[0], pair
+
+
+def _match_limit_negation(
+    provenance: GraphProvenance,
+    limit: GraphProvenance,
+) -> bool:
+    args = _provenance_binary_args(provenance, "core.binary.-", "_sub")
+    if args is None:
+        return False
+    left, right = args
+    return _is_literal_number_provenance_value(left, 0.0) and right == limit
+
+
+def _match_packed_gegelu_clamped_channels(
+    gate: GraphProvenance,
+    up: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance] | None:
+    if gate.kind != "op" or gate.op != "_clamp" or len(gate.args) < 3:
+        return None
+    if up.kind != "op" or up.op != "_clamp" or len(up.args) < 3:
+        return None
+    gate_raw, gate_min, gate_max = gate.args[:3]
+    up_raw, up_min, up_max = up.args[:3]
+    if not _is_literal_provenance_value(gate_min, None):
+        return None
+    if gate_max != up_max:
+        return None
+    if not _match_limit_negation(up_min, gate_max):
+        return None
+    gate_source = _match_packed_gegelu_channel(gate_raw, start=0, end=1)
+    up_source = _match_packed_gegelu_channel(up_raw, start=1, end=2)
+    if gate_source is None or up_source is None:
+        return None
+    gate_input, gate_pair = gate_source
+    up_input, up_pair = up_source
+    if gate_input != up_input or gate_pair != up_pair:
+        return None
+    return gate_input, gate_max
+
+
+def _match_packed_gegelu_activation(
+    provenance: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance] | None:
+    matched = _match_packed_gegelu_activation_with_alpha(provenance)
+    if matched is None:
+        return None
+    source, limit, alpha = matched
+    if not _is_literal_number_provenance_value(alpha, 1.702):
+        return None
+    return source, limit
+
+
+def _match_packed_gegelu_activation_with_alpha(
+    provenance: GraphProvenance,
+) -> tuple[GraphProvenance, GraphProvenance, GraphProvenance] | None:
+    outer_mul_args = _provenance_binary_args(provenance, "core.binary.*", "_mul")
+    if outer_mul_args is None:
+        return None
+    for up_plus_one, gate_term in (outer_mul_args, outer_mul_args[::-1]):
+        add_args = _provenance_binary_args(up_plus_one, "core.binary.+", "_add")
+        if add_args is None:
+            continue
+        up_candidate: GraphProvenance | None = None
+        if _is_literal_number_provenance_value(add_args[0], 1.0):
+            up_candidate = add_args[1]
+        elif _is_literal_number_provenance_value(add_args[1], 1.0):
+            up_candidate = add_args[0]
+        if up_candidate is None:
+            continue
+        gate_term_args = _provenance_binary_args(gate_term, "core.binary.*", "_mul")
+        if gate_term_args is None:
+            continue
+        for gate_candidate, sigmoid_candidate in (gate_term_args, gate_term_args[::-1]):
+            if sigmoid_candidate.kind != "op" or sigmoid_candidate.op != "_activations_sigmoid" or len(sigmoid_candidate.args) != 1:
+                continue
+            sigmoid_input_args = _provenance_binary_args(sigmoid_candidate.args[0], "core.binary.*", "_mul")
+            if sigmoid_input_args is None:
+                continue
+            alpha: GraphProvenance | None = None
+            if sigmoid_input_args[0] == gate_candidate:
+                alpha = sigmoid_input_args[1]
+            elif sigmoid_input_args[1] == gate_candidate:
+                alpha = sigmoid_input_args[0]
+            if alpha is None:
+                continue
+            matched = _match_packed_gegelu_clamped_channels(gate_candidate, up_candidate)
+            if matched is not None:
+                source, limit = matched
+                return source, limit, alpha
+    return None
+
+
+def _packed_gegelu_type_shape_matches(
+    source_operand: GraphOperand,
+    output_type: TypeExpr | None,
+) -> bool:
+    source_type = graph_operand_type(source_operand)
+    if not isinstance(source_type, TypeTensor) or not isinstance(output_type, TypeTensor):
+        return False
+    if source_type.base != output_type.base:
+        return False
+    if len(source_type.dims) != len(output_type.dims) or not source_type.dims:
+        return False
+    if tuple(source_type.dims[:-1]) != tuple(output_type.dims[:-1]):
+        return False
+    source_last = source_type.dims[-1]
+    output_last = output_type.dims[-1]
+    if isinstance(source_last, int) and isinstance(output_last, int):
+        return source_last == 2 * output_last
+    if isinstance(source_last, DimExprBinary) and source_last.op == "*":
+        return (
+            (source_last.left == output_last and source_last.right == 2)
+            or (source_last.right == output_last and source_last.left == 2)
+        )
+    return False
+
+
+def _rewrite_packed_gegelu_intrinsics(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand = _module_provenance_to_operand_map(
+            module,
+            local_provenance=local_provenance,
+        )
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            if len(node.outputs) != 1:
+                new_nodes.append(node)
+                continue
+            output_provenance = local_provenance.get(node.outputs[0].name)
+            if output_provenance is None:
+                new_nodes.append(node)
+                continue
+            matched = _match_packed_gegelu_activation(output_provenance)
+            if matched is None:
+                new_nodes.append(node)
+                continue
+            source_provenance, limit_provenance = matched
+            source_operand = _provenance_to_graph_operand(
+                source_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            limit_operand = _provenance_to_graph_operand(
+                limit_provenance,
+                provenance_to_operand=provenance_to_operand,
+            )
+            if source_operand is None or limit_operand is None:
+                new_nodes.append(node)
+                continue
+            if not _packed_gegelu_type_shape_matches(source_operand, node.outputs[0].type_expr):
+                new_nodes.append(node)
+                continue
+            changed = True
+            new_nodes.append(
+                replace(
+                    node,
+                    op=GraphOp("_activations_gegelu"),
+                    inputs=(source_operand, limit_operand),
+                    attrs={},
+                )
+            )
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _provenance_to_graph_operand(
+    provenance: GraphProvenance,
+    *,
+    provenance_to_operand: Mapping[GraphProvenance, GraphOperand],
+) -> GraphOperand | None:
+    if provenance in provenance_to_operand:
+        return provenance_to_operand[provenance]
+    if provenance.kind == "literal":
+        return GraphLiteral(provenance.value, TypeAny())
+    return None
+
+
+def _collect_literal_path_provenance_operands(
+    operand: GraphOperand,
+    out: dict[GraphProvenance, GraphOperand],
+) -> None:
+    if isinstance(operand, GraphLiteral):
+        out.setdefault(GraphProvenance("literal", value=operand.value), operand)
+        return
+    if isinstance(operand, GraphPath):
+        prefix = "@@" if operand.absolute else "@"
+        out.setdefault(GraphProvenance("path", value=prefix + ".".join(operand.parts)), operand)
+        return
+    if not isinstance(operand, GraphExpr):
+        return
+    for item in (*operand.inputs, *operand.attrs.values()):
+        _collect_literal_path_provenance_operands(item, out)
+
+
 def _single_rope_apply_fact(
     facts,
 ) -> GraphRopeApplyFactorsFact | None:
@@ -369,7 +4707,11 @@ def _input_provenance_name(provenance: GraphProvenance) -> str | None:
     return provenance.name if provenance.kind == "input" else None
 
 
-def _rewrite_torch_rope_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_torch_rope_intrinsics(
+    graph: GraphProgram,
+    *,
+    enabled_intrinsics: frozenset[str],
+) -> GraphProgram:
     provenance = infer_graph_provenance(graph)
     modules_by_name = {module.name: module for module in graph.modules}
     changed = False
@@ -382,6 +4724,49 @@ def _rewrite_torch_rope_intrinsics(graph: GraphProgram) -> GraphProgram:
                 module=module,
                 modules_by_name=modules_by_name,
                 provenance=provenance,
+            )
+            if rewritten is None:
+                new_nodes.append(node)
+            elif not _backend_intrinsic_enabled(enabled_intrinsics, rewritten.op.name):
+                new_nodes.append(node)
+            else:
+                changed = True
+                new_nodes.append(rewritten)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_assign_unit_slice(graph: GraphProgram) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        local_provenance = provenance.module_local_provenance.get(module.name, {})
+        provenance_to_operand: dict[GraphProvenance, GraphOperand] = {}
+        for value in module.inputs:
+            value_provenance = local_provenance.get(value.name)
+            if value_provenance is not None:
+                provenance_to_operand.setdefault(
+                    value_provenance,
+                    GraphValueRef(value.name, value.type_expr, value.dims),
+                )
+        for node in module.nodes:
+            for operand in (*node.inputs, *node.attrs.values()):
+                _collect_literal_path_provenance_operands(operand, provenance_to_operand)
+            for output in node.outputs:
+                value_provenance = local_provenance.get(output.name)
+                if value_provenance is not None:
+                    provenance_to_operand.setdefault(
+                        value_provenance,
+                        GraphValueRef(output.name, output.type_expr, output.dims),
+                    )
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            rewritten = _maybe_rewrite_node_to_assign_unit_slice(
+                node,
+                module=module,
+                provenance=provenance,
+                provenance_to_operand=provenance_to_operand,
             )
             if rewritten is None:
                 new_nodes.append(node)
@@ -632,6 +5017,9 @@ def _literal_fact_type(value: object, formal_type: TypeExpr) -> TypeExpr:
 
 
 def _validate_optimizer_graph(graph: GraphProgram, *, phase: str) -> None:
+    key = _graph_program_validation_key(graph)
+    if key in _VALIDATED_OPTIMIZER_GRAPH_KEYS:
+        return
     try:
         validate_graph_program(graph)
         modules_by_name = {module.name: module for module in graph.modules}
@@ -639,6 +5027,109 @@ def _validate_optimizer_graph(graph: GraphProgram, *, phase: str) -> None:
             _validate_optimizer_module_metadata(module, modules_by_name=modules_by_name)
     except ValueError as exc:
         raise ValueError(f"graph optimizer phase {phase!r} produced invalid graph: {exc}") from exc
+    _VALIDATED_OPTIMIZER_GRAPH_KEYS.add(key)
+
+
+_VALIDATED_OPTIMIZER_GRAPH_KEYS: set[object] = set()
+_REFRESH_GRAPH_PROGRAM_TYPES_CACHE: dict[object, GraphProgram] = {}
+
+
+def _graph_type_key(type_expr: TypeExpr | None) -> object:
+    return repr(type_expr)
+
+
+def _hashable_graph_metadata(value: object) -> object:
+    if isinstance(value, dict):
+        return tuple(
+            sorted(
+                (key, _hashable_graph_metadata(item))
+                for key, item in value.items()
+            )
+        )
+    if isinstance(value, list | tuple):
+        return tuple(_hashable_graph_metadata(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return tuple(sorted(_hashable_graph_metadata(item) for item in value))
+    return value
+
+
+def _graph_dim_key(dim: DimToken) -> object:
+    return repr(dim)
+
+
+def _graph_value_validation_key(value: GraphValue | GraphValueRef) -> object:
+    return (
+        value.name,
+        _graph_type_key(value.type_expr),
+        tuple(_graph_dim_key(dim) for dim in value.dims or ()),
+        value.optional if isinstance(value, GraphValue) else None,
+    )
+
+
+def _graph_operand_validation_key(operand: GraphOperand) -> object:
+    if isinstance(operand, GraphValueRef):
+        return ("ref", _graph_value_validation_key(operand))
+    if isinstance(operand, GraphLiteral):
+        return ("lit", operand.value, _graph_type_key(operand.type_expr))
+    if isinstance(operand, GraphPath):
+        return ("path", operand.absolute, operand.parts)
+    return (
+        "expr",
+        operand.op.name,
+        tuple(_graph_operand_validation_key(item) for item in operand.inputs),
+        tuple(
+            sorted(
+                (key, _graph_operand_validation_key(value))
+                for key, value in operand.attrs.items()
+            )
+        ),
+        _graph_type_key(operand.type_expr),
+        tuple(_graph_dim_key(dim) for dim in operand.dims or ()),
+    )
+
+
+def _graph_node_validation_key(node: GraphNode) -> object:
+    return (
+        node.id,
+        node.op.name,
+        tuple(_graph_operand_validation_key(item) for item in node.inputs),
+        tuple(
+            sorted(
+                (key, _graph_operand_validation_key(value))
+                for key, value in node.attrs.items()
+            )
+        ),
+        tuple(_graph_value_validation_key(output) for output in node.outputs),
+        node.source_module,
+        _graph_type_key(node.type_expr),
+        tuple(_graph_dim_key(dim) for dim in node.dims or ()),
+    )
+
+
+def _graph_module_validation_key(module: GraphModule) -> object:
+    return (
+        module.name,
+        tuple(_graph_value_validation_key(value) for value in module.inputs),
+        tuple(_graph_operand_validation_key(output) for output in module.outputs),
+        module.output_names,
+        tuple(_graph_node_validation_key(node) for node in module.nodes),
+        _graph_type_key(module.return_type_expr),
+        repr(module.constraints),
+        module.is_global_binding,
+    )
+
+
+def _graph_program_validation_key(graph: GraphProgram) -> object:
+    return (
+        graph.main_module,
+        tuple(
+            sorted(
+                (key, _hashable_graph_metadata(value))
+                for key, value in graph.pragmas.items()
+            )
+        ),
+        tuple(_graph_module_validation_key(module) for module in graph.modules),
+    )
 
 
 def _validate_optimizer_module_metadata(
@@ -1319,6 +5810,41 @@ def _strip_optional_refs_in_operand(
                 },
             )
         )
+    return operand
+
+
+def _domain_refined_operand_type(operand: GraphOperand, fact: GraphDomainFact | None) -> GraphOperand:
+    if not isinstance(operand, GraphValueRef | GraphExpr) or fact is None:
+        return operand
+    operand_type = operand.type_expr
+    if fact.kind == GraphDomainKind.NULL:
+        return replace(operand, type_expr=TypeNull(), dims=operand.dims)
+    if fact.kind != GraphDomainKind.NOT_NULL or not isinstance(operand_type, TypeOptional):
+        return operand
+    inner = operand_type.inner
+    return replace(
+        operand,
+        type_expr=inner,
+        dims=inner.dims if isinstance(inner, TypeTensor) else operand.dims,
+    )
+
+
+def _refine_operand_types_from_domain_facts(
+    operand: GraphOperand,
+    local_facts: Mapping[str, GraphDomainFact],
+) -> GraphOperand:
+    if isinstance(operand, GraphValueRef):
+        return _domain_refined_operand_type(operand, local_facts.get(operand.name))
+    if isinstance(operand, GraphExpr):
+        rewritten = replace(
+            operand,
+            inputs=tuple(_refine_operand_types_from_domain_facts(item, local_facts) for item in operand.inputs),
+            attrs={
+                key: _refine_operand_types_from_domain_facts(value, local_facts)
+                for key, value in operand.attrs.items()
+            },
+        )
+        return _domain_refined_operand_type(rewritten, None)
     return operand
 
 
@@ -2154,6 +6680,10 @@ def _select_result_dim(left: DimToken, right: DimToken) -> DimToken:
     right = substitute_dim_token(right, {})
     if left == right:
         return left
+    if left == 1:
+        return right
+    if right == 1:
+        return left
     return _stable_join_dim_name(left, right)
 
 
@@ -2362,14 +6892,66 @@ def _refresh_graph_operand_types(
     globals_env: Mapping[str, GraphValue],
     modules_by_name: Mapping[str, GraphModule],
     dim_values: Mapping[str, DimToken] | None = None,
+    local_domain_facts: Mapping[str, GraphDomainFact] | None = None,
+    local_conditions: Mapping[str, GraphExpr] | None = None,
 ) -> GraphOperand:
     if isinstance(operand, GraphValueRef):
         value = env.get(operand.name) or globals_env.get(operand.name)
         if value is None:
-            return operand
-        return replace(operand, type_expr=_value_ref_type(value), dims=value.dims)
+            refreshed = operand
+        else:
+            refreshed = replace(operand, type_expr=_value_ref_type(value), dims=value.dims)
+        if local_domain_facts:
+            refreshed = _refine_operand_types_from_domain_facts(refreshed, local_domain_facts)
+        return refreshed
     if not isinstance(operand, GraphExpr):
         return operand
+    if operand.op.name == "core.select" and len(operand.inputs) == 3 and not operand.attrs:
+        facts = local_domain_facts or {}
+        conditions = local_conditions or {}
+        cond = _refresh_graph_operand_types(
+            operand.inputs[0],
+            env=env,
+            globals_env=globals_env,
+            modules_by_name=modules_by_name,
+            dim_values=dim_values,
+            local_domain_facts=facts,
+            local_conditions=conditions,
+        )
+        true_facts = refine_graph_domain_facts_for_branch(cond, True, facts, conditions)
+        false_facts = refine_graph_domain_facts_for_branch(cond, False, facts, conditions)
+        true_operand = _refresh_graph_operand_types(
+            operand.inputs[1],
+            env=env,
+            globals_env=globals_env,
+            modules_by_name=modules_by_name,
+            dim_values=dim_values,
+            local_domain_facts=true_facts,
+            local_conditions=conditions,
+        )
+        false_operand = _refresh_graph_operand_types(
+            operand.inputs[2],
+            env=env,
+            globals_env=globals_env,
+            modules_by_name=modules_by_name,
+            dim_values=dim_values,
+            local_domain_facts=false_facts,
+            local_conditions=conditions,
+        )
+        inputs = _refine_select_inputs_from_condition((cond, true_operand, false_operand), conditions=conditions)
+        result_type = _select_result_type(
+            operand.type_expr,
+            graph_operand_type(inputs[1]),
+            graph_operand_type(inputs[2]),
+        )
+        inputs = _refine_select_inputs_from_result(inputs, result_type)
+        return replace(
+            operand,
+            inputs=inputs,
+            attrs={},
+            type_expr=result_type,
+            dims=result_type.dims if isinstance(result_type, TypeTensor) else operand.dims,
+        )
     inputs = tuple(
         _refresh_graph_operand_types(
             item,
@@ -2377,6 +6959,8 @@ def _refresh_graph_operand_types(
             globals_env=globals_env,
             modules_by_name=modules_by_name,
             dim_values=dim_values,
+            local_domain_facts=local_domain_facts,
+            local_conditions=local_conditions,
         )
         for item in operand.inputs
     )
@@ -2387,6 +6971,8 @@ def _refresh_graph_operand_types(
             globals_env=globals_env,
             modules_by_name=modules_by_name,
             dim_values=dim_values,
+            local_domain_facts=local_domain_facts,
+            local_conditions=local_conditions,
         )
         for key, value in operand.attrs.items()
     }
@@ -2557,6 +7143,8 @@ def _refresh_graph_module_types(
                 globals_env=globals_env,
                 modules_by_name=modules_by_name,
                 dim_values=dim_values,
+                local_domain_facts={},
+                local_conditions=conditions,
             )
             for item in node.inputs
         )
@@ -2567,6 +7155,8 @@ def _refresh_graph_module_types(
                 globals_env=globals_env,
                 modules_by_name=modules_by_name,
                 dim_values=dim_values,
+                local_domain_facts={},
+                local_conditions=conditions,
             )
             for key, value in node.attrs.items()
         }
@@ -2849,6 +7439,8 @@ def _refresh_graph_module_types(
             globals_env=globals_env,
             modules_by_name=modules_by_name,
             dim_values=dim_values,
+            local_domain_facts={},
+            local_conditions=conditions,
         )
         for output in module.outputs
     )
@@ -3008,6 +7600,10 @@ def _refine_repeat_callee_signatures(graph: GraphProgram) -> GraphProgram:
 
 
 def _refresh_graph_program_types(graph: GraphProgram) -> GraphProgram:
+    cache_key = _graph_program_validation_key(graph)
+    cached = _REFRESH_GRAPH_PROGRAM_TYPES_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     current = graph
     for _ in range(16):
         modules_by_name = {module.name: module for module in current.modules}
@@ -3035,9 +7631,33 @@ def _refresh_graph_program_types(graph: GraphProgram) -> GraphProgram:
         )
         refreshed = _refine_repeat_callee_signatures(refreshed)
         if refreshed == current:
+            if len(_REFRESH_GRAPH_PROGRAM_TYPES_CACHE) > 128:
+                _REFRESH_GRAPH_PROGRAM_TYPES_CACHE.clear()
+            _REFRESH_GRAPH_PROGRAM_TYPES_CACHE[cache_key] = current
             return current
         current = refreshed
     raise RuntimeError("graph type refresh did not converge after 16 iterations")
+
+
+def _refresh_single_graph_module_in_program(graph: GraphProgram, module: GraphModule) -> GraphModule:
+    modules_by_name = {item.name: item for item in graph.modules}
+    modules_by_name[module.name] = module
+    global_dim_values = _atomic_int_constant_dims(graph)
+    globals_env = {
+        item.name: GraphValue(
+            name=item.name,
+            type_expr=_module_output_types(module if item.name == module.name else item)[0],
+            dims=None,
+        )
+        for item in graph.modules
+        if not item.inputs and len(item.outputs) == 1
+    }
+    return _refresh_graph_module_types(
+        module,
+        globals_env=globals_env,
+        modules_by_name=modules_by_name,
+        global_dim_values=global_dim_values,
+    )
 
 
 def _atomic_literal_constants(graph: GraphProgram) -> dict[str, GraphLiteral]:
@@ -3169,6 +7789,21 @@ def _module_dim_refs(module: GraphModule) -> set[str]:
         collect_type(graph_operand_type(output))
     collect_type(module.return_type_expr)
     return refs
+
+
+def _module_dim_value_names(module: GraphModule) -> set[str]:
+    names = {
+        value.name
+        for value in module.inputs
+        if isinstance(value.type_expr, TypeDim | TypeInt)
+    }
+    for node in module.nodes:
+        names.update(
+            value.name
+            for value in node.outputs
+            if isinstance(value.type_expr, TypeDim | TypeInt)
+        )
+    return names
 
 
 def _type_dim_refs(type_expr: TypeExpr | None) -> set[str]:
@@ -3548,10 +8183,6 @@ def _operand_is_statically_non_null_for_fold(operand: GraphOperand) -> bool:
         return True
     if isinstance(operand, GraphLiteral):
         return operand.value is not None
-    if isinstance(operand, GraphValueRef):
-        return not isinstance(operand.type_expr, TypeAny | TypeOptional | TypeNull)
-    if isinstance(operand, GraphExpr) and not operand.inputs and not operand.attrs:
-        return not isinstance(operand.type_expr, TypeAny | TypeOptional | TypeNull)
     return False
 
 
@@ -3754,6 +8385,28 @@ def _shape_index_forwarder(module: GraphModule) -> tuple[int, int] | None:
     return tensor_index, dim_index
 
 
+def _tensor_size_forwarder(module: GraphModule) -> tuple[int, int] | None:
+    if module.is_global_binding:
+        return None
+    if len(module.nodes) != 1 or len(module.outputs) != 1:
+        return None
+    node = module.nodes[0]
+    if node.op.name != "_tensor_size" or node.attrs or len(node.inputs) != 2 or len(node.outputs) != 1:
+        return None
+    tensor_input, dim_input = node.inputs
+    if not isinstance(tensor_input, GraphValueRef) or not isinstance(dim_input, GraphValueRef):
+        return None
+    returned = module.outputs[0]
+    if not isinstance(returned, GraphValueRef) or returned.name != node.outputs[0].name:
+        return None
+    formal_indexes = {formal.name: index for index, formal in enumerate(module.inputs)}
+    tensor_index = formal_indexes.get(tensor_input.name)
+    dim_index = formal_indexes.get(dim_input.name)
+    if tensor_index is None or dim_index is None:
+        return None
+    return tensor_index, dim_index
+
+
 def _shape_query_replacement(
     expr: GraphExpr,
     *,
@@ -3802,6 +8455,11 @@ def _shape_query_replacement(
             return None
         return allowed(_indexed_operand(items, index))
     if expr.op.name == "_tensor_size" and len(expr.inputs) == 2:
+        if not (
+            isinstance(expr.inputs[0], GraphValueRef)
+            and expr.inputs[0].name in stable_shape_values
+        ):
+            return None
         items = _typed_shape_operands(expr.inputs[0])
         index = _literal_int(expr.inputs[1])
         if items is None or index is None:
@@ -3812,6 +8470,22 @@ def _shape_query_replacement(
     callee = modules_by_name.get(expr.op.name)
     if callee is None:
         return None
+    forwarder = _tensor_size_forwarder(callee)
+    if forwarder is not None:
+        tensor_index, dim_index = forwarder
+        actuals = _call_actuals(expr, callee)
+        if len(actuals) <= max(tensor_index, dim_index):
+            return None
+        if not (
+            isinstance(actuals[tensor_index], GraphValueRef)
+            and actuals[tensor_index].name in stable_shape_values
+        ):
+            return None
+        items = _typed_shape_operands(actuals[tensor_index])
+        index = _literal_int(actuals[dim_index])
+        if items is None or index is None:
+            return None
+        return allowed(_indexed_operand(items, index))
     forwarder = _shape_index_forwarder(callee)
     if forwarder is None:
         return None
@@ -4289,6 +8963,7 @@ def _canonicalize_generated_value_names_in_module(
         old: new
         for old, new in renames.items()
         if _is_dim_value_type(local_value_types.get(old, TypeAny()))
+        or old in _module_dim_refs(module)
     }
     return replace(
         module,
@@ -5090,7 +9765,27 @@ def _optimize_modules_local_with_fresh_domain_facts(
         try:
             _validate_optimizer_graph(candidate, phase=f"{phase}.{iteration}")
         except ValueError:
-            return current
+            accepted = current
+            accepted_modules_by_name = {module.name: module for module in accepted.modules}
+            for before_module, after_module in zip(current.modules, pre_refresh_modules, strict=True):
+                if before_module == after_module:
+                    continue
+                trial_modules = tuple(
+                    after_module if module.name == before_module.name else accepted_modules_by_name[module.name]
+                    for module in accepted.modules
+                )
+                trial = replace(accepted, modules=trial_modules)
+                trial = _sanitize_graph_constraints(trial)
+                try:
+                    _validate_optimizer_graph(trial, phase=f"{phase}.{iteration}.{before_module.name}")
+                except ValueError:
+                    continue
+                accepted = trial
+                accepted_modules_by_name = {module.name: module for module in accepted.modules}
+            if accepted == current:
+                return current
+            current = accepted
+            continue
         current = candidate
         if current == before:
             return current
@@ -6156,6 +10851,8 @@ def _callsite_specialization_subst(
 def _can_specialize_module(module: GraphModule, *, recursive_modules: set[str], main_module: str) -> bool:
     if module.name == main_module:
         return False
+    if _specialized_module_base(module.name) is not None:
+        return False
     if module.name in recursive_modules:
         return False
     return True
@@ -6843,6 +11540,8 @@ def _specialize_recursive_sccs(graph: GraphProgram, *, config: GraphOptimizeConf
     for component in _strongly_connected_components(edges):
         if graph.main_module in component:
             continue
+        if any(_specialized_module_base(name) is not None for name in component):
+            continue
         recursive = len(component) > 1 or any(name in edges.get(name, ()) for name in component)
         if not recursive:
             continue
@@ -7421,9 +12120,9 @@ def _can_inline_module(
         return False
     if module.name in recursive_modules:
         return False
-    if _module_signature_has_variadic_rows(module):
-        return False
     forwarding = _forwarding_node(module)
+    if _module_signature_has_variadic_rows(module) and forwarding is None:
+        return False
     if forwarding is not None:
         if forwarding.op.name == "core.select" and not allow_control_select:
             return False
@@ -7442,24 +12141,25 @@ def _can_inline_module(
 
 
 def _module_signature_has_variadic_rows(module: GraphModule) -> bool:
-    def has_variadic(type_expr: TypeExpr | None) -> bool:
-        if isinstance(type_expr, TypeTensor):
-            return any(isinstance(dim, str) and dim.startswith("..") for dim in type_expr.dims)
-        if isinstance(type_expr, TypeOptional):
-            return has_variadic(type_expr.inner)
-        if isinstance(type_expr, TypeList):
-            return has_variadic(type_expr.item)
-        if isinstance(type_expr, TypeTuple):
-            return any(has_variadic(item) for item in type_expr.items)
-        if isinstance(type_expr, TypeNamed):
-            return any(isinstance(dim, str) and dim.startswith("..") for dim in type_expr.args)
-        return False
-
     return (
-        any(has_variadic(value.type_expr) for value in module.inputs)
-        or has_variadic(module.return_type_expr)
-        or any(has_variadic(graph_operand_type(output)) for output in module.outputs)
+        any(_type_has_variadic_rows(value.type_expr) for value in module.inputs)
+        or _type_has_variadic_rows(module.return_type_expr)
+        or any(_type_has_variadic_rows(graph_operand_type(output)) for output in module.outputs)
     )
+
+
+def _type_has_variadic_rows(type_expr: TypeExpr | None) -> bool:
+    if isinstance(type_expr, TypeTensor):
+        return any(isinstance(dim, str) and dim.startswith("..") for dim in type_expr.dims)
+    if isinstance(type_expr, TypeOptional):
+        return _type_has_variadic_rows(type_expr.inner)
+    if isinstance(type_expr, TypeList):
+        return _type_has_variadic_rows(type_expr.item)
+    if isinstance(type_expr, TypeTuple):
+        return any(_type_has_variadic_rows(item) for item in type_expr.items)
+    if isinstance(type_expr, TypeNamed):
+        return any(isinstance(dim, str) and dim.startswith("..") for dim in type_expr.args)
+    return False
 
 
 def _is_small_inline_candidate(module: GraphModule, counts: Counter[str]) -> bool:
@@ -7473,7 +12173,7 @@ def _is_small_inline_candidate(module: GraphModule, counts: Counter[str]) -> boo
 
 def _module_uses_runtime_shape_queries(module: GraphModule) -> bool:
     for node in module.nodes:
-        if node.op.name in {"_shape", "_tensor_size", "Tensor.size"}:
+        if node.op.name in {"_shape", "_tensor_size"}:
             return True
         for operand in (*node.inputs, *node.attrs.values()):
             if _operand_uses_runtime_shape_queries(operand):
@@ -7513,7 +12213,7 @@ def _module_has_tensor_values(module: GraphModule) -> bool:
 def _operand_uses_runtime_shape_queries(operand: GraphOperand) -> bool:
     if not isinstance(operand, GraphExpr):
         return False
-    if operand.op.name in {"_shape", "_tensor_size", "Tensor.size"}:
+    if operand.op.name in {"_shape", "_tensor_size"}:
         return True
     return any(_operand_uses_runtime_shape_queries(item) for item in operand.inputs) or any(
         _operand_uses_runtime_shape_queries(item) for item in operand.attrs.values()
@@ -7664,6 +12364,15 @@ def _can_inline_forwarded_call_node(node: GraphNode, callee: GraphModule, inner:
     # Tensor[B,1,Q,K]).  Trust the rewritten forwarded op and let the graph type
     # refresh propagate its inferred output types.
     forwarded_output_types = _forwarded_node_output_types(forwarded, len(node.outputs))
+    if _module_signature_has_variadic_rows(callee):
+        return (
+            len(node.outputs) > 1
+            and
+            forwarded_output_types is not None
+            and len(forwarded_output_types) == len(node.outputs)
+            and not any(_type_has_variadic_rows(output_type) for output_type in forwarded_output_types)
+            and _inline_call_substitution_is_closed(callee, node.inputs)
+        )
     if forwarded_output_types is not None and len(forwarded_output_types) == len(node.outputs):
         return _inline_call_substitution_is_closed(callee, node.inputs)
     expected_output_types = _instantiate_call_output_types(
@@ -7912,6 +12621,31 @@ def _inlined_dim_subst(
     return combined
 
 
+def _can_inline_with_dim_subst(
+    callee: GraphModule,
+    *,
+    dim_subst: Mapping[str, DimToken],
+    caller_dim_refs: set[str],
+) -> bool:
+    """Reject inline candidates that would leak callee-local type symbols.
+
+    A callee input signature may use a symbolic dimension that does not bind to
+    a caller-visible symbol at a specific call site.  Inlining that body would
+    move the callee symbol into the caller module, where graph validation must
+    reject it as an undefined type/value reference.  Skip those candidates
+    before building and validating large invalid graphs.
+    """
+
+    for dim_name in _module_dim_refs(callee):
+        if (
+            _is_plain_dim_symbol(dim_name)
+            and dim_name not in dim_subst
+            and dim_name not in caller_dim_refs
+        ):
+            return False
+    return True
+
+
 def _rewrite_forwarded_call_node(
     node: GraphNode,
     callee: GraphModule,
@@ -8146,6 +12880,8 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
         constraints: list[Constraint] = list(module.constraints)
         temp_index = 0
         used_names = _module_value_names(module)
+        caller_dim_refs = _module_dim_refs(module) | _module_dim_value_names(module)
+        local_conditions: dict[str, GraphExpr] = {}
 
         def _inline_expr_call(expr: GraphExpr, *, prefix: str) -> GraphOperand:
             nonlocal temp_index
@@ -8173,6 +12909,8 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 dim_subst=dim_subst,
                 used_names=used_names,
             )
+            if not _can_inline_with_dim_subst(callee, dim_subst=inline_dim_subst, caller_dim_refs=caller_dim_refs):
+                return expr
             inlined_constraints = _inlined_constraints(
                 callee,
                 renames=renames,
@@ -8207,7 +12945,10 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
             prefix: str,
             allow_general_inline: bool = True,
             expected_type: TypeExpr | None = None,
+            local_domain_facts: Mapping[str, GraphDomainFact] | None = None,
         ) -> GraphOperand:
+            if local_domain_facts:
+                operand = _refine_operand_types_from_domain_facts(operand, local_domain_facts)
             if not isinstance(operand, GraphExpr):
                 return operand
             forwarding_callee = inlineable.get(operand.op.name)
@@ -8227,6 +12968,13 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 and allow_forwarding_inline
                 and _can_inline_forwarded_call_expr(operand, forwarding_callee, forwarding)
             ):
+                dim_subst = _call_dim_subst(forwarding_callee, operand.inputs)
+                if not _can_inline_with_dim_subst(
+                    forwarding_callee,
+                    dim_subst=dim_subst,
+                    caller_dim_refs=caller_dim_refs,
+                ):
+                    return operand
                 forwarded = _rewrite_forwarded_call_expr(
                     operand,
                     forwarding_callee,
@@ -8244,6 +12992,13 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 and allow_forwarding_inline
                 and _can_inline_call_expr(operand, forwarding_callee)
             ):
+                dim_subst = _call_dim_subst(forwarding_callee, operand.inputs)
+                if not _can_inline_with_dim_subst(
+                    forwarding_callee,
+                    dim_subst=dim_subst,
+                    caller_dim_refs=caller_dim_refs,
+                ):
+                    return operand
                 forwarded = _rewrite_forwarded_expr_call_expr(
                     operand,
                     forwarding_callee,
@@ -8256,6 +13011,18 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 ):
                     return forwarded
             if operand.op.name == "core.select" and len(operand.inputs) == 3 and not operand.attrs:
+                true_domain_facts = refine_graph_domain_facts_for_branch(
+                    operand.inputs[0],
+                    True,
+                    local_domain_facts or {},
+                    local_conditions,
+                )
+                false_domain_facts = refine_graph_domain_facts_for_branch(
+                    operand.inputs[0],
+                    False,
+                    local_domain_facts or {},
+                    local_conditions,
+                )
                 return replace(
                     operand,
                     inputs=(
@@ -8263,18 +13030,21 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                             operand.inputs[0],
                             prefix=f"{prefix}_cond",
                             allow_general_inline=allow_general_inline,
+                            local_domain_facts=local_domain_facts,
                         ),
                         _inline_nested_expr_calls(
                             operand.inputs[1],
                             prefix=f"{prefix}_then",
                             allow_general_inline=False,
                             expected_type=operand.type_expr,
+                            local_domain_facts=true_domain_facts,
                         ),
                         _inline_nested_expr_calls(
                             operand.inputs[2],
                             prefix=f"{prefix}_else",
                             allow_general_inline=False,
                             expected_type=operand.type_expr,
+                            local_domain_facts=false_domain_facts,
                         ),
                     ),
                 )
@@ -8285,6 +13055,7 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                         item,
                         prefix=f"{prefix}_arg{index + 1}",
                         allow_general_inline=allow_general_inline,
+                        local_domain_facts=local_domain_facts,
                     )
                     for index, item in enumerate(operand.inputs)
                 ),
@@ -8293,6 +13064,7 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                         value,
                         prefix=f"{prefix}_{key}",
                         allow_general_inline=allow_general_inline,
+                        local_domain_facts=local_domain_facts,
                     )
                     for key, value in operand.attrs.items()
                 },
@@ -8343,6 +13115,19 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                         for key, value in node.attrs.items()
                     },
                 )
+            if (
+                len(node.outputs) == 1
+                and node.op.name.startswith("core.binary.")
+                and len(node.inputs) == 2
+                and not node.attrs
+            ):
+                local_conditions[node.outputs[0].name] = GraphExpr(
+                    op=node.op,
+                    inputs=node.inputs,
+                    attrs=node.attrs,
+                    type_expr=node.type_expr,
+                    dims=node.dims,
+                )
             callee = inlineable.get(node.op.name)
             if callee is None:
                 nodes.append(node)
@@ -8352,6 +13137,10 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 forwarding is not None
                 and _can_inline_forwarded_call_node(node, callee, forwarding)
             ):
+                dim_subst = _call_node_dim_subst(callee, node)
+                if not _can_inline_with_dim_subst(callee, dim_subst=dim_subst, caller_dim_refs=caller_dim_refs):
+                    nodes.append(node)
+                    continue
                 inlined_constraints = _inlined_constraints(
                     callee,
                     renames={
@@ -8384,6 +13173,10 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 forwarded_expr is not None
                 and _can_inline_call_node(node, callee)
             ):
+                dim_subst = _call_node_dim_subst(callee, node)
+                if not _can_inline_with_dim_subst(callee, dim_subst=dim_subst, caller_dim_refs=caller_dim_refs):
+                    nodes.append(node)
+                    continue
                 inlined_constraints = _inlined_constraints(
                     callee,
                     renames={},
@@ -8408,6 +13201,9 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                         )
                     constraints.extend(inlined_constraints)
                     continue
+            if _module_signature_has_variadic_rows(callee):
+                nodes.append(node)
+                continue
             if not _can_inline_call_node(node, callee):
                 nodes.append(node)
                 continue
@@ -8429,6 +13225,9 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 dim_subst=dim_subst,
                 used_names=used_names,
             )
+            if not _can_inline_with_dim_subst(callee, dim_subst=inline_dim_subst, caller_dim_refs=caller_dim_refs):
+                nodes.append(node)
+                continue
             inlined_constraints = _inlined_constraints(
                 callee,
                 renames=renames,
@@ -8514,17 +13313,25 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
     try:
         _validate_optimizer_graph(inlined, phase="inline.candidate")
     except ValueError:
+        changed_indices = [
+            index
+            for index, (original_module, rewritten_module) in enumerate(
+                zip(graph.modules, rewritten_modules, strict=True)
+            )
+            if rewritten_module != original_module
+        ]
+        if len(changed_indices) > 32:
+            return graph
         accepted = list(graph.modules)
         changed = False
-        for index, (original_module, rewritten_module) in enumerate(
-            zip(graph.modules, rewritten_modules, strict=True)
-        ):
-            if rewritten_module == original_module:
-                continue
+        for index in changed_indices:
+            rewritten_module = rewritten_modules[index]
             candidate_modules = list(accepted)
-            candidate_modules[index] = rewritten_module
-            candidate = _alpha_rename_shadowed_type_dims(replace(graph, modules=tuple(candidate_modules)))
-            candidate = _refresh_graph_program_types(candidate)
+            candidate_modules[index] = _refresh_single_graph_module_in_program(
+                replace(graph, modules=tuple(candidate_modules)),
+                rewritten_module,
+            )
+            candidate = replace(graph, modules=tuple(candidate_modules))
             candidate = _alpha_rename_shadowed_type_dims(candidate)
             candidate = _sanitize_graph_constraints(candidate)
             try:
@@ -8548,15 +13355,15 @@ def optimize_graph_program(
     *,
     config: GraphOptimizeConfig | None = None,
 ) -> GraphProgram:
+    _VALIDATED_OPTIMIZER_GRAPH_KEYS.clear()
+    _REFRESH_GRAPH_PROGRAM_TYPES_CACHE.clear()
     config = config or GraphOptimizeConfig()
     if config.specialize_definitions not in _SPECIALIZE_MODES:
         raise ValueError(
             "GraphOptimizeConfig.specialize_definitions must be one of: "
             + ", ".join(sorted(_SPECIALIZE_MODES))
         )
-    if config.backend_intrinsics not in _BACKEND_INTRINSIC_TARGETS:
-        allowed = ", ".join(sorted(item for item in _BACKEND_INTRINSIC_TARGETS if item))
-        raise ValueError(f"unsupported graph backend intrinsics target {config.backend_intrinsics!r}; expected one of: {allowed}")
+    backend_intrinsic_target, enabled_backend_intrinsics = _parse_backend_intrinsics(config.backend_intrinsics)
     graph = _alpha_rename_shadowed_type_dims(graph)
     graph = _sanitize_graph_constraints(graph)
     _validate_optimizer_graph(graph, phase="input")
@@ -8678,18 +13485,124 @@ def optimize_graph_program(
                     pass
                 else:
                     current = candidate
-        if config.backend_intrinsics == "codegen2-torch":
-            candidate = _rewrite_torch_rope_intrinsics(current)
+        candidate = _rewrite_assign_unit_slice(current)
+        if candidate != current:
+            candidate = _refresh_graph_program_types(candidate)
+            candidate = _alpha_rename_shadowed_type_dims(candidate)
+            candidate = _sanitize_graph_constraints(candidate)
+            try:
+                _validate_optimizer_graph(candidate, phase="assign_unit_slice")
+            except ValueError:
+                pass
+            else:
+                current = candidate
+        candidate = _rewrite_linear_projection_packs(current)
+        if candidate != current:
+            candidate = _refresh_graph_program_types(candidate)
+            candidate = _alpha_rename_shadowed_type_dims(candidate)
+            candidate = _sanitize_graph_constraints(candidate)
+            _validate_optimizer_graph(candidate, phase="linear_projection_pack")
+            current = candidate
+        candidate = _rewrite_dense_gate_up_linear_pairs(current)
+        if candidate != current:
+            candidate = _refresh_graph_program_types(candidate)
+            candidate = _alpha_rename_shadowed_type_dims(candidate)
+            candidate = _sanitize_graph_constraints(candidate)
+            _validate_optimizer_graph(candidate, phase="dense_gate_up_linear_pair")
+            current = candidate
+        if backend_intrinsic_target == "codegen2-torch":
+            candidate = (
+                _rewrite_torch_rope_intrinsics(current, enabled_intrinsics=enabled_backend_intrinsics)
+                if (
+                    _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rope_apply_factors")
+                    or _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_rope_pair_apply_factors")
+                )
+                else current
+            )
             if candidate != current:
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="torch_rope_intrinsics")
                 current = candidate
-            candidate = _rewrite_torch_sdpa_intrinsics(current)
+            candidate = (
+                _rewrite_torch_sdpa_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_sdpa")
+                else current
+            )
             if candidate != current:
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="torch_sdpa_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_swiglu_ffn_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_swiglu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_swiglu_ffn_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_expert_swiglu_ffn_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_expert_swiglu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_expert_swiglu_ffn_intrinsics")
+                current = candidate
+            selected_expert_intrinsics = {
+                "__torch_selected_expert_clamped_packed_swiglu_ffn",
+                "__torch_selected_expert_packed_gegelu_ffn",
+                "__torch_selected_expert_packed_swiglu_ffn",
+                "__torch_selected_expert_relu2_ffn",
+                "__torch_selected_expert_swiglu_ffn",
+            }
+            candidate = (
+                _rewrite_torch_selected_expert_intrinsics(
+                    current,
+                    enabled_intrinsics=enabled_backend_intrinsics,
+                )
+                if selected_expert_intrinsics & enabled_backend_intrinsics
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_selected_expert_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_expert_packed_swiglu_ffn_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_expert_packed_swiglu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_expert_packed_swiglu_ffn_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_weighted_topk_sum_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_weighted_topk_sum")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_weighted_topk_sum_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_topk_normalize_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_topk_normalize")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="torch_topk_normalize_intrinsics")
                 current = candidate
         if config.constant_folding:
             module_effects = infer_graph_module_effects(current.modules)

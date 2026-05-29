@@ -411,25 +411,37 @@ rope_pair_base_split_interleaved q k position_ids ?theta=10000.0 ?scale_factor=n
   return rope_pair_base q k position_ids theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=false
 
 
-rope_apply_proportional :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> Tensor[B,H,S,HD]
-rope_apply_proportional x position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false = do
-  idx <- arange x start=0 end=(HD / 2) |> cast dtype="float32"
-  rot_half <- ((floor ((HD * partial_rotary_factor) / 2)) :: Dim)
-  keep <- le idx (rot_half - 1)
-  inv <- exp (0 - ((log theta) * ((2.0 * idx) / HD)))
+rope_apply_proportional :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_proportional x position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false ?prefix_only=false = do
+  rot <- ((floor (HD * partial_rotary_factor)) :: Dim)
+  rot <- (rot < 0) ? 0 : rot
+  rot <- (rot > HD) ? HD : rot
+  return (prefix_only ? (rot <= 0) : false) ? x : do
+    sin, cos <- rope_proportional_factors position_ids HD theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved prefix_only=prefix_only
+    return prefix_only ? (rope_apply_prefix_factors x sin cos rot interleaved=interleaved) : (rope_apply_factors x sin cos interleaved=interleaved)
+
+
+rope_proportional_prefix_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,1,S,R], Tensor[B,1,S,R])
+rope_proportional_prefix_factors position_ids head_dim ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false = do
+  rot <- ((floor (head_dim * partial_rotary_factor)) :: Dim)
+  rot <- (rot < 0) ? 0 : rot
+  rot <- (rot > head_dim) ? head_dim : rot
+  idx <- arange position_ids start=0 end=(rot / 2) |> cast dtype="float32"
+  inv <- exp (0 - ((log theta) * ((2.0 * idx) / rot)))
   inv <- (scale_factor == null) ? inv : (inv / scale_factor)
-  inv <- where keep inv 0.0
   pos <- cast position_ids dtype="float32" |> reshape shape=[B, S, 1]
-  ang <- pos * (reshape inv shape=[1, 1, (HD / 2)])
-  sin_half <- sin ang |> cast_like x |> reshape shape=[B, 1, S, (HD / 2)]
-  cos_half <- cos ang |> cast_like x |> reshape shape=[B, 1, S, (HD / 2)]
-  sin_full <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
-  cos_full <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
-  return (x * cos_full) + ((rope_rotate_half x interleaved=interleaved) * sin_full)
+  ang <- pos * (reshape inv shape=[1, 1, (rot / 2)])
+  sin_half <- sin ang |> reshape shape=[B, 1, S, (rot / 2)]
+  cos_half <- cos ang |> reshape shape=[B, 1, S, (rot / 2)]
+  sin <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin <- (sin :: Tensor[B,1,S,rot])
+  cos <- (cos :: Tensor[B,1,S,rot])
+  return sin, cos
 
 
-rope_proportional_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,1,S,head_dim], Tensor[B,1,S,head_dim])
-rope_proportional_factors position_ids head_dim ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false = do
+rope_proportional_masked_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,1,S,head_dim], Tensor[B,1,S,head_dim])
+rope_proportional_masked_factors position_ids head_dim ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false = do
   idx <- arange position_ids start=0 end=(head_dim / 2) |> cast dtype="float32"
   rot_half <- ((floor ((head_dim * partial_rotary_factor) / 2)) :: Dim)
   keep <- le idx (rot_half - 1)
@@ -447,17 +459,24 @@ rope_proportional_factors position_ids head_dim ?theta=10000.0 ?scale_factor=nul
   return sin, cos
 
 
-rope_pair_proportional_factors :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
-rope_pair_proportional_factors q k sin cos ?interleaved=false = do
-  q_rot <- rope_apply_factors q sin cos interleaved=interleaved
-  k_rot <- rope_apply_factors k sin cos interleaved=interleaved
+rope_proportional_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> ?Bool -> (Tensor[B,1,S,R], Tensor[B,1,S,R])
+rope_proportional_factors position_ids head_dim ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false ?prefix_only=false = do
+  return prefix_only
+    ? (rope_proportional_prefix_factors position_ids head_dim theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved)
+    : (rope_proportional_masked_factors position_ids head_dim theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved)
+
+
+rope_pair_proportional_factors :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
+rope_pair_proportional_factors q k sin cos ?interleaved=false ?prefix_only=false = do
+  q_rot <- prefix_only ? (rope_apply_prefix_factors q sin cos R interleaved=interleaved) : (rope_apply_factors q sin cos interleaved=interleaved)
+  k_rot <- prefix_only ? (rope_apply_prefix_factors k sin cos R interleaved=interleaved) : (rope_apply_factors k sin cos interleaved=interleaved)
   return q_rot, k_rot
 
 
-rope_pair_proportional :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
-rope_pair_proportional q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false = do
-  q_rot <- rope_apply_proportional q position_ids theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved
-  k_rot <- rope_apply_proportional k position_ids theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved
+rope_pair_proportional :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
+rope_pair_proportional q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false ?prefix_only=false = do
+  q_rot <- rope_apply_proportional q position_ids theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved prefix_only=prefix_only
+  k_rot <- rope_apply_proportional k position_ids theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved prefix_only=prefix_only
   return q_rot, k_rot
 
 

@@ -51,6 +51,11 @@ def type_rule(
     input_dims = helpers.type_dims(arg_types[0])
     if input_dims is None:
         return None
+    if any(isinstance(item, str) and item.startswith("..") for item in input_dims):
+        # A variadic shape pack has unknown rank.  Inferring a concrete slice
+        # axis from the tuple position would collapse the pack incorrectly
+        # (for example Tensor[..S] sliced on -1 is not rank-1 Tensor[S]).
+        return None
     dim_token = _arg_dim_token(args[1], helpers)
     if not isinstance(dim_token, int):
         return None

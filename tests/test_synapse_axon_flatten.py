@@ -27,6 +27,7 @@ from brainsurgery.synapse.axon.ast import (
     AxonScopeBind,
     AxonYield,
     TypeInt,
+    TypeList,
     TypeNamed,
     TypeOptional,
     TypePath,
@@ -309,6 +310,30 @@ def test_flatten_threads_loop_scope_into_called_module_paths() -> None:
     assert "gpt2_block __scope" in rendered
     assert "gpt2_block @@'h.{i}'" in rendered
     assert "@@'{__scope}.attn.c_attn'" in rendered
+
+
+def test_flatten_cond_helper_preserves_branch_refined_optional_params() -> None:
+    source = """
+append :: List[Int] -> Int -> List[Int]
+append values value = values
+
+main :: ?List[Int] -> ?Int -> ?List[Int]
+main values value = do
+  is_null <- values == null
+  out <- is_null ? null : do
+    value_is_null <- value == null
+    result <- value_is_null ? values : append values value
+    return result
+  return out
+"""
+    flat = _flatten(parse_axon_program(source), main_module="main")
+
+    helper = next(module for module in flat.modules if module.name.startswith("main__cond_else"))
+    params = {param.name: param for param in helper.params}
+    assert params["value"].optional
+    assert isinstance(params["value"].type_expr, TypeInt)
+    assert not params["values"].optional
+    assert params["values"].type_expr == TypeList(TypeInt())
 
 
 def test_flatten_threads_explicit_path_param_into_absolute_templates() -> None:

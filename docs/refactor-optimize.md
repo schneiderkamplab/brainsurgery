@@ -26,9 +26,12 @@ Top optimizer strengthening priorities:
   generation shapes; prompt-time symbols such as `S`/`K` must not be reused for a
   one-token decode-step tensor unless the op/type rule proves they are equal.
   The current implementation keeps a conservative safety barrier: multi-node
-  helpers containing runtime shape queries are not inlined, and shape-query
-  folding only applies to stable module inputs. This should be relaxed only
-  after graph validation can prove shape metadata freshness end-to-end.
+  helpers containing runtime shape queries are not inlined, and graph-level
+  shape-query folding only applies to stable module inputs. Direct primitive
+  `_tensor_size`, `_shape`/`_list_index`, and structural one-node forwarders to
+  those primitives are folded only under that stable-shape guard. This should be
+  relaxed only after graph validation can prove shape metadata freshness
+  end-to-end.
 - Lower flattened tail-recursive loop-helper SCCs to explicit iterative
   graph/codegen loops. The recognizer should require a single-entry SCC, a loop
   index/bound/step state, tail calls only in tail position, and a carry tuple
@@ -61,6 +64,15 @@ Top optimizer strengthening priorities:
   - Only after Graph IR validation is strong enough, feed the facts into
     fold/dead-branch cleanup and then into specialization/inlining.
   - Iterate fact derivation and cleanup to a validated graph fixpoint.
+  - Use branch facts to unlock safe inlining of helpers called from lazy select
+    branches. The inliner now threads branch-local domain facts through nested
+    `core.select` operands, so a call in the false branch of `values == null`
+    sees `values` as non-null without relaxing optional-to-nonoptional call
+    compatibility globally. Flatten now also preserves branch-refined optional
+    parameter types for extracted condition helpers: only names proven non-null
+    by the enclosing branch are stripped from optional form. Remaining metadata
+    cleanup should carry outer branch refinements through nested select
+    expressions during graph type refresh.
 - Inline single-use total-pure list/tuple literals when they are only argument
   scaffolding for flat-safe primitive calls such as `_reshape`, `_expand`, and
   `_permute`.
@@ -93,37 +105,165 @@ Top optimizer strengthening priorities:
   or pair-output callsites to `__torch_rope_apply_factors` /
   `__torch_rope_pair_apply_factors` only when `--graph-backend-intrinsics
   codegen2-torch` is selected.
+- Fill/scatter unit-slice is a backend-neutral graph rewrite: it rewrites to
+  `_assign_unit_slice` when output provenance proves a primitive
+  `_scatter(base, index, src, dim)` whose `index` provenance is primitive
+  `_fill(src, value, ...)`. This works through ordinary Axon wrappers without
+  treating wrapper names as semantic evidence.
+- Dense gate/up linear pairing is a backend-neutral graph rewrite: adjacent
+  same-input primitive `_linear` computations become one normal `_linear`
+  against an explicit packed-parameter graph metadata entry, followed by
+  `_chunk`. The rewrite is rejected unless both outputs are type-compatible,
+  both linears are non-expert and unbiased, and the exact gate/up source weight
+  paths have no other semantic parameter reads in the reachable graph, including
+  non-linear contexts such as `Params.param`. Codegen materializes the packed
+  weight from the explicit graph metadata, removes the original source tensors
+  from runtime state, and lowers only the resulting normal `_linear`/`_chunk`.
+  The runtime-side materialization for dense packed pairs, expert banks, and
+  fused expert gate/up banks now goes through one generic parameter-join helper
+  (`cat`/`stack` plus optional source removal), even where the source of the
+  join is still path-derived backend storage metadata rather than a graph
+  rewrite.
 
 ## Codegen Lowering Tricks To Move Toward Graph Rewrites
 
-The codegen2-torch backend still contains several local recognizers that are
-useful but would be cleaner as validated Graph IR rewrites:
+The active migration backlog is limited to patterns that are already useful,
+not deselected, and not already implemented as graph intrinsics.  Backend
+intrinsics should still require provenance or primitive-level proof; ordinary
+Axon definition names are not semantic evidence.
 
-- Static `Tensor.size` lowering: direct codegen can turn `_tensor_size(x, dim)`
-  into a shape-symbol expression from type metadata. Prefer a graph-level
-  rewrite/fact that replaces proven static shape queries before codegen.
-- Single-primitive forwarder detection: codegen treats one-node definitions that
-  forward to primitives as primitive-like. Prefer graph inlining or provenance
-  rewriting so codegen only sees the primitive or an explicit intrinsic.
-- Fill/scatter unit-slice lowering: codegen recognizes `_fill` feeding
-  `_scatter` and emits a direct indexed assignment. Prefer a provenance-backed
-  graph intrinsic or canonical graph op for this update pattern.
-- List append/list construction shortcuts: codegen emits direct Python list
-  operations for `_list_append`, `_list_init`, and cache append-like patterns.
-  A graph-level cache representation pass would make this explicit and would
-  also address KV-cache concat overhead.
-- Static parameter-key fast paths for embedding/layernorm/linear: codegen
-  bypasses generic path composition when a path is statically absolute. This is
-  mostly a backend concern, but graph/path metadata could expose resolved
-  static parameter keys explicitly to reduce ad-hoc path checks.
-- Path-derived expert bank handling for `_expert_linear`: codegen can map
-  split expert parameter paths to banked tensors. This should remain generic
-  path metadata, but the graph could eventually carry an explicit banked-param
-  access node.
+- Static shape-query lowering: implemented as a graph-level rewrite for direct
+  primitive `_tensor_size`, primitive `_shape` followed by primitive
+  `_list_index`, and structural one-node forwarders to those primitives. It is
+  deliberately stable-shape guarded: module-input tensor dimensions may be
+  folded, but value-dependent intermediate tensors such as `_where_indices`
+  outputs must keep runtime shape queries unless a later freshness proof says
+  otherwise. If the graph rewrite does not prove a static replacement, codegen
+  emits a real runtime shape query; it no longer has a second static
+  tensor-size inference path.
+- Single-primitive forwarder detection: graph optimization owns this. Structural
+  one-node forwarders are inlined by Graph IR before codegen, including argument
+  reordering and multi-output destructuring cases. Codegen no longer treats
+  ordinary module names as primitive-like; it only lowers real primitives and
+  explicit backend intrinsics.
+- Fill/scatter unit-slice lowering: implemented as a provenance-backed
+  backend-neutral `_assign_unit_slice` graph op. The older codegen syntactic
+  peepholes for this pattern have been removed, so the optimization is owned by
+  Graph IR.
+- List append/list construction: `_list_init`, `_list_append`, `_list_index`,
+  and `_list_length` are primitive lowerings. Codegen must not infer cache
+  semantics from normal Axon definitions such as `Cache.append` or
+  `Cache.past_length`; those definitions should be optimized only by generic
+  graph inlining/domain facts. `_list_append` currently preserves value
+  semantics by returning a new Python list expression. A future graph-level
+  cache representation pass may introduce an explicit affine/in-place cache
+  update intrinsic when usage analysis proves it safe.
+- Static parameter-key fast paths for embedding/layernorm/linear: this remains
+  a backend storage decision, not a graph rewrite. Graph IR already carries
+  `GraphPath` operands; codegen may bypass generic path composition only when
+  that path metadata proves an untemplated absolute key. Templated paths must
+  keep dynamic path rendering. Tests cover both cases.
+- RMSNorm/LayerNorm algebraic expansions: not currently actionable as a graph
+  rewrite for the migrated model set. Normalization is already represented by
+  `_rmsnorm`, `_layernorm`, or `_l2norm` primitives in the builtins/models that
+  matter. Revisit only if a model intentionally expresses normalization as
+  primitive arithmetic and profiling shows backend-native norm lowering is
+  missed.
+- Dense SwiGLU/gated-MLP gate/up projection: implemented as a backend-neutral
+  packed-parameter `_linear` plus `_chunk` rewrite when provenance proves
+  adjacent same-input non-expert `_linear` computations. The full dense
+  `silu(gate) * up -> down`
+  region is also implemented for Torch as `__torch_swiglu_ffn` when provenance
+  proves the gate/up pair, `_activations_silu`, multiply, and unbiased
+  non-expert down `_linear` chain, and when the fused gate/up source weights
+  have no other semantic parameter reads in the reachable graph.
+- MoE SwiGLU/gated-MLP blocks: the straight-line expert pattern is implemented
+  for Torch as `__torch_expert_swiglu_ffn` when provenance proves
+  same-input/same-expert-index unbiased, non-transposed `_expert_linear` gate
+  and up projections, `_activations_silu(gate) * up`, and an unbiased,
+  non-transposed `_expert_linear` down projection. This works through ordinary
+  wrappers because the proof is primitive provenance, not definition names.
+  The packed gate/up variant used by `grouped_swiglu_ffn_basic` is implemented
+  as `__torch_expert_packed_swiglu_ffn` when provenance proves one unbiased
+  `_expert_linear`, `_chunk(..., parts=2)`, `_activations_silu`, multiply, and
+  an unbiased down `_expert_linear` with the same expert-index and transpose
+  provenance. Remaining variants with clamps or separate grouped routing should
+  become additional provenance-backed rewrites only after a profiled slow family
+  motivates them.
+- Expanded packed GeGELU activation should not be canonicalized back to
+  `_activations_gegelu` by default. `ActivationsBasic.axon` intentionally shows
+  the internals of activation formulas, and the optimizer should not erase that
+  structure without a concrete backend/runtime performance reason.
+- Top-k MoE routing plus grouped expert matmul: a provenance-backed
+  `__torch_grouped_moe` intrinsic is high-value for MoE families, provided the
+  match is derived from primitive dataflow and routing semantics rather than
+  model or module names.
+  A small backend-specific reduction slice is implemented as
+  `__torch_weighted_topk_sum`: provenance must prove
+  `sum(values * unsqueeze(topk_scores, -1), dim=2, keepdim=false)` with matching
+  `[B,T,TOPK,D]` / `[B,T,TOPK]` / `[B,T,D]` tensor metadata. This intentionally
+  does not infer router semantics; it only collapses the final weighted expert
+  reduction common to grouped MoE blocks.
+  The selected-weight normalization slice is implemented as
+  `__torch_topk_normalize`: provenance must prove `_topk` weights followed by
+  `cumsum(weights, -1)`, slicing the last running sum, division by that
+  denominator, and `cast_like`. The rewrite leaves the `_topk` indices path
+  unchanged.
+  The first selected-expert loop slice is implemented for packed SwiGLU experts
+  as `__torch_selected_expert_packed_swiglu_ffn`: provenance must prove a
+  `core.repeat` expert loop whose body selects tokens via primitive
+  `_where_indices` over top-k indices, computes an unbiased packed gate/up
+  `_linear -> _split -> _activations_silu -> multiply -> _linear` expert body,
+  and scatters back with primitive `_index_add` weighted by the corresponding
+  top-k scores. The rewrite removes the expert-id segment from the proven
+  templated expert weight paths to request banked expert weights from codegen.
+  A direct grouped selected-expert packed SwiGLU form is also implemented:
+  provenance must prove `unsqueeze/expand(hidden) -> _expert_linear(gate_up) ->
+  chunk -> silu(gate) * up -> _expert_linear(down) -> weighted sum`, either
+  directly in the caller or through an ordinary callee body. The proof still
+  comes from primitive provenance, not from the callee definition name.
+  A direct grouped selected-expert separate-gate/up SwiGLU form is implemented
+  as `__torch_selected_expert_swiglu_ffn`: provenance must prove the same
+  selected-token expansion and weighted sum, but with separate unbiased
+  `_expert_linear(gate)` and `_expert_linear(up)` paths feeding
+  `_activations_silu(gate) * up` before the down expert linear.
+  A second selected-expert loop slice is implemented for ReLU2 two-linear
+  experts as `__torch_selected_expert_relu2_ffn`: provenance must prove the same
+  select/scatter loop shape plus an unbiased `_linear -> _activations_relu2 ->
+  _linear` expert body.
+  A third selected-expert slice is implemented for GPT-OSS-style packed GeGLU
+  experts as `__torch_selected_expert_packed_gegelu_ffn`: provenance must prove
+  either the select/scatter loop shape or the direct grouped top-k-axis shape, a
+  packed gate/up expert linear, an alpha/limit-aware GeGLU activation on that
+  packed result, a down expert linear with matching expert index, matching
+  transpose, and matching bias setting. Bias paths are used only when the proven
+  expert-linear provenance says bias is enabled; the direct form carries the
+  explicit `alpha` operand rather than assuming GPT-OSS defaults.
+  A fourth selected-expert loop slice is implemented for DeepSeek-style clamped
+  packed SwiGLU experts as `__torch_selected_expert_clamped_packed_swiglu_ffn`:
+  provenance must prove the same select/scatter loop shape, one unbiased packed
+  gate/up expert `_linear`, chunk into gate/up halves, matching finite clamp
+  limits, `_activations_silu(gate) * up`, and an unbiased down `_linear`.
+- Causal Conv1D state/update blocks: a provenance-backed
+  `__torch_causal_conv1d_step` or related block intrinsic is a candidate for
+  Mamba/Jamba-style models if pure Axon lowering remains a bottleneck.
 - Backend intrinsics already implemented in graph optimize:
   `__torch_sdpa`, `__torch_rope_apply_factors`, and
-  `__torch_rope_pair_apply_factors`. These are the target style for future
-  backend-specific fusions.
+  `__torch_rope_pair_apply_factors`, `__torch_swiglu_ffn`, and
+  `__torch_expert_swiglu_ffn`, `__torch_expert_packed_swiglu_ffn`,
+  `__torch_weighted_topk_sum`, `__torch_topk_normalize`, and
+  `__torch_selected_expert_packed_swiglu_ffn`,
+  `__torch_selected_expert_swiglu_ffn`,
+  `__torch_selected_expert_relu2_ffn`.
+  These are the target style for future backend-specific fusions.
+- Backend-neutral graph rewrites already implemented include `_assign_unit_slice`
+  and dense gate/up packed-parameter `_linear` plus `_chunk`.
+- Path-derived expert-bank handling for `_expert_linear` is intentionally not
+  in this graph-rewrite backlog for now. It is primarily a backend storage and
+  state-dict layout decision. Graph IR should keep precise path/expert metadata;
+  codegen may choose banked parameter access. Revisit only if cross-backend
+  scheduling, memory planning, or custom kernel selection needs the banked form
+  before lowering.
 
 `optimize_flat_typed_axon_file` currently mixes several categories:
 
@@ -996,9 +1136,9 @@ data-dependent compact index tensors. That is hard for tensor backends without a
 native nonzero/compaction primitive and should not be handled by backend
 special-casing normal Axon modules.
 
-A future Graph IR optimization can recognize the semantic pattern, with structural
-checks rather than module-name hacks, and rewrite it into selected-expert batched
-execution over the router top-k axis:
+Graph IR optimization recognizes proven slices of this semantic pattern, with
+structural provenance checks rather than module-name hacks, and rewrites them
+into selected-expert batched execution over the router top-k axis:
 
 ```text
 hidden_sel = unsqueeze(hidden, 2) expanded to [B,T,K,D]
@@ -1008,7 +1148,7 @@ down       = indexed_expert_linear(down_weight, act, topk_indices)
 routed     = sum(down * unsqueeze(topk_scores, -1), dim=2)
 ```
 
-Required preconditions:
+Required preconditions for the general form:
 
 - the loop range covers expert ids and has no side effects beyond the routed carry
 - `MoE.select` consumes the same `hidden`, `topk_scores`, and `topk_indices` for
@@ -1027,9 +1167,15 @@ those efficiently:
 - tinygrad can use the same selected-weight indexing pattern used by its local
   MoE example (`weight[sel]`) and reduce over the top-k axis
 
-This pass is an optimization, not a semantic crutch. If the pattern is not proven,
-the graph should remain unchanged; a backend that cannot lower `_where_indices`
-should then fail with an unsupported primitive error.
+The first implemented slices cover packed SwiGLU experts, clamped packed SwiGLU
+experts, packed GeGELU experts, and ReLU2 two-linear experts, lowering to
+`__torch_selected_expert_packed_swiglu_ffn`,
+`__torch_selected_expert_clamped_packed_swiglu_ffn`,
+`__torch_selected_expert_packed_gegelu_ffn`, or
+`__torch_selected_expert_relu2_ffn` for `codegen2-torch` only. This pass is an
+optimization, not a semantic crutch. If the pattern is not proven, the graph
+remains unchanged; a backend that cannot lower `_where_indices` should then fail
+with an unsupported primitive error.
 
 ## Proposed Refactor Slices
 

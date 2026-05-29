@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import TypeAlias
@@ -605,13 +606,26 @@ def _operand_domain_fact(
             return local_facts[operand.name]
         if operand.name in global_value_names:
             return global_value_domain_fact(operand.name)
+        type_fact = _domain_fact_from_type(graph_operand_type(operand))
+        if type_fact is not None:
+            return type_fact
         return UNKNOWN_FACT
-    return _expr_domain_fact(
+    expr_fact = _expr_domain_fact(
         operand,
         local_facts=local_facts,
         local_conditions=local_conditions or {},
         global_value_names=global_value_names,
     )
+    if expr_fact.kind != GraphDomainKind.UNKNOWN:
+        return expr_fact
+    type_fact = _domain_fact_from_type(graph_operand_type(operand))
+    return type_fact if type_fact is not None else expr_fact
+
+
+def _domain_fact_from_type(type_expr: TypeExpr) -> GraphDomainFact | None:
+    if isinstance(type_expr, TypeNull):
+        return NULL_FACT
+    return None
 
 
 def _expr_domain_fact(
@@ -710,6 +724,22 @@ def _refine_facts_for_branch(
     if fact is None or fact.kind != GraphDomainKind.LITERAL or type(fact.value) is not bool:
         return local_facts
     return local_facts
+
+
+def refine_graph_domain_facts_for_branch(
+    condition: GraphOperand,
+    branch_value: bool,
+    local_facts: Mapping[str, GraphDomainFact],
+    local_conditions: Mapping[str, GraphExpr],
+) -> dict[str, GraphDomainFact]:
+    """Return branch-local facts implied by a lazy select branch condition."""
+
+    return _refine_facts_for_branch(
+        condition,
+        branch_value,
+        dict(local_facts),
+        dict(local_conditions),
+    )
 
 
 def _refine_facts_for_binary_condition(
@@ -928,5 +958,6 @@ __all__ = [
     "interval_domain_fact",
     "literal_domain_fact",
     "path_domain_fact",
+    "refine_graph_domain_facts_for_branch",
     "validate_graph_domain_analysis",
 ]

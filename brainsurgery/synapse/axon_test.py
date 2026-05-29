@@ -1331,6 +1331,26 @@ def _should_trust_remote_code(
 _GENERATION_MIXIN_CLASS_CACHE: dict[type[Any], type[Any]] = {}
 
 
+def _generation_config_from_model_config(config: Any) -> GenerationConfig:
+    try:
+        return GenerationConfig.from_model_config(config)
+    except AttributeError as exc:
+        if "to_dict" not in str(exc):
+            raise
+    generation_config = GenerationConfig()
+    for name in (
+        "bos_token_id",
+        "eos_token_id",
+        "pad_token_id",
+        "decoder_start_token_id",
+        "max_length",
+        "min_length",
+    ):
+        if hasattr(config, name):
+            setattr(generation_config, name, getattr(config, name))
+    return generation_config
+
+
 def _ensure_hf_generation_mixin(model: Any) -> bool:
     added = False
     if not hasattr(model, "generate"):
@@ -1350,7 +1370,7 @@ def _ensure_hf_generation_mixin(model: Any) -> bool:
     if not hasattr(model, "generation_config") or model.generation_config is None:
         config = getattr(model, "config", None)
         if config is not None:
-            model.generation_config = GenerationConfig.from_model_config(config)
+            model.generation_config = _generation_config_from_model_config(config)
     return added
 
 
@@ -2944,7 +2964,14 @@ def _hf_input_embedding_device(model: Any) -> torch.device | None:
 
 def _hf_decoder_embedding_device(model: Any) -> torch.device | None:
     get_decoder = getattr(model, "get_decoder", None)
-    decoder = get_decoder() if callable(get_decoder) else getattr(model, "decoder", None)
+    decoder = None
+    if callable(get_decoder):
+        try:
+            decoder = get_decoder()
+        except Exception:
+            decoder = None
+    if decoder is None:
+        decoder = getattr(model, "decoder", None)
     if decoder is not None:
         get_embeddings = getattr(decoder, "get_input_embeddings", None)
         if callable(get_embeddings):
@@ -3329,6 +3356,8 @@ def _run_axon_test_single(
         if isinstance(model_config, dict)
         else ""
     )
+    if resolved_hf_experts_implementation is None and resolved_model_type == "gpt_oss":
+        resolved_hf_experts_implementation = "grouped_mm"
     adapter_storage_dtype = (
         resolved_dtype
         if hf_strict_dtype
@@ -4304,9 +4333,15 @@ def _run_axon_test_single(
             param_devices = (
                 [f"cuda:{idx}" for idx in range(max(1, torch.cuda.device_count()))]
                 if axon_backend == "pipeline2-torch"
+                else [str(target_device)]
+                if axon_backend == "codegen2-torch"
                 else None
             )
-            state_load_device = torch.device("cpu") if axon_backend == "pipeline2-torch" else target_device
+            state_load_device = (
+                torch.device("cpu")
+                if axon_backend in {"pipeline2-torch", "codegen2-torch"}
+                else target_device
+            )
             if axon_backend == "codegen2-tinygrad":
                 if local_state_dict is None:
                     syn = model_cls.from_safetensors(
@@ -4334,7 +4369,7 @@ def _run_axon_test_single(
                     )
                     for key, value in local_state_dict.items()
                 }
-            if axon_backend == "pipeline2-torch":
+            if axon_backend in {"pipeline2-torch", "codegen2-torch"}:
                 syn = model_cls.from_state_dict(
                     local_state_dict,
                     param_devices=param_devices,
