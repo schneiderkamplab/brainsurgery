@@ -12,17 +12,13 @@ import NN
 
 
 
-MODEL_DIM <- do
-  return (Config.dim@@n_embd default=4096)
+MODEL_DIM <- (Config.dim@@n_embd default=4096)
 
-VOCAB_SIZE <- do
-  return (Config.dim@@vocab_size default=50400)
+VOCAB_SIZE <- (Config.dim@@vocab_size default=50400)
 
-NUM_LAYERS <- do
-  return (Config.dim@@n_layer default=28)
+NUM_LAYERS <- (Config.dim@@n_layer default=28)
 
-NUM_HEADS <- do
-  return (Config.dim@@n_head default=16)
+NUM_HEADS <- (Config.dim@@n_head default=16)
 
 MODEL_HEAD_DIM <- do
   return MODEL_DIM / NUM_HEADS
@@ -30,17 +26,13 @@ MODEL_HEAD_DIM <- do
 FFN <- do
   return 4 * MODEL_DIM
 
-EPS <- do
-  return (Config.float@@layer_norm_epsilon default=1e-05)
+EPS <- (Config.float@@layer_norm_epsilon default=1e-05)
 
-MAX_POSITIONS <- do
-  return (Config.dim@@n_positions default=2048)
+MAX_POSITIONS <- (Config.dim@@n_positions default=2048)
 
-ROTARY_DIM <- do
-  return (Config.dim@@rotary_dim default=64)
+ROTARY_DIM <- (Config.dim@@rotary_dim default=64)
 
-THETA <- do
-  return (Config.float@@rotary_emb_base default=10000.0)
+THETA <- (Config.float@@rotary_emb_base default=10000.0)
 
 HAS_LM_HEAD <- do
   return has_root "lm_head"

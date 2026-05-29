@@ -11,20 +11,20 @@ import NN
 
 
 
-MODEL_DIM = Config.int @@d_model default=512
-VOCAB_SIZE = Config.int @@vocab_size default=32128
-L_ENC = Config.int @@num_layers default=6
-L_DEC_OVERRIDE = Config.int @@num_decoder_layers default=-1
+MODEL_DIM <- Config.int @@d_model default=512
+VOCAB_SIZE <- Config.int @@vocab_size default=32128
+L_ENC <- Config.int @@num_layers default=6
+L_DEC_OVERRIDE <- Config.int @@num_decoder_layers default=-1
 L_DEC = (L_DEC_OVERRIDE > 0) ? L_DEC_OVERRIDE : L_ENC
-NUM_HEADS = Config.int @@num_heads default=8
-HEAD_DIM = Config.int @@d_kv default=64
+NUM_HEADS <- Config.int @@num_heads default=8
+HEAD_DIM <- Config.int @@d_kv default=64
 ATTN_DIM = NUM_HEADS * HEAD_DIM
-FFN = Config.int @@d_ff default=2048
-EPS = Config.float @@layer_norm_epsilon default=1e-06
-NUM_BUCKETS = Config.int @@relative_attention_num_buckets default=32
-MAX_DISTANCE = Config.int @@relative_attention_max_distance default=128
+FFN <- Config.int @@d_ff default=2048
+EPS <- Config.float @@layer_norm_epsilon default=1e-06
+NUM_BUCKETS <- Config.int @@relative_attention_num_buckets default=32
+MAX_DISTANCE <- Config.int @@relative_attention_max_distance default=128
 LM_SCALE_DERIVED = 1.0 / sqrt MODEL_DIM
-LM_SCALE_OVERRIDE = Config.float @@output_logit_scale default=-1.0
+LM_SCALE_OVERRIDE <- Config.float @@output_logit_scale default=-1.0
 LM_SCALE = (LM_SCALE_OVERRIDE > 0.0) ? LM_SCALE_OVERRIDE : LM_SCALE_DERIVED
 
 t5_encoder_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]

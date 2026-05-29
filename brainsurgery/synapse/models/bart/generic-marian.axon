@@ -12,15 +12,15 @@ import Tensor
 
 
 
-MODEL_DIM = Config.int@d_model default=512
-VOCAB_SIZE = Config.int@vocab_size default=58101
-L_ENC = Config.int@encoder_layers default=6
-L_DEC = Config.int@decoder_layers default=6
-H_ENC = Config.int@encoder_attention_heads default=8
-H_DEC = Config.int@decoder_attention_heads default=8
-FFN_ENC = Config.int@encoder_ffn_dim default=2048
-FFN_DEC = Config.int@decoder_ffn_dim default=2048
-EPS = Config.float@layernorm_embedding_eps default=1e-05
+MODEL_DIM <- Config.int@d_model default=512
+VOCAB_SIZE <- Config.int@vocab_size default=58101
+L_ENC <- Config.int@encoder_layers default=6
+L_DEC <- Config.int@decoder_layers default=6
+H_ENC <- Config.int@encoder_attention_heads default=8
+H_DEC <- Config.int@decoder_attention_heads default=8
+FFN_ENC <- Config.int@encoder_ffn_dim default=2048
+FFN_DEC <- Config.int@decoder_ffn_dim default=2048
+EPS <- Config.float@layernorm_embedding_eps default=1e-05
 EMB_SCALE = sqrt MODEL_DIM
 
 marian_encoder_layer :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]

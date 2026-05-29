@@ -13,35 +13,26 @@ import NN
 
 
 
-MODEL_DIM <- do
-  return (Config.dim @@d_model default=1024)
+MODEL_DIM <- (Config.dim @@d_model default=1024)
 
-VOCAB_SIZE <- do
-  return (Config.dim @@vocab_size default=256008)
+VOCAB_SIZE <- (Config.dim @@vocab_size default=256008)
 
-NUM_LAYERS <- do
-  return (Config.dim @@num_layers default=24)
+NUM_LAYERS <- (Config.dim @@num_layers default=24)
 
-NUM_HEADS <- do
-  return (Config.dim @@attention_heads default=16)
+NUM_HEADS <- (Config.dim @@attention_heads default=16)
 
 MODEL_HEAD_DIM <- do
   return MODEL_DIM / NUM_HEADS
 
-FFN <- do
-  return (Config.dim @@ffn_dim default=4096)
+FFN <- (Config.dim @@ffn_dim default=4096)
 
-EPS <- do
-  return (Config.float @@layer_norm_eps default=1e-05)
+EPS <- (Config.float @@layer_norm_eps default=1e-05)
 
-MAX_POSITIONS <- do
-  return (Config.dim @@max_position_embeddings default=2048)
+MAX_POSITIONS <- (Config.dim @@max_position_embeddings default=2048)
 
-ACT <- do
-  return (Config.str @@activation_function default="gelu")
+ACT <- (Config.str @@activation_function default="gelu")
 
-SCALE_EMB <- do
-  return (Config.bool @@scale_embedding default=true)
+SCALE_EMB <- (Config.bool @@scale_embedding default=true)
 
 EMB_SCALE <- do
   return SCALE_EMB ? (sqrt MODEL_DIM) : 1.0

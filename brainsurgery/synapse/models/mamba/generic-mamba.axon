@@ -15,13 +15,13 @@ type MambaLayerCache[B,C,K,D,N] = (Tensor[B,C,K], Tensor[B,D,N])
 type MambaCache[B,C,K,D,N] = List[MambaLayerCache[B,C,K,D,N]]
 
 -- Mamba-2.8B architecture constants.
-MODEL_DIM = Config.int@@hidden_size default=2560                          -- residual hidden size
-I = Config.int@@intermediate_size default=5120                    -- mixer inner width
-N = Config.int@@state_size default=16                             -- state-space width
-R = Config.int@@time_step_rank default=160                        -- delta rank
-NUM_LAYERS = Config.int@@n_layer default=64                                -- mixer block count
-VOCAB_SIZE = Config.int@@vocab_size default=50280                          -- tokenizer vocabulary size
-EPS = Config.float@@layer_norm_epsilon default=1e-5               -- RMSNorm epsilon
+MODEL_DIM <- Config.int@@hidden_size default=2560                          -- residual hidden size
+I <- Config.int@@intermediate_size default=5120                    -- mixer inner width
+N <- Config.int@@state_size default=16                             -- state-space width
+R <- Config.int@@time_step_rank default=160                        -- delta rank
+NUM_LAYERS <- Config.int@@n_layer default=64                                -- mixer block count
+VOCAB_SIZE <- Config.int@@vocab_size default=50280                          -- tokenizer vocabulary size
+EPS <- Config.float@@layer_norm_epsilon default=1e-5               -- RMSNorm epsilon
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true

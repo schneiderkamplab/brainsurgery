@@ -50,7 +50,7 @@ THETA = 1000000000.0
 
 HAS_WINDOW = false
 
-MAX_POSITIONS = HAS_WINDOW ? (Config.int @@'{CFG}.sliding_window' default=4096) : 0
+MAX_POSITIONS <- HAS_WINDOW ? (Config.int @@'{CFG}.sliding_window' default=4096) : 0
 
 magistral_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 magistral_norm@path x = NN.rmsnorm@path x eps=EPS

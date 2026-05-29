@@ -14,29 +14,22 @@ import NN
 
 
 
-MODEL_DIM <- do
-  return (Config.has_value @@hidden_size) ? (Config.int @@hidden_size default=1024) : (Config.int @@n_embed default=1024)
+MODEL_DIM <- (Config.has_value @@hidden_size) ? (Config.int @@hidden_size default=1024) : (Config.int @@n_embed default=1024)
 
-VOCAB_SIZE <- do
-  return Config.int @@vocab_size default=250880
+VOCAB_SIZE <- Config.int @@vocab_size default=250880
 
-NUM_LAYERS <- do
-  return Config.int @@n_layer default=24
+NUM_LAYERS <- Config.int @@n_layer default=24
 
-NUM_HEADS <- do
-  return Config.int @@n_head default=16
+NUM_HEADS <- Config.int @@n_head default=16
 
 FFN <- do
   return 4 * MODEL_DIM
 
-EPS <- do
-  return Config.float @@layer_norm_epsilon default=1e-05
+EPS <- Config.float @@layer_norm_epsilon default=1e-05
 
-MAX_CTX <- do
-  return Config.int @@seq_length default=2048
+MAX_CTX <- Config.int @@seq_length default=2048
 
-POST_LN_RESID <- do
-  return Config.bool @@apply_residual_connection_post_layernorm default=false
+POST_LN_RESID <- Config.bool @@apply_residual_connection_post_layernorm default=false
 
 HAS_LM_HEAD <- do
   return has_root "lm_head"

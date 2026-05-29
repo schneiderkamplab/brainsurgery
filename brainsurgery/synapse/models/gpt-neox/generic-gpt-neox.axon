@@ -11,43 +11,32 @@ import NN
 
 
 
-MODEL_DIM <- do
-  return (Config.dim@@hidden_size default=6144)
+MODEL_DIM <- (Config.dim@@hidden_size default=6144)
 
-VOCAB_SIZE <- do
-  return (Config.dim@@vocab_size default=50432)
+VOCAB_SIZE <- (Config.dim@@vocab_size default=50432)
 
-NUM_LAYERS <- do
-  return (Config.dim@@num_hidden_layers default=44)
+NUM_LAYERS <- (Config.dim@@num_hidden_layers default=44)
 
-NUM_HEADS <- do
-  return (Config.dim@@num_attention_heads default=64)
+NUM_HEADS <- (Config.dim@@num_attention_heads default=64)
 
 MODEL_HEAD_DIM <- do
   return MODEL_DIM / NUM_HEADS
 
-FFN <- do
-  return (Config.dim@@intermediate_size default=24576)
+FFN <- (Config.dim@@intermediate_size default=24576)
 
-EPS <- do
-  return (Config.float@@layer_norm_eps default=1e-05)
+EPS <- (Config.float@@layer_norm_eps default=1e-05)
 
-THETA <- do
-  return (Config.float@@rope_theta default=10000.0)
+THETA <- (Config.float@@rope_theta default=10000.0)
 
-ROTARY_PCT <- do
-  return (Config.float@@rotary_pct default=0.25)
+ROTARY_PCT <- (Config.float@@rotary_pct default=0.25)
 
 ROTARY_DIM <- floor (MODEL_HEAD_DIM * ROTARY_PCT)
 
-MAX_POSITIONS <- do
-  return (Config.dim@@max_position_embeddings default=2048)
+MAX_POSITIONS <- (Config.dim@@max_position_embeddings default=2048)
 
-PAR <- do
-  return (Config.bool@@use_parallel_residual default=true)
+PAR <- (Config.bool@@use_parallel_residual default=true)
 
-ACT <- do
-  return (Config.str@@hidden_act default="gelu")
+ACT <- (Config.str@@hidden_act default="gelu")
 
 neox_ln :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 neox_ln@path x = NN.layernorm@path x eps=EPS

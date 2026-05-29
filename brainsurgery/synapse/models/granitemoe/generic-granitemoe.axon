@@ -13,23 +13,23 @@ import Tensor
 
 
 
-MODEL_DIM = Config.dim@@hidden_size default=4096
-VOCAB_SIZE = Config.dim@@vocab_size default=32000
-NUM_LAYERS = Config.dim@@num_hidden_layers default=32
-NUM_HEADS = Config.dim@@num_attention_heads default=32
-KVH = Config.dim@@num_key_value_heads default=8
-MODEL_HEAD_DIM = Config.dim@@head_dim default=64
+MODEL_DIM <- Config.dim@@hidden_size default=4096
+VOCAB_SIZE <- Config.dim@@vocab_size default=32000
+NUM_LAYERS <- Config.dim@@num_hidden_layers default=32
+NUM_HEADS <- Config.dim@@num_attention_heads default=32
+KVH <- Config.dim@@num_key_value_heads default=8
+MODEL_HEAD_DIM <- Config.dim@@head_dim default=64
 KVD = KVH * MODEL_HEAD_DIM
-FFN = Config.dim@@intermediate_size default=11008
-E = Config.dim@@num_local_experts default=8
-EPT = Config.int@@num_experts_per_tok default=2
-EPS = Config.float@@rms_norm_eps default=1e-06
-THETA = Config.float @@'rope_parameters.rope_theta' default=10000.0
+FFN <- Config.dim@@intermediate_size default=11008
+E <- Config.dim@@num_local_experts default=8
+EPT <- Config.int@@num_experts_per_tok default=2
+EPS <- Config.float@@rms_norm_eps default=1e-06
+THETA <- Config.float @@'rope_parameters.rope_theta' default=10000.0
 ATTN_BIAS = false
-EMBED_MUL = Config.float@@embedding_multiplier default=1.0
-LOGITS_SCALE = Config.float@@logits_scaling default=1.0
-RESID_MUL = Config.float@@residual_multiplier default=1.0
-ATTN_SCALE = Config.float@@attention_multiplier default=1.0
+EMBED_MUL <- Config.float@@embedding_multiplier default=1.0
+LOGITS_SCALE <- Config.float@@logits_scaling default=1.0
+RESID_MUL <- Config.float@@residual_multiplier default=1.0
+ATTN_SCALE <- Config.float@@attention_multiplier default=1.0
 
 granitemoe_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 granitemoe_norm@path x = NN.rmsnorm@path x eps=EPS

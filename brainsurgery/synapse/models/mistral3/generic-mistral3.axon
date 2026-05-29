@@ -13,26 +13,26 @@ import Tensor
 
 
 
-HAS_TEXT_CONFIG = Config.has_key @@text_config
-MODEL_DIM = HAS_TEXT_CONFIG ? (Config.int @@'text_config.hidden_size' default=4096) : (Config.int @@hidden_size default=4096)
-VOCAB_SIZE = HAS_TEXT_CONFIG ? (Config.int @@'text_config.vocab_size' default=131072) : (Config.int @@vocab_size default=131072)
-NUM_LAYERS = HAS_TEXT_CONFIG ? (Config.int @@'text_config.num_hidden_layers' default=34) : (Config.int @@num_hidden_layers default=34)
-NUM_HEADS = HAS_TEXT_CONFIG ? (Config.int @@'text_config.num_attention_heads' default=32) : (Config.int @@num_attention_heads default=32)
-KVH = HAS_TEXT_CONFIG ? (Config.int @@'text_config.num_key_value_heads' default=8) : (Config.int @@num_key_value_heads default=8)
-HAS_HEAD_DIM = HAS_TEXT_CONFIG ? (Config.has_value @@'text_config.head_dim') : (Config.has_value @@head_dim)
-MODEL_HEAD_DIM = HAS_HEAD_DIM ? (HAS_TEXT_CONFIG ? (Config.int @@'text_config.head_dim' default=128) : (Config.int @@head_dim default=128)) : (MODEL_DIM / NUM_HEADS)
+HAS_TEXT_CONFIG <- Config.has_key @@text_config
+MODEL_DIM <- HAS_TEXT_CONFIG ? (Config.int @@'text_config.hidden_size' default=4096) : (Config.int @@hidden_size default=4096)
+VOCAB_SIZE <- HAS_TEXT_CONFIG ? (Config.int @@'text_config.vocab_size' default=131072) : (Config.int @@vocab_size default=131072)
+NUM_LAYERS <- HAS_TEXT_CONFIG ? (Config.int @@'text_config.num_hidden_layers' default=34) : (Config.int @@num_hidden_layers default=34)
+NUM_HEADS <- HAS_TEXT_CONFIG ? (Config.int @@'text_config.num_attention_heads' default=32) : (Config.int @@num_attention_heads default=32)
+KVH <- HAS_TEXT_CONFIG ? (Config.int @@'text_config.num_key_value_heads' default=8) : (Config.int @@num_key_value_heads default=8)
+HAS_HEAD_DIM <- HAS_TEXT_CONFIG ? (Config.has_value @@'text_config.head_dim') : (Config.has_value @@head_dim)
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (HAS_TEXT_CONFIG ? (Config.int @@'text_config.head_dim' default=128) : (Config.int @@head_dim default=128)) : (MODEL_DIM / NUM_HEADS)
 KVD = KVH * MODEL_HEAD_DIM
-FFN = HAS_TEXT_CONFIG ? (Config.int @@'text_config.intermediate_size' default=14336) : (Config.int @@intermediate_size default=14336)
-EPS = HAS_TEXT_CONFIG ? (Config.float @@'text_config.rms_norm_eps' default=1e-05) : (Config.float @@rms_norm_eps default=1e-05)
+FFN <- HAS_TEXT_CONFIG ? (Config.int @@'text_config.intermediate_size' default=14336) : (Config.int @@intermediate_size default=14336)
+EPS <- HAS_TEXT_CONFIG ? (Config.float @@'text_config.rms_norm_eps' default=1e-05) : (Config.float @@rms_norm_eps default=1e-05)
 
-THETA = HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.rope_theta' default=1000000.0) : (Config.float @@'rope_parameters.rope_theta' default=1000000.0)
-ROPE_FACTOR = HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.factor' default=16.0) : (Config.float @@'rope_parameters.factor' default=16.0)
-ROPE_CONTEXT = HAS_TEXT_CONFIG ? (Config.int @@'text_config.rope_parameters.original_max_position_embeddings' default=16384) : (Config.int @@'rope_parameters.original_max_position_embeddings' default=16384)
-ROPE_BETA_FAST = HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.beta_fast' default=32.0) : (Config.float @@'rope_parameters.beta_fast' default=32.0)
-ROPE_BETA_SLOW = HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.beta_slow' default=1.0) : (Config.float @@'rope_parameters.beta_slow' default=1.0)
-ROPE_MSCALE = HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.mscale' default=1.0) : (Config.float @@'rope_parameters.mscale' default=1.0)
-ROPE_MSCALE_ALL_DIM = HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.mscale_all_dim' default=1.0) : (Config.float @@'rope_parameters.mscale_all_dim' default=1.0)
-Q_SCALE_BETA = HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.llama_4_scaling_beta' default=0.1) : (Config.float @@'rope_parameters.llama_4_scaling_beta' default=0.1)
+THETA <- HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.rope_theta' default=1000000.0) : (Config.float @@'rope_parameters.rope_theta' default=1000000.0)
+ROPE_FACTOR <- HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.factor' default=16.0) : (Config.float @@'rope_parameters.factor' default=16.0)
+ROPE_CONTEXT <- HAS_TEXT_CONFIG ? (Config.int @@'text_config.rope_parameters.original_max_position_embeddings' default=16384) : (Config.int @@'rope_parameters.original_max_position_embeddings' default=16384)
+ROPE_BETA_FAST <- HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.beta_fast' default=32.0) : (Config.float @@'rope_parameters.beta_fast' default=32.0)
+ROPE_BETA_SLOW <- HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.beta_slow' default=1.0) : (Config.float @@'rope_parameters.beta_slow' default=1.0)
+ROPE_MSCALE <- HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.mscale' default=1.0) : (Config.float @@'rope_parameters.mscale' default=1.0)
+ROPE_MSCALE_ALL_DIM <- HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.mscale_all_dim' default=1.0) : (Config.float @@'rope_parameters.mscale_all_dim' default=1.0)
+Q_SCALE_BETA <- HAS_TEXT_CONFIG ? (Config.float @@'text_config.rope_parameters.llama_4_scaling_beta' default=0.1) : (Config.float @@'rope_parameters.llama_4_scaling_beta' default=0.1)
 
 mistral3_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 mistral3_norm@path x = NN.rmsnorm@path x eps=EPS

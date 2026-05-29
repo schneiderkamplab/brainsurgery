@@ -68,7 +68,7 @@ ROPE_SCALE_FULL = 1.0
 
 ROTARY_PARTIAL_FULL = 0.25
 
-ROPE_PERIOD = Config.int @@text_config.sliding_window_pattern default=(USE_DOUBLE_WIDE_MLP ? 5 : 6)
+ROPE_PERIOD <- Config.int @@text_config.sliding_window_pattern default=(USE_DOUBLE_WIDE_MLP ? 5 : 6)
 
 ATTN_K_EQ_V = false
 

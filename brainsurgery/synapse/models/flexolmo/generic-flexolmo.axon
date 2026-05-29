@@ -14,17 +14,17 @@ import Tensor
 
 
 -- FlexOlmo architecture constants.
-MODEL_DIM    = Config.int @@hidden_size default=4096                       -- residual hidden size
-VOCAB_SIZE    = Config.int @@vocab_size default=100352                      -- tokenizer vocabulary size
-NUM_LAYERS    = Config.int @@num_hidden_layers default=32                   -- number of decoder layers
-NUM_HEADS    = Config.int @@num_attention_heads default=32                 -- attention head count
+MODEL_DIM <- Config.int @@hidden_size default=4096                       -- residual hidden size
+VOCAB_SIZE <- Config.int @@vocab_size default=100352                      -- tokenizer vocabulary size
+NUM_LAYERS <- Config.int @@num_hidden_layers default=32                   -- number of decoder layers
+NUM_HEADS <- Config.int @@num_attention_heads default=32                 -- attention head count
 MODEL_HEAD_DIM   = MODEL_DIM / NUM_HEADS                                                        -- per-head dimension
-E    = Config.int @@num_experts default=2                          -- routed experts
-EPT  = Config.int @@num_experts_per_tok default=2                  -- top-k experts per token
-MAX_POSITIONS    = Config.int @@max_position_embeddings default=4096           -- causal window
-FFN  = Config.int @@intermediate_size default=11008                -- expert FFN width
-EPS  = Config.float @@rms_norm_eps default=1e-06                   -- RMSNorm epsilon
-THETA = Config.float @@rope_theta default=500000.0                 -- RoPE theta
+E <- Config.int @@num_experts default=2                          -- routed experts
+EPT <- Config.int @@num_experts_per_tok default=2                  -- top-k experts per token
+MAX_POSITIONS <- Config.int @@max_position_embeddings default=4096           -- causal window
+FFN <- Config.int @@intermediate_size default=11008                -- expert FFN width
+EPS <- Config.float @@rms_norm_eps default=1e-06                   -- RMSNorm epsilon
+THETA <- Config.float @@rope_theta default=500000.0                 -- RoPE theta
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM                                         -- qk scaling
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]

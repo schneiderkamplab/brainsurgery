@@ -13,21 +13,21 @@ import Tensor
 
 
 
-MODEL_DIM    = Config.int @@hidden_size default=4096
-VOCAB_SIZE    = Config.int @@vocab_size default=151552
-NUM_LAYERS    = Config.int @@num_hidden_layers default=40
-NUM_HEADS    = Config.int @@num_attention_heads default=32
-KVH  = Config.int @@num_key_value_heads default=2
-MODEL_HEAD_DIM   = Config.int @@head_dim default=128
+MODEL_DIM <- Config.int @@hidden_size default=4096
+VOCAB_SIZE <- Config.int @@vocab_size default=151552
+NUM_LAYERS <- Config.int @@num_hidden_layers default=40
+NUM_HEADS <- Config.int @@num_attention_heads default=32
+KVH <- Config.int @@num_key_value_heads default=2
+MODEL_HEAD_DIM <- Config.int @@head_dim default=128
 QD   = NUM_HEADS * MODEL_HEAD_DIM
 KVD  = KVH * MODEL_HEAD_DIM
-FFN  = Config.int @@intermediate_size default=13696
-EPS  = Config.float @@rms_norm_eps default=1e-05
-THETA = Config.float @@rope_theta default=10000.0
-MAX_POSITIONS    = Config.int @@max_position_embeddings default=32768
+FFN <- Config.int @@intermediate_size default=13696
+EPS <- Config.float @@rms_norm_eps default=1e-05
+THETA <- Config.float @@rope_theta default=10000.0
+MAX_POSITIONS <- Config.int @@max_position_embeddings default=32768
 PROPE <- Config.float @@partial_rotary_factor default=0.5
 ROTARY_DIM <- floor (MODEL_HEAD_DIM * PROPE)
-ATTN_BIAS = Config.bool @@attention_bias default=true
+ATTN_BIAS <- Config.bool @@attention_bias default=true
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS

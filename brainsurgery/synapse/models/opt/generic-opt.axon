@@ -13,35 +13,26 @@ import NN
 
 
 
-MODEL_DIM <- do
-  return Config.int @@hidden_size default=2048
+MODEL_DIM <- Config.int @@hidden_size default=2048
 
-VOCAB_SIZE <- do
-  return Config.int @@vocab_size default=50272
+VOCAB_SIZE <- Config.int @@vocab_size default=50272
 
-NUM_LAYERS <- do
-  return Config.int @@num_hidden_layers default=24
+NUM_LAYERS <- Config.int @@num_hidden_layers default=24
 
-NUM_HEADS <- do
-  return Config.int @@num_attention_heads default=32
+NUM_HEADS <- Config.int @@num_attention_heads default=32
 
 MODEL_HEAD_DIM <- do
   return MODEL_DIM / NUM_HEADS
 
-FFN <- do
-  return Config.int @@ffn_dim default=8192
+FFN <- Config.int @@ffn_dim default=8192
 
-EPS <- do
-  return Config.float @@layer_norm_eps default=1e-05
+EPS <- Config.float @@layer_norm_eps default=1e-05
 
-MAX_POSITIONS <- do
-  return Config.int @@max_position_embeddings default=2048
+MAX_POSITIONS <- Config.int @@max_position_embeddings default=2048
 
-DO_PRE_LN <- do
-  return Config.bool @@do_layer_norm_before default=true
+DO_PRE_LN <- Config.bool @@do_layer_norm_before default=true
 
-ACT <- do
-  return Config.str @@activation_function default="relu"
+ACT <- Config.str @@activation_function default="relu"
 
 ATTN_SCALE <- do
   return 1.0 / sqrt MODEL_HEAD_DIM

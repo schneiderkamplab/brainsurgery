@@ -54,7 +54,7 @@ MAXPOS = 65536
 
 HAS_SLIDING_WINDOW = false
 
-MAX_POSITIONS = HAS_SLIDING_WINDOW ? (Config.int@@sliding_window default=32768) : MAXPOS
+MAX_POSITIONS <- HAS_SLIDING_WINDOW ? (Config.int@@sliding_window default=32768) : MAXPOS
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS

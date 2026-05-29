@@ -19,20 +19,20 @@ type JambaLayerCache[B,H,T,DH,C,K,D,N] = (?AttnLayerCache[B,H,T,DH], ?MambaLayer
 type JambaCache[B,H,T,DH,C,K,D,N] = List[JambaLayerCache[B,H,T,DH,C,K,D,N]]
 
 -- Jamba-3B architecture constants.
-MODEL_DIM = Config.int@@hidden_size default=2560                          -- residual hidden size
-VOCAB_SIZE = Config.int@@vocab_size default=65536                          -- tokenizer vocabulary size
-NUM_LAYERS = Config.int@@num_hidden_layers default=28                      -- decoder depth
-NUM_HEADS = Config.int@@num_attention_heads default=20                    -- query heads
-KVH = Config.int@@num_key_value_heads default=1                   -- key/value heads
-MODEL_HEAD_DIM = Config.int@@head_dim default=128                            -- per-head dimension
+MODEL_DIM <- Config.int@@hidden_size default=2560                          -- residual hidden size
+VOCAB_SIZE <- Config.int@@vocab_size default=65536                          -- tokenizer vocabulary size
+NUM_LAYERS <- Config.int@@num_hidden_layers default=28                      -- decoder depth
+NUM_HEADS <- Config.int@@num_attention_heads default=20                    -- query heads
+KVH <- Config.int@@num_key_value_heads default=1                   -- key/value heads
+MODEL_HEAD_DIM <- Config.int@@head_dim default=128                            -- per-head dimension
 SCALE = 1.0 / sqrt MODEL_HEAD_DIM                                              -- qk scaling
-FF = Config.int@@intermediate_size default=8192                   -- FFN width
-I = MODEL_DIM * (Config.int@@mamba_expand default=2)                      -- mamba inner width
-N = Config.int@@mamba_d_state default=16                          -- state-space width
-R = Config.int@@mamba_dt_rank default=160                         -- delta rank
-ATTN_PERIOD = Config.int@@attn_layer_period default=14            -- attention cadence
-ATTN_OFFSET = Config.int@@attn_layer_offset default=7             -- attention phase offset
-EPS = Config.float@@rms_norm_eps default=1e-6                     -- RMSNorm epsilon
+FF <- Config.int@@intermediate_size default=8192                   -- FFN width
+I <- MODEL_DIM * (Config.int@@mamba_expand default=2)                      -- mamba inner width
+N <- Config.int@@mamba_d_state default=16                          -- state-space width
+R <- Config.int@@mamba_dt_rank default=160                         -- delta rank
+ATTN_PERIOD <- Config.int@@attn_layer_period default=14            -- attention cadence
+ATTN_OFFSET <- Config.int@@attn_layer_offset default=7             -- attention phase offset
+EPS <- Config.float@@rms_norm_eps default=1e-6                     -- RMSNorm epsilon
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true

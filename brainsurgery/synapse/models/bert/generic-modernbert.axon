@@ -12,17 +12,17 @@ import Tensor
 
 
 
-MODEL_DIM          = Config.int @@hidden_size default=768
-VOCAB_SIZE          = Config.int @@vocab_size default=50368
-NUM_LAYERS          = Config.int @@num_hidden_layers default=22
-NUM_HEADS          = Config.int @@num_attention_heads default=12
-FFN        = Config.int @@intermediate_size default=1152
-EPS        = Config.float @@norm_eps default=1e-05
-FULL_EVERY = Config.int @@global_attn_every_n_layers default=3
-LOCAL_ATTN = Config.int @@local_attention default=128
-LOCAL_WIN  = Config.int @@local_attention_window default=64
-THETA_FULL = Config.float @'rope_parameters.full_attention.rope_theta' default=160000.0
-THETA_LOCAL = Config.float @'rope_parameters.sliding_attention.rope_theta' default=10000.0
+MODEL_DIM <- Config.int @@hidden_size default=768
+VOCAB_SIZE <- Config.int @@vocab_size default=50368
+NUM_LAYERS <- Config.int @@num_hidden_layers default=22
+NUM_HEADS <- Config.int @@num_attention_heads default=12
+FFN <- Config.int @@intermediate_size default=1152
+EPS <- Config.float @@norm_eps default=1e-05
+FULL_EVERY <- Config.int @@global_attn_every_n_layers default=3
+LOCAL_ATTN <- Config.int @@local_attention default=128
+LOCAL_WIN <- Config.int @@local_attention_window default=64
+THETA_FULL <- Config.float @'rope_parameters.full_attention.rope_theta' default=160000.0
+THETA_LOCAL <- Config.float @'rope_parameters.sliding_attention.rope_theta' default=10000.0
 
 modernbert_layer :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 modernbert_layer x i rope_sin_full rope_cos_full rope_sin_local rope_cos_local mask_full mask_local = do

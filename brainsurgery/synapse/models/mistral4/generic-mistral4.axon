@@ -14,32 +14,32 @@ import Tensor
 
 
 
-CFG = (Config.has_key@@text_config) ? "text_config" : ""
+CFG <- (Config.has_key@@text_config) ? "text_config" : ""
 ROPE_CFG = (CFG == "") ? "rope_parameters" : "text_config.rope_parameters"
-MODEL_DIM = Config.int @@'{CFG}.hidden_size' default=4096
-VOCAB_SIZE = Config.int @@'{CFG}.vocab_size' default=131072
-NUM_LAYERS = Config.int @@'{CFG}.num_hidden_layers' default=36
-NUM_HEADS = Config.int @@'{CFG}.num_attention_heads' default=32
-QKNOPE = Config.int @@'{CFG}.qk_nope_head_dim' default=64
-QKROPE = Config.int @@'{CFG}.qk_rope_head_dim' default=64
+MODEL_DIM <- Config.int @@'{CFG}.hidden_size' default=4096
+VOCAB_SIZE <- Config.int @@'{CFG}.vocab_size' default=131072
+NUM_LAYERS <- Config.int @@'{CFG}.num_hidden_layers' default=36
+NUM_HEADS <- Config.int @@'{CFG}.num_attention_heads' default=32
+QKNOPE <- Config.int @@'{CFG}.qk_nope_head_dim' default=64
+QKROPE <- Config.int @@'{CFG}.qk_rope_head_dim' default=64
 QKHD = QKNOPE + QKROPE
-VHD = Config.int @@'{CFG}.v_head_dim' default=128
-QLR = Config.int @@'{CFG}.q_lora_rank' default=1024
-KVR = Config.int @@'{CFG}.kv_lora_rank' default=256
-EM = Config.int @@'{CFG}.moe_intermediate_size' default=2048
-E = Config.int @@'{CFG}.n_routed_experts' default=128
-EPT = Config.int @@'{CFG}.num_experts_per_tok' default=4
-SE = Config.int @@'{CFG}.n_shared_experts' default=1
-EPS = Config.float @@'{CFG}.rms_norm_eps' default=1e-06
-THETA = Config.float @@'{ROPE_CFG}.rope_theta' default=10000.0
-ROPE_FACTOR = Config.float @@'{ROPE_CFG}.factor' default=128.0
-ROPE_CONTEXT = Config.int @@'{ROPE_CFG}.original_max_position_embeddings' default=8192
-ROPE_BETA_FAST = Config.float @@'{ROPE_CFG}.beta_fast' default=32.0
-ROPE_BETA_SLOW = Config.float @@'{ROPE_CFG}.beta_slow' default=1.0
-ROPE_MSCALE = Config.float @@'{ROPE_CFG}.mscale' default=1.0
-ROPE_MSCALE_ALL_DIM = Config.float @@'{ROPE_CFG}.mscale_all_dim' default=1.0
-Q_SCALE_BETA = Config.float @@'{ROPE_CFG}.llama_4_scaling_beta' default=0.1
-ROUTE_SCALE = Config.float @@'{CFG}.routed_scaling_factor' default=1.0
+VHD <- Config.int @@'{CFG}.v_head_dim' default=128
+QLR <- Config.int @@'{CFG}.q_lora_rank' default=1024
+KVR <- Config.int @@'{CFG}.kv_lora_rank' default=256
+EM <- Config.int @@'{CFG}.moe_intermediate_size' default=2048
+E <- Config.int @@'{CFG}.n_routed_experts' default=128
+EPT <- Config.int @@'{CFG}.num_experts_per_tok' default=4
+SE <- Config.int @@'{CFG}.n_shared_experts' default=1
+EPS <- Config.float @@'{CFG}.rms_norm_eps' default=1e-06
+THETA <- Config.float @@'{ROPE_CFG}.rope_theta' default=10000.0
+ROPE_FACTOR <- Config.float @@'{ROPE_CFG}.factor' default=128.0
+ROPE_CONTEXT <- Config.int @@'{ROPE_CFG}.original_max_position_embeddings' default=8192
+ROPE_BETA_FAST <- Config.float @@'{ROPE_CFG}.beta_fast' default=32.0
+ROPE_BETA_SLOW <- Config.float @@'{ROPE_CFG}.beta_slow' default=1.0
+ROPE_MSCALE <- Config.float @@'{ROPE_CFG}.mscale' default=1.0
+ROPE_MSCALE_ALL_DIM <- Config.float @@'{ROPE_CFG}.mscale_all_dim' default=1.0
+Q_SCALE_BETA <- Config.float @@'{ROPE_CFG}.llama_4_scaling_beta' default=0.1
+ROUTE_SCALE <- Config.float @@'{CFG}.routed_scaling_factor' default=1.0
 ATTN_SCALE = 1.0 / sqrt QKHD
 
 mistral4_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]

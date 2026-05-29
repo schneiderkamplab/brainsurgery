@@ -36,7 +36,7 @@ NUM_HEADS = HAS_TEXT_CONFIG ? (32 :: Dim) : (4 :: Dim)
 
 KVH = HAS_TEXT_CONFIG ? (8 :: Dim) : (2 :: Dim)
 
-MODEL_HEAD_DIM = HAS_TEXT_CONFIG ? ((false) ? (Config.dim @@text_config.head_dim default=(MODEL_DIM / NUM_HEADS)) : (MODEL_DIM / NUM_HEADS)) : ((false) ? (Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)) : (MODEL_DIM / NUM_HEADS))
+MODEL_HEAD_DIM <- HAS_TEXT_CONFIG ? ((false) ? (Config.dim @@text_config.head_dim default=(MODEL_DIM / NUM_HEADS)) : (MODEL_DIM / NUM_HEADS)) : ((false) ? (Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)) : (MODEL_DIM / NUM_HEADS))
 
 QD = NUM_HEADS * MODEL_HEAD_DIM
 
@@ -50,7 +50,7 @@ THETA = HAS_TEXT_CONFIG ? (1000000.0) : (1000000.0)
 
 ROPE_MODE = "default"
 
-ROPE_ORIGINAL_CONTEXT = Config.dim @@rope_scaling.original_max_position_embeddings default=(HAS_TEXT_CONFIG ? (8192 :: Dim) : (8192 :: Dim))
+ROPE_ORIGINAL_CONTEXT <- Config.dim @@rope_scaling.original_max_position_embeddings default=(HAS_TEXT_CONFIG ? (8192 :: Dim) : (8192 :: Dim))
 
 ROPE_MAX_CONTEXT = HAS_TEXT_CONFIG ? (8192 :: Dim) : (512 :: Dim)
 

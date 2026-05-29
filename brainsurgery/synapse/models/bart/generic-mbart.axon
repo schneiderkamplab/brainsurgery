@@ -11,18 +11,18 @@ import Tensor
 
 
 
-MODEL_DIM = Config.int@d_model default=1024
-VOCAB_SIZE = Config.int@vocab_size default=250054
-L_ENC = Config.int@encoder_layers default=12
-L_DEC = Config.int@decoder_layers default=12
-H_ENC = Config.int@encoder_attention_heads default=16
-H_DEC = Config.int@decoder_attention_heads default=16
-FFN_ENC = Config.int@encoder_ffn_dim default=4096
-FFN_DEC = Config.int@decoder_ffn_dim default=4096
-EPS = Config.float@layernorm_embedding_eps default=1e-05
-POS_OFFSET = Config.int@learned_pos_offset default=2
+MODEL_DIM <- Config.int@d_model default=1024
+VOCAB_SIZE <- Config.int@vocab_size default=250054
+L_ENC <- Config.int@encoder_layers default=12
+L_DEC <- Config.int@decoder_layers default=12
+H_ENC <- Config.int@encoder_attention_heads default=16
+H_DEC <- Config.int@decoder_attention_heads default=16
+FFN_ENC <- Config.int@encoder_ffn_dim default=4096
+FFN_DEC <- Config.int@decoder_ffn_dim default=4096
+EPS <- Config.float@layernorm_embedding_eps default=1e-05
+POS_OFFSET <- Config.int@learned_pos_offset default=2
 EMB_SCALE_DERIVED = sqrt MODEL_DIM
-EMB_SCALE = Config.float@embed_scale default=EMB_SCALE_DERIVED
+EMB_SCALE <- Config.float@embed_scale default=EMB_SCALE_DERIVED
 
 mbart_encoder_layer :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 mbart_encoder_layer x keep = do

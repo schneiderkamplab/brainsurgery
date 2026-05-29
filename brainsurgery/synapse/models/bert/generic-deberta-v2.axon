@@ -12,17 +12,17 @@ import Tensor
 
 
 
-MODEL_DIM   = Config.int @@hidden_size default=1536
-E   = (Config.has_key @@embedding_size) ? (Config.int @@embedding_size default=1536) : MODEL_DIM
-VOCAB_SIZE   = Config.int @@vocab_size default=128100
-NUM_LAYERS   = Config.int @@num_hidden_layers default=24
-NUM_HEADS   = Config.int @@num_attention_heads default=24
-FFN = Config.int @@intermediate_size default=6144
-EPS = Config.float @@layer_norm_eps default=1e-07
-POS_BUCKETS = Config.int @@position_buckets default=256
-MAX_REL = Config.int @@max_position_embeddings default=512
-REL_Q_SCALE = Config.float @@deberta_rel_q_scale default=0.5773502691896257
-ATTN_SCALE = Config.float @@deberta_attn_scale default=0.125
+MODEL_DIM <- Config.int @@hidden_size default=1536
+E <- (Config.has_key @@embedding_size) ? (Config.int @@embedding_size default=1536) : MODEL_DIM
+VOCAB_SIZE <- Config.int @@vocab_size default=128100
+NUM_LAYERS <- Config.int @@num_hidden_layers default=24
+NUM_HEADS <- Config.int @@num_attention_heads default=24
+FFN <- Config.int @@intermediate_size default=6144
+EPS <- Config.float @@layer_norm_eps default=1e-07
+POS_BUCKETS <- Config.int @@position_buckets default=256
+MAX_REL <- Config.int @@max_position_embeddings default=512
+REL_Q_SCALE <- Config.float @@deberta_rel_q_scale default=0.5773502691896257
+ATTN_SCALE <- Config.float @@deberta_attn_scale default=0.125
 
 deberta_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 deberta_block x keep = do

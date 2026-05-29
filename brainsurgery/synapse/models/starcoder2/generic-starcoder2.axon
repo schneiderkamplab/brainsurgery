@@ -13,21 +13,21 @@ import Tensor
 
 
 
-MODEL_DIM = Config.int @@hidden_size default=4608
-VOCAB_SIZE = Config.int @@vocab_size default=49152
-NUM_LAYERS = Config.int @@num_hidden_layers default=32
-NUM_HEADS = Config.int @@num_attention_heads default=36
-KVH = Config.int @@num_key_value_heads default=4
+MODEL_DIM <- Config.int @@hidden_size default=4608
+VOCAB_SIZE <- Config.int @@vocab_size default=49152
+NUM_LAYERS <- Config.int @@num_hidden_layers default=32
+NUM_HEADS <- Config.int @@num_attention_heads default=36
+KVH <- Config.int @@num_key_value_heads default=4
 MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
 KVD = KVH * MODEL_HEAD_DIM
-FFN = Config.int @@intermediate_size default=18432
-EPS = Config.float @@norm_epsilon default=1e-05
-MAX_POSITIONS = Config.int @@max_position_embeddings default=16384
-HAS_SLIDING_WINDOW = Config.has_value @@sliding_window
-SW = HAS_SLIDING_WINDOW ? (Config.int @@sliding_window default=4096) : MAX_POSITIONS
-HAS_ROPE_THETA = Config.has_value @@rope_theta
-THETA = HAS_ROPE_THETA ? (Config.float @@rope_theta default=10000.0) : 10000.0
-ACT = Config.str @@hidden_act default="gelu_pytorch_tanh"
+FFN <- Config.int @@intermediate_size default=18432
+EPS <- Config.float @@norm_epsilon default=1e-05
+MAX_POSITIONS <- Config.int @@max_position_embeddings default=16384
+HAS_SLIDING_WINDOW <- Config.has_value @@sliding_window
+SW <- HAS_SLIDING_WINDOW ? (Config.int @@sliding_window default=4096) : MAX_POSITIONS
+HAS_ROPE_THETA <- Config.has_value @@rope_theta
+THETA <- HAS_ROPE_THETA ? (Config.float @@rope_theta default=10000.0) : 10000.0
+ACT <- Config.str @@hidden_act default="gelu_pytorch_tanh"
 HAS_LM_HEAD = has_root "lm_head"
 HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 

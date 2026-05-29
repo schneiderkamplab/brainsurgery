@@ -14,23 +14,23 @@ import Tensor
 
 
 
-MODEL_DIM = Config.int @@hidden_size default=2048
-VOCAB_SIZE = Config.int @@vocab_size default=49152
-NUM_LAYERS = Config.int @@num_hidden_layers default=40
-NUM_HEADS = Config.int @@num_attention_heads default=32
-KVH = Config.int @@num_key_value_heads default=8
-HAS_HEAD_DIM = Config.has_value @@head_dim
-MODEL_HEAD_DIM = HAS_HEAD_DIM ? (Config.int @@head_dim default=64) : (MODEL_DIM / NUM_HEADS)
+MODEL_DIM <- Config.int @@hidden_size default=2048
+VOCAB_SIZE <- Config.int @@vocab_size default=49152
+NUM_LAYERS <- Config.int @@num_hidden_layers default=40
+NUM_HEADS <- Config.int @@num_attention_heads default=32
+KVH <- Config.int @@num_key_value_heads default=8
+HAS_HEAD_DIM <- Config.has_value @@head_dim
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (Config.int @@head_dim default=64) : (MODEL_DIM / NUM_HEADS)
 QD = NUM_HEADS * MODEL_HEAD_DIM
 KVD = KVH * MODEL_HEAD_DIM
-FFN = Config.int @@intermediate_size default=8192
-EPS = Config.float @@rms_norm_eps default=1e-05
-THETA = Config.float @@rope_theta default=10000.0
-MAX_POSITIONS = Config.int @@max_position_embeddings default=4096
-EMBED_SCALE = Config.float @@embedding_multiplier default=1.0
-RESIDUAL_SCALE = Config.float @@residual_multiplier default=1.0
-ATTN_SCALE = Config.float @@attention_multiplier default=(1.0 / sqrt MODEL_HEAD_DIM)
-LOGITS_SCALE = Config.float @@logits_scaling default=1.0
+FFN <- Config.int @@intermediate_size default=8192
+EPS <- Config.float @@rms_norm_eps default=1e-05
+THETA <- Config.float @@rope_theta default=10000.0
+MAX_POSITIONS <- Config.int @@max_position_embeddings default=4096
+EMBED_SCALE <- Config.float @@embedding_multiplier default=1.0
+RESIDUAL_SCALE <- Config.float @@residual_multiplier default=1.0
+ATTN_SCALE <- Config.float @@attention_multiplier default=(1.0 / sqrt MODEL_HEAD_DIM)
+LOGITS_SCALE <- Config.float @@logits_scaling default=1.0
 HAS_LM_HEAD = has_root "lm_head"
 
 granite_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]

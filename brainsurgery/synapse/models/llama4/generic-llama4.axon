@@ -16,31 +16,31 @@ import Tensor
 
 CFG = "text_config"
 
-MODEL_DIM = Config.int @@'{CFG}.hidden_size' default=5120
-VOCAB_SIZE = Config.int @@'{CFG}.vocab_size' default=202048
-NUM_LAYERS = Config.int @@'{CFG}.num_hidden_layers' default=48
-NUM_HEADS = Config.int @@'{CFG}.num_attention_heads' default=40
-KVH = Config.int @@'{CFG}.num_key_value_heads' default=8
-MODEL_HEAD_DIM = Config.int @@'{CFG}.head_dim' default=128
+MODEL_DIM <- Config.int @@'{CFG}.hidden_size' default=5120
+VOCAB_SIZE <- Config.int @@'{CFG}.vocab_size' default=202048
+NUM_LAYERS <- Config.int @@'{CFG}.num_hidden_layers' default=48
+NUM_HEADS <- Config.int @@'{CFG}.num_attention_heads' default=40
+KVH <- Config.int @@'{CFG}.num_key_value_heads' default=8
+MODEL_HEAD_DIM <- Config.int @@'{CFG}.head_dim' default=128
 KVD = KVH * MODEL_HEAD_DIM
-FFN = Config.int @@'{CFG}.intermediate_size' default=8192
-FFN_SHARED = Config.int @@'{CFG}.intermediate_size_mlp' default=16384
-E = Config.int @@'{CFG}.num_local_experts' default=16
-EPT = Config.int @@'{CFG}.num_experts_per_tok' default=1
-EPS = Config.float @@'{CFG}.rms_norm_eps' default=1e-05
-THETA = Config.float @@'{CFG}.rope_theta' default=500000.0
-MAX_POSITIONS = Config.int @@'{CFG}.max_position_embeddings' default=262144
-ROPE_SCALE = Config.float @@'{CFG}.rope_scaling.factor' default=16.0
-ROPE_LOW_FREQ = Config.float @@'{CFG}.rope_scaling.low_freq_factor' default=1.0
-ROPE_HIGH_FREQ = Config.float @@'{CFG}.rope_scaling.high_freq_factor' default=1.0
-ROPE_CONTEXT = Config.int @@'{CFG}.rope_scaling.original_max_position_embeddings' default=8192
+FFN <- Config.int @@'{CFG}.intermediate_size' default=8192
+FFN_SHARED <- Config.int @@'{CFG}.intermediate_size_mlp' default=16384
+E <- Config.int @@'{CFG}.num_local_experts' default=16
+EPT <- Config.int @@'{CFG}.num_experts_per_tok' default=1
+EPS <- Config.float @@'{CFG}.rms_norm_eps' default=1e-05
+THETA <- Config.float @@'{CFG}.rope_theta' default=500000.0
+MAX_POSITIONS <- Config.int @@'{CFG}.max_position_embeddings' default=262144
+ROPE_SCALE <- Config.float @@'{CFG}.rope_scaling.factor' default=16.0
+ROPE_LOW_FREQ <- Config.float @@'{CFG}.rope_scaling.low_freq_factor' default=1.0
+ROPE_HIGH_FREQ <- Config.float @@'{CFG}.rope_scaling.high_freq_factor' default=1.0
+ROPE_CONTEXT <- Config.int @@'{CFG}.rope_scaling.original_max_position_embeddings' default=8192
 HAS_LLAMA3_FREQ_SPLIT = ROPE_HIGH_FREQ >= ROPE_LOW_FREQ
-NO_ROPE_INTERVAL = Config.int @@'{CFG}.no_rope_layer_interval' default=4
-ATTN_CHUNK = Config.int @@'{CFG}.attention_chunk_size' default=8192
-USE_QK_NORM = Config.bool @@'{CFG}.use_qk_norm' default=true
-USE_TEMP_TUNING = Config.bool @@'{CFG}.attn_temperature_tuning' default=true
-FLOOR_SCALE = Config.float @@'{CFG}.floor_scale' default=8192.0
-ATTN_TEMP_SCALE = Config.float @@'{CFG}.attn_scale' default=0.1
+NO_ROPE_INTERVAL <- Config.int @@'{CFG}.no_rope_layer_interval' default=4
+ATTN_CHUNK <- Config.int @@'{CFG}.attention_chunk_size' default=8192
+USE_QK_NORM <- Config.bool @@'{CFG}.use_qk_norm' default=true
+USE_TEMP_TUNING <- Config.bool @@'{CFG}.attn_temperature_tuning' default=true
+FLOOR_SCALE <- Config.float @@'{CFG}.floor_scale' default=8192.0
+ATTN_TEMP_SCALE <- Config.float @@'{CFG}.attn_scale' default=0.1
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
 llama4_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]

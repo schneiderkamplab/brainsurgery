@@ -10,20 +10,22 @@ import Cache (Cache, CacheLayer)
 import Config
 import NN
 import Tensor
-MODEL_DIM = Config.int @@text_config.hidden_size default=(Config.int @@hidden_size default=640)
-VOCAB_SIZE = Config.int @@text_config.vocab_size default=(Config.int @@vocab_size default=262208)
-NUM_LAYERS = Config.int @@text_config.num_hidden_layers default=(Config.int @@num_hidden_layers default=18)
-NUM_HEADS = Config.int @@text_config.num_attention_heads default=(Config.int @@num_attention_heads default=8)
-KVH = Config.int @@text_config.num_key_value_heads default=(Config.int @@num_key_value_heads default=4)
-MODEL_HEAD_DIM = Config.int @@text_config.head_dim default=(Config.int @@head_dim default=256)
-FFN = Config.int @@text_config.intermediate_size default=(Config.int @@intermediate_size default=2048)
-ROPE_PERIOD = Config.int @@text_config._sliding_window_pattern default=(Config.int @@text_config.sliding_window_pattern default=(Config.int @@_sliding_window_pattern default=(Config.int @@sliding_window_pattern default=6)))
-THETA_BASE = Config.float @@text_config.rope_local_base_freq default=(Config.float @@rope_local_base_freq default=10000.0)
-THETA_LONG = Config.float @@text_config.rope_theta default=(Config.float @@rope_theta default=1000000.0)
-ROPE_LONG_SCALE = Config.float @@text_config.rope_scaling.factor default=(Config.float @@rope_scaling.factor default=1.0)
-WIN_LOCAL = Config.int @@text_config.sliding_window default=(Config.int @@sliding_window default=512)
-WIN_LONG = Config.int @@text_config.max_position_embeddings default=(Config.int @@max_position_embeddings default=131072)
-QUERY_PRE_ATTN_SCALAR = Config.float @@text_config.query_pre_attn_scalar default=(Config.float @@query_pre_attn_scalar default=256.0)
+MODEL_DIM <- Config.int @@text_config.hidden_size default=(Config.int @@hidden_size default=640)
+MODEL_DIM_FLOAT <- Config.float @@text_config.hidden_size default=(Config.float @@hidden_size default=640.0)
+EMB_SCALE <- sqrt MODEL_DIM_FLOAT
+VOCAB_SIZE <- Config.int @@text_config.vocab_size default=(Config.int @@vocab_size default=262208)
+NUM_LAYERS <- Config.int @@text_config.num_hidden_layers default=(Config.int @@num_hidden_layers default=18)
+NUM_HEADS <- Config.int @@text_config.num_attention_heads default=(Config.int @@num_attention_heads default=8)
+KVH <- Config.int @@text_config.num_key_value_heads default=(Config.int @@num_key_value_heads default=4)
+MODEL_HEAD_DIM <- Config.int @@text_config.head_dim default=(Config.int @@head_dim default=256)
+FFN <- Config.int @@text_config.intermediate_size default=(Config.int @@intermediate_size default=2048)
+ROPE_PERIOD <- Config.int @@text_config._sliding_window_pattern default=(Config.int @@text_config.sliding_window_pattern default=(Config.int @@_sliding_window_pattern default=(Config.int @@sliding_window_pattern default=6)))
+THETA_BASE <- Config.float @@text_config.rope_local_base_freq default=(Config.float @@rope_local_base_freq default=10000.0)
+THETA_LONG <- Config.float @@text_config.rope_theta default=(Config.float @@rope_theta default=1000000.0)
+ROPE_LONG_SCALE <- Config.float @@text_config.rope_scaling.factor default=(Config.float @@rope_scaling.factor default=1.0)
+WIN_LOCAL <- Config.int @@text_config.sliding_window default=(Config.int @@sliding_window default=512)
+WIN_LONG <- Config.int @@text_config.max_position_embeddings default=(Config.int @@max_position_embeddings default=131072)
+QUERY_PRE_ATTN_SCALAR <- Config.float @@text_config.query_pre_attn_scalar default=(Config.float @@query_pre_attn_scalar default=256.0)
 ATTN_SCALE = 1.0 / sqrt QUERY_PRE_ATTN_SCALAR
 HAS_MODEL_LM_MODEL = has_root "model.language_model.model"
 HAS_LM_MODEL = has_root "language_model.model"
@@ -66,8 +68,7 @@ gemma3_body@__scope input_ids attn_mask past_kv use_cache = do
   mask_long <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WIN_LONG
   additive_mask_local <- mask_to_additive_for_input input_ids mask_local NUM_HEADS
   additive_mask_long <- mask_to_additive_for_input input_ids mask_long NUM_HEADS
-  emb_scale <- sqrt (Config.float @@text_config.hidden_size default=(Config.float @@hidden_size default=640.0))
-  x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=emb_scale
+  x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=EMB_SCALE
   new_kv <- use_cache ? Cache.init : null
   x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
     past_i <- Cache.index past_kv i

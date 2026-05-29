@@ -14,29 +14,29 @@ import Tensor
 
 
 
-MODEL_DIM = Config.int @@hidden_size default=4096
-VOCAB_SIZE = Config.int @@vocab_size default=32064
-NUM_LAYERS = Config.int @@num_hidden_layers default=32
-NUM_HEADS = Config.int @@num_attention_heads default=32
-KVH = Config.int @@num_key_value_heads default=8
-HAS_HEAD_DIM = Config.has_value @@head_dim
-MODEL_HEAD_DIM = HAS_HEAD_DIM ? (Config.int @@head_dim default=128) : (MODEL_DIM / NUM_HEADS)
+MODEL_DIM <- Config.int @@hidden_size default=4096
+VOCAB_SIZE <- Config.int @@vocab_size default=32064
+NUM_LAYERS <- Config.int @@num_hidden_layers default=32
+NUM_HEADS <- Config.int @@num_attention_heads default=32
+KVH <- Config.int @@num_key_value_heads default=8
+HAS_HEAD_DIM <- Config.has_value @@head_dim
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (Config.int @@head_dim default=128) : (MODEL_DIM / NUM_HEADS)
 QD = NUM_HEADS * MODEL_HEAD_DIM
 KVD = KVH * MODEL_HEAD_DIM
-FFN = Config.int @@intermediate_size default=6400
-E = Config.int @@num_local_experts default=16
-EPT = Config.int @@num_experts_per_tok default=2
-EPS = Config.float @@rms_norm_eps default=1e-05
-THETA = Config.float @@rope_theta default=10000.0
-ROPE_MODE = Config.str @@'rope_scaling.rope_type' default=(Config.str @@'rope_scaling.type' default="default")
-ROPE_ORIGINAL_CONTEXT = Config.int @@'rope_scaling.original_max_position_embeddings' default=(Config.int @@original_max_position_embeddings default=4096)
-ROPE_MAX_CONTEXT = Config.int @@max_position_embeddings default=131072
-ROPE_LONG_FACTOR = Config.list @@'rope_scaling.long_factor' default=[]
-ROPE_SHORT_FACTOR = Config.list @@'rope_scaling.short_factor' default=[]
-HAS_LONGROPE = Config.has_key @@'rope_scaling.long_factor'
-ROPE_ATTENTION_FACTOR = Config.float @@'rope_scaling.long_mscale' default=1.0
-WINDOW = Config.int @@sliding_window default=131072
-ROUTER_JITTER = Config.float @@router_jitter_noise default=0.01
+FFN <- Config.int @@intermediate_size default=6400
+E <- Config.int @@num_local_experts default=16
+EPT <- Config.int @@num_experts_per_tok default=2
+EPS <- Config.float @@rms_norm_eps default=1e-05
+THETA <- Config.float @@rope_theta default=10000.0
+ROPE_MODE <- Config.str @@'rope_scaling.rope_type' default=(Config.str @@'rope_scaling.type' default="default")
+ROPE_ORIGINAL_CONTEXT <- Config.int @@'rope_scaling.original_max_position_embeddings' default=(Config.int @@original_max_position_embeddings default=4096)
+ROPE_MAX_CONTEXT <- Config.int @@max_position_embeddings default=131072
+ROPE_LONG_FACTOR <- Config.list @@'rope_scaling.long_factor' default=[]
+ROPE_SHORT_FACTOR <- Config.list @@'rope_scaling.short_factor' default=[]
+HAS_LONGROPE <- Config.has_key @@'rope_scaling.long_factor'
+ROPE_ATTENTION_FACTOR <- Config.float @@'rope_scaling.long_mscale' default=1.0
+WINDOW <- Config.int @@sliding_window default=131072
+ROUTER_JITTER <- Config.float @@router_jitter_noise default=0.01
 HAS_LM_HEAD = has_root "lm_head"
 HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 

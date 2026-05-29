@@ -23,26 +23,19 @@ import Tensor
 
 
 
-MODEL_DIM <- do
-  return ((Config.dim@@hidden_size default=4096) :: Dim)
+MODEL_DIM <- ((Config.dim@@hidden_size default=4096) :: Dim)
 
-VOCAB_SIZE <- do
-  return ((Config.dim@@vocab_size default=32000) :: Dim)
+VOCAB_SIZE <- ((Config.dim@@vocab_size default=32000) :: Dim)
 
-NUM_LAYERS <- do
-  return ((Config.dim@@num_hidden_layers default=32) :: Dim)
+NUM_LAYERS <- ((Config.dim@@num_hidden_layers default=32) :: Dim)
 
-NUM_HEADS <- do
-  return ((Config.dim@@num_attention_heads default=32) :: Dim)
+NUM_HEADS <- ((Config.dim@@num_attention_heads default=32) :: Dim)
 
-KVH <- do
-  return ((Config.dim@@num_key_value_heads default=8) :: Dim)
+KVH <- ((Config.dim@@num_key_value_heads default=8) :: Dim)
 
-HAS_HEAD_DIM <- do
-  return (Config.has_value@@head_dim)
+HAS_HEAD_DIM <- (Config.has_value@@head_dim)
 
-MODEL_HEAD_DIM <- do
-  return (HAS_HEAD_DIM ? (Config.dim@@head_dim default=128) : (MODEL_DIM / NUM_HEADS) :: Dim)
+MODEL_HEAD_DIM <- (HAS_HEAD_DIM ? (Config.dim@@head_dim default=128) : (MODEL_DIM / NUM_HEADS) :: Dim)
 
 QD <- do
   return (NUM_HEADS * MODEL_HEAD_DIM :: Dim)
@@ -50,20 +43,15 @@ QD <- do
 KVD <- do
   return (KVH * MODEL_HEAD_DIM :: Dim)
 
-FFN <- do
-  return ((Config.dim@@intermediate_size default=14336) :: Dim)
+FFN <- ((Config.dim@@intermediate_size default=14336) :: Dim)
 
-EPS <- do
-  return (Config.float@@rms_norm_eps default=1e-05)
+EPS <- (Config.float@@rms_norm_eps default=1e-05)
 
-THETA <- do
-  return (Config.float@@rope_theta default=10000.0)
+THETA <- (Config.float@@rope_theta default=10000.0)
 
-HAS_SLIDING_WINDOW <- do
-  return (Config.has_value@@sliding_window)
+HAS_SLIDING_WINDOW <- (Config.has_value@@sliding_window)
 
-MAX_POSITIONS <- do
-  return (HAS_SLIDING_WINDOW ? (Config.dim@@sliding_window default=4096) : (4096 :: Dim) :: Dim)
+MAX_POSITIONS <- (HAS_SLIDING_WINDOW ? (Config.dim@@sliding_window default=4096) : (4096 :: Dim) :: Dim)
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS

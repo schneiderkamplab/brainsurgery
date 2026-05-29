@@ -16,41 +16,41 @@ import Positions (position_ids, rope_apply_trailing, rope_apply_trailing_inverse
 import Tensor
 
 
-MODEL_DIM = Config.dim @@hidden_size default=4096
-VOCAB_SIZE = Config.dim @@vocab_size default=129280
-NUM_LAYERS = Config.dim @@num_hidden_layers default=43
-NUM_HEADS = Config.dim @@num_attention_heads default=64
-HEAD_DIM = Config.dim @@head_dim default=512
-ROPE_HEAD_DIM = Config.dim @@qk_rope_head_dim default=64
-Q_LORA_RANK = Config.dim @@q_lora_rank default=1024
-HC_MULT = Config.dim @@hc_mult default=4
-NUM_EXPERTS = Config.dim @@n_routed_experts default=256
-EXPERTS_PER_TOKEN = Config.dim @@num_experts_per_tok default=6
-SHARED_EXPERTS = Config.dim @@n_shared_experts default=1
-MOE_DIM = Config.dim @@moe_intermediate_size default=2048
-SLIDING_WINDOW = Config.dim @@sliding_window default=128
-O_GROUPS = Config.dim @@o_groups default=8
-O_LORA_RANK = Config.dim @@o_lora_rank default=1024
-INDEX_HEADS = Config.dim @@index_n_heads default=64
-INDEX_HEAD_DIM = Config.dim @@index_head_dim default=128
-INDEX_TOPK = Config.dim @@index_topk default=512
-EPS = Config.float @@rms_norm_eps default=1e-6
-THETA = Config.float @@rope_theta default=10000.0
-COMPRESS_THETA = Config.float @@compress_rope_theta default=160000.0
-COMPRESS_ROPE_FACTOR = Config.float @@'rope_scaling.factor' default=16.0
-COMPRESS_ROPE_BETA_FAST = Config.float @@'rope_scaling.beta_fast' default=32.0
-COMPRESS_ROPE_BETA_SLOW = Config.float @@'rope_scaling.beta_slow' default=1.0
-COMPRESS_ORIGINAL_CONTEXT = Config.dim @@'rope_scaling.original_max_position_embeddings' default=65536
-COMPRESS_ROPE_ATTENTION_FACTOR = Config.float @@'rope_scaling.attention_factor' default=1.0
-PARTIAL_ROPE = Config.float @@partial_rotary_factor default=0.125
-SWIGLU_LIMIT = Config.float @@swiglu_limit default=10.0
-HC_SINKHORN_ITERS = Config.int @@hc_sinkhorn_iters default=20
-LAYER_TYPES = Config.list @@layer_types default=["heavily_compressed_attention", "heavily_compressed_attention"]
-MLP_LAYER_TYPES = Config.list @@mlp_layer_types default=["hash_moe", "hash_moe", "hash_moe"]
-HAS_LAYER_TYPES = Config.has_key @@layer_types
-HAS_MLP_LAYER_TYPES = Config.has_key @@mlp_layer_types
-COMPRESS_RATIOS = Config.list @@compress_ratios default=[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]
-NUM_HASH_LAYERS = Config.dim @@num_hash_layers default=3
+MODEL_DIM <- Config.dim @@hidden_size default=4096
+VOCAB_SIZE <- Config.dim @@vocab_size default=129280
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=43
+NUM_HEADS <- Config.dim @@num_attention_heads default=64
+HEAD_DIM <- Config.dim @@head_dim default=512
+ROPE_HEAD_DIM <- Config.dim @@qk_rope_head_dim default=64
+Q_LORA_RANK <- Config.dim @@q_lora_rank default=1024
+HC_MULT <- Config.dim @@hc_mult default=4
+NUM_EXPERTS <- Config.dim @@n_routed_experts default=256
+EXPERTS_PER_TOKEN <- Config.dim @@num_experts_per_tok default=6
+SHARED_EXPERTS <- Config.dim @@n_shared_experts default=1
+MOE_DIM <- Config.dim @@moe_intermediate_size default=2048
+SLIDING_WINDOW <- Config.dim @@sliding_window default=128
+O_GROUPS <- Config.dim @@o_groups default=8
+O_LORA_RANK <- Config.dim @@o_lora_rank default=1024
+INDEX_HEADS <- Config.dim @@index_n_heads default=64
+INDEX_HEAD_DIM <- Config.dim @@index_head_dim default=128
+INDEX_TOPK <- Config.dim @@index_topk default=512
+EPS <- Config.float @@rms_norm_eps default=1e-6
+THETA <- Config.float @@rope_theta default=10000.0
+COMPRESS_THETA <- Config.float @@compress_rope_theta default=160000.0
+COMPRESS_ROPE_FACTOR <- Config.float @@'rope_scaling.factor' default=16.0
+COMPRESS_ROPE_BETA_FAST <- Config.float @@'rope_scaling.beta_fast' default=32.0
+COMPRESS_ROPE_BETA_SLOW <- Config.float @@'rope_scaling.beta_slow' default=1.0
+COMPRESS_ORIGINAL_CONTEXT <- Config.dim @@'rope_scaling.original_max_position_embeddings' default=65536
+COMPRESS_ROPE_ATTENTION_FACTOR <- Config.float @@'rope_scaling.attention_factor' default=1.0
+PARTIAL_ROPE <- Config.float @@partial_rotary_factor default=0.125
+SWIGLU_LIMIT <- Config.float @@swiglu_limit default=10.0
+HC_SINKHORN_ITERS <- Config.int @@hc_sinkhorn_iters default=20
+LAYER_TYPES <- Config.list @@layer_types default=["heavily_compressed_attention", "heavily_compressed_attention"]
+MLP_LAYER_TYPES <- Config.list @@mlp_layer_types default=["hash_moe", "hash_moe", "hash_moe"]
+HAS_LAYER_TYPES <- Config.has_key @@layer_types
+HAS_MLP_LAYER_TYPES <- Config.has_key @@mlp_layer_types
+COMPRESS_RATIOS <- Config.list @@compress_ratios default=[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]
+NUM_HASH_LAYERS <- Config.dim @@num_hash_layers default=3
 HAS_HF_PREFIX = has_root "model"
 
 deepseek_v4_layer_type :: Int -> String

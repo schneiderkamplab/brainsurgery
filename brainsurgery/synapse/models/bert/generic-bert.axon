@@ -10,12 +10,12 @@ import NN
 
 
 
-MODEL_DIM   = Config.int @@hidden_size default=768
-VOCAB_SIZE   = Config.int @@vocab_size default=30522
-NUM_LAYERS   = Config.int @@num_hidden_layers default=12
-NUM_HEADS   = Config.int @@num_attention_heads default=12
-FFN = Config.int @@intermediate_size default=3072
-EPS = Config.float @@layer_norm_eps default=1e-12
+MODEL_DIM <- Config.int @@hidden_size default=768
+VOCAB_SIZE <- Config.int @@vocab_size default=30522
+NUM_LAYERS <- Config.int @@num_hidden_layers default=12
+NUM_HEADS <- Config.int @@num_attention_heads default=12
+FFN <- Config.int @@intermediate_size default=3072
+EPS <- Config.float @@layer_norm_eps default=1e-12
 
 bert_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 bert_block x keep = do

@@ -14,21 +14,21 @@ import Tensor
 
 
 
-HAS_TEXT_CONFIG = Config.has_key @@text_config
+HAS_TEXT_CONFIG <- Config.has_key @@text_config
 HAS_LANGUAGE_MODEL = has_root "language_model"
 
-MODEL_DIM = HAS_TEXT_CONFIG ? (Config.int @@text_config.hidden_size default=576) : (Config.int @@hidden_size default=576)
-VOCAB_SIZE = HAS_TEXT_CONFIG ? (Config.int @@text_config.vocab_size default=49152) : (Config.int @@vocab_size default=49152)
-NUM_LAYERS = HAS_TEXT_CONFIG ? (Config.int @@text_config.num_hidden_layers default=30) : (Config.int @@num_hidden_layers default=30)
-NUM_HEADS = HAS_TEXT_CONFIG ? (Config.int @@text_config.num_attention_heads default=9) : (Config.int @@num_attention_heads default=9)
-KVH = HAS_TEXT_CONFIG ? (Config.int @@text_config.num_key_value_heads default=3) : (Config.int @@num_key_value_heads default=3)
-HAS_HEAD_DIM = HAS_TEXT_CONFIG ? (Config.has_key @@text_config.head_dim) : (Config.has_key @@head_dim)
-MODEL_HEAD_DIM = HAS_HEAD_DIM ? (HAS_TEXT_CONFIG ? (Config.int @@text_config.head_dim default=64) : (Config.int @@head_dim default=64)) : (MODEL_DIM / NUM_HEADS)
+MODEL_DIM <- HAS_TEXT_CONFIG ? (Config.int @@text_config.hidden_size default=576) : (Config.int @@hidden_size default=576)
+VOCAB_SIZE <- HAS_TEXT_CONFIG ? (Config.int @@text_config.vocab_size default=49152) : (Config.int @@vocab_size default=49152)
+NUM_LAYERS <- HAS_TEXT_CONFIG ? (Config.int @@text_config.num_hidden_layers default=30) : (Config.int @@num_hidden_layers default=30)
+NUM_HEADS <- HAS_TEXT_CONFIG ? (Config.int @@text_config.num_attention_heads default=9) : (Config.int @@num_attention_heads default=9)
+KVH <- HAS_TEXT_CONFIG ? (Config.int @@text_config.num_key_value_heads default=3) : (Config.int @@num_key_value_heads default=3)
+HAS_HEAD_DIM <- HAS_TEXT_CONFIG ? (Config.has_key @@text_config.head_dim) : (Config.has_key @@head_dim)
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (HAS_TEXT_CONFIG ? (Config.int @@text_config.head_dim default=64) : (Config.int @@head_dim default=64)) : (MODEL_DIM / NUM_HEADS)
 KVD = KVH * MODEL_HEAD_DIM
-FFN = HAS_TEXT_CONFIG ? (Config.int @@text_config.intermediate_size default=1536) : (Config.int @@intermediate_size default=1536)
-EPS = HAS_TEXT_CONFIG ? (Config.float @@text_config.rms_norm_eps default=1e-05) : (Config.float @@rms_norm_eps default=1e-05)
-THETA = HAS_TEXT_CONFIG ? (Config.float @@text_config.rope_theta default=10000.0) : (Config.float @@rope_theta default=10000.0)
-MAX_POSITIONS = HAS_TEXT_CONFIG ? (Config.int @@text_config.max_position_embeddings default=2048) : (Config.int @@max_position_embeddings default=2048)
+FFN <- HAS_TEXT_CONFIG ? (Config.int @@text_config.intermediate_size default=1536) : (Config.int @@intermediate_size default=1536)
+EPS <- HAS_TEXT_CONFIG ? (Config.float @@text_config.rms_norm_eps default=1e-05) : (Config.float @@rms_norm_eps default=1e-05)
+THETA <- HAS_TEXT_CONFIG ? (Config.float @@text_config.rope_theta default=10000.0) : (Config.float @@rope_theta default=10000.0)
+MAX_POSITIONS <- HAS_TEXT_CONFIG ? (Config.int @@text_config.max_position_embeddings default=2048) : (Config.int @@max_position_embeddings default=2048)
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS

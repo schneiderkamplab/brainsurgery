@@ -63,8 +63,7 @@ THETA <- do
 HAS_SLIDING_WINDOW <- do
   return (false)
 
-MAX_POSITIONS <- do
-  return (HAS_SLIDING_WINDOW ? (Config.dim@@sliding_window default=4096) : ((4096 :: Dim) :: Dim))
+MAX_POSITIONS <- (HAS_SLIDING_WINDOW ? (Config.dim@@sliding_window default=4096) : ((4096 :: Dim) :: Dim))
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS

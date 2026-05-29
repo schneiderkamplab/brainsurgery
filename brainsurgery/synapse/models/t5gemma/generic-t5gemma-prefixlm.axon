@@ -12,38 +12,38 @@ import Tensor
 
 
 
-D_ENC = Config.int @@'encoder.hidden_size' default=512
-D_DEC = Config.int @@'decoder.hidden_size' default=512
-VOCAB_SIZE = Config.int @@'decoder.vocab_size' default=256000
-L_ENC = Config.int @@'encoder.num_hidden_layers' default=8
-L_DEC = Config.int @@'decoder.num_hidden_layers' default=8
-H_ENC = Config.int @@'encoder.num_attention_heads' default=8
-KVH_ENC = Config.int @@'encoder.num_key_value_heads' default=8
-HD_ENC = Config.int @@'encoder.head_dim' default=64
+D_ENC <- Config.int @@'encoder.hidden_size' default=512
+D_DEC <- Config.int @@'decoder.hidden_size' default=512
+VOCAB_SIZE <- Config.int @@'decoder.vocab_size' default=256000
+L_ENC <- Config.int @@'encoder.num_hidden_layers' default=8
+L_DEC <- Config.int @@'decoder.num_hidden_layers' default=8
+H_ENC <- Config.int @@'encoder.num_attention_heads' default=8
+KVH_ENC <- Config.int @@'encoder.num_key_value_heads' default=8
+HD_ENC <- Config.int @@'encoder.head_dim' default=64
 QD_ENC = H_ENC * HD_ENC
 KVD_ENC = KVH_ENC * HD_ENC
-H_DEC = Config.int @@'decoder.num_attention_heads' default=8
-KVH_DEC = Config.int @@'decoder.num_key_value_heads' default=8
-HD_DEC = Config.int @@'decoder.head_dim' default=64
+H_DEC <- Config.int @@'decoder.num_attention_heads' default=8
+KVH_DEC <- Config.int @@'decoder.num_key_value_heads' default=8
+HD_DEC <- Config.int @@'decoder.head_dim' default=64
 QD_DEC = H_DEC * HD_DEC
 KVD_DEC = KVH_DEC * HD_DEC
-FFN_ENC = Config.int @@'encoder.intermediate_size' default=1024
-FFN_DEC = Config.int @@'decoder.intermediate_size' default=1024
-EPS_ENC = Config.float @@'encoder.rms_norm_eps' default=1e-06
-EPS_DEC = Config.float @@'decoder.rms_norm_eps' default=1e-06
-THETA_ENC = Config.float @@'encoder.rope_theta' default=10000.0
-THETA_DEC = Config.float @@'decoder.rope_theta' default=10000.0
-WIN_SLIDE_ENC = Config.int @@'encoder.sliding_window' default=4096
-WIN_SLIDE_DEC = Config.int @@'decoder.sliding_window' default=4096
-WIN_FULL_ENC = Config.int @@'encoder.max_position_embeddings' default=8192
-WIN_FULL_DEC = Config.int @@'decoder.max_position_embeddings' default=8192
-ROPE_PERIOD_ENC = Config.int @@'encoder.sliding_window_pattern' default=2
-ROPE_PERIOD_DEC = Config.int @@'decoder.sliding_window_pattern' default=2
-ATTN_SCALE_ENC = 1.0 / sqrt (Config.float @@'encoder.query_pre_attn_scalar' default=64.0)
-ATTN_SCALE_DEC = 1.0 / sqrt (Config.float @@'decoder.query_pre_attn_scalar' default=64.0)
+FFN_ENC <- Config.int @@'encoder.intermediate_size' default=1024
+FFN_DEC <- Config.int @@'decoder.intermediate_size' default=1024
+EPS_ENC <- Config.float @@'encoder.rms_norm_eps' default=1e-06
+EPS_DEC <- Config.float @@'decoder.rms_norm_eps' default=1e-06
+THETA_ENC <- Config.float @@'encoder.rope_theta' default=10000.0
+THETA_DEC <- Config.float @@'decoder.rope_theta' default=10000.0
+WIN_SLIDE_ENC <- Config.int @@'encoder.sliding_window' default=4096
+WIN_SLIDE_DEC <- Config.int @@'decoder.sliding_window' default=4096
+WIN_FULL_ENC <- Config.int @@'encoder.max_position_embeddings' default=8192
+WIN_FULL_DEC <- Config.int @@'decoder.max_position_embeddings' default=8192
+ROPE_PERIOD_ENC <- Config.int @@'encoder.sliding_window_pattern' default=2
+ROPE_PERIOD_DEC <- Config.int @@'decoder.sliding_window_pattern' default=2
+ATTN_SCALE_ENC <- 1.0 / sqrt (Config.float @@'encoder.query_pre_attn_scalar' default=64.0)
+ATTN_SCALE_DEC <- 1.0 / sqrt (Config.float @@'decoder.query_pre_attn_scalar' default=64.0)
 EMB_SCALE_ENC = sqrt D_ENC
 EMB_SCALE_DEC = sqrt D_DEC
-LOGIT_SOFTCAP = Config.float @@'decoder.final_logit_softcapping' default=30.0
+LOGIT_SOFTCAP <- Config.float @@'decoder.final_logit_softcapping' default=30.0
 
 t5gemma_encoder_block :: Tensor[B,S,D_ENC] -> Int -> Tensor[B,1,S,S] -> Tensor[B,1,S,S] -> Tensor[B,H_ENC,S,S] -> Tensor[B,H_ENC,S,S] -> Tensor[B,1,S,HD_ENC] -> Tensor[B,1,S,HD_ENC] -> Tensor[B,S,D_ENC]
 t5gemma_encoder_block x i mask_slide mask_full additive_mask_slide additive_mask_full rope_sin rope_cos = do

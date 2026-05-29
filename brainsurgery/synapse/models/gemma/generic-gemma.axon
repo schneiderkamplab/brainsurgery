@@ -14,19 +14,21 @@ import Tensor
 
 
 
-MODEL_DIM = Config.int @@hidden_size default=3072
-VOCAB_SIZE = Config.int @@vocab_size default=256000
-NUM_LAYERS = Config.int @@num_hidden_layers default=28
-NUM_HEADS = Config.int @@num_attention_heads default=16
-KVH = Config.int @@num_key_value_heads default=16
-HAS_HEAD_DIM = Config.has_value @@head_dim
-MODEL_HEAD_DIM = HAS_HEAD_DIM ? (Config.int @@head_dim default=256) : (MODEL_DIM / NUM_HEADS)
+MODEL_DIM <- Config.int @@hidden_size default=3072
+MODEL_DIM_FLOAT <- Config.float @@hidden_size default=3072.0
+EMB_SCALE <- sqrt MODEL_DIM_FLOAT
+VOCAB_SIZE <- Config.int @@vocab_size default=256000
+NUM_LAYERS <- Config.int @@num_hidden_layers default=28
+NUM_HEADS <- Config.int @@num_attention_heads default=16
+KVH <- Config.int @@num_key_value_heads default=16
+HAS_HEAD_DIM <- Config.has_value @@head_dim
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (Config.int @@head_dim default=256) : (MODEL_DIM / NUM_HEADS)
 QD = NUM_HEADS * MODEL_HEAD_DIM
 KVD = KVH * MODEL_HEAD_DIM
-FFN = Config.int @@intermediate_size default=24576
-EPS = Config.float @@rms_norm_eps default=1e-06
-THETA = Config.float @@rope_theta default=10000.0
-MAX_POSITIONS = Config.int @@max_position_embeddings default=8192
+FFN <- Config.int @@intermediate_size default=24576
+EPS <- Config.float @@rms_norm_eps default=1e-06
+THETA <- Config.float @@rope_theta default=10000.0
+MAX_POSITIONS <- Config.int @@max_position_embeddings default=8192
 HAS_LM_HEAD = has_root "lm_head"
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
@@ -61,8 +63,7 @@ gemma input_ids attn_mask past_kv use_cache = do
   key_len <- past_length + S
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
   logits, new_kv <- scope@model do
-    emb_scale <- _sqrt (Config.float @@hidden_size default=3072.0)
-    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=emb_scale
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=EMB_SCALE
     new_kv <- use_cache ? Cache.init : null
     x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
       past_i <- Cache.index past_kv i
