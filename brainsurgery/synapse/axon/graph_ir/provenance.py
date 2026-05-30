@@ -980,6 +980,9 @@ def _contains_op(provenance: GraphProvenance, op_name: str, *, depth: int = 12) 
 
 
 def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
+    standard = _standard_sdpa_fact(provenance)
+    if standard is not None:
+        return standard
     # reshape(matmul(where(keep_g, probs, 0), unsqueeze(v, 2)), ...)
     if provenance.kind != "op" or provenance.op != "_reshape" or len(provenance.args) < 1:
         return None
@@ -1025,6 +1028,76 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     )
 
 
+def _standard_sdpa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
+    # matmul(where(keep, slice(softmax(scores * default_scale + additive_from_keep)), 0), v)
+    if provenance.kind != "op" or provenance.op != "_matmul" or len(provenance.args) != 2:
+        return None
+    probs_masked, v = provenance.args
+    v_name = _input_name(v)
+    if v_name is None:
+        return None
+    if probs_masked.kind != "op" or probs_masked.op != "_where" or len(probs_masked.args) != 3:
+        return None
+    keep, probs, zero = probs_masked.args
+    if zero != _make_provenance("literal", value=0):
+        return None
+    keep_name = _input_name(keep)
+    if keep_name is None:
+        return None
+    softmax_in = _match_probs_slice_softmax(probs)
+    if softmax_in is None:
+        return None
+    scores_scaled, additive_mask = _match_binary_op(softmax_in, "core.binary.+")
+    if scores_scaled is None or additive_mask is None:
+        return None
+    # The direct keep-mask form computes the additive mask inside the callee.
+    # The backend intrinsic receives the bool keep mask directly; SDPA backends
+    # convert it to additive form internally.
+    additive_keep = _match_additive_mask_from_keep(additive_mask)
+    if additive_keep is None or additive_keep != keep_name:
+        return None
+    scores, scale = _match_binary_op(scores_scaled, "core.binary.*")
+    if scores is None or scale is None or not _is_default_scale(scale):
+        return None
+    q_name, k_name = _match_standard_qk_scores(scores)
+    if q_name is None or k_name is None:
+        return None
+    return GraphSdpaGqaFact(
+        q=q_name,
+        k=k_name,
+        v=v_name,
+        additive_mask=keep_name,
+        keep=keep_name,
+        default_scale=True,
+    )
+
+
+def _match_additive_mask_from_keep(provenance: GraphProvenance) -> str | None:
+    if provenance.kind != "op" or provenance.op != "_where" or len(provenance.args) != 3:
+        return None
+    keep, yes, no = provenance.args
+    keep_name = _input_name(keep)
+    if keep_name is None:
+        return None
+    if not _is_zero_like(yes):
+        return None
+    return keep_name if _is_min_like(no) else None
+
+
+def _is_zero_like(provenance: GraphProvenance) -> bool:
+    return provenance.kind == "op" and provenance.op == "_zeros_like" and len(provenance.args) >= 1
+
+
+def _is_min_like(provenance: GraphProvenance) -> bool:
+    if provenance.kind == "op" and provenance.op == "_dtype_value" and len(provenance.args) >= 2:
+        return provenance.args[1] == _make_provenance("literal", value="min")
+    if provenance.kind == "op" and provenance.op == "_fill" and len(provenance.args) >= 2:
+        return _is_min_like(provenance.args[1])
+    if provenance.kind == "op" and provenance.op == "_empty_like" and provenance.args:
+        return False
+    return False
+
+
 def _match_binary_op(
     provenance: GraphProvenance,
     op_name: str,
@@ -1051,6 +1124,16 @@ def _match_qk_scores(provenance: GraphProvenance) -> tuple[str | None, str | Non
         return None, None
     k_name = _match_unsqueeze_input(kt.args[0], dim=2)
     return q_name, k_name
+
+
+def _match_standard_qk_scores(provenance: GraphProvenance) -> tuple[str | None, str | None]:
+    if provenance.kind != "op" or provenance.op != "_matmul" or len(provenance.args) != 2:
+        return None, None
+    q_name = _input_name(provenance.args[0])
+    kt = provenance.args[1]
+    if kt.kind != "op" or kt.op != "_transpose" or not kt.args:
+        return None, None
+    return q_name, _input_name(kt.args[0])
 
 
 def _match_gqa_keep_expand(provenance: GraphProvenance) -> str | None:

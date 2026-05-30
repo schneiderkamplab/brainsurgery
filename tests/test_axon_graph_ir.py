@@ -5625,7 +5625,7 @@ def test_codegen2_tinygrad_emits_gpt2_source() -> None:
 
     assert "| Op | Count | Reason |" in table
     assert "`embedding`" not in table
-    assert "from tinygrad import Tensor, dtypes" in code
+    assert "from tinygrad import Tensor, TinyJit, dtypes" in code
     assert "class TinyGPT2" in code
     assert "class TinyGPT2(nn.Module)" not in code
     assert "def load_state_dict(self, state_dict, strict=True):" in code

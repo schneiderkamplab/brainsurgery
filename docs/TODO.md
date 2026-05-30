@@ -109,11 +109,19 @@ These should stay optional until each pass has precise preconditions, typed vali
   reintroducing a permanent high-level `_mamba_scan` primitive. Avoid
   model-family branches; validate on `BlackMamba-2.8B`, `mamba-2.8b-hf`, and
   Jamba/Mamba2-style users separately.
-- Possible graph rewrite: broaden SDPA recognition. Current Torch SDPA lowering
-  is intentionally conservative. Future work should recognize more
-  provenance-proven attention score/mask/softmax/value subgraphs, including GQA
-  and additive-mask variants, while checking type/shape compatibility and
-  documenting any assumptions such as no fully masked rows.
+- Possible graph rewrite: broaden SDPA recognition. Current Torch/tinygrad SDPA
+  lowering is intentionally conservative and opt-in through backend-specific
+  intrinsics. It recognizes provenance-proven attention score/mask/softmax/value
+  subgraphs, including the standard bool-keep/additive-mask form used by GPT-2
+  and the GQA/additive-mask form. Remaining work should add more variants only
+  with primitive-level provenance, type/shape compatibility checks, and a
+  provenance/domain proof for the documented no-fully-masked-rows assumption.
+  Evidence: on 2026-05-30, `codegen2-tinygrad:sdpa` improved GPT-2 forward-only
+  max-len 128 from about 0.0095s to 0.0085s with healthy fidelity. tinygrad's
+  optional `FLASH_ATTENTION=1` path entered `extra.thunder.tiny.fa` after
+  installing the matching tinygrad `extra/` package, but failed NVRTC/PTX
+  assembly on B200 with illegal `mma.m16n16k16`; keep that path manual until the
+  tinygrad flash kernel supports this environment.
 - Possible graph rewrite: cache/list region optimization. `_list_init`,
   `_list_append`, `_list_index`, and `_list_length` are normal primitive
   lowerings today. If profiling still shows cache-list overhead, introduce an

@@ -117,23 +117,39 @@ _TORCH_BACKEND_INTRINSICS = frozenset(
         "__torch_weighted_topk_sum",
     }
 )
-_BACKEND_INTRINSIC_TARGETS = {None, "codegen2-torch"}
+_TINYGRAD_BACKEND_INTRINSICS = frozenset(
+    {
+        "__tinygrad_sdpa",
+    }
+)
+_BACKEND_INTRINSICS_BY_TARGET = {
+    "codegen2-torch": _TORCH_BACKEND_INTRINSICS,
+    "codegen2-tinygrad": _TINYGRAD_BACKEND_INTRINSICS,
+}
+_BACKEND_INTRINSIC_PREFIX_BY_TARGET = {
+    "codegen2-torch": "__torch_",
+    "codegen2-tinygrad": "__tinygrad_",
+}
+_BACKEND_INTRINSIC_TARGETS = {None, *_BACKEND_INTRINSICS_BY_TARGET}
 _SMALL_INLINE_NODE_LIMIT = 4
 
 
-def _normalize_backend_intrinsic_name(name: str) -> str:
+def _normalize_backend_intrinsic_name(name: str, *, target: str) -> str:
     token = name.strip()
     if not token:
         raise ValueError("empty backend intrinsic selector")
     if token in {"*", "all"}:
         return token
-    if token.startswith("_torch_"):
+    allowed_intrinsics = _BACKEND_INTRINSICS_BY_TARGET[target]
+    prefix = _BACKEND_INTRINSIC_PREFIX_BY_TARGET[target]
+    single_prefix = prefix.removeprefix("_")
+    if token.startswith(single_prefix):
         token = "_" + token
-    elif not token.startswith("__torch_"):
-        token = "__torch_" + token
-    if token not in _TORCH_BACKEND_INTRINSICS:
-        allowed = ", ".join(sorted(_TORCH_BACKEND_INTRINSICS))
-        raise ValueError(f"unknown codegen2-torch graph intrinsic {name!r}; expected one of: {allowed}")
+    elif not token.startswith(prefix):
+        token = prefix + token
+    if token not in allowed_intrinsics:
+        allowed = ", ".join(sorted(allowed_intrinsics))
+        raise ValueError(f"unknown {target} graph intrinsic {name!r}; expected one of: {allowed}")
     return token
 
 
@@ -151,13 +167,12 @@ def _parse_backend_intrinsics(value: str | None) -> tuple[str | None, frozenset[
             f"unsupported graph backend intrinsics target {value!r}; expected {allowed!r} "
             "or target:intrinsic[,intrinsic...]"
         )
-    if target != "codegen2-torch":
-        return target, frozenset()
+    allowed_intrinsics = _BACKEND_INTRINSICS_BY_TARGET[target]
     if not sep or selector_text.strip() in {"", "*", "all"}:
-        return target, _TORCH_BACKEND_INTRINSICS
-    selected = {_normalize_backend_intrinsic_name(item) for item in selector_text.split(",")}
+        return target, allowed_intrinsics
+    selected = {_normalize_backend_intrinsic_name(item, target=target) for item in selector_text.split(",")}
     if "*" in selected or "all" in selected:
-        return target, _TORCH_BACKEND_INTRINSICS
+        return target, allowed_intrinsics
     return target, frozenset(selected)
 
 
@@ -237,12 +252,13 @@ def _has_additive_mask_from_keep_fact(
     )
 
 
-def _maybe_rewrite_node_to_torch_sdpa(
+def _maybe_rewrite_node_to_backend_sdpa(
     node: GraphNode,
     *,
     module: GraphModule,
     modules_by_name: Mapping[str, GraphModule],
     provenance,
+    op_name: str,
 ) -> GraphNode | None:
     if len(node.outputs) != 1 or node.attrs or node.op.name not in modules_by_name:
         return None
@@ -281,11 +297,11 @@ def _maybe_rewrite_node_to_torch_sdpa(
             local_provenance=local_provenance,
         )
         keep_prov = _graph_value_ref_provenance(keep, local_provenance=local_provenance)
-        if not _has_additive_mask_from_keep_fact(additive_prov, keep_prov):
+        if fact.additive_mask != fact.keep and not _has_additive_mask_from_keep_fact(additive_prov, keep_prov):
             continue
         return replace(
             node,
-            op=GraphOp("__torch_sdpa"),
+            op=GraphOp(op_name),
             inputs=(
                 q,
                 k,
@@ -4890,7 +4906,7 @@ def _is_literal_value(operand: GraphOperand | None, value: object) -> bool:
     return isinstance(operand, GraphLiteral) and operand.value == value
 
 
-def _rewrite_torch_sdpa_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_backend_sdpa_intrinsics(graph: GraphProgram, *, op_name: str) -> GraphProgram:
     provenance = infer_graph_provenance(graph)
     modules_by_name = {module.name: module for module in graph.modules}
     changed = False
@@ -4898,11 +4914,12 @@ def _rewrite_torch_sdpa_intrinsics(graph: GraphProgram) -> GraphProgram:
     for module in graph.modules:
         new_nodes: list[GraphNode] = []
         for node in module.nodes:
-            rewritten = _maybe_rewrite_node_to_torch_sdpa(
+            rewritten = _maybe_rewrite_node_to_backend_sdpa(
                 node,
                 module=module,
                 modules_by_name=modules_by_name,
                 provenance=provenance,
+                op_name=op_name,
             )
             if rewritten is None:
                 new_nodes.append(node)
@@ -13525,7 +13542,7 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="torch_rope_intrinsics")
                 current = candidate
             candidate = (
-                _rewrite_torch_sdpa_intrinsics(current)
+                _rewrite_backend_sdpa_intrinsics(current, op_name="__torch_sdpa")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__torch_sdpa")
                 else current
             )
@@ -13603,6 +13620,17 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="torch_topk_normalize_intrinsics")
+                current = candidate
+        if backend_intrinsic_target == "codegen2-tinygrad":
+            candidate = (
+                _rewrite_backend_sdpa_intrinsics(current, op_name="__tinygrad_sdpa")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__tinygrad_sdpa")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="tinygrad_sdpa_intrinsics")
                 current = candidate
         if config.constant_folding:
             module_effects = infer_graph_module_effects(current.modules)

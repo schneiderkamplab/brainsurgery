@@ -91,11 +91,11 @@ Top optimizer strengthening priorities:
 - Backend-specific intrinsics are opt-in only. Graph optimization may introduce
   names of the form `__<backend>_<name>` only when the caller explicitly selects
   a compatible backend target, and backend-neutral optimization must never emit
-  them. The first such intrinsic is `__torch_sdpa`, derived from provenance facts
-  for a GQA attention subgraph plus additive-mask provenance. This rewrite
-  currently assumes the attention keep mask has no fully masked rows; the future
-  hardening target is a provenance/domain proof for nonempty keep rows before the
-  rewrite can be made generally safe.
+  them. The SDPA intrinsics `__torch_sdpa` and `__tinygrad_sdpa` are derived from
+  provenance facts for attention subgraphs plus additive-mask provenance. These
+  rewrites currently assume the attention keep mask has no fully masked rows; the
+  future hardening target is a provenance/domain proof for nonempty keep rows
+  before the rewrite can be made generally safe.
 - Backend-specific intrinsic rewrites must not infer semantics from ordinary
   Axon definition names. Definition names may identify a callee for graph
   traversal, but the semantic proof must come from the callee body provenance or
@@ -248,7 +248,7 @@ Axon definition names are not semantic evidence.
   `__torch_causal_conv1d_step` or related block intrinsic is a candidate for
   Mamba/Jamba-style models if pure Axon lowering remains a bottleneck.
 - Backend intrinsics already implemented in graph optimize:
-  `__torch_sdpa`, `__torch_rope_apply_factors`, and
+  `__torch_sdpa`, `__tinygrad_sdpa`, `__torch_rope_apply_factors`, and
   `__torch_rope_pair_apply_factors`, `__torch_swiglu_ffn`, and
   `__torch_expert_swiglu_ffn`, `__torch_expert_packed_swiglu_ffn`,
   `__torch_weighted_topk_sum`, `__torch_topk_normalize`, and

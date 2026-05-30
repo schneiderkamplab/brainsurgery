@@ -663,6 +663,8 @@ def _run_benchmark_pair(
     oom_cpu_fallback: bool = True,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    forward_warmup: int = 0,
+    forward_repeat: int = 1,
 ) -> dict[str, Any]:
     model_dir = _ensure_checkpoint_model_dir(repo_root=repo_root, checkpoint_id=pair.checkpoint_id)
     print()
@@ -710,6 +712,8 @@ def _run_benchmark_pair(
         oom_cpu_fallback=oom_cpu_fallback,
         profile_axon=profile_axon,
         profile_axon_top_n=profile_axon_top_n,
+        forward_warmup=forward_warmup,
+        forward_repeat=forward_repeat,
     )
     enriched = dict(result)
     enriched["axon_file"] = pair.axon_file
@@ -1187,6 +1191,8 @@ def run_axon_benchmark(
     oom_cpu_fallback: bool = True,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    forward_warmup: int = 0,
+    forward_repeat: int = 1,
     table_format: str = "markdown",
     log_dir: Path | None = None,
     stream_csv: Path | None = None,
@@ -1210,6 +1216,8 @@ def run_axon_benchmark(
         raise ValueError("axon_typechecker must be 'typecheck2'")
     axon_typechecker = typechecker_token
     benchmark_mode = _resolve_benchmark_mode(benchmark_mode)
+    forward_warmup = max(0, int(forward_warmup))
+    forward_repeat = max(1, int(forward_repeat))
     if axon_backend != "pipeline2-torch" and pipeline_parallel_size is not None:
         raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2-torch")
     repo_root = _repo_root()
@@ -1312,6 +1320,8 @@ def run_axon_benchmark(
         "oom_cpu_fallback": oom_cpu_fallback,
         "profile_axon": profile_axon,
         "profile_axon_top_n": profile_axon_top_n,
+        "forward_warmup": forward_warmup,
+        "forward_repeat": forward_repeat,
     }
 
     if stream_csv is not None:

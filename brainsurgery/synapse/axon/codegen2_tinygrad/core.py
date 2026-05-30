@@ -4,9 +4,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from ..ast import TypeBool, TypeOptional
+from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional
 from ..codegen2_common import normalize_primitive_op
-from ..codegen2_torch.core import _DirectTorchEmitter
+from ..codegen2_torch.core import _DirectTorchEmitter, graph_main_output_names
 from ..graph_ir import GraphProgram, validate_graph_program
 
 
@@ -94,6 +94,7 @@ SUPPORTED_TINYGRAD_PRIMITIVES: frozenset[str] = frozenset({
     "activations_gelu_pytorch_tanh",
     "activations_gegelu",
     "activations_xielu",
+    "_tinygrad_sdpa",
 })
 
 # Kept as a diagnostic table for genuinely missing tinygrad coverage. It should
@@ -156,11 +157,15 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "self._tiny_device = self._infer_tiny_device(state_dict)")
         add(lines, 8, "self._torch_backing_tensors = []")
         add(lines, 8, "self.state_dict_tensors = {}")
+        add(lines, 8, "self._embedding_aranges = {}")
         add(lines, 8, "self.config = dict(({} if _MODEL_CONFIG is None else _MODEL_CONFIG) if config is None else config)")
         add(lines, 8, "self._profile_enabled = False")
         add(lines, 8, "self._profile_cuda = True")
         add(lines, 8, "self._profile_records = {}")
         add(lines, 8, "self._symbols = {}")
+        add(lines, 8, "self._jit_enabled = True")
+        add(lines, 8, "self._forward_jits = {}")
+        add(lines, 8, "self._forward_jit_seen = set()")
         add(lines, 8, "self.load_state_dict(state_dict)")
         add(lines, 4, "")
         add(lines, 4, "def enable_profile(self, enabled=True, *, cuda=True, reset=True):")
@@ -233,6 +238,9 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "self._tiny_device = self._infer_tiny_device(state_dict)")
         add(lines, 8, "self._torch_backing_tensors = []")
         add(lines, 8, "self.state_dict_tensors = {str(k): self._to_tiny(v) for k, v in state_dict.items()}")
+        add(lines, 8, "self._embedding_aranges = {}")
+        add(lines, 8, "self._forward_jits = {}")
+        add(lines, 8, "self._forward_jit_seen = set()")
         add(lines, 8, "self.setup()")
         add(lines, 8, "self._symbols = self._eval_symbols()")
         add(lines, 8, "return self")
@@ -246,8 +254,48 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 12, "self._torch_device = torch.device(device)")
         add(lines, 12, "self._tiny_device = self._torch_to_tiny_device(self._torch_device)")
         add(lines, 12, "self.state_dict_tensors = {k: self._move_tiny(v, self._tiny_device) for k, v in self.state_dict_tensors.items()}")
+        add(lines, 12, "self._embedding_aranges = {}")
+        add(lines, 12, "self._forward_jits = {}")
+        add(lines, 12, "self._forward_jit_seen = set()")
         add(lines, 12, "self.after_to()")
         add(lines, 8, "return self")
+        add(lines, 4, "")
+        add(lines, 4, "def enable_jit(self, enabled=True, reset=True):")
+        add(lines, 8, "self._jit_enabled = bool(enabled)")
+        add(lines, 8, "if reset:")
+        add(lines, 12, "self._forward_jits = {}")
+        add(lines, 12, "self._forward_jit_seen = set()")
+        add(lines, 8, "return self")
+        add(lines, 4, "")
+        add(lines, 4, "def _jit_signature(self, value):")
+        add(lines, 8, "if isinstance(value, Tensor):")
+        add(lines, 12, "return ('tensor', tuple(value.shape), str(value.dtype), str(value.device))")
+        add(lines, 8, "if isinstance(value, tuple):")
+        add(lines, 12, "return ('tuple', tuple(self._jit_signature(item) for item in value))")
+        add(lines, 8, "if isinstance(value, list):")
+        add(lines, 12, "return ('list', tuple(self._jit_signature(item) for item in value))")
+        add(lines, 8, "if isinstance(value, dict):")
+        add(lines, 12, "return ('dict', tuple((key, self._jit_signature(item)) for key, item in sorted(value.items())))")
+        add(lines, 8, "return ('value', value)")
+        add(lines, 4, "")
+        add(lines, 4, "def _forward_maybe_jit(self, input_ids, **inputs):")
+        add(lines, 8, "if input_ids is not None:")
+        add(lines, 12, "input_ids = self._to_tiny(input_ids)")
+        add(lines, 8, "inputs = {k: self._to_tiny(v) for k, v in inputs.items()}")
+        add(lines, 8, "if not self._jit_enabled or self._profile_enabled:")
+        add(lines, 12, "return self._forward(input_ids, **inputs)")
+        add(lines, 8, "signature = self._jit_signature((input_ids, inputs))")
+        add(lines, 8, "if signature not in self._forward_jit_seen:")
+        add(lines, 12, "self._forward_jit_seen.add(signature)")
+        add(lines, 12, "return self._forward(input_ids, **inputs)")
+        add(lines, 8, "jit = self._forward_jits.get(signature)")
+        add(lines, 8, "if jit is None:")
+        add(lines, 12, "jit = TinyJit(self._forward, prune=True)")
+        add(lines, 12, "self._forward_jits[signature] = jit")
+        add(lines, 8, "return jit(input_ids, **inputs)")
+        add(lines, 4, "")
+        add(lines, 4, "def _forward_for_generate(self, input_ids, **inputs):")
+        add(lines, 8, "return self._forward_maybe_jit(input_ids, **inputs)")
         add(lines, 4, "")
         add(lines, 4, "def after_to(self):")
         add(lines, 8, "return None")
@@ -313,7 +361,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 4, "")
         add(lines, 4, "def _to_tiny(self, value):")
         add(lines, 8, "if isinstance(value, Tensor):")
-        add(lines, 12, "return value.to(self._tiny_device)")
+        add(lines, 12, "return value if value.device == self._tiny_device else value.to(self._tiny_device)")
         add(lines, 8, "if torch.is_tensor(value):")
         add(lines, 12, "tensor = value.detach()")
         add(lines, 12, "if not tensor.is_contiguous():")
@@ -379,6 +427,14 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 4, "_compose_path = staticmethod(_common_compose_path)")
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _path_template_part(value):")
+        add(lines, 8, "if isinstance(value, str) and value.startswith('@@'):")
+        add(lines, 12, "return value[2:].strip('.')")
+        add(lines, 8, "if isinstance(value, str) and value.startswith('@'):")
+        add(lines, 12, "return value[1:].strip('.')")
+        add(lines, 8, "return value")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
         add(lines, 8, "key = str(path).lstrip('@')")
@@ -521,6 +577,25 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "indices = x.numpy().nonzero()")
         add(lines, 8, "return tuple(Tensor(index.astype('int64'), dtype=dtypes.int64, device=self._tiny_device) for index in indices)")
         add(lines, 4, "")
+        add(lines, 4, "def _embedding(self, base, ids):")
+        add(lines, 8, "weight_path = self._compose_path(base, 'weight')")
+        add(lines, 8, "weight = self._param(weight_path)")
+        add(lines, 8, "if not isinstance(ids, Tensor):")
+        add(lines, 12, "ids = Tensor(ids, dtype=dtypes.int64, device=weight.device)")
+        add(lines, 8, "elif not dtypes.is_int(ids.dtype):")
+        add(lines, 12, "ids = ids.cast(dtypes.int64)")
+        add(lines, 8, "ids = ids.to(weight.device)")
+        add(lines, 8, "vocab_size, embed_size = int(weight.shape[0]), int(weight.shape[1])")
+        add(lines, 8, "cache_key = (str(weight_path), str(weight.device), vocab_size)")
+        add(lines, 8, "arange = self._embedding_aranges.get(cache_key)")
+        add(lines, 8, "if arange is None:")
+        add(lines, 12, "arange = Tensor.arange(vocab_size, requires_grad=False, device=weight.device).unsqueeze(-1)")
+        add(lines, 12, "self._embedding_aranges[cache_key] = arange")
+        add(lines, 8, "big_shape = tuple(ids.shape) + (vocab_size, embed_size)")
+        add(lines, 8, "idx = ids.reshape(tuple(ids.shape) + (1, 1)).expand(big_shape)")
+        add(lines, 8, "vals = weight.expand(big_shape)")
+        add(lines, 8, "return (arange.expand(big_shape) == idx).where(vals, 0).sum(-2, dtype=vals.dtype)")
+        add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _concat(*args, dim=None):")
         add(lines, 8, "if dim is None:")
@@ -626,20 +701,20 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
                     add(lines, 8, f"{value.name} = inputs[{value.name!r}]")
                 args.append(value.name)
         add(lines, 8, f"result = self.{self.method_names[main.name]}({', '.join(args)})")
-        names = main.output_names or ("logits",)
+        names = graph_main_output_names(self.program, main)
         if len(names) == 1:
             add(lines, 8, "return result[0]")
         else:
             add(lines, 8, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
         add(lines, 4, "")
         add(lines, 4, "def forward(self, input_ids=None, **inputs):")
-        add(lines, 8, "return self._to_torch(self._forward(input_ids, **inputs))")
+        add(lines, 8, "return self._to_torch(self._forward_maybe_jit(input_ids, **inputs))")
 
     def _emit_generate(self, lines: list[str]) -> None:
         add = self._add
         main = self.modules_by_name[self.program.main_module]
         input_names = {value.name for value in main.inputs}
-        output_names = set(main.output_names or ("logits",))
+        output_names = set(graph_main_output_names(self.program, main))
         attention_name = "attn_mask" if "attn_mask" in input_names else (
             "attention_mask" if "attention_mask" in input_names else None
         )
@@ -652,7 +727,10 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         )
         use_cache_name = "use_cache" if "use_cache" in input_names else None
         has_decoder_inputs = "decoder_input_ids" in input_names
-        is_cached_decoder = not has_decoder_inputs and cache_name is not None and cache_output_name is not None
+        # tinygrad's TinyJit needs stable input shapes for reuse. The current
+        # Axon cache representation is a Python list of growing K/V tensors, so
+        # it is slower than recomputing until we add a preallocated cache.
+        is_cached_decoder = False
         is_decoder_only = not has_decoder_inputs
         add(lines, 4, "def generate(self, input_ids, max_new_tokens=20, **kwargs):")
         add(lines, 8, "input_ids = self._to_tiny(input_ids)")
@@ -705,7 +783,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
                 add(lines, 12, f"forward_kwargs[{use_cache_name!r}] = True")
             if attention_name is not None:
                 add(lines, 12, f"forward_kwargs[{attention_name!r}] = attention_mask")
-            add(lines, 12, "result = self._forward(step_input, **forward_kwargs)")
+            add(lines, 12, "result = self._forward_for_generate(step_input, **forward_kwargs) if cache is not None and int(step_input.shape[1]) == 1 else self._forward(step_input, **forward_kwargs)")
             add(lines, 12, "if isinstance(result, dict): cache = result.get(" + repr(cache_output_name) + ", cache)")
             add(lines, 12, "next_id = _next_id(_logits(result))")
             add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
@@ -727,7 +805,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             add(lines, 12, "forward_kwargs = dict(kwargs)")
             if attention_name is not None:
                 add(lines, 12, f"forward_kwargs[{attention_name!r}] = attention_mask")
-            add(lines, 12, "result = self._forward(out, **forward_kwargs)")
+            add(lines, 12, "result = self._forward_for_generate(out, **forward_kwargs)")
             add(lines, 12, "next_id = _next_id(_logits(result))")
             add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
             add(lines, 12, "out = out.cat(next_id, dim=1)")
@@ -769,7 +847,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
         attrs = {k: self._operand_expr(v, local=local, symbols_dict=symbols_dict) for k, v in node.attrs.items()}
         if primitive == "embedding":
-            return f"self._param(self._compose_path({args[0]}, 'weight'))[{args[1]}]"
+            return f"self._embedding({args[0]}, {args[1]})"
         if primitive == "linear":
             bias = args[3] if len(args) > 3 else "False"
             transpose = args[4] if len(args) > 4 else "False"
@@ -777,7 +855,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
             return (
-                f"(lambda _w, _b: ({args[1]}.matmul(_w) + (_b if _b is not None else 0)) "
+                f"(lambda _w, _b: {args[1]}.linear(_w, _b) "
                 f"if bool({transpose}) else {args[1]}.linear(_w.transpose(-1, -2), _b))"
                 f"((lambda _w: (_w[int({expert})] if {expert} is not None else _w))(self._param(self._compose_path({args[0]}, {weight_leaf}))), "
                 f"((lambda _b: (_b[int({expert})] if (_b is not None and {expert} is not None and len(_b.shape) >= 2) else _b))(self._optional_param(self._compose_path({args[0]}, {bias_leaf}))) if bool({bias}) else None))"
@@ -788,6 +866,16 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
             return f"self._expert_linear({args[0]}, {args[1]}, {args[2]}, bias=bool({bias}), transpose=bool({transpose}), weight_leaf={weight_leaf}, bias_leaf={bias_leaf})"
+        if primitive == "_tinygrad_sdpa":
+            if len(args) < 6:
+                raise ValueError("__tinygrad_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
+            if not self._literal_null_arg(node.inputs[4]):
+                raise ValueError("__tinygrad_sdpa lowering currently requires default scale")
+            return (
+                f"{args[0]}.scaled_dot_product_attention("
+                f"{args[1]}, {args[2]}, attn_mask={args[3]}, dropout_p=0.0, "
+                f"is_causal=False, enable_gqa=bool({args[5]}))"
+            )
         if primitive == "layernorm":
             eps = args[2] if len(args) > 2 else "1e-5"
             weight_leaf = args[4] if len(args) > 4 else "'weight'"
@@ -883,6 +971,75 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             return simple[primitive]()
         raise NotImplementedError(f"direct codegen2-tinygrad unsupported graph op {primitive!r}")
 
+    def _emit_layernorm_node(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        target: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if len(node.inputs) < 2:
+            return False
+        args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
+        eps = (
+            self._scalar_operand_expr(
+                node.inputs[2],
+                local=local,
+                symbols_dict=symbols_dict,
+                expected=(TypeFloat, TypeInt, TypeDim),
+                cast="float",
+            )
+            if len(node.inputs) > 2
+            else "1e-5"
+        )
+        bias_expr = (
+            self._scalar_operand_expr(
+                node.inputs[5],
+                local=local,
+                symbols_dict=symbols_dict,
+                expected=(TypeBool,),
+                cast="bool",
+            )
+            if len(node.inputs) > 5
+            else "True"
+        )
+        bias_literal = self._literal_bool_arg(node.inputs[5]) if len(node.inputs) > 5 else True
+        weight = self._param_expr_for_path(
+            node.inputs[0],
+            node.inputs[4] if len(node.inputs) > 4 else "weight",
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        bias_value = self._param_expr_for_path(
+            node.inputs[0],
+            node.inputs[6] if len(node.inputs) > 6 else "bias",
+            optional=True,
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        weight_name = f"{target}__weight"
+        bias_name = f"{target}__bias"
+        self._add(lines, indent, f"{weight_name} = {weight}")
+        self._emit_optional_param_bind(
+            lines,
+            target=bias_name,
+            value_expr=bias_value,
+            flag_expr=bias_expr,
+            flag_literal=bias_literal,
+            indent=indent,
+        )
+        y_name = f"{target}__y"
+        self._add(lines, indent, f"{y_name} = {args[1]}.layernorm(axis=-1, eps={eps})")
+        op_expr = f"({y_name} * {weight_name} + ({bias_name} if {bias_name} is not None else 0))"
+        if self.profile:
+            self._add(lines, indent, f"{target} = self._profile_call({f'node:{target}:_layernorm'!r}, lambda: {op_expr})")
+        else:
+            self._add(lines, indent, f"{target} = {op_expr}")
+        return True
+
     def _emit_linear_node(
         self,
         lines: list[str],
@@ -953,13 +1110,11 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             bias_arg = bias_name
         self._add(lines, indent, f"{x_name} = {args[1]}")
         if transpose_literal is True:
-            op_expr = f"{x_name}.matmul({weight_name})"
-            if bias_literal is not False:
-                op_expr = f"({op_expr} + ({bias_arg} if {bias_arg} is not None else 0))"
+            op_expr = f"{x_name}.linear({weight_name}, {bias_arg})"
         elif transpose_literal is False:
             op_expr = f"{x_name}.linear({weight_name}.transpose(-1, -2), {bias_arg})"
         else:
-            direct = f"{x_name}.matmul({weight_name}) + ({bias_arg} if {bias_arg} is not None else 0)"
+            direct = f"{x_name}.linear({weight_name}, {bias_arg})"
             standard = f"{x_name}.linear({weight_name}.transpose(-1, -2), {bias_arg})"
             op_expr = f"({direct} if {transpose_expr} else {standard})"
         if self.profile:
@@ -974,6 +1129,7 @@ def emit_model_code_from_graph_ir(
     *,
     class_name: str = "AxonTinygradModel",
     model_config: dict[str, Any] | None = None,
+    profile: bool = False,
 ) -> str:
     validate_graph_program(graph)
     unsupported = non_obvious_tinygrad_ops(graph)
@@ -984,7 +1140,7 @@ def emit_model_code_from_graph_ir(
             "Unsupported Graph IR ops:\n"
             f"{table}"
         )
-    emitter = _DirectTinygradEmitter(program=graph, class_name=class_name)
+    emitter = _DirectTinygradEmitter(program=graph, class_name=class_name, profile=profile)
     body = emitter.emit()
     # Tensor execution inside generated definitions uses tinygrad and converts
     # back to torch at the public forward/generate boundary.
@@ -994,7 +1150,7 @@ def emit_model_code_from_graph_ir(
             "",
             "import time",
             "import torch",
-            "from tinygrad import Tensor, dtypes",
+            "from tinygrad import Tensor, TinyJit, dtypes",
             "from tinygrad.nn import state as tiny_state",
             "from brainsurgery.synapse.axon.codegen2_common import (",
             "    compose_path as _common_compose_path,",

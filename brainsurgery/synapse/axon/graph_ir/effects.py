@@ -24,13 +24,13 @@ def join_usage(left: UsageClass, right: UsageClass) -> UsageClass:
 
 
 def graph_op_effect(op_name: str) -> GraphEffect:
-    if op_name.startswith("__torch_"):
+    if op_name.startswith(("__torch_", "__tinygrad_")):
         return GraphEffect.TOTAL_PURE
     return op_effect(op_name)
 
 
 def graph_op_usage(op_name: str) -> UsageClass:
-    if op_name.startswith("__torch_"):
+    if op_name.startswith(("__torch_", "__tinygrad_")):
         return UsageClass.UNRESTRICTED
     normalized = op_name[1:] if op_name.startswith("_") else op_name
     semantics = get_op_semantics(normalized)
@@ -79,7 +79,7 @@ def _graph_op_call_effect(
             )
     if module_effects is not None and op_name in module_effects:
         return module_effects[op_name]
-    if op_name.startswith("__torch_"):
+    if op_name.startswith(("__torch_", "__tinygrad_")):
         return GraphEffect.TOTAL_PURE
     normalized = op_name[1:] if op_name.startswith("_") else op_name
     if normalized in {

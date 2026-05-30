@@ -705,6 +705,18 @@ def axon_test(
             "generate is supported for causal_lm and seq2seq_lm; encoder-only models are forward-only."
         ),
     ),
+    forward_warmup: int = typer.Option(
+        0,
+        "--forward-warmup",
+        min=0,
+        help="Number of untimed warmup forward passes before timed forward repeats.",
+    ),
+    forward_repeat: int = typer.Option(
+        1,
+        "--forward-repeat",
+        min=1,
+        help="Number of timed forward passes; reported forward time is the mean.",
+    ),
     trace_layers: bool = typer.Option(
         False,
         "--trace-layers/--no-trace-layers",
@@ -831,6 +843,8 @@ def axon_test(
             dtype=dtype,
             model_task=model_task,
             benchmark_mode=benchmark_mode,
+            forward_warmup=forward_warmup,
+            forward_repeat=forward_repeat,
             trace_layers=trace_layers,
             hf_align_bf16_profile=hf_align_bf16_profile,
             hf_align_mask_contract=hf_align_mask_contract,
@@ -925,6 +939,18 @@ def axon_benchmark(
             "Benchmark execution mode (auto, forward, or generate). "
             "generate is supported for causal_lm and seq2seq_lm; encoder-only models are forward-only."
         ),
+    ),
+    forward_warmup: int = typer.Option(
+        0,
+        "--forward-warmup",
+        min=0,
+        help="Number of untimed warmup forward passes before timed forward repeats.",
+    ),
+    forward_repeat: int = typer.Option(
+        1,
+        "--forward-repeat",
+        min=1,
+        help="Number of timed forward passes; reported forward time is the mean.",
     ),
     trace_layers: bool = typer.Option(
         False,
@@ -1127,6 +1153,8 @@ def axon_benchmark(
             dtype=dtype,
             model_task=model_task,
             benchmark_mode=benchmark_mode,
+            forward_warmup=forward_warmup,
+            forward_repeat=forward_repeat,
             trace_layers=trace_layers,
             hf_align_bf16_profile=hf_align_bf16_profile,
             hf_align_mask_contract=hf_align_mask_contract,

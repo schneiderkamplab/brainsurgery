@@ -2913,6 +2913,34 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
     return out, dt
 
 
+def _time_forward_repeated(
+    label: str,
+    fn: Any,
+    *,
+    warmup: int,
+    repeat: int,
+) -> tuple[Any, float, list[float]]:
+    warmup = max(0, int(warmup))
+    repeat = max(1, int(repeat))
+    out: Any = None
+    def _sync_cuda() -> None:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    with timing(message=label):
+        for _ in range(warmup):
+            out = fn()
+            _sync_cuda()
+        samples: list[float] = []
+        for _ in range(repeat):
+            _sync_cuda()
+            t0 = time.perf_counter()
+            out = fn()
+            _sync_cuda()
+            samples.append(time.perf_counter() - t0)
+    return out, sum(samples) / max(1, len(samples)), samples
+
+
 def _call_generate_compatible(model: Any, **kwargs: Any) -> Any:
     """Call HF/reference generate with only supported keyword arguments."""
 
@@ -3286,11 +3314,15 @@ def _run_axon_test_single(
     oom_cpu_fallback: bool = True,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    forward_warmup: int = 0,
+    forward_repeat: int = 1,
 ) -> dict[str, Any]:
     resolved_device = _resolve_device(device)
     resolved_dtype = _resolve_dtype(dtype)
     resolved_model_task = _resolve_model_task(model_task)
     resolved_benchmark_mode = _resolve_benchmark_mode(benchmark_mode)
+    forward_warmup = max(0, int(forward_warmup))
+    forward_repeat = max(1, int(forward_repeat))
     resolved_hf_experts_implementation = _normalize_hf_experts_implementation(
         hf_experts_implementation
     )
@@ -3460,6 +3492,7 @@ def _run_axon_test_single(
                     graph_program,
                     class_name=class_name,
                     model_config=model_config,
+                    profile=profile_axon,
                 )
             else:
                 code = emit_torch_model_code_from_graph_ir(
@@ -4146,12 +4179,16 @@ def _run_axon_test_single(
 
             hf_gen: torch.Tensor | None = None
             hf_time = 0.0
+            hf_forward_samples: list[float] = []
             with _patch_transformers_mask_device_map_inputs(enabled=hf_device_map is not None):
                 if not run_generate_benchmark:
-                    hf_t0 = time.perf_counter()
-                    with timing(message="HF"), torch.no_grad():
-                        hf_logits = _run_hf_forward(hf)
-                    hf_time = time.perf_counter() - hf_t0
+                    with torch.no_grad():
+                        hf_logits, hf_time, hf_forward_samples = _time_forward_repeated(
+                            "HF",
+                            lambda model=hf: _run_hf_forward(model),
+                            warmup=forward_warmup,
+                            repeat=forward_repeat,
+                        )
                 else:
                     hf_forward_time = 0.0
                     with torch.no_grad():
@@ -4282,6 +4319,7 @@ def _run_axon_test_single(
                 "logits": hf_logits_cpu,
                 "gen": hf_gen_cpu,
                 "time": hf_time,
+                "forward_samples": hf_forward_samples,
                 "dummy_mask": dummy_mask,
                 "decoder_attention_mask": io.get("decoder_attention_mask"),
                 "layer_inputs": hf_layer_inputs,
@@ -4297,6 +4335,7 @@ def _run_axon_test_single(
         hf_dummy_tokens_mask: torch.Tensor | None = None
         hf_layer_inputs: dict[int, torch.Tensor] = {}
         hf_layer_outputs: dict[int, torch.Tensor] = {}
+        hf_forward_samples: list[float] = []
         hf_exec_device_str = "skipped"
         state_ref_cpu: dict[str, torch.Tensor] | None = None
         decoder_attention_mask_for_metrics: torch.Tensor | None = None
@@ -4315,6 +4354,7 @@ def _run_axon_test_single(
             hf_logits = cast(torch.Tensor, hf_result["logits"])
             hf_gen = cast(torch.Tensor | None, hf_result["gen"])
             hf_time = float(hf_result["time"])
+            hf_forward_samples = list(cast(Sequence[float], hf_result.get("forward_samples", [])))
             hf_dummy_tokens_mask = cast(torch.Tensor | None, hf_result["dummy_mask"])
             hf_layer_inputs = cast(dict[int, torch.Tensor], hf_result["layer_inputs"])
             hf_layer_outputs = cast(dict[int, torch.Tensor], hf_result["layer_outputs"])
@@ -4484,11 +4524,15 @@ def _run_axon_test_single(
 
             syn_gen: torch.Tensor | None = None
             syn_time = 0.0
+            syn_forward_samples: list[float] = []
             if not run_generate_benchmark:
-                syn_t0 = time.perf_counter()
-                with timing(message="AxonDerived"), torch.no_grad():
-                    syn_logits = _run_syn_forward()
-                syn_time = time.perf_counter() - syn_t0
+                with torch.no_grad():
+                    syn_logits, syn_time, syn_forward_samples = _time_forward_repeated(
+                        "AxonDerived",
+                        _run_syn_forward,
+                        warmup=forward_warmup,
+                        repeat=forward_repeat,
+                    )
             else:
                 with torch.no_grad():
                     syn_logits = _run_syn_forward()
@@ -4527,6 +4571,7 @@ def _run_axon_test_single(
                 "logits": syn_logits_cpu,
                 "gen": syn_gen_cpu,
                 "time": syn_time,
+                "forward_samples": syn_forward_samples,
                 "layer_inputs": syn_layer_inputs,
                 "layer_outputs": syn_layer_outputs,
                 "device": str(target_device),
@@ -4550,6 +4595,7 @@ def _run_axon_test_single(
         syn_logits = cast(torch.Tensor, syn_result["logits"])
         syn_gen = cast(torch.Tensor | None, syn_result["gen"])
         syn_time = float(syn_result["time"])
+        syn_forward_samples = list(cast(Sequence[float], syn_result.get("forward_samples", [])))
         syn_layer_inputs = cast(dict[int, torch.Tensor], syn_result["layer_inputs"])
         syn_layer_outputs = cast(dict[int, torch.Tensor], syn_result["layer_outputs"])
         syn_exec_device_str = cast(str, syn_result["device"])
@@ -4788,6 +4834,8 @@ def _run_axon_test_single(
         print(f"Compile mode:          {compile_mode}")
         print(f"Compile fullgraph:     {bool(compile_fullgraph)}")
         print(f"Compile dynamic:       {bool(compile_dynamic)}")
+        if not run_generate_benchmark:
+            print(f"Forward warmup/repeat: {forward_warmup}/{forward_repeat}")
         print()
         hf_time_safe = 0.0 if hf_time is None else hf_time
         if not skip_hf:
@@ -4812,6 +4860,21 @@ def _run_axon_test_single(
             print(f"HF forward:     {hf_time_safe:.4f}s total")
             print(f"Axon forward:   {syn_time:.4f}s total")
             print(f"Speed ratio (Axon/HF): {syn_time / max(hf_time_safe, 1e-9):.3f}x")
+            if forward_repeat > 1 or forward_warmup:
+                if hf_forward_samples:
+                    print(
+                        "HF forward samples | "
+                        f"mean/min/last: {hf_time_safe:.4f}s/"
+                        f"{min(hf_forward_samples):.4f}s/{hf_forward_samples[-1]:.4f}s "
+                        f"samples={[round(item, 6) for item in hf_forward_samples]}"
+                    )
+                if syn_forward_samples:
+                    print(
+                        "Axon forward samples | "
+                        f"mean/min/last: {syn_time:.4f}s/"
+                        f"{min(syn_forward_samples):.4f}s/{syn_forward_samples[-1]:.4f}s "
+                        f"samples={[round(item, 6) for item in syn_forward_samples]}"
+                    )
         print()
         if (
             (not skip_hf)
@@ -4880,6 +4943,10 @@ def _run_axon_test_single(
         result = {
             "hf_time": hf_time,
             "axon_time": syn_time,
+            "hf_forward_samples": hf_forward_samples,
+            "axon_forward_samples": syn_forward_samples,
+            "forward_warmup": forward_warmup,
+            "forward_repeat": forward_repeat,
             "speed_ratio_axon_over_hf": (
                 None if hf_time is None else syn_time / max(hf_time, 1.0e-9)
             ),
@@ -4959,6 +5026,8 @@ def run_axon_test(
     hf_strict_dtype: bool = False,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    forward_warmup: int = 0,
+    forward_repeat: int = 1,
 ) -> dict[str, Any]:
     return _run_axon_test_single(
         axon_file=axon_file,
@@ -4997,6 +5066,8 @@ def run_axon_test(
         hf_strict_dtype=hf_strict_dtype,
         profile_axon=profile_axon,
         profile_axon_top_n=profile_axon_top_n,
+        forward_warmup=forward_warmup,
+        forward_repeat=forward_repeat,
     )
 
 
