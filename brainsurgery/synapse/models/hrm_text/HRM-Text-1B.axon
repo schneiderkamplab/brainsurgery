@@ -6,7 +6,7 @@
 
 import Activations (sigmoid, silu)
 
-import Attention (attention, merge_heads)
+import Attention (attention_with_additive_mask, mask_to_additive_for_input, merge_heads)
 
 import Masking (causal_mask_for_input)
 
@@ -67,8 +67,8 @@ EMBED_SCALE <- (HAS_EMBED_SCALE ? (39.191835884530846) : ((1.0 / INIT_RANGE) :: 
 hrm_rms :: Tensor[B,S,D] -> Tensor[B,S,D]
 hrm_rms x = NN.rmsnorm_noscale x eps=EPS cast_float=true
 
-hrm_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
-hrm_block x rope_sin rope_cos mask past_kv = do
+hrm_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
+hrm_block x rope_sin rope_cos additive_mask mask past_kv = do
   xn <- hrm_rms x
   a, new_kv <- scope@attn do
     gqkv <- NN.linear@gqkv_proj xn dim=GQKV_DIM bias=false
@@ -79,7 +79,7 @@ hrm_block x rope_sin rope_cos mask past_kv = do
     gate <- Tensor.reshape gate_lin shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
     q, k <- rope_pair_base_factors q k rope_sin rope_cos
     k, v, new_kv <- Cache.update past_kv k v
-    a <- attention q k v mask
+    a <- attention_with_additive_mask q k v additive_mask mask
     a <- sigmoid gate |> mul a
     a <- merge_heads a |> NN.linear@o_proj dim=MODEL_DIM
     return a, new_kv
@@ -91,22 +91,22 @@ hrm_block x rope_sin rope_cos mask past_kv = do
     return gate |> silu |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
   return x + m, new_kv
 
-hrm_stack :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Cache[B,NUM_HEADS,K,DH] -> Int -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH])
-hrm_stack@path x rope_sin rope_cos mask past_kv new_kv cycle_offset = do
+hrm_stack :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Cache[B,NUM_HEADS,K,DH] -> Int -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH])
+hrm_stack@path x rope_sin rope_cos additive_mask mask past_kv new_kv cycle_offset = do
   x, new_kv <- for@layers i <- [0..NUM_LAYERS_I) carry (x, new_kv) do
     slot <- cycle_offset + i
     past_i <- Cache.index past_kv slot
-    x, new_i <- hrm_block x rope_sin rope_cos mask past_i
+    x, new_i <- hrm_block x rope_sin rope_cos additive_mask mask past_i
     new_kv <- Cache.append new_kv new_i
     yield x, new_kv
   x <- hrm_rms x
   return x, new_kv
 
-hrm_l_cycles :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Cache[B,NUM_HEADS,K,DH] -> Int -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH], Int)
-hrm_l_cycles z_l z_h rope_sin rope_cos mask past_kv new_kv slot_offset = do
+hrm_l_cycles :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Cache[B,NUM_HEADS,K,DH] -> Int -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,DH], Int)
+hrm_l_cycles z_l z_h rope_sin rope_cos additive_mask mask past_kv new_kv slot_offset = do
   z_l, new_kv, slot_offset <- for i <- [0..L_CYCLES) carry (z_l, new_kv, slot_offset) do
     x_l <- z_l + z_h
-    z_l, new_kv <- hrm_stack@model.L_module x_l rope_sin rope_cos mask past_kv new_kv slot_offset
+    z_l, new_kv <- hrm_stack@model.L_module x_l rope_sin rope_cos additive_mask mask past_kv new_kv slot_offset
     slot_offset <- slot_offset + NUM_LAYERS_I
     yield z_l, new_kv, slot_offset
   return z_l, new_kv, slot_offset
@@ -118,6 +118,7 @@ hrm_text input_ids attn_mask past_kv use_cache = do
   rope_sin, rope_cos <- rope_base_factors pos_ids MODEL_HEAD_DIM THETA
   key_len <- past_length + S
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  additive_mask <- mask_to_additive_for_input input_ids mask NUM_HEADS
   x <- NN.embedding@@model.embed_tokens input_ids dim=MODEL_DIM scale=EMBED_SCALE
   z0 <- ((param @@model.z_L_init) :: Tensor[MODEL_DIM])
   z_l <- Tensor.reshape z0 shape=[1, 1, MODEL_DIM] |> Tensor.expand shape=[B, S, MODEL_DIM] |> Tensor.cast_like x
@@ -125,9 +126,9 @@ hrm_text input_ids attn_mask past_kv use_cache = do
   new_kv <- use_cache ? Cache.init : null
   slot_offset <- 0
   z_h, z_l, new_kv, slot_offset <- for i <- [0..H_CYCLES) carry (z_h, z_l, new_kv, slot_offset) do
-    z_l, new_kv, slot_offset <- hrm_l_cycles z_l z_h rope_sin rope_cos mask past_kv new_kv slot_offset
+    z_l, new_kv, slot_offset <- hrm_l_cycles z_l z_h rope_sin rope_cos additive_mask mask past_kv new_kv slot_offset
     x_h <- z_h + z_l
-    z_h, new_kv <- hrm_stack@model.H_module x_h rope_sin rope_cos mask past_kv new_kv slot_offset
+    z_h, new_kv <- hrm_stack@model.H_module x_h rope_sin rope_cos additive_mask mask past_kv new_kv slot_offset
     slot_offset <- slot_offset + NUM_LAYERS_I
     yield z_h, z_l, new_kv, slot_offset
   logits <- NN.linear@@lm_head z_h dim=VOCAB_SIZE bias=false
