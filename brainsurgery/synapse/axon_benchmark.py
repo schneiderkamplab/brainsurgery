@@ -189,6 +189,12 @@ def _resolve_tinygrad_worker_specs(*, device: str, processes: int) -> list[_Work
     )
 
 
+def _resolve_mlx_worker_specs(*, device: str, processes: int) -> list[_WorkerSpec] | None:
+    if processes <= 1:
+        return None
+    return None
+
+
 def _estimate_model_param_count(model_dir: Path) -> tuple[int, bool] | None:
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
@@ -663,6 +669,7 @@ def _run_benchmark_pair(
     oom_cpu_fallback: bool = True,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    metal_capture: bool = False,
     forward_warmup: int = 0,
     forward_repeat: int = 1,
 ) -> dict[str, Any]:
@@ -712,6 +719,7 @@ def _run_benchmark_pair(
         oom_cpu_fallback=oom_cpu_fallback,
         profile_axon=profile_axon,
         profile_axon_top_n=profile_axon_top_n,
+        metal_capture=metal_capture,
         forward_warmup=forward_warmup,
         forward_repeat=forward_repeat,
     )
@@ -1191,6 +1199,7 @@ def run_axon_benchmark(
     oom_cpu_fallback: bool = True,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    metal_capture: bool = False,
     forward_warmup: int = 0,
     forward_repeat: int = 1,
     table_format: str = "markdown",
@@ -1204,11 +1213,11 @@ def run_axon_benchmark(
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
         backend_token = "codegen2-torch"
-    valid_backends = {"codegen2-torch", "codegen2-tinygrad", "runtime2-torch", "pipeline2-torch"}
+    valid_backends = {"codegen2-torch", "codegen2-tinygrad", "codegen2-mlx", "runtime2-torch", "pipeline2-torch"}
     if backend_token not in valid_backends:
         raise ValueError(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'runtime2-torch', or 'pipeline2-torch'"
+            "'codegen2-mlx', 'runtime2-torch', or 'pipeline2-torch'"
         )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
@@ -1320,6 +1329,7 @@ def run_axon_benchmark(
         "oom_cpu_fallback": oom_cpu_fallback,
         "profile_axon": profile_axon,
         "profile_axon_top_n": profile_axon_top_n,
+        "metal_capture": metal_capture,
         "forward_warmup": forward_warmup,
         "forward_repeat": forward_repeat,
     }
@@ -1342,6 +1352,11 @@ def run_axon_benchmark(
             effective_device = pipeline_worker_specs[0].run_device
     elif axon_backend == "codegen2-tinygrad":
         pipeline_worker_specs = _resolve_tinygrad_worker_specs(
+            device=device,
+            processes=max(1, int(processes)),
+        )
+    elif axon_backend == "codegen2-mlx":
+        pipeline_worker_specs = _resolve_mlx_worker_specs(
             device=device,
             processes=max(1, int(processes)),
         )

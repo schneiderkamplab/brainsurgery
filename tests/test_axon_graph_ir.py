@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -36,6 +37,11 @@ from brainsurgery.synapse.axon.codegen2_torch import Codegen2GraphModel, emit_mo
 from brainsurgery.synapse.axon.codegen2_tinygrad import (
     emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir,
     tinygrad_op_table_markdown,
+)
+from brainsurgery.synapse.axon.codegen2_mlx import (
+    emit_model_code_from_graph_ir as emit_mlx_model_code_from_graph_ir,
+    mlx_op_table_markdown,
+    torch_state_dict_to_mlx,
 )
 from brainsurgery.synapse.axon.analysis import infer_axon_definition_effects, op_effect
 from brainsurgery.synapse.axon.graph_ir import (
@@ -8172,6 +8178,207 @@ def test_codegen2_tinygrad_materializes_final_logits_bias_flat_alias() -> None:
     expected = torch.nn.functional.linear(x, weight, bias.reshape(5))
 
     assert torch.allclose(actual.to(expected.device), expected, atol=1e-6, rtol=1e-6)
+
+
+def test_codegen2_mlx_emits_gpt2_source() -> None:
+    pytest.importorskip("mlx")
+    program = resolve_axon_program_from_path(
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+    ).ast
+
+    graph = lower_axon_program_to_graph_ir(_typed(program, main_module="gpt2"), main_module="gpt2")
+    table = mlx_op_table_markdown(graph)
+    code = emit_mlx_model_code_from_graph_ir(graph, class_name="MlxGPT2")
+
+    assert "| Op | Count | Reason |" in table
+    assert "`embedding`" not in table
+    assert "import mlx.core as mx" in code
+    assert "import mlx.nn as nn" in code
+    assert "class MlxGPT2(nn.Module):" in code
+    assert "def _forward(self, input_ids=None, **inputs):" in code
+    assert "def forward(self, input_ids=None, **inputs):" in code
+
+
+def test_codegen2_mlx_generated_expert_linear_matches_torch() -> None:
+    pytest.importorskip("mlx")
+    graph = _expert_linear_graph()
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    weight = torch.arange(3 * 5 * 4, dtype=torch.float32, device=device).reshape(3, 5, 4) / 10.0
+    x = torch.arange(2 * 2 * 2 * 4, dtype=torch.float32, device=device).reshape(2, 2, 2, 4) / 7.0
+    expert_idx_t = torch.tensor([[[0, 1], [2, 0]], [[1, 2], [0, 1]]], dtype=torch.long, device=device)
+    namespace: dict[str, object] = {}
+    exec(emit_mlx_model_code_from_graph_ir(graph), namespace)
+    model_cls = namespace["AxonMlxModel"]
+    mlx_weight = torch_state_dict_to_mlx({"experts.weight": weight})
+    model = model_cls.from_state_dict(mlx_weight)
+
+    expert_idx = torch_state_dict_to_mlx({"idx": expert_idx_t})["idx"]
+    actual_np = model.forward(x=torch_state_dict_to_mlx({"x": x})["x"], expert_idx=expert_idx)
+    actual = torch.from_numpy(np.asarray(actual_np))
+
+    expected = torch.matmul(
+        x.unsqueeze(-2),
+        weight[expert_idx_t].transpose(-1, -2),
+    ).squeeze(-2)
+
+    assert torch.allclose(actual.to(expected.device), expected, atol=1e-5, rtol=1e-5)
+
+
+def test_codegen2_mlx_setup_stacks_individual_expert_weights() -> None:
+    pytest.importorskip("mlx")
+    graph = _expert_linear_graph()
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    weight = torch.arange(3 * 5 * 4, dtype=torch.float32, device=device).reshape(3, 5, 4) / 10.0
+    x = torch.arange(2 * 2 * 2 * 4, dtype=torch.float32, device=device).reshape(2, 2, 2, 4) / 7.0
+    expert_idx_t = torch.tensor([[[0, 1], [2, 0]], [[1, 2], [0, 1]]], dtype=torch.long, device=device)
+    namespace: dict[str, object] = {}
+    exec(emit_mlx_model_code_from_graph_ir(graph), namespace)
+    model_cls = namespace["AxonMlxModel"]
+    mlx_state = torch_state_dict_to_mlx(
+        {f"experts.{idx}.weight": expert_weight for idx, expert_weight in enumerate(weight)}
+    )
+    model = model_cls.from_state_dict(mlx_state)
+
+    expert_idx = torch_state_dict_to_mlx({"idx": expert_idx_t})["idx"]
+    actual_np = model.forward(x=torch_state_dict_to_mlx({"x": x})["x"], expert_idx=expert_idx)
+    actual = torch.from_numpy(np.asarray(actual_np))
+
+    expected = torch.matmul(
+        x.unsqueeze(-2),
+        weight[expert_idx_t].transpose(-1, -2),
+    ).squeeze(-2)
+
+    assert torch.allclose(actual.to(expected.device), expected, atol=1e-5, rtol=1e-5)
+
+
+def test_codegen2_mlx_gelu_matches_torch_exact_gelu() -> None:
+    pytest.importorskip("mlx")
+    tensor_type = _tensor("B", "S")
+    graph = _single_primitive_graph(
+        "_activations_gelu",
+        (GraphValue("x", tensor_type),),
+        (GraphValueRef("x", tensor_type),),
+        tensor_type,
+    )
+    namespace: dict[str, object] = {}
+    exec(emit_mlx_model_code_from_graph_ir(graph), namespace)
+    model = namespace["AxonMlxModel"].from_state_dict({})
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    x_t = torch.linspace(-6, 6, 97, dtype=torch.float32, device=device).reshape(1, 97)
+
+    actual_np = model.forward(x=torch_state_dict_to_mlx({"x": x_t})["x"])
+    actual = torch.from_numpy(np.asarray(actual_np))
+
+    expected = torch.nn.functional.gelu(x_t)
+
+    assert torch.allclose(actual.to(expected.device), expected, atol=1e-6, rtol=1e-6)
+
+
+def test_codegen2_mlx_compiled_forward_matches_uncompiled() -> None:
+    pytest.importorskip("mlx")
+    import mlx.core as mx
+    tensor_type = _tensor("B", "S")
+    graph = _single_primitive_graph(
+        "_activations_gelu",
+        (GraphValue("x", tensor_type),),
+        (GraphValueRef("x", tensor_type),),
+        tensor_type,
+    )
+    namespace: dict[str, object] = {}
+    exec(emit_mlx_model_code_from_graph_ir(graph), namespace)
+    model = namespace["AxonMlxModel"].from_state_dict({})
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    x_t = torch.linspace(-6, 6, 97, dtype=torch.float32, device=device).reshape(1, 97)
+    x = torch_state_dict_to_mlx({"x": x_t})["x"]
+
+    actual_np = model.forward(x)
+    actual = torch.from_numpy(np.asarray(actual_np))
+
+    model.forward = mx.compile(model.forward)
+    compiled_np = model.forward(x)
+    compiled = torch.from_numpy(np.asarray(compiled_np))
+
+    assert torch.allclose(compiled.to(actual.device), actual, atol=1e-6, rtol=1e-6)
+
+
+def test_codegen2_mlx_softmax_honors_dtype_argument() -> None:
+    pytest.importorskip("mlx")
+    tensor_type = _tensor("B", "S")
+    graph = _single_primitive_graph(
+        "_softmax",
+        (GraphValue("x", tensor_type),),
+        (
+            GraphValueRef("x", tensor_type),
+            GraphLiteral(-1, TypeInt()),
+            GraphLiteral("float32", TypeString()),
+        ),
+        tensor_type,
+    )
+    namespace: dict[str, object] = {}
+    exec(emit_mlx_model_code_from_graph_ir(graph), namespace)
+    model = namespace["AxonMlxModel"].from_state_dict({})
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(0)
+    x_t = (torch.randn(3, 11, dtype=torch.float16, device=device) * 8).contiguous()
+
+    actual_np = model.forward(x=torch_state_dict_to_mlx({"x": x_t})["x"])
+    actual = torch.from_numpy(np.asarray(actual_np))
+
+    expected = torch.softmax(x_t.float(), dim=-1)
+
+    assert actual.dtype == torch.float32
+    assert torch.allclose(actual.to(expected.device), expected, atol=1e-4, rtol=1e-4)
+
+
+def test_codegen2_mlx_materializes_final_logits_bias_flat_alias() -> None:
+    pytest.importorskip("mlx")
+    x_type = _tensor("B", "D")
+    y_type = _tensor("B", "V")
+    graph = _single_primitive_graph(
+        "_linear",
+        (GraphValue("x", x_type),),
+        (
+            GraphPath(absolute=True, parts=("shared",)),
+            GraphValueRef("x", x_type),
+            GraphLiteral(5, TypeDim()),
+            GraphLiteral(True, TypeBool()),
+            GraphLiteral(False, TypeBool()),
+            GraphLiteral(None, TypeNull()),
+            GraphLiteral("@weight", TypePath()),
+            GraphLiteral("@@final_logits_bias_flat", TypePath()),
+        ),
+        y_type,
+    )
+    namespace: dict[str, object] = {}
+    exec(emit_mlx_model_code_from_graph_ir(graph), namespace)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    weight_t = torch.arange(5 * 4, dtype=torch.float32, device=device).reshape(5, 4) / 13.0
+    bias_t = torch.arange(5, dtype=torch.float32, device=device).reshape(1, 5) / 7.0
+    x_t = torch.arange(3 * 4, dtype=torch.float32, device=device).reshape(3, 4) / 11.0
+    state = torch_state_dict_to_mlx({
+        "shared.weight": weight_t,
+        "final_logits_bias": bias_t,
+    })
+    model = namespace["AxonMlxModel"].from_state_dict(state)
+
+    actual_np = model.forward(x=torch_state_dict_to_mlx({"x": x_t})["x"])
+    actual = torch.from_numpy(np.asarray(actual_np))
+
+    expected = torch.nn.functional.linear(x_t, weight_t, bias_t.reshape(5))
+
+    assert torch.allclose(actual.to(expected.device), expected, atol=1e-6, rtol=1e-6)
+
+
+def test_codegen2_mlx_torch_state_dict_conversion() -> None:
+    pytest.importorskip("mlx")
+    import mlx.core as mx
+
+    t = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    result = torch_state_dict_to_mlx({"w": t})
+    assert "w" in result
+    assert isinstance(result["w"], mx.array)
+    assert result["w"].shape == (3, 4)
+    assert result["w"].dtype == mx.float32
 
 
 def test_graph_ir_preserves_list_destructuring_outputs() -> None:

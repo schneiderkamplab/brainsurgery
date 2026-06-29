@@ -231,10 +231,12 @@ def _axon_codegen_dump_to_text(
     lower_graph_fn = getattr(axon_module, "lower_axon_program_to_graph_ir")
 
     backend = backend.strip().lower()
-    if backend not in {"codegen2-torch", "codegen2-tinygrad"}:
-        raise typer.BadParameter("backend must be 'codegen2-torch' or 'codegen2-tinygrad'")
+    if backend not in {"codegen2-torch", "codegen2-tinygrad", "codegen2-mlx"}:
+        raise typer.BadParameter("backend must be 'codegen2-torch', 'codegen2-tinygrad', or 'codegen2-mlx'")
     if profile and backend != "codegen2-torch":
         raise typer.BadParameter("--profile-code is currently supported only for --backend codegen2-torch")
+    if backend == "codegen2-mlx" and align_devices:
+        raise typer.BadParameter("--align-devices is not supported with --backend codegen2-mlx")
 
     model_dir = weights or (_checkpoint_model_dir(checkpoint) if checkpoint is not None else None)
     model_config = None
@@ -276,7 +278,11 @@ def _axon_codegen_dump_to_text(
             profile=profile,
             align_devices=align_devices,
         )
-    emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_tinygrad")
+    if backend == "codegen2-tinygrad":
+        emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_tinygrad")
+        emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
+        return emit_fn(graph, class_name=class_name, model_config=model_config)
+    emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_mlx")
     emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
     return emit_fn(graph, class_name=class_name, model_config=model_config)
 
@@ -1100,6 +1106,11 @@ def axon_benchmark(
         min=1,
         help="Number of Axon profiling regions to print when --profile-axon is enabled.",
     ),
+    metal_capture: bool = typer.Option(
+        False,
+        "--metal-capture/--no-metal-capture",
+        help="Enable Metal GPU trace capture (mx.metal) during MLX backend inference. Writes .gputrace to log dir.",
+    ),
     table_format: str = typer.Option(
         "markdown",
         "--table-format",
@@ -1181,6 +1192,7 @@ def axon_benchmark(
             oom_cpu_fallback=oom_cpu_fallback,
             profile_axon=profile_axon,
             profile_axon_top_n=profile_axon_top_n,
+            metal_capture=metal_capture,
             table_format=table_format,
             log_dir=log_dir,
             stream_csv=stream_csv,

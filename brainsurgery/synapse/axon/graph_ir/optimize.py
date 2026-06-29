@@ -122,13 +122,21 @@ _TINYGRAD_BACKEND_INTRINSICS = frozenset(
         "__tinygrad_sdpa",
     }
 )
+_MLX_BACKEND_INTRINSICS = frozenset(
+    {
+        "__mlx_sdpa",
+        "__mlx_rope",
+    }
+)
 _BACKEND_INTRINSICS_BY_TARGET = {
     "codegen2-torch": _TORCH_BACKEND_INTRINSICS,
     "codegen2-tinygrad": _TINYGRAD_BACKEND_INTRINSICS,
+    "codegen2-mlx": _MLX_BACKEND_INTRINSICS,
 }
 _BACKEND_INTRINSIC_PREFIX_BY_TARGET = {
     "codegen2-torch": "__torch_",
     "codegen2-tinygrad": "__tinygrad_",
+    "codegen2-mlx": "__mlx_",
 }
 _BACKEND_INTRINSIC_TARGETS = {None, *_BACKEND_INTRINSICS_BY_TARGET}
 _SMALL_INLINE_NODE_LIMIT = 4
@@ -4736,6 +4744,84 @@ def _rewrite_torch_rope_intrinsics(
         new_nodes: list[GraphNode] = []
         for node in module.nodes:
             rewritten = _maybe_rewrite_node_to_torch_rope_apply_factors(
+                node,
+                module=module,
+                modules_by_name=modules_by_name,
+                provenance=provenance,
+            )
+            if rewritten is None:
+                new_nodes.append(node)
+            elif not _backend_intrinsic_enabled(enabled_intrinsics, rewritten.op.name):
+                new_nodes.append(node)
+            else:
+                changed = True
+                new_nodes.append(rewritten)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _maybe_rewrite_node_to_mlx_rope(
+    node: GraphNode,
+    *,
+    module: GraphModule,
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+) -> GraphNode | None:
+    call_rewrite = _maybe_rewrite_call_to_torch_rope_apply_factors(
+        node,
+        modules_by_name=modules_by_name,
+        provenance=provenance,
+    )
+    if call_rewrite is not None:
+        x = call_rewrite.inputs[0]
+        interleaved = call_rewrite.inputs[3]
+        return replace(
+            node,
+            op=GraphOp("__mlx_rope"),
+            inputs=(x, interleaved),
+            attrs={},
+        )
+    if len(node.outputs) != 1:
+        return None
+    local_provenance = provenance.module_local_provenance.get(module.name, {})
+    output_provenance = local_provenance.get(node.outputs[0].name)
+    if output_provenance is None:
+        return None
+    if not any(
+        fact.kind == "rope_apply_factors"
+        and isinstance(fact.value, GraphRopeApplyFactorsFact)
+        and not fact.value.interleaved
+        for fact in graph_provenance_facts(output_provenance)
+    ):
+        return None
+    operands = _match_rope_apply_factors_operands(node)
+    if operands is None:
+        return None
+    x, _sin, _cos = operands
+    return replace(
+        node,
+        op=GraphOp("__mlx_rope"),
+        inputs=(
+            x,
+            GraphLiteral(value=False, type_expr=TypeBool()),
+        ),
+        attrs={},
+    )
+
+
+def _rewrite_mlx_rope_intrinsics(
+    graph: GraphProgram,
+    *,
+    enabled_intrinsics: frozenset[str],
+) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    modules_by_name = {module.name: module for module in graph.modules}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            rewritten = _maybe_rewrite_node_to_mlx_rope(
                 node,
                 module=module,
                 modules_by_name=modules_by_name,
@@ -13631,6 +13717,27 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="tinygrad_sdpa_intrinsics")
+                current = candidate
+        if backend_intrinsic_target == "codegen2-mlx":
+            candidate = (
+                _rewrite_backend_sdpa_intrinsics(current, op_name="__mlx_sdpa")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_sdpa")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_sdpa_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_mlx_rope_intrinsics(current, enabled_intrinsics=enabled_backend_intrinsics)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_rope")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_rope_intrinsics")
                 current = candidate
         if config.constant_folding:
             module_effects = infer_graph_module_effects(current.modules)

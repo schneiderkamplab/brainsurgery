@@ -437,23 +437,41 @@ def _cleanup(device: torch.device) -> None:
         torch.mps.empty_cache()
 
 
+def _to_torch(value: Any) -> torch.Tensor | None:
+    if torch.is_tensor(value):
+        return value
+    try:
+        import mlx.core as mx
+        if isinstance(value, mx.array):
+            import numpy as np
+            return torch.from_numpy(np.asarray(value))
+    except ImportError:
+        pass
+    return None
+
 def _extract_logits(output: Any) -> torch.Tensor:
-    if torch.is_tensor(output):
-        return output
+    t = _to_torch(output)
+    if t is not None:
+        return t
     logits_attr = getattr(output, "logits", None)
-    if torch.is_tensor(logits_attr):
-        return logits_attr
+    t = _to_torch(logits_attr)
+    if t is not None:
+        return t
     if isinstance(output, dict):
         logits = output.get("logits")
-        if torch.is_tensor(logits):
-            return logits
+        t = _to_torch(logits)
+        if t is not None:
+            return t
         if len(output) == 1:
             only_value = next(iter(output.values()))
-            if torch.is_tensor(only_value):
-                return only_value
+            t = _to_torch(only_value)
+            if t is not None:
+                return t
         raise ValueError("Expected tensor logits in dict output")
-    if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
-        return output[0]
+    if isinstance(output, tuple) and output:
+        t = _to_torch(output[0])
+        if t is not None:
+            return t
     raise ValueError(
         f"Unsupported model output type for logits extraction: {type(output).__name__}"
     )
@@ -3109,6 +3127,14 @@ def _maybe_compile_model(
 ) -> Any:
     if not enabled:
         return model
+    try:
+        import mlx.core as mx
+        import mlx.nn as mx_nn
+        if isinstance(model, mx_nn.Module):
+            model._forward = mx.compile(model._forward)
+            return model
+    except ImportError:
+        pass
     compile_fn = getattr(torch, "compile", None)
     if compile_fn is None:
         raise ValueError("torch.compile is not available in this PyTorch build")
@@ -3314,6 +3340,7 @@ def _run_axon_test_single(
     oom_cpu_fallback: bool = True,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    metal_capture: bool = False,
     forward_warmup: int = 0,
     forward_repeat: int = 1,
 ) -> dict[str, Any]:
@@ -3347,11 +3374,11 @@ def _run_axon_test_single(
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
         backend_token = "codegen2-torch"
-    valid_backends = {"codegen2-torch", "codegen2-tinygrad", "runtime2-torch", "pipeline2-torch"}
+    valid_backends = {"codegen2-torch", "codegen2-tinygrad", "codegen2-mlx", "runtime2-torch", "pipeline2-torch"}
     if backend_token not in valid_backends:
         raise ValueError(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'runtime2-torch', or 'pipeline2-torch'"
+            "'codegen2-mlx', 'runtime2-torch', or 'pipeline2-torch'"
         )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
@@ -3489,6 +3516,16 @@ def _run_axon_test_single(
         else:
             if axon_backend == "codegen2-tinygrad":
                 code = emit_tinygrad_model_code_from_graph_ir(
+                    graph_program,
+                    class_name=class_name,
+                    model_config=model_config,
+                    profile=profile_axon,
+                )
+            elif axon_backend == "codegen2-mlx":
+                from brainsurgery.synapse.axon.codegen2_mlx import (
+                    emit_model_code_from_graph_ir as emit_mlx_model_code,
+                )
+                code = emit_mlx_model_code(
                     graph_program,
                     class_name=class_name,
                     model_config=model_config,
@@ -4391,6 +4428,14 @@ def _run_axon_test_single(
                     ).to(target_device).eval()
                 else:
                     syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
+            elif axon_backend == "codegen2-mlx":
+                if local_state_dict is None:
+                    syn = model_cls.from_safetensors(
+                        safetensors_files,
+                        model_config=model_config,
+                    ).eval()
+                else:
+                    syn = model_cls.from_state_dict(local_state_dict).eval()
             elif local_state_dict is None:
                 local_state_dict = _load_state_dict(
                     safetensors_files,
@@ -4414,7 +4459,7 @@ def _run_axon_test_single(
                     local_state_dict,
                     param_devices=param_devices,
                 ).eval()
-            elif axon_backend != "codegen2-tinygrad":
+            elif axon_backend not in {"codegen2-tinygrad", "codegen2-mlx"}:
                 syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
             if profile_axon:
                 enable_profile = getattr(syn, "enable_profile", None)
@@ -4522,6 +4567,17 @@ def _run_axon_test_single(
                             return torch.cat(logits_parts, dim=0)
                 return _extract_logits(model(**io["syn_inputs"]))
 
+            import time as _time
+            _metal_capture: Any = None
+            if metal_capture and axon_backend == "codegen2-mlx":
+                try:
+                    import mlx.metal as _mx_metal
+                    _capture_path = f"mx_gputrace_{int(_time.time())}.gputrace"
+                    _mx_metal.start_capture(_capture_path)
+                    _metal_capture = _mx_metal
+                except Exception:
+                    pass
+
             syn_gen: torch.Tensor | None = None
             syn_time = 0.0
             syn_forward_samples: list[float] = []
@@ -4563,8 +4619,16 @@ def _run_axon_test_single(
                 if callable(profile_summary):
                     profile_rows = list(profile_summary(profile_axon_top_n))
                     _print_axon_profile_summary(profile_rows)
+            if _metal_capture is not None:
+                try:
+                    _metal_capture.stop_capture()
+                except Exception:
+                    pass
+
+            if not torch.is_tensor(syn_logits):
+                syn_logits = _to_torch(syn_logits)
             syn_logits_cpu = syn_logits.detach().cpu()
-            syn_gen_cpu = None if syn_gen is None else syn_gen.detach().cpu()
+            syn_gen_cpu = None if syn_gen is None else (_to_torch(syn_gen).detach().cpu() if not torch.is_tensor(syn_gen) else syn_gen.detach().cpu())
             del syn
             _cleanup(target_device)
             return {
@@ -5026,6 +5090,7 @@ def run_axon_test(
     hf_strict_dtype: bool = False,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    metal_capture: bool = False,
     forward_warmup: int = 0,
     forward_repeat: int = 1,
 ) -> dict[str, Any]:
@@ -5066,6 +5131,7 @@ def run_axon_test(
         hf_strict_dtype=hf_strict_dtype,
         profile_axon=profile_axon,
         profile_axon_top_n=profile_axon_top_n,
+        metal_capture=metal_capture,
         forward_warmup=forward_warmup,
         forward_repeat=forward_repeat,
     )
