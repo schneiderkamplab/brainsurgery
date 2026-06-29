@@ -185,9 +185,12 @@ def _axon_graph_ir_to_dot(
         program = optimize_ast_fn(program, main_module=main_module)
     graph = lower_graph_fn(program, main_module=main_module)
     if optimize_graph:
+        effective_graph_backend_intrinsics = graph_backend_intrinsics
+        if effective_graph_backend_intrinsics is None and backend == "codegen2-triton":
+            effective_graph_backend_intrinsics = "codegen2-triton"
         graph = optimize_graph_fn(
             graph,
-            config=graph_optimize_config_cls(backend_intrinsics=graph_backend_intrinsics),
+            config=graph_optimize_config_cls(backend_intrinsics=effective_graph_backend_intrinsics),
         )
     return render_dot_fn(
         graph,
@@ -231,10 +234,14 @@ def _axon_codegen_dump_to_text(
     lower_graph_fn = getattr(axon_module, "lower_axon_program_to_graph_ir")
 
     backend = backend.strip().lower()
-    if backend not in {"codegen2-torch", "codegen2-tinygrad"}:
-        raise typer.BadParameter("backend must be 'codegen2-torch' or 'codegen2-tinygrad'")
-    if profile and backend != "codegen2-torch":
-        raise typer.BadParameter("--profile-code is currently supported only for --backend codegen2-torch")
+    if backend not in {"codegen2-torch", "codegen2-tinygrad", "codegen2-triton"}:
+        raise typer.BadParameter(
+            "backend must be 'codegen2-torch', 'codegen2-tinygrad', or 'codegen2-triton'"
+        )
+    if profile and backend not in {"codegen2-torch", "codegen2-triton"}:
+        raise typer.BadParameter(
+            "--profile-code is currently supported only for --backend codegen2-torch or codegen2-triton"
+        )
 
     model_dir = weights or (_checkpoint_model_dir(checkpoint) if checkpoint is not None else None)
     model_config = None
@@ -268,6 +275,16 @@ def _axon_codegen_dump_to_text(
 
     if backend == "codegen2-torch":
         emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_torch")
+        emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
+        return emit_fn(
+            graph,
+            class_name=class_name,
+            model_config=model_config,
+            profile=profile,
+            align_devices=align_devices,
+        )
+    if backend == "codegen2-triton":
+        emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_triton")
         emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
         return emit_fn(
             graph,
@@ -382,8 +399,8 @@ def axon_stage_dump(
         "--graph-backend-intrinsics",
         help=(
             "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
-            "Use codegen2-torch for all Torch intrinsics, or "
-            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list. "
+            "Use a backend name for all supported intrinsics, or "
+            "backend:intrinsic[,intrinsic...] for an allow-list. "
             "Default keeps Graph IR backend-neutral."
         ),
     ),
@@ -482,8 +499,8 @@ def axon_graph_ir_dot(
         "--graph-backend-intrinsics",
         help=(
             "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
-            "Use codegen2-torch for all Torch intrinsics, or "
-            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list. "
+            "Use a backend name for all supported intrinsics, or "
+            "backend:intrinsic[,intrinsic...] for an allow-list. "
             "Default keeps Graph IR backend-neutral."
         ),
     ),
@@ -571,7 +588,7 @@ def axon_codegen_dump(
     backend: str = typer.Option(
         "codegen2-torch",
         "--backend",
-        help="Codegen backend: codegen2-torch or codegen2-tinygrad.",
+        help="Codegen backend: codegen2-torch, codegen2-tinygrad, or codegen2-triton.",
     ),
     class_name: str = typer.Option(
         "AxonGeneratedModel",
@@ -593,8 +610,8 @@ def axon_codegen_dump(
         "--graph-backend-intrinsics",
         help=(
             "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
-            "Use codegen2-torch for all Torch intrinsics, or "
-            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list. "
+            "Use a backend name for all supported intrinsics, or "
+            "backend:intrinsic[,intrinsic...] for an allow-list. "
             "Default keeps Graph IR backend-neutral."
         ),
     ),
@@ -717,6 +734,18 @@ def axon_test(
         min=1,
         help="Number of timed forward passes; reported forward time is the mean.",
     ),
+    generate_warmup: int = typer.Option(
+        0,
+        "--generate-warmup",
+        min=0,
+        help="Number of untimed warmup generate calls before timed generate repeats.",
+    ),
+    generate_repeat: int = typer.Option(
+        1,
+        "--generate-repeat",
+        min=1,
+        help="Number of timed generate calls; reported generate time is the mean.",
+    ),
     trace_layers: bool = typer.Option(
         False,
         "--trace-layers/--no-trace-layers",
@@ -820,8 +849,8 @@ def axon_test(
         "--graph-backend-intrinsics",
         help=(
             "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
-            "Use codegen2-torch for all Torch intrinsics, or "
-            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list."
+            "Use a backend name for all supported intrinsics, or "
+            "backend:intrinsic[,intrinsic...] for an allow-list."
         ),
     ),
 ) -> None:
@@ -845,6 +874,8 @@ def axon_test(
             benchmark_mode=benchmark_mode,
             forward_warmup=forward_warmup,
             forward_repeat=forward_repeat,
+            generate_warmup=generate_warmup,
+            generate_repeat=generate_repeat,
             trace_layers=trace_layers,
             hf_align_bf16_profile=hf_align_bf16_profile,
             hf_align_mask_contract=hf_align_mask_contract,
@@ -952,6 +983,18 @@ def axon_benchmark(
         min=1,
         help="Number of timed forward passes; reported forward time is the mean.",
     ),
+    generate_warmup: int = typer.Option(
+        0,
+        "--generate-warmup",
+        min=0,
+        help="Number of untimed warmup generate calls before timed generate repeats.",
+    ),
+    generate_repeat: int = typer.Option(
+        1,
+        "--generate-repeat",
+        min=1,
+        help="Number of timed generate calls; reported generate time is the mean.",
+    ),
     trace_layers: bool = typer.Option(
         False,
         "--trace-layers/--no-trace-layers",
@@ -1035,7 +1078,7 @@ def axon_benchmark(
         "--axon-backend",
         help=(
             "Axon execution backend (codegen2-torch, codegen2-tinygrad, "
-            "runtime2-torch, or pipeline2-torch)."
+            "codegen2-triton, runtime2-torch, or pipeline2-torch)."
         ),
     ),
     axon_typechecker: str = typer.Option(
@@ -1067,8 +1110,8 @@ def axon_benchmark(
         "--graph-backend-intrinsics",
         help=(
             "Opt in to backend-specific Graph IR intrinsics during --optimize-graph. "
-            "Use codegen2-torch for all Torch intrinsics, or "
-            "codegen2-torch:intrinsic[,intrinsic...] for an allow-list."
+            "Use a backend name for all supported intrinsics, or "
+            "backend:intrinsic[,intrinsic...] for an allow-list."
         ),
     ),
     skip_hf: bool = typer.Option(
@@ -1155,6 +1198,8 @@ def axon_benchmark(
             benchmark_mode=benchmark_mode,
             forward_warmup=forward_warmup,
             forward_repeat=forward_repeat,
+            generate_warmup=generate_warmup,
+            generate_repeat=generate_repeat,
             trace_layers=trace_layers,
             hf_align_bf16_profile=hf_align_bf16_profile,
             hf_align_mask_contract=hf_align_mask_contract,

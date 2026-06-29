@@ -62,6 +62,7 @@ from ..graph_ir.effects import (
     infer_graph_module_effects,
     infer_graph_module_usages,
 )
+from ..graph_ir.ownership import infer_graph_ownership
 from ..graph_ir.substitute import substitute_graph_node_dims, substitute_graph_operand_dims
 
 
@@ -341,6 +342,22 @@ def _tensor_dims_from_type(type_expr: Any) -> tuple[Any, ...] | None:
     if isinstance(type_expr, TypeTensor):
         return tuple(type_expr.dims)
     return None
+
+
+def _is_static_mask_type(type_expr: Any) -> bool:
+    if isinstance(type_expr, TypeOptional):
+        return _is_static_mask_type(type_expr.inner)
+    if isinstance(type_expr, TypeNamed) and type_expr.name.endswith("StaticMask"):
+        return True
+    if (
+        isinstance(type_expr, TypeTuple)
+        and len(type_expr.items) == 2
+        and isinstance(type_expr.items[0], TypeTensor)
+        and len(type_expr.items[0].dims) == 2
+        and isinstance(type_expr.items[1], TypeDim)
+    ):
+        return True
+    return False
 
 
 def _fresh_inline_dim(name: str, *, prefix: str) -> str:
@@ -784,6 +801,20 @@ def _module_free_dim_refs(module: GraphModule, *, global_names: set[str]) -> set
     for operand in module.outputs:
         _free_dim_refs_in_operand(operand, local=local | global_names, out=out)
     return out
+
+
+def _owned_inplace_primitive_ops(program: GraphProgram, inplace_node_ids: frozenset[str]) -> frozenset[str]:
+    by_op: dict[str, set[str]] = {}
+    for module in program.modules:
+        for node in module.nodes:
+            if node.op.name.startswith("core."):
+                continue
+            by_op.setdefault(node.op.name, set()).add(node.id)
+    return frozenset(
+        op_name
+        for op_name, node_ids in by_op.items()
+        if node_ids and node_ids <= inplace_node_ids
+    )
 
 
 def _collect_term_dim_ref_names(operand: GraphOperand, out: set[str]) -> None:
@@ -1360,24 +1391,27 @@ class Codegen2GraphModel(nn.Module):
         )
 
     @staticmethod
-    def _assign_unit_slice(
+    def _assign_slice(
         x: torch.Tensor,
-        dim: Any,
-        index: Any,
         src: torch.Tensor,
+        dim: Any,
+        start: Any,
+        end: Any,
     ) -> torch.Tensor:
+        out = x.clone()
         dim = int(dim)
         if dim < 0:
-            dim += x.dim()
-        index = int(index)
-        sl = [slice(None)] * x.dim()
-        sl[dim] = slice(index, index + 1)
-        if src.device != x.device:
-            src = src.to(device=x.device)
-        if x.is_floating_point() and src.is_floating_point() and src.dtype != x.dtype:
-            src = src.to(dtype=x.dtype)
-        x[tuple(sl)] = src
-        return x
+            dim += out.dim()
+        start = int(start)
+        end = int(end)
+        sl = [slice(None)] * out.dim()
+        sl[dim] = slice(start, end)
+        if src.device != out.device:
+            src = src.to(device=out.device)
+        if out.is_floating_point() and src.is_floating_point() and out.dtype != src.dtype:
+            src = src.to(dtype=out.dtype)
+        out[tuple(sl)] = src
+        return out
 
     def _scatter(self, x: torch.Tensor, index: torch.Tensor, src: Any, dim: Any) -> torch.Tensor:
         dim = int(dim)
@@ -2440,10 +2474,10 @@ class Codegen2GraphModel(nn.Module):
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else -1
             out(self._scatter(args[0], args[1], args[2], dim))
             return True
-        if primitive == "assign_unit_slice":
-            if len(args) < 4:
-                raise ValueError("_assign_unit_slice expects x, dim, index, src")
-            out(self._assign_unit_slice(args[0], args[1], args[2], args[3]))
+        if primitive == "assign_slice":
+            if len(args) < 5:
+                raise ValueError("_assign_slice expects x, src, dim, start, end")
+            out(self._assign_slice(args[0], args[1], args[2], args[3], args[4]))
             return True
         if primitive == "index_add":
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else 0
@@ -2971,6 +3005,11 @@ class _DirectTorchEmitter:
         self.state_key_filter_prefixes = _state_key_filter_prefixes(program)
         self.emitted_module_names = self._emitted_module_names()
         self.needs_expert_banks = _graph_uses_expert_linear(program)
+        self.ownership = infer_graph_ownership(program, assume_module_inputs_owned=True)
+        self.inplace_owned_primitive_ops = _owned_inplace_primitive_ops(
+            program,
+            self.ownership.inplace_assign_slice_node_ids,
+        )
         self._inline_stack: set[str] = set()
         self._emitted_defs_stack: list[dict[str, Any]] = []
         self._emitted_aliases_stack: list[dict[str, GraphOperand]] = []
@@ -3462,13 +3501,31 @@ class _DirectTorchEmitter:
         add(lines, 8, "return F.conv1d(x, weight, bias=bias, stride=int(stride), dilation=int(dilation), groups=int(groups))")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _assign_unit_slice(x, dim, index, src):")
+        add(lines, 4, "def _assign_slice(x, src, dim, start, end):")
+        add(lines, 8, "out = x.clone()")
+        add(lines, 8, "dim = int(dim)")
+        add(lines, 8, "if dim < 0:")
+        add(lines, 12, "dim += out.dim()")
+        add(lines, 8, "start = int(start)")
+        add(lines, 8, "end = int(end)")
+        add(lines, 8, "sl = [slice(None)] * out.dim()")
+        add(lines, 8, "sl[dim] = slice(start, end)")
+        add(lines, 8, "if src.device != out.device:")
+        add(lines, 12, "src = src.to(device=out.device)")
+        add(lines, 8, "if out.is_floating_point() and src.is_floating_point() and out.dtype != src.dtype:")
+        add(lines, 12, "src = src.to(dtype=out.dtype)")
+        add(lines, 8, "out[tuple(sl)] = src")
+        add(lines, 8, "return out")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _assign_slice_inplace(x, src, dim, start, end):")
         add(lines, 8, "dim = int(dim)")
         add(lines, 8, "if dim < 0:")
         add(lines, 12, "dim += x.dim()")
-        add(lines, 8, "index = int(index)")
+        add(lines, 8, "start = int(start)")
+        add(lines, 8, "end = int(end)")
         add(lines, 8, "sl = [slice(None)] * x.dim()")
-        add(lines, 8, "sl[dim] = slice(index, index + 1)")
+        add(lines, 8, "sl[dim] = slice(start, end)")
         add(lines, 8, "if src.device != x.device:")
         add(lines, 12, "src = src.to(device=x.device)")
         add(lines, 8, "if x.is_floating_point() and src.is_floating_point() and x.dtype != src.dtype:")
@@ -4022,6 +4079,12 @@ class _DirectTorchEmitter:
         add(lines, 4, "def _forward(self, input_ids=None, **inputs):")
         args: list[str] = []
         first_input = main.inputs[0].name if main.inputs else None
+        static_attention_inputs = {
+            value.name
+            for value in main.inputs
+            if value.name in {"attn_mask", "attention_mask", "decoder_attention_mask"}
+            and _is_static_mask_type(value.type_expr)
+        }
         for value in main.inputs:
             if value.name == "input_ids":
                 add(lines, 8, "if input_ids is None:")
@@ -4043,6 +4106,13 @@ class _DirectTorchEmitter:
                     add(lines, 8, f"{value.name} = inputs[{value.name!r}]")
                 else:
                     add(lines, 8, f"{value.name} = inputs.get({value.name!r}, None)")
+                if value.name in static_attention_inputs:
+                    add(lines, 8, f"if torch.is_tensor({value.name}):")
+                    add(lines, 12, f"__static_len_{value.name} = int({value.name}.shape[1])")
+                    add(lines, 12, f"__static_capacity_{value.name} = max(int(self.config.get('n_positions', self.config.get('max_position_embeddings', __static_len_{value.name}))), __static_len_{value.name})")
+                    add(lines, 12, f"__static_store_{value.name} = torch.zeros(({value.name}.shape[0], __static_capacity_{value.name}), dtype={value.name}.dtype, device={value.name}.device)")
+                    add(lines, 12, f"__static_store_{value.name}[:, :__static_len_{value.name}] = {value.name}")
+                    add(lines, 12, f"{value.name} = (__static_store_{value.name}, __static_len_{value.name})")
                 args.append(value.name)
         add(lines, 8, f"result = self.{self.method_names[main.name]}({', '.join(args)})")
         names = _main_output_names(self.program, main)
@@ -4061,6 +4131,13 @@ class _DirectTorchEmitter:
         output_names = set(_main_output_names(self.program, main))
         attention_name = "attn_mask" if "attn_mask" in input_names else (
             "attention_mask" if "attention_mask" in input_names else None
+        )
+        attention_value = next(
+            (value for value in main.inputs if value.name == attention_name),
+            None,
+        )
+        uses_static_attention_mask = (
+            attention_value is not None and _is_static_mask_type(attention_value.type_expr)
         )
         decoder_attention_name = (
             "decoder_attention_mask" if "decoder_attention_mask" in input_names else None
@@ -4089,6 +4166,17 @@ class _DirectTorchEmitter:
         add(lines, 12, "return torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)")
         add(lines, 8, "def _ones_like_ids(ids):")
         add(lines, 12, "return torch.ones(ids.shape, dtype=torch.long, device=ids.device)")
+        add(lines, 8, "def _static_attention_mask(mask, prompt_ids, capacity):")
+        add(lines, 12, "valid = _ones_like_ids(prompt_ids) if mask is None else mask.to(device=prompt_ids.device)")
+        add(lines, 12, "store = torch.zeros((valid.shape[0], int(capacity)), dtype=valid.dtype, device=valid.device)")
+        add(lines, 12, "length = int(valid.shape[1])")
+        add(lines, 12, "store[:, :length] = valid")
+        add(lines, 12, "return (store, length)")
+        add(lines, 8, "def _append_static_attention_mask(mask, next_id):")
+        add(lines, 12, "store, length = mask")
+        add(lines, 12, "src = _ones_like_ids(next_id).to(dtype=store.dtype, device=store.device)")
+        add(lines, 12, "store[:, length:length + 1] = src")
+        add(lines, 12, "return (store, length + 1)")
         add(lines, 8, "def _generation_limit(prompt_ids):")
         add(lines, 12, "requested = kwargs.pop('max_new_tokens', None)")
         add(lines, 12, "if requested is not None:")
@@ -4128,6 +4216,9 @@ class _DirectTorchEmitter:
                 add(lines, 8, f"attention_mask = kwargs.pop({attention_name!r}, kwargs.pop({other!r}, None))")
                 add(lines, 8, "if attention_mask is None:")
                 add(lines, 12, "attention_mask = _ones_like_ids(out)")
+                if uses_static_attention_mask:
+                    add(lines, 8, "static_capacity = max(int(self.config.get('n_positions', self.config.get('max_position_embeddings', out.shape[1] + limit))), int(out.shape[1]) + int(limit))")
+                    add(lines, 8, "attention_mask = _static_attention_mask(attention_mask, out, static_capacity)")
             if use_cache_name is not None:
                 add(lines, 8, f"kwargs.pop({use_cache_name!r}, None)")
             add(lines, 8, "for _ in range(limit):")
@@ -4149,8 +4240,14 @@ class _DirectTorchEmitter:
             add(lines, 12, "out = torch.cat([out, next_id], dim=1)")
             if attention_name is not None:
                 if self.align_devices:
-                    add(lines, 12, "attention_mask = self._move_to(attention_mask, next_id.device)")
-                add(lines, 12, "attention_mask = torch.cat([attention_mask, _ones_like_ids(next_id)], dim=1)")
+                    if uses_static_attention_mask:
+                        add(lines, 12, "attention_mask = (self._move_to(attention_mask[0], next_id.device), attention_mask[1])")
+                    else:
+                        add(lines, 12, "attention_mask = self._move_to(attention_mask, next_id.device)")
+                if uses_static_attention_mask:
+                    add(lines, 12, "attention_mask = _append_static_attention_mask(attention_mask, next_id)")
+                else:
+                    add(lines, 12, "attention_mask = torch.cat([attention_mask, _ones_like_ids(next_id)], dim=1)")
             add(lines, 12, "if finished is not None and bool(finished.all().item()):")
             add(lines, 16, "break")
             add(lines, 8, "return out")
@@ -5307,6 +5404,21 @@ class _DirectTorchEmitter:
         primitive = _normalize_primitive_op(op)
         return self._primitive_expr(primitive, node, local=local, symbols_dict=symbols_dict)
 
+    def _assign_slice_inplace_allowed(self, node: Any) -> bool:
+        if node.id in self.ownership.inplace_assign_slice_node_ids:
+            return True
+        # Codegen may inline ordinary Axon definitions after ownership has run.
+        # In that case the primitive node id is rewritten.  If all original
+        # occurrences of the same primitive op were proven owned, synthesized
+        # inline copies inherit the same lowering.
+        if node.op.name in self.inplace_owned_primitive_ops:
+            return True
+        source_module = getattr(node, "source_module", None)
+        if not source_module:
+            return False
+        source_node_id = f"{source_module}:1"
+        return source_node_id in self.ownership.inplace_assign_slice_node_ids
+
     def _operand_may_be_tensor(self, operand: GraphOperand) -> bool:
         type_expr = getattr(operand, "type_expr", None)
         if isinstance(type_expr, TypeOptional):
@@ -5489,10 +5601,12 @@ class _DirectTorchEmitter:
                 f"(self._rope_apply_factors({args[0]}, {args[2]}, {args[3]}, {interleaved}), "
                 f"self._rope_apply_factors({args[1]}, {args[2]}, {args[3]}, {interleaved}))"
             )
-        if primitive == "assign_unit_slice":
-            if len(args) < 4:
-                raise ValueError("_assign_unit_slice expects x, dim, index, src")
-            return f"self._assign_unit_slice({args[0]}, {args[1]}, {args[2]}, {args[3]})"
+        if primitive == "assign_slice":
+            if len(args) < 5:
+                raise ValueError("_assign_slice expects x, src, dim, start, end")
+            if self._assign_slice_inplace_allowed(node):
+                return f"self._assign_slice_inplace({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})"
+            return f"self._assign_slice({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})"
         if primitive == "_torch_gate_up_linear_pair":
             if len(args) < 7:
                 raise ValueError("__torch_gate_up_linear_pair expects input, gate/up weight paths, gate/up bias paths, bias, and transpose")
@@ -5704,7 +5818,7 @@ class _DirectTorchEmitter:
             "require": lambda: f"self._require_value({args[0]})",
             "gather": lambda: f"torch.gather({args[0]}, dim={int_arg(2, '-1')}, index=self._move_to({args[1]}, {args[0]}.device))",
             "scatter": lambda: f"self._scatter({args[0]}, {args[1]}, {args[2]}, {int_arg(3, '-1')})",
-            "assign_unit_slice": lambda: f"self._assign_unit_slice({args[0]}, {args[1]}, {args[2]}, {args[3]})",
+            "assign_slice": lambda: f"self._assign_slice({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "index_add": lambda: f"torch.index_add({args[0]}, dim={int_arg(3, '0')}, index=self._move_to({args[1]}, {args[0]}.device), source=self._move_to({args[2]}, {args[0]}.device))",
             "and": lambda: (
                 f"(lambda _a, _b: torch.logical_and(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"

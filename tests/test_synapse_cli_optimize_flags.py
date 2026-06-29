@@ -160,3 +160,4 @@ def test_synapse_codegen_dump_exposes_codegen2_flags() -> None:
     assert "--optimize-graph" in help_text
     assert "--profile-code" in help_text
     assert "codegen2-torch" in help_text
+    assert "codegen2-triton" in help_text

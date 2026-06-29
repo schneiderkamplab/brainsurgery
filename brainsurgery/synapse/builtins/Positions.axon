@@ -1,4 +1,5 @@
 import Math (PI, clamp, cos, exp, floor, log, sin, sqrt)
+import Masking (StaticMask)
 import NN (embedding, layernorm, linear)
 import Params param
 import Tensor (
@@ -31,6 +32,7 @@ export (
   linear_position_bias,
   linear_position_bias_for_input,
   position_ids,
+  position_ids_static,
   relative_bias_disentangled,
   relative_position_bias,
   rope_pair_base,
@@ -87,6 +89,19 @@ position_ids :: TokenIds[B,S] -> ?Tensor[B,SM] -> ?Dim -> ?Int -> Tensor[B,S]
 position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = (attn_mask == null)
   ? (position_ids_nomask x past_length)
   : (position_ids_masked x attn_mask pad_fill)
+
+position_ids_static_masked :: TokenIds[B,S] -> StaticMask[B,C] -> Int -> Tensor[B,S]
+position_ids_static_masked x attn_mask pad_fill = do
+  mask_values, length <- attn_mask
+  pos <- cast mask_values dtype="long" |> cumsum dim=-1
+  pos <- where (eq mask_values 0) pad_fill (pos - 1)
+  return slice pos dim=-1 start=(length - S) end=length
+
+
+position_ids_static :: TokenIds[B,S] -> ?StaticMask[B,C] -> ?Dim -> ?Int -> Tensor[B,S]
+position_ids_static x ?attn_mask=null ?past_length=0 ?pad_fill=0 = (attn_mask == null)
+  ? (position_ids_nomask x past_length)
+  : (position_ids_static_masked x attn_mask pad_fill)
 
 
 position_ids_scale :: Tensor[B,SM] -> Float -> Tensor[B,SM]

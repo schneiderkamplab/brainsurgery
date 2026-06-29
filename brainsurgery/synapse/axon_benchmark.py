@@ -665,6 +665,8 @@ def _run_benchmark_pair(
     profile_axon_top_n: int = 40,
     forward_warmup: int = 0,
     forward_repeat: int = 1,
+    generate_warmup: int = 0,
+    generate_repeat: int = 1,
 ) -> dict[str, Any]:
     model_dir = _ensure_checkpoint_model_dir(repo_root=repo_root, checkpoint_id=pair.checkpoint_id)
     print()
@@ -714,6 +716,8 @@ def _run_benchmark_pair(
         profile_axon_top_n=profile_axon_top_n,
         forward_warmup=forward_warmup,
         forward_repeat=forward_repeat,
+        generate_warmup=generate_warmup,
+        generate_repeat=generate_repeat,
     )
     enriched = dict(result)
     enriched["axon_file"] = pair.axon_file
@@ -1193,6 +1197,8 @@ def run_axon_benchmark(
     profile_axon_top_n: int = 40,
     forward_warmup: int = 0,
     forward_repeat: int = 1,
+    generate_warmup: int = 0,
+    generate_repeat: int = 1,
     table_format: str = "markdown",
     log_dir: Path | None = None,
     stream_csv: Path | None = None,
@@ -1204,11 +1210,17 @@ def run_axon_benchmark(
     backend_token = str(axon_backend).strip().lower()
     if backend_token == "single":
         backend_token = "codegen2-torch"
-    valid_backends = {"codegen2-torch", "codegen2-tinygrad", "runtime2-torch", "pipeline2-torch"}
+    valid_backends = {
+        "codegen2-torch",
+        "codegen2-tinygrad",
+        "codegen2-triton",
+        "runtime2-torch",
+        "pipeline2-torch",
+    }
     if backend_token not in valid_backends:
         raise ValueError(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'runtime2-torch', or 'pipeline2-torch'"
+            "'codegen2-triton', 'runtime2-torch', or 'pipeline2-torch'"
         )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
@@ -1218,6 +1230,8 @@ def run_axon_benchmark(
     benchmark_mode = _resolve_benchmark_mode(benchmark_mode)
     forward_warmup = max(0, int(forward_warmup))
     forward_repeat = max(1, int(forward_repeat))
+    generate_warmup = max(0, int(generate_warmup))
+    generate_repeat = max(1, int(generate_repeat))
     if axon_backend != "pipeline2-torch" and pipeline_parallel_size is not None:
         raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2-torch")
     repo_root = _repo_root()
@@ -1322,6 +1336,8 @@ def run_axon_benchmark(
         "profile_axon_top_n": profile_axon_top_n,
         "forward_warmup": forward_warmup,
         "forward_repeat": forward_repeat,
+        "generate_warmup": generate_warmup,
+        "generate_repeat": generate_repeat,
     }
 
     if stream_csv is not None:

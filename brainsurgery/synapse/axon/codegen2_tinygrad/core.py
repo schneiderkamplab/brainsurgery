@@ -4,9 +4,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional
+from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeList, TypeOptional
 from ..codegen2_common import normalize_primitive_op
-from ..codegen2_torch.core import _DirectTorchEmitter, graph_main_output_names
+from ..codegen2_torch.core import _DirectTorchEmitter, _is_static_mask_type, graph_main_output_names
 from ..graph_ir import GraphProgram, validate_graph_program
 
 
@@ -41,6 +41,7 @@ SUPPORTED_TINYGRAD_PRIMITIVES: frozenset[str] = frozenset({
     "reshape",
     "arange",
     "slice",
+    "assign_slice",
     "chunk",
     "split",
     "concat",
@@ -166,6 +167,12 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "self._jit_enabled = True")
         add(lines, 8, "self._forward_jits = {}")
         add(lines, 8, "self._forward_jit_seen = set()")
+        add(lines, 8, "self._tinygrad_mutable_slices = False")
+        add(lines, 8, "self._tinygrad_owned_static_cache_roots = set()")
+        add(lines, 8, "self._tinygrad_owned_static_cache_views = {}")
+        add(lines, 8, "self._tinygrad_pending_static_cache_assign = None")
+        add(lines, 8, "self._tinygrad_decode_cache_kv = None")
+        add(lines, 8, "self._tinygrad_owned_decode = bool(int(os.environ.get('AXON_TINYGRAD_OWNED_DECODE', '0')))")
         add(lines, 8, "self.load_state_dict(state_dict)")
         add(lines, 4, "")
         add(lines, 4, "def enable_profile(self, enabled=True, *, cuda=True, reset=True):")
@@ -241,6 +248,9 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "self._embedding_aranges = {}")
         add(lines, 8, "self._forward_jits = {}")
         add(lines, 8, "self._forward_jit_seen = set()")
+        add(lines, 8, "self._tinygrad_owned_static_cache_views = {}")
+        add(lines, 8, "self._tinygrad_pending_static_cache_assign = None")
+        add(lines, 8, "self._tinygrad_decode_cache_kv = None")
         add(lines, 8, "self.setup()")
         add(lines, 8, "self._symbols = self._eval_symbols()")
         add(lines, 8, "return self")
@@ -270,6 +280,12 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 4, "def _jit_signature(self, value):")
         add(lines, 8, "if isinstance(value, Tensor):")
         add(lines, 12, "return ('tensor', tuple(value.shape), str(value.dtype), str(value.device))")
+        add(lines, 8, "if isinstance(value, UOp):")
+        add(lines, 12, "try:")
+        add(lines, 16, "var, _ = value.unbind()")
+        add(lines, 16, "return ('uop', var.expr, var.arg[1], var.arg[2], str(var.dtype))")
+        add(lines, 12, "except Exception:")
+        add(lines, 16, "return ('uop-expr', str(value))")
         add(lines, 8, "if isinstance(value, tuple):")
         add(lines, 12, "return ('tuple', tuple(self._jit_signature(item) for item in value))")
         add(lines, 8, "if isinstance(value, list):")
@@ -278,21 +294,50 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 12, "return ('dict', tuple((key, self._jit_signature(item)) for key, item in sorted(value.items())))")
         add(lines, 8, "return ('value', value)")
         add(lines, 4, "")
+        add(lines, 4, "def _collect_jit_uops(self, value, out=None):")
+        add(lines, 8, "if out is None:")
+        add(lines, 12, "out = []")
+        add(lines, 8, "if isinstance(value, UOp):")
+        add(lines, 12, "out.append(value)")
+        add(lines, 8, "elif isinstance(value, (tuple, list)):")
+        add(lines, 12, "for item in value:")
+        add(lines, 16, "self._collect_jit_uops(item, out)")
+        add(lines, 8, "elif isinstance(value, dict):")
+        add(lines, 12, "for item in value.values():")
+        add(lines, 16, "self._collect_jit_uops(item, out)")
+        add(lines, 8, "return out")
+        add(lines, 4, "")
+        add(lines, 4, "def _jit_return_safe(self, value):")
+        add(lines, 8, "if isinstance(value, UOp):")
+        add(lines, 12, "return Tensor.empty((), dtype=dtypes.int64, device=self._tiny_device)")
+        add(lines, 8, "if isinstance(value, tuple):")
+        add(lines, 12, "return tuple(self._jit_return_safe(item) for item in value)")
+        add(lines, 8, "if isinstance(value, list):")
+        add(lines, 12, "return [self._jit_return_safe(item) for item in value]")
+        add(lines, 8, "if isinstance(value, dict):")
+        add(lines, 12, "return {key: self._jit_return_safe(item) for key, item in value.items()}")
+        add(lines, 8, "return value")
+        add(lines, 4, "")
+        add(lines, 4, "def _forward_jit_entry(self, input_ids, **inputs):")
+        add(lines, 8, "inputs = {k: v for k, v in inputs.items() if not k.startswith('__jit_uop_')}")
+        add(lines, 8, "return self._jit_return_safe(self._forward(input_ids, **inputs))")
+        add(lines, 4, "")
         add(lines, 4, "def _forward_maybe_jit(self, input_ids, **inputs):")
         add(lines, 8, "if input_ids is not None:")
         add(lines, 12, "input_ids = self._to_tiny(input_ids)")
         add(lines, 8, "inputs = {k: self._to_tiny(v) for k, v in inputs.items()}")
         add(lines, 8, "if not self._jit_enabled or self._profile_enabled:")
         add(lines, 12, "return self._forward(input_ids, **inputs)")
+        add(lines, 8, "jit_uops = {f'__jit_uop_{i}': uop for i, uop in enumerate(self._collect_jit_uops((input_ids, inputs)))}")
         add(lines, 8, "signature = self._jit_signature((input_ids, inputs))")
         add(lines, 8, "if signature not in self._forward_jit_seen:")
         add(lines, 12, "self._forward_jit_seen.add(signature)")
         add(lines, 12, "return self._forward(input_ids, **inputs)")
         add(lines, 8, "jit = self._forward_jits.get(signature)")
         add(lines, 8, "if jit is None:")
-        add(lines, 12, "jit = TinyJit(self._forward, prune=True)")
+        add(lines, 12, "jit = TinyJit(self._forward_jit_entry, prune=True)")
         add(lines, 12, "self._forward_jits[signature] = jit")
-        add(lines, 8, "return jit(input_ids, **inputs)")
+        add(lines, 8, "return jit(input_ids, **inputs, **jit_uops)")
         add(lines, 4, "")
         add(lines, 4, "def _forward_for_generate(self, input_ids, **inputs):")
         add(lines, 8, "return self._forward_maybe_jit(input_ids, **inputs)")
@@ -344,7 +389,9 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _torch_to_tiny_device(device):")
         add(lines, 8, "device = torch.device(device)")
-        add(lines, 8, "if device.type == 'cuda': return 'CUDA'")
+        add(lines, 8, "if device.type == 'cuda':")
+        add(lines, 12, "index = 0 if device.index is None else int(device.index)")
+        add(lines, 12, "return 'CUDA' if index == 0 else f'CUDA:{index}'")
         add(lines, 8, "if device.type == 'cpu': return 'CPU'")
         add(lines, 8, "return str(device).upper()")
         add(lines, 4, "")
@@ -388,6 +435,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 4, "")
         add(lines, 4, "def _to_torch(self, value):")
         add(lines, 8, "if isinstance(value, Tensor):")
+        add(lines, 12, "self._flush_tinygrad_pending_cache_assign()")
         add(lines, 12, "return torch.from_numpy(value.numpy()).to(self._torch_device)")
         add(lines, 8, "if isinstance(value, tuple):")
         add(lines, 12, "return tuple(self._to_torch(item) for item in value)")
@@ -400,6 +448,29 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _move_to(cls, value, device):")
         add(lines, 8, "return value")
+        add(lines, 4, "")
+        add(lines, 4, "def _remember_owned_cache_view(self, view, root, kv, layer=None):")
+        add(lines, 8, "if isinstance(view, Tensor) and isinstance(root, Tensor):")
+        add(lines, 12, "self._tinygrad_owned_static_cache_views[id(view)] = {'root': root, 'kv': int(kv), 'layer': layer}")
+        add(lines, 8, "return view")
+        add(lines, 4, "")
+        add(lines, 4, "def _owned_cache_tuple_from_kv(self, cache_kv, length):")
+        add(lines, 8, "keys = cache_kv[0]")
+        add(lines, 8, "values = cache_kv[1]")
+        add(lines, 8, "self._remember_owned_cache_view(keys, cache_kv, 0)")
+        add(lines, 8, "self._remember_owned_cache_view(values, cache_kv, 1)")
+        add(lines, 8, "return (keys, values, length)")
+        add(lines, 4, "")
+        add(lines, 4, "def _owned_cache_view_info(self, value):")
+        add(lines, 8, "return self._tinygrad_owned_static_cache_views.get(id(value))")
+        add(lines, 4, "")
+        add(lines, 4, "def _flush_tinygrad_pending_cache_assign(self):")
+        add(lines, 8, "pending = self._tinygrad_pending_static_cache_assign")
+        add(lines, 8, "if pending is None:")
+        add(lines, 12, "return")
+        add(lines, 8, "self._tinygrad_pending_static_cache_assign = None")
+        add(lines, 8, "target = pending['x'].shrink(tuple((pending['start'], pending['end']) if i == pending['dim'] else None for i in range(len(pending['x'].shape))))")
+        add(lines, 8, "target.assign(pending['src']).realize()")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _align_pair(left, right, *, prefer='right'):")
@@ -596,6 +667,90 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 8, "vals = weight.expand(big_shape)")
         add(lines, 8, "return (arange.expand(big_shape) == idx).where(vals, 0).sum(-2, dtype=vals.dtype)")
         add(lines, 4, "")
+        add(lines, 4, "def _slice(self, x, dim, start, end):")
+        add(lines, 8, "dim = int(dim)")
+        add(lines, 8, "if dim < 0:")
+        add(lines, 12, "dim += len(x.shape)")
+        add(lines, 8, "raw_start, raw_end = start, end")
+        add(lines, 8, "if not isinstance(start, UOp):")
+        add(lines, 12, "start = int(start)")
+        add(lines, 8, "if not isinstance(end, UOp):")
+        add(lines, 12, "end = int(end)")
+        add(lines, 8, "view = x.shrink(tuple((start, end) if i == dim else None for i in range(len(x.shape))))")
+        add(lines, 8, "info = self._owned_cache_view_info(x)")
+        add(lines, 8, "if info is not None and dim == 0 and not isinstance(raw_start, UOp) and not isinstance(raw_end, UOp) and int(end) == int(start) + 1:")
+        add(lines, 12, "self._remember_owned_cache_view(view, info['root'], info['kv'], int(start))")
+        add(lines, 8, "return view")
+        add(lines, 4, "")
+        add(lines, 4, "def _reshape(self, x, shape):")
+        add(lines, 8, "view = x.reshape(tuple(int(item) for item in shape))")
+        add(lines, 8, "info = self._owned_cache_view_info(x)")
+        add(lines, 8, "if info is not None:")
+        add(lines, 12, "self._remember_owned_cache_view(view, info['root'], info['kv'], info.get('layer'))")
+        add(lines, 8, "return view")
+        add(lines, 4, "")
+        add(lines, 4, "def _assign_slice(self, x, src, dim, start, end):")
+        add(lines, 8, "dim = int(dim)")
+        add(lines, 8, "if dim < 0:")
+        add(lines, 12, "dim += len(x.shape)")
+        add(lines, 8, "if isinstance(src, Tensor) and src.device != x.device:")
+        add(lines, 12, "src = src.to(x.device)")
+        add(lines, 8, "if self._tinygrad_mutable_slices:")
+        add(lines, 12, "info = self._owned_cache_view_info(x)")
+        add(lines, 12, "if info is not None and info.get('layer') is not None and dim == len(x.shape) - 2:")
+        add(lines, 16, "if not isinstance(start, UOp): start = int(start)")
+        add(lines, 16, "if not isinstance(end, UOp): end = int(end)")
+        add(lines, 16, "pending = self._tinygrad_pending_static_cache_assign")
+        add(lines, 16, "key = (id(info['root']), int(info['layer']), dim, start, end)")
+        add(lines, 16, "if int(info['kv']) == 0:")
+        add(lines, 20, "if pending is not None:")
+        add(lines, 24, "self._flush_tinygrad_pending_cache_assign()")
+        add(lines, 20, "self._tinygrad_pending_static_cache_assign = {'key': key, 'x': x, 'src': src, 'dim': dim, 'start': start, 'end': end}")
+        add(lines, 20, "return x")
+        add(lines, 16, "if int(info['kv']) == 1 and pending is not None and pending.get('key') == key:")
+        add(lines, 20, "root = info['root']")
+        add(lines, 20, "layer = int(info['layer'])")
+        add(lines, 20, "self._tinygrad_pending_static_cache_assign = None")
+        add(lines, 20, "target_slice = []")
+        add(lines, 20, "for axis in range(len(root.shape)):")
+        add(lines, 24, "if axis == 0: target_slice.append((0, 2))")
+        add(lines, 24, "elif axis == 1: target_slice.append((layer, layer + 1))")
+        add(lines, 24, "elif axis == dim + 2: target_slice.append((start, end))")
+        add(lines, 24, "else: target_slice.append(None)")
+        add(lines, 20, "packed_src = Tensor.stack(pending['src'], src, dim=0).unsqueeze(1)")
+        add(lines, 20, "root.shrink(tuple(target_slice)).assign(packed_src).realize()")
+        add(lines, 20, "return x")
+        add(lines, 16, "if pending is not None:")
+        add(lines, 20, "self._flush_tinygrad_pending_cache_assign()")
+        add(lines, 12, "if self._tinygrad_pending_static_cache_assign is not None:")
+        add(lines, 16, "self._flush_tinygrad_pending_cache_assign()")
+        add(lines, 12, "if id(x) in self._tinygrad_owned_static_cache_roots and dim == 0 and not isinstance(start, UOp) and not isinstance(end, UOp) and int(end) == int(start) + 1:")
+        add(lines, 16, "# StaticCache.static_put writes the layer view back into the")
+        add(lines, 16, "# root cache. In owned decode mode the view update already")
+        add(lines, 16, "# mutated the root buffer, matching tinygrad's native cache.")
+        add(lines, 16, "return x")
+        add(lines, 12, "target = x.shrink(tuple((start, end) if i == dim else None for i in range(len(x.shape))))")
+        add(lines, 12, "target.assign(src).realize()")
+        add(lines, 12, "return x")
+        add(lines, 8, "if isinstance(start, UOp) or isinstance(end, UOp):")
+        add(lines, 12, "if int(src.shape[dim]) != 1:")
+        add(lines, 16, "raise NotImplementedError('symbolic _assign_slice currently requires unit source extent')")
+        add(lines, 12, "idx_shape = [1] * len(x.shape)")
+        add(lines, 12, "idx_shape[dim] = int(x.shape[dim])")
+        add(lines, 12, "idx = Tensor.arange(0, int(x.shape[dim]), dtype=dtypes.int64, device=x.device).reshape(tuple(idx_shape))")
+        add(lines, 12, "mask = (idx >= start) & (idx < end)")
+        add(lines, 12, "return mask.where(src, x)")
+        add(lines, 8, "start = int(start)")
+        add(lines, 8, "end = int(end)")
+        add(lines, 8, "parts = []")
+        add(lines, 8, "if start > 0:")
+        add(lines, 12, "parts.append(x.shrink(tuple((0, start) if i == dim else None for i in range(len(x.shape)))))")
+        add(lines, 8, "parts.append(src)")
+        add(lines, 8, "if end < int(x.shape[dim]):")
+        add(lines, 12, "parts.append(x.shrink(tuple((end, int(x.shape[dim])) if i == dim else None for i in range(len(x.shape)))))")
+        add(lines, 8, "first, *rest = parts")
+        add(lines, 8, "return first if not rest else first.cat(*rest, dim=dim)")
+        add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _concat(*args, dim=None):")
         add(lines, 8, "if dim is None:")
@@ -678,6 +833,12 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 12, "input_ids = self._to_tiny(input_ids)")
         add(lines, 8, "inputs = {k: self._to_tiny(v) for k, v in inputs.items()}")
         args: list[str] = []
+        static_attention_inputs = {
+            value.name
+            for value in main.inputs
+            if value.name in {"attn_mask", "attention_mask", "decoder_attention_mask"}
+            and _is_static_mask_type(value.type_expr)
+        }
         first_input = main.inputs[0].name if main.inputs else None
         for value in main.inputs:
             if value.name == "input_ids":
@@ -699,6 +860,13 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
                     add(lines, 8, f"if {value.name!r} not in inputs:")
                     add(lines, 12, f"raise ValueError('Missing required input: {value.name}')")
                     add(lines, 8, f"{value.name} = inputs[{value.name!r}]")
+                if value.name in static_attention_inputs:
+                    add(lines, 8, f"if isinstance({value.name}, Tensor):")
+                    add(lines, 12, f"__static_len_{value.name} = int({value.name}.shape[1])")
+                    add(lines, 12, f"__static_capacity_{value.name} = max(int(self.config.get('n_positions', self.config.get('max_position_embeddings', __static_len_{value.name}))), __static_len_{value.name})")
+                    add(lines, 12, f"__static_store_{value.name} = Tensor.zeros({value.name}.shape[0], __static_capacity_{value.name}, dtype={value.name}.dtype, device={value.name}.device)")
+                    add(lines, 12, f"__static_store_{value.name} = self._assign_slice(__static_store_{value.name}, {value.name}, 1, 0, __static_len_{value.name})")
+                    add(lines, 12, f"{value.name} = (__static_store_{value.name}, __static_len_{value.name})")
                 args.append(value.name)
         add(lines, 8, f"result = self.{self.method_names[main.name]}({', '.join(args)})")
         names = graph_main_output_names(self.program, main)
@@ -718,19 +886,31 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         attention_name = "attn_mask" if "attn_mask" in input_names else (
             "attention_mask" if "attention_mask" in input_names else None
         )
+        attention_value = next((value for value in main.inputs if value.name == attention_name), None)
+        uses_static_attention_mask = (
+            attention_value is not None and _is_static_mask_type(attention_value.type_expr)
+        )
         decoder_attention_name = "decoder_attention_mask" if "decoder_attention_mask" in input_names else None
         cache_name = "past_kv" if "past_kv" in input_names else (
             "past_cache" if "past_cache" in input_names else None
         )
+        cache_input = next((value for value in main.inputs if value.name == cache_name), None)
+        cache_type = cache_input.type_expr if cache_input is not None else None
+        cache_inner_type = cache_type.inner if isinstance(cache_type, TypeOptional) else cache_type
+        has_static_cache_shape = cache_name is not None and cache_inner_type is not None and not isinstance(cache_inner_type, TypeList)
         cache_output_name = "new_kv" if "new_kv" in output_names else (
             "past_kv" if "past_kv" in output_names else ("cache" if "cache" in output_names else None)
         )
         use_cache_name = "use_cache" if "use_cache" in input_names else None
         has_decoder_inputs = "decoder_input_ids" in input_names
-        # tinygrad's TinyJit needs stable input shapes for reuse. The current
-        # Axon cache representation is a Python list of growing K/V tensors, so
-        # it is slower than recomputing until we add a preallocated cache.
-        is_cached_decoder = False
+        # tinygrad's TinyJit needs stable input shapes for reuse. Only static
+        # cache inputs have stable tensor shapes; list caches grow every token.
+        is_cached_decoder = (
+            not has_decoder_inputs
+            and cache_name is not None
+            and cache_output_name is not None
+            and has_static_cache_shape
+        )
         is_decoder_only = not has_decoder_inputs
         add(lines, 4, "def generate(self, input_ids, max_new_tokens=20, **kwargs):")
         add(lines, 8, "input_ids = self._to_tiny(input_ids)")
@@ -741,6 +921,42 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 12, "return logits[:, -1, :].argmax(axis=-1).reshape((logits.shape[0], 1)).cast(dtypes.int64)")
         add(lines, 8, "def _ones_like_ids(ids):")
         add(lines, 12, "return Tensor.ones(*ids.shape, dtype=dtypes.int64, device=self._tiny_device)")
+        add(lines, 8, "def _static_attention_mask(mask, prompt_ids, capacity):")
+        add(lines, 12, "valid = _ones_like_ids(prompt_ids) if mask is None else mask")
+        add(lines, 12, "# Generated tokens are always valid; the length field still")
+        add(lines, 12, "# controls which columns are visible at each decode step.")
+        add(lines, 12, "store = Tensor.ones(valid.shape[0], int(capacity), dtype=valid.dtype, device=valid.device)")
+        add(lines, 12, "length = int(valid.shape[1])")
+        add(lines, 12, "store = self._assign_slice(store, valid, 1, 0, length)")
+        add(lines, 12, "return (store, length)")
+        add(lines, 8, "def _append_static_attention_mask(mask, next_id):")
+        add(lines, 12, "store, length = mask")
+        add(lines, 12, "src = _ones_like_ids(next_id).cast(store.dtype)")
+        add(lines, 12, "store = self._assign_slice(store, src, 1, length, length + 1)")
+        add(lines, 12, "return (store, length + 1)")
+        add(lines, 8, "def _static_tuple_length(value, default=0):")
+        add(lines, 12, "if value is None: return int(default)")
+        add(lines, 12, "try: return int(value[-1])")
+        add(lines, 12, "except Exception: return int(default)")
+        add(lines, 8, "def _with_static_tuple_length(value, length):")
+        add(lines, 12, "if value is None: return None")
+        add(lines, 12, "return tuple(value[:-1]) + (int(length),)")
+        add(lines, 8, "def _realize_static_tuple(value):")
+        add(lines, 12, "if value is None: return None")
+        add(lines, 12, "return tuple(item.realize() if isinstance(item, Tensor) else item for item in value)")
+        add(lines, 8, "def _pack_owned_static_cache(value):")
+        add(lines, 12, "if value is None: return None, None")
+        add(lines, 12, "value = _realize_static_tuple(value)")
+        add(lines, 12, "packed = Tensor.stack(value[0], value[1], dim=0).contiguous().realize()")
+        add(lines, 12, "self._tinygrad_decode_cache_kv = packed")
+        add(lines, 12, "return self._owned_cache_tuple_from_kv(packed, value[-1]), packed")
+        add(lines, 8, "def _bind_static_tuple_length(value, var, length):")
+        add(lines, 12, "if value is None: return None")
+        add(lines, 12, "return tuple(value[:-1]) + (var.bind(int(length)),)")
+        add(lines, 8, "def _maybe_bind_static_tuple_length(value, var, length):")
+        add(lines, 12, "# Symbolic length UOps are only safe through the decode-step JIT")
+        add(lines, 12, "# wrapper, where they are explicit top-level TinyJit inputs.")
+        add(lines, 12, "return value")
         add(lines, 8, "def _generation_limit(prompt_ids):")
         add(lines, 12, "requested = kwargs.pop('max_new_tokens', None)")
         add(lines, 12, "if requested is not None: return int(requested)")
@@ -761,36 +977,143 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         add(lines, 12, "next_id = finished.where(Tensor.full(next_id.shape, pad, dtype=dtypes.int64, device=self._tiny_device), next_id)")
         add(lines, 12, "hit = (raw_next == eos.reshape((1, -1))).max(axis=1, keepdim=True)")
         add(lines, 12, "finished = finished | hit")
-        add(lines, 12, "return next_id, finished")
+        add(lines, 12, "return next_id.realize(), finished.realize()")
         add(lines, 8, "def _all_done(finished):")
         add(lines, 12, "return finished is not None and bool(finished.min().item())")
         if is_cached_decoder:
             add(lines, 8, "out = input_ids")
+            add(lines, 8, "last_token = None")
             add(lines, 8, "limit = _generation_limit(out)")
             add(lines, 8, "eos, pad, finished = _eos_state(out.shape[0])")
             add(lines, 8, f"cache = kwargs.pop({cache_name!r}, None)")
+            add(lines, 8, "cache_length = _static_tuple_length(cache, 0)")
+            if has_static_cache_shape:
+                add(lines, 8, "cache_owned_realized = False")
+                add(lines, 8, "owned_cache_kv = None")
             if attention_name is not None:
                 other = "attention_mask" if attention_name == "attn_mask" else "attn_mask"
                 add(lines, 8, f"attention_mask = kwargs.pop({attention_name!r}, kwargs.pop({other!r}, None))")
                 add(lines, 8, "if attention_mask is None: attention_mask = _ones_like_ids(out)")
+                if uses_static_attention_mask:
+                    add(lines, 8, "static_capacity = max(int(self.config.get('n_positions', self.config.get('max_position_embeddings', out.shape[1] + limit))), int(out.shape[1]) + int(limit))")
+                    add(lines, 8, "attention_mask = _static_attention_mask(attention_mask, out, static_capacity)")
+                    add(lines, 8, "attention_length = _static_tuple_length(attention_mask, int(out.shape[1]))")
+                    add(lines, 8, "attention_length_var = Variable('attention_length', 0, int(static_capacity))")
+            if has_static_cache_shape:
+                add(lines, 8, "static_cache_capacity = int(static_capacity) if 'static_capacity' in locals() else int(self.config.get('n_positions', self.config.get('max_position_embeddings', out.shape[1] + limit)))")
+                add(lines, 8, "cache_length_var = Variable('cache_length', 0, int(static_cache_capacity))")
             if use_cache_name is not None:
                 add(lines, 8, f"kwargs.pop({use_cache_name!r}, None)")
-            add(lines, 8, "for _ in range(limit):")
-            add(lines, 12, "step_input = out[:, -1:] if cache is not None else out")
-            add(lines, 12, "forward_kwargs = dict(kwargs)")
-            add(lines, 12, f"forward_kwargs[{cache_name!r}] = cache")
+            if has_static_cache_shape and uses_static_attention_mask and attention_name is not None:
+                add(lines, 8, "if not kwargs:")
+                add(lines, 12, "decode_jit_key = ('generate_static_decode', bool(self._tinygrad_owned_decode))")
+                add(lines, 12, "decode_step_jit = self._forward_jits.get(decode_jit_key)")
+                add(lines, 12, "if decode_step_jit is None:")
+                add(lines, 16, "if self._tinygrad_owned_decode:")
+                add(lines, 20, "def _decode_step_jit_entry(step_ids, attention_store, cache_len_bound, attention_len_bound):")
+                add(lines, 24, "step_inputs = {}")
+                add(lines, 24, "cache_kv = self._tinygrad_decode_cache_kv")
+                add(lines, 24, f"step_inputs[{cache_name!r}] = self._owned_cache_tuple_from_kv(cache_kv, cache_len_bound)")
+                if use_cache_name is not None:
+                    add(lines, 24, f"step_inputs[{use_cache_name!r}] = True")
+                add(lines, 24, f"step_inputs[{attention_name!r}] = (attention_store, attention_len_bound)")
+                add(lines, 24, "step_result = self._forward(step_ids, **step_inputs)")
+                add(lines, 24, "return _next_id(step_result['logits'])")
+                add(lines, 16, "else:")
+                add(lines, 20, "def _decode_step_jit_entry(step_ids, cache_keys, cache_values, attention_store, cache_len_bound, attention_len_bound):")
+                add(lines, 24, "step_inputs = {}")
+                add(lines, 24, f"step_inputs[{cache_name!r}] = (cache_keys, cache_values, cache_len_bound)")
+                if use_cache_name is not None:
+                    add(lines, 24, f"step_inputs[{use_cache_name!r}] = True")
+                add(lines, 24, f"step_inputs[{attention_name!r}] = (attention_store, attention_len_bound)")
+                add(lines, 24, "step_result = self._forward(step_ids, **step_inputs)")
+                add(lines, 24, f"step_cache = step_result.get({cache_output_name!r}) if isinstance(step_result, dict) else None")
+                add(lines, 24, "return _next_id(step_result['logits']), step_cache[0], step_cache[1]")
+                add(lines, 16, "decode_step_jit = TinyJit(_decode_step_jit_entry, prune=True)")
+                add(lines, 16, "self._forward_jits[decode_jit_key] = decode_step_jit")
+                add(lines, 8, "else:")
+                add(lines, 12, "if self._tinygrad_owned_decode:")
+                add(lines, 16, "def _decode_step_jit_entry(step_ids, attention_store, cache_len_bound, attention_len_bound):")
+                add(lines, 20, "step_kwargs = dict(kwargs)")
+                add(lines, 20, "cache_kv = self._tinygrad_decode_cache_kv")
+                add(lines, 20, f"step_kwargs[{cache_name!r}] = self._owned_cache_tuple_from_kv(cache_kv, cache_len_bound)")
+                if use_cache_name is not None:
+                    add(lines, 20, f"step_kwargs[{use_cache_name!r}] = True")
+                add(lines, 20, f"step_kwargs[{attention_name!r}] = (attention_store, attention_len_bound)")
+                add(lines, 20, "step_result = self._forward(step_ids, **step_kwargs)")
+                add(lines, 20, "return _next_id(step_result['logits'])")
+                add(lines, 12, "else:")
+                add(lines, 16, "def _decode_step_jit_entry(step_ids, cache_keys, cache_values, attention_store, cache_len_bound, attention_len_bound):")
+                add(lines, 20, "step_kwargs = dict(kwargs)")
+                add(lines, 20, f"step_kwargs[{cache_name!r}] = (cache_keys, cache_values, cache_len_bound)")
+                if use_cache_name is not None:
+                    add(lines, 20, f"step_kwargs[{use_cache_name!r}] = True")
+                add(lines, 20, f"step_kwargs[{attention_name!r}] = (attention_store, attention_len_bound)")
+                add(lines, 20, "step_result = self._forward(step_ids, **step_kwargs)")
+                add(lines, 20, f"step_cache = step_result.get({cache_output_name!r}) if isinstance(step_result, dict) else None")
+                add(lines, 20, "return _next_id(step_result['logits']), step_cache[0], step_cache[1]")
+                add(lines, 12, "decode_step_jit = TinyJit(_decode_step_jit_entry, prune=True)")
+            else:
+                add(lines, 8, "decode_step_jit = None")
+            loop_indent = 8
+            body_indent = 12
+            add(lines, loop_indent, "for _ in range(limit):")
+            add(lines, body_indent, "step_input = (last_token if last_token is not None else out[:, -1:].contiguous().realize()) if cache is not None else out")
+            add(lines, body_indent, "step_len = int(step_input.shape[1])")
+            add(lines, body_indent, "forward_kwargs = dict(kwargs)")
+            if has_static_cache_shape:
+                add(lines, body_indent, f"forward_kwargs[{cache_name!r}] = _maybe_bind_static_tuple_length(cache, cache_length_var, cache_length) if cache is not None and step_len == 1 else cache")
+            else:
+                add(lines, body_indent, f"forward_kwargs[{cache_name!r}] = cache")
             if use_cache_name is not None:
-                add(lines, 12, f"forward_kwargs[{use_cache_name!r}] = True")
+                add(lines, body_indent, f"forward_kwargs[{use_cache_name!r}] = True")
             if attention_name is not None:
-                add(lines, 12, f"forward_kwargs[{attention_name!r}] = attention_mask")
-            add(lines, 12, "result = self._forward_for_generate(step_input, **forward_kwargs) if cache is not None and int(step_input.shape[1]) == 1 else self._forward(step_input, **forward_kwargs)")
-            add(lines, 12, "if isinstance(result, dict): cache = result.get(" + repr(cache_output_name) + ", cache)")
-            add(lines, 12, "next_id = _next_id(_logits(result))")
-            add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
-            add(lines, 12, "out = out.cat(next_id, dim=1)")
+                if uses_static_attention_mask:
+                    add(lines, body_indent, f"forward_kwargs[{attention_name!r}] = _maybe_bind_static_tuple_length(attention_mask, attention_length_var, attention_length) if step_len == 1 else attention_mask")
+                else:
+                    add(lines, body_indent, f"forward_kwargs[{attention_name!r}] = attention_mask")
+            if has_static_cache_shape and uses_static_attention_mask and attention_name is not None:
+                add(lines, body_indent, "used_decode_jit = self._jit_enabled and not self._profile_enabled and cache is not None and step_len == 1")
+                add(lines, body_indent, "if used_decode_jit:")
+                add(lines, body_indent + 4, "if not self._tinygrad_owned_decode:")
+                add(lines, body_indent + 8, "next_id, cache_keys, cache_values = decode_step_jit(step_input, cache[0], cache[1], attention_mask[0], cache_length_var.bind(cache_length), attention_length_var.bind(attention_length))")
+                add(lines, body_indent + 8, f"result = {{{cache_output_name!r}: (cache_keys, cache_values, cache_length + step_len)}}")
+                add(lines, body_indent + 4, "else:")
+                add(lines, body_indent + 8, "if not cache_owned_realized:")
+                add(lines, body_indent + 12, "cache, owned_cache_kv = _pack_owned_static_cache(cache)")
+                add(lines, body_indent + 12, "cache_owned_realized = True")
+                add(lines, body_indent + 12, "self._tinygrad_owned_static_cache_roots = {id(cache[0]), id(cache[1])}")
+                add(lines, body_indent + 8, "previous_mutable_slices = self._tinygrad_mutable_slices")
+                add(lines, body_indent + 8, "previous_cache_roots = self._tinygrad_owned_static_cache_roots")
+                add(lines, body_indent + 8, "self._tinygrad_owned_static_cache_roots = {id(cache[0]), id(cache[1])}")
+                add(lines, body_indent + 8, "self._tinygrad_mutable_slices = True")
+                add(lines, body_indent + 8, "try:")
+                add(lines, body_indent + 12, "next_id = decode_step_jit(step_input, attention_mask[0], cache_length_var.bind(cache_length), attention_length_var.bind(attention_length))")
+                add(lines, body_indent + 8, "finally:")
+                add(lines, body_indent + 12, "self._tinygrad_mutable_slices = previous_mutable_slices")
+                add(lines, body_indent + 12, "self._tinygrad_owned_static_cache_roots = previous_cache_roots")
+                add(lines, body_indent + 8, f"result = {{{cache_output_name!r}: cache}}")
+                add(lines, body_indent, "else:")
+                add(lines, body_indent + 4, "result = self._forward_for_generate(step_input, **forward_kwargs) if cache is not None and int(step_input.shape[1]) == 1 else self._forward(step_input, **forward_kwargs)")
+            else:
+                add(lines, body_indent, "used_decode_jit = False")
+                add(lines, body_indent, "result = self._forward_for_generate(step_input, **forward_kwargs) if cache is not None and int(step_input.shape[1]) == 1 else self._forward(step_input, **forward_kwargs)")
+            add(lines, body_indent, "if isinstance(result, dict): cache = result.get(" + repr(cache_output_name) + ", cache)")
+            if has_static_cache_shape:
+                add(lines, body_indent, "if cache is not None:")
+                add(lines, body_indent + 4, "cache_length += step_len")
+                add(lines, body_indent + 4, "cache = _with_static_tuple_length(cache, cache_length)")
+            add(lines, body_indent, "if not used_decode_jit:")
+            add(lines, body_indent + 4, "next_id = _next_id(_logits(result))")
+            add(lines, body_indent, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
+            add(lines, body_indent, "last_token = next_id")
+            add(lines, body_indent, "out = out.cat(next_id, dim=1)")
             if attention_name is not None:
-                add(lines, 12, "attention_mask = attention_mask.cat(_ones_like_ids(next_id), dim=1)")
-            add(lines, 12, "if _all_done(finished): break")
+                if uses_static_attention_mask:
+                    add(lines, body_indent, "attention_length += 1")
+                else:
+                    add(lines, body_indent, "attention_mask = attention_mask.cat(_ones_like_ids(next_id), dim=1)")
+            add(lines, body_indent, "if _all_done(finished): break")
             add(lines, 8, "return self._to_torch(out)")
             return
         if is_decoder_only:
@@ -902,9 +1225,10 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         if primitive.startswith("config_") or primitive in {"params_param", "params_has_root"}:
             return super()._primitive_expr(primitive, node, local=local, symbols_dict=symbols_dict)
         simple = {
-            "reshape": lambda: f"{args[0]}.reshape(tuple(int(x) for x in {args[1]}))",
+            "reshape": lambda: f"self._reshape({args[0]}, {args[1]})",
             "arange": lambda: f"Tensor.arange(int({args[1]}), int(({args[0]}.shape[-2] if {args[2]} is None and len({args[0]}.shape) >= 2 else ({args[0]}.shape[-1] if {args[2]} is None else {args[2]}))), dtype=dtypes.int64, device=self._tiny_device)",
-            "slice": lambda: f"{args[0]}.shrink(tuple((int({args[2]}), int({args[3]})) if i == (int({args[1]}) % len({args[0]}.shape)) else None for i in range(len({args[0]}.shape))))",
+            "slice": lambda: f"self._slice({args[0]}, {args[1]}, {args[2]}, {args[3]})",
+            "assign_slice": lambda: f"self._assign_slice({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "chunk": lambda: f"{args[0]}.chunk(int({args[2] if len(args) > 2 else attrs.get('parts', '1')}), dim=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
             "split": lambda: f"{args[0]}.split([int(x) for x in {args[2] if len(args) > 2 else attrs.get('sizes', '[]')}], dim=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
             "sum": lambda: f"{args[0]}.sum(axis=int({args[1] if len(args) > 1 else '-1'}), keepdim=bool({args[2] if len(args) > 2 else 'False'}))",
@@ -1148,9 +1472,10 @@ def emit_model_code_from_graph_ir(
         [
             "from __future__ import annotations",
             "",
+            "import os",
             "import time",
             "import torch",
-            "from tinygrad import Tensor, TinyJit, dtypes",
+            "from tinygrad import Tensor, TinyJit, dtypes, UOp, Variable",
             "from tinygrad.nn import state as tiny_state",
             "from brainsurgery.synapse.axon.codegen2_common import (",
             "    compose_path as _common_compose_path,",

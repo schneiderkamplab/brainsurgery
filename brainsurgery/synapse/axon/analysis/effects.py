@@ -125,6 +125,7 @@ _TOTAL_PURE_PRIMITIVE_OPS = {
     "repeat",
     "reshape",
     "rmsnorm",
+    "assign_slice",
     "scatter",
     "select",
     "shape",

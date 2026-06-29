@@ -37,6 +37,9 @@ from brainsurgery.synapse.axon.codegen2_tinygrad import (
     emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir,
     tinygrad_op_table_markdown,
 )
+from brainsurgery.synapse.axon.codegen2_triton import (
+    emit_model_code_from_graph_ir as emit_triton_model_code_from_graph_ir,
+)
 from brainsurgery.synapse.axon.analysis import infer_axon_definition_effects, op_effect
 from brainsurgery.synapse.axon.graph_ir import (
     GraphDomainAnalysis,
@@ -62,6 +65,7 @@ from brainsurgery.synapse.axon.graph_ir import (
     infer_graph_provenance,
     infer_graph_module_effects,
     infer_graph_module_usages,
+    infer_graph_ownership,
     infer_main_module_domain_facts,
     optimize_graph_program,
     prune_graph_to_main,
@@ -822,6 +826,218 @@ def test_graph_usage_marks_fresh_zero_arg_global_refs_affine() -> None:
     assert effects["Cache.init"] == GraphEffect.TOTAL_PURE
     assert usages["List.init"] == UsageClass.AFFINE
     assert usages["Cache.init"] == UsageClass.AFFINE
+
+
+def test_graph_usage_marks_fresh_tensor_allocations_affine() -> None:
+    tensor_t = TypeTensor("Tensor", (2, 3))
+    ref = GraphValue("ref", tensor_t, tensor_t.dims)
+    shape = GraphExpr(
+        GraphOp("core.list"),
+        (GraphLiteral(2, TypeDim()), GraphLiteral(3, TypeDim())),
+        {},
+        TypeList(TypeDim()),
+    )
+    module = GraphModule(
+        name="main",
+        inputs=(ref,),
+        outputs=(GraphValueRef("z", tensor_t, tensor_t.dims),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("_zeros"),
+                inputs=(GraphValueRef("ref", tensor_t, tensor_t.dims), shape, GraphLiteral(None, TypeNull())),
+                attrs={},
+                outputs=(GraphValue("z", tensor_t, tensor_t.dims),),
+                source_module="main",
+                type_expr=tensor_t,
+                dims=tensor_t.dims,
+            ),
+        ),
+        return_type_expr=tensor_t,
+    )
+
+    effects = infer_graph_module_effects((module,))
+    usages = infer_graph_module_usages((module,))
+
+    assert effects["main"] == GraphEffect.TOTAL_PURE
+    assert usages["main"] == UsageClass.AFFINE
+
+
+def test_graph_ir_optimizer_does_not_cse_fresh_tensor_allocations() -> None:
+    tensor_t = TypeTensor("Tensor", (2, 3))
+    ref = GraphValue("ref", tensor_t, tensor_t.dims)
+    shape = GraphExpr(
+        GraphOp("core.list"),
+        (GraphLiteral(2, TypeDim()), GraphLiteral(3, TypeDim())),
+        {},
+        TypeList(TypeDim()),
+    )
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(ref,),
+                outputs=(
+                    GraphValueRef("keys", tensor_t, tensor_t.dims),
+                    GraphValueRef("values", tensor_t, tensor_t.dims),
+                ),
+                output_names=("keys", "values"),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_zeros"),
+                        inputs=(GraphValueRef("ref", tensor_t, tensor_t.dims), shape, GraphLiteral(None, TypeNull())),
+                        attrs={},
+                        outputs=(GraphValue("keys", tensor_t, tensor_t.dims),),
+                        source_module="main",
+                        type_expr=tensor_t,
+                        dims=tensor_t.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_zeros"),
+                        inputs=(GraphValueRef("ref", tensor_t, tensor_t.dims), shape, GraphLiteral(None, TypeNull())),
+                        attrs={},
+                        outputs=(GraphValue("values", tensor_t, tensor_t.dims),),
+                        source_module="main",
+                        type_expr=tensor_t,
+                        dims=tensor_t.dims,
+                    ),
+                ),
+                return_type_expr=TypeTuple((tensor_t, tensor_t)),
+            ),
+        ),
+        main_module="main",
+        pragmas={},
+    )
+
+    optimized = optimize_graph_program(graph)
+    nodes = optimized.modules[0].nodes
+
+    assert [node.op.name for node in nodes] == ["_zeros", "_zeros"]
+    assert optimized.modules[0].outputs == (
+        GraphValueRef("keys", tensor_t, tensor_t.dims),
+        GraphValueRef("values", tensor_t, tensor_t.dims),
+    )
+
+
+def test_graph_ownership_allows_inplace_assign_slice_for_owned_base() -> None:
+    tensor_t = TypeTensor("Tensor", (2, 3))
+    ref = GraphValue("ref", tensor_t, tensor_t.dims)
+    shape = GraphExpr(
+        GraphOp("core.list"),
+        (GraphLiteral(2, TypeDim()), GraphLiteral(3, TypeDim())),
+        {},
+        TypeList(TypeDim()),
+    )
+    src = GraphValue("src", tensor_t, tensor_t.dims)
+    assign_node = GraphNode(
+        id="main:2",
+        op=GraphOp("_assign_slice"),
+        inputs=(
+            GraphValueRef("base", tensor_t, tensor_t.dims),
+            GraphValueRef("src", tensor_t, tensor_t.dims),
+            GraphLiteral(0, TypeInt()),
+            GraphLiteral(0, TypeDim()),
+            GraphLiteral(1, TypeDim()),
+        ),
+        attrs={},
+        outputs=(GraphValue("updated", tensor_t, tensor_t.dims),),
+        source_module="main",
+        type_expr=tensor_t,
+        dims=tensor_t.dims,
+    )
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(ref, src),
+                outputs=(GraphValueRef("updated", tensor_t, tensor_t.dims),),
+                output_names=("out",),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_zeros"),
+                        inputs=(GraphValueRef("ref", tensor_t, tensor_t.dims), shape, GraphLiteral(None, TypeNull())),
+                        attrs={},
+                        outputs=(GraphValue("base", tensor_t, tensor_t.dims),),
+                        source_module="main",
+                        type_expr=tensor_t,
+                        dims=tensor_t.dims,
+                    ),
+                    assign_node,
+                ),
+                return_type_expr=tensor_t,
+            ),
+        ),
+        main_module="main",
+        pragmas={},
+    )
+
+    ownership = infer_graph_ownership(graph)
+
+    assert "main:2" in ownership.inplace_assign_slice_node_ids
+
+
+def test_graph_ownership_rejects_inplace_assign_slice_when_old_base_is_live() -> None:
+    tensor_t = TypeTensor("Tensor", (2, 3))
+    ref = GraphValue("ref", tensor_t, tensor_t.dims)
+    shape = GraphExpr(
+        GraphOp("core.list"),
+        (GraphLiteral(2, TypeDim()), GraphLiteral(3, TypeDim())),
+        {},
+        TypeList(TypeDim()),
+    )
+    src = GraphValue("src", tensor_t, tensor_t.dims)
+    graph = GraphProgram(
+        modules=(
+            GraphModule(
+                name="main",
+                inputs=(ref, src),
+                outputs=(
+                    GraphValueRef("updated", tensor_t, tensor_t.dims),
+                    GraphValueRef("base", tensor_t, tensor_t.dims),
+                ),
+                output_names=("updated", "base"),
+                nodes=(
+                    GraphNode(
+                        id="main:1",
+                        op=GraphOp("_zeros"),
+                        inputs=(GraphValueRef("ref", tensor_t, tensor_t.dims), shape, GraphLiteral(None, TypeNull())),
+                        attrs={},
+                        outputs=(GraphValue("base", tensor_t, tensor_t.dims),),
+                        source_module="main",
+                        type_expr=tensor_t,
+                        dims=tensor_t.dims,
+                    ),
+                    GraphNode(
+                        id="main:2",
+                        op=GraphOp("_assign_slice"),
+                        inputs=(
+                            GraphValueRef("base", tensor_t, tensor_t.dims),
+                            GraphValueRef("src", tensor_t, tensor_t.dims),
+                            GraphLiteral(0, TypeInt()),
+                            GraphLiteral(0, TypeDim()),
+                            GraphLiteral(1, TypeDim()),
+                        ),
+                        attrs={},
+                        outputs=(GraphValue("updated", tensor_t, tensor_t.dims),),
+                        source_module="main",
+                        type_expr=tensor_t,
+                        dims=tensor_t.dims,
+                    ),
+                ),
+                return_type_expr=TypeTuple((tensor_t, tensor_t)),
+            ),
+        ),
+        main_module="main",
+        pragmas={},
+    )
+
+    ownership = infer_graph_ownership(graph)
+
+    assert "main:2" not in ownership.inplace_assign_slice_node_ids
 
 
 def test_graph_ir_optimizer_inlines_effectful_zero_arg_forwarder_without_sharing() -> None:
@@ -5635,6 +5851,24 @@ def test_codegen2_tinygrad_emits_gpt2_source() -> None:
     assert "def _forward_tiny" not in code
 
 
+def test_codegen2_triton_emits_gpt2_source() -> None:
+    program = resolve_axon_program_from_path(
+        Path("brainsurgery/synapse/models/gpt2/generic-gpt2.axon")
+    ).ast
+
+    graph = lower_axon_program_to_graph_ir(_typed(program, main_module="gpt2"), main_module="gpt2")
+    code = emit_triton_model_code_from_graph_ir(graph, class_name="TritonGPT2")
+
+    assert "import triton" in code
+    assert "import triton.language as tl" in code
+    assert "def _axon_triton_rope_apply_kernel" in code
+    assert "_axon_triton_rope_apply_kernel[grid]" in code
+    assert "class TritonGPT2(nn.Module)" in code
+    assert "def load_state_dict(self, state_dict, strict=True):" in code
+    assert "def setup(self):" in code
+    assert "def _forward(self, input_ids=None, **inputs):" in code
+
+
 def test_codegen2_tinygrad_accepts_where_indices_primitive() -> None:
     tensor_type = _tensor("B", "S")
     idx_type = _tensor("N")
@@ -9013,11 +9247,17 @@ def test_graph_ir_optimizer_rewrites_fill_scatter_unit_slice_for_torch_backend()
     ops = [node.op.name for node in optimized_main.nodes]
     assert "_fill" not in ops
     assert "Tensor.scatter" not in ops
-    assert "_assign_unit_slice" in ops
-    assign = next(node for node in optimized_main.nodes if node.op.name == "_assign_unit_slice")
+    assert "_assign_slice" in ops
+    assign = next(node for node in optimized_main.nodes if node.op.name == "_assign_slice")
     assert assign.inputs == (
         GraphValueRef("y_all", tensor_t),
+        GraphValueRef("y_step", step_t),
         GraphLiteral(1, dim_t),
         GraphValueRef("t", TypeInt()),
-        GraphValueRef("y_step", step_t),
+        GraphExpr(
+            op=GraphOp("core.binary.+"),
+            inputs=(GraphValueRef("t", TypeInt()), GraphLiteral(1, TypeInt())),
+            attrs={},
+            type_expr=TypeInt(),
+        ),
     )

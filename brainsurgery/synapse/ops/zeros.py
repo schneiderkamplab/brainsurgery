@@ -16,6 +16,13 @@ LOWERING_TYPE_SIGNATURE = {
     "returns": "dynamic",
 }
 
+PRIMITIVE_SEMANTICS = {
+    # Fresh tensors are pure values, but their storage identity must not be
+    # shared by CSE/hoisting. Backend ownership rewrites may update them
+    # in-place after proving uniqueness.
+    "usage": "affine",
+}
+
 
 def type_rule(
     *,
@@ -32,5 +39,6 @@ def type_rule(
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "PRIMITIVE_SEMANTICS",
     "type_rule",
 ]

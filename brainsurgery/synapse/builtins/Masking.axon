@@ -18,8 +18,11 @@ export (
   blocksparse_mask,
   causal_mask,
   causal_mask_for_input,
+  static_causal_mask_for_input,
+  static_mask_length,
 )
 
+type StaticMask[B,C] = (Tensor[B,C], Dim)
 
 -- === CAUSAL MASK ===
 causal_mask_keep :: Tensor[B,HQ,Q,HDQ] -> Tensor[B,HK,K,HDK] -> ?Dim -> Tensor[B,1,Q,K]
@@ -70,6 +73,43 @@ causal_mask_for_input x K ?padding_mask=null ?window=null = if padding_mask == n
     causal_mask_for_input_keep x K window=window
   else
     causal_mask_for_input_masked x K padding_mask window=window
+
+static_mask_length :: ?StaticMask[B,C] -> Dim
+static_mask_length mask = (mask == null) ? 0 : do
+  _, length <- mask
+  return length
+
+
+static_causal_mask_for_input_keep :: Tensor[B,Q] -> StaticMask[B,C] -> ?Dim -> Tensor[B,1,Q,C]
+static_causal_mask_for_input_keep x mask ?window=null = do
+  _, length <- mask
+  row_ids <- arange x start=0 end=Q |> reshape shape=[Q, 1]
+  col_ids <- arange x start=0 end=C |> reshape shape=[1, C]
+  aligned <- row_ids + (length - Q)
+  upper <- le col_ids aligned
+  valid <- le col_ids (length - 1)
+  causal <- and upper valid
+  keep_window <- (window == null) ? causal : (and causal (le (aligned - window + 1) col_ids))
+  keep <- reshape keep_window shape=[1, 1, Q, C]
+  return expand keep shape=[B, 1, Q, C]
+
+
+static_causal_mask_for_input_masked :: Tensor[B,Q] -> StaticMask[B,C] -> ?Dim -> Tensor[B,1,Q,C]
+static_causal_mask_for_input_masked x mask ?window=null = do
+  mask_values, length <- mask
+  keep <- static_causal_mask_for_input_keep x mask window=window
+  pad_keep <- cast mask_values dtype="bool" |> reshape shape=[B, 1, 1, C]
+  masked_keep <- and keep pad_keep
+  query_keep <- slice mask_values dim=-1 start=(length - Q) end=length |> cast dtype="bool" |> reshape shape=[B, 1, Q, 1]
+  col_ids <- arange x start=0 end=C |> reshape shape=[1, 1, 1, C]
+  dummy_keep <- and (eq col_ids 0) (eq query_keep false)
+  return where dummy_keep true masked_keep
+
+
+static_causal_mask_for_input :: Tensor[B,Q] -> ?StaticMask[B,C] -> ?Dim -> Tensor[B,1,Q,C]
+static_causal_mask_for_input x mask ?window=null = (mask == null)
+  ? causal_mask_for_input_keep x Q window=window
+  : static_causal_mask_for_input_masked x mask window=window
 
 
 -- === BIDIRECTIONAL MASK ===
