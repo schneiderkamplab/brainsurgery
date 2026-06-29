@@ -22,3 +22,5 @@ dist/
 build/
 *.egg-info/
 tmp
+test_venv/
+docs/plans/
