@@ -537,6 +537,24 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "alpha_n = beta + alpha_n_base")
         add(lines, 8, "eps = float(eps_raw.item()) if isinstance(eps_raw, mx.array) else float(eps_raw)")
         add(lines, 8, "return mx.where(x > 0, alpha_p * x * x + beta * x, (mx.exp(mx.minimum(x, eps)) - 1.0 - x) * alpha_n + beta * x)")
+        if self.paged_attention:
+            add(lines, 4, "def _paged_gather(self, blocks, block_table, total_len, block_size):")
+            add(lines, 8, "n_blocks = (total_len + block_size - 1) // block_size")
+            add(lines, 8, "used = block_table[:n_blocks]")
+            add(lines, 8, "selected = blocks[used]")
+            add(lines, 8, "H, BS, DH = selected.shape[1], selected.shape[2], selected.shape[3]")
+            add(lines, 8, "flat = selected.transpose(1, 0, 2, 3).reshape(H, -1, DH)")
+            add(lines, 8, "return flat[:, :total_len, :][None, ...]")
+            add(lines, 4, "def _paged_scatter(self, blocks, block_table, position, new, block_size):")
+            add(lines, 8, "S = new.shape[2]")
+            add(lines, 8, "for s in range(S):")
+            add(lines, 12, "pos = position + s")
+            add(lines, 12, "bi = pos // block_size")
+            add(lines, 12, "bo = pos % block_size")
+            add(lines, 12, "block_idx = block_table[bi]")
+            add(lines, 12, "new_slice = new[0, :, s:s+1, :]")
+            add(lines, 12, "blocks[block_idx, :, bo:bo+1, :] = new_slice")
+            add(lines, 8, "return blocks")
 
     def _emit_load_state_dict(self, lines: list[str]) -> None:
         add = self._add
@@ -602,8 +620,11 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add = self._add
         add(lines, 4, "def _forward(self, input_ids=None, **inputs):")
         args: list[str] = []
+        skip_paged = {"past_kv", "use_cache"} if self.paged_attention else set()
         first_input = main.inputs[0].name if main.inputs else None
         for value in main.inputs:
+            if value.name in skip_paged:
+                continue
             if value.name == "input_ids":
                 add(lines, 8, "if input_ids is None:")
                 add(lines, 12, "input_ids = inputs.get('input_ids')")
@@ -627,12 +648,39 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                     add(lines, 8, f"{value.name} = inputs[{value.name!r}]")
                 add(lines, 8, f"{value.name} = self._to_mlx({value.name})")
                 args.append(value.name)
+        if self.paged_attention:
+            add(lines, 8, "k_blocks = inputs['k_blocks']")
+            add(lines, 8, "v_blocks = inputs['v_blocks']")
+            add(lines, 8, "block_table = inputs['block_table']")
+            add(lines, 8, "position = int(inputs['position'])")
+            add(lines, 8, "block_size = int(inputs['block_size'])")
+            add(lines, 8, "num_layers = k_blocks.shape[0]")
+            add(lines, 8, "if position > 0:")
+            add(lines, 12, "gathered_past_kv = []")
+            add(lines, 12, "for li in range(num_layers):")
+            add(lines, 16, "k_past = self._paged_gather(k_blocks[li], block_table, position, block_size)")
+            add(lines, 16, "v_past = self._paged_gather(v_blocks[li], block_table, position, block_size)")
+            add(lines, 16, "gathered_past_kv.append((k_past, v_past))")
+            add(lines, 12, "past_kv = gathered_past_kv")
+            add(lines, 8, "else:")
+            add(lines, 12, "past_kv = None")
+            add(lines, 8, "use_cache = mx.array(True)")
+            args.extend(["past_kv", "use_cache"])
         add(lines, 8, f"result = self.{self.method_names[main.name]}({', '.join(args)})")
-        names = graph_main_output_names(self.program, main)
-        if len(names) == 1:
-            add(lines, 8, "return result[0]")
+        if self.paged_attention:
+            add(lines, 8, "new_kv = result[1]")
+            add(lines, 8, "sliced_new_kv = []")
+            add(lines, 8, "for li in range(num_layers):")
+            add(lines, 12, "k_new_tokens = new_kv[li][0][:, :, position:, :]")
+            add(lines, 12, "v_new_tokens = new_kv[li][1][:, :, position:, :]")
+            add(lines, 12, "sliced_new_kv.append((k_new_tokens, v_new_tokens))")
+            add(lines, 8, "return {'logits': result[0], 'new_kv': sliced_new_kv}")
         else:
-            add(lines, 8, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
+            names = graph_main_output_names(self.program, main)
+            if len(names) == 1:
+                add(lines, 8, "return result[0]")
+            else:
+                add(lines, 8, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
         add(lines, 4, "")
         add(lines, 4, "def forward(self, input_ids=None, **inputs):")
         add(lines, 8, "input_ids = self._to_mlx(input_ids, mx.int64) if input_ids is not None else None")
@@ -1027,6 +1075,7 @@ def emit_model_code_from_graph_ir(
     class_name: str = "AxonMlxModel",
     model_config: dict[str, Any] | None = None,
     profile: bool = False,
+    paged_attention: bool = False,
 ) -> str:
     validate_graph_program(graph)
     unsupported = non_obvious_mlx_ops(graph)
@@ -1037,7 +1086,7 @@ def emit_model_code_from_graph_ir(
             "Unsupported Graph IR ops:\n"
             f"{table}"
         )
-    emitter = _DirectMlxEmitter(program=graph, class_name=class_name, profile=profile)
+    emitter = _DirectMlxEmitter(program=graph, class_name=class_name, profile=profile, paged_attention=paged_attention)
     body = emitter.emit()
     return "\n".join(
         [

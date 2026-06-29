@@ -259,6 +259,7 @@ signature_type: type_expr (LAMBDA_ARROW type_expr)*
     | type_list
     | type_tensor
     | type_name -> type_named
+    | PATH_LIT -> type_named
 type_tuple: LPAR type_expr "," type_expr ("," type_expr)* ","? RPAR
 type_list: "List" LSQB type_expr RSQB
 type_tensor: type_name LSQB type_dim_expr ("," type_dim_expr)* RSQB
@@ -711,7 +712,7 @@ class _ProgramTransformer(Transformer[Token, object]):
         return str(token)
 
     def type_named(self, children: list[object]) -> TypeExpr:
-        raw = cast(str, children[0]).strip()
+        raw = cast(str, children[0]).strip().lstrip("@")
         if raw == "Any":
             return TypeAny()
         if raw == "Int":

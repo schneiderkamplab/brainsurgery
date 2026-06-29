@@ -2956,11 +2956,13 @@ class _DirectTorchEmitter:
         class_name: str,
         profile: bool = False,
         align_devices: bool = False,
+        paged_attention: bool = False,
     ) -> None:
         self.program = program
         self.class_name = class_name
         self.profile = bool(profile)
         self.align_devices = bool(align_devices)
+        self.paged_attention = bool(paged_attention)
         self.modules_by_name = {module.name: module for module in program.modules}
         self.method_names = {name: f"_def_{_py_ident(name)}" for name in self.modules_by_name}
         self.global_symbol_names = _runtime_symbol_module_names(program)
@@ -3876,6 +3878,24 @@ class _DirectTorchEmitter:
         add(lines, 8, "if device is not None:")
         add(lines, 12, "items = tuple(cls._move_to(item, device) for item in items)")
         add(lines, 8, "return torch.cat(list(items), dim=int(dim))")
+        if self.paged_attention:
+            add(lines, 4, "def _paged_gather(self, blocks, block_table, total_len, block_size):")
+            add(lines, 8, "n_blocks = (total_len + block_size - 1) // block_size")
+            add(lines, 8, "used = block_table[:n_blocks]")
+            add(lines, 8, "selected = blocks[used]")
+            add(lines, 8, "H, BS, DH = selected.shape[1], selected.shape[2], selected.shape[3]")
+            add(lines, 8, "flat = selected.permute(1, 0, 2, 3).reshape(H, -1, DH)")
+            add(lines, 8, "return flat[:, :total_len, :].unsqueeze(0)")
+            add(lines, 4, "def _paged_scatter(self, blocks, block_table, position, new, block_size):")
+            add(lines, 8, "S = new.shape[2]")
+            add(lines, 8, "for s in range(S):")
+            add(lines, 12, "pos = position + s")
+            add(lines, 12, "bi = pos // block_size")
+            add(lines, 12, "bo = pos % block_size")
+            add(lines, 12, "block_idx = block_table[bi]")
+            add(lines, 12, "new_slice = new[0, :, s:s+1, :]")
+            add(lines, 12, "blocks[block_idx, :, bo:bo+1, :] = new_slice")
+            add(lines, 8, "return blocks")
 
     def _emit_eval_symbols(self, lines: list[str]) -> None:
         add = self._add
@@ -4021,8 +4041,11 @@ class _DirectTorchEmitter:
         add = self._add
         add(lines, 4, "def _forward(self, input_ids=None, **inputs):")
         args: list[str] = []
+        skip_paged = {"past_kv", "use_cache"} if self.paged_attention else set()
         first_input = main.inputs[0].name if main.inputs else None
         for value in main.inputs:
+            if value.name in skip_paged:
+                continue
             if value.name == "input_ids":
                 add(lines, 8, "if input_ids is None:")
                 add(lines, 12, "input_ids = inputs.get('input_ids')")
@@ -4044,12 +4067,39 @@ class _DirectTorchEmitter:
                 else:
                     add(lines, 8, f"{value.name} = inputs.get({value.name!r}, None)")
                 args.append(value.name)
+        if self.paged_attention:
+            add(lines, 8, "k_blocks = inputs['k_blocks']")
+            add(lines, 8, "v_blocks = inputs['v_blocks']")
+            add(lines, 8, "block_table = inputs['block_table']")
+            add(lines, 8, "position = int(inputs['position'])")
+            add(lines, 8, "block_size = int(inputs['block_size'])")
+            add(lines, 8, "num_layers = k_blocks.shape[0]")
+            add(lines, 8, "if position > 0:")
+            add(lines, 12, "gathered_past_kv = []")
+            add(lines, 12, "for li in range(num_layers):")
+            add(lines, 16, "k_past = self._paged_gather(k_blocks[li], block_table, position, block_size)")
+            add(lines, 16, "v_past = self._paged_gather(v_blocks[li], block_table, position, block_size)")
+            add(lines, 16, "gathered_past_kv.append((k_past, v_past))")
+            add(lines, 12, "past_kv = gathered_past_kv")
+            add(lines, 8, "else:")
+            add(lines, 12, "past_kv = None")
+            add(lines, 8, "use_cache = True")
+            args.extend(["past_kv", "use_cache"])
         add(lines, 8, f"result = self.{self.method_names[main.name]}({', '.join(args)})")
-        names = _main_output_names(self.program, main)
-        if len(names) == 1:
-            add(lines, 8, "return result[0]")
+        if self.paged_attention:
+            add(lines, 8, "new_kv = result[1]")
+            add(lines, 8, "sliced_new_kv = []")
+            add(lines, 8, "for li in range(num_layers):")
+            add(lines, 12, "k_new_tokens = new_kv[li][0][:, :, position:, :]")
+            add(lines, 12, "v_new_tokens = new_kv[li][1][:, :, position:, :]")
+            add(lines, 12, "sliced_new_kv.append((k_new_tokens, v_new_tokens))")
+            add(lines, 8, "return {'logits': result[0], 'new_kv': sliced_new_kv}")
         else:
-            add(lines, 8, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
+            names = _main_output_names(self.program, main)
+            if len(names) == 1:
+                add(lines, 8, "return result[0]")
+            else:
+                add(lines, 8, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
         add(lines, 4, "")
         add(lines, 4, "def forward(self, input_ids=None, **inputs):")
         add(lines, 8, "return self._forward(input_ids, **inputs)")
@@ -5957,6 +6007,7 @@ def emit_model_code_from_graph_ir(
     model_config: dict[str, Any] | None = None,
     profile: bool = False,
     align_devices: bool = False,
+    paged_attention: bool = False,
 ) -> str:
     """Emit direct Python/PyTorch model code from graph IR."""
     validate_graph_program(program)
@@ -5965,6 +6016,7 @@ def emit_model_code_from_graph_ir(
         class_name=class_name,
         profile=profile,
         align_devices=align_devices,
+        paged_attention=paged_attention,
     )
     body = emitter.emit()
     header = [

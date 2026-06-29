@@ -5,12 +5,14 @@ import typer
 from . import transforms
 from .cli import app as cli_app
 from .cli.synapse import app as synapse_app
+from .serving.cli import app as serve_app
 from .web.cli import app as webcli_app
 from .web.ui import app as webui_app
 
 app = typer.Typer(help="Brain surgery command suite.")
 app.add_typer(cli_app, name="cli")
 app.add_typer(synapse_app, name="synapse")
+app.add_typer(serve_app, name="serve")
 app.add_typer(webcli_app, name="webcli")
 app.add_typer(webui_app, name="webui")
 
@@ -50,6 +52,7 @@ def main(argv: list[str] | None = None) -> None:
     top_level = {
         "cli",
         "synapse",
+        "serve",
         "webcli",
         "webui",
         "-h",
@@ -66,4 +69,4 @@ def main(argv: list[str] | None = None) -> None:
     app(args=["cli", *_normalize_cli_args(args)], prog_name="brainsurgery")
 
 
-__all__ = ["app", "main", "cli_app", "synapse_app", "webcli_app", "webui_app", "transforms"]
+__all__ = ["app", "main", "cli_app", "synapse_app", "serve_app", "webcli_app", "webui_app", "transforms"]
