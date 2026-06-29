@@ -21,6 +21,7 @@ class Sequence:
     eos_token_id: int | None = None
     finished: bool = False
     sampled_token: int | None = None
+    prefill_pos: int = 0
 
 
 @dataclass
@@ -29,6 +30,7 @@ class SeqInput:
     input_ids: Any
     phase: Phase
     num_tokens: int
+    is_last_prefill_chunk: bool = True
 
 
 @dataclass
@@ -47,6 +49,14 @@ class Scheduler(ABC):
 
     @abstractmethod
     def on_step_complete(self, seq_id: int, token_id: int) -> None:
+        ...
+
+    @abstractmethod
+    def advance_prefill(self, seq_id: int, num_tokens: int) -> None:
+        ...
+
+    @abstractmethod
+    def set_prefill_pos(self, seq_id: int, pos: int) -> None:
         ...
 
     @abstractmethod

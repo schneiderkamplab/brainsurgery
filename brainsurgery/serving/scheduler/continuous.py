@@ -15,7 +15,9 @@ class ContinuousBatchScheduler(Scheduler):
         *,
         max_batch_size: int = 8,
         max_seq_len: int = 2048,
+        prefill_chunk_size: int = 0,
     ):
+        self._prefill_chunk_size = prefill_chunk_size
         self._max_batch_size = max_batch_size
         self._max_seq_len = max_seq_len
         self._sequences: dict[int, Sequence] = {}
@@ -59,11 +61,18 @@ class ContinuousBatchScheduler(Scheduler):
                 if seq.finished:
                     continue
                 if seq.phase == Phase.PREFILL:
+                    chunk_size = len(seq.prompt) - seq.prefill_pos
+                    if self._prefill_chunk_size > 0:
+                        chunk_size = min(chunk_size, self._prefill_chunk_size)
+                    chunk = seq.prompt[seq.prefill_pos:seq.prefill_pos + chunk_size]
+                    is_last = seq.prefill_pos + chunk_size >= len(seq.prompt)
+                    seq._pending_prefill_tokens = chunk_size
                     planned.append(SeqInput(
                         seq_id=seq.seq_id,
-                        input_ids=seq.prompt,
+                        input_ids=chunk,
                         phase=Phase.PREFILL,
-                        num_tokens=len(seq.prompt),
+                        num_tokens=chunk_size,
+                        is_last_prefill_chunk=is_last,
                     ))
                 else:
                     planned.append(SeqInput(
@@ -82,12 +91,26 @@ class ContinuousBatchScheduler(Scheduler):
             seq.generated.append(token_id)
             seq.sampled_token = token_id
             if seq.phase == Phase.PREFILL:
+                seq.prefill_pos += seq._pending_prefill_tokens
+                seq._pending_prefill_tokens = 0
                 seq.phase = Phase.DECODE
                 logger.debug("Seq %d transitioned to decode", seq_id)
             full_len = len(seq.prompt) + len(seq.generated)
             if token_id == seq.eos_token_id or full_len >= seq.max_tokens:
                 seq.finished = True
                 self._finish(seq_id)
+
+    def advance_prefill(self, seq_id: int, num_tokens: int) -> None:
+        with self._lock:
+            seq = self._running.get(seq_id)
+            if seq is not None and seq.phase == Phase.PREFILL:
+                seq.prefill_pos += num_tokens
+
+    def set_prefill_pos(self, seq_id: int, pos: int) -> None:
+        with self._lock:
+            seq = self._sequences.get(seq_id)
+            if seq is not None:
+                seq.prefill_pos = pos
 
     def _finish(self, seq_id: int) -> None:
         seq = self._running.pop(seq_id, None)
