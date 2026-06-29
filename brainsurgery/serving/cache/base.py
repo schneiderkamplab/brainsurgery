@@ -19,7 +19,11 @@ KVCacheState = Any
 
 class KVCache(ABC):
     @abstractmethod
-    def init_entry(self, seq_id: int) -> int:
+    def init_entry(self, seq_id: int, prompt_tokens: list[int] | None = None) -> int:
+        ...
+
+    @abstractmethod
+    def register_blocks(self, seq_id: int, tokens: list[int]) -> None:
         ...
 
     @abstractmethod

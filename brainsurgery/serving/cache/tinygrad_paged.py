@@ -48,9 +48,12 @@ class TinygradPagedKVCache(KVCache):
             max_blocks, block_size, max_blocks * block_size, mb,
         )
 
-    def init_entry(self, seq_id: int) -> int:
+    def init_entry(self, seq_id: int, prompt_tokens: list[int] | None = None) -> int:
         self._entries[seq_id] = _PagedEntry(seq_id=seq_id)
         return 0
+
+    def register_blocks(self, seq_id: int, tokens: list[int]) -> None:
+        pass
 
     def _alloc_block(self) -> int | None:
         if not self._free_blocks:
@@ -77,18 +80,22 @@ class TinygradPagedKVCache(KVCache):
         if entry is None:
             raise KeyError(f"Unknown seq_id: {seq_id}")
         n_heads, num_new, head_dim = k.shape
-        for i in range(num_new):
-            pos = entry.num_tokens + i
-            block_idx = pos // self._block_size
-            offset = pos % self._block_size
-            while block_idx >= len(entry.block_table):
-                blk = self._alloc_block()
-                if blk is None:
-                    raise RuntimeError("Cache full")
-                entry.block_table.append(blk)
-            blk = entry.block_table[block_idx]
-            self._k_pool[blk, layer_idx, :n_heads, offset, :] = k[:, i, :]
-            self._v_pool[blk, layer_idx, :n_heads, offset, :] = v[:, i, :]
+        if num_new == 0:
+            return
+        pos_start = entry.num_tokens
+        blocks_needed = (pos_start + num_new + self._block_size - 1) // self._block_size
+        while len(entry.block_table) < blocks_needed:
+            blk = self._alloc_block()
+            if blk is None:
+                raise RuntimeError("Cache full")
+            entry.block_table.append(blk)
+        positions = np.arange(pos_start, pos_start + num_new)
+        block_indices = positions // self._block_size
+        offsets = positions % self._block_size
+        blk_table = np.array(entry.block_table, dtype=np.int64)
+        blk_ids = blk_table[block_indices]
+        self._k_pool[blk_ids, layer_idx, :n_heads, offsets, :] = k.transpose(1, 0, 2)
+        self._v_pool[blk_ids, layer_idx, :n_heads, offsets, :] = v.transpose(1, 0, 2)
 
     def advance_tokens(self, seq_id: int, num_new: int) -> None:
         entry = self._entries.get(seq_id)
@@ -107,18 +114,22 @@ class TinygradPagedKVCache(KVCache):
         n_layers, batch, n_heads, num_new, head_dim = k.shape
         assert batch == 1
         assert n_layers == self._num_layers
-        for i in range(num_new):
-            pos = entry.num_tokens + i
-            block_idx = pos // self._block_size
-            offset = pos % self._block_size
-            while block_idx >= len(entry.block_table):
-                blk = self._alloc_block()
-                if blk is None:
-                    raise RuntimeError("Cache full")
-                entry.block_table.append(blk)
-            blk = entry.block_table[block_idx]
-            self._k_pool[blk, :, :n_heads, offset, :] = k[:, 0, :, i, :]
-            self._v_pool[blk, :, :n_heads, offset, :] = v[:, 0, :, i, :]
+        if num_new == 0:
+            return
+        pos_start = entry.num_tokens
+        blocks_needed = (pos_start + num_new + self._block_size - 1) // self._block_size
+        while len(entry.block_table) < blocks_needed:
+            blk = self._alloc_block()
+            if blk is None:
+                raise RuntimeError("Cache full")
+            entry.block_table.append(blk)
+        positions = np.arange(pos_start, pos_start + num_new)
+        block_indices = positions // self._block_size
+        offsets = positions % self._block_size
+        blk_table = np.array(entry.block_table, dtype=np.int64)
+        blk_ids = blk_table[block_indices]
+        self._k_pool[blk_ids, :, :n_heads, offsets, :] = k[:, 0, :, :, :].transpose(3, 0, 1, 2)
+        self._v_pool[blk_ids, :, :n_heads, offsets, :] = v[:, 0, :, :, :].transpose(3, 0, 1, 2)
         entry.num_tokens += num_new
 
     def gather(self, seq_id: int) -> KVCacheState | None:
@@ -128,16 +139,15 @@ class TinygradPagedKVCache(KVCache):
             return None
         num_tokens = entry.num_tokens
         L, H, D = self._num_layers, self._num_heads, self._head_dim
-        k_full = np.zeros((L, H, num_tokens, D), dtype=self._k_pool.dtype)
-        v_full = np.zeros((L, H, num_tokens, D), dtype=self._v_pool.dtype)
-        for pos in range(num_tokens):
-            block_idx = pos // self._block_size
-            offset = pos % self._block_size
-            blk = entry.block_table[block_idx]
-            k_full[:, :, pos, :] = self._k_pool[blk, :, :H, offset, :]
-            v_full[:, :, pos, :] = self._v_pool[blk, :, :H, offset, :]
+        positions = np.arange(num_tokens)
+        block_indices = positions // self._block_size
+        offsets = positions % self._block_size
+        blk_table = np.array(entry.block_table, dtype=np.int64)
+        blk_ids = blk_table[block_indices]
+        k_full = self._k_pool[blk_ids, :, :H, offsets, :].transpose(1, 2, 0, 3)
+        v_full = self._v_pool[blk_ids, :, :H, offsets, :].transpose(1, 2, 0, 3)
         return tuple(
-            (Tensor(k_full[layer:layer+1]), Tensor(v_full[layer:layer+1]))
+            (Tensor(k_full[layer:layer+1].copy()), Tensor(v_full[layer:layer+1].copy()))
             for layer in range(L)
         )
 
