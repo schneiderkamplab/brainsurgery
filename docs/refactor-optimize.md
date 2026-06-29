@@ -106,7 +106,7 @@ Top optimizer strengthening priorities:
   `__torch_rope_pair_apply_factors` only when `--graph-backend-intrinsics
   codegen2-torch` is selected.
 - Fill/scatter unit-slice is a backend-neutral graph rewrite: it rewrites to
-  `_assign_unit_slice` when output provenance proves a primitive
+  `_assign_slice(base, src, dim, index, index + 1)` when output provenance proves a primitive
   `_scatter(base, index, src, dim)` whose `index` provenance is primitive
   `_fill(src, value, ...)`. This works through ordinary Axon wrappers without
   treating wrapper names as semantic evidence.
@@ -147,7 +147,7 @@ Axon definition names are not semantic evidence.
   ordinary module names as primitive-like; it only lowers real primitives and
   explicit backend intrinsics.
 - Fill/scatter unit-slice lowering: implemented as a provenance-backed
-  backend-neutral `_assign_unit_slice` graph op. The older codegen syntactic
+  backend-neutral `_assign_slice` graph op. The older codegen syntactic
   peepholes for this pattern have been removed, so the optimization is owned by
   Graph IR.
 - List append/list construction: `_list_init`, `_list_append`, `_list_index`,
@@ -256,7 +256,7 @@ Axon definition names are not semantic evidence.
   `__torch_selected_expert_swiglu_ffn`,
   `__torch_selected_expert_relu2_ffn`.
   These are the target style for future backend-specific fusions.
-- Backend-neutral graph rewrites already implemented include `_assign_unit_slice`
+- Backend-neutral graph rewrites already implemented include `_assign_slice`
   and dense gate/up packed-parameter `_linear` plus `_chunk`.
 - Path-derived expert-bank handling for `_expert_linear` is intentionally not
   in this graph-rewrite backlog for now. It is primarily a backend storage and

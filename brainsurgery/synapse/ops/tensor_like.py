@@ -12,6 +12,10 @@ LOWERING_TYPE_SIGNATURE = {
     "returns": "dynamic",
 }
 
+PRIMITIVE_SEMANTICS = {
+    "usage": "affine",
+}
+
 
 def type_rule(
     *,
@@ -33,5 +37,6 @@ def type_rule(
 __all__ = [
     "OP_NAME",
     "LOWERING_TYPE_SIGNATURE",
+    "PRIMITIVE_SEMANTICS",
     "type_rule",
 ]

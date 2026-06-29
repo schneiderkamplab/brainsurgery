@@ -6,6 +6,7 @@ export (
   and,
   arange,
   arange_step,
+  assign_slice,
   cast,
   cast_like,
   chunk,
@@ -149,6 +150,9 @@ masked_fill x mask value = where mask value x
 
 slice :: Tensor[..S] -> Int -> Dim -> Dim -> Tensor[..R]
 slice x dim start end = _slice x dim start end
+
+assign_slice :: Tensor[..S] -> Tensor[..R] -> Int -> Dim -> Dim -> Tensor[..S]
+assign_slice x src dim start end = _assign_slice x src dim start end
 
 softmax :: Tensor[..S] -> ?Int -> ?String -> Tensor[..S]
 softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype

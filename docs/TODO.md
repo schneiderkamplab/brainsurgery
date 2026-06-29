@@ -185,5 +185,11 @@ These should stay optional until each pass has precise preconditions, typed vali
   overhead for small hot operations such as RMSNorm and path-derived weight
   access. Prefer graph-validated inlining or generated-code local caching over
   ad-hoc backend special cases.
+- TinyGrad static-cache generation: reusable decode-step JIT works for GPT-2
+  static-cache generation with left padding when cache/mask lengths are explicit
+  top-level TinyJit `Variable` inputs and symbolic `_assign_slice` lowers to a
+  functional unit-slice mask update. Broaden validation beyond GPT-2/static
+  single-token decode before migrating real model files or relying on symbolic
+  multi-token cache updates.
 - Graph-level parameter/path normalization: continue canonicalizing path templates structurally, but do not inline constants or scopes by string rewriting. Template symbols are first-class dependencies and must remain visible to closure, validation, and codegen.
 - Backend-aware but semantic-preserving lowering: add optional graph passes for pipeline partitioning, parameter placement, buffer hoisting, and dtype/dequant planning once Graph IR carries enough metadata to validate the transformed graph before code generation.

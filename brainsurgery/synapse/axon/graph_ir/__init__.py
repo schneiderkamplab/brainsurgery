@@ -37,6 +37,7 @@ from .effects import (
     infer_graph_module_usages,
 )
 from .optimize import GraphOptimizeConfig, optimize_graph_program, prune_graph_to_main
+from .ownership import GraphOwnershipAnalysis, infer_graph_ownership
 from .render import (
     graph_domain_definition_comments,
     graph_module_to_axon_definition,
@@ -54,6 +55,7 @@ from .provenance import (
 
 __all__ = [
     "GraphOptimizeConfig",
+    "GraphOwnershipAnalysis",
     "GraphAttr",
     "GraphEffect",
     "UsageClass",
@@ -95,6 +97,7 @@ __all__ = [
     "format_graph_provenance",
     "infer_graph_module_effects",
     "infer_graph_module_usages",
+    "infer_graph_ownership",
     "infer_graph_provenance",
     "infer_main_module_domain_facts",
     "validate_graph_domain_analysis",
