@@ -30,6 +30,7 @@ from brainsurgery.core.runtime.transform import REGISTRY, register_transform
 from brainsurgery.core.specs.scalar_comparison import ScalarComparison, parse_scalar_comparison
 from brainsurgery.core.specs.types import StateDictLike
 from brainsurgery.core.specs.validation import (
+    TransformPayloadSchema,
     require_expr,
     require_same_shape_dtype_device,
     require_same_shape_dtype_device3,
@@ -115,6 +116,14 @@ def test_typed_transform_require_spec_and_register_transform_validation() -> Non
         name = "typed"
         spec_type = int
 
+        def payload_schema(self) -> TransformPayloadSchema:
+            return TransformPayloadSchema(
+                mode_key=None,
+                default_mode="default",
+                common_required=set(),
+                common_allowed=set(),
+            )
+
         def compile(self, payload: dict, default_model: str | None) -> int:
             del payload, default_model
             return 1
@@ -133,6 +142,14 @@ def test_typed_transform_require_spec_and_register_transform_validation() -> Non
 
     class _NoName(BaseTransform):
         name = ""
+
+        def payload_schema(self) -> TransformPayloadSchema:
+            return TransformPayloadSchema(
+                mode_key=None,
+                default_mode="default",
+                common_required=set(),
+                common_allowed=set(),
+            )
 
         def compile(self, payload: dict, default_model: str | None):
             del payload, default_model

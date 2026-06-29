@@ -1,0 +1,64 @@
+{-# CHECKPOINTS "google-bert/bert-base-uncased" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "bert" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (bidirectional_mask_for_input)
+
+import Positions (position_ids)
+
+import Config
+
+import NN
+
+MODEL_DIM = 768
+
+VOCAB_SIZE = 30522
+
+NUM_LAYERS = 12
+
+NUM_HEADS = 12
+
+FFN = 3072
+
+EPS = 1e-12
+
+bert_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+bert_block x keep = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- x + a
+  x <- NN.layernorm@attention.output.LayerNorm x eps=EPS weight_path=@attention.output.LayerNorm.gamma bias_path=@attention.output.LayerNorm.beta
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  y <- x + m
+  y <- NN.layernorm@output.LayerNorm y eps=EPS weight_path=@output.LayerNorm.gamma bias_path=@output.LayerNorm.beta
+  return y
+
+bert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+bert input_ids attn_mask = do
+  pos_ids <- position_ids input_ids
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@bert.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@bert.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@bert.embeddings.token_type_embeddings tok_type_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- x + typ
+  x <- NN.layernorm@bert.embeddings.LayerNorm x eps=EPS weight_path=@@bert.embeddings.LayerNorm.gamma bias_path=@@bert.embeddings.LayerNorm.beta
+  x <- for@bert.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- bert_block x keep
+    yield x
+  logits <- scope@cls.predictions do
+    x <- NN.linear@transform.dense x dim=MODEL_DIM bias=true |> gelu
+    x <- NN.layernorm@transform.LayerNorm x eps=EPS weight_path=@@cls.predictions.transform.LayerNorm.gamma bias_path=@@cls.predictions.transform.LayerNorm.beta
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@bert.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
+  return logits

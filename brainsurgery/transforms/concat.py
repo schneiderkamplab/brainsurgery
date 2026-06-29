@@ -8,6 +8,7 @@ from ..core import (
     StateDictProvider,
     TensorRef,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     ensure_mapping_payload,
     match_expr_names,
@@ -16,7 +17,7 @@ from ..core import (
     parse_slice,
     register_transform,
     state_dict_for_ref,
-    validate_payload_keys,
+    validate_payload_schema,
     view_for_ref_name,
 )
 from ..engine import emit_verbose_event
@@ -42,8 +43,6 @@ class ConcatTransform(BaseTransform):
     name = "concat"
     error_type = ConcatTransformError
     spec_type = ConcatSpec
-    allowed_keys = {"from", "to", "dim"}
-    required_keys = {"from", "to"}
     help_text = (
         "Concatenates multiple source tensors into one destination tensor.\n"
         "\n"
@@ -55,16 +54,24 @@ class ConcatTransform(BaseTransform):
         "  concat: { from: ['a::x::[:, :4]', 'a::x::[:, 4:]'], to: a::x_rebuilt, dim: 1 }"
     )
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required={"from", "to"},
+            common_allowed={"from", "to", "dim"},
+        )
+
     def completion_reference_keys(self) -> list[str]:
         return ["from", "to"]
 
     def compile(self, payload: Any, default_model: str | None) -> ConcatSpec:
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
 
         raw_from = payload.get("from")

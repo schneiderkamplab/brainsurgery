@@ -1,12 +1,16 @@
 .vscode
 __pycache__
-models
+/models
+/log/
 .brainsurgery
 
 # Python cache/build artifacts
 *.py[cod]
 *.pyo
 *.pyd
+*.aux
+*.pdf
+*.log
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -17,3 +21,4 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+tmp

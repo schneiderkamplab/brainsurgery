@@ -1,0 +1,398 @@
+{-# CHECKPOINTS ["deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4-Pro", "test/DeepSeek-V4-Test"] #-}
+{-# TOKENIZER ["test/DeepSeek-V4-Test", "openai-community/gpt2"] #-}
+{-# TASK "causal_lm" #-}
+
+import Config
+import Activations (sigmoid, silu, sqrtsoftplus)
+import Attention attention
+import List
+import Masking causal_mask
+import Math (clamp, floor, sqrt)
+import MoE
+import NN
+import Params
+import Params (param, has_root)
+import Positions (position_ids, rope_apply_trailing, rope_apply_trailing_inverse, rope_apply_trailing_yarn, rope_apply_trailing_yarn_inverse)
+import Tensor
+
+
+MODEL_DIM <- Config.dim @@hidden_size default=4096
+VOCAB_SIZE <- Config.dim @@vocab_size default=129280
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=43
+NUM_HEADS <- Config.dim @@num_attention_heads default=64
+HEAD_DIM <- Config.dim @@head_dim default=512
+ROPE_HEAD_DIM <- Config.dim @@qk_rope_head_dim default=64
+Q_LORA_RANK <- Config.dim @@q_lora_rank default=1024
+HC_MULT <- Config.dim @@hc_mult default=4
+NUM_EXPERTS <- Config.dim @@n_routed_experts default=256
+EXPERTS_PER_TOKEN <- Config.dim @@num_experts_per_tok default=6
+SHARED_EXPERTS <- Config.dim @@n_shared_experts default=1
+MOE_DIM <- Config.dim @@moe_intermediate_size default=2048
+SLIDING_WINDOW <- Config.dim @@sliding_window default=128
+O_GROUPS <- Config.dim @@o_groups default=8
+O_LORA_RANK <- Config.dim @@o_lora_rank default=1024
+INDEX_HEADS <- Config.dim @@index_n_heads default=64
+INDEX_HEAD_DIM <- Config.dim @@index_head_dim default=128
+INDEX_TOPK <- Config.dim @@index_topk default=512
+EPS <- Config.float @@rms_norm_eps default=1e-6
+THETA <- Config.float @@rope_theta default=10000.0
+COMPRESS_THETA <- Config.float @@compress_rope_theta default=160000.0
+COMPRESS_ROPE_FACTOR <- Config.float @@'rope_scaling.factor' default=16.0
+COMPRESS_ROPE_BETA_FAST <- Config.float @@'rope_scaling.beta_fast' default=32.0
+COMPRESS_ROPE_BETA_SLOW <- Config.float @@'rope_scaling.beta_slow' default=1.0
+COMPRESS_ORIGINAL_CONTEXT <- Config.dim @@'rope_scaling.original_max_position_embeddings' default=65536
+COMPRESS_ROPE_ATTENTION_FACTOR <- Config.float @@'rope_scaling.attention_factor' default=1.0
+PARTIAL_ROPE <- Config.float @@partial_rotary_factor default=0.125
+SWIGLU_LIMIT <- Config.float @@swiglu_limit default=10.0
+HC_SINKHORN_ITERS <- Config.int @@hc_sinkhorn_iters default=20
+LAYER_TYPES <- Config.list @@layer_types default=["heavily_compressed_attention", "heavily_compressed_attention"]
+MLP_LAYER_TYPES <- Config.list @@mlp_layer_types default=["hash_moe", "hash_moe", "hash_moe"]
+HAS_LAYER_TYPES <- Config.has_key @@layer_types
+HAS_MLP_LAYER_TYPES <- Config.has_key @@mlp_layer_types
+COMPRESS_RATIOS <- Config.list @@compress_ratios default=[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]
+NUM_HASH_LAYERS <- Config.dim @@num_hash_layers default=3
+HAS_HF_PREFIX = has_root "model"
+
+deepseek_v4_layer_type :: Int -> String
+deepseek_v4_layer_type i = HAS_LAYER_TYPES ? (List.index LAYER_TYPES i) : do
+  ratio <- List.index COMPRESS_RATIOS i
+  return (ratio == 0) ? "sliding_attention" : ((ratio == 4) ? "compressed_sparse_attention" : "heavily_compressed_attention")
+
+deepseek_v4_mlp_type :: Int -> String
+deepseek_v4_mlp_type i = HAS_MLP_LAYER_TYPES ? (List.index MLP_LAYER_TYPES i) : ((i < NUM_HASH_LAYERS) ? "hash_moe" : "moe")
+
+deepseek_v4_embed :: Tensor.TokenIds[B,S] -> Tensor[B,S,MODEL_DIM]
+deepseek_v4_embed input_ids = HAS_HF_PREFIX
+  ? (NN.embedding@@model.embed_tokens input_ids dim=MODEL_DIM)
+  : (NN.embedding@@embed input_ids dim=MODEL_DIM)
+
+deepseek_v4_head :: Tensor[B,S,MODEL_DIM] -> Tensor[B,S,VOCAB_SIZE]
+deepseek_v4_head x = HAS_HF_PREFIX
+  ? (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false)
+  : (NN.linear@@head x dim=VOCAB_SIZE bias=false)
+
+deepseek_v4_rmsnorm_final :: Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM]
+deepseek_v4_rmsnorm_final x = HAS_HF_PREFIX
+  ? (NN.rmsnorm@@model.norm x eps=EPS dim=MODEL_DIM cast_float=true)
+  : (NN.rmsnorm@@norm x eps=EPS dim=MODEL_DIM cast_float=true)
+
+deepseek_v4_hc_head :: Tensor[B,S,HC_MULT,MODEL_DIM] -> Tensor[B,S,MODEL_DIM]
+deepseek_v4_hc_head x = do
+  flat <- Tensor.reshape x shape=[B, S, (HC_MULT * MODEL_DIM)]
+  flat <- NN.rmsnorm_noscale flat eps=EPS dim=(HC_MULT * MODEL_DIM) cast_float=true
+  mixes <- HAS_HF_PREFIX
+    ? (NN.linear@@model.hc_head flat dim=HC_MULT bias=false weight_path=@@model.hc_head.hc_fn)
+    : (NN.linear@@hc_head flat dim=HC_MULT bias=false weight_path=@@hc_head.hc_fn)
+  scale <- HAS_HF_PREFIX ? (param @@model.hc_head.hc_scale) : (param @@hc_head.hc_scale)
+  base <- HAS_HF_PREFIX ? (param @@model.hc_head.hc_base) : (param @@hc_head.hc_base)
+  scale <- Tensor.reshape scale shape=[1, 1, 1]
+  base <- Tensor.reshape base shape=[1, 1, HC_MULT]
+  pre <- sigmoid ((mixes * scale) + base)
+  pre <- pre + EPS
+  pre <- Tensor.unsqueeze pre dim=-1
+  weighted <- pre * x
+  return Tensor.sum weighted dim=2 keepdim=false
+
+deepseek_v4_hyper_connection :: Path -> Tensor[B,S,HC_MULT,MODEL_DIM] -> (Any, Any, Any)
+deepseek_v4_hyper_connection@path hidden_streams = do
+  flat <- Tensor.reshape hidden_streams shape=[B, S, (HC_MULT * MODEL_DIM)]
+  flat <- NN.rmsnorm_noscale flat eps=EPS dim=(HC_MULT * MODEL_DIM) cast_float=true
+  mix_dim <- (2 + HC_MULT) * HC_MULT
+  mix <- NN.linear@path flat dim=mix_dim bias=false weight_path=@fn
+  scale <- param @scale
+  base <- param @base
+  pre_scale <- Tensor.slice scale dim=0 start=0 end=1 |> Tensor.reshape shape=[1, 1, 1]
+  post_scale <- Tensor.slice scale dim=0 start=1 end=2 |> Tensor.reshape shape=[1, 1, 1]
+  comb_scale <- Tensor.slice scale dim=0 start=2 end=3 |> Tensor.reshape shape=[1, 1, 1, 1]
+  pre_base <- Tensor.slice base dim=0 start=0 end=HC_MULT |> Tensor.reshape shape=[1, 1, HC_MULT]
+  post_base <- Tensor.slice base dim=0 start=HC_MULT end=(2 * HC_MULT) |> Tensor.reshape shape=[1, 1, HC_MULT]
+  comb_base <- Tensor.slice base dim=0 start=(2 * HC_MULT) end=mix_dim |> Tensor.reshape shape=[1, 1, HC_MULT, HC_MULT]
+  pre_logits <- Tensor.slice mix dim=-1 start=0 end=HC_MULT
+  post_logits <- Tensor.slice mix dim=-1 start=HC_MULT end=(2 * HC_MULT)
+  comb_logits <- Tensor.slice mix dim=-1 start=(2 * HC_MULT) end=mix_dim |> Tensor.reshape shape=[B, S, HC_MULT, HC_MULT]
+  pre <- sigmoid ((pre_logits * pre_scale) + pre_base)
+  pre <- pre + EPS
+  post <- 2.0 * sigmoid ((post_logits * post_scale) + post_base)
+  comb <- Tensor.softmax ((comb_logits * comb_scale) + comb_base) dim=-1 dtype="float32"
+  comb <- comb + EPS
+  denom <- Tensor.sum comb dim=-2 keepdim=true
+  comb <- comb / (denom + EPS)
+  comb <- for j <- [1..HC_SINKHORN_ITERS) carry (comb) do
+    denom <- Tensor.sum comb dim=-1 keepdim=true
+    comb <- comb / (denom + EPS)
+    denom <- Tensor.sum comb dim=-2 keepdim=true
+    comb <- comb / (denom + EPS)
+    yield comb
+  collapsed <- Tensor.sum ((Tensor.unsqueeze pre dim=-1) * hidden_streams) dim=2 keepdim=false
+  return post, comb, collapsed
+
+deepseek_v4_grouped_linear :: Path -> Tensor[B,S,O_GROUPS,GI] -> Tensor[B,S,O_GROUPS * O_LORA_RANK]
+deepseek_v4_grouped_linear@path x = do
+  w <- param @weight
+  w <- Tensor.reshape w shape=[O_GROUPS, O_LORA_RANK, GI]
+  w <- Tensor.transpose w dim1=1 dim2=2
+  x2 <- Tensor.unsqueeze x dim=3
+  w2 <- Tensor.reshape w shape=[1, 1, O_GROUPS, GI, O_LORA_RANK]
+  y <- Tensor.matmul x2 w2
+  return Tensor.reshape y shape=[B, S, (O_GROUPS * O_LORA_RANK)]
+
+deepseek_v4_rope_apply :: Tensor[B,H,S,D] -> Tensor[B,S] -> String -> Tensor[B,H,S,D]
+deepseek_v4_rope_apply x pos_ids layer_type = (layer_type == "sliding_attention")
+  ? (rope_apply_trailing x pos_ids THETA ROPE_HEAD_DIM interleaved=true)
+  : (rope_apply_trailing_yarn x pos_ids COMPRESS_THETA ROPE_HEAD_DIM COMPRESS_ROPE_FACTOR COMPRESS_ROPE_BETA_FAST COMPRESS_ROPE_BETA_SLOW COMPRESS_ORIGINAL_CONTEXT attention_factor=COMPRESS_ROPE_ATTENTION_FACTOR interleaved=true)
+
+deepseek_v4_rope_apply_inverse :: Tensor[B,H,S,D] -> Tensor[B,S] -> String -> Tensor[B,H,S,D]
+deepseek_v4_rope_apply_inverse x pos_ids layer_type = (layer_type == "sliding_attention")
+  ? (rope_apply_trailing_inverse x pos_ids THETA ROPE_HEAD_DIM interleaved=true)
+  : (rope_apply_trailing_yarn_inverse x pos_ids COMPRESS_THETA ROPE_HEAD_DIM COMPRESS_ROPE_FACTOR COMPRESS_ROPE_BETA_FAST COMPRESS_ROPE_BETA_SLOW COMPRESS_ORIGINAL_CONTEXT attention_factor=COMPRESS_ROPE_ATTENTION_FACTOR interleaved=true)
+
+deepseek_v4_attention_hca_kv :: Path -> Tensor[B,NUM_HEADS,S,HEAD_DIM] -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S] -> (Tensor[B,NUM_HEADS,S + T,HEAD_DIM], Tensor[B,1,S,T])
+deepseek_v4_attention_hca_kv@path base_kv hidden_states pos_ids = do
+  compressed, comp_keep <- deepseek_v4_hca_compress@path hidden_states pos_ids
+  compressed <- Tensor.repeat compressed repeats=NUM_HEADS dim=1
+  return Tensor.concat base_kv compressed dim=2, comp_keep
+
+deepseek_v4_attention_csa_kv :: Path -> Tensor[B,NUM_HEADS,S,HEAD_DIM] -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,Q_LORA_RANK] -> Tensor[B,S] -> (Tensor[B,NUM_HEADS,S + T,HEAD_DIM], Tensor[B,1,S,T])
+deepseek_v4_attention_csa_kv@path base_kv hidden_states q_res pos_ids = do
+  compressed, comp_keep <- deepseek_v4_csa_compress@path hidden_states q_res pos_ids
+  compressed <- Tensor.repeat compressed repeats=NUM_HEADS dim=1
+  return Tensor.concat base_kv compressed dim=2, comp_keep
+
+deepseek_v4_attention_core :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S] -> ?Tensor[B,K] -> String -> Tensor[B,S,MODEL_DIM]
+deepseek_v4_attention_core@path hidden_states pos_ids attn_mask layer_type = do
+  q_res <- NN.linear@q_a_proj hidden_states dim=Q_LORA_RANK bias=false
+  q_res <- NN.rmsnorm@q_a_norm q_res eps=EPS dim=Q_LORA_RANK cast_float=true
+  q <- NN.linear@q_b_proj q_res dim=(NUM_HEADS * HEAD_DIM) bias=false
+  q <- Tensor.reshape q shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.transpose dim1=1 dim2=2
+  q <- NN.rmsnorm_noscale q eps=EPS dim=HEAD_DIM cast_float=false
+  q <- deepseek_v4_rope_apply q pos_ids layer_type
+  kv <- NN.linear@kv_proj hidden_states dim=HEAD_DIM bias=false
+  kv <- NN.rmsnorm@kv_norm kv eps=EPS dim=HEAD_DIM cast_float=true
+  kv <- Tensor.reshape kv shape=[B, S, 1, HEAD_DIM] |> Tensor.transpose dim1=1 dim2=2
+  kv <- deepseek_v4_rope_apply kv pos_ids layer_type
+  base_kv <- kv
+  base_kv <- Tensor.repeat base_kv repeats=NUM_HEADS dim=1
+  empty_keep <- Tensor.slice (causal_mask q base_kv padding_mask=attn_mask window=SLIDING_WINDOW) dim=-1 start=0 end=0
+  kv, comp_keep <- (layer_type == "heavily_compressed_attention")
+    ? (deepseek_v4_attention_hca_kv@compressor base_kv hidden_states pos_ids)
+    : ((layer_type == "compressed_sparse_attention")
+      ? (deepseek_v4_attention_csa_kv@compressor base_kv hidden_states q_res pos_ids)
+      : (base_kv, empty_keep))
+  mask <- causal_mask q base_kv padding_mask=attn_mask window=SLIDING_WINDOW
+  base_len <- Tensor.size base_kv dim=2
+  kv_len <- Tensor.size kv dim=2
+  comp_len <- kv_len - base_len
+  mask <- (comp_len == 0) ? mask : (Tensor.concat mask comp_keep dim=-1)
+  sinks <- param @sinks |> Tensor.reshape shape=[1, NUM_HEADS, 1, 1] |> Tensor.expand shape=[B, NUM_HEADS, S, 1]
+  out <- attention q kv kv mask sink_logits=sinks scale=(1.0 / sqrt HEAD_DIM) fp32_compute=false
+  out <- deepseek_v4_rope_apply_inverse out pos_ids layer_type
+  out <- Tensor.transpose out dim1=1 dim2=2
+  grouped <- Tensor.reshape out shape=[B, S, O_GROUPS, ((NUM_HEADS * HEAD_DIM) / O_GROUPS)]
+  grouped <- deepseek_v4_grouped_linear@o_a_proj grouped
+  return NN.linear@o_b_proj grouped dim=MODEL_DIM bias=false
+
+deepseek_v4_hca_compress :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S] -> (Tensor[B,1,T,HEAD_DIM], Tensor[B,1,S,T])
+deepseek_v4_hca_compress@path hidden_states pos_ids = do
+  kv <- NN.linear@kv_proj hidden_states dim=HEAD_DIM bias=false
+  gate <- NN.linear@gate_proj hidden_states dim=HEAD_DIM bias=false
+  nwin <- floor (S / 128)
+  usable <- nwin * 128
+  kv <- Tensor.slice kv dim=1 start=0 end=usable
+  gate <- Tensor.slice gate dim=1 start=0 end=usable
+  kv <- Tensor.reshape kv shape=[B, nwin, 128, HEAD_DIM]
+  pb <- param @position_bias |> Tensor.reshape shape=[1, 128, HEAD_DIM]
+  gate <- Tensor.reshape gate shape=[B, nwin, 128, HEAD_DIM]
+  gate <- gate + pb
+  weights <- Tensor.softmax gate dim=2 dtype="float32"
+  compressed <- Tensor.sum (kv * weights) dim=2 keepdim=false
+  compressed <- NN.rmsnorm@kv_norm compressed eps=EPS dim=HEAD_DIM cast_float=true
+  pos <- Tensor.arange compressed start=0 end=nwin |> Tensor.reshape shape=[1, nwin] |> Tensor.expand shape=[B, nwin]
+  pos <- pos * 128
+  compressed <- Tensor.reshape compressed shape=[B, 1, nwin, HEAD_DIM]
+  compressed <- rope_apply_trailing_yarn compressed pos COMPRESS_THETA ROPE_HEAD_DIM COMPRESS_ROPE_FACTOR COMPRESS_ROPE_BETA_FAST COMPRESS_ROPE_BETA_SLOW COMPRESS_ORIGINAL_CONTEXT attention_factor=COMPRESS_ROPE_ATTENTION_FACTOR interleaved=true
+  entry <- Tensor.arange compressed start=0 end=nwin |> Tensor.reshape shape=[1, 1, 1, nwin] |> Tensor.expand shape=[B, 1, S, nwin]
+  threshold <- (pos_ids + 1) / 128
+  threshold <- Tensor.reshape threshold shape=[B, 1, S, 1] |> Tensor.expand shape=[B, 1, S, nwin]
+  keep <- Tensor.le (entry + 1) threshold
+  return compressed, keep
+
+deepseek_v4_csa_compress :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,Q_LORA_RANK] -> Tensor[B,S] -> (Tensor[B,1,T,HEAD_DIM], Tensor[B,1,S,T])
+deepseek_v4_csa_compress@path hidden_states q_res pos_ids = do
+  nwin <- floor (S / 4)
+  kv <- NN.linear@kv_proj hidden_states dim=(2 * HEAD_DIM) bias=false
+  gate <- NN.linear@gate_proj hidden_states dim=(2 * HEAD_DIM) bias=false
+  usable <- nwin * 4
+  kv <- Tensor.slice kv dim=1 start=0 end=usable
+  gate <- Tensor.slice gate dim=1 start=0 end=usable
+  kv <- Tensor.reshape kv shape=[B, nwin, 4, (2 * HEAD_DIM)]
+  gate <- Tensor.reshape gate shape=[B, nwin, 4, (2 * HEAD_DIM)]
+  pb <- param @position_bias |> Tensor.reshape shape=[1, 1, 4, (2 * HEAD_DIM)]
+  gate <- gate + pb
+  cur_kv <- Tensor.slice kv dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM) |> Tensor.reshape shape=[B, nwin, 4, HEAD_DIM]
+  cur_gate <- Tensor.slice gate dim=-1 start=HEAD_DIM end=(2 * HEAD_DIM) |> Tensor.reshape shape=[B, nwin, 4, HEAD_DIM]
+  prev_kv <- Tensor.slice kv dim=-1 start=0 end=HEAD_DIM |> Tensor.reshape shape=[B, nwin, 4, HEAD_DIM]
+  prev_gate <- Tensor.slice gate dim=-1 start=0 end=HEAD_DIM |> Tensor.reshape shape=[B, nwin, 4, HEAD_DIM]
+  zero_kv <- Tensor.zeros cur_kv shape=[B, 1, 4, HEAD_DIM]
+  neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, HEAD_DIM] value=(Tensor.dtype_value cur_gate "min")
+  prev_kv_shift <- (nwin == 0) ? cur_kv : Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
+  prev_gate_shift <- (nwin == 0) ? cur_gate : Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
+  new_kv <- Tensor.concat prev_kv_shift cur_kv dim=2
+  new_gate <- Tensor.concat prev_gate_shift cur_gate dim=2
+  weights <- Tensor.softmax new_gate dim=2 dtype="float32"
+  compressed <- Tensor.sum (new_kv * weights) dim=2 keepdim=false
+  compressed <- NN.rmsnorm@kv_norm compressed eps=EPS dim=HEAD_DIM cast_float=true
+  pos <- Tensor.arange compressed start=0 end=nwin |> Tensor.reshape shape=[1, nwin] |> Tensor.expand shape=[B, nwin]
+  pos <- pos * 4
+  compressed <- Tensor.reshape compressed shape=[B, 1, nwin, HEAD_DIM]
+  compressed <- rope_apply_trailing_yarn compressed pos COMPRESS_THETA ROPE_HEAD_DIM COMPRESS_ROPE_FACTOR COMPRESS_ROPE_BETA_FAST COMPRESS_ROPE_BETA_SLOW COMPRESS_ORIGINAL_CONTEXT attention_factor=COMPRESS_ROPE_ATTENTION_FACTOR interleaved=true
+  topk, k_eff, valid <- deepseek_v4_csa_index@indexer hidden_states q_res pos_ids
+  entry <- Tensor.arange compressed start=0 end=nwin |> Tensor.reshape shape=[1, 1, nwin, 1] |> Tensor.expand shape=[B, S, nwin, k_eff]
+  selected <- Tensor.reshape topk shape=[B, S, 1, k_eff] |> Tensor.expand shape=[B, S, nwin, k_eff]
+  valid <- Tensor.reshape valid shape=[B, S, 1, k_eff] |> Tensor.expand shape=[B, S, nwin, k_eff]
+  matches <- Tensor.and (Tensor.eq entry selected) valid
+  hits <- Tensor.sum matches dim=-1 keepdim=false
+  keep <- Tensor.le 1 hits
+  keep <- Tensor.reshape keep shape=[B, 1, S, nwin]
+  return compressed, keep
+
+deepseek_v4_csa_index :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,Q_LORA_RANK] -> Tensor[B,S] -> (Any, Dim, Any)
+deepseek_v4_csa_index@path hidden_states q_res pos_ids = do
+  kv <- NN.linear@kv_proj hidden_states dim=(2 * INDEX_HEAD_DIM) bias=false
+  gate <- NN.linear@gate_proj hidden_states dim=(2 * INDEX_HEAD_DIM) bias=false
+  nwin <- floor (S / 4)
+  usable <- nwin * 4
+  kv <- Tensor.slice kv dim=1 start=0 end=usable
+  gate <- Tensor.slice gate dim=1 start=0 end=usable
+  kv <- Tensor.reshape kv shape=[B, nwin, 4, (2 * INDEX_HEAD_DIM)]
+  gate <- Tensor.reshape gate shape=[B, nwin, 4, (2 * INDEX_HEAD_DIM)]
+  pb <- param @position_bias |> Tensor.reshape shape=[1, 1, 4, (2 * INDEX_HEAD_DIM)]
+  gate <- gate + pb
+  cur_kv <- Tensor.slice kv dim=-1 start=INDEX_HEAD_DIM end=(2 * INDEX_HEAD_DIM) |> Tensor.reshape shape=[B, nwin, 4, INDEX_HEAD_DIM]
+  cur_gate <- Tensor.slice gate dim=-1 start=INDEX_HEAD_DIM end=(2 * INDEX_HEAD_DIM) |> Tensor.reshape shape=[B, nwin, 4, INDEX_HEAD_DIM]
+  prev_kv <- Tensor.slice kv dim=-1 start=0 end=INDEX_HEAD_DIM |> Tensor.reshape shape=[B, nwin, 4, INDEX_HEAD_DIM]
+  prev_gate <- Tensor.slice gate dim=-1 start=0 end=INDEX_HEAD_DIM |> Tensor.reshape shape=[B, nwin, 4, INDEX_HEAD_DIM]
+  zero_kv <- Tensor.zeros cur_kv shape=[B, 1, 4, INDEX_HEAD_DIM]
+  neg_gate <- Tensor.full cur_gate shape=[B, 1, 4, INDEX_HEAD_DIM] value=(Tensor.dtype_value cur_gate "min")
+  prev_kv_shift <- (nwin == 0) ? cur_kv : Tensor.concat zero_kv (Tensor.slice prev_kv dim=1 start=0 end=(nwin - 1)) dim=1
+  prev_gate_shift <- (nwin == 0) ? cur_gate : Tensor.concat neg_gate (Tensor.slice prev_gate dim=1 start=0 end=(nwin - 1)) dim=1
+  new_kv <- Tensor.concat prev_kv_shift cur_kv dim=2
+  new_gate <- Tensor.concat prev_gate_shift cur_gate dim=2
+  weights <- Tensor.softmax new_gate dim=2 dtype="float32"
+  compressed_kv <- Tensor.sum (new_kv * weights) dim=2 keepdim=false
+  compressed_kv <- NN.rmsnorm@kv_norm compressed_kv eps=EPS dim=INDEX_HEAD_DIM cast_float=true
+  pos <- Tensor.arange compressed_kv start=0 end=nwin |> Tensor.reshape shape=[1, nwin] |> Tensor.expand shape=[B, nwin]
+  pos <- pos * 4
+  compressed_kv <- Tensor.reshape compressed_kv shape=[B, 1, nwin, INDEX_HEAD_DIM]
+  compressed_kv <- rope_apply_trailing_yarn compressed_kv pos COMPRESS_THETA ROPE_HEAD_DIM COMPRESS_ROPE_FACTOR COMPRESS_ROPE_BETA_FAST COMPRESS_ROPE_BETA_SLOW COMPRESS_ORIGINAL_CONTEXT attention_factor=COMPRESS_ROPE_ATTENTION_FACTOR interleaved=true
+  compressed_kv <- Tensor.reshape compressed_kv shape=[B, nwin, INDEX_HEAD_DIM]
+  q <- NN.linear@q_b_proj q_res dim=(INDEX_HEADS * INDEX_HEAD_DIM) bias=false
+  q <- Tensor.reshape q shape=[B, S, INDEX_HEADS, INDEX_HEAD_DIM] |> Tensor.transpose dim1=1 dim2=2
+  q <- rope_apply_trailing_yarn q pos_ids COMPRESS_THETA ROPE_HEAD_DIM COMPRESS_ROPE_FACTOR COMPRESS_ROPE_BETA_FAST COMPRESS_ROPE_BETA_SLOW COMPRESS_ORIGINAL_CONTEXT attention_factor=COMPRESS_ROPE_ATTENTION_FACTOR interleaved=true
+  scores <- Tensor.matmul (Tensor.cast q dtype="float32") (Tensor.transpose (Tensor.cast compressed_kv dtype="float32") dim1=1 dim2=2 |> Tensor.unsqueeze dim=1)
+  scores <- clamp scores min=0.0
+  scores <- scores * (1.0 / sqrt INDEX_HEAD_DIM)
+  weights <- NN.linear@weights_proj hidden_states dim=INDEX_HEADS bias=false
+  weights <- weights * (1.0 / sqrt INDEX_HEADS)
+  weights <- Tensor.transpose weights dim1=1 dim2=2 |> Tensor.unsqueeze dim=-1
+  index_scores <- Tensor.sum (scores * weights) dim=1 keepdim=false
+  entry <- Tensor.arange index_scores start=0 end=nwin |> Tensor.reshape shape=[1, 1, nwin] |> Tensor.expand shape=[B, S, nwin]
+  threshold <- floor ((pos_ids + 1) / 4)
+  threshold <- Tensor.reshape threshold shape=[B, S, 1] |> Tensor.expand shape=[B, S, nwin]
+  future <- Tensor.le threshold entry
+  neg_inf <- Tensor.full index_scores shape=[B, S, nwin] value=(Tensor.dtype_value index_scores "min")
+  index_scores <- Tensor.where future neg_inf index_scores
+  k_eff <- (nwin < INDEX_TOPK) ? nwin : INDEX_TOPK
+  _, topk <- Tensor.topk index_scores k_eff dim=-1 largest=true sorted=false
+  topk_threshold <- floor ((pos_ids + 1) / 4)
+  topk_threshold <- Tensor.reshape topk_threshold shape=[B, S, 1] |> Tensor.expand shape=[B, S, k_eff]
+  invalid <- Tensor.le topk_threshold topk
+  safe_topk <- Tensor.where invalid 0 topk
+  valid <- Tensor.where invalid false true
+  return safe_topk, k_eff, valid
+
+deepseek_v4_swiglu :: Path -> Tensor[N,MODEL_DIM] -> Tensor[N,MODEL_DIM]
+deepseek_v4_swiglu@path x = do
+  gate <- NN.linear@gate_proj x dim=MOE_DIM bias=false
+  up <- NN.linear@up_proj x dim=MOE_DIM bias=false
+  gate <- clamp gate max=SWIGLU_LIMIT
+  up <- clamp up min=(0.0 - SWIGLU_LIMIT) max=SWIGLU_LIMIT
+  gate <- silu gate
+  hidden <- gate * up
+  return NN.linear@down_proj hidden dim=MODEL_DIM bias=false
+
+deepseek_v4_router :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor.TokenIds[B,S] -> Bool -> (Any, Any)
+deepseek_v4_router@path hidden_states input_ids is_hash = do
+  flat <- Tensor.reshape hidden_states shape=[B * S, MODEL_DIM]
+  logits <- NN.linear@gate flat dim=NUM_EXPERTS bias=false
+  scores <- sqrtsoftplus logits
+  return is_hash ? (do
+    table <- Params.param @gate.tid2eid
+    ids <- Tensor.reshape input_ids shape=[B * S, 1] |> Tensor.expand shape=[B * S, EXPERTS_PER_TOKEN]
+    indices <- Tensor.gather table ids dim=0
+    weights <- Tensor.gather scores indices dim=1
+    denom <- Tensor.sum weights dim=-1 keepdim=true
+    weights <- (weights / (denom + 1e-20)) * 1.5
+    return Tensor.reshape weights shape=[B, S, EXPERTS_PER_TOKEN], Tensor.reshape indices shape=[B, S, EXPERTS_PER_TOKEN]
+  ) : (do
+    bias <- Params.param @gate.e_score_correction_bias |> Tensor.reshape shape=[1, NUM_EXPERTS]
+    _, indices <- Tensor.topk (scores + bias) EXPERTS_PER_TOKEN dim=-1 largest=true sorted=false
+    weights <- Tensor.gather scores indices dim=1
+    denom <- Tensor.sum weights dim=-1 keepdim=true
+    weights <- (weights / (denom + 1e-20)) * 1.5
+    return Tensor.reshape weights shape=[B, S, EXPERTS_PER_TOKEN], Tensor.reshape indices shape=[B, S, EXPERTS_PER_TOKEN]
+  )
+
+deepseek_v4_experts :: Path -> Tensor[B,S,MODEL_DIM] -> Any -> Any -> Tensor[B,S,MODEL_DIM]
+deepseek_v4_experts@path hidden_states weights indices = do
+  routed <- hidden_states * 0.0
+  routed <- for e <- [0..NUM_EXPERTS) carry (routed) do
+    selected, token_idx, topk_pos, sel_scores <- MoE.select hidden_states weights indices e
+    gate_up <- NN.linear@experts selected dim=(2 * MOE_DIM) bias=false expert=e weight_path=@experts.gate_up_proj
+    gate, up <- Tensor.chunk gate_up dim=-1 parts=2
+    gate <- clamp gate max=SWIGLU_LIMIT
+    up <- clamp up min=(0.0 - SWIGLU_LIMIT) max=SWIGLU_LIMIT
+    gate <- silu gate
+    upd <- gate * up
+    upd <- NN.linear@experts upd dim=MODEL_DIM bias=false expert=e weight_path=@experts.down_proj
+    routed <- MoE.scatter_add routed token_idx upd sel_scores
+    yield routed
+  return routed
+
+deepseek_v4_mlp :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor.TokenIds[B,S] -> String -> Tensor[B,S,MODEL_DIM]
+deepseek_v4_mlp@path x input_ids mlp_type = do
+  is_hash <- mlp_type == "hash_moe"
+  weights, indices <- deepseek_v4_router@path x input_ids is_hash
+  routed <- deepseek_v4_experts@path x weights indices
+  shared <- Tensor.reshape x shape=[B * S, MODEL_DIM] |> deepseek_v4_swiglu@shared_experts |> Tensor.reshape shape=[B, S, MODEL_DIM]
+  return routed + shared
+
+deepseek_v4_block :: Path -> Tensor[B,S,HC_MULT,MODEL_DIM] -> Tensor.TokenIds[B,S] -> Tensor[B,S] -> ?Tensor[B,K] -> String -> String -> Tensor[B,S,HC_MULT,MODEL_DIM]
+deepseek_v4_block@path hidden_states input_ids pos_ids attn_mask layer_type mlp_type = do
+  post, comb, collapsed <- deepseek_v4_hyper_connection@attn_hc hidden_states
+  attn_in <- NN.rmsnorm@input_layernorm collapsed eps=EPS dim=MODEL_DIM cast_float=true
+  attn_out <- deepseek_v4_attention_core@self_attn attn_in pos_ids attn_mask layer_type
+  post2 <- Tensor.unsqueeze post dim=-1
+  attn2 <- Tensor.unsqueeze attn_out dim=2
+  hidden_states <- (post2 * attn2) + Tensor.matmul (Tensor.transpose comb dim1=-1 dim2=-2) hidden_states
+  post, comb, collapsed <- deepseek_v4_hyper_connection@ffn_hc hidden_states
+  mlp_in <- NN.rmsnorm@post_attention_layernorm collapsed eps=EPS dim=MODEL_DIM cast_float=true
+  mlp_out <- deepseek_v4_mlp@mlp mlp_in input_ids mlp_type
+  post2 <- Tensor.unsqueeze post dim=-1
+  mlp2 <- Tensor.unsqueeze mlp_out dim=2
+  return (post2 * mlp2) + Tensor.matmul (Tensor.transpose comb dim1=-1 dim2=-2) hidden_states
+
+deepseek_v4 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Any -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?Any)
+deepseek_v4 input_ids attn_mask past_kv use_cache = do
+  x <- deepseek_v4_embed input_ids
+  x <- Tensor.unsqueeze x dim=2
+  x <- Tensor.expand x shape=[B, S, HC_MULT, MODEL_DIM]
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=0
+  x <- for i <- [0..NUM_LAYERS) carry (x) do
+    layer_type <- deepseek_v4_layer_type i
+    mlp_type <- deepseek_v4_mlp_type i
+    x <- deepseek_v4_block @@'model.layers.{i}' x input_ids pos_ids attn_mask layer_type mlp_type
+    yield x
+  x <- deepseek_v4_hc_head x
+  x <- deepseek_v4_rmsnorm_final x
+  logits <- deepseek_v4_head x
+  return logits, null

@@ -11,6 +11,7 @@ from .refs import (
 from .scalar_comparison import ScalarComparison, parse_scalar_comparison
 from .types import StateDictLike, StateDictProvider, TransformError
 from .validation import (
+    TransformPayloadSchema,
     ensure_mapping_payload,
     parse_torch_dtype,
     require_expr,
@@ -19,6 +20,7 @@ from .validation import (
     require_same_shape_dtype_device,
     require_same_shape_dtype_device3,
     validate_payload_keys,
+    validate_payload_schema,
 )
 
 __all__ = [
@@ -35,6 +37,7 @@ __all__ = [
     "StateDictLike",
     "StateDictProvider",
     "TransformError",
+    "TransformPayloadSchema",
     "ensure_mapping_payload",
     "parse_torch_dtype",
     "require_expr",
@@ -42,5 +45,6 @@ __all__ = [
     "require_numeric",
     "require_same_shape_dtype_device",
     "require_same_shape_dtype_device3",
+    "validate_payload_schema",
     "validate_payload_keys",
 ]

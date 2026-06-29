@@ -305,7 +305,7 @@ def test_webui_handler_routes_and_errors(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(
         webui_handler,
         "_render_execution_summary",
-        lambda **kwargs: (seen_modes.append(kwargs["mode"]) or "transforms: []\n"),
+        lambda **kwargs: seen_modes.append(kwargs["mode"]) or "transforms: []\n",
     )
     handler_cls.do_POST(h)
     assert h._json[-1][1]["ok"] is True
@@ -407,7 +407,7 @@ def test_webui_page_contains_exit_summary_mode_selector() -> None:
     assert '<script type="module" src="/static/js/main.js"></script>' in webui_page._HTML_PAGE
     assert "summary mode: raw" in transforms_ui_js
     assert "summaryModeSelect" in transforms_ui_js
-    assert "mode: list aliases" in transforms_ui_js
+    assert 'modeKey + ": " + String(name).toLowerCase()' in transforms_ui_js
 
 
 def test_webui_handler_read_send_helpers_and_filename_suggestion(tmp_path: Path) -> None:

@@ -1,0 +1,26 @@
+import Config
+
+-- OLMo 3 shared architecture settings (7B/32B base + instruct/think variants).
+-- Keep top-level config lookups with stable defaults from the released 7B models.
+D = Config.int "hidden_size" default=4096                         -- residual hidden size
+V = Config.int "vocab_size" default=100278                        -- tokenizer vocabulary size
+L = Config.int "num_hidden_layers" default=32                     -- number of decoder layers
+H = Config.int "num_attention_heads" default=32                   -- query attention head count
+KVH = Config.int "num_key_value_heads" default=32                 -- key/value attention head count
+HD = Config.int "head_dim" default=128                            -- per-head hidden size
+FFN = Config.int "intermediate_size" default=11008                -- MLP expansion size
+EPS = Config.float "rms_norm_eps" default=1e-06                   -- RMSNorm epsilon
+THETA = Config.float "rope_theta" default=500000.0                -- RoPE base theta
+C = Config.int "max_position_embeddings" default=65536            -- full-attention window
+SW = Config.int "sliding_window" default=4096                     -- sliding-attention window
+
+-- OLMo 3 alternates 3 sliding layers, then 1 full-attention layer.
+FULL_ATTN_PERIOD = 4
+
+-- YaRN scaling fields used by OLMo 3 configs.
+ROPE_SCALE = Config.float "rope_scaling.factor" default=8.0
+ROPE_BETA_FAST = Config.float "rope_scaling.beta_fast" default=32.0
+ROPE_BETA_SLOW = Config.float "rope_scaling.beta_slow" default=1.0
+ROPE_CONTEXT = Config.int "rope_scaling.original_max_position_embeddings" default=8192
+
+ATTN_SCALE = 1.0 / sqrt HD

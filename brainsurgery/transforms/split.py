@@ -8,6 +8,7 @@ from ..core import (
     StateDictProvider,
     TensorRef,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     ensure_mapping_payload,
     match_expr_names,
@@ -16,7 +17,7 @@ from ..core import (
     parse_slice,
     register_transform,
     state_dict_for_ref,
-    validate_payload_keys,
+    validate_payload_schema,
     view_for_ref_name,
 )
 from ..engine import emit_verbose_event
@@ -43,8 +44,6 @@ class SplitTransform(BaseTransform):
     name = "split"
     error_type = SplitTransformError
     spec_type = SplitSpec
-    allowed_keys = {"from", "to", "sizes", "dim"}
-    required_keys = {"from", "to", "sizes"}
     help_text = (
         "Splits one source tensor into multiple destination tensors.\n"
         "\n"
@@ -55,16 +54,24 @@ class SplitTransform(BaseTransform):
         "  split: { from: x, to: [x0, x1], sizes: [32, 32], dim: 0 }"
     )
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required={"from", "to", "sizes"},
+            common_allowed={"from", "to", "sizes", "dim"},
+        )
+
     def completion_reference_keys(self) -> list[str]:
         return ["from", "to"]
 
     def compile(self, payload: Any, default_model: str | None) -> SplitSpec:
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
         from_ref = parse_model_expr(payload.get("from"), default_model=default_model)
         if from_ref.slice_spec is not None:

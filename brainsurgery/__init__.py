@@ -15,26 +15,6 @@ app.add_typer(webcli_app, name="webcli")
 app.add_typer(webui_app, name="webui")
 
 
-_CLI_OPTIONS_WITH_VALUE = {
-    "--shard-size",
-    "--num-workers",
-    "--provider",
-    "--arena-root",
-    "--arena-segment-size",
-    "--summarize-path",
-    "--summary-mode",
-    "--log-level",
-}
-
-_CLI_FLAG_OPTIONS = {
-    "-i",
-    "--interactive",
-    "-s",
-    "--summarize",
-    "--no-summarize",
-}
-
-
 def _normalize_cli_args(raw_args: list[str]) -> list[str]:
     option_tokens: list[str] = []
     positional_tokens: list[str] = []
@@ -44,17 +24,17 @@ def _normalize_cli_args(raw_args: list[str]) -> list[str]:
         if token == "--":
             positional_tokens.extend(raw_args[index:])
             break
-        if token in _CLI_OPTIONS_WITH_VALUE:
+        if token.startswith("--"):
             option_tokens.append(token)
-            if index + 1 < len(raw_args):
-                option_tokens.append(raw_args[index + 1])
-                index += 2
-                continue
-        elif any(token.startswith(opt + "=") for opt in _CLI_OPTIONS_WITH_VALUE):
-            option_tokens.append(token)
+            if "=" not in token and index + 1 < len(raw_args):
+                next_token = raw_args[index + 1]
+                if not next_token.startswith("-"):
+                    option_tokens.append(next_token)
+                    index += 2
+                    continue
             index += 1
             continue
-        elif token in _CLI_FLAG_OPTIONS:
+        if token.startswith("-") and token != "-":
             option_tokens.append(token)
             index += 1
             continue

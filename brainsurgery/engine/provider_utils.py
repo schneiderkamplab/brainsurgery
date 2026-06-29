@@ -43,6 +43,37 @@ def list_model_aliases(provider: StateDictProvider | None) -> set[str]:
     return aliases
 
 
+def set_model_runtime_metadata(
+    provider: StateDictProvider,
+    alias: str,
+    metadata: dict[str, object],
+) -> None:
+    setter = getattr(provider, "set_model_runtime_metadata", None)
+    if callable(setter):
+        setter(alias, dict(metadata))
+        return
+    bag = getattr(provider, "model_runtime_metadata", None)
+    if isinstance(bag, dict):
+        bag[alias] = dict(metadata)
+        return
+    setattr(provider, "model_runtime_metadata", {alias: dict(metadata)})
+
+
+def get_model_runtime_metadata(
+    provider: StateDictProvider,
+    alias: str,
+) -> dict[str, object] | None:
+    getter = getattr(provider, "get_model_runtime_metadata", None)
+    if callable(getter):
+        result = getter(alias)
+        return dict(result) if isinstance(result, dict) else None
+    bag = getattr(provider, "model_runtime_metadata", None)
+    if not isinstance(bag, dict):
+        return None
+    value = bag.get(alias)
+    return dict(value) if isinstance(value, dict) else None
+
+
 def _has_model_alias(provider: StateDictProvider, alias: str) -> bool:
     if _is_base_provider_instance(provider):
         has_model_alias = getattr(provider, "has_model_alias", None)
@@ -134,6 +165,8 @@ def new_empty_state_dict(mappings: list[tuple[str, dict[str, object]]]) -> objec
 __all__ = [
     "iter_alias_mappings",
     "list_model_aliases",
+    "set_model_runtime_metadata",
+    "get_model_runtime_metadata",
     "get_or_create_alias_state_dict",
     "resolve_single_model_alias",
     "find_alias_mapping",

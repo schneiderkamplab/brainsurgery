@@ -1,0 +1,781 @@
+\documentclass{article}
+
+\IfFileExists{neurips_2024.sty}{
+  \usepackage[preprint]{neurips_2024}
+}{
+  \usepackage[margin=1in]{geometry}
+}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\IfFileExists{natbib.sty}{\usepackage{natbib}}{}
+\providecommand{\citep}[1]{\cite{#1}}
+
+\title{Axon: A Tensors-First Functional Programming Language for Machine Learning Models}
+
+\author{Brainsurgery contributors}
+
+\newcommand{\axon}{\textsc{Axon}}
+\newcommand{\graphir}{\textsc{Graph IR}}
+\newcommand{\stage}[1]{\textsc{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Axon is a domain-specific language and compiler pipeline for describing neural
+network architectures in a form that remains inspectable, typed, and close to
+the parameter structure of modern checkpoints.  The current implementation is
+organized as a sequence of explicit source-to-source and source-to-graph
+stages.  Each stage consumes a single canonical Axon abstract syntax tree or a
+typed graph representation, strengthens a local invariant, and exposes those
+invariants to validation and round-trip tests.  This document describes the
+system in the style of a conference systems paper: we state the design goals,
+define each pipeline contract, and identify the boundary between frontend
+normalization, typed core construction, graph lowering, and backend execution.
+\end{abstract}
+
+\section{Introduction}
+
+Large language model implementations are usually distributed as a mixture of
+Python modules, checkpoint-specific configuration conventions, and tensor
+state dictionaries.  This ecosystem is flexible, but it makes independent
+analysis, transformation, and backend generation difficult.  A compiler that
+targets model families rather than one hand-written implementation per
+checkpoint must preserve several kinds of information simultaneously: lexical
+names, symbolic dimensions, parameter paths, optional configuration defaults,
+control-flow structure, and precise tensor types.
+
+Axon addresses this problem with a small model-description language and a
+compiler pipeline that deliberately avoids string-serialization round trips in
+semantic stages.  The central design choice is that the pre-lowering compiler
+uses one canonical Axon AST.  Stages do not switch to unrelated syntax trees;
+instead, they progressively remove surface syntax, resolve names, elaborate
+implicit structure, flatten control, and attach inferred metadata.  Graph
+lowering then translates the fully typed flat program into an in-memory Graph
+IR consumed by code generation and runtime backends.
+
+The goal of this document is not to specify all user-facing Axon syntax.  It is
+to make the current pipeline legible as a compiler system: what each stage
+accepts, what it guarantees, what it refuses to do, and why those boundaries
+matter for correctness and backend portability.
+
+\paragraph{Contributions.}
+This document makes three system contributions.  First, it gives a stage
+contract for the active Axon compiler path, from source text to typed Graph IR.
+Second, it describes how typed metadata and symbolic shape information flow
+through the compiler without relying on rendered strings as semantic data.
+Third, it defines the backend boundary used by torch, pipeline, runtime, and
+tinygrad execution targets.
+
+\section{Design Goals}
+
+\paragraph{Single semantic AST.}
+All pre-lowering stages operate on the same Axon AST representation.  A parsed,
+resolved, normalized, flattened, and typed program differs by invariants and
+metadata, not by changing the meaning of nodes through ad hoc intermediate
+formats.
+
+\paragraph{Stage-local contracts.}
+Each stage owns a narrow contract.  For example, name resolution does not infer
+tensor types; flattening does not repair type errors; backends do not interpret
+surface Axon scope syntax.  This separation allows validators and round-trip
+tests to target individual compiler properties.
+
+\paragraph{No model-family special casing in the compiler core.}
+Model-specific quirks belong in loading and integration paths, not in parsing,
+type checking, lowering, graph IR, code generation, runtime, or builtins.
+Compiler stages must implement generic language semantics.
+
+\paragraph{Typed graph execution.}
+Backends consume a structured, typed Graph IR rather than YAML-like dictionaries
+or string-rendered call forms.  This preserves shape and type information for
+future backend optimizations and reduces accidental semantic drift.
+
+\section{The Axon Language}
+
+Axon is designed as a compact functional language for model-family
+descriptions.  Its first-class domain objects are tensors, symbolic dimensions,
+paths into a checkpoint state dictionary, configuration values, and reusable
+library definitions.  The language is intentionally biased toward describing
+the mathematical structure of a neural network rather than the mechanics of a
+specific Python implementation.
+
+\paragraph{Tensors and dimensions first.}
+Tensor types carry symbolic shapes.  A type such as
+\[
+  \code{Tensor[B,S,D]}
+\]
+states that a value is a tensor whose batch, sequence, and hidden dimensions
+are represented by the dimension symbols \(\code{B}\), \(\code{S}\), and
+\(\code{D}\).  Dimension symbols are not comments: they participate in
+typechecking, unification, primitive type rules, and Graph IR metadata.  This
+lets a reusable definition express shape relationships without hard-coding
+checkpoint sizes.
+
+\paragraph{Haskell-inspired syntax.}
+Definitions use signatures, curried-looking arrows, optional parameters, and a
+\code{do}-style statement form:
+\begin{verbatim}
+block :: Tensor[B,S,D] -> ?Tensor[B,K] -> Tensor[B,S,D]
+block x attn_mask = do
+  h <- NN.rmsnorm@ln x
+  a <- Attention.attention h h h attn_mask
+  return x + a
+\end{verbatim}
+The syntax is not Haskell, but it borrows the idea that signatures are central
+documentation and that sequencing should expose dataflow explicitly.  Pipes
+and scoped parameter paths are surface conveniences that are normalized away
+before flattening.
+
+\paragraph{Functional semantics.}
+Axon definitions are pure functions over explicit arguments, configuration
+lookups, and parameter-path reads.  A bind statement names the value produced
+by an expression.  Except for ternary branch expressions, expressions are
+eager: a call used as an argument is evaluated before the callee receives the
+value.  This eagerness is important for flattening and for preserving the
+semantics of computations with expensive tensor operations.
+
+\paragraph{Paths and reusable libraries.}
+Checkpoint parameters are accessed through typed path values.  Relative path
+sugar is lexical authoring syntax; the flat core uses ordinary \code{Path}
+arguments and absolute or templated absolute paths.  Reusable library modules
+such as \code{NN}, \code{Tensor}, \code{Attention}, \code{Masking}, \code{MoE},
+\code{Cache}, and \code{Positions} define model-independent operations.  Model
+files combine these libraries with checkpoint-specific configuration paths and
+architecture-level control.
+
+\paragraph{Semantic core.}
+The compiler treats the surface language as notation for a smaller core.  The
+core contains explicit calls, explicit path arguments, flat bindings, helper
+definitions for loops, and typed primitive calls.  Optional and default
+parameters are represented through ordinary call arguments and keyword
+arguments according to the elaboration contract, rather than through backend
+fallbacks.  Backend implementations consume Graph IR derived from this core;
+they do not implement surface Axon syntax.
+
+\section{Type System, Checking, and Inference}
+
+The active type system is implemented by \code{typecheck2}.  It is not a
+separate backend contract and it is not the removed legacy checker.  Its input
+is a flat, closed Axon AST after normalization, elaboration, and flattening;
+its output is the same AST with typed module signatures and per-expression
+metadata.  The checker is MAIN-module based: it resolves the effective MAIN
+module, computes the reachable definition graph, prunes unreachable
+definitions, checks demanded definitions from MAIN, and validates the typed
+result.
+
+\paragraph{Types.}
+The implemented type language includes \code{Any}, \code{Bool}, \code{Dim},
+\code{Float}, \code{Int}, \code{Null}, \code{Path}, \code{String},
+\code{List[T]}, tuples, optionals \code{?T}, tensor types
+\[
+  \code{Tensor}[d_1,\ldots,d_n],
+\]
+tensor sub-bases such as \code{IdxTensor[...]}, named type aliases, and
+generated type variables.  Dimension tokens may be integer literals, symbolic
+names, variadic binders such as \code{..S}, or symbolic expressions over
+\(+\), \(-\), \(*\), and \(/\).  Type aliases are expanded during unification
+and normalization, including aliases with variadic dimension parameters.
+
+\paragraph{Expression metadata.}
+The typing judgment can be read operationally as
+\[
+  \Gamma \vdash e \Rightarrow (e^\tau,\tau,a,d),
+\]
+where \(\Gamma\) contains term bindings, desugared \code{Path} bindings,
+dimension-name bindings, module definitions, aliases, expression aliases,
+type-variable substitutions, and dimension substitutions.  The result is a
+typed expression \(e^\tau\), inferred type \(\tau\), inferred arity \(a\), and
+inferred tensor dimensions \(d\) when applicable.  Typed validation rejects
+missing arity metadata and rejects tensor expressions without inferred
+dimensions.
+
+\paragraph{Literals, ascriptions, and numeric inference.}
+Variables are typed by environment lookup.  Unbound names are type errors.
+Literals initially receive their natural scalar types: integers are
+\code{Int}, floats are \code{Float}, booleans are \code{Bool}, strings are
+\code{String}, \code{null} is \code{Null}, and path literals are \code{Path}.
+Type ascriptions \((e :: T)\) are checked rather than erased: the inferred
+type of \(e\) is unified with \(T\), and the ascription remains in the typed
+AST.  Numeric unification is deliberately pragmatic: \code{Int} with
+\code{Float} yields \code{Float}, \code{Dim} with \code{Float} yields
+\code{Float}, and \code{Int} with \code{Dim} yields \code{Dim}.  Numeric
+literals are retagged in typed contexts, e.g. integer literals inside
+\code{List[Dim]} shape arguments become dimension literals.
+
+\paragraph{Unification and dimension names.}
+Unification first applies substitutions and expands aliases.  Type variables
+bind with an occurs check; \code{Any} unifies with and yields the other side;
+lists, tuples, optionals, named types, and tensor types unify structurally.
+Tensor unification checks compatible bases and dimension sequences.  The
+generic base \code{Tensor} can unify with more specific tensor bases, while
+incompatible non-generic bases are rejected.  Dimension unification supports
+ordinary symbols, integer literals, variadic dimension binders, and symbolic
+binary expressions.  It simplifies common arithmetic identities, rejects
+recursive dimension bindings, and prefers readable existing names over
+generated names when two dimensions are equivalent.
+
+\paragraph{Calls and call-site specialization.}
+User definitions, builtin Axon definitions, and generated helpers all use the
+same call path.  At a call site, the callee signature is instantiated with
+fresh type and dimension variables, explicit path arguments are consumed first,
+actual arguments are typed, and actual types are unified with formal parameter
+types.  Dimension-typed actual expressions are also used to bind fresh
+signature dimensions to source-level dimension names.  When safe, typecheck2
+checks the callee body under the call-site environment and uses the specialized
+body return type if it is more precise than the declared header.  Caller
+substitutions are restored afterward so local inference does not leak
+arbitrarily across calls.  Recursive calls use the current instantiated
+interface when the callee is already active.
+
+\paragraph{Primitive rules.}
+Primitive calls are registered in \code{brainsurgery/synapse/ops}.  Each
+primitive provides \code{OP\_NAME} and a \code{LOWERING\_TYPE\_SIGNATURE}; it
+may additionally provide a \code{type\_rule} hook.  Typecheck2 checks actuals
+against the lowering signature, rejects explicit \code{null} where a
+non-optional primitive parameter is required, then lets the primitive rule
+compute a more precise result type when necessary.  This is where rules for
+shape-transforming operations such as \code{reshape}, \code{expand},
+\code{permute}, \code{transpose}, \code{chunk}, \code{split}, \code{concat},
+and \code{slice} live, as well as neural-network primitives such as
+\code{embedding}, \code{linear}, \verb|expert_linear|, \code{layernorm}, and
+\code{rmsnorm}.
+
+\paragraph{Branches, nullability, and returns.}
+Ternaries and expression-level \code{if} require boolean conditions.  Branch
+types are joined structurally: tuples itemwise, optionals by joining inner
+types, and tensors by preserving equivalent dimensions or using broadcasting
+where appropriate.  Null checks refine environments: in a branch guarded by
+\code{x == null} or \code{x != null}, a value of type \code{?T} is treated as
+\code{Null} on the null side and \(T\) on the non-null side.  Return and yield
+statements are checked against declared return types when available, while
+preserving protected header dimension names so literals or generated call-site
+names do not overwrite meaningful signature dimensions.
+
+\paragraph{Destructuring and generated helpers.}
+Multi-target binds destructure tuples of matching arity, lists by repeating
+the list item type, and unconstrained type variables by binding them to tuples
+of fresh type variables.  Generated loop and branch helpers are ordinary
+definitions: they do not have a compatibility typing mode.  After checking,
+generated helper signatures and body annotations are normalized and
+canonicalized.  Typecheck2 repeats the pass up to a fixed bound and returns
+once the typed AST reaches a deterministic fixpoint; short equivalent-name
+cycles are broken by choosing a deterministic structural spelling.
+
+\paragraph{Current limits.}
+The active checker does not expose a complete public constraint store over
+dimensions, integers, booleans, and nullability.  Some broad primitive
+signatures still rely on primitive-specific hooks for precision.  Unknown
+keyword arguments on user calls are still permissively carried by the checker,
+although later validation or lowering may reject them.  These are
+implementation facts, not intended backend escape hatches.
+
+\section{System Model}
+
+An Axon compilation unit consists of model-family source files, builtin Axon
+definitions, checkpoint metadata, and a selected main definition.  The compiler
+must support both generic model-family files and materialized checkpoint
+variants.  A model definition may reference symbolic dimensions, configuration
+values, optional cache values, parameter paths, scoped parameter templates, and
+builtin neural-network operations.
+
+The compiler has two semantic representation families.  The first is the Axon
+AST used by all frontend and typed-core stages.  The second is Graph IR, a
+typed SSA-like representation inspired by standard compiler dataflow
+representations such as SSA~\citep{cytron1991ssa}.  Flattening uses an
+administrative-normal-form style decomposition of nested expressions into
+explicit binds, similar in spirit to ANF/CPS compiler normal forms
+\citep{sabry1992anf}.  Backend execution currently targets PyTorch
+\citep{paszke2019pytorch} and tinygrad.
+
+\section{Compiler Invariants}
+
+The most important invariant is monotonicity of structure: later stages should
+see fewer surface constructs and more metadata, never weaker semantic
+information.  For example, after resolution, there should be no unresolved
+imports; after normalization, there should be no callee path sugar; after
+flattening, there should be no statement-level control; after typecheck2, graph
+lowering should not need to infer missing tensor types.
+
+The second invariant is backend isolation.  Backend implementations may choose
+different tensor libraries and primitive implementations, but they must consume
+the same Graph IR contract.  If a backend requires weaker validation or
+model-family-specific dispatch to run, the issue belongs either in the backend
+implementation or in an explicitly approved language extension.
+
+\section{Pipeline Overview}
+
+The current default path is shown below.  Optional optimization is split into
+two explicitly named phases.  \code{optimize-ast} runs after typecheck2 on flat
+typed Axon, before Graph IR lowering.  \code{optimize-graph} runs after Graph
+IR lowering on the typed graph.  Both phases are off by default and are not
+part of the correctness-critical contract: the backend path is expected to
+work without either optimizer.
+
+\begin{figure}[t]
+\centering
+\fbox{\begin{minipage}{0.92\linewidth}
+\centering
+source Axon
+\(\rightarrow\) parse/load/materialize
+\(\rightarrow\) resolve/validate
+\(\rightarrow\) normalize/elaborate
+\(\rightarrow\) flatten
+\(\rightarrow\) typecheck2
+\(\rightarrow\) [optional optimize-ast]
+\(\rightarrow\) Graph IR
+\(\rightarrow\) [optional optimize-graph]
+\(\rightarrow\) backend execution
+\end{minipage}}
+\caption{Default Axon compilation path.  \code{optimize-ast} and
+\code{optimize-graph} are optional, off by default, and outside the
+correctness-critical path.}
+\label{fig:pipeline}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  stagebox/.style={draw, rounded corners, fill=blue!6, align=center, minimum width=2.6cm, minimum height=0.9cm},
+  repbox/.style={draw, rounded corners, fill=gray!8, align=center, minimum width=2.4cm, minimum height=0.7cm},
+  edge/.style={-{Latex[length=2mm]}, thick},
+  note/.style={align=center, font=\small}
+]
+\node[repbox] (src) {source\\Axon};
+\node[stagebox, right=1.2cm of src] (parse) {parse\\load\\materialize};
+\node[repbox, right=1.2cm of parse] (onefile) {one-file\\ASTs};
+\node[stagebox, below=1.0cm of onefile] (resolve) {resolve\\validate};
+\node[repbox, left=1.2cm of resolve] (closed) {closed\\AST};
+\node[stagebox, left=1.2cm of closed] (norm) {normalize\\elaborate};
+\node[repbox, below=1.0cm of norm] (normast) {normalized\\AST};
+\node[stagebox, right=1.2cm of normast] (flatten) {flatten};
+\node[repbox, right=1.2cm of flatten] (flat) {flat\\AST};
+\node[stagebox, below=1.0cm of flat] (tc) {typecheck2};
+\node[repbox, left=1.2cm of tc] (typed) {typed flat\\AST};
+\node[stagebox, left=1.2cm of typed] (lower) {Graph IR\\lowering};
+\node[repbox, below=1.0cm of lower] (graph) {typed\\Graph IR};
+\node[stagebox, right=1.2cm of graph] (graphopt) {optional\\optimize-graph};
+\node[stagebox, right=1.2cm of graphopt] (backend) {torch / runtime\\pipeline / tinygrad};
+\node[repbox, right=1.2cm of backend] (exec) {executable\\model};
+\node[stagebox, below=0.9cm of typed] (astopt) {optional\\optimize-ast};
+
+\draw[edge] (src) -- (parse);
+\draw[edge] (parse) -- (onefile);
+\draw[edge] (onefile) -- (resolve);
+\draw[edge] (resolve) -- (closed);
+\draw[edge] (closed) -- (norm);
+\draw[edge] (norm) -- (normast);
+\draw[edge] (normast) -- (flatten);
+\draw[edge] (flatten) -- (flat);
+\draw[edge] (flat) -- (tc);
+\draw[edge] (tc) -- (typed);
+\draw[edge] (typed) -- (lower);
+\draw[edge, dashed] (typed) -- (astopt);
+\draw[edge, dashed] (astopt) -- (lower);
+\draw[edge] (lower) -- (graph);
+\draw[edge, dashed] (graph) -- (graphopt);
+\draw[edge, dashed] (graphopt) -- (backend);
+\draw[edge, bend right=18] (graph) to (backend);
+\draw[edge] (backend) -- (exec);
+
+\node[note, below=0.35cm of graph] {optimization is optional and outside\\the correctness-critical path};
+\end{tikzpicture}
+\caption{Staged Axon pipeline.  Blue boxes are transformations; gray boxes are
+representations with stronger invariants than the previous representation.}
+\label{fig:pipeline-tikz}
+\end{figure}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Phase & Representation & Primary invariant \\
+\midrule
+Parse/load/materialize & one-file ASTs & syntactic structure and checkpoint defaults \\
+Resolve/validate & closed AST & no unresolved imports or names \\
+Normalize/elaborate & normalized AST & explicit call and default/defaultable structure \\
+Flatten & flat AST & no statement-level control or relative paths \\
+Typecheck2 & typed flat AST & expression types, arities, and dimensions \\
+Optimize-ast & typed flat AST & optional conservative AST cleanup \\
+Graph lowering & Graph IR & typed SSA-like graph modules \\
+Optimize-graph & Graph IR & optional graph cleanup and specialization \\
+Backend & generated/runtime code & executable tensor program \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Optional Optimization}
+
+Optimization is intentionally split by representation.  Both optimizers are
+explicitly requested with CLI flags and are off by default.  This keeps the
+correctness-critical contract simple: typecheck2 plus Graph IR lowering must
+produce executable programs without relying on optimization.
+
+\paragraph{Typed-AST optimization.}
+The pre-Graph phase, \code{optimize-ast}, calls
+\code{optimize\_safe\_flat\_typed\_axon\_file} on a closed, flat, typed Axon
+file.  It is deliberately narrow.  Starting from the selected main module, it
+prunes unreachable definitions, rewrites each remaining definition with local
+literal folding, atomic alias cleanup, and return-alias promotion, then re-runs
+typecheck2.  The pass validates flatness and typedness after each iteration and
+terminates only when structural AST equality reports a fixpoint.  It therefore
+acts as a safe readability and cleanup pass, not as a semantic repair step.
+
+\paragraph{Graph optimization.}
+The graph phase, \code{optimize-graph}, calls
+\code{optimize\_graph\_program} on typed Graph IR.  Its input is a
+\code{GraphProgram} containing typed modules, values, nodes, structured paths,
+dimension metadata, constraints, and graph-level effect information.  One graph
+iteration applies the following validator-backed sequence:
+\begin{enumerate}
+\item prune the module graph to the selected main module, treating type
+metadata, dimension metadata, constraints, and path templates as dependencies;
+\item substitute locally proven atomic dimension constants and simplify
+symbolic dimension expressions such as \(H \cdot (D / H)\);
+\item promote total-pure zero-argument modules to explicit model-global graph
+values;
+\item run local cleanup, including atomic alias cleanup, dead temporary
+elimination for total-pure nodes, literal scalar folding, and tuple/list
+repackaging cleanup;
+\item eliminate common subexpressions only for expressions proven
+\code{total\_pure};
+\item specialize recursive-invariant and single-callsite helpers when the
+actuals are safe constants, paths, or global values and constraint substitution
+can be represented;
+\item inline constrained total-pure helpers when doing so preserves eager Axon
+semantics and transfers constraints soundly;
+\item prune again, validate the whole graph, and repeat until structural
+equality reaches a fixpoint.
+\end{enumerate}
+The graph optimizer has a bounded iteration limit and fails loudly if it does
+not converge.  After convergence it canonicalizes generated module and value
+names while preserving source-readable names.  All substitutions use the same
+typed operand-substitution machinery for value references, path-template
+symbols, type and dimension metadata, constraints, and return operands, which
+prevents stale metadata after specialization or inlining.
+
+\paragraph{Optimization boundary.}
+Neither optimizer may weaken validation or introduce backend-required behavior.
+If a backend needs a program property, that property belongs in the stage
+contract and validator.  Optimization may make the graph smaller and more
+readable, expose constants for code generation, or prepare future graph-level
+kernel fusion, but it must preserve the non-optimized program's semantics.
+
+The following sections describe the stages in order.
+
+\section{Running Example}
+
+This section follows a small Axon fragment through the main representations.
+The example is intentionally smaller than a full transformer block, but it
+uses the same mechanisms: path sugar, a defaulted keyword argument, tensor
+shapes, nested calls, and typed graph lowering.
+
+\paragraph{Surface Axon.}
+A model author can write a reusable projection with a concise functional form:
+\begin{verbatim}
+project :: Tensor[B,S,D] -> Tensor[B,S,O]
+project x = do
+  y <- Tensor.reshape x shape=[B, S, D]
+       |> NN.linear@proj dim=O
+  return y
+\end{verbatim}
+The surface program contains a pipe, callee-attached path sugar
+\code{@proj}, a shape expression, and an omitted default argument such as
+\code{bias=true} from the library definition of \code{NN.linear}.
+
+\paragraph{Normalize and elaborate.}
+Normalization removes pipe syntax and path sugar by turning them into ordinary
+call structure.  Elaboration then accounts for defaultable parameters declared
+by the callee signature:
+\begin{verbatim}
+project x = do
+  y <- NN.linear @proj
+         (Tensor.reshape x shape=[B, S, D])
+         dim=O bias=true
+  return y
+\end{verbatim}
+The point is not that all defaults must always be textually present in user
+source.  The invariant is that downstream stages see a call surface whose
+provided positional, keyword, and path arguments are unambiguous.
+
+\paragraph{Flatten.}
+Flatten preserves eager evaluation order by introducing explicit binds and by
+making paths absolute or templated absolute values:
+\begin{verbatim}
+project :: Tensor[B,S,D] -> Tensor[B,S,O]
+project x = do
+  _v1 <- Tensor.reshape x shape=[B, S, D]
+  y <- NN.linear @@proj _v1 dim=O bias=true
+  return y
+\end{verbatim}
+The flat program has no pipe expression, no nested call used as an argument,
+and no callee path sugar.  It is still Axon source, but it is now in the core
+form expected by typecheck2 and Graph IR lowering.
+
+\paragraph{Typecheck2.}
+Typecheck2 annotates every expression with type, arity, and tensor-dimension
+metadata.  The same flat program can be read as:
+\begin{verbatim}
+_v1 <- (Tensor.reshape (x :: Tensor[B,S,D])
+          shape=([B, S, D] :: List[Dim]) :: Tensor[B,S,D])
+y <- (NN.linear (@@proj :: Path) (_v1 :: Tensor[B,S,D])
+        dim=(O :: Dim) bias=(true :: Bool) :: Tensor[B,S,O])
+\end{verbatim}
+The important information is not the exact rendered punctuation, but the fact
+that the tensor shape relation \(x : \code{Tensor[B,S,D]}\) and
+\(y : \code{Tensor[B,S,O]}\) is explicit before lowering.
+
+\paragraph{Graph IR.}
+Lowering turns each flat bind into a typed graph node.  A schematic graph
+module is:
+\begin{verbatim}
+module project(x: Tensor[B,S,D]) -> Tensor[B,S,O]
+  n1 = call Tensor.reshape(
+         x, shape=[B,S,D]) -> Tensor[B,S,D]
+  n2 = call NN.linear(
+         path=@@proj, x=n1, dim=O, bias=true)
+       -> Tensor[B,S,O]
+  return n2
+\end{verbatim}
+Backends receive this structured graph object, not a string-rendered Axon
+program.  Torch, pipeline, runtime, and tinygrad implementations therefore
+share the same typed operands, path values, and output types.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  value/.style={draw, rounded corners, fill=blue!6, align=center, minimum width=2.7cm, minimum height=0.8cm},
+  nodeop/.style={draw, rounded corners, fill=orange!10, align=center, minimum width=3.3cm, minimum height=1.0cm},
+  attr/.style={draw, rounded corners, fill=green!8, align=center, minimum width=2.4cm, minimum height=0.7cm},
+  edge/.style={-{Latex[length=2mm]}, thick}
+]
+\node[value] (x) {\code{x}\\\code{Tensor[B,S,D]}};
+\node[nodeop, right=2.2cm of x] (reshape) {\code{n1: Tensor.reshape}\\out: \code{\_v1}\\\code{Tensor[B,S,D]}};
+\node[nodeop, right=2.4cm of reshape] (linear) {\code{n2: NN.linear}\\out: \code{y}\\\code{Tensor[B,S,O]}};
+\node[value, right=2.2cm of linear] (ret) {\code{return y}\\\code{Tensor[B,S,O]}};
+
+\node[attr, above=0.9cm of reshape] (shape) {\code{shape=[B,S,D]}};
+\node[attr, above=0.9cm of linear] (path) {\code{path=@@proj}};
+\node[attr, below=0.9cm of linear] (attrs) {\code{dim=O, bias=true}};
+
+\draw[edge] (x) -- (reshape);
+\draw[edge] (reshape) -- (linear);
+\draw[edge] (linear) -- (ret);
+\draw[edge] (shape) -- (reshape);
+\draw[edge] (path) -- (linear);
+\draw[edge] (attrs) -- (linear);
+\end{tikzpicture}
+\caption{Graph IR view of the running example.  Rectangles denote typed graph
+values and operation nodes.  Paths, literals, and shape lists are structured
+operands or attributes, not strings that backends must parse.}
+\label{fig:running-graph-ir}
+\end{figure}
+
+\paragraph{Why the stages matter.}
+The example illustrates the intended division of labor.  Normalize removes
+surface notation; elaborate resolves the defaultable call surface; flatten
+exposes evaluation order; typecheck2 attaches shape and arity metadata; Graph
+IR lowering produces backend-neutral typed dataflow.  No backend has to know
+how \code{|>}, \code{@proj}, lexical scopes, or omitted defaults were written
+in the source program.
+
+\input{sections/parse.tex}
+\input{sections/load.tex}
+\input{sections/materialize.tex}
+\input{sections/resolve.tex}
+\input{sections/validate.tex}
+\input{sections/normalize.tex}
+\input{sections/elaborate.tex}
+\input{sections/flatten.tex}
+\input{sections/typecheck2.tex}
+\input{sections/graph_lowering.tex}
+\input{sections/graph_validation.tex}
+\input{sections/graph_execution.tex}
+
+\section{Validation and Round Trips}
+
+The implementation treats rendering as an observability mechanism, not as a
+semantic transport.  Stage tests therefore distinguish weak and strong
+round-trips.  A weak round-trip reparses the rendered output and reruns only
+the minimum stage subset needed to compare the stage artifact.  A strong
+round-trip reruns all earlier stages before comparing the artifact.  Strong
+round-trips are more expensive, but they catch hidden dependencies on
+unrendered state and stale inferred metadata.
+
+The same philosophy applies to Graph IR rendering.  The graph may be rendered
+for inspection or debugging, but execution backends receive the in-memory graph
+object.  This avoids the class of failures caused by serializing typed
+operands to strings and parsing them back into weaker representations.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Round-trip family & Files or cases & Ordinary passes & XPass trackers \\
+\midrule
+Parser and resolver & models plus builtins & included & 0 \\
+Normalize, elaborate, flatten, typecheck2 & 256 model files & included & 0 \\
+Graph IR, non-optimized & 256 model files & included & 0 \\
+Graph IR, \code{optimize-ast} & 256 model files & included & 0 \\
+Graph IR, \code{optimize-graph} & 256 model files & included & 0 \\
+Combined optimized Graph IR trackers & 261 cases & 0 & 261 \\
+\midrule
+Full run & 4384 collected tests & 4123 & 261 \\
+\bottomrule
+\end{tabular}
+\caption{Round-trip validation snapshot from
+\code{pytest -q -n 8} over the parser, resolver, normalize, elaborate,
+flatten, typecheck2, and Graph IR round-trip tests.  The run completed with no
+failures in 2:14:36.  The XPass rows are tests intentionally marked as
+non-strict trackers for optimized Graph IR stability; they passed in this
+snapshot.}
+\label{tab:roundtrip}
+\end{table}
+
+\section{Failure Isolation}
+
+The staged architecture is intended to make failures actionable.  A closedness
+failure is a resolver or validation issue; a rank mismatch before lowering is a
+typecheck2 issue; a Graph IR type compatibility error is a lowering or graph
+validator issue; a torch-only numerical mismatch after Graph IR validation is
+usually an Axon semantic or primitive type-rule issue; a tinygrad-only mismatch
+is normally a backend implementation issue.  This classification is an
+engineering discipline rather than a theorem, but it is essential for avoiding
+model-specific fixes in compiler layers.
+
+\section{Backend Scope}
+
+The active backends are:
+\begin{itemize}[leftmargin=*]
+\item \code{codegen2-torch}, a direct Python/PyTorch code generator from Graph IR;
+\item \code{runtime2-torch}, an interpreter for the same graph contract;
+\item \code{pipeline2-torch}, a graph partitioning backend for multi-device execution;
+\item \code{codegen2-tinygrad}, a newer tinygrad code-generation backend.
+\end{itemize}
+The tinygrad backend is intentionally separate and configurable; it should
+improve coverage and speed through backend-local implementations rather than by
+weakening earlier compiler invariants.
+
+\section{Experimental Evaluation}
+
+The practical evaluation target is checkpoint fidelity: for each Axon file and
+checkpoint pair, compare the Axon-derived model against the reference
+Transformers model using masked top-1 agreement and masked maximum absolute
+logit difference.  Torch parity is required for any change that affects Axon
+source files or compiler stages up to Graph IR.  Backend-only changes may be
+evaluated against an already validated Graph IR artifact and then swept across
+model families.
+
+The test matrix should report at least three categories: healthy rows, hard
+execution errors, and numerical divergences above the chosen threshold.  Test
+checkpoints with random weights are useful for feature coverage, but their
+fidelity thresholds are interpreted separately from real checkpoints.
+
+\paragraph{Coverage.}
+Table~\ref{tab:coverage} summarizes the model coverage declared in the
+repository snapshot used for this document.  A ``pair'' is one Axon file and
+one declared checkpoint.  Test checkpoints are synthetic random models used to
+exercise families whose real checkpoints are too large for routine smoke
+testing.  The snapshot was computed from the same declared model/checkpoint
+matrix used for round-trip reporting.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Set & Families & Axon files & Pairs & Checkpoints & Test pairs \\
+\midrule
+All model files & 54 & 256 & 553 & 274 & 31 \\
+Generic model-family files & 54 & 77 & 301 & 274 & 31 \\
+\bottomrule
+\end{tabular}
+\caption{Declared Axon model coverage in the repository snapshot.}
+\label{tab:coverage}
+\end{table}
+
+\paragraph{Stage stability.}
+Table~\ref{tab:roundtrip} reports the current stage-stability snapshot.  Unlike
+checkpoint fidelity, these tests do not execute model weights; they verify that
+rendered stage artifacts are stable under weak and strong reprocessing
+contracts.  The suite covers parser and resolver artifacts, weak and strong
+normalize/elaborate/flatten/typecheck2 artifacts, non-optimized Graph IR, and
+the optional \code{optimize-ast} and \code{optimize-graph} paths.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Run & Collected & Ordinary passes & XPass trackers & Failures \\
+\midrule
+Stage round trips, \code{-n 8} & 4384 & 4123 & 261 & 0 \\
+\bottomrule
+\end{tabular}
+\caption{Round-trip test outcome for the same repository snapshot.  XPass
+trackers are non-strict expected-failure markers used for optimized Graph IR
+stability; in this run they passed.}
+\label{tab:stage-stability}
+\end{table}
+
+\paragraph{Checkpoint fidelity.}
+End-to-end checkpoint fidelity remains the runtime benchmark target: each row
+compares Axon-derived logits against the reference Transformers model using
+masked top-1 agreement and masked maximum absolute logit difference.  This
+paper snapshot does not claim a fresh completed fidelity sweep; stale partial
+tinygrad snapshots have been removed from the evaluation tables to avoid
+mixing runtime-backend progress with stage-stability claims.
+
+\section{Related Work}
+
+Axon follows common compiler practice by separating parsing, name resolution,
+normalization, type checking, and graph lowering.  Its flat core is close in
+spirit to ANF-style intermediate representations~\citep{sabry1992anf}, while
+Graph IR adopts the single-assignment and dataflow flavor of SSA-based
+compiler representations~\citep{cytron1991ssa}.  Its execution backends are
+designed to interoperate with tensor libraries such as PyTorch
+\citep{paszke2019pytorch}.  The distinguishing requirement is not merely graph
+execution, but preserving model-family parameter paths, symbolic dimensions,
+and checkpoint configuration semantics through the compiler.
+
+\section{Discussion}
+
+The staged design trades implementation simplicity in a single monolithic
+compiler pass for stronger local reasoning.  This matters for model compilers
+because many failures are otherwise ambiguous: a wrong logit can arise from a
+bad model file, a type inference bug, a path-resolution bug, a lowering bug, a
+backend numerical mismatch, or a checkpoint-loading quirk.  Stage contracts
+make these failure modes easier to isolate.
+
+The main open design pressure is where to place optimization.  Some
+transformations are clearly source-level simplifications, while others are
+better expressed on Graph IR with explicit dataflow and typed operands.  The
+current contract keeps optimization optional and requires the backend path to
+remain correct without it.  This makes optimization a performance and
+readability layer rather than a hidden correctness dependency.
+
+\section{Conclusion}
+
+Axon is evolving toward a compiler architecture in which every transformation
+has a named contract, every backend consumes typed structured data, and model
+family quirks are isolated from compiler semantics.  The current pipeline is
+already capable of resolving model-family Axon programs, flattening and typing
+them, lowering them to Graph IR, and executing them through multiple backends.
+The remaining work is to harden validation coverage, improve typed artifact
+round-tripping, and make backend-specific performance improvements without
+reintroducing implicit compatibility paths.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

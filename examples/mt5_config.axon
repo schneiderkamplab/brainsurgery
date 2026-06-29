@@ -1,0 +1,13 @@
+import Config
+
+-- Shared mT5-family settings (small/base/large/xl/xxl).
+D = Config.int "d_model" default=512                                  -- model hidden size
+V = Config.int "vocab_size" default=250112                            -- tokenizer vocabulary size
+L_ENC = Config.int "num_layers" default=8                             -- encoder layer count
+L_DEC_OVERRIDE = Config.int "num_decoder_layers" default=-1           -- optional decoder depth override
+L_DEC = (L_DEC_OVERRIDE > 0) ? L_DEC_OVERRIDE : L_ENC                  -- decoder layer count fallback
+H = Config.int "num_heads" default=6                                  -- attention head count
+FFN = Config.int "d_ff" default=1024                                  -- feed-forward hidden width
+EPS = Config.float "layer_norm_epsilon" default=1e-06                 -- T5-style RMSNorm epsilon
+NUM_BUCKETS = Config.int "relative_attention_num_buckets" default=32  -- relative-position bucket count
+MAX_DISTANCE = Config.int "relative_attention_max_distance" default=128 -- relative-position max distance

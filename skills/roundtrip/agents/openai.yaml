@@ -1,0 +1,4 @@
+interface:
+  display_name: "Axon Roundtrip"
+  short_description: "Run and debug Axon staged render roundtrip tests"
+  default_prompt: "Use $roundtrip to run Axon weak/strong stage roundtrip tests with pytest-xdist and debug canonicalization failures."

@@ -12,6 +12,7 @@ from ..core import (
     StateDictProvider,
     TensorRef,
     TransformError,
+    TransformPayloadSchema,
     UnarySpec,
     UnaryTransform,
     ensure_mapping_payload,
@@ -21,7 +22,7 @@ from ..core import (
     require_expr,
     require_numeric,
     resolve_name_mappings,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from ..engine import emit_verbose_event, emit_verbose_unary_activity
 
@@ -96,16 +97,24 @@ class PhloraTransform(IteratingTransform[PhloraSpec, ResolvedPhloraMapping]):
         super().__init__()
         self._svd_cache = PhloraSvdCache()
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(self.required_keys),
+            common_allowed=set(self.allowed_keys),
+        )
+
     def completion_reference_keys(self) -> list[str]:
         return ["target", "target_a", "target_b"]
 
     def compile(self, payload: dict, default_model: str | None) -> PhloraSpec:
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
 
         source_ref = parse_model_expr(

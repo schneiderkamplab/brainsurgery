@@ -65,39 +65,6 @@ def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor
     return (y * weight.float()).to(dtype=x.dtype)
 
 
-def _mamba_scan(
-    *,
-    u: torch.Tensor,
-    delta: torch.Tensor,
-    a_log: torch.Tensor,
-    b: torch.Tensor,
-    c: torch.Tensor,
-    d: torch.Tensor,
-) -> torch.Tensor:
-    batch, seq, inner = int(u.shape[0]), int(u.shape[1]), int(u.shape[2])
-    state_dim = int(a_log.shape[1])
-    work_dtype = torch.float32
-    u_work = u.to(dtype=work_dtype)
-    delta_work = F.softplus(delta.to(dtype=work_dtype))
-    a_work = -torch.exp(a_log.to(dtype=work_dtype))
-    b_work = b.to(dtype=work_dtype)
-    c_work = c.to(dtype=work_dtype)
-    d_work = d.to(dtype=work_dtype)
-    state = torch.zeros((batch, inner, state_dim), device=u.device, dtype=work_dtype)
-    outs: list[torch.Tensor] = []
-    for t in range(seq):
-        u_t = u_work[:, t, :]
-        delta_t = delta_work[:, t, :]
-        b_t = b_work[:, t, :]
-        c_t = c_work[:, t, :]
-        a_t = torch.exp(delta_t.unsqueeze(-1) * a_work.unsqueeze(0))
-        bu_t = (delta_t * u_t).unsqueeze(-1) * b_t.unsqueeze(1)
-        state = a_t * state + bu_t
-        y_t = (state * c_t.unsqueeze(1)).sum(dim=-1) + u_t * d_work.unsqueeze(0)
-        outs.append(y_t)
-    return torch.stack(outs, dim=1).to(dtype=u.dtype)
-
-
 class BlackMambaReferenceModel(nn.Module):
     def __init__(self, *, config: BlackMambaConfig, state_dict: dict[str, torch.Tensor]) -> None:
         super().__init__()
@@ -153,14 +120,30 @@ class BlackMambaReferenceModel(nn.Module):
         )
         delta = self._linear(dt, f"{pref}.dt_proj.weight", f"{pref}.dt_proj.bias")
 
-        y_scan = _mamba_scan(
-            u=u_conv,
-            delta=delta,
-            a_log=self._state[f"{pref}.A_log"],
-            b=b,
-            c=c,
-            d=self._state[f"{pref}.D"],
-        )
+        a_log = self._state[f"{pref}.A_log"]
+        d = self._state[f"{pref}.D"]
+        batch, seq, inner = int(u_conv.shape[0]), int(u_conv.shape[1]), int(u_conv.shape[2])
+        state_dim = int(a_log.shape[1])
+        work_dtype = torch.float32
+        u_work = u_conv.to(dtype=work_dtype)
+        delta_work = F.softplus(delta.to(dtype=work_dtype))
+        a_work = -torch.exp(a_log.to(dtype=work_dtype))
+        b_work = b.to(dtype=work_dtype)
+        c_work = c.to(dtype=work_dtype)
+        d_work = d.to(dtype=work_dtype)
+        state = torch.zeros((batch, inner, state_dim), device=u_conv.device, dtype=work_dtype)
+        outs: list[torch.Tensor] = []
+        for t in range(seq):
+            u_t = u_work[:, t, :]
+            delta_t = delta_work[:, t, :]
+            b_t = b_work[:, t, :]
+            c_t = c_work[:, t, :]
+            a_t = torch.exp(delta_t.unsqueeze(-1) * a_work.unsqueeze(0))
+            bu_t = (delta_t * u_t).unsqueeze(-1) * b_t.unsqueeze(1)
+            state = a_t * state + bu_t
+            y_t = (state * c_t.unsqueeze(1)).sum(dim=-1) + u_t * d_work.unsqueeze(0)
+            outs.append(y_t)
+        y_scan = torch.stack(outs, dim=1).to(dtype=u_conv.dtype)
         y = self._linear(y_scan * F.silu(gate), f"{pref}.out_proj.weight")
         return x + y
 

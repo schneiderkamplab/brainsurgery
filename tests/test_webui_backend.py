@@ -36,6 +36,14 @@ def test_set_transform_metadata_contains_boolean_keys() -> None:
     assert "verbose" in set_item["boolean_keys"]
 
 
+def test_load_transform_metadata_contains_mode_schema() -> None:
+    load_item = next(item for item in _transform_items() if item["name"] == "load")
+    assert load_item["mode_key"] == "backend"
+    assert load_item["default_mode"] == "auto"
+    assert "axon" in load_item["modes"]
+    assert "weights" in load_item["mode_allowed_keys"]["axon"]
+
+
 def test_transform_items_include_iterating_metadata() -> None:
     copy_item = next(item for item in _transform_items() if item["name"] == "copy")
     help_item = next(item for item in _transform_items() if item["name"] == "help")

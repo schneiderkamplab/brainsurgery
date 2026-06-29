@@ -1,0 +1,6 @@
+import t5 (t5)
+
+t5_small :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
+t5_small input_ids attention_mask decoder_input_ids decoder_attention_mask = do
+  logits <- t5 input_ids attention_mask decoder_input_ids decoder_attention_mask
+  return logits

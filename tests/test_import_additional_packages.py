@@ -7,7 +7,7 @@ CONFIG = {
     "algorithms": {"allowed": {"algorithms", "core"}},
     "expressions": {"allowed": {"expressions", "core"}},
     "transforms": {"allowed": {"transforms", "algorithms", "core", "engine", "expressions"}},
-    "cli": {"allowed": {"cli", "core", "engine"}},
+    "cli": {"allowed": {"cli", "core", "engine", "synapse"}},
     "web": {"allowed": {"web", "core", "engine", "http", "cli", "ui"}},
 }
 

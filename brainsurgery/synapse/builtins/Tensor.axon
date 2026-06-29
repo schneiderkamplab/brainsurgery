@@ -1,0 +1,188 @@
+import List index
+import Math (floor)
+type TokenIds[B,S] = Tensor[B,S]
+type IdxTensor[..S] = Tensor[..S]
+export (
+  and,
+  arange,
+  arange_step,
+  assign_slice,
+  cast,
+  cast_like,
+  chunk,
+  concat,
+  cumsum,
+  dtype_value,
+  deinterleave_last2,
+  eq,
+  expand,
+  empty,
+  gather,
+  full,
+  index_add,
+  le,
+  matmul,
+  min_like,
+  permute,
+  repeat,
+  reshape,
+  shape,
+  scatter,
+  size,
+  slice,
+  softmax,
+  split,
+  sum,
+  tensor_like,
+  topk,
+  transpose,
+  unsqueeze,
+  where,
+  where_indices,
+  zeros,
+  zeros_like,
+)
+
+split :: Tensor[..S] -> ?Int -> ?List[Dim] -> List[Tensor[..R]]
+split x ?dim=-1 ?sizes=null = _split x dim sizes
+
+chunk :: Tensor[..S] -> ?Int -> ?Dim -> List[Tensor[..R]]
+chunk x ?dim=-1 ?parts=null = _chunk x dim parts
+
+permute :: Tensor[..S] -> ?Any -> Tensor[..R]
+permute x ?dims=null = _permute x dims
+
+transpose :: Tensor[..S] -> ?Int -> ?Int -> Tensor[..R]
+transpose x ?dim1=1 ?dim2=2 = _transpose x dim1 dim2
+
+reshape :: Tensor[..S] -> List[Dim] -> Tensor[..R]
+reshape x shape = _reshape x shape
+
+shape :: Tensor[..S] -> List[Dim]
+shape x = _shape x
+
+size :: Tensor[..S] -> Int -> Dim
+size x dim = _tensor_size x dim
+
+expand :: Tensor[..S] -> ?List[Dim] -> Tensor[..R]
+expand x ?shape=null = _expand x shape
+
+arange :: Tensor[..S] -> ?Dim -> ?Dim -> IdxTensor[..R]
+arange x ?start=0 ?end=null = _arange x start end
+
+arange_step :: Tensor[..S] -> ?Dim -> ?Dim -> ?Int -> IdxTensor[..R]
+arange_step x ?start=0 ?end=null ?stride=1 = do
+  ref <- arange x
+  ref_end <- size ref 0
+  end_value <- ((end == null) ? ref_end : end)
+  fwd <- (stride > 0)
+  base <- (fwd ? (arange x start=start end=end_value) : (arange x start=end_value end=start))
+  base_len <- size base 0
+  stride_abs <- (fwd ? stride : (0 - stride))
+  count <- floor ((base_len + stride_abs - 1) / stride_abs)
+  idx <- arange base start=0 end=count
+
+  return (fwd ? ((idx * stride_abs) + start) : (start - (idx * stride_abs)))
+
+cast :: Tensor[..S] -> ?String -> Tensor[..S]
+cast x ?dtype=null = _cast x dtype
+
+cast_like :: Tensor[..S] -> Tensor[..R] -> Tensor[..S]
+cast_like x ref = _cast_like x ref
+
+tensor_like :: Any -> Tensor[..S] -> ?String -> Tensor[..R]
+tensor_like value ref ?dtype=null = _tensor_like value ref dtype
+
+empty :: Tensor[..REF] -> List[Dim] -> ?String -> Tensor[..S]
+empty ref shape ?dtype=null = _empty ref shape dtype
+
+zeros :: Tensor[..REF] -> List[Dim] -> ?String -> Tensor[..S]
+zeros ref shape ?dtype=null = _zeros ref shape dtype
+
+full :: Tensor[..REF] -> List[Dim] -> Any -> ?String -> Tensor[..S]
+full ref shape value ?dtype=null = _full ref shape value dtype
+
+cumsum :: Tensor[..S] -> ?Int -> Tensor[..S]
+cumsum x ?dim=-1 = _cumsum x dim
+
+unsqueeze :: Tensor[..S] -> ?Int -> Tensor[..R]
+unsqueeze x ?dim=0 = _unsqueeze x dim
+
+repeat :: Tensor[B,H,T,HD] -> Dim -> ?Int -> Tensor[B,H * repeats,T,HD]
+repeat x repeats ?dim=1 = _repeat x repeats dim
+
+concat :: Tensor[..S] -> Tensor[..T] -> ?Int -> Tensor[..R]
+concat x y ?dim=-1 = _concat x y dim=dim
+
+matmul :: Tensor[..S] -> Tensor[..T] -> Tensor[..R]
+matmul x y = _matmul x y
+
+eq :: Any -> Any -> Tensor[..R]
+eq x y = _eq x y
+
+le :: Any -> Any -> Tensor[..R]
+le x y = _le x y
+
+and :: Tensor[..S] -> Tensor[..T] -> Tensor[..R]
+and x y = _and x y
+
+where :: Any -> Any -> Any -> Tensor[..R]
+where cond x y = _where cond x y
+
+where_indices :: Tensor[..S] -> (IdxTensor[..I], IdxTensor[..J])
+where_indices x = _where_indices x
+
+require :: Any -> Any
+require x = _require x
+
+deinterleave_last2 :: Tensor[N,W] -> (Tensor[N,W / 2], Tensor[N,W / 2])
+deinterleave_last2 x = do
+  n <- size x 0
+  w <- size x -1
+  h <- w / 2
+  pair <- reshape x shape=[n, h, 2]
+  even <- slice pair dim=-1 start=0 end=1 |> reshape shape=[n, h]
+  odd <- slice pair dim=-1 start=1 end=2 |> reshape shape=[n, h]
+  return even, odd
+
+masked_fill :: Tensor[..S] -> Tensor[..M] -> Tensor[..V] -> Tensor[..S]
+masked_fill x mask value = where mask value x
+
+slice :: Tensor[..S] -> Int -> Dim -> Dim -> Tensor[..R]
+slice x dim start end = _slice x dim start end
+
+assign_slice :: Tensor[..S] -> Tensor[..R] -> Int -> Dim -> Dim -> Tensor[..S]
+assign_slice x src dim start end = _assign_slice x src dim start end
+
+softmax :: Tensor[..S] -> ?Int -> ?String -> Tensor[..S]
+softmax x ?dim=-1 ?dtype=null = _softmax x dim dtype
+
+sum :: Tensor[..S] -> ?Int -> ?Bool -> Tensor[..R]
+sum x ?dim=-1 ?keepdim=false = _sum x dim keepdim
+
+topk :: Tensor[..S] -> Dim -> ?Int -> ?Bool -> ?Bool -> (Tensor[..R], IdxTensor[..I])
+topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted
+
+dtype_value :: Tensor[..S] -> String -> Float
+dtype_value x kind = _dtype_value x kind
+
+empty_like :: Tensor[..S] -> ?String -> Tensor[..S]
+empty_like x ?dtype=null = _empty_like x dtype
+
+fill :: Tensor[..S] -> Any -> ?String -> Tensor[..S]
+fill x value ?dtype=null = _fill x value dtype
+
+gather :: Tensor[..S] -> IdxTensor[..I] -> ?Int -> Tensor[..R]
+gather x index ?dim=-1 = _gather x index dim
+
+scatter :: Tensor[..S] -> IdxTensor[..I] -> Any -> ?Int -> Tensor[..S]
+scatter x index src ?dim=-1 = _scatter x index src dim
+
+index_add :: Tensor[..S] -> IdxTensor[..I] -> Tensor[..T] -> ?Int -> Tensor[..S]
+index_add x index src ?dim=0 = _index_add x index src dim
+
+zeros_like :: Tensor[..S] -> Tensor[..S]
+zeros_like x = _zeros_like x
+
+min_like :: Tensor[..S] -> Tensor[..S]
+min_like x = fill (empty_like x) (dtype_value x "min")

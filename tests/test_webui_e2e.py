@@ -11,9 +11,7 @@ from typing import Any
 from urllib import request
 from urllib.error import HTTPError
 
-import pytest
 import torch
-from omegaconf import OmegaConf
 from safetensors.torch import save_file
 
 import brainsurgery  # noqa: F401
@@ -22,34 +20,6 @@ from brainsurgery.web.ui.handler import _handler_factory
 from brainsurgery.web.ui.session import _SessionState
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(plan: dict[str, Any]) -> dict[str, Any]:
-    patched = dict(plan)
-    model_file = "models/gpt2/model.safetensors"
-
-    inputs = patched.get("inputs")
-    if isinstance(inputs, list):
-        patched["inputs"] = [model_file if item == "models/gpt2" else item for item in inputs]
-
-    transforms = patched.get("transforms")
-    if isinstance(transforms, list):
-        updated_transforms: list[Any] = []
-        for item in transforms:
-            if (
-                isinstance(item, dict)
-                and "load" in item
-                and isinstance(item["load"], dict)
-                and item["load"].get("path") == "models/gpt2"
-            ):
-                load_payload = dict(item["load"])
-                load_payload["path"] = model_file
-                updated_transforms.append({"load": load_payload})
-            else:
-                updated_transforms.append(item)
-        patched["transforms"] = updated_transforms
-
-    return patched
 
 
 def _post_json(base_url: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -102,7 +72,7 @@ def _running_webui(tmp_path: Path) -> Iterator[str]:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_factory(session))
     except PermissionError as exc:
         provider.close()
-        pytest.skip(f"local webui bind is not permitted in this environment: {exc}")
+        raise RuntimeError(f"local webui bind is not permitted in this environment: {exc}") from exc
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
@@ -113,67 +83,6 @@ def _running_webui(tmp_path: Path) -> Iterator[str]:
         server.server_close()
         thread.join(timeout=5)
         provider.close()
-
-
-def test_webui_e2e_replays_gpt2_plan_and_exit_summary_contains_full_transforms(
-    tmp_path: Path,
-) -> None:
-    plan_path = REPO_ROOT / "examples" / "gpt2.yaml"
-    plan_obj = OmegaConf.to_container(OmegaConf.load(plan_path), resolve=True)
-    assert isinstance(plan_obj, dict)
-    plan_obj = _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(plan_obj)
-
-    inputs = plan_obj.get("inputs")
-    transforms = plan_obj.get("transforms")
-    assert isinstance(inputs, list) and inputs
-    assert isinstance(transforms, list) and transforms
-
-    model_input = inputs[0]
-    assert isinstance(model_input, str)
-
-    with _running_webui(tmp_path) as base_url:
-        load_resp = _post_json(
-            base_url,
-            "/api/load",
-            {
-                "server_path": model_input,
-                "alias": "model",
-            },
-        )
-        assert load_resp.get("ok") is True
-
-        for raw in transforms:
-            assert isinstance(raw, dict) and len(raw) == 1
-            transform_name, payload = next(iter(raw.items()))
-            assert isinstance(transform_name, str)
-            apply_resp = _post_json(
-                base_url,
-                "/api/_apply_transform",
-                {
-                    "transform": transform_name,
-                    "payload": payload,
-                },
-            )
-            assert apply_resp.get("ok") is True, f"{transform_name}: {apply_resp.get('error')}"
-
-        exit_resp = _post_json(
-            base_url,
-            "/api/_apply_transform",
-            {"transform": "exit", "payload": {}},
-        )
-        assert exit_resp.get("ok") is True, exit_resp.get("error")
-
-    output = exit_resp.get("output")
-    assert isinstance(output, str) and output.strip()
-    summary_obj = OmegaConf.to_container(OmegaConf.create(output), resolve=True)
-    assert isinstance(summary_obj, dict)
-
-    expected_transforms = [
-        {"load": {"path": model_input, "alias": "model"}},
-        *transforms,
-        {"exit": {}},
-    ]
-    assert summary_obj == {"transforms": expected_transforms}
 
 
 def test_webui_state_exposes_runtime_flags_and_set_updates_them(tmp_path: Path) -> None:

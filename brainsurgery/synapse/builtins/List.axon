@@ -1,8 +1,18 @@
-init :: List
+export (
+  append,
+  index,
+  init,
+  length,
+)
+
+init :: List[_T]
 init = _list_init
 
-index :: ?List -> I -> ?Any
+index :: List[_T] -> Int -> _T
 index values i = _list_index values i
 
-append :: List -> Any -> List
+append :: List[_T] -> _T -> List[_T]
 append values value = _list_append values value
+
+length :: List[_T] -> Dim
+length values = _list_length values

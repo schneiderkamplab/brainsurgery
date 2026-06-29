@@ -1,0 +1,70 @@
+\section{Elaborate}
+
+\paragraph{Input and output.}
+Elaboration consumes a normalized closed AST and produces a closed AST with
+implicit call structure made explicit where the language contract requires it.
+
+\paragraph{Contract.}
+The current elaboration stage is signature-aware and focuses on the boundary
+between surface calls and the flat core.  It preserves user-visible type
+ascriptions and does not erase inferred metadata.  Its job is to make
+defaultable call structure explicit enough that flattening, typecheck2, and
+Graph IR lowering do not need ad hoc fallback logic for omitted optional
+parameters.
+
+Elaboration accounts for already-supplied positional arguments, explicit
+keyword arguments, path arguments introduced by normalization, and optional
+parameters with implicit \code{null} defaults.  It adds a missing keyword
+argument only when the corresponding formal parameter is not already covered by
+the call.  This is part of the round-trip contract: flat rendered Axon
+represents scoped calls with ordinary leading \code{Path} arguments, and
+reparsing such a program preserves the same call surface instead of adding
+duplicate defaults for parameters supplied positionally.
+
+\paragraph{Rationale.}
+Elaboration sits after normalization because normalization first determines
+which expressions are calls.  Once calls are explicit, elaboration can apply
+signature-aware rules without reinterpreting syntax.
+
+\paragraph{Formal view.}
+For normalized AST \(A_n\), elaboration produces \(A_e\):
+\[
+  \mathsf{elaborate}: A_n \rightarrow A_e .
+\]
+The transformation is signature-aware but not type-inferential.  For a call
+\(\code{f}\ a_1 \ldots a_m\ \{k_j=v_j\}\), it binds actual arguments to the
+callee surface after accounting for path slots and positional parameters.  For
+each remaining formal parameter \(p\), elaboration may insert \(p=d_p\) when
+\(p\) has a declared default \(d_p\), or \(p=\code{null}\) when \(p\) is
+optional without an explicit default.  It does not solve tensor shapes.
+
+The stage is idempotent under the weak and strong round-trip tests used for
+model Axon files: rendering and reparsing an elaborated artifact, with or
+without re-running earlier resolution, yields the same elaborated call
+structure.
+
+\paragraph{Example.}
+If a library function has the signature
+\begin{verbatim}
+linear :: Path -> Tensor[B,S,D] -> ?Dim -> ?Bool -> Tensor[B,S,O]
+linear path x ?dim=null ?bias=true = ...
+\end{verbatim}
+then a call such as
+\begin{verbatim}
+y <- NN.linear @w x
+\end{verbatim}
+can be elaborated to an equivalent call with explicit defaulted arguments:
+\begin{verbatim}
+y <- NN.linear @w x dim=null bias=true
+\end{verbatim}
+This prevents downstream stages from inventing backend-specific defaults.
+However, if a call already supplies the optional parameter positionally,
+elaboration does not also add the keyword form:
+\begin{verbatim}
+y <- f path x supplied_optional
+\end{verbatim}
+must remain a single binding of the optional formal, not become
+\begin{verbatim}
+y <- f path x supplied_optional optional=null
+\end{verbatim}
+after rendering and reparsing.

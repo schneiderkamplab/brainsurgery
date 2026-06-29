@@ -1,27 +1,56 @@
 from .axon import (
     AxonBind,
-    AxonModule,
+    AxonDefinition,
     AxonParam,
     AxonRepeat,
     AxonReturn,
-    AxonScope,
-    lower_axon_module_to_synapse_block,
-    lower_axon_module_to_synapse_spec,
-    lower_axon_program_to_synapse_spec,
+    MaterializeContext,
+    ResolveDiagnostic,
+    ResolveReport,
+    ast_equal,
+    checkpoint_pragma_entries,
+    flatten_closed_axon_file,
+    graph_domain_definition_comments,
+    group_output_name,
+    graph_program_to_axon_file,
+    load_materialize_context,
+    load_tokenizer,
+    lower_axon_program_to_graph_ir,
+    materialize_axon_file,
+    normalize_checkpoint_name,
+    optimize_graph_program,
+    optimize_safe_flat_typed_axon_file,
     parse_axon_module,
     parse_axon_program,
     parse_axon_program_from_path,
-    synapse_spec_to_axon_module_text,
+    render_axon_file,
+    render_graph_program_to_dot,
+    resolve_axon_program_from_path,
+    resolve_axon_program_to_source,
+    resolve_loaded_axon_files,
+    validate_axon_program,
+    validate_closed_axon_file,
+    validate_flat_axon_file,
 )
-from .codegen import emit_model_code_from_synapse_spec, load_synapse_torch_op_map
-from .runtime import SynapseProgramModel
-
 
 def run_axon_test(*args, **kwargs):
     # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
     from .axon_test import run_axon_test as _run_axon_test
 
     return _run_axon_test(*args, **kwargs)
+
+
+def run_axon_benchmark(*args, **kwargs):
+    # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
+    from .axon_benchmark import run_axon_benchmark as _run_axon_benchmark
+
+    return _run_axon_benchmark(*args, **kwargs)
+
+
+def render_axon_benchmark_csv(*args, **kwargs):
+    from .axon_benchmark import render_axon_benchmark_csv as _render_axon_benchmark_csv
+
+    return _render_axon_benchmark_csv(*args, **kwargs)
 
 
 def run_axon_test_matrix(*args, **kwargs):
@@ -31,39 +60,55 @@ def run_axon_test_matrix(*args, **kwargs):
     return _run_axon_test_matrix(*args, **kwargs)
 
 
-def run_axon_op_parity(*args, **kwargs):
-    # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
-    from .op_parity import run_axon_op_parity as _run_axon_op_parity
+def render_axon_benchmark_log(*args, **kwargs):
+    from .axon_test_log import render_axon_benchmark_log as _render_axon_benchmark_log
 
-    return _run_axon_op_parity(*args, **kwargs)
+    return _render_axon_benchmark_log(*args, **kwargs)
 
 
-def run_codegen_runtime_parity(*args, **kwargs):
-    # Lazy import keeps benchmarking deps (e.g., transformers) out of core package import paths.
-    from .op_parity import run_codegen_runtime_parity as _run_codegen_runtime_parity
+def render_axon_test_log(*args, **kwargs):
+    from .axon_test_log import render_axon_test_log as _render_axon_test_log
 
-    return _run_codegen_runtime_parity(*args, **kwargs)
+    return _render_axon_test_log(*args, **kwargs)
 
 
 __all__ = [
     "AxonBind",
-    "AxonModule",
+    "AxonDefinition",
     "AxonParam",
     "AxonRepeat",
     "AxonReturn",
-    "AxonScope",
-    "SynapseProgramModel",
-    "emit_model_code_from_synapse_spec",
+    "MaterializeContext",
+    "ast_equal",
+    "checkpoint_pragma_entries",
+    "group_output_name",
+    "graph_program_to_axon_file",
+    "graph_domain_definition_comments",
+    "flatten_closed_axon_file",
+    "load_materialize_context",
+    "run_axon_benchmark",
+    "render_axon_benchmark_csv",
     "run_axon_test",
+    "render_axon_benchmark_log",
+    "render_axon_test_log",
     "run_axon_test_matrix",
-    "run_axon_op_parity",
-    "run_codegen_runtime_parity",
-    "lower_axon_module_to_synapse_block",
-    "lower_axon_module_to_synapse_spec",
-    "lower_axon_program_to_synapse_spec",
-    "load_synapse_torch_op_map",
+    "lower_axon_program_to_graph_ir",
+    "load_tokenizer",
     "parse_axon_module",
     "parse_axon_program",
     "parse_axon_program_from_path",
-    "synapse_spec_to_axon_module_text",
+    "materialize_axon_file",
+    "normalize_checkpoint_name",
+    "optimize_graph_program",
+    "optimize_safe_flat_typed_axon_file",
+    "render_axon_file",
+    "render_graph_program_to_dot",
+    "resolve_loaded_axon_files",
+    "resolve_axon_program_from_path",
+    "resolve_axon_program_to_source",
+    "ResolveDiagnostic",
+    "ResolveReport",
+    "validate_closed_axon_file",
+    "validate_flat_axon_file",
+    "validate_axon_program",
 ]

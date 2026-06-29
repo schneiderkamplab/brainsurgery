@@ -1,0 +1,39 @@
+\section{Parse}
+
+\paragraph{Input and output.}
+The parse stage consumes Axon source text and produces a one-file Axon AST.
+It records syntactic structure, source-level names, declarations, imports,
+exports, pragmas, type ascriptions, path literals, and expression forms.
+
+\paragraph{Contract.}
+Parsing is intentionally syntax-local.  It does not load imported files,
+resolve names, infer types, normalize call syntax, materialize configuration
+values, or lower operations.  A parse result may contain unresolved references
+and surface sugar; those are obligations of later stages.
+
+\paragraph{Rationale.}
+Keeping parse pure makes it possible to test grammar stability independently
+from the file system and from checkpoint availability.  It also prevents the
+parser from becoming an implicit compatibility layer for downstream stages.
+
+\paragraph{Formal view.}
+Let \(\Sigma\) be source text and \(A_f\) be a one-file Axon AST.  Parse is a
+partial function
+\[
+  \mathsf{parse}: \Sigma \rightharpoonup A_f .
+\]
+It is undefined for syntactically invalid programs, but it is defined for
+programs with unresolved identifiers, unresolved imports, or type errors.
+
+\paragraph{Example.}
+The source fragment
+\begin{verbatim}
+import NN
+
+embed :: Tensor[B,S] -> Tensor[B,S,D]
+embed ids = NN.embedding@wte ids dim=D
+\end{verbatim}
+is parsed into an import declaration, a typed definition, a parameter list, and
+a call expression whose callee still carries surface path sugar
+\code{@wte}.  Parse records this structure but does not decide whether
+\code{NN.embedding} exists or whether \code{D} is a valid dimension symbol.

@@ -1,0 +1,39 @@
+import List
+export (
+  bool,
+  dim,
+  float,
+  has_key,
+  has_value,
+  int,
+  list,
+  str,
+  value,
+)
+
+has_key :: Path -> Bool
+has_key key = _config_has key
+
+has_value :: Path -> Bool
+has_value key = (value key default=null) != null
+
+int :: Path -> ?Int -> Int
+int key ?default=null = _config_int key default
+
+dim :: Path -> ?Dim -> Dim
+dim key ?default=null = _config_dim key default
+
+float :: Path -> ?Float -> Float
+float key ?default=null = _config_float key default
+
+str :: Path -> ?String -> String
+str key ?default=null = _config_str key default
+
+bool :: Path -> ?Bool -> Bool
+bool key ?default=null = _config_bool key default
+
+list :: Path -> ?List[_T] -> List[_T]
+list key ?default=List.init = _config_list key default
+
+value :: Path -> ?Any -> Any
+value key ?default=null = _config_value key default

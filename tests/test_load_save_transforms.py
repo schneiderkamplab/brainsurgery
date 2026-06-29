@@ -257,7 +257,6 @@ def test_output_writes_dcp_directory(tmp_path: Path) -> None:
     assert torch.equal(loaded["x_copy"], expected["x"])
 
 
-@pytest.mark.skipif(np is None, reason="numpy not available")
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
 def test_load_tensor_npy_then_save_tensor_npy(provider_name: str, tmp_path: Path) -> None:
     assert np is not None

@@ -53,6 +53,7 @@ from .specs import (
     StateDictProvider,
     TensorRef,
     TransformError,
+    TransformPayloadSchema,
     ensure_mapping_payload,
     format_tensor_ref,
     must_model,
@@ -65,7 +66,7 @@ from .specs import (
     require_numeric,
     require_same_shape_dtype_device,
     require_same_shape_dtype_device3,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from .tensor_views import (
     binary_mapping_views,
@@ -130,6 +131,7 @@ __all__ = [
     "StateDictLike",
     "StateDictProvider",
     "TensorRef",
+    "TransformPayloadSchema",
     "TransformError",
     "ensure_mapping_payload",
     "format_tensor_ref",
@@ -143,5 +145,5 @@ __all__ = [
     "require_numeric",
     "require_same_shape_dtype_device",
     "require_same_shape_dtype_device3",
-    "validate_payload_keys",
+    "validate_payload_schema",
 ]

@@ -71,8 +71,6 @@ def test_prefixes_compile_and_apply_additional_paths(monkeypatch: pytest.MonkeyP
     assert transform.completion_key_candidates("prefixes: { mode: add, ", "") == ["alias: "]
     assert transform.completion_value_candidates("unknown", "", []) is None
 
-    with pytest.raises(PrefixesTransformError, match="unknown keys"):
-        prefixes_module._require_only_keys({"mode": "list", "x": 1}, allowed={"mode"})
     assert prefixes_module._prefixes_mode("prefixes: {}") is None
 
 

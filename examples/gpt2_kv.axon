@@ -1,16 +1,17 @@
-T   = 1024   -- max sequence length
-D   = 768    -- hidden dimensions
-L   = 12     -- number of layers
-H   = 12     -- number of attention heads
-V   = 520257 -- vocab size
-
+import Config
 import Activations gelu_new
 import Cache past_length
 
-lin :: @Path -> Tensor[B,S,Din] -> I -> Tensor[B,S,dim]
+T   = Config.int "n_positions" default=1024   -- max sequence length
+D   = Config.int "n_embd" default=768         -- hidden dimensions
+L   = Config.int "n_layer" default=12         -- number of layers
+H   = Config.int "n_head" default=12          -- number of attention heads
+V   = Config.int "vocab_size" default=520257  -- vocab size
+
+lin :: @Path -> Tensor[B,S,Din] -> Int -> Tensor[B,S,dim]
 lin@path x dim = linear@path x dim=dim bias=true transpose=true
 
-gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?Cache -> (Tensor[B,S,D], ?Cache)
+gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 gpt2_block x attn_mask past_kv = do
   x1 <- layernorm@ln_1 x
   a, new_kv <- scope@attn do

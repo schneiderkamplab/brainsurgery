@@ -1,0 +1,21 @@
+import Config
+import Params
+
+-- Config namespace root.
+CFG = (Config.has "text_config") ? "text_config" : ""
+
+-- Parameter root for checkpoint key lookup.
+PARAM_ROOT = (Params.has_root "language_model") ? "language_model" : ""
+
+D = Config.int "hidden_size" root=CFG default=2048                 -- residual hidden size
+V = Config.int "vocab_size" root=CFG default=128256                -- vocabulary size
+L = Config.int "num_hidden_layers" root=CFG default=36             -- number of decoder layers
+H = Config.int "num_attention_heads" root=CFG default=16           -- query attention heads
+KVH = Config.int "num_key_value_heads" root=CFG default=4          -- key/value attention heads
+HD = (Config.has "head_dim" root=CFG) ? Config.int "head_dim" root=CFG default=128 : (D / H) -- per-head hidden size
+KVD = KVH * HD                                                     -- key/value projection width
+FFN = Config.int "intermediate_size" root=CFG default=11008        -- MLP hidden width
+EPS = Config.float "rms_norm_eps" root=CFG default=1e-06          -- RMSNorm epsilon
+THETA = Config.float "rope_theta" root=CFG default=5000000.0      -- RoPE base theta
+C = Config.int "max_position_embeddings" root=CFG default=65536   -- max context window
+NO_ROPE_LAYER_INTERVAL = Config.int "no_rope_layer_interval" root=CFG default=4 -- every Nth layer skips RoPE

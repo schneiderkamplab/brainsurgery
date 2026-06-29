@@ -1,0 +1,44 @@
+\section{Validate}
+
+\paragraph{Input and output.}
+Validation consumes a closed AST and returns the same AST when the requested
+invariant set holds.  On failure, it reports diagnostics rather than producing
+a repaired program.
+
+\paragraph{Contract.}
+The pre-flatten validator checks closedness, unresolved-name rejection,
+type-alias arity and visibility, and structural properties required before
+normalization and flattening.  Later validators check stronger stage-specific
+properties such as normalized calls, flat control, Graph IR lowerability, and
+typed metadata consistency.
+
+\paragraph{Rationale.}
+Validation is a certification layer, not a transformation layer.  This is what
+lets later stages reject invalid inputs instead of weakening their assumptions.
+
+\paragraph{Formal view.}
+A validator is a predicate over an AST representation:
+\[
+  \mathsf{validate}_k(A) =
+  \begin{cases}
+  A & \text{if invariant set } k \text{ holds},\\
+  \bot & \text{otherwise.}
+  \end{cases}
+\]
+The returned AST is structurally identical to the input.  Diagnostics are
+separate from transformation.
+
+\paragraph{Example.}
+Before flattening, validation rejects a closed program that still contains a
+reachable unresolved name:
+\begin{verbatim}
+f x = does_not_exist x
+\end{verbatim}
+After flattening, a stronger validator rejects statement-level control:
+\begin{verbatim}
+if cond then do
+  y <- f x
+else do
+  y <- g x
+\end{verbatim}
+because flat Axon must express this through values, helpers, or ternaries.

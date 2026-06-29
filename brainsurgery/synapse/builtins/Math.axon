@@ -1,0 +1,49 @@
+export (
+  PI,
+  add,
+  clamp,
+  cos,
+  div,
+  exp,
+  floor,
+  log,
+  mul,
+  pow,
+  sin,
+  sqrt,
+)
+
+PI = 3.141592653589793
+
+add :: Any -> Any -> Any
+add x y = _add x y
+
+div :: Any -> Any -> Any
+div x y = _div x y
+
+mul :: Any -> Any -> Any
+mul x y = _mul x y
+
+pow :: Any -> Any -> Any
+pow x y = _pow x y
+
+exp :: T -> T
+exp x = _exp x
+
+log :: T -> T
+log x = _log x
+
+floor :: Any -> Any
+floor x = _floor x
+
+sin :: Tensor[..S] -> Tensor[..S]
+sin x = _sin x
+
+cos :: Tensor[..S] -> Tensor[..S]
+cos x = _cos x
+
+sqrt :: Float -> Float
+sqrt x = _sqrt x
+
+clamp :: Tensor[..S] -> ?Float -> ?Float -> Tensor[..S]
+clamp x ?min=null ?max=null = _clamp x min max

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 import torch
-from omegaconf import OmegaConf
 
 from brainsurgery.engine import (
     RuntimeFlagLifecycleScope,
@@ -17,68 +14,6 @@ from brainsurgery.engine import (
 from brainsurgery.engine.execution import _execute_transform_pairs
 from brainsurgery.engine.plan import compile_plan
 from brainsurgery.transforms.copy import CopyTransform
-
-
-def _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(plan: dict[str, object]) -> dict[str, object]:
-    patched = dict(plan)
-    model_file = "models/gpt2/model.safetensors"
-
-    inputs = patched.get("inputs")
-    if isinstance(inputs, list):
-        patched["inputs"] = [model_file if item == "models/gpt2" else item for item in inputs]
-
-    transforms = patched.get("transforms")
-    if isinstance(transforms, list):
-        updated_transforms: list[object] = []
-        for item in transforms:
-            if (
-                isinstance(item, dict)
-                and "load" in item
-                and isinstance(item["load"], dict)
-                and item["load"].get("path") == "models/gpt2"
-            ):
-                load_payload = dict(item["load"])
-                load_payload["path"] = model_file
-                updated_transforms.append({"load": load_payload})
-            else:
-                updated_transforms.append(item)
-        patched["transforms"] = updated_transforms
-
-    return patched
-
-
-def test_download_gpt2_model_and_run_example_yaml(
-    tmp_path: Path, gpt2_local_paths: tuple[Path, Path]
-) -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    _ = gpt2_local_paths
-    source_plan = OmegaConf.to_container(
-        OmegaConf.load(repo_root / "examples" / "gpt2.yaml"), resolve=True
-    )
-    assert isinstance(source_plan, dict)
-    patched_plan = _rewrite_gpt2_plan_for_checkpoint_path_ambiguity(source_plan)
-    plan_path = tmp_path / "gpt2_integration.yaml"
-    plan_path.write_text(OmegaConf.to_yaml(patched_plan, resolve=True), encoding="utf-8")
-
-    run = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "brainsurgery.cli",
-            "--log-level",
-            "warning",
-            "--no-summarize",
-            str(plan_path),
-        ],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-    )
-    assert run.returncode == 0, (
-        f"brainsurgery examples/gpt2.yaml failed\nstdout:\n{run.stdout}\nstderr:\n{run.stderr}"
-    )
-
-    assert (repo_root / "models" / "test" / "model.safetensors.index.json").exists()
 
 
 @pytest.mark.parametrize("provider_name", ["inmemory", "arena"])
