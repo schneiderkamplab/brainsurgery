@@ -3433,7 +3433,6 @@ def _run_axon_test_single(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
             "'codegen2-mlx', 'codegen2-triton', 'runtime2-torch', or 'pipeline2-torch'"
         )
-        )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
     if typechecker_token != "typecheck2":
