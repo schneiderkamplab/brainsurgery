@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import queue
 import threading
 from typing import Any
 
@@ -26,6 +25,7 @@ class Engine:
         *,
         max_batch_size: int = 8,
         max_seq_len: int = 2048,
+        prefill_chunk_size: int = 0,
         block_size: int = 16,
         cache_blocks: int = 1024,
         device: str = "cpu",
@@ -41,13 +41,16 @@ class Engine:
         self._scheduler = ContinuousBatchScheduler(
             max_batch_size=max_batch_size,
             max_seq_len=max_seq_len,
+            prefill_chunk_size=prefill_chunk_size,
         )
         self._cache = self._create_cache(cfg, block_size, cache_blocks, dtype)
         self._tokenizer: Any = None
 
         # Concurrent serving state
-        self._token_queues: dict[int, queue.Queue] = {}
+        self._token_queues: dict[int, asyncio.Queue] = {}
         self._request_params: dict[int, dict[str, float]] = {}
+        self._finished_sequences: set[int] = set()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_lock = threading.Lock()
         self._loop_event = threading.Event()
         self._stop_event = threading.Event()
@@ -124,19 +127,28 @@ class Engine:
             outputs = self._execute_plan(plan)
 
             with self._loop_lock:
+                processed_ids = set(o['seq_id'] for o in outputs)
                 for o in outputs:
                     seq_id = o['seq_id']
                     token_id = o['token_id']
                     self._scheduler.on_step_complete(seq_id, token_id)
                     q = self._token_queues.get(seq_id)
-                    if q is not None:
-                        q.put(token_id)
+                    if q is not None and self._loop is not None:
+                        self._loop.call_soon_threadsafe(q.put_nowait, token_id)
                 for seq_id in list(self._token_queues.keys()):
                     if not self._scheduler.is_running(seq_id):
-                        q = self._token_queues.pop(seq_id, None)
-                        if q is not None:
-                            q.put(None)
-                        self._request_params.pop(seq_id, None)
+                        if seq_id in self._finished_sequences or seq_id not in processed_ids:
+                            continue
+                        q = self._token_queues.get(seq_id)
+                        if q is not None and self._loop is not None:
+                            def _cleanup(q=q, seq_id=seq_id):
+                                q.put_nowait(None)
+                                self._finished_sequences.add(seq_id)
+                            self._loop.call_soon_threadsafe(_cleanup)
+                        else:
+                            self._token_queues.pop(seq_id, None)
+                            self._request_params.pop(seq_id, None)
+                            self._finished_sequences.add(seq_id)
 
     def _ensure_tokenizer(self, prompt: str | list[int]) -> list[int]:
         if isinstance(prompt, str):
@@ -155,22 +167,34 @@ class Engine:
         **kwargs: Any,
     ) -> int:
         prompt_ids = self._ensure_tokenizer(prompt)
+        if self._loop is None:
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
         with self._loop_lock:
             seq_id = self._scheduler.add(prompt_ids, max_tokens=max_tokens, **kwargs)
-            self._cache.init_entry(seq_id)
-            self._token_queues[seq_id] = queue.Queue()
+            cached_prefix_len = self._cache.init_entry(seq_id, prompt_ids)
+            self._scheduler.set_prefill_pos(seq_id, cached_prefix_len)
+            self._token_queues[seq_id] = asyncio.Queue()
             self._request_params[seq_id] = {"temperature": temperature, "top_p": top_p}
         self._loop_event.set()
         return seq_id
 
     async def await_token(self, seq_id: int) -> int | None:
         """Wait for the next token from the background loop. Returns None when finished."""
-        loop = asyncio.get_event_loop()
         while True:
             q = self._token_queues.get(seq_id)
             if q is None:
+                if seq_id in self._finished_sequences:
+                    return None
+                await asyncio.sleep(0.01)
+                continue
+            token_id = await q.get()
+            if token_id is None:
+                self._token_queues.pop(seq_id, None)
+                self._request_params.pop(seq_id, None)
                 return None
-            token_id = await loop.run_in_executor(None, q.get)
             return token_id
 
     # --- Synchronous step (CLI mode, no background loop) ---
@@ -194,6 +218,22 @@ class Engine:
         temperature: float | None = None,
         top_p: float | None = None,
     ) -> list[dict[str, Any]]:
+        is_paged = getattr(self._model, '_paged_attention', False)
+        has_intermediate_prefill = any(
+            s.phase == Phase.PREFILL and not s.is_last_prefill_chunk
+            for s in plan.sequences
+        )
+        if is_paged or self._backend != 'codegen2-torch' or has_intermediate_prefill:
+            return self._execute_plan_sequential(plan, temperature=temperature, top_p=top_p)
+        return self._execute_plan_batched(plan, temperature=temperature, top_p=top_p)
+
+    def _execute_plan_sequential(
+        self,
+        plan: BatchPlan,
+        *,
+        temperature: float | None = None,
+        top_p: float | None = None,
+    ) -> list[dict[str, Any]]:
         outputs: list[dict[str, Any]] = []
         is_paged = getattr(self._model, '_paged_attention', False)
         for seq_input in plan.sequences:
@@ -211,15 +251,22 @@ class Engine:
                 tp = top_p
 
             if is_paged:
-                block_table = self._cache.get_block_table(seq_id)
+                block_table_list = self._cache.get_block_table(seq_id)
                 position = self._cache.get_position(seq_id)
                 num_tokens = len(tokens)
                 num_blocks_needed = (position + num_tokens + self._cache.block_size - 1) // self._cache.block_size
-                while len(block_table) < num_blocks_needed:
+                while len(block_table_list) < num_blocks_needed:
                     blk = self._cache._alloc_block()
                     if blk is None:
                         raise RuntimeError("Cache full")
-                    block_table.append(blk)
+                    block_table_list.append(blk)
+
+                if self._backend == 'codegen2-mlx':
+                    import mlx.core as mx
+                    block_table = mx.array(block_table_list, dtype=mx.int32)
+                else:
+                    block_table = block_table_list
+
                 forward_kwargs = dict(
                     k_blocks=self._cache.k_blocks,
                     v_blocks=self._cache.v_blocks,
@@ -235,8 +282,13 @@ class Engine:
 
             if new_kv is not None and seq_input.phase == Phase.PREFILL:
                 self._store_prefill_cache(seq_id, new_kv)
+                self._cache.register_blocks(seq_id, seq_input.input_ids)
             if seq_input.phase == Phase.DECODE and new_kv is not None:
                 self._store_decode_cache(seq_id, new_kv)
+
+            if seq_input.phase == Phase.PREFILL and not seq_input.is_last_prefill_chunk:
+                self._scheduler.advance_prefill(seq_id, seq_input.num_tokens)
+                continue
 
             prefill = seq_input.phase == Phase.PREFILL
             next_token = self._model.sample(
@@ -245,6 +297,68 @@ class Engine:
                 top_p=tp,
                 prefill=prefill,
             )
+            outputs.append({"seq_id": seq_id, "token_id": next_token})
+
+        return outputs
+
+    def _execute_plan_batched(
+        self,
+        plan: BatchPlan,
+        *,
+        temperature: float | None = None,
+        top_p: float | None = None,
+    ) -> list[dict[str, Any]]:
+        prefill_seqs = [s for s in plan.sequences if s.phase == Phase.PREFILL]
+        decode_seqs = [s for s in plan.sequences if s.phase == Phase.DECODE]
+        outputs: list[dict[str, Any]] = []
+
+        if prefill_seqs:
+            max_len = max(len(s.input_ids) for s in prefill_seqs)
+            padded = [s.input_ids + [0] * (max_len - len(s.input_ids)) for s in prefill_seqs]
+            batch_tokens = torch.tensor(padded, dtype=torch.long, device=self._device)
+
+            logits, new_kv = self._model.forward(batch_tokens, past_kv=None, use_cache=True)
+
+            for i, seq_input in enumerate(prefill_seqs):
+                seq_id = seq_input.seq_id
+                if temperature is None or top_p is None:
+                    with self._loop_lock:
+                        params = self._request_params.get(seq_id, {"temperature": 0.0, "top_p": 1.0})
+                    temp, tp = params["temperature"], params["top_p"]
+                else:
+                    temp, tp = temperature, top_p
+
+                actual_len = len(seq_input.input_ids)
+                seq_new_kv = [(k[i:i+1, :, :actual_len], v[i:i+1, :, :actual_len]) for k, v in new_kv]
+                self._store_prefill_cache(seq_id, seq_new_kv)
+                self._cache.register_blocks(seq_id, seq_input.input_ids)
+
+                if not seq_input.is_last_prefill_chunk:
+                    self._scheduler.advance_prefill(seq_id, seq_input.num_tokens)
+                    continue
+
+                seq_logits = logits[i:i+1, actual_len - 1:actual_len, :]
+                next_token = self._model.sample(seq_logits, temperature=temp, top_p=tp, prefill=True)
+                outputs.append({"seq_id": seq_id, "token_id": next_token})
+
+        for seq_input in decode_seqs:
+            seq_id = seq_input.seq_id
+            input_tensor = torch.tensor([[seq_input.input_ids[0]]], dtype=torch.long, device=self._device)
+
+            if temperature is None or top_p is None:
+                with self._loop_lock:
+                    params = self._request_params.get(seq_id, {"temperature": 0.0, "top_p": 1.0})
+                temp, tp = params["temperature"], params["top_p"]
+            else:
+                temp, tp = temperature, top_p
+
+            past_kv = self._cache.gather(seq_id)
+            logits, new_kv = self._model.forward(input_tensor, past_kv=past_kv, use_cache=True)
+
+            if new_kv is not None:
+                self._store_decode_cache(seq_id, new_kv)
+
+            next_token = self._model.sample(logits, temperature=temp, top_p=tp, prefill=False)
             outputs.append({"seq_id": seq_id, "token_id": next_token})
 
         return outputs
