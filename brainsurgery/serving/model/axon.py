@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +31,25 @@ _BACKEND_EMITTERS: dict[str, str] = {
     "codegen2-mlx": "brainsurgery.synapse.axon.codegen2_mlx",
     "codegen2-tinygrad": "brainsurgery.synapse.axon.codegen2_tinygrad",
 }
+
+
+def _resolve_tinygrad_serving_device(device: str) -> str | None:
+    """Map a serving device string to a tinygrad device name.
+
+    On Apple Silicon (Darwin), auto-upgrades 'cpu' to 'METAL' to match MLX's
+    always-Metal behavior. Use --device metal or --device cuda to target
+    specific devices explicitly.
+    """
+    d = device.lower()
+    if d in ("metal", "mps", "gpu"):
+        return "METAL"
+    if d == "cuda":
+        return "CUDA"
+    if d == "cpu":
+        import platform
+        if platform.system() == "Darwin":
+            return "METAL"
+    return None
 
 
 def _load_model_config(model_dir: Path) -> dict[str, Any]:
@@ -94,6 +112,22 @@ def _detect_model_config(model_config_dict: dict[str, Any]) -> ModelConfig:
     )
 
 
+def _realize_all_tensors(output: Any) -> None:
+    tensors: list = []
+    _stack = [output]
+    while _stack:
+        v = _stack.pop()
+        if isinstance(v, dict):
+            _stack.extend(v.values())
+        elif isinstance(v, (list, tuple)):
+            _stack.extend(v)
+        elif type(v).__module__ == "tinygrad.tensor":
+            tensors.append(v)
+    if len(tensors) > 1:
+        from tinygrad import Tensor as _Tensor
+        _Tensor.realize(tensors[0], *tensors[1:])
+
+
 class AxonServingModel(ServingModel):
     def __init__(
         self,
@@ -103,6 +137,7 @@ class AxonServingModel(ServingModel):
         device: torch.device,
         dtype: torch.dtype,
         paged_attention: bool = False,
+        compile_mode: str | None = None,
     ):
         self._model = model
         self.config = config
@@ -110,6 +145,29 @@ class AxonServingModel(ServingModel):
         self._device = device
         self._dtype = dtype
         self._paged_attention = paged_attention
+        self._tiny_device = getattr(model, '_tiny_device', None)
+        if compile_mode:
+            self.compile(compile_mode)
+
+    def compile(self, mode: str) -> None:
+        if getattr(self, '_compiled', False):
+            return
+        if self._backend == "codegen2-mlx":
+            import mlx.core as mx
+            self._model._forward = mx.compile(self._model._forward)
+            logger.info("Applied mx.compile to MLX serving model (mode=%s)", mode)
+        elif self._backend == "codegen2-torch":
+            compile_fn = getattr(torch, "compile", None)
+            if compile_fn is None:
+                raise ValueError("torch.compile not available in this PyTorch build")
+            self._model = compile_fn(self._model, mode=mode, fullgraph=True)
+            logger.info("Applied torch.compile(mode=%s, fullgraph=True) to torch serving model", mode)
+        elif self._backend == "codegen2-tinygrad":
+            self._model.enable_jit(True, reset=True)
+            logger.info("Enabled TinyJit for tinygrad serving model (mode=%s)", mode)
+        else:
+            logger.warning("Backend %s does not support compile mode '%s'", self._backend, mode)
+        self._compiled = True
 
     @staticmethod
     def _to_torch(value: Any) -> Any:
@@ -136,10 +194,15 @@ class AxonServingModel(ServingModel):
         optimize_graph: bool = False,
         graph_backend_intrinsics: str | None = None,
         paged_attention: bool = False,
+        compile_mode: str | None = None,
         class_name: str = "AxonServingModel",
     ) -> AxonServingModel:
         resolved_dtype: torch.dtype = getattr(torch, dtype, torch.float32)
         target_device = torch.device(device)
+
+        if backend == "codegen2-tinygrad" and not optimize_graph:
+            optimize_graph = True
+            graph_backend_intrinsics = "codegen2-tinygrad"
 
         logger.info(
             "Compiling %s with backend=%s device=%s dtype=%s paged=%s",
@@ -164,6 +227,16 @@ class AxonServingModel(ServingModel):
             state_dict = _load_state_dict_torch(safetensors_paths, target_device, resolved_dtype)
             if backend == "codegen2-tinygrad":
                 model = ModelClass(state_dict).eval()
+                tiny_device = _resolve_tinygrad_serving_device(device)
+                if tiny_device and tiny_device != "CPU":
+                    for name, tensor in list(model.state_dict_tensors.items()):
+                        model.state_dict_tensors[name] = tensor.to(tiny_device).realize()
+                    model._tiny_device = tiny_device
+                    model._forward_jits = {}
+                    model._forward_jit_seen = set()
+                    if hasattr(model, 'after_to'):
+                        model.after_to()
+                    logger.info("Moved tinygrad model to %s", tiny_device)
             else:
                 model = ModelClass.from_state_dict(state_dict).eval()
 
@@ -173,7 +246,7 @@ class AxonServingModel(ServingModel):
             detected.num_layers, detected.num_heads, detected.vocab_size,
             detected.max_seq_len, backend,
         )
-        return cls(model, detected, backend, target_device, resolved_dtype, paged_attention=paged_attention)
+        return cls(model, detected, backend, target_device, resolved_dtype, paged_attention=paged_attention, compile_mode=compile_mode)
 
     def forward(
         self,
@@ -193,9 +266,10 @@ class AxonServingModel(ServingModel):
             else:
                 output = self._forward_mlx(input_ids, past_kv, **kwargs)
         elif self._backend == "codegen2-tinygrad":
-            if not self._paged_attention and past_kv is not None:
+            if not self._paged_attention:
                 kwargs["past_kv"] = past_kv
             output = self._model._forward_maybe_jit(input_ids, **kwargs)
+            _realize_all_tensors(output)
         else:
             if not self._paged_attention and past_kv is not None:
                 kwargs["past_kv"] = past_kv
@@ -225,30 +299,24 @@ class AxonServingModel(ServingModel):
         top_p: float,
         prefill: bool,
     ) -> int:
-        import numpy as np
+        import mlx.core as mx
 
         last = logits[0, -1, :] if prefill else logits[0, 0, :]
-        if isinstance(last, (list, tuple)):
-            last_np = np.asarray(last, dtype=np.float32)
-        else:
-            last_np = np.array(last, dtype=np.float32)
         if temperature > 0.0:
-            scaled = last_np / temperature
-            probs = np.exp(scaled - scaled.max())
-            probs = probs / probs.sum()
+            scaled = last / temperature
             if top_p < 1.0:
-                sorted_idx = np.argsort(-probs)
+                sorted_idx = mx.argsort(-scaled, axis=-1)
+                probs = mx.softmax(scaled, axis=-1)
                 sorted_probs = probs[sorted_idx]
-                cumsum = np.cumsum(sorted_probs)
-                cutoff = cumsum > top_p
-                cutoff = np.roll(cutoff, 1)
-                cutoff[0] = False
-                sorted_probs[cutoff] = 0.0
+                cumsum = mx.cumsum(sorted_probs, axis=-1)
+                cutoff = cumsum - sorted_probs > top_p
+                sorted_probs = mx.where(cutoff, mx.zeros_like(sorted_probs), sorted_probs)
                 probs[sorted_idx] = sorted_probs
                 probs = probs / probs.sum()
-            idx = int(np.random.choice(len(probs), p=probs))
-            return idx
-        return int(np.argmax(last_np).item())
+                idx = int(mx.random.categorical(mx.log(probs), num_samples=1).item())
+                return idx
+            return int(mx.random.categorical(scaled, num_samples=1).item())
+        return int(mx.argmax(last, axis=-1).item())
 
     def _sample_tinygrad(
         self,

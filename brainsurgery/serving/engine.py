@@ -8,8 +8,8 @@ from typing import Any
 import torch
 
 from .cache.base import KVCache
-from .cache.paged import TorchPagedKVCache
 from .cache.mlx_paged import MLXPagedKVCache
+from .cache.paged import TorchPagedKVCache
 from .cache.tinygrad_paged import TinygradPagedKVCache
 from .model.base import CacheState, ServingModel
 from .scheduler.base import BatchPlan, Phase, Scheduler
@@ -30,6 +30,7 @@ class Engine:
         cache_blocks: int = 1024,
         device: str = "cpu",
         dtype: str = "float32",
+        compile_mode: str | None = None,
     ):
         self._model = model
         self._device = torch.device(device)
@@ -37,6 +38,9 @@ class Engine:
         self._device_str = device
         self._dtype_str = dtype
         self._backend = getattr(model, '_backend', 'codegen2-torch')
+        self._tg_device = getattr(model, '_tiny_device', None)
+        if compile_mode:
+            self._model.compile(compile_mode)
         cfg = model.config
         self._scheduler = ContinuousBatchScheduler(
             max_batch_size=max_batch_size,
@@ -45,6 +49,11 @@ class Engine:
         )
         self._cache = self._create_cache(cfg, block_size, cache_blocks, dtype)
         self._tokenizer: Any = None
+        self._block_size = block_size
+        self._max_seq_len = max_seq_len
+
+        if compile_mode:
+            self.warmup()
 
         # Concurrent serving state
         self._token_queues: dict[int, asyncio.Queue] = {}
@@ -74,6 +83,7 @@ class Engine:
                 block_size=block_size,
                 max_blocks=cache_blocks,
                 dtype=dtype,
+                device=self._tg_device,
             )
         return TorchPagedKVCache(
             num_layers=cfg.num_layers,
@@ -85,13 +95,53 @@ class Engine:
             device=self._device,
         )
 
+    def warmup(self) -> None:
+        """Populate tinygrad Metal shader cache to accelerate all buckets.
+
+        Tinygrad's shader compiler produces faster kernels for larger shapes.
+        Warming up a single large bucket populates the global shader cache,
+        making all smaller buckets ~3x faster at runtime.  We use 2 calls
+        (not 3) so the TinyJit is created but NOT captured — serving captures
+        JITs naturally with real inputs, which produces faster graphs than
+        warmup-captured ones.
+        """
+        is_paged = getattr(self._model, '_paged_attention', False)
+        if not is_paged:
+            return
+        if self._backend != 'codegen2-tinygrad':
+            return
+        bs = self._block_size
+        warmup_bucket = 256
+        from tinygrad import Tensor
+        from tinygrad import dtypes as tg_dtypes
+        devkw = {"device": self._tg_device} if self._tg_device else {}
+        logger.info("Warming up shader cache (bucket=%d)", warmup_bucket)
+        n_blocks = warmup_bucket // bs
+        block_table = Tensor(list(range(n_blocks)), dtype=tg_dtypes.int64, **devkw)
+        dummy_ids = self._make_input_tensor([0])
+        forward_kwargs = dict(
+            k_blocks=self._cache.k_blocks,
+            v_blocks=self._cache.v_blocks,
+            block_table=block_table,
+            position=warmup_bucket,
+            block_size=bs,
+        )
+        try:
+            self._model.forward(dummy_ids, **forward_kwargs)
+            self._model.forward(dummy_ids, **forward_kwargs)
+        except Exception:
+            logger.debug("Warmup failed (non-fatal)", exc_info=True)
+        logger.info("Warmup complete")
+
     def _make_input_tensor(self, tokens: list[int]) -> Any:
         if self._backend == 'codegen2-mlx':
             import mlx.core as mx
             return mx.array([tokens], dtype=mx.int32)
         if self._backend == 'codegen2-tinygrad':
-            from tinygrad import Tensor, dtypes as tg_dtypes
-            return Tensor([tokens]).cast(tg_dtypes.int64)
+            from tinygrad import Tensor
+            from tinygrad import dtypes as tg_dtypes
+            devkw = {"device": self._tg_device} if self._tg_device else {}
+            return Tensor([tokens], **devkw).cast(tg_dtypes.int64)
         return torch.tensor([tokens], dtype=torch.long, device=self._device)
 
     def set_tokenizer(self, tokenizer: Any) -> None:
@@ -116,6 +166,9 @@ class Engine:
             import mlx.core as mx
             mx.set_default_device(mx.gpu)
             mx.default_stream(mx.gpu)
+        if self._backend == "codegen2-tinygrad" and self._tg_device:
+            from tinygrad import Device
+            Device.DEFAULT = self._tg_device
         while not self._stop_event.is_set():
             with self._loop_lock:
                 plan = self._scheduler.schedule()
@@ -264,6 +317,11 @@ class Engine:
                 if self._backend == 'codegen2-mlx':
                     import mlx.core as mx
                     block_table = mx.array(block_table_list, dtype=mx.int32)
+                elif self._backend == 'codegen2-tinygrad':
+                    from tinygrad import Tensor
+                    from tinygrad import dtypes as tg_dtypes
+                    devkw = {"device": self._tg_device} if self._tg_device else {}
+                    block_table = Tensor(block_table_list, dtype=tg_dtypes.int64, **devkw)
                 else:
                     block_table = block_table_list
 

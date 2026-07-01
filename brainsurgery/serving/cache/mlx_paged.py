@@ -71,7 +71,6 @@ class MLXPagedKVCache(KVCache):
         k: Any,
         v: Any,
     ) -> None:
-        import mlx.core as mx
         entry = self._entries.get(seq_id)
         if entry is None:
             raise KeyError(f"Unknown seq_id: {seq_id}")
@@ -85,13 +84,16 @@ class MLXPagedKVCache(KVCache):
             if blk is None:
                 raise RuntimeError("Cache full")
             entry.block_table.append(blk)
-        positions = mx.arange(pos_start, pos_start + num_new)
-        block_indices = positions // self._block_size
-        offsets = positions % self._block_size
-        blk_table = mx.array(entry.block_table, dtype=mx.int32)
-        blk_ids = blk_table[block_indices]
-        self._k_pool[blk_ids, layer_idx, :n_heads, offsets, :] = mx.transpose(k, (1, 0, 2))
-        self._v_pool[blk_ids, layer_idx, :n_heads, offsets, :] = mx.transpose(v, (1, 0, 2))
+        # Write each position individually; MLX's mixed fancy indexing
+        # (array indices + slices together) does not reliably support
+        # batched assignment for multi-token prefill.
+        for i in range(num_new):
+            pos = pos_start + i
+            blk = pos // self._block_size
+            off = pos % self._block_size
+            blk_id = entry.block_table[blk]
+            self._k_pool[blk_id, layer_idx, :n_heads, off, :] = k[:, i, :]
+            self._v_pool[blk_id, layer_idx, :n_heads, off, :] = v[:, i, :]
 
     def advance_tokens(self, seq_id: int, num_new: int) -> None:
         entry = self._entries.get(seq_id)
@@ -99,7 +101,6 @@ class MLXPagedKVCache(KVCache):
             entry.num_tokens += num_new
 
     def append(self, seq_id: int, k: Any, v: Any) -> None:
-        import mlx.core as mx
         entry = self._entries.get(seq_id)
         if entry is None:
             raise KeyError(f"Unknown seq_id: {seq_id}")
@@ -115,13 +116,15 @@ class MLXPagedKVCache(KVCache):
             if blk is None:
                 raise RuntimeError("Cache full")
             entry.block_table.append(blk)
-        positions = mx.arange(pos_start, pos_start + num_new)
-        block_indices = positions // self._block_size
-        offsets = positions % self._block_size
-        blk_table = mx.array(entry.block_table, dtype=mx.int32)
-        blk_ids = blk_table[block_indices]
-        self._k_pool[blk_ids, :, :n_heads, offsets, :] = mx.transpose(k[:, 0, :, :, :], (3, 0, 1, 2))
-        self._v_pool[blk_ids, :, :n_heads, offsets, :] = mx.transpose(v[:, 0, :, :, :], (3, 0, 1, 2))
+        # Write each new token position across all layers/heads.
+        # Per-position loop avoids MLX advanced-indexing limitations.
+        for i in range(num_new):
+            pos = pos_start + i
+            blk = pos // self._block_size
+            off = pos % self._block_size
+            blk_id = entry.block_table[blk]
+            self._k_pool[blk_id, :, :n_heads, off, :] = k[:, 0, :, i, :]
+            self._v_pool[blk_id, :, :n_heads, off, :] = v[:, 0, :, i, :]
         entry.num_tokens += num_new
 
     def gather(self, seq_id: int) -> KVCacheState | None:

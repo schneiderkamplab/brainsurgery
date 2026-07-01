@@ -36,6 +36,10 @@ class ServingModel(ABC):
     ) -> tuple[Any, CacheState]:
         ...
 
+    def compile(self, mode: str) -> None:
+        """Apply backend graph capture / kernel fusion for serving."""
+        raise NotImplementedError(f"compile not supported by {type(self).__name__}")
+
     def sample(
         self,
         logits: Any,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import numpy as np
+from tinygrad import Tensor, dtypes
 
 from .base import KVCache, KVCacheState
 
@@ -17,7 +17,25 @@ class _PagedEntry:
         self.num_tokens: int = 0
 
 
+_DTYPE_MAP: dict[str, dtypes.DType] = {
+    "float32": dtypes.float32,
+    "float16": dtypes.float16,
+    "bfloat16": dtypes.bfloat16,
+}
+
+
+def _d(device: str | None) -> dict[str, str]:
+    return {"device": device} if device else {}
+
+
 class TinygradPagedKVCache(KVCache):
+    """Paged KV cache using a single pre-allocated pool tensor.
+
+    Allocates one big tensor for all K (and one for V) and uses
+    ``__setitem__`` to write individual blocks — avoids the O(num_blocks)
+    stack overhead of the per-block-list approach.
+    """
+
     def __init__(
         self,
         num_layers: int,
@@ -27,22 +45,24 @@ class TinygradPagedKVCache(KVCache):
         block_size: int = 16,
         max_blocks: int = 1024,
         dtype: str = "float32",
+        device: str | None = None,
     ):
-        np_dtype = getattr(np, dtype, np.float32)
-
         self._num_layers = num_layers
         self._num_heads = num_heads
         self._head_dim = head_dim
         self._block_size = block_size
+        self._device = device
+        tdtype = _DTYPE_MAP.get(dtype, dtypes.float32)
 
         self._entries: dict[int, _PagedEntry] = {}
         self._free_blocks: list[int] = list(range(max_blocks))
 
-        shape = (max_blocks, num_layers, num_heads, block_size, head_dim)
-        self._k_pool = np.zeros(shape, dtype=np_dtype)
-        self._v_pool = np.zeros(shape, dtype=np_dtype)
+        pool_shape = (num_layers, max_blocks, num_heads, block_size, head_dim)
+        devkw = _d(device)
+        self._k_pool = Tensor.zeros(*pool_shape, dtype=tdtype, **devkw).contiguous().realize()
+        self._v_pool = Tensor.zeros(*pool_shape, dtype=tdtype, **devkw).contiguous().realize()
 
-        mb = shape[0] * shape[1] * shape[2] * shape[3] * shape[4] * 2 * 4 / (1024 * 1024)
+        mb = max_blocks * num_layers * num_heads * block_size * head_dim * 2 * 4 / (1024 * 1024)
         logger.info(
             "TinygradPagedKVCache: %d blocks x %d tokens = %d max tokens, %.1f MB",
             max_blocks, block_size, max_blocks * block_size, mb,
@@ -60,8 +80,12 @@ class TinygradPagedKVCache(KVCache):
             logger.warning("Out of cache blocks!")
             return None
         block_id = self._free_blocks.pop()
-        self._k_pool[block_id] = np.zeros_like(self._k_pool[block_id])
-        self._v_pool[block_id] = np.zeros_like(self._v_pool[block_id])
+        self._k_pool[:, block_id].assign(Tensor.zeros(*self._k_pool[:, block_id].shape, dtype=self._k_pool.dtype, **(
+            _d(self._device) if self._device else {}
+        )).realize())
+        self._v_pool[:, block_id].assign(Tensor.zeros(*self._v_pool[:, block_id].shape, dtype=self._v_pool.dtype, **(
+            _d(self._device) if self._device else {}
+        )).realize())
         return block_id
 
     def append_layer_tokens(
@@ -71,11 +95,6 @@ class TinygradPagedKVCache(KVCache):
         k: Any,
         v: Any,
     ) -> None:
-        from tinygrad import Tensor
-        if isinstance(k, Tensor):
-            k = k.numpy()
-        if isinstance(v, Tensor):
-            v = v.numpy()
         entry = self._entries.get(seq_id)
         if entry is None:
             raise KeyError(f"Unknown seq_id: {seq_id}")
@@ -89,13 +108,16 @@ class TinygradPagedKVCache(KVCache):
             if blk is None:
                 raise RuntimeError("Cache full")
             entry.block_table.append(blk)
-        positions = np.arange(pos_start, pos_start + num_new)
-        block_indices = positions // self._block_size
-        offsets = positions % self._block_size
-        blk_table = np.array(entry.block_table, dtype=np.int64)
-        blk_ids = blk_table[block_indices]
-        self._k_pool[blk_ids, layer_idx, :n_heads, offsets, :] = k.transpose(1, 0, 2)
-        self._v_pool[blk_ids, layer_idx, :n_heads, offsets, :] = v.transpose(1, 0, 2)
+        blk_first = pos_start // self._block_size
+        blk_last = (pos_start + num_new - 1) // self._block_size
+        for blk_idx in range(blk_first, blk_last + 1):
+            blk_id = entry.block_table[blk_idx]
+            blk_off_start = max(0, pos_start - blk_idx * self._block_size)
+            blk_off_end = min(self._block_size, pos_start + num_new - blk_idx * self._block_size)
+            k_start = max(0, blk_idx * self._block_size - pos_start)
+            k_end = k_start + (blk_off_end - blk_off_start)
+            self._k_pool[layer_idx, blk_id, :n_heads, blk_off_start:blk_off_end, :].assign(k[:, k_start:k_end, :])
+            self._v_pool[layer_idx, blk_id, :n_heads, blk_off_start:blk_off_end, :].assign(v[:, k_start:k_end, :])
 
     def advance_tokens(self, seq_id: int, num_new: int) -> None:
         entry = self._entries.get(seq_id)
@@ -103,11 +125,6 @@ class TinygradPagedKVCache(KVCache):
             entry.num_tokens += num_new
 
     def append(self, seq_id: int, k: Any, v: Any) -> None:
-        from tinygrad import Tensor
-        if isinstance(k, Tensor):
-            k = k.numpy()
-        if isinstance(v, Tensor):
-            v = v.numpy()
         entry = self._entries.get(seq_id)
         if entry is None:
             raise KeyError(f"Unknown seq_id: {seq_id}")
@@ -123,31 +140,35 @@ class TinygradPagedKVCache(KVCache):
             if blk is None:
                 raise RuntimeError("Cache full")
             entry.block_table.append(blk)
-        positions = np.arange(pos_start, pos_start + num_new)
-        block_indices = positions // self._block_size
-        offsets = positions % self._block_size
-        blk_table = np.array(entry.block_table, dtype=np.int64)
-        blk_ids = blk_table[block_indices]
-        self._k_pool[blk_ids, :, :n_heads, offsets, :] = k[:, 0, :, :, :].transpose(3, 0, 1, 2)
-        self._v_pool[blk_ids, :, :n_heads, offsets, :] = v[:, 0, :, :, :].transpose(3, 0, 1, 2)
+        blk_first = pos_start // self._block_size
+        blk_last = (pos_start + num_new - 1) // self._block_size
+        for blk_idx in range(blk_first, blk_last + 1):
+            blk_id = entry.block_table[blk_idx]
+            blk_off_start = max(0, pos_start - blk_idx * self._block_size)
+            blk_off_end = min(self._block_size, pos_start + num_new - blk_idx * self._block_size)
+            k_start = max(0, blk_idx * self._block_size - pos_start)
+            k_end = k_start + (blk_off_end - blk_off_start)
+            self._k_pool[:, blk_id, :n_heads, blk_off_start:blk_off_end, :].assign(k[:, 0, :, k_start:k_end, :])
+            self._v_pool[:, blk_id, :n_heads, blk_off_start:blk_off_end, :].assign(v[:, 0, :, k_start:k_end, :])
         entry.num_tokens += num_new
 
     def gather(self, seq_id: int) -> KVCacheState | None:
-        from tinygrad import Tensor
         entry = self._entries.get(seq_id)
         if entry is None or entry.num_tokens == 0:
             return None
         num_tokens = entry.num_tokens
-        L, H, D = self._num_layers, self._num_heads, self._head_dim
-        positions = np.arange(num_tokens)
+        L, H = self._num_layers, self._num_heads
+        table = entry.block_table
+        devkw = _d(self._device)
+        blocks_k = self._k_pool[:, table]  # (L, nb, H, B, D) — no stack needed!
+        blocks_v = self._v_pool[:, table]
+        positions = Tensor.arange(num_tokens, **devkw)
         block_indices = positions // self._block_size
         offsets = positions % self._block_size
-        blk_table = np.array(entry.block_table, dtype=np.int64)
-        blk_ids = blk_table[block_indices]
-        k_full = self._k_pool[blk_ids, :, :H, offsets, :].transpose(1, 2, 0, 3)
-        v_full = self._v_pool[blk_ids, :, :H, offsets, :].transpose(1, 2, 0, 3)
+        k_full = blocks_k[:, block_indices, :, offsets, :].permute(1, 2, 0, 3).realize()
+        v_full = blocks_v[:, block_indices, :, offsets, :].permute(1, 2, 0, 3).realize()
         return tuple(
-            (Tensor(k_full[layer:layer+1].copy()), Tensor(v_full[layer:layer+1].copy()))
+            (k_full[layer:layer+1], v_full[layer:layer+1])
             for layer in range(L)
         )
 
@@ -163,13 +184,11 @@ class TinygradPagedKVCache(KVCache):
 
     @property
     def k_blocks(self) -> Any:
-        from tinygrad import Tensor
-        return Tensor(self._k_pool.transpose(1, 0, 2, 3, 4).copy())
+        return self._k_pool
 
     @property
     def v_blocks(self) -> Any:
-        from tinygrad import Tensor
-        return Tensor(self._v_pool.transpose(1, 0, 2, 3, 4).copy())
+        return self._v_pool
 
     @property
     def block_size(self) -> int:

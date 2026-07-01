@@ -103,6 +103,11 @@ def serve_command(
         "--paged-attention/--no-paged-attention",
         help="Enable paged attention for memory-efficient KV cache.",
     ),
+    compile_mode: str | None = typer.Option(
+        None,
+        "--compile",
+        help="Apply torch.compile/mx.compile/TinyJit to serving model.",
+    ),
     prompt: str = typer.Option(
         "Hello, world!",
         "--prompt",
@@ -128,6 +133,7 @@ def serve_command(
         optimize_graph=optimize_graph,
         graph_backend_intrinsics=backend_intrinsics,
         paged_attention=paged_attention,
+        compile_mode=compile_mode,
     )
     logger.info("Model loaded successfully.")
 
@@ -141,6 +147,7 @@ def serve_command(
         cache_blocks=cache_blocks,
         device=device,
         dtype=dtype,
+        compile_mode=compile_mode,
     )
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(str(weights))
@@ -214,6 +221,11 @@ def http_command(
         "--paged-attention/--no-paged-attention",
         help="Enable paged attention for memory-efficient KV cache.",
     ),
+    compile_mode: str | None = typer.Option(
+        None,
+        "--compile",
+        help="Apply torch.compile/mx.compile/TinyJit to serving model.",
+    ),
 ) -> None:
     import uvicorn
 
@@ -231,11 +243,13 @@ def http_command(
         optimize_graph=optimize_graph,
         graph_backend_intrinsics=backend_intrinsics,
         paged_attention=paged_attention,
+        compile_mode=compile_mode,
     )
     logger.info("Model loaded successfully.")
 
-    from .engine import Engine
     from transformers import AutoTokenizer
+
+    from .engine import Engine
 
     engine = Engine(
         model,
@@ -245,6 +259,7 @@ def http_command(
         cache_blocks=cache_blocks,
         device=device,
         dtype=dtype,
+        compile_mode=compile_mode,
     )
     tokenizer = AutoTokenizer.from_pretrained(str(weights))
     engine.set_tokenizer(tokenizer)
