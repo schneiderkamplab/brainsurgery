@@ -901,7 +901,9 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             return f"({args[0]})[(slice(None),)*({dim}) + (slice({args[2]}, {args[3]}),) + (slice(None),)*({ndim}-({dim})-1)]"
         if primitive == "_mlx_rope":
             return f"mx.fast.rope({args[0]}, dims={args[0]}.shape[-1], traditional=bool({args[1]}))"
-        if primitive.startswith("config_") or primitive in {"params_param", "params_has_root"}:
+        if primitive == "params_has_root":
+            return f"any(k == {args[0]} or k.startswith(str({args[0]}) + '.') for k in self._flat_tensors)"
+        if primitive.startswith("config_") or primitive in {"params_param"}:
             return super()._primitive_expr(primitive, node, local=local, symbols_dict=symbols_dict)
         simple = {
             "reshape": lambda: f"{args[0]}.reshape(tuple(int(x) for x in {args[1]}))",
