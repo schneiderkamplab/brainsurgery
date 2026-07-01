@@ -12,6 +12,7 @@ class ModelConfig:
     max_seq_len: int = 2048
     num_layers: int = 12
     num_heads: int = 12
+    num_kv_heads: int = 0
     head_dim: int = 64
     vocab_size: int = 50257
     dtype: str = "float32"

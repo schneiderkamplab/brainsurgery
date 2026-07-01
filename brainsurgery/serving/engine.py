@@ -66,10 +66,11 @@ class Engine:
         self._loop_thread: threading.Thread | None = None
 
     def _create_cache(self, cfg: Any, block_size: int, cache_blocks: int, dtype: str) -> KVCache:
+        kv_heads = getattr(cfg, 'num_kv_heads', cfg.num_heads) or cfg.num_heads
         if self._backend == 'codegen2-mlx':
             return MLXPagedKVCache(
                 num_layers=cfg.num_layers,
-                num_heads=cfg.num_heads,
+                num_heads=kv_heads,
                 head_dim=cfg.head_dim,
                 block_size=block_size,
                 max_blocks=cache_blocks,
@@ -78,7 +79,7 @@ class Engine:
         if self._backend == 'codegen2-tinygrad':
             return TinygradPagedKVCache(
                 num_layers=cfg.num_layers,
-                num_heads=cfg.num_heads,
+                num_heads=kv_heads,
                 head_dim=cfg.head_dim,
                 block_size=block_size,
                 max_blocks=cache_blocks,
@@ -87,7 +88,7 @@ class Engine:
             )
         return TorchPagedKVCache(
             num_layers=cfg.num_layers,
-            num_heads=cfg.num_heads,
+            num_heads=kv_heads,
             head_dim=cfg.head_dim,
             block_size=block_size,
             max_blocks=cache_blocks,

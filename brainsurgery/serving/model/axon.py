@@ -96,6 +96,7 @@ def _detect_model_config(model_config_dict: dict[str, Any]) -> ModelConfig:
         or hf.get("num_layers", 12)
     )
     num_heads = hf.get("num_attention_heads") or hf.get("n_head", 12)
+    num_kv_heads = hf.get("num_key_value_heads") or hf.get("num_kv_heads", 0)
     head_dim = hf.get("head_dim") or (hf.get("hidden_size", 768) // num_heads)
     vocab_size = hf.get("vocab_size", 50257)
     hidden_size = hf.get("hidden_size") or hf.get("n_embd", 768)
@@ -104,6 +105,7 @@ def _detect_model_config(model_config_dict: dict[str, Any]) -> ModelConfig:
         max_seq_len=max_seq_len,
         num_layers=num_layers,
         num_heads=num_heads,
+        num_kv_heads=num_kv_heads or num_heads,
         head_dim=head_dim,
         vocab_size=vocab_size,
         hidden_dim=hidden_size,
@@ -219,9 +221,10 @@ class AxonServingModel(ServingModel):
             import mlx.core as mx
             state_dict: dict[str, Any] = {}
             for path in safetensors_paths:
-                with safetensors.safe_open(str(path), framework="np") as f:
+                with safetensors.safe_open(str(path), framework="pt") as f:
                     for key in f.keys():
-                        state_dict[str(key)] = mx.array(f.get_tensor(key))
+                        t = f.get_tensor(key)
+                        state_dict[str(key)] = mx.array(t.float().numpy())
             model = ModelClass(state_dict).eval()
         else:
             state_dict = _load_state_dict_torch(safetensors_paths, target_device, resolved_dtype)
