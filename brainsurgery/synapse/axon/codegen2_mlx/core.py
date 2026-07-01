@@ -213,6 +213,8 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 4, "def __init__(self, state_dict: dict[str, mx.array], config: dict | None = None):")
         add(lines, 8, "super().__init__()")
         add(lines, 8, "object.__setattr__(self, '_flat_tensors', {})")
+        add(lines, 8, "object.__setattr__(self, '_path_cache', {})")
+        add(lines, 8, "object.__setattr__(self, '_compiled_fn', None)")
         add(lines, 8, "object.__setattr__(self, 'config', dict(({} if _MODEL_CONFIG is None else _MODEL_CONFIG) if config is None else config))")
         add(lines, 8, "object.__setattr__(self, '_jit_enabled', False)")
         add(lines, 8, "object.__setattr__(self, '_quantized', False)")
@@ -287,21 +289,30 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
         add(lines, 4, "")
-        add(lines, 4, "@staticmethod")
-        add(lines, 4, "def _path_template_part(value):")
+        add(lines, 4, "def _path_template_part(self, value):")
+        add(lines, 8, "cached = self._path_cache.get(value)")
+        add(lines, 8, "if cached is not None:")
+        add(lines, 12, "return cached")
         add(lines, 8, "if isinstance(value, str) and value.startswith('@@'):")
-        add(lines, 12, "return value[2:].strip('.')")
-        add(lines, 8, "if isinstance(value, str) and value.startswith('@'):")
-        add(lines, 12, "return value[1:].strip('.')")
-        add(lines, 8, "return value")
+        add(lines, 12, "result = value[2:].strip('.')")
+        add(lines, 8, "elif isinstance(value, str) and value.startswith('@'):")
+        add(lines, 12, "result = value[1:].strip('.')")
+        add(lines, 8, "else:")
+        add(lines, 12, "result = value")
+        add(lines, 8, "self._path_cache[value] = result")
+        add(lines, 8, "return result")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
         add(lines, 8, "key = str(path).lstrip('@')")
+        add(lines, 8, "if key in self._flat_tensors:")
+        add(lines, 12, "return self._flat_tensors[key]")
         add(lines, 8, "self._materialize_expert_bank_for_path(key)")
         add(lines, 8, "return _common_required_state_value(self._flat_tensors, path)")
         add(lines, 4, "")
         add(lines, 4, "def _optional_param(self, path):")
         add(lines, 8, "key = str(path).lstrip('@')")
+        add(lines, 8, "if key in self._flat_tensors:")
+        add(lines, 12, "return self._flat_tensors[key]")
         add(lines, 8, "self._materialize_expert_bank_for_path(key)")
         add(lines, 8, "return _common_optional_state_value(self._flat_tensors, path)")
         add(lines, 4, "")
@@ -611,6 +622,12 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                 add(lines, 12, "raise ValueError('Missing required input: input_ids')")
                 add(lines, 8, "input_ids = self._to_mlx(input_ids, mx.int64)")
                 args.append("input_ids")
+            elif value.name == "use_cache":
+                add(lines, 8, "use_cache = inputs.get('use_cache', None)")
+                args.append("use_cache")
+            elif value.name == "past_kv":
+                add(lines, 8, "past_kv = inputs.get('past_kv', None)")
+                args.append("past_kv")
             elif value.name == first_input:
                 add(lines, 8, f"{value.name} = inputs.get({value.name!r}, input_ids)")
                 if not (value.optional or isinstance(value.type_expr, TypeOptional)):
@@ -637,8 +654,34 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 4, "def forward(self, input_ids=None, **inputs):")
         add(lines, 8, "input_ids = self._to_mlx(input_ids, mx.int64) if input_ids is not None else None")
         add(lines, 8, "for _k, _v in list(inputs.items()):")
+        add(lines, 12, "if _k in ('use_cache', 'past_kv'):")
+        add(lines, 16, "continue")
         add(lines, 12, "inputs[_k] = self._to_mlx(_v)")
+        add(lines, 8, "if self._compiled_fn is not None:")
+        add(lines, 12, "result = self._compiled_fn(input_ids, **inputs)")
+        add(lines, 12, "if isinstance(result, (list, tuple)):")
+        add(lines, 16, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
+        add(lines, 12, "return result")
         add(lines, 8, "return self._forward(input_ids, **inputs)")
+        add(lines, 4, "")
+        add(lines, 4, "def compile(self, max_kv_length=2048):")
+        add(lines, 8, "\"\"\"Compile _forward with mx.compile and warmup KV shapes 0..max_kv_length.\"\"\"")
+        add(lines, 8, "if self._compiled_fn is not None:")
+        add(lines, 12, "return self._compiled_fn")
+        add(lines, 8, "self._compiled_fn = mx.compile(self._forward)")
+        add(lines, 8, "prompt_ids = mx.zeros((1, 1), dtype=mx.int64)")
+        add(lines, 8, "kv = None")
+        add(lines, 8, "for length in range(1, max_kv_length + 1):")
+        add(lines, 12, "inp = mx.array([[0]], dtype=mx.int64)")
+        add(lines, 12, "result = self._compiled_fn(inp, past_kv=kv, use_cache=True)")
+        add(lines, 12, "if isinstance(result, (list, tuple)):")
+        add(lines, 16, "kv = result[1] if len(result) > 1 else None")
+        add(lines, 12, "else:")
+        add(lines, 16, "kv = result.get('new_kv') if isinstance(result, dict) else None")
+        add(lines, 12, "if kv is None:")
+        add(lines, 16, "break")
+        add(lines, 8, "mx.eval(mx.array(0))")
+        add(lines, 8, "return self._compiled_fn")
 
     def _emit_generate(self, lines: list[str]) -> None:
         add = self._add
@@ -853,7 +896,9 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             return f"({args[0]})[(slice(None),)*({dim}) + (slice({args[2]}, {args[3]}),) + (slice(None),)*({ndim}-({dim})-1)]"
         if primitive == "_mlx_rope":
             return f"mx.fast.rope({args[0]}, dims={args[0]}.shape[-1], traditional=bool({args[1]}))"
-        if primitive.startswith("config_") or primitive in {"params_param", "params_has_root"}:
+        if primitive == "params_has_root":
+            return f"any(k == {args[0]} or k.startswith(str({args[0]}) + '.') for k in self._flat_tensors)"
+        if primitive.startswith("config_") or primitive in {"params_param"}:
             return super()._primitive_expr(primitive, node, local=local, symbols_dict=symbols_dict)
         simple = {
             "reshape": lambda: f"{args[0]}.reshape(tuple(int(x) for x in {args[1]}))",
@@ -909,9 +954,9 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             "activations_gegelu": lambda: f"self._gegelu({args[0]}, {args[1] if len(args) > 1 else 'None'})",
             "activations_xielu": lambda: f"self._xielu({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "list_init": lambda: "[]",
-            "list_append": lambda: f"([*({args[0]} or []), {args[1]}])",
+            "list_append": lambda: f"([*({args[0]} if {args[0]} is not None else []), {args[1]}])",
             "list_index": lambda: f"{args[0]}[int({args[1]})]",
-            "list_length": lambda: f"len({args[0]} or [])",
+            "list_length": lambda: f"(0 if {args[0]} is None else len({args[0]}))",
             "shape": lambda: f"list(self._value({args[0]}).shape)",
             "tensor_size": lambda: f"self._value({args[0]}).shape[int({args[1]})]",
         }
