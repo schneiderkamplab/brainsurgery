@@ -20,22 +20,49 @@ logging.getLogger("brainsurgery").setLevel(logging.ERROR)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-if "--gemma3" in sys.argv:
+if "--gemma4-e2b" in sys.argv:
+    AXON_FILE = REPO_ROOT / "brainsurgery" / "synapse" / "models" / "gemma4" / "gemma-4-E2B.axon"
+    WEIGHTS_DIR = REPO_ROOT / "models" / "gemma-4-E2B"
+    MODEL_NAME = "Gemma-4-E2B"
+    KEY_FILTER = "model.language_model."
+    LOAD_DTYPE = "bfloat16"
+    PROMPT_LENS = [16, 64, 256, 512, 1024]
+    GEN_STEPS = 32
+    TRIALS = 2
+    MAX_KV_WARMUP = 1100
+    BACKENDS = ["torch (MPS)", "mlx (GPU)", "mlx+compile"]
+    EQ_PROMPT_LEN = 16
+    EQ_GEN_STEPS = 16
+elif "--gemma3" in sys.argv:
     AXON_FILE = REPO_ROOT / "brainsurgery" / "synapse" / "models" / "gemma3" / "gemma-3-270m.axon"
     WEIGHTS_DIR = REPO_ROOT / "models" / "gemma-3-270m"
     MODEL_NAME = "Gemma-3-270M"
+    KEY_FILTER = None
+    LOAD_DTYPE = "float32"
+    PROMPT_LENS = [16, 64, 256, 512, 1024]
+    GEN_STEPS = 64
+    TRIALS = 3
+    MAX_KV_WARMUP = 1100
+    BACKENDS = None
+    EQ_PROMPT_LEN = 16
+    EQ_GEN_STEPS = 16
 else:
     AXON_FILE = REPO_ROOT / "brainsurgery" / "synapse" / "models" / "gpt2" / "gpt2.axon"
     WEIGHTS_DIR = REPO_ROOT / "models" / "gpt2"
     if not (WEIGHTS_DIR / "model.safetensors").exists():
         WEIGHTS_DIR = REPO_ROOT / "models" / "openai-community" / "gpt2"
     MODEL_NAME = "GPT-2"
+    KEY_FILTER = None
+    LOAD_DTYPE = "float32"
+    PROMPT_LENS = [16, 64, 256, 512, 1024]
+    GEN_STEPS = 64
+    TRIALS = 3
+    MAX_KV_WARMUP = 1100
+    BACKENDS = None
+    EQ_PROMPT_LEN = 16
+    EQ_GEN_STEPS = 16
 
-PROMPT_LENS = [16, 64, 256, 512, 1024]
-GEN_STEPS = 64
-TRIALS = 3
 CLASS_NAME = "GeneratedModel"
-MAX_KV_WARMUP = 1100
 
 
 def _load_generated_class(py_path: Path, class_name: str):
@@ -131,27 +158,43 @@ def compile_and_load(backend: str, tmp_dir: Path):
     # Load weights
     import safetensors
     safetensors_paths = _resolve_safetensors_paths(WEIGHTS_DIR)
+    keep_fp32 = "embed_tokens" if LOAD_DTYPE == "bfloat16" else None
     if backend in ("codegen2-mlx", "codegen2-mlx-compiled"):
         import mlx.core as mx
+        import torch
         import safetensors
         state_dict = {}
         for p in safetensors_paths:
             with safetensors.safe_open(str(p), framework="pt") as f:
                 for key in f.keys():
+                    if KEY_FILTER and not str(key).startswith(KEY_FILTER):
+                        continue
                     t = f.get_tensor(key)
-                    state_dict[str(key)] = mx.array(t.float().numpy())
-        model = model_cls.from_state_dict(state_dict).eval()
+                    if LOAD_DTYPE == "bfloat16" and t.dtype == torch.bfloat16:
+                        if keep_fp32 and keep_fp32 in str(key):
+                            state_dict[str(key)] = mx.array(t.float().numpy()).astype(mx.float32)
+                        else:
+                            state_dict[str(key)] = mx.array(t.float().numpy()).astype(mx.bfloat16)
+                    else:
+                        state_dict[str(key)] = mx.array(t.float().numpy())
+        model = model_cls.from_state_dict(state_dict, model_config=model_config).eval()
         return model, "mlx"
     else:
         import torch
         device = "mps" if torch.backends.mps.is_available() else "cpu"
         target_device = torch.device(device)
+        target_dtype = torch.bfloat16 if LOAD_DTYPE == "bfloat16" else torch.float32
         state_dict = {}
         for p in safetensors_paths:
             with safetensors.safe_open(str(p), framework="pt") as f:
                 for key in f.keys():
+                    if KEY_FILTER and not str(key).startswith(KEY_FILTER):
+                        continue
                     t = f.get_tensor(key)
-                    state_dict[str(key)] = t.to(device=target_device, dtype=torch.float32)
+                    if keep_fp32 and keep_fp32 in str(key):
+                        state_dict[str(key)] = t.to(device=target_device, dtype=torch.float32)
+                    else:
+                        state_dict[str(key)] = t.to(device=target_device, dtype=target_dtype)
         if backend == "codegen2-triton":
             model = model_cls.from_state_dict(state_dict, param_devices=[device]).eval()
         else:
@@ -193,6 +236,47 @@ def _unpack(result, kind: str):
     if isinstance(result, dict):
         return result.get('logits'), result.get('new_kv')
     return result[0], result[1] if isinstance(result, (tuple, list)) and len(result) > 1 else (result[0], None)
+
+
+def _logits_to_numpy(logits, kind: str):
+    import numpy as np
+    if kind == "mlx":
+        import mlx.core as mx
+        return np.asarray(logits[:, -1, :].astype(mx.float32))
+    else:
+        import torch
+        return logits[:, -1, :].float().cpu().numpy()
+
+
+def run_equivalence(backend: str, tmp_dir: Path):
+    """Run a fixed prompt + decode steps, return (last_logits_np, token_ids)."""
+    model, kind = compile_and_load(backend, tmp_dir)
+    if backend == "codegen2-mlx-compiled":
+        import mlx.core as mx
+        model.compile(max_kv_length=MAX_KV_WARMUP)
+        mx.eval(mx.array(0))
+    prompt_ids = list(range(EQ_PROMPT_LEN))
+    inp = to_int_array(prompt_ids, kind)
+    logits, kv = _unpack(model.forward(inp, use_cache=True), kind)
+    sync(kind)
+    last_logits = _logits_to_numpy(logits, kind)
+    token_ids = [argmax_last(logits, kind)]
+    for _ in range(EQ_GEN_STEPS - 1):
+        inp = to_int_array([token_ids[-1]], kind)
+        logits, kv = _unpack(model.forward(inp, past_kv=kv, use_cache=True), kind)
+        sync(kind)
+        token_ids.append(argmax_last(logits, kind))
+    del model
+    import gc
+    gc.collect()
+    if kind == "mlx":
+        import mlx.core as mx
+        mx.clear_cache()
+    else:
+        import torch
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    return last_logits, token_ids
 
 
 def run_backend(label: str, backend: str, tmp_dir: Path):
@@ -269,19 +353,65 @@ def run_backend(label: str, backend: str, tmp_dir: Path):
 
 
 def main():
-    configs = [
+    import numpy as np
+
+    all_configs = [
         ("torch (MPS)", "codegen2-torch"),
         ("triton (MPS)", "codegen2-triton"),
         ("mlx (GPU)", "codegen2-mlx"),
         ("mlx+compile", "codegen2-mlx-compiled"),
     ]
+    if BACKENDS is not None:
+        configs = [(label, b) for label, b in all_configs if label in BACKENDS]
+    else:
+        configs = all_configs
 
-    results: dict[str, dict[int, float]] = {}
+    eq_results: dict[str, tuple] = {}
+    perf_results: dict[str, dict[int, float]] = {}
 
     with TemporaryDirectory(prefix="axon_bench_") as tmp_dir:
+        # --- Equivalence checks ---
+        print(f"{'='*60}")
+        print(f"Equivalence Check — {MODEL_NAME} (prompt_len={EQ_PROMPT_LEN}, gen_steps={EQ_GEN_STEPS})")
+        print(f"{'='*60}")
+        for label, backend in configs:
+            backend_id = "codegen2-mlx-compiled" if "compile" in backend else backend
+            print(f"  [{label}]...", end=" ", flush=True)
+            try:
+                eq_results[label] = run_equivalence(backend_id, Path(tmp_dir))
+                print(f"first_token={eq_results[label][1][0]}")
+            except Exception as e:
+                print(f"FAILED: {e}")
+                import traceback
+                traceback.print_exc()
+
+        ref_label = configs[0][0] if configs else None
+        ref = eq_results.get(ref_label) if ref_label else None
+        if ref is not None:
+            ref_logits, ref_tokens = ref
+            for label, _ in configs[1:]:
+                if label not in eq_results:
+                    continue
+                logits, tokens = eq_results[label]
+                max_abs = float(np.max(np.abs(logits - ref_logits))) if logits.shape == ref_logits.shape else float("nan")
+                top1_match = sum(1 for a, b in zip(tokens, ref_tokens) if a == b)
+                token_seq_match = tokens == ref_tokens
+                print(f"\n  {label} vs {ref_label}:")
+                print(f"    Logits max abs diff: {max_abs:.6e}")
+                print(f"    Top1 match: {top1_match}/{EQ_GEN_STEPS}")
+                print(f"    Token sequence exact: {token_seq_match}")
+                if not token_seq_match:
+                    diffs = [(i, a, b) for i, (a, b) in enumerate(zip(tokens, ref_tokens)) if a != b]
+                    for i, a, b in diffs[:5]:
+                        print(f"      step {i}: {label}={a} vs {ref_label}={b}")
+
+        # --- Throughput benchmarks ---
+        print(f"\n{'='*60}")
+        print(f"Throughput Benchmark — {MODEL_NAME}")
+        print(f"{'='*60}")
         for label, backend in configs:
             per_prompt = run_backend(label, backend, Path(tmp_dir))
-            results[label] = per_prompt
+            perf_results[label] = per_prompt
             print()
 
     # Summary
@@ -289,7 +419,7 @@ def main():
     print(f"  {'Backend':<16s}" + "".join(f"  p={p:<5d}" for p in PROMPT_LENS))
     print("  " + "-" * 16 + "".join("-------" for _ in PROMPT_LENS))
     for label, _ in configs:
-        row = results.get(label, {})
+        row = perf_results.get(label, {})
         if not row:
             print(f"  {label:<16s}" + "  n/a     " * len(PROMPT_LENS))
             continue
