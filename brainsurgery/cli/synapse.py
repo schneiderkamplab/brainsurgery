@@ -594,7 +594,10 @@ def axon_codegen_dump(
     backend: str = typer.Option(
         "codegen2-torch",
         "--backend",
-        help="Codegen backend: codegen2-torch, codegen2-tinygrad, or codegen2-triton.",
+        help=(
+            "Codegen backend: codegen2-torch, codegen2-tinygrad, "
+            "codegen2-mlx, or codegen2-triton."
+        ),
     ),
     class_name: str = typer.Option(
         "AxonGeneratedModel",
@@ -1084,7 +1087,7 @@ def axon_benchmark(
         "--axon-backend",
         help=(
             "Axon execution backend (codegen2-torch, codegen2-tinygrad, "
-            "codegen2-triton, runtime2-torch, or pipeline2-torch)."
+            "codegen2-mlx, codegen2-triton, runtime2-torch, or pipeline2-torch)."
         ),
     ),
     axon_typechecker: str = typer.Option(
