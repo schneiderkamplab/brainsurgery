@@ -1214,13 +1214,14 @@ def run_axon_benchmark(
         "codegen2-torch",
         "codegen2-tinygrad",
         "codegen2-triton",
+        "codegen2-vllm",
         "runtime2-torch",
         "pipeline2-torch",
     }
     if backend_token not in valid_backends:
         raise ValueError(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'codegen2-triton', 'runtime2-torch', or 'pipeline2-torch'"
+            "'codegen2-triton', 'codegen2-vllm', 'runtime2-torch', or 'pipeline2-torch'"
         )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
