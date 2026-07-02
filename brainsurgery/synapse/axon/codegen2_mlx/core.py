@@ -231,9 +231,10 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 4, "def from_safetensors(cls, safetensors_files, *, model_config=None):")
         add(lines, 8, "state_dict = {}")
         add(lines, 8, "for path in safetensors_files:")
-        add(lines, 12, "with safe_open(str(path), framework='np') as f:")
+        add(lines, 12, "with safe_open(str(path), framework='pt') as f:")
         add(lines, 16, "for key in f.keys():")
-        add(lines, 20, "state_dict[str(key)] = mx.array(f.get_tensor(key))")
+        add(lines, 20, "t = f.get_tensor(key)")
+        add(lines, 20, "state_dict[str(key)] = mx.array(t.float().numpy()) if t.dtype == __import__('torch').bfloat16 else mx.array(t.numpy())")
         add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config)")
         add(lines, 4, "")
         self._emit_load_state_dict(lines)
@@ -874,7 +875,11 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         if primitive == "rmsnorm":
             x = args[0]
             eps = args[1] if len(args) > 1 else "1e-6"
-            return f"mx.fast.rms_norm({x}, None, float({eps}))"
+            cast_float = args[3] if len(args) > 3 else "False"
+            return (
+                f"(mx.fast.rms_norm({x}.astype(mx.float32), None, float({eps})).astype({x}.dtype) "
+                f"if {cast_float} else mx.fast.rms_norm({x}, None, float({eps})))"
+            )
         if primitive == "tensor_like":
             dtype = args[2] if len(args) > 2 else "None"
             return f"({args[0]}.astype(self._dtype_from_name({dtype}) or {args[1]}.dtype) if isinstance({args[0]}, mx.array) else mx.array({args[0]}, dtype=(self._dtype_from_name({dtype}) or {args[1]}.dtype)))"
@@ -910,7 +915,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             "permute": lambda: f"mx.transpose({args[0]}, axes=tuple(int(x) for x in {args[1]}))",
             "transpose": lambda: f"mx.swapaxes({args[0]}, int({args[1]}), int({args[2]}))",
             "unsqueeze": lambda: f"self._unsqueeze({args[0]}, {args[1]})",
-            "repeat": lambda: f"{args[0]}.repeat(int({args[1]}), axis=(int({args[2]}) if int({args[2]}) >= 0 else int({args[2]}) + len({args[0]}.shape)))",
+            "repeat": lambda: f"mx.repeat({args[0]}, int({args[1]}), axis=(int({args[2]}) if int({args[2]}) >= 0 else int({args[2]}) + len({args[0]}.shape)))",
             "matmul": lambda: f"({args[0]} @ {args[1]})",
             "where": lambda: f"self._where({args[0]}, {args[1]}, {args[2]})",
             "where_indices": lambda: f"self._where_indices({args[0]})",
@@ -945,7 +950,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             "activations_silu": lambda: f"mx.sigmoid({args[0]}) * {args[0]}",
             "activations_sigmoid": lambda: f"mx.sigmoid({args[0]})",
             "activations_swiglu": lambda: f"(mx.sigmoid({args[0]}) * {args[0]} * {args[0]})",
-            "l2norm": lambda: f"({args[0]} * mx.rsqrt(({args[0]} * {args[0]}).mean(axis=-1, keepdims=True) + float({args[1] if len(args) > 1 else '1e-6'})))",
+            "l2norm": lambda: f"({args[0]}.astype(mx.float32) * mx.rsqrt(({args[0]}.astype(mx.float32) * {args[0]}.astype(mx.float32)).mean(axis=-1, keepdims=True) + float({args[1] if len(args) > 1 else '1e-6'}))).astype({args[0]}.dtype)",
             "activations_relu": lambda: f"mx.maximum({args[0]}, 0)",
             "activations_relu2": lambda: f"(mx.maximum({args[0]}, 0) * mx.maximum({args[0]}, 0))",
             "activations_gelu": lambda: f"nn.gelu({args[0]})",
