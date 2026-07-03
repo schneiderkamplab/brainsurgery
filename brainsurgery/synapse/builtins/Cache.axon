@@ -13,21 +13,12 @@ export (
   past_length,
   past_length_any,
   past_length_kv,
-  static_commit,
-  static_commit_kv,
-  static_index,
-  static_index_at,
-  static_index_kv,
-  static_index_kv_at,
-  static_init_kv_like,
-  static_init_like,
-  static_past_length,
-  static_past_length_kv,
-  static_put,
-  static_put_kv,
-  static_update,
-  static_update_full,
-  static_update_kv,
+  finish,
+  finish_kv,
+  prepare,
+  prepare_kv,
+  read,
+  read_kv,
   update,
   update_kv,
 )
@@ -37,10 +28,6 @@ type Cache[B,H,T,DH] = List[CacheLayer[B,H,T,DH]]
 type CacheLayerKV[B,H,T,DK,DV] = (Tensor[B,H,T,DK], Tensor[B,H,T,DV])
 type CacheKV[B,H,T,DK,DV] = List[CacheLayerKV[B,H,T,DK,DV]]
 type CacheAny = List[(Any, Any)]
-type StaticCacheLayer[B,H,C,DH] = (Tensor[B,H,C,DH], Tensor[B,H,C,DH], Dim)
-type StaticCache[B,H,L,C,DH] = (Tensor[L,B,H,C,DH], Tensor[L,B,H,C,DH], Dim)
-type StaticCacheLayerKV[B,H,C,DK,DV] = (Tensor[B,H,C,DK], Tensor[B,H,C,DV], Dim)
-type StaticCacheKV[B,H,L,C,DK,DV] = (Tensor[L,B,H,C,DK], Tensor[L,B,H,C,DV], Dim)
 
 update :: ?CacheLayer[B,H,P,DH] -> Tensor[B,H,S,DH] -> Tensor[B,H,S,DH] -> (Tensor[B,H,K,DH], Tensor[B,H,K,DH], ?CacheLayer[B,H,K,DH])
 update past k v = (past == null)
@@ -70,6 +57,18 @@ init_any = List.init
 
 init_kv :: CacheKV[B,H,T,DK,DV]
 init_kv = List.init
+
+prepare :: ?Cache[B,H,T,DH] -> ?Bool -> ?Dim -> ?Cache[B,H,T,DH]
+prepare past use_cache capacity = List.init
+
+prepare_kv :: ?CacheKV[B,H,T,DK,DV] -> ?Bool -> ?Dim -> ?CacheKV[B,H,T,DK,DV]
+prepare_kv past use_cache capacity = List.init
+
+read :: ?Cache[B,H,T,DH] -> ?Cache[B,H,T,DH] -> ?Cache[B,H,T,DH]
+read past work = past
+
+read_kv :: ?CacheKV[B,H,T,DK,DV] -> ?CacheKV[B,H,T,DK,DV] -> ?CacheKV[B,H,T,DK,DV]
+read_kv past work = past
 
 index :: ?Cache[B,H,T,DH] -> Int -> ?CacheLayer[B,H,T,DH]
 index values i = (values == null) ? null : (((List.length (values :: Cache[B,H,T,DH])) == 0) ? null : List.index (values :: Cache[B,H,T,DH]) i)
@@ -107,121 +106,8 @@ past_length_kv cache = (cache == null) ? 0 : (((List.length (cache :: CacheKV[B,
   return Tensor.size k -2
 )
 
-static_init_like :: Tensor[..REF] -> Dim -> Dim -> Dim -> Dim -> Dim -> StaticCache[B,H,L,C,DH]
-static_init_like ref batch slots heads capacity head_dim = do
-  keys <- Tensor.zeros ref shape=[slots, batch, heads, capacity, head_dim]
-  values <- Tensor.zeros ref shape=[slots, batch, heads, capacity, head_dim]
-  return (keys, values, 0)
+finish :: ?Cache[B,H,T,DH] -> Dim -> ?Cache[B,H,T,DH]
+finish cache length = cache
 
-static_init_kv_like :: Tensor[..REF] -> Dim -> Dim -> Dim -> Dim -> Dim -> Dim -> StaticCacheKV[B,H,L,C,DK,DV]
-static_init_kv_like ref batch slots heads capacity key_dim value_dim = do
-  keys <- Tensor.zeros ref shape=[slots, batch, heads, capacity, key_dim]
-  values <- Tensor.zeros ref shape=[slots, batch, heads, capacity, value_dim]
-  return (keys, values, 0)
-
-static_past_length :: ?StaticCache[B,H,L,C,DH] -> Dim
-static_past_length cache = (cache == null) ? 0 : do
-  _, _, length <- cache
-  return length
-
-static_past_length_kv :: ?StaticCacheKV[B,H,L,C,DK,DV] -> Dim
-static_past_length_kv cache = (cache == null) ? 0 : do
-  _, _, length <- cache
-  return length
-
-static_index_at :: ?StaticCache[B,H,L,C,DH] -> Int -> Dim -> ?StaticCacheLayer[B,H,C,DH]
-static_index_at cache i length = (cache == null) ? null : do
-  keys, values, _ <- cache
-  next <- i + 1
-  k <- Tensor.slice keys 0 i next |> Tensor.reshape shape=[B, H, C, DH]
-  v <- Tensor.slice values 0 i next |> Tensor.reshape shape=[B, H, C, DH]
-  return (k, v, length)
-
-static_index :: ?StaticCache[B,H,L,C,DH] -> Int -> ?StaticCacheLayer[B,H,C,DH]
-static_index cache i = (cache == null) ? null : do
-  length <- static_past_length cache
-  return static_index_at cache i length
-
-static_index_kv_at :: ?StaticCacheKV[B,H,L,C,DK,DV] -> Int -> Dim -> ?StaticCacheLayerKV[B,H,C,DK,DV]
-static_index_kv_at cache i length = (cache == null) ? null : do
-  keys, values, _ <- cache
-  next <- i + 1
-  k <- Tensor.slice keys 0 i next |> Tensor.reshape shape=[B, H, C, DK]
-  v <- Tensor.slice values 0 i next |> Tensor.reshape shape=[B, H, C, DV]
-  return (k, v, length)
-
-static_index_kv :: ?StaticCacheKV[B,H,L,C,DK,DV] -> Int -> ?StaticCacheLayerKV[B,H,C,DK,DV]
-static_index_kv cache i = (cache == null) ? null : do
-  length <- static_past_length_kv cache
-  return static_index_kv_at cache i length
-
-static_update :: ?StaticCacheLayer[B,H,C,DH] -> Tensor[B,H,S,DH] -> Tensor[B,H,S,DH] -> (Tensor[B,H,K,DH], Tensor[B,H,K,DH], ?StaticCacheLayer[B,H,C,DH])
-static_update past k v = (past == null)
-  ? do
-    return k, v, null
-  : do
-    k_store, v_store, length <- past
-    end <- length + S
-    k_store <- Tensor.assign_slice k_store k -2 length end
-    v_store <- Tensor.assign_slice v_store v -2 length end
-    k_all <- Tensor.slice k_store -2 0 end
-    v_all <- Tensor.slice v_store -2 0 end
-    return k_all, v_all, (k_store, v_store, end)
-
-static_update_full :: ?StaticCacheLayer[B,H,C,DH] -> Tensor[B,H,S,DH] -> Tensor[B,H,S,DH] -> (Tensor[B,H,C,DH], Tensor[B,H,C,DH], ?StaticCacheLayer[B,H,C,DH])
-static_update_full past k v = (past == null)
-  ? do
-    return k, v, null
-  : do
-    k_store, v_store, length <- past
-    end <- length + S
-    k_store <- Tensor.assign_slice k_store k -2 length end
-    v_store <- Tensor.assign_slice v_store v -2 length end
-    return k_store, v_store, (k_store, v_store, end)
-
-static_update_kv :: ?StaticCacheLayerKV[B,H,C,DK,DV] -> Tensor[B,H,S,DK] -> Tensor[B,H,S,DV] -> (Tensor[B,H,K,DK], Tensor[B,H,K,DV], ?StaticCacheLayerKV[B,H,C,DK,DV])
-static_update_kv past k v = (past == null)
-  ? do
-    return k, v, null
-  : do
-    k_store, v_store, length <- past
-    end <- length + S
-    k_store <- Tensor.assign_slice k_store k -2 length end
-    v_store <- Tensor.assign_slice v_store v -2 length end
-    k_all <- Tensor.slice k_store -2 0 end
-    v_all <- Tensor.slice v_store -2 0 end
-    return k_all, v_all, (k_store, v_store, end)
-
-static_put :: ?StaticCache[B,H,L,C,DH] -> Int -> ?StaticCacheLayer[B,H,C,DH] -> ?StaticCache[B,H,L,C,DH]
-static_put cache i layer = (cache == null) ? null : ((layer == null) ? cache : do
-  keys, values, length <- (cache :: StaticCache[B,H,L,C,DH])
-  k, v, _ <- layer
-  next <- i + 1
-  k_slot <- Tensor.unsqueeze k dim=0
-  v_slot <- Tensor.unsqueeze v dim=0
-  keys <- Tensor.assign_slice keys k_slot 0 i next
-  values <- Tensor.assign_slice values v_slot 0 i next
-  return (keys, values, length)
-)
-
-static_put_kv :: ?StaticCacheKV[B,H,L,C,DK,DV] -> Int -> ?StaticCacheLayerKV[B,H,C,DK,DV] -> ?StaticCacheKV[B,H,L,C,DK,DV]
-static_put_kv cache i layer = (cache == null) ? null : ((layer == null) ? cache : do
-  keys, values, length <- (cache :: StaticCacheKV[B,H,L,C,DK,DV])
-  k, v, _ <- layer
-  next <- i + 1
-  k_slot <- Tensor.unsqueeze k dim=0
-  v_slot <- Tensor.unsqueeze v dim=0
-  keys <- Tensor.assign_slice keys k_slot 0 i next
-  values <- Tensor.assign_slice values v_slot 0 i next
-  return (keys, values, length)
-)
-
-static_commit :: ?StaticCache[B,H,L,C,DH] -> Dim -> ?StaticCache[B,H,L,C,DH]
-static_commit cache length = (cache == null) ? null : do
-  keys, values, _ <- cache
-  return (keys, values, length)
-
-static_commit_kv :: ?StaticCacheKV[B,H,L,C,DK,DV] -> Dim -> ?StaticCacheKV[B,H,L,C,DK,DV]
-static_commit_kv cache length = (cache == null) ? null : do
-  keys, values, _ <- cache
-  return (keys, values, length)
+finish_kv :: ?CacheKV[B,H,T,DK,DV] -> Dim -> ?CacheKV[B,H,T,DK,DV]
+finish_kv cache length = cache

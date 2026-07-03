@@ -55,6 +55,7 @@ from .axon import (
     typecheck2_flat_axon_file,
 )
 from .axon.ast import AxonFile, TypeOptional
+from .axon.codegen2_jax import emit_model_code_from_graph_ir as emit_jax_model_code_from_graph_ir
 from .axon.codegen2_tinygrad import emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir
 from .axon.codegen2_triton import emit_model_code_from_graph_ir as emit_triton_model_code_from_graph_ir
 from .axon.codegen2_torch import (
@@ -456,6 +457,13 @@ def _to_torch(value: Any) -> torch.Tensor | None:
     try:
         import mlx.core as mx
         if isinstance(value, mx.array):
+            import numpy as np
+            return torch.from_numpy(np.asarray(value))
+    except ImportError:
+        pass
+    try:
+        import jax
+        if isinstance(value, jax.Array):
             import numpy as np
             return torch.from_numpy(np.asarray(value))
     except ImportError:
@@ -3424,6 +3432,7 @@ def _run_axon_test_single(
         "codegen2-torch",
         "codegen2-tinygrad",
         "codegen2-mlx",
+        "codegen2-jax",
         "codegen2-triton",
         "runtime2-torch",
         "pipeline2-torch",
@@ -3431,7 +3440,8 @@ def _run_axon_test_single(
     if backend_token not in valid_backends:
         raise ValueError(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'codegen2-mlx', 'codegen2-triton', 'runtime2-torch', or 'pipeline2-torch'"
+            "'codegen2-mlx', 'codegen2-jax', 'codegen2-triton', 'runtime2-torch', "
+            "or 'pipeline2-torch'"
         )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
@@ -3583,6 +3593,13 @@ def _run_axon_test_single(
                     emit_model_code_from_graph_ir as emit_mlx_model_code,
                 )
                 code = emit_mlx_model_code(
+                    graph_program,
+                    class_name=class_name,
+                    model_config=model_config,
+                    profile=profile_axon,
+                )
+            elif axon_backend == "codegen2-jax":
+                code = emit_jax_model_code_from_graph_ir(
                     graph_program,
                     class_name=class_name,
                     model_config=model_config,
@@ -4509,6 +4526,14 @@ def _run_axon_test_single(
                     ).eval()
                 else:
                     syn = model_cls.from_state_dict(local_state_dict).eval()
+            elif axon_backend == "codegen2-jax":
+                if local_state_dict is None:
+                    syn = model_cls.from_safetensors(
+                        safetensors_files,
+                        model_config=model_config,
+                    ).eval()
+                else:
+                    syn = model_cls.from_state_dict(local_state_dict).eval()
             elif local_state_dict is None:
                 local_state_dict = _load_state_dict(
                     safetensors_files,
@@ -4532,7 +4557,7 @@ def _run_axon_test_single(
                     local_state_dict,
                     param_devices=param_devices,
                 ).eval()
-            elif axon_backend not in {"codegen2-tinygrad", "codegen2-mlx"}:
+            elif axon_backend not in {"codegen2-tinygrad", "codegen2-mlx", "codegen2-jax"}:
                 syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
             if profile_axon:
                 enable_profile = getattr(syn, "enable_profile", None)

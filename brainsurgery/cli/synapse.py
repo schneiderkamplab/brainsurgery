@@ -234,16 +234,18 @@ def _axon_codegen_dump_to_text(
     lower_graph_fn = getattr(axon_module, "lower_axon_program_to_graph_ir")
 
     backend = backend.strip().lower()
-    if backend not in {"codegen2-torch", "codegen2-tinygrad", "codegen2-mlx", "codegen2-triton"}:
+    if backend not in {"codegen2-torch", "codegen2-tinygrad", "codegen2-mlx", "codegen2-jax", "codegen2-triton"}:
         raise typer.BadParameter(
-            "backend must be 'codegen2-torch', 'codegen2-tinygrad', 'codegen2-mlx', or 'codegen2-triton'"
+            "backend must be 'codegen2-torch', 'codegen2-tinygrad', 'codegen2-mlx', "
+            "'codegen2-jax', or 'codegen2-triton'"
         )
-    if profile and backend not in {"codegen2-torch", "codegen2-triton"}:
+    if profile and backend not in {"codegen2-torch", "codegen2-jax", "codegen2-triton"}:
         raise typer.BadParameter(
-            "--profile-code is currently supported only for --backend codegen2-torch or codegen2-triton"
+            "--profile-code is currently supported only for --backend codegen2-torch, "
+            "codegen2-jax, or codegen2-triton"
         )
-    if backend == "codegen2-mlx" and align_devices:
-        raise typer.BadParameter("--align-devices is not supported with --backend codegen2-mlx")
+    if backend in {"codegen2-mlx", "codegen2-jax"} and align_devices:
+        raise typer.BadParameter(f"--align-devices is not supported with --backend {backend}")
 
     model_dir = weights or (_checkpoint_model_dir(checkpoint) if checkpoint is not None else None)
     model_config = None
@@ -289,6 +291,10 @@ def _axon_codegen_dump_to_text(
         emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_tinygrad")
         emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
         return emit_fn(graph, class_name=class_name, model_config=model_config)
+    if backend == "codegen2-jax":
+        emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_jax")
+        emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
+        return emit_fn(graph, class_name=class_name, model_config=model_config, profile=profile)
     if backend == "codegen2-triton":
         emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_triton")
         emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
@@ -596,7 +602,7 @@ def axon_codegen_dump(
         "--backend",
         help=(
             "Codegen backend: codegen2-torch, codegen2-tinygrad, "
-            "codegen2-mlx, or codegen2-triton."
+            "codegen2-mlx, codegen2-jax, or codegen2-triton."
         ),
     ),
     class_name: str = typer.Option(
@@ -1087,7 +1093,7 @@ def axon_benchmark(
         "--axon-backend",
         help=(
             "Axon execution backend (codegen2-torch, codegen2-tinygrad, "
-            "codegen2-mlx, codegen2-triton, runtime2-torch, or pipeline2-torch)."
+            "codegen2-mlx, codegen2-jax, codegen2-triton, runtime2-torch, or pipeline2-torch)."
         ),
     ),
     axon_typechecker: str = typer.Option(

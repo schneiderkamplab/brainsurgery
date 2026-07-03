@@ -6,25 +6,23 @@ import Activations (gelu_pytorch_tanh, tanh)
 
 import Attention (attention_scaled, merge_heads, reshape_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (StaticMask, static_causal_mask_for_input_active, static_mask_for_input)
 
 import Math (mul, sqrt)
 
 import Params (has_root, param)
 
-import Positions (position_ids, rope_pair_proportional_factors, rope_proportional_factors)
+import Positions (position_ids_static, rope_pair_proportional_factors, rope_proportional_factors)
 
-import Cache (StaticCache, StaticCacheLayer)
+import StaticCache (Cache, CacheLayer, append, finish, index, past_length, prepare, update)
 
 import Config
-
-import List
 
 import NN
 
 import Tensor
 
-type Gemma4EStaticCache[B,H,L,C,DHS,DHF] = (StaticCache[B,H,L,C,DHS], StaticCache[B,H,L,C,DHF])
+type Gemma4EStaticCache[B,H,K,C,DHS,DHF] = (Cache[B,H,K,C,DHS], Cache[B,H,K,C,DHF])
 
 CFG <- "text_config"
 
@@ -109,8 +107,7 @@ rms@path x = NN.rmsnorm@path x cast_float=true
 
 gemma4_per_layer_inputs :: Tensor.TokenIds[B,T] -> Tensor[B,T,D] -> ?Int -> ?Int -> ?Float -> ?Float -> ?Float -> ?Float -> Tensor[B,T,NL,PD]
 gemma4_per_layer_inputs input_ids hidden ?num_layers=null ?per_layer_dim=null ?embed_scale=1.0 ?projection_scale=1.0 ?combine_scale=1.0 ?rms_eps=1e-6 = do
-  input_shape <- Tensor.shape input_ids
-  seq_len <- List.index input_shape 1
+  seq_len <- Tensor.size input_ids 1
   model_layers <- (num_layers == null) ? 1 : num_layers
   layer_dim <- (per_layer_dim == null) ? 1 : per_layer_dim
   embed <- NN.embedding@embed_tokens_per_layer input_ids dim=(model_layers * layer_dim) scale=embed_scale
@@ -123,8 +120,7 @@ gemma4_per_layer_inputs input_ids hidden ?num_layers=null ?per_layer_dim=null ?e
 
 gemma4_per_layer_input_at :: Tensor[B,T,NL,PD] -> Int -> Tensor[B,T,PD]
 gemma4_per_layer_input_at x i = do
-  x_shape <- Tensor.shape x
-  seq_len <- List.index x_shape 1
+  seq_len <- Tensor.size x 1
   return Tensor.slice x dim=2 start=i end=(i + 1) |> Tensor.reshape shape=[B, seq_len, PD]
 
 gemma4_kv :: Tensor[B,S,D] -> Dim -> Dim -> (Tensor[B,KVH,S,DH], Tensor[B,KVH,S,DH])
@@ -148,7 +144,7 @@ gemma4_shared_qk q k sin cos = do
   q_rot, _ <- rope_pair_proportional_factors q q sin cos
   return q_rot, k
 
-gemma4_e_block :: Tensor[B,S,D] -> Tensor[B,S,NL,PD] -> Int -> Tensor[B,S] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,GHD] -> Tensor[B,1,S,GHD] -> ?StaticCacheLayer[B,KVH,C,MODEL_HEAD_DIM] -> ?StaticCacheLayer[B,KVH,C,GHD] -> ?Tensor[B,KVH,S,DHF] -> ?Tensor[B,KVH,S,DHF] -> ?Tensor[B,KVH,S,DHS] -> ?Tensor[B,KVH,S,DHS] -> ?Bool -> (Tensor[B,S,D], ?StaticCacheLayer[B,KVH,C,MODEL_HEAD_DIM], ?StaticCacheLayer[B,KVH,C,GHD], ?Tensor[B,KVH,S,DHF], ?Tensor[B,KVH,S,DHF], ?Tensor[B,KVH,S,DHS], ?Tensor[B,KVH,S,DHS])
+gemma4_e_block :: Tensor[B,S,D] -> Tensor[B,S,NL,PD] -> Int -> Tensor[B,S] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,GHD] -> Tensor[B,1,S,GHD] -> CacheLayer[B,KVH,K,C,MODEL_HEAD_DIM] -> CacheLayer[B,KVH,K,C,GHD] -> ?Tensor[B,KVH,S,DHF] -> ?Tensor[B,KVH,S,DHF] -> ?Tensor[B,KVH,S,DHS] -> ?Tensor[B,KVH,S,DHS] -> ?Bool -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,C,MODEL_HEAD_DIM], ?CacheLayer[B,KVH,K,C,GHD], ?Tensor[B,KVH,S,DHF], ?Tensor[B,KVH,S,DHF], ?Tensor[B,KVH,S,DHS], ?Tensor[B,KVH,S,DHS])
 gemma4_e_block x per_layer_inputs i pos_ids mask_local mask_full rope_sin_local rope_cos_local rope_sin_full rope_cos_full past_kv_local past_kv_full shared_full_k shared_full_v shared_sliding_k shared_sliding_v use_cache = do
   full <- ((i + 1) % ROPE_PERIOD) == 0
   shared_layer <- i >= (NUM_LAYERS - NUM_KV_SHARED)
@@ -163,11 +159,11 @@ gemma4_e_block x per_layer_inputs i pos_ids mask_local mask_full rope_sin_local 
     q, k_step <- full ? (shared_layer ? (gemma4_shared_qk q k_step rope_sin_full rope_cos_full) : (rope_pair_proportional_factors q k_step rope_sin_full rope_cos_full)) : (shared_layer ? (gemma4_shared_qk q k_step rope_sin_local rope_cos_local) : (rope_pair_proportional_factors q k_step rope_sin_local rope_cos_local))
     k, v, new_kv_local, new_kv_full <- full
       ? do
-        k, v, new_kv_full <- ((Cache.static_update past_kv_full k_step v_step) :: (Tensor[B,KVH,K,GHD], Tensor[B,KVH,K,GHD], ?StaticCacheLayer[B,KVH,C,GHD]))
-        return k, v, (null :: ?StaticCacheLayer[B,KVH,C,MODEL_HEAD_DIM]), new_kv_full
+        k, v, new_kv_full <- ((update past_kv_full k_step v_step) :: (Tensor[B,KVH,K,GHD], Tensor[B,KVH,K,GHD], ?CacheLayer[B,KVH,K,WIN_FULL,GHD]))
+        return k, v, (null :: ?CacheLayer[B,KVH,K,C,MODEL_HEAD_DIM]), new_kv_full
       : do
-        k, v, new_kv_local <- ((Cache.static_update past_kv_local k_step v_step) :: (Tensor[B,KVH,K,MODEL_HEAD_DIM], Tensor[B,KVH,K,MODEL_HEAD_DIM], ?StaticCacheLayer[B,KVH,C,MODEL_HEAD_DIM]))
-        return k, v, new_kv_local, (null :: ?StaticCacheLayer[B,KVH,C,GHD])
+        k, v, new_kv_local <- ((update past_kv_local k_step v_step) :: (Tensor[B,KVH,K,MODEL_HEAD_DIM], Tensor[B,KVH,K,MODEL_HEAD_DIM], ?CacheLayer[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM]))
+        return k, v, new_kv_local, (null :: ?CacheLayer[B,KVH,K,C,GHD])
     shared_k <- k_step
     shared_v <- v_step
     k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
@@ -192,45 +188,47 @@ gemma4_e_block x per_layer_inputs i pos_ids mask_local mask_full rope_sin_local 
   shared_sliding_v <- ((shared_layer == false) and (full == false)) ? shared_v : shared_sliding_v
   return x, new_kv_local, new_kv_full, shared_full_k, shared_full_v, shared_sliding_k, shared_sliding_v
 
-gemma4_e :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Gemma4EStaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,MODEL_HEAD_DIM,GHD] -> ?Bool -> (Tensor[B,S,V], ?Gemma4EStaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,MODEL_HEAD_DIM,GHD])
+gemma4_e :: Tensor.TokenIds[B,S] -> ?StaticMask[B,WIN_FULL] -> ?Gemma4EStaticCache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM,GHD] -> ?Bool -> (Tensor[B,S,V], ?Gemma4EStaticCache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM,GHD])
 gemma4_e input_ids attn_mask past_kv use_cache = do
   past_length <- (past_kv == null) ? 0 : do
-    past_local, _ <- (past_kv :: Gemma4EStaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,MODEL_HEAD_DIM,GHD])
-    return Cache.static_past_length past_local
-  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
-  key_len <- past_length + S
-  mask_local <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WIN_LOCAL
-  mask_full <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WIN_FULL
+    past_local, _ <- (past_kv :: Gemma4EStaticCache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM,GHD])
+    return past_length past_local
+  attn_mask <- static_mask_for_input input_ids attn_mask WIN_FULL
+  pos_ids <- position_ids_static input_ids attn_mask=attn_mask past_length=past_length
+  mask_local <- static_causal_mask_for_input_active input_ids attn_mask window=WIN_LOCAL
+  mask_full <- static_causal_mask_for_input_active input_ids attn_mask window=WIN_FULL
   rope_sin_local, rope_cos_local <- rope_proportional_factors pos_ids MODEL_HEAD_DIM theta=THETA_LOCAL
   rope_sin_full, rope_cos_full <- rope_proportional_factors pos_ids GHD theta=THETA_FULL scale_factor=ROPE_SCALE_FULL partial_rotary_factor=ROTARY_PARTIAL_FULL
   logits, new_kv <- scope@model.language_model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=EMB_SCALE
     per_layer_inputs <- gemma4_per_layer_inputs input_ids x num_layers=NUM_LAYERS per_layer_dim=PLI embed_scale=PLI_SCALE projection_scale=PROJ_SCALE combine_scale=PER_LAYER_INPUT_SCALE rms_eps=EPS
-    cache_local <- ((use_cache ? ((past_kv == null) ? (Cache.static_init_like x B CACHE_SLOTS KVH WIN_FULL MODEL_HEAD_DIM) : do
-      local, _ <- (past_kv :: Gemma4EStaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,MODEL_HEAD_DIM,GHD])
+    past_local <- ((use_cache ? ((past_kv == null) ? (null :: ?Cache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM]) : do
+      local, _ <- (past_kv :: Gemma4EStaticCache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM,GHD])
       return local
-    ) : null) :: ?StaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,MODEL_HEAD_DIM])
-    cache_full <- ((use_cache ? ((past_kv == null) ? (Cache.static_init_like x B CACHE_SLOTS KVH WIN_FULL GHD) : do
-      _, full <- (past_kv :: Gemma4EStaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,MODEL_HEAD_DIM,GHD])
+    ) : null) :: ?Cache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM])
+    past_full <- ((use_cache ? ((past_kv == null) ? (null :: ?Cache[B,KVH,K,WIN_FULL,GHD]) : do
+      _, full <- (past_kv :: Gemma4EStaticCache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM,GHD])
       return full
-    ) : null) :: ?StaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,GHD])
+    ) : null) :: ?Cache[B,KVH,K,WIN_FULL,GHD])
+    cache_local <- prepare past_local use_cache WIN_FULL
+    cache_full <- prepare past_full use_cache WIN_FULL
     shared_full_k <- (null :: ?Tensor[B,KVH,S,DHF])
     shared_full_v <- (null :: ?Tensor[B,KVH,S,DHF])
     shared_sliding_k <- (null :: ?Tensor[B,KVH,S,DHS])
     shared_sliding_v <- (null :: ?Tensor[B,KVH,S,DHS])
     x, cache_local, cache_full, shared_full_k, shared_full_v, shared_sliding_k, shared_sliding_v <- for@layers i <- [0..NUM_LAYERS) carry (x, cache_local, cache_full, shared_full_k, shared_full_v, shared_sliding_k, shared_sliding_v) do
-      past_i_local <- ((Cache.static_index_at cache_local i past_length) :: ?StaticCacheLayer[B,KVH,WIN_FULL,MODEL_HEAD_DIM])
-      past_i_full <- ((Cache.static_index_at cache_full i past_length) :: ?StaticCacheLayer[B,KVH,WIN_FULL,GHD])
+      past_i_local <- ((index cache_local i) :: CacheLayer[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM])
+      past_i_full <- ((index cache_full i) :: CacheLayer[B,KVH,K,WIN_FULL,GHD])
       x, new_i_local, new_i_full, shared_full_k, shared_full_v, shared_sliding_k, shared_sliding_v <- gemma4_e_block x per_layer_inputs i pos_ids mask_local mask_full rope_sin_local rope_cos_local rope_sin_full rope_cos_full past_i_local past_i_full shared_full_k shared_full_v shared_sliding_k shared_sliding_v use_cache
-      cache_local <- ((Cache.static_put cache_local i new_i_local) :: ?StaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,MODEL_HEAD_DIM])
-      cache_full <- ((Cache.static_put cache_full i new_i_full) :: ?StaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,GHD])
+      cache_local <- ((append cache_local new_i_local) :: Cache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM])
+      cache_full <- ((append cache_full new_i_full) :: Cache[B,KVH,K,WIN_FULL,GHD])
       yield x, cache_local, cache_full, shared_full_k, shared_full_v, shared_sliding_k, shared_sliding_v
     new_length <- past_length + S
     new_kv <- ((use_cache ? do
-      cache_local <- Cache.static_commit cache_local new_length
-      cache_full <- Cache.static_commit cache_full new_length
-      return ((cache_local, cache_full) :: Gemma4EStaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,MODEL_HEAD_DIM,GHD])
-    : null) :: ?Gemma4EStaticCache[B,KVH,CACHE_SLOTS,WIN_FULL,MODEL_HEAD_DIM,GHD])
+      cache_local <- finish cache_local new_length
+      cache_full <- finish cache_full new_length
+      return ((cache_local, cache_full) :: Gemma4EStaticCache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM,GHD])
+    : null) :: ?Gemma4EStaticCache[B,KVH,K,WIN_FULL,MODEL_HEAD_DIM,GHD])
     logits <- rms@norm x |> NN.linear@embed_tokens
     logits <- logits / LOGIT_SOFTCAP
     logits <- tanh logits

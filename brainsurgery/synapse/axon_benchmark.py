@@ -195,6 +195,40 @@ def _resolve_mlx_worker_specs(*, device: str, processes: int) -> list[_WorkerSpe
     return None
 
 
+def _resolve_jax_worker_specs(*, device: str, processes: int) -> list[_WorkerSpec] | None:
+    normalized = str(device).strip().lower()
+    if processes <= 1 or not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
+        return None
+    return _resolve_pipeline_worker_specs(
+        backend="codegen2-jax",
+        device=device,
+        processes=processes,
+        pipeline_parallel_size=1,
+    )
+
+
+def _set_jax_worker_env_if_needed(common_kwargs: dict[str, Any]) -> dict[str, str | None]:
+    if str(common_kwargs.get("axon_backend", "")).strip().lower() != "codegen2-jax":
+        return {}
+    previous = {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE"),
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": os.environ.get("XLA_PYTHON_CLIENT_MEM_FRACTION"),
+        "JAX_DEFAULT_MATMUL_PRECISION": os.environ.get("JAX_DEFAULT_MATMUL_PRECISION"),
+    }
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "true")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.26")
+    os.environ.setdefault("JAX_DEFAULT_MATMUL_PRECISION", "highest")
+    return previous
+
+
+def _restore_env(previous: dict[str, str | None]) -> None:
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 def _estimate_model_param_count(model_dir: Path) -> tuple[int, bool] | None:
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
@@ -761,6 +795,7 @@ def _run_benchmark_jobs_serial(
     previous_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     if worker_cuda_visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = worker_cuda_visible_devices
+    previous_jax_env = _set_jax_worker_env_if_needed(common_kwargs)
     try:
         for pair_index, pair in enumerate(pairs):
             log_path = worker_log_path(
@@ -824,6 +859,7 @@ def _run_benchmark_jobs_serial(
             progress.update(1)
         parent_logger.log(f"run_finish total_rows={len(results)}")
     finally:
+        _restore_env(previous_jax_env)
         if worker_cuda_visible_devices is not None:
             if previous_cuda_visible_devices is None:
                 os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -860,6 +896,7 @@ def _run_benchmark_worker_loop(
     try:
         if worker_cuda_visible_devices is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = worker_cuda_visible_devices
+        previous_jax_env = _set_jax_worker_env_if_needed(common_kwargs)
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             file_handle = log_path.open("w", encoding="utf-8", buffering=1)
@@ -903,6 +940,8 @@ def _run_benchmark_worker_loop(
                     )
                 )
     finally:
+        if "previous_jax_env" in locals():
+            _restore_env(previous_jax_env)
         if worker_cuda_visible_devices is not None:
             if previous_cuda_visible_devices is None:
                 os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -1223,6 +1262,7 @@ def run_axon_benchmark(
         "codegen2-torch",
         "codegen2-tinygrad",
         "codegen2-mlx",
+        "codegen2-jax",
         "codegen2-triton",
         "runtime2-torch",
         "pipeline2-torch",
@@ -1230,7 +1270,8 @@ def run_axon_benchmark(
     if backend_token not in valid_backends:
         raise ValueError(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'codegen2-mlx', 'codegen2-triton', 'runtime2-torch', or 'pipeline2-torch'"
+            "'codegen2-mlx', 'codegen2-jax', 'codegen2-triton', 'runtime2-torch', "
+            "or 'pipeline2-torch'"
         )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
@@ -1374,6 +1415,11 @@ def run_axon_benchmark(
         )
     elif axon_backend == "codegen2-mlx":
         pipeline_worker_specs = _resolve_mlx_worker_specs(
+            device=device,
+            processes=max(1, int(processes)),
+        )
+    elif axon_backend == "codegen2-jax":
+        pipeline_worker_specs = _resolve_jax_worker_specs(
             device=device,
             processes=max(1, int(processes)),
         )

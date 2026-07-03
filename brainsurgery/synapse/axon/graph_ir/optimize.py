@@ -128,6 +128,11 @@ _MLX_BACKEND_INTRINSICS = frozenset(
         "__mlx_rope",
     }
 )
+_JAX_BACKEND_INTRINSICS = frozenset(
+    {
+        "__jax_sdpa",
+    }
+)
 _TRITON_BACKEND_INTRINSICS = frozenset(
     {
         "__triton_rmsnorm_noscale",
@@ -142,12 +147,14 @@ _BACKEND_INTRINSICS_BY_TARGET = {
     "codegen2-torch": _TORCH_BACKEND_INTRINSICS,
     "codegen2-tinygrad": _TINYGRAD_BACKEND_INTRINSICS,
     "codegen2-mlx": _MLX_BACKEND_INTRINSICS,
+    "codegen2-jax": _JAX_BACKEND_INTRINSICS,
     "codegen2-triton": _TRITON_BACKEND_INTRINSICS,
 }
 _BACKEND_INTRINSIC_PREFIX_BY_TARGET = {
     "codegen2-torch": "__torch_",
     "codegen2-tinygrad": "__tinygrad_",
     "codegen2-mlx": "__mlx_",
+    "codegen2-jax": "__jax_",
     "codegen2-triton": "__triton_",
 }
 _BACKEND_INTRINSIC_TARGETS = {None, *_BACKEND_INTRINSICS_BY_TARGET}
@@ -12626,6 +12633,8 @@ def _can_inline_module(
         return False
     if module.name in recursive_modules:
         return False
+    if _module_signature_has_static_cache_types(module):
+        return False
     forwarding = _forwarding_node(module)
     if _module_signature_has_variadic_rows(module) and forwarding is None:
         return False
@@ -12644,6 +12653,26 @@ def _can_inline_module(
         if not allow_control_select:
             return False
     return _is_non_effectful(module_effects.get(module.name))
+
+
+def _module_signature_has_static_cache_types(module: GraphModule) -> bool:
+    return (
+        any(_type_has_static_cache_type(value.type_expr) for value in module.inputs)
+        or _type_has_static_cache_type(module.return_type_expr)
+        or any(_type_has_static_cache_type(graph_operand_type(output)) for output in module.outputs)
+    )
+
+
+def _type_has_static_cache_type(type_expr: TypeExpr | None) -> bool:
+    if isinstance(type_expr, TypeOptional):
+        return _type_has_static_cache_type(type_expr.inner)
+    if isinstance(type_expr, TypeList):
+        return _type_has_static_cache_type(type_expr.item)
+    if isinstance(type_expr, TypeTuple):
+        return any(_type_has_static_cache_type(item) for item in type_expr.items)
+    if isinstance(type_expr, TypeNamed):
+        return type_expr.name.startswith("StaticCache")
+    return False
 
 
 def _module_signature_has_variadic_rows(module: GraphModule) -> bool:
@@ -14141,6 +14170,17 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="mlx_rope_intrinsics")
+                current = candidate
+        if backend_intrinsic_target == "codegen2-jax":
+            candidate = (
+                _rewrite_backend_sdpa_intrinsics(current, op_name="__jax_sdpa")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_sdpa")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_sdpa_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-triton":
             candidate = (

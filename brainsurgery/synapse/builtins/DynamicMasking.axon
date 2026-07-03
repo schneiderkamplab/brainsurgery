@@ -1,0 +1,20 @@
+import Masking
+import Tensor
+
+export (
+  Mask,
+  causal_mask_for_input,
+  mask_for_input,
+  mask_length_for_input,
+)
+
+type Mask[B,K,C] = Tensor[B,K]
+
+mask_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> ?Mask[B,K,C]
+mask_for_input x mask capacity = Masking.mask_for_input x mask capacity
+
+mask_length_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> Dim
+mask_length_for_input x mask past_length = Masking.mask_length_for_input x mask past_length
+
+causal_mask_for_input :: Tensor[B,Q] -> Dim -> ?Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,K]
+causal_mask_for_input x key_length ?padding_mask=null ?window=null = Masking.causal_mask_for_input x key_length padding_mask=padding_mask window=window
