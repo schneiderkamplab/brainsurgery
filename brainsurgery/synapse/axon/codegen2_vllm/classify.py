@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 
 from ..graph_ir.core import (
+    GraphExpr,
     GraphLiteral,
     GraphModule,
     GraphNode,
@@ -60,18 +61,31 @@ class VLLMLayerClassification:
     embedding_node_ids: set[str] = field(default_factory=set)
     lm_head_node_id: str | None = None
     rmsnorm_node_ids: set[str] = field(default_factory=set)
+    qk_norm_node_ids: set[str] = field(default_factory=set)
+    repeated_module_names: set[str] = field(default_factory=set)
+    loop_index_param: dict[str, str] = field(default_factory=dict)
+    module_scope_parts: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    per_layer_scalar_node_id: str | None = None
+    logit_softcap: float | None = None
+    o_proj_node_ids: set[str] = field(default_factory=set)
+    pli_gate_node_id: str | None = None
+    pli_proj_node_id: str | None = None
+    pli_norm_node_id: str | None = None
+    pli_embed_node_id: str | None = None
+    pli_model_proj_node_id: str | None = None
+    pli_proj_norm_node_id: str | None = None
 
     def layer_type(self, node: GraphNode) -> VLLMLayerType:
         return self.node_types.get(node.id, VLLMLayerType.DEFAULT)
 
 
-_ACTIVATION_PRIMITIVES = frozenset({
-    "_activations_gelu_new",
-    "_activations_gelu",
-    "_activations_relu",
-    "_activations_silu",
-    "_activations_sigmoid",
-})
+def _discover_activation_primitives(program: GraphProgram) -> frozenset[str]:
+    primitives: set[str] = set()
+    for module in program.modules:
+        for node in module.nodes:
+            if node.op.name.startswith("_activations_"):
+                primitives.add(node.op.name)
+    return frozenset(primitives)
 
 _TRIVIAL_TRANSFORM_OPS = frozenset({
     "Tensor.reshape",
@@ -104,8 +118,28 @@ def _node_output_name(node: GraphNode) -> str | None:
     return None
 
 
-def _module_contains_primitive(module: GraphModule, prim_name: str) -> bool:
-    return any(node.op.name == prim_name for node in module.nodes)
+def _module_contains_primitive(
+    module: GraphModule,
+    prim_name: str,
+    modules_by_name: dict[str, GraphModule] | None = None,
+    *,
+    recursive: bool = False,
+) -> bool:
+    for node in module.nodes:
+        if node.op.name == prim_name:
+            return True
+        if (
+            recursive
+            and modules_by_name is not None
+            and "." in node.op.name
+            and node.op.name in modules_by_name
+        ):
+            callee = modules_by_name[node.op.name]
+            if _module_contains_primitive(
+                callee, prim_name, modules_by_name, recursive=True
+            ):
+                return True
+    return False
 
 
 def _find_node_by_id(program: GraphProgram, node_id: str) -> GraphNode | None:
@@ -148,7 +182,10 @@ def _is_embedding_call(
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
-    return _module_contains_primitive(mod, "_embedding")
+    return _module_contains_primitive(
+        mod, "_embedding", modules_by_name,
+        recursive="." in node.op.name,
+    )
 
 
 def _is_linear_call(
@@ -158,7 +195,9 @@ def _is_linear_call(
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
-    return _module_contains_primitive(mod, "_linear")
+    return _module_contains_primitive(
+        mod, "_linear", modules_by_name, recursive=False,
+    )
 
 
 def _is_layernorm_call(
@@ -168,7 +207,10 @@ def _is_layernorm_call(
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
-    return _module_contains_primitive(mod, "_layernorm")
+    return _module_contains_primitive(
+        mod, "_layernorm", modules_by_name,
+        recursive="." in node.op.name,
+    )
 
 
 def _is_rmsnorm_call(
@@ -178,17 +220,25 @@ def _is_rmsnorm_call(
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
-    return _module_contains_primitive(mod, "_rmsnorm")
+    return _module_contains_primitive(
+        mod, "_rmsnorm", modules_by_name,
+        recursive="." in node.op.name,
+    )
 
 
 def _is_activation_call(
     node: GraphNode,
     modules_by_name: dict[str, GraphModule],
+    activation_primitives: frozenset[str] | None = None,
 ) -> bool:
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
-    return any(n.op.name in _ACTIVATION_PRIMITIVES for n in mod.nodes)
+    if activation_primitives is None:
+        return any(
+            n.op.name.startswith("_activations_") for n in mod.nodes
+        )
+    return any(n.op.name in activation_primitives for n in mod.nodes)
 
 
 def _is_sdpa_intrinsic_node(node: GraphNode) -> bool:
@@ -254,20 +304,70 @@ def _classify_embeddings(
     modules_by_name: dict[str, GraphModule],
     classification: VLLMLayerClassification,
 ) -> None:
-    main_module = next(
-        (m for m in program.modules if m.name == program.main_module), None
-    )
-    if main_module is None:
-        return
-    for node in main_module.nodes:
-        if not _is_embedding_call(node, modules_by_name):
-            continue
-        if len(node.inputs) < 2:
-            continue
-        x_input = node.inputs[1]
-        if _is_main_input(x_input, main_module):
-            classification.node_types[node.id] = VLLMLayerType.VOCAB_PARALLEL_EMBEDDING
-            classification.embedding_node_ids.add(node.id)
+    all_module_input_names: set[str] = set()
+    for module in program.modules:
+        for inp in module.inputs:
+            if isinstance(inp, (GraphValueRef, GraphValue)):
+                all_module_input_names.add(inp.name)
+    for module in program.modules:
+        for node in module.nodes:
+            if not _is_embedding_call(node, modules_by_name):
+                continue
+            if len(node.inputs) < 2:
+                continue
+            x_input = node.inputs[1]
+            x_name = _value_name(x_input)
+            if x_name is not None and x_name in all_module_input_names:
+                classification.node_types[node.id] = VLLMLayerType.VOCAB_PARALLEL_EMBEDDING
+                classification.embedding_node_ids.add(node.id)
+
+
+def _is_structural_attention_call(
+    node: GraphNode,
+    modules_by_name: dict[str, GraphModule],
+) -> bool:
+    mod = _called_module(node, modules_by_name)
+    if mod is None:
+        return False
+    if len(node.inputs) < 3:
+        return False
+    has_matmul = False
+    has_softmax = False
+    for inner in mod.nodes:
+        if inner.op.name in ("_matmul", "Tensor.matmul"):
+            has_matmul = True
+        if inner.op.name in ("_softmax", "Tensor.softmax"):
+            has_softmax = True
+    return has_matmul and has_softmax
+
+
+def _classify_qkv_producers_structural(
+    *,
+    module: GraphModule,
+    node: GraphNode,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    q_actual = node.inputs[0]
+    k_actual = node.inputs[1]
+    v_actual = node.inputs[2]
+    q_linear = _find_linear_call_for_value_deep(module, q_actual, modules_by_name)
+    k_linear = _find_linear_call_for_value_deep(module, k_actual, modules_by_name)
+    v_linear = _find_linear_call_for_value_deep(module, v_actual, modules_by_name)
+    if q_linear and k_linear and v_linear:
+        ids = {q_linear.id, k_linear.id, v_linear.id}
+        if len(ids) < 2:
+            return
+        group = QKVGroup(
+            q_node_id=q_linear.id,
+            k_node_id=k_linear.id,
+            v_node_id=v_linear.id,
+            attention_node_id=node.id,
+        )
+        classification.qkv_groups.append(group)
+        for linear_node in [q_linear, k_linear, v_linear]:
+            if linear_node.id not in classification.node_types:
+                classification.node_types[linear_node.id] = VLLMLayerType.QKV_PARALLEL_LINEAR
 
 
 def _classify_attention_and_qkv(
@@ -294,6 +394,18 @@ def _classify_attention_and_qkv(
                 classification.node_types[node.id] = VLLMLayerType.ATTENTION
                 classification.attention_node_ids.add(node.id)
                 _classify_qkv_producers_from_intrinsic(
+                    module=module,
+                    node=node,
+                    modules_by_name=modules_by_name,
+                    classification=classification,
+                )
+            elif (
+                node.id not in classification.node_types
+                and _is_structural_attention_call(node, modules_by_name)
+            ):
+                classification.node_types[node.id] = VLLMLayerType.ATTENTION
+                classification.attention_node_ids.add(node.id)
+                _classify_qkv_producers_structural(
                     module=module,
                     node=node,
                     modules_by_name=modules_by_name,
@@ -436,17 +548,97 @@ def _find_linear_call_for_value(
     return None
 
 
+def _find_linear_call_for_value_deep(
+    module: GraphModule,
+    operand: GraphOperand,
+    modules_by_name: dict[str, GraphModule],
+    depth: int = 0,
+    visited: set[str] | None = None,
+) -> GraphNode | None:
+    if depth > 12:
+        return None
+    if visited is None:
+        visited = set()
+    name = _value_name(operand)
+    if name is None:
+        if isinstance(operand, GraphExpr):
+            for inp in operand.inputs:
+                result = _find_linear_call_for_value_deep(
+                    module, inp, modules_by_name, depth, visited
+                )
+                if result is not None:
+                    return result
+        return None
+    if name in visited:
+        return None
+    visited.add(name)
+    node = _resolve_value_to_node(module, operand)
+    if node is None:
+        return None
+    if _is_linear_call(node, modules_by_name):
+        return node
+    if node.op.name == "core.select" and len(node.inputs) >= 2:
+        out_idx: int | None = None
+        for i, out in enumerate(node.outputs):
+            if _value_name(out) == name:
+                out_idx = i
+                break
+        if out_idx is not None:
+            true_branch = node.inputs[1]
+            if (
+                isinstance(true_branch, GraphExpr)
+                and true_branch.op.name == "core.tuple"
+                and out_idx < len(true_branch.inputs)
+            ):
+                result = _find_linear_call_for_value_deep(
+                    module, true_branch.inputs[out_idx],
+                    modules_by_name, depth + 1, visited,
+                )
+                if result is not None:
+                    return result
+            if len(node.inputs) >= 3:
+                false_branch = node.inputs[2]
+                if isinstance(false_branch, GraphExpr):
+                    for inp in false_branch.inputs:
+                        result = _find_linear_call_for_value_deep(
+                            module, inp, modules_by_name, depth + 1, visited,
+                        )
+                        if result is not None:
+                            return result
+            return None
+    if node.op.name in modules_by_name and len(node.outputs) > 1:
+        out_idx: int | None = None
+        for i, out in enumerate(node.outputs):
+            if _value_name(out) == name:
+                out_idx = i
+                break
+        if out_idx is not None and out_idx < len(node.inputs):
+            result = _find_linear_call_for_value_deep(
+                module, node.inputs[out_idx],
+                modules_by_name, depth + 1, visited,
+            )
+            if result is not None:
+                return result
+    for inp in node.inputs:
+        result = _find_linear_call_for_value_deep(
+            module, inp, modules_by_name, depth + 1, visited
+        )
+        if result is not None:
+            return result
+    return None
+
+
 def _classify_ffn(
     program: GraphProgram,
     modules_by_name: dict[str, GraphModule],
     provenance: GraphProvenanceAnalysis,
     classification: VLLMLayerClassification,
 ) -> None:
-    _classify_swiglu_ffn(program, modules_by_name, classification)
+    _classify_gated_ffn(program, modules_by_name, classification)
     _classify_simple_ffn(program, modules_by_name, classification)
 
 
-def _classify_swiglu_ffn(
+def _classify_gated_ffn(
     program: GraphProgram,
     modules_by_name: dict[str, GraphModule],
     classification: VLLMLayerClassification,
@@ -454,16 +646,16 @@ def _classify_swiglu_ffn(
     for module in program.modules:
         nodes = list(module.nodes)
         for i, node in enumerate(nodes):
-            silu_output = _find_silu_followed_by_mul(module, node, nodes, i, modules_by_name)
-            if silu_output is None:
+            act_output = _find_activation_followed_by_mul(module, node, nodes, i, modules_by_name)
+            if act_output is None:
                 continue
-            silu_node, mul_node, mul_output = silu_output
-            gate_input = silu_node.inputs[0] if silu_node.inputs else None
+            act_node, mul_node, mul_output = act_output
+            gate_input = act_node.inputs[0] if act_node.inputs else None
             up_input = None
             if mul_node and len(mul_node.inputs) >= 2:
-                silu_name = _node_output_name(silu_node)
+                act_name = _node_output_name(act_node)
                 in0_name = _value_name(mul_node.inputs[0])
-                if in0_name == silu_name:
+                if in0_name == act_name:
                     up_input = mul_node.inputs[1]
                 else:
                     up_input = mul_node.inputs[0]
@@ -491,29 +683,31 @@ def _classify_swiglu_ffn(
                     classification.node_types[down_linear.id] = VLLMLayerType.ROW_PARALLEL_LINEAR
 
 
-def _find_silu_followed_by_mul(
+def _find_activation_followed_by_mul(
     module: GraphModule,
     node: GraphNode,
     nodes: list[GraphNode],
     index: int,
     modules_by_name: dict[str, GraphModule],
 ) -> tuple[GraphNode, GraphNode, str] | None:
-    if node.op.name != "_activations_silu" and not _is_activation_call(node, modules_by_name):
+    if node.op.name.startswith("_activations_"):
+        pass
+    elif not _is_activation_call(node, modules_by_name):
         return None
-    if _is_activation_call(node, modules_by_name):
+    else:
         mod = _called_module(node, modules_by_name)
-        if mod is None or not any(n.op.name == "_activations_silu" for n in mod.nodes):
+        if mod is None or not any(n.op.name.startswith("_activations_") for n in mod.nodes):
             return None
     if len(node.inputs) < 1:
         return None
-    silu_output = _node_output_name(node)
-    if silu_output is None:
+    act_output = _node_output_name(node)
+    if act_output is None:
         return None
     for j in range(index + 1, len(nodes)):
         if nodes[j].op.name in {"_mul", "core.binary.*"} and len(nodes[j].inputs) >= 2:
             in0_name = _value_name(nodes[j].inputs[0])
             in1_name = _value_name(nodes[j].inputs[1])
-            if in0_name == silu_output or in1_name == silu_output:
+            if in0_name == act_output or in1_name == act_output:
                 mul_output = _node_output_name(nodes[j])
                 if mul_output is None:
                     continue
@@ -530,8 +724,6 @@ def _classify_simple_ffn(
         nodes = list(module.nodes)
         for i, node in enumerate(nodes):
             if not _is_activation_call(node, modules_by_name):
-                continue
-            if node.op.name == "_activations_silu":
                 continue
             up_linear = None
             if node.inputs:
@@ -588,25 +780,52 @@ def _classify_lm_head(
     modules_by_name: dict[str, GraphModule],
     classification: VLLMLayerClassification,
 ) -> None:
-    main_module = next(
-        (m for m in program.modules if m.name == program.main_module), None
-    )
+    main_module = modules_by_name.get(program.main_module)
     if main_module is None:
         return
-    output_names = {
-        out.name for out in main_module.outputs
-        if isinstance(out, (GraphValueRef, GraphValue))
-    }
-    for node in reversed(main_module.nodes):
-        if not _is_linear_call(node, modules_by_name):
-            continue
-        if node.id in classification.node_types:
-            continue
-        node_output = _node_output_name(node)
-        if node_output and node_output in output_names:
-            classification.node_types[node.id] = VLLMLayerType.PARALLEL_LM_HEAD
-            classification.lm_head_node_id = node.id
-            return
+    all_output_names: set[str] = set()
+    for out in main_module.outputs:
+        if isinstance(out, (GraphValueRef, GraphValue)):
+            all_output_names.add(out.name)
+
+    def _reaches_output(name: str, visited: set[str] | None = None, depth: int = 0) -> bool:
+        if name in all_output_names:
+            return True
+        if depth > 8:
+            return False
+        if visited is None:
+            visited = set()
+        if name in visited:
+            return False
+        visited.add(name)
+        for module in program.modules:
+            for node in module.nodes:
+                for inp in node.inputs:
+                    found = False
+                    if _value_name(inp) == name:
+                        found = True
+                    elif isinstance(inp, GraphExpr):
+                        for sub in inp.inputs:
+                            if _value_name(sub) == name:
+                                found = True
+                                break
+                    if found:
+                        out_name = _node_output_name(node)
+                        if out_name and _reaches_output(out_name, visited, depth + 1):
+                            return True
+        return False
+
+    for module in program.modules:
+        for node in reversed(module.nodes):
+            if not _is_linear_call(node, modules_by_name):
+                continue
+            if node.id in classification.node_types:
+                continue
+            node_output = _node_output_name(node)
+            if node_output and _reaches_output(node_output):
+                classification.node_types[node.id] = VLLMLayerType.PARALLEL_LM_HEAD
+                classification.lm_head_node_id = node.id
+                return
 
 
 def _classify_norms(
@@ -614,13 +833,278 @@ def _classify_norms(
     modules_by_name: dict[str, GraphModule],
     classification: VLLMLayerClassification,
 ) -> None:
+    qkv_node_ids: set[str] = set()
+    for g in classification.qkv_groups:
+        qkv_node_ids.add(g.q_node_id)
+        qkv_node_ids.add(g.k_node_id)
     for module in program.modules:
+        if "." in module.name:
+            continue
         for node in module.nodes:
+            if node.op.name not in modules_by_name:
+                continue
             if _is_layernorm_call(node, modules_by_name):
                 classification.node_types[node.id] = VLLMLayerType.LAYERNORM
             elif _is_rmsnorm_call(node, modules_by_name):
                 classification.node_types[node.id] = VLLMLayerType.RMSNORM
                 classification.rmsnorm_node_ids.add(node.id)
+                if len(node.inputs) >= 1 and qkv_node_ids:
+                    src = _trace_back(module, node.inputs[0], qkv_node_ids)
+                    if src is not None:
+                        classification.qk_norm_node_ids.add(node.id)
+
+
+def _classify_repeated_modules(
+    program: GraphProgram,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    for module in program.modules:
+        if "__loop" not in module.name or "_step" not in module.name:
+            continue
+        loop_var_name: str | None = None
+        for inp in module.inputs:
+            name = _value_name(inp)
+            if name is None or name == "__scope":
+                continue
+            loop_var_name = name
+            break
+        if loop_var_name is None:
+            continue
+        for node in module.nodes:
+            if node.op.name not in modules_by_name:
+                continue
+            if "." in node.op.name:
+                continue
+            body_module = modules_by_name[node.op.name]
+            if not node.inputs:
+                continue
+            scope_inp = node.inputs[0]
+            scope_parts: tuple[str, ...] | None = None
+            if isinstance(scope_inp, GraphPath):
+                scope_parts = tuple(scope_inp.parts)
+            for j, inp in enumerate(node.inputs):
+                inp_name = _value_name(inp)
+                if inp_name != loop_var_name:
+                    continue
+                if j < len(body_module.inputs):
+                    body_param_name = _value_name(body_module.inputs[j])
+                    if body_param_name is not None:
+                        classification.repeated_module_names.add(node.op.name)
+                        classification.loop_index_param[node.op.name] = body_param_name
+                        if scope_parts is not None:
+                            classification.module_scope_parts[node.op.name] = scope_parts
+                    break
+
+
+def _classify_per_layer_called_modules(
+    program: GraphProgram,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    """Detect modules called from within repeated modules (e.g. gemma4_kv called from gemma4_e_block).
+
+    Such modules' parameterized nodes (linear, norm) are per-layer and should
+    be treated as ModuleList in the emitter.
+    """
+    if not classification.repeated_module_names:
+        return
+
+    existing = set(classification.repeated_module_names)
+    for repeated_name in list(existing):
+        repeated_mod = modules_by_name.get(repeated_name)
+        if repeated_mod is None:
+            continue
+        for node in repeated_mod.nodes:
+            for inp in node.inputs:
+                if isinstance(inp, GraphExpr):
+                    called_name = inp.op.name
+                    if called_name in modules_by_name and called_name not in existing:
+                        classification.repeated_module_names.add(called_name)
+                        parent_idx = classification.loop_index_param.get(repeated_name, "i")
+                        classification.loop_index_param[called_name] = parent_idx
+
+
+def _linear_path_leaf(node: GraphNode) -> str | None:
+    """Extract the leaf name (e.g. 'q_proj') from a linear call's path."""
+    for inp in node.inputs:
+        if isinstance(inp, GraphPath) and inp.parts:
+            for part in inp.parts:
+                if part in ("q_proj", "k_proj", "v_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"):
+                    return part
+    return None
+
+
+def _classify_qkv_by_path(
+    program: GraphProgram,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    """Detect QKV by linear path names when structural detection fails."""
+    if classification.qkv_groups:
+        return
+    if not classification.repeated_module_names:
+        return
+    repeated_mod_name = max(
+        classification.repeated_module_names,
+        key=lambda n: len(modules_by_name[n].nodes) if n in modules_by_name else 0,
+    )
+    repeated_mod = modules_by_name.get(repeated_mod_name)
+    if repeated_mod is None:
+        return
+
+    q_node = k_node = v_node = o_node = attn_node = None
+
+    for module in program.modules:
+        for node in module.nodes:
+            if _is_linear_call(node, modules_by_name):
+                leaf = _linear_path_leaf(node)
+                if leaf == "q_proj" and q_node is None:
+                    q_node = node
+                elif leaf == "k_proj" and k_node is None:
+                    k_node = node
+                elif leaf == "v_proj" and v_node is None:
+                    v_node = node
+                elif leaf == "o_proj" and o_node is None:
+                    o_node = node
+            elif (
+                _is_structural_attention_call(node, modules_by_name)
+                and attn_node is None
+            ):
+                attn_node = node
+
+    if q_node and k_node and v_node:
+        group = QKVGroup(
+            q_node_id=q_node.id,
+            k_node_id=k_node.id,
+            v_node_id=v_node.id,
+            attention_node_id=attn_node.id if attn_node else None,
+        )
+        classification.qkv_groups.append(group)
+        for linear_node in [q_node, k_node, v_node]:
+            if linear_node.id not in classification.node_types:
+                classification.node_types[linear_node.id] = (
+                    VLLMLayerType.QKV_PARALLEL_LINEAR
+                )
+        if attn_node:
+            classification.node_types[attn_node.id] = VLLMLayerType.ATTENTION
+            classification.attention_node_ids.add(attn_node.id)
+        if o_node:
+            classification.node_types[o_node.id] = VLLMLayerType.ROW_PARALLEL_LINEAR
+            classification.o_proj_node_ids.add(o_node.id)
+
+
+def _classify_per_layer_features(
+    program: GraphProgram,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    """Detect per-layer scalar, logit softcapping, and other features."""
+    if not classification.repeated_module_names:
+        return
+    repeated_mod_name = max(
+        classification.repeated_module_names,
+        key=lambda n: len(modules_by_name[n].nodes) if n in modules_by_name else 0,
+    )
+    repeated_mod = modules_by_name.get(repeated_mod_name)
+    if repeated_mod is None:
+        return
+
+    for node in repeated_mod.nodes:
+        if node.op.name == "Params.param":
+            classification.per_layer_scalar_node_id = node.id
+            break
+
+    main_module = modules_by_name.get(program.main_module)
+    if main_module is not None:
+        for node in main_module.nodes:
+            if node.op.name == "Activations.tanh":
+                tanh_input = node.inputs[0] if node.inputs else None
+                if isinstance(tanh_input, GraphExpr) and tanh_input.op.name == "core.binary./":
+                    for out_node in main_module.nodes:
+                        if (
+                            out_node.op.name == "core.binary.*"
+                            and len(out_node.inputs) >= 2
+                        ):
+                            left, right = out_node.inputs[0], out_node.inputs[1]
+                            left_name = _value_name(left)
+                            out_name = _node_output_name(node)
+                            if left_name and out_name and left_name == out_name:
+                                cap = _literal_value(right, None)
+                                if isinstance(cap, (int, float)):
+                                    classification.logit_softcap = float(cap)
+                                break
+
+    # Detect PLI (per-layer inputs) modules
+    _pli_leaf_names = {"per_layer_input_gate", "per_layer_projection",
+                       "per_layer_model_projection", "embed_tokens_per_layer",
+                       "per_layer_projection_norm", "post_per_layer_input_norm"}
+
+    def _check_pli_path(node, modules_by_name):
+        """Check node and its called module for PLI path leaves."""
+        for inp in node.inputs:
+            if isinstance(inp, GraphPath) and inp.parts:
+                for part in inp.parts:
+                    if part in _pli_leaf_names:
+                        return part
+        # Also check inside the called module's definition nodes
+        called_mod = modules_by_name.get(node.op.name)
+        if called_mod is not None:
+            for inner_node in called_mod.nodes:
+                for inp in inner_node.inputs:
+                    if isinstance(inp, GraphPath) and inp.parts:
+                        for part in inp.parts:
+                            if part in _pli_leaf_names:
+                                return part
+        return None
+
+    for module in program.modules:
+        for node in module.nodes:
+            matched_leaf = _check_pli_path(node, modules_by_name)
+            if matched_leaf is None:
+                continue
+            if _is_linear_call(node, modules_by_name):
+                if matched_leaf == "per_layer_input_gate":
+                    classification.pli_gate_node_id = node.id
+                elif matched_leaf == "per_layer_projection":
+                    if repeated_mod is not None and node.id.startswith(repeated_mod_name + ":"):
+                        classification.pli_proj_node_id = node.id
+                elif matched_leaf == "per_layer_model_projection":
+                    classification.pli_model_proj_node_id = node.id
+            if _is_rmsnorm_call(node, modules_by_name):
+                if matched_leaf == "post_per_layer_input_norm":
+                    classification.pli_norm_node_id = node.id
+                elif matched_leaf == "per_layer_projection_norm":
+                    classification.pli_proj_norm_node_id = node.id
+            if node.op.name == "NN.embedding" or node.op.name == "_embedding":
+                if matched_leaf == "embed_tokens_per_layer":
+                    classification.pli_embed_node_id = node.id
+
+
+def _classify_remaining_linears(
+    program: GraphProgram,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    """Classify unclassified linear calls as ColumnParallelLinear or RowParallelLinear.
+
+    Heuristic: if the path leaf suggests projecting back to hidden_size
+    (e.g. 'down_proj', 'per_layer_projection', 'o_proj'), classify as
+    RowParallelLinear; otherwise ColumnParallelLinear.
+    """
+    row_hints = ("down_proj", "o_proj", "per_layer_projection")
+    for module in program.modules:
+        for node in module.nodes:
+            if node.id in classification.node_types:
+                continue
+            if not _is_linear_call(node, modules_by_name):
+                continue
+            leaf = _linear_path_leaf(node)
+            if leaf and any(leaf.endswith(h) for h in row_hints):
+                classification.node_types[node.id] = VLLMLayerType.ROW_PARALLEL_LINEAR
+            else:
+                classification.node_types[node.id] = VLLMLayerType.COLUMN_PARALLEL_LINEAR
 
 
 def classify_graph_for_vllm(program: GraphProgram) -> VLLMLayerClassification:
@@ -628,11 +1112,16 @@ def classify_graph_for_vllm(program: GraphProgram) -> VLLMLayerClassification:
     provenance = infer_graph_provenance(program)
     classification = VLLMLayerClassification()
     _classify_embeddings(program, modules_by_name, classification)
+    _classify_repeated_modules(program, modules_by_name, classification)
+    _classify_per_layer_called_modules(program, modules_by_name, classification)
     _classify_attention_and_qkv(program, modules_by_name, provenance, classification)
+    _classify_qkv_by_path(program, modules_by_name, classification)
     _classify_ffn(program, modules_by_name, provenance, classification)
     _classify_output_projections(program, modules_by_name, classification)
     _classify_lm_head(program, modules_by_name, classification)
     _classify_norms(program, modules_by_name, classification)
+    _classify_remaining_linears(program, modules_by_name, classification)
+    _classify_per_layer_features(program, modules_by_name, classification)
     return classification
 
 
