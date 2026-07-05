@@ -66,8 +66,11 @@ class VLLMLayerClassification:
     loop_index_param: dict[str, str] = field(default_factory=dict)
     module_scope_parts: dict[str, tuple[str, ...]] = field(default_factory=dict)
     per_layer_scalar_node_id: str | None = None
+    per_layer_scalar_has_residual_add: bool = False
     logit_softcap: float | None = None
     o_proj_node_ids: set[str] = field(default_factory=set)
+    v_norm_node_ids: set[str] = field(default_factory=set)
+    has_k_eq_v: bool = False
     pli_gate_node_id: str | None = None
     pli_proj_node_id: str | None = None
     pli_norm_node_id: str | None = None
@@ -93,6 +96,8 @@ _TRIVIAL_TRANSFORM_OPS = frozenset({
     "Tensor.transpose",
     "Tensor.cast",
     "Tensor.expand",
+    "Attention.reshape_heads",
+    "Attention.flatten_heads",
 })
 
 
@@ -138,6 +143,31 @@ def _module_contains_primitive(
             if _module_contains_primitive(
                 callee, prim_name, modules_by_name, recursive=True
             ):
+                return True
+    return False
+
+
+_PARAM_PRIMITIVES = frozenset({
+    "_linear", "_rmsnorm", "_embedding", "_params_param",
+})
+
+
+def _module_has_params(
+    module: GraphModule,
+    modules_by_name: dict[str, GraphModule],
+    _visited: set[str] | None = None,
+) -> bool:
+    """Check if a module contains any parameterized nodes (recursively)."""
+    if _visited is None:
+        _visited = set()
+    if module.name in _visited:
+        return False
+    _visited.add(module.name)
+    for node in module.nodes:
+        if node.op.name in _PARAM_PRIMITIVES:
+            return True
+        if node.op.name in modules_by_name:
+            if _module_has_params(modules_by_name[node.op.name], modules_by_name, _visited):
                 return True
     return False
 
@@ -313,9 +343,9 @@ def _classify_embeddings(
         for node in module.nodes:
             if not _is_embedding_call(node, modules_by_name):
                 continue
-            if len(node.inputs) < 2:
+            if len(node.inputs) < 1:
                 continue
-            x_input = node.inputs[1]
+            x_input = node.inputs[0] if len(node.inputs) < 2 else node.inputs[1]
             x_name = _value_name(x_input)
             if x_name is not None and x_name in all_module_input_names:
                 classification.node_types[node.id] = VLLMLayerType.VOCAB_PARALLEL_EMBEDDING
@@ -837,6 +867,7 @@ def _classify_norms(
     for g in classification.qkv_groups:
         qkv_node_ids.add(g.q_node_id)
         qkv_node_ids.add(g.k_node_id)
+        qkv_node_ids.add(g.v_node_id)
     for module in program.modules:
         if "." in module.name:
             continue
@@ -848,8 +879,11 @@ def _classify_norms(
             elif _is_rmsnorm_call(node, modules_by_name):
                 classification.node_types[node.id] = VLLMLayerType.RMSNORM
                 classification.rmsnorm_node_ids.add(node.id)
-                if len(node.inputs) >= 1 and qkv_node_ids:
-                    src = _trace_back(module, node.inputs[0], qkv_node_ids)
+                if len(node.inputs) >= 2 and qkv_node_ids:
+                    data_inp = node.inputs[1] if isinstance(
+                        node.inputs[0], GraphPath
+                    ) else node.inputs[0]
+                    src = _trace_back(module, data_inp, qkv_node_ids)
                     if src is not None:
                         classification.qk_norm_node_ids.add(node.id)
 
@@ -871,6 +905,7 @@ def _classify_repeated_modules(
             break
         if loop_var_name is None:
             continue
+        found_called = False
         for node in module.nodes:
             if node.op.name not in modules_by_name:
                 continue
@@ -895,6 +930,12 @@ def _classify_repeated_modules(
                         if scope_parts is not None:
                             classification.module_scope_parts[node.op.name] = scope_parts
                     break
+            found_called = True
+        # If the block was inlined into the loop body (no called module found),
+        # treat the loop body module itself as the repeated module.
+        if not found_called:
+            classification.repeated_module_names.add(module.name)
+            classification.loop_index_param[module.name] = loop_var_name
 
 
 def _classify_per_layer_called_modules(
@@ -915,14 +956,33 @@ def _classify_per_layer_called_modules(
         repeated_mod = modules_by_name.get(repeated_name)
         if repeated_mod is None:
             continue
+        parent_scope = classification.module_scope_parts.get(repeated_name)
         for node in repeated_mod.nodes:
             for inp in node.inputs:
                 if isinstance(inp, GraphExpr):
                     called_name = inp.op.name
                     if called_name in modules_by_name and called_name not in existing:
+                        # Only add called modules that have parameterized nodes
+                        # (linear, norm, embedding). Skip utility modules like
+                        # Cache helpers that have no per-layer parameters.
+                        called_mod = modules_by_name[called_name]
+                        if not _module_has_params(called_mod, modules_by_name):
+                            continue
                         classification.repeated_module_names.add(called_name)
                         parent_idx = classification.loop_index_param.get(repeated_name, "i")
                         classification.loop_index_param[called_name] = parent_idx
+                        # Propagate scope_parts: inherit parent's scope + sub-path from call's scope input
+                        if called_name not in classification.module_scope_parts:
+                            if inp.inputs and isinstance(inp.inputs[0], GraphPath):
+                                call_scope = tuple(inp.inputs[0].parts)
+                                if call_scope and call_scope[0] == "{__scope}":
+                                    extra = call_scope[1:]
+                                else:
+                                    extra = call_scope
+                                if parent_scope is not None:
+                                    classification.module_scope_parts[called_name] = tuple(parent_scope) + extra
+                                else:
+                                    classification.module_scope_parts[called_name] = call_scope
 
 
 def _linear_path_leaf(node: GraphNode) -> str | None:
@@ -973,6 +1033,11 @@ def _classify_qkv_by_path(
                 and attn_node is None
             ):
                 attn_node = node
+            elif (
+                _is_sdpa_intrinsic_node(node)
+                and attn_node is None
+            ):
+                attn_node = node
 
     if q_node and k_node and v_node:
         group = QKVGroup(
@@ -1012,8 +1077,12 @@ def _classify_per_layer_features(
         return
 
     for node in repeated_mod.nodes:
-        if node.op.name == "Params.param":
+        if node.op.name in ("Params.param", "Params.param_scale"):
             classification.per_layer_scalar_node_id = node.id
+            if node.op.name == "Params.param_scale" and node.inputs:
+                inp0 = node.inputs[0]
+                if hasattr(inp0, "op") and inp0.op.name == "core.binary.+":
+                    classification.per_layer_scalar_has_residual_add = True
             break
 
     main_module = modules_by_name.get(program.main_module)
@@ -1082,6 +1151,45 @@ def _classify_per_layer_features(
                     classification.pli_embed_node_id = node.id
 
 
+def _classify_v_norms(
+    program: GraphProgram,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    """Detect v_norms: norms that produce the 'v' output of a module with (k, v) outputs.
+
+    Also detect k_eq_v: a KV module that has only one linear (k_proj) and no v_proj,
+    meaning k and v come from the same projection.
+    """
+    for module in program.modules:
+        out_names = [_value_name(o) for o in module.outputs]
+        if "k" not in out_names or "v" not in out_names:
+            continue
+        v_out_idx = out_names.index("v")
+        k_out_idx = out_names.index("k")
+        v_out_name = _value_name(module.outputs[v_out_idx])
+        k_out_name = _value_name(module.outputs[k_out_idx])
+        if v_out_name is None or k_out_name is None:
+            continue
+
+        linear_count = 0
+        has_v_proj = False
+        for node in module.nodes:
+            if _is_linear_call(node, modules_by_name):
+                linear_count += 1
+                leaf = _linear_path_leaf(node)
+                if leaf == "v_proj":
+                    has_v_proj = True
+            if node.id in classification.rmsnorm_node_ids:
+                node_out_name = _node_output_name(node)
+                if node_out_name == v_out_name and node.id in classification.qk_norm_node_ids:
+                    classification.qk_norm_node_ids.discard(node.id)
+                    classification.v_norm_node_ids.add(node.id)
+
+        if linear_count == 1 and not has_v_proj:
+            classification.has_k_eq_v = True
+
+
 def _classify_remaining_linears(
     program: GraphProgram,
     modules_by_name: dict[str, GraphModule],
@@ -1107,6 +1215,42 @@ def _classify_remaining_linears(
                 classification.node_types[node.id] = VLLMLayerType.COLUMN_PARALLEL_LINEAR
 
 
+def _classify_qkv_deep_fallback(
+    program: GraphProgram,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    """Fallback: detect QKV by deep-tracing from attention intrinsics.
+
+    Used when structural and path-based detection both fail (e.g. when
+    q/k/v projections are separate and go through reshape/permute before
+    reaching the attention node).
+    """
+    for module in program.modules:
+        for node in module.nodes:
+            if not _is_sdpa_intrinsic_node(node):
+                continue
+            if len(node.inputs) < 3:
+                continue
+            q_linear = _find_linear_call_for_value_deep(module, node.inputs[0], modules_by_name)
+            k_linear = _find_linear_call_for_value_deep(module, node.inputs[1], modules_by_name)
+            v_linear = _find_linear_call_for_value_deep(module, node.inputs[2], modules_by_name)
+            if q_linear and k_linear and v_linear:
+                group = QKVGroup(
+                    q_node_id=q_linear.id,
+                    k_node_id=k_linear.id,
+                    v_node_id=v_linear.id,
+                    attention_node_id=node.id,
+                )
+                classification.qkv_groups.append(group)
+                for linear_node in [q_linear, k_linear, v_linear]:
+                    if linear_node.id not in classification.node_types:
+                        classification.node_types[linear_node.id] = VLLMLayerType.QKV_PARALLEL_LINEAR
+                classification.node_types[node.id] = VLLMLayerType.ATTENTION
+                classification.attention_node_ids.add(node.id)
+                return
+
+
 def classify_graph_for_vllm(program: GraphProgram) -> VLLMLayerClassification:
     modules_by_name = {module.name: module for module in program.modules}
     provenance = infer_graph_provenance(program)
@@ -1116,12 +1260,15 @@ def classify_graph_for_vllm(program: GraphProgram) -> VLLMLayerClassification:
     _classify_per_layer_called_modules(program, modules_by_name, classification)
     _classify_attention_and_qkv(program, modules_by_name, provenance, classification)
     _classify_qkv_by_path(program, modules_by_name, classification)
+    if not classification.qkv_groups:
+        _classify_qkv_deep_fallback(program, modules_by_name, classification)
     _classify_ffn(program, modules_by_name, provenance, classification)
     _classify_output_projections(program, modules_by_name, classification)
     _classify_lm_head(program, modules_by_name, classification)
     _classify_norms(program, modules_by_name, classification)
     _classify_remaining_linears(program, modules_by_name, classification)
     _classify_per_layer_features(program, modules_by_name, classification)
+    _classify_v_norms(program, modules_by_name, classification)
     return classification
 
 
