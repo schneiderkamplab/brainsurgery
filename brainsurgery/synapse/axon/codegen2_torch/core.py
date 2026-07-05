@@ -2441,6 +2441,12 @@ class Codegen2GraphModel(nn.Module):
             return True
         if primitive == "matmul":
             left, right = self._align_pair(args[0], args[1], prefer="right")
+            if (
+                torch.is_tensor(left) and torch.is_tensor(right)
+                and left.is_floating_point() and right.is_floating_point()
+                and left.dtype != right.dtype
+            ):
+                left = left.to(dtype=right.dtype)
             out(torch.matmul(left, right))
             return True
         if primitive == "softmax":
@@ -5805,9 +5811,9 @@ class _DirectTorchEmitter:
             "unsqueeze": lambda: f"torch.unsqueeze({args[0]}, {int_arg(1)})",
             "repeat": lambda: f"({args[0]} if {int_arg(1)} == 1 else torch.repeat_interleave({args[0]}, repeats={int_arg(1)}, dim=({int_arg(2)} if {int_arg(2)} >= 0 else {int_arg(2)} + {args[0]}.dim())))",
             "matmul": lambda: (
-                f"(lambda _a, _b: torch.matmul(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
+                f"(lambda _a, _b: torch.matmul(_a.to(dtype=_b.dtype) if _a.is_floating_point() and _b.is_floating_point() and _a.dtype != _b.dtype else _a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
                 if self.align_devices
-                else f"torch.matmul({args[0]}, {args[1]})"
+                else f"(lambda _a, _b: torch.matmul(_a.to(dtype=_b.dtype) if _a.is_floating_point() and _b.is_floating_point() and _a.dtype != _b.dtype else _a, _b))({args[0]}, {args[1]})"
             ),
             "softmax": lambda: f"F.softmax({args[0]}, dim={int_arg(1, '-1')})",
             "where": lambda: (
