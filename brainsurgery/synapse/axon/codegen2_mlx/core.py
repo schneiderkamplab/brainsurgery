@@ -740,6 +740,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 12, "return finished is not None and bool(finished.min().item())")
         if is_cached_decoder:
             add(lines, 8, "out = input_ids")
+            add(lines, 8, "current = out")
             add(lines, 8, "limit = _generation_limit(out)")
             add(lines, 8, "eos, pad, finished = _eos_state(out.shape[0])")
             add(lines, 8, f"cache = kwargs.pop({cache_name!r}, None)")
@@ -757,7 +758,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                 add(lines, 8, "mask_store[:, :int(out.shape[1])] = attention_mask")
                 add(lines, 8, "mask_len = int(out.shape[1])")
             add(lines, 8, "for step in range(limit):")
-            add(lines, 12, "step_input = out[:, -1:] if cache is not None else out")
+            add(lines, 12, "step_input = current[:, -1:] if cache is not None else current")
             add(lines, 12, "forward_kwargs = dict(kwargs)")
             add(lines, 12, f"forward_kwargs[{cache_name!r}] = cache")
             if use_cache_name is not None:
@@ -773,6 +774,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             add(lines, 12, "next_id = _next_id(_logits(result))")
             add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
             add(lines, 12, "generated.append(next_id)")
+            add(lines, 12, "current = next_id")
             if attention_name is not None:
                 add(lines, 12, "mask_store[:, mask_len:mask_len + 1] = _ones_like_ids(next_id)")
                 add(lines, 12, "mask_len += 1")
