@@ -2959,8 +2959,27 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
 
 
 def _sync_device_output(value: Any) -> None:
+    """Force evaluation of lazy arrays and sync the device.
+
+    Handles MLX (``mx.eval``), JAX (``block_until_ready``), and torch
+    (``cuda/mps.synchronize``).  MLX operations are lazy: ``mx.eval(mx.array(0))``
+    does NOT evaluate the model output — we must explicitly eval the returned array.
+    """
+    try:
+        import mlx.core as mx
+        if isinstance(value, mx.array):
+            mx.eval(value)
+            return
+    except ImportError:
+        pass
     if hasattr(value, "block_until_ready"):
         value.block_until_ready()
+        return
+    if torch.is_tensor(value):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.synchronize()
         return
     if isinstance(value, dict):
         for item in value.values():
@@ -2985,6 +3004,8 @@ def _time_generate_repeated(
     def _sync() -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.synchronize()
         try:
             import mlx.core as mx
             mx.eval(mx.array(0))
@@ -2994,11 +3015,10 @@ def _time_generate_repeated(
     with timing(message=label):
         warmup_samples: list[float] = []
         for _ in range(warmup):
-            _sync_cuda()
+            _sync()
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
-            _sync_cuda()
             warmup_samples.append(time.perf_counter() - t0)
         samples: list[float] = []
         for _ in range(repeat):
@@ -3006,7 +3026,6 @@ def _time_generate_repeated(
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
-            _sync_cuda()
             samples.append(time.perf_counter() - t0)
     return out, sum(samples) / max(1, len(samples)), samples, warmup_samples
 
@@ -3021,9 +3040,12 @@ def _time_forward_repeated(
     warmup = max(0, int(warmup))
     repeat = max(1, int(repeat))
     out: Any = None
+
     def _sync() -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.synchronize()
         try:
             import mlx.core as mx
             mx.eval(mx.array(0))
@@ -3033,11 +3055,10 @@ def _time_forward_repeated(
     with timing(message=label):
         warmup_samples: list[float] = []
         for _ in range(warmup):
-            _sync_cuda()
+            _sync()
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
-            _sync_cuda()
             warmup_samples.append(time.perf_counter() - t0)
         samples: list[float] = []
         for _ in range(repeat):
@@ -3045,7 +3066,6 @@ def _time_forward_repeated(
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
-            _sync_cuda()
             samples.append(time.perf_counter() - t0)
     return out, sum(samples) / max(1, len(samples)), samples, warmup_samples
 

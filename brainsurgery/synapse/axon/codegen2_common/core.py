@@ -28,10 +28,10 @@ def path_parts(value: Any) -> tuple[bool, str]:
 
 
 def compose_path(base: Any, leaf: Any) -> str:
-    base_key = "" if base is None else str(base).strip().lstrip("@")
     leaf_text = "" if leaf is None else str(leaf).strip()
     if leaf_text.startswith("@@"):
         return leaf_text.lstrip("@")
+    base_key = "" if base is None else str(base).strip().lstrip("@")
     leaf_key = leaf_text.lstrip("@")
     if not base_key:
         return leaf_key
