@@ -3,7 +3,7 @@
 
 import Activations (gelu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (bidirectional_mask_for_input)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
 import Positions (position_ids)
 import Config
 import NN
@@ -33,8 +33,9 @@ electra_block x keep = do
   y <- NN.layernorm@output.LayerNorm y eps=EPS
   return y
 
-electra :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+electra :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
 electra input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
   pos_ids <- position_ids input_ids
   keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
   tok_type_ids <- input_ids - input_ids

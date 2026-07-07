@@ -69,16 +69,102 @@ class _WorkerSpec:
 
 
 _SUMMARY_FIELDNAMES = [
+    "backend",
     "axon",
     "checkpoint",
     "model_dir",
     "fallback",
+    "benchmark_path",
+    "hf_time",
+    "axon_time",
+    "speed_ratio_axon_over_hf",
+    "forward_warmup",
+    "forward_repeat",
+    "generate_warmup",
+    "generate_repeat",
+    "hf_sample_count",
+    "axon_sample_count",
+    "hf_warmup_sample_count",
+    "axon_warmup_sample_count",
+    "axon_profile_top_region",
+    "axon_profile_top_seconds",
+    "axon_profile_top_calls",
     "masked_top1_eq",
     "masked_max_abs_diff",
     "masked_max_rel_diff",
 ]
 
 _MAX_BENCHMARK_WORKER_RETRIES = 1
+
+_VALID_AXON_BENCHMARK_BACKENDS = {
+    "codegen2-torch",
+    "codegen2-tinygrad",
+    "codegen2-mlx",
+    "codegen2-jax",
+    "codegen2-triton",
+    "runtime2-torch",
+    "pipeline2-torch",
+}
+
+
+def _normalize_axon_backend_token(value: str) -> str:
+    token = str(value).strip().lower()
+    if token == "single":
+        token = "codegen2-torch"
+    if token not in _VALID_AXON_BENCHMARK_BACKENDS:
+        valid = ", ".join(sorted(_VALID_AXON_BENCHMARK_BACKENDS))
+        raise ValueError(f"axon_backend must be one of: {valid}")
+    return token
+
+
+def _normalize_axon_backend_sequence(
+    *,
+    axon_backend: str,
+    axon_backends: str | Sequence[str] | None,
+) -> tuple[str, ...]:
+    if axon_backends is None:
+        return (_normalize_axon_backend_token(axon_backend),)
+    raw_items: list[str] = []
+    if isinstance(axon_backends, str):
+        raw_items.extend(part.strip() for part in axon_backends.split(","))
+    else:
+        for item in axon_backends:
+            raw_items.extend(part.strip() for part in str(item).split(","))
+    backends = tuple(_normalize_axon_backend_token(item) for item in raw_items if item)
+    if not backends:
+        raise ValueError("axon_backends must contain at least one backend")
+    if "pipeline2-torch" in backends and len(backends) > 1:
+        raise ValueError("--axon-backends cannot mix pipeline2-torch with other backends")
+    return backends
+
+
+def _normalize_backend_builtins_overlays(
+    values: str | Sequence[str] | None,
+) -> dict[str, tuple[str, ...]]:
+    mapping: dict[str, tuple[str, ...]] = {}
+    if values is None:
+        return mapping
+    raw_values = [values] if isinstance(values, str) else list(values)
+    for raw in raw_values:
+        text = str(raw).strip()
+        if not text:
+            continue
+        if ":" not in text:
+            raise ValueError(
+                "--backend-builtins-overlay entries must have the form BACKEND:OVERLAY[,OVERLAY...]"
+            )
+        backend_text, overlays_text = text.split(":", 1)
+        backend = _normalize_axon_backend_token(backend_text)
+        overlays = tuple(part.strip().strip("/") for part in overlays_text.split(",") if part.strip())
+        if not overlays:
+            raise ValueError(
+                "--backend-builtins-overlay entries must specify at least one overlay"
+            )
+        if backend in mapping:
+            mapping[backend] = (*mapping[backend], *overlays)
+        else:
+            mapping[backend] = overlays
+    return mapping
 
 
 def _cuda_visible_tokens_for_indices(indices: Sequence[int]) -> list[str]:
@@ -216,7 +302,7 @@ def _set_jax_worker_env_if_needed(common_kwargs: dict[str, Any]) -> dict[str, st
         "JAX_DEFAULT_MATMUL_PRECISION": os.environ.get("JAX_DEFAULT_MATMUL_PRECISION"),
     }
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "true")
-    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.26")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.18")
     os.environ.setdefault("JAX_DEFAULT_MATMUL_PRECISION", "highest")
     return previous
 
@@ -484,23 +570,86 @@ def _summary_row_from_result(row: dict[str, Any]) -> dict[str, object]:
         masked_top1_eq_text = str(masked_top1_eq)
     else:
         masked_top1_eq_text = str(masked_top1_eq)
+    def _format_optional_float(value: object) -> str:
+        if value is None:
+            return ""
+        try:
+            return f"{float(cast(Any, value)):.6g}"
+        except Exception:
+            return str(value)
+
+    def _sample_count(*keys: str) -> int:
+        fallback = 0
+        for key in keys:
+            value = row.get(key)
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                count = len(value)
+                if count:
+                    return count
+                fallback = count
+        return fallback
+
+    profile_rows = row.get("axon_profile")
+    profile_top = None
+    if isinstance(profile_rows, Sequence) and profile_rows and isinstance(profile_rows[0], dict):
+        profile_top = cast(dict[str, Any], profile_rows[0])
+
     return {
+        "backend": str(row.get("axon_backend", row.get("backend", ""))),
         "axon": str(row["axon_file"]),
         "checkpoint": str(row["checkpoint_id"]),
         "model_dir": str(row["weights"]),
         "fallback": str(row.get("fallback", "none")),
+        "benchmark_path": str(row.get("benchmark_path", "")),
+        "hf_time": _format_optional_float(row.get("hf_time")),
+        "axon_time": _format_optional_float(row.get("axon_time")),
+        "speed_ratio_axon_over_hf": _format_optional_float(row.get("speed_ratio_axon_over_hf")),
+        "forward_warmup": row.get("forward_warmup", ""),
+        "forward_repeat": row.get("forward_repeat", ""),
+        "generate_warmup": row.get("generate_warmup", ""),
+        "generate_repeat": row.get("generate_repeat", ""),
+        "hf_sample_count": _sample_count("hf_forward_samples", "hf_generate_samples"),
+        "axon_sample_count": _sample_count("axon_forward_samples", "axon_generate_samples"),
+        "hf_warmup_sample_count": _sample_count(
+            "hf_forward_warmup_samples", "hf_generate_warmup_samples"
+        ),
+        "axon_warmup_sample_count": _sample_count(
+            "axon_forward_warmup_samples", "axon_generate_warmup_samples"
+        ),
+        "axon_profile_top_region": "" if profile_top is None else str(profile_top.get("name", "")),
+        "axon_profile_top_seconds": "" if profile_top is None else _format_optional_float(profile_top.get("seconds")),
+        "axon_profile_top_calls": "" if profile_top is None else str(profile_top.get("count", "")),
         "masked_top1_eq": masked_top1_eq_text,
         "masked_max_abs_diff": _format_metric_value(row.get("masked_max_diff")),
         "masked_max_rel_diff": _format_metric_value(row.get("masked_max_rel_diff")),
     }
 
 
-def _summary_row_from_pair(pair: _BenchmarkPair, *, fallback: str) -> dict[str, object]:
+def _summary_row_from_pair(
+    pair: _BenchmarkPair,
+    *,
+    fallback: str,
+    axon_backend: str = "",
+) -> dict[str, object]:
     return {
+        "backend": axon_backend,
         "axon": str(pair.axon_file),
         "checkpoint": pair.checkpoint_id,
         "model_dir": str(pair.model_dir),
         "fallback": fallback,
+        "benchmark_path": "",
+        "hf_time": "",
+        "axon_time": "",
+        "speed_ratio_axon_over_hf": "",
+        "forward_warmup": "",
+        "forward_repeat": "",
+        "generate_warmup": "",
+        "generate_repeat": "",
+        "hf_sample_count": "",
+        "axon_sample_count": "",
+        "axon_profile_top_region": "",
+        "axon_profile_top_seconds": "",
+        "axon_profile_top_calls": "",
         "masked_top1_eq": fallback,
         "masked_max_abs_diff": fallback,
         "masked_max_rel_diff": fallback,
@@ -515,12 +664,29 @@ def _sanitize_benchmark_result(row: dict[str, Any]) -> dict[str, Any]:
         "hf_model_dir": row["hf_model_dir"],
     }
     for key in (
+        "axon_backend",
         "fallback",
         "hf_device",
         "axon_device",
         "hf_time",
         "axon_time",
+        "hf_forward_samples",
+        "axon_forward_samples",
+        "hf_forward_warmup_samples",
+        "axon_forward_warmup_samples",
+        "forward_warmup",
+        "forward_repeat",
+        "hf_generate_samples",
+        "axon_generate_samples",
+        "hf_generate_warmup_samples",
+        "axon_generate_warmup_samples",
+        "generate_warmup",
+        "generate_repeat",
         "speed_ratio_axon_over_hf",
+        "benchmark_path",
+        "model_task",
+        "benchmark_mode",
+        "axon_profile",
         "mean_diff",
         "max_diff",
         "last_max_diff",
@@ -547,6 +713,7 @@ def _error_result_for_pair(
     err: BaseException | _BenchmarkWorkerError,
     *,
     repo_root: Path,
+    axon_backend: str = "",
 ) -> dict[str, Any]:
     model_dir = repo_root / "models" / pair.checkpoint_id
     if isinstance(err, _BenchmarkWorkerError):
@@ -554,6 +721,7 @@ def _error_result_for_pair(
     else:
         error_text = f"ERROR: {type(err).__name__}: {err}"
     return {
+        "axon_backend": axon_backend,
         "axon_file": pair.axon_file,
         "checkpoint_id": pair.checkpoint_id,
         "weights": model_dir,
@@ -593,27 +761,86 @@ def _worker_result_path(log_path: Path | None) -> Path | None:
     return log_path.with_suffix(".result.json")
 
 
-def _write_worker_result_file(log_path: Path | None, result: dict[str, Any]) -> None:
+def _make_json_serializable(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _make_json_serializable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_make_json_serializable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_make_json_serializable(item) for item in value]
+    return value
+
+
+def _restore_result_paths(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("axon_file", "weights", "hf_model_dir"):
+        if key in row:
+            row[key] = Path(row[key])
+    return row
+
+
+def _write_worker_result_file(log_path: Path | None, result: Any) -> None:
     result_path = _worker_result_path(log_path)
     if result_path is None:
         return
-    serializable = {key: str(value) if isinstance(value, Path) else value for key, value in result.items()}
+    serializable = _make_json_serializable(result)
     tmp_path = result_path.with_suffix(result_path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as handle:
         json.dump(serializable, handle, sort_keys=True)
     tmp_path.replace(result_path)
 
 
-def _read_worker_result_file(log_path: Path | None) -> dict[str, Any] | None:
+def _read_worker_result_file(log_path: Path | None) -> Any | None:
     result_path = _worker_result_path(log_path)
     if result_path is None or not result_path.exists():
         return None
     with result_path.open("r", encoding="utf-8") as handle:
         row = json.load(handle)
-    for key in ("axon_file", "weights", "hf_model_dir"):
-        if key in row:
-            row[key] = Path(row[key])
-    return cast(dict[str, Any], row)
+    if isinstance(row, list):
+        return [_restore_result_paths(cast(dict[str, Any], item)) for item in row]
+    return _restore_result_paths(cast(dict[str, Any], row))
+
+
+def _read_worker_results_file(log_path: Path | None) -> list[dict[str, Any]] | None:
+    rows = _read_worker_result_file(log_path)
+    if rows is None:
+        return None
+    if isinstance(rows, list):
+        return cast(list[dict[str, Any]], rows)
+    return [cast(dict[str, Any], rows)]
+
+
+def _backend_kwargs(common_kwargs: dict[str, Any], axon_backend: str) -> dict[str, Any]:
+    backend_kwargs = dict(common_kwargs)
+    backend_kwargs.pop("axon_backends", None)
+    backend_overlay_map = cast(
+        dict[str, tuple[str, ...]],
+        backend_kwargs.pop("backend_builtins_overlays", {}),
+    )
+    base_overlays = tuple(str(item) for item in (backend_kwargs.get("builtins_overlays") or ()))
+    backend_overlays = backend_overlay_map.get(axon_backend, ())
+    backend_kwargs["builtins_overlays"] = (*base_overlays, *backend_overlays)
+    backend_kwargs["axon_backend"] = axon_backend
+    return backend_kwargs
+
+
+def _backend_sequence(common_kwargs: dict[str, Any]) -> tuple[str, ...]:
+    raw = common_kwargs.get("axon_backends")
+    if raw is None:
+        return (str(common_kwargs["axon_backend"]),)
+    return tuple(str(item) for item in raw)
+
+
+def _log_result_summary(result: dict[str, Any]) -> None:
+    print(f"result.backend={result.get('axon_backend', '')}")
+    print(f"result.axon={Path(result['axon_file']).name}")
+    print(f"result.checkpoint={result['checkpoint_id']}")
+    print(f"result.model_dir={result['weights']}")
+    print(f"result.fallback={result.get('fallback', 'none')}")
+    print(f"result.masked_top1_eq={result.get('masked_top1_eq')}")
+    print(f"result.masked_max_abs_diff={result.get('masked_max_diff')}")
+    print(f"result.masked_max_rel_diff={result.get('masked_max_rel_diff')}")
 
 
 def render_axon_benchmark_csv(*, csv_path: Path, table_format: str = "markdown") -> str:
@@ -698,6 +925,7 @@ def _run_benchmark_pair(
     optimize_ast: bool,
     optimize_graph: bool,
     graph_backend_intrinsics: str | None,
+    builtins_overlays: tuple[str, ...] | list[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
@@ -750,6 +978,7 @@ def _run_benchmark_pair(
         optimize_ast=optimize_ast,
         optimize_graph=optimize_graph,
         graph_backend_intrinsics=graph_backend_intrinsics,
+        builtins_overlays=builtins_overlays,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
         oom_cpu_fallback=oom_cpu_fallback,
@@ -766,6 +995,7 @@ def _run_benchmark_pair(
     enriched["checkpoint_id"] = pair.checkpoint_id
     enriched["weights"] = model_dir
     enriched["hf_model_dir"] = model_dir
+    enriched["axon_backend"] = axon_backend
     return _sanitize_benchmark_result(enriched)
 
 
@@ -789,77 +1019,92 @@ def _run_benchmark_jobs_serial(
         else device
     )
     parent_logger.log(
-        f"run_start total_pairs={len(pairs)} devices={[device_label]} max_concurrent=1"
+        f"run_start total_pairs={len(pairs)} total_rows={len(pairs) * len(_backend_sequence(common_kwargs))} "
+        f"backends={list(_backend_sequence(common_kwargs))} devices={[device_label]} max_concurrent=1"
     )
-    progress = tqdm(total=len(pairs), desc="synapse axon-benchmark", unit="pair")
+    progress = tqdm(
+        total=len(pairs) * len(_backend_sequence(common_kwargs)),
+        desc="synapse axon-benchmark",
+        unit="row",
+    )
     previous_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     if worker_cuda_visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = worker_cuda_visible_devices
-    previous_jax_env = _set_jax_worker_env_if_needed(common_kwargs)
     try:
         for pair_index, pair in enumerate(pairs):
-            log_path = worker_log_path(
-                log_dir,
-                axon_name=pair.axon_file.stem.replace(" ", "_"),
-                model_name=pair.model_dir.name.replace(" ", "_"),
-                pid=os.getpid(),
-            )
-            parent_logger.log(
-                "child_start "
-                f"pair_index={pair_index} pid={os.getpid()} device={device} "
-                f"axon={pair.axon_file.name} checkpoint={pair.checkpoint_id} model_dir={pair.model_dir} "
-                f"log_path={worker_log_display_path(log_dir, axon_name=pair.axon_file.stem.replace(' ', '_'), model_name=pair.model_dir.name.replace(' ', '_'), pid=os.getpid())}"
-            )
-            file_handle: io.TextIOWrapper | None = None
-            tee_stdout: Any = sys.stdout
-            tee_stderr: Any = sys.stderr
-            try:
-                if log_path is not None:
-                    log_path.parent.mkdir(parents=True, exist_ok=True)
-                    file_handle = log_path.open("w", encoding="utf-8", buffering=1)
-                    print(f"log_path={log_path.name}", file=file_handle)
-                    tee_stdout = TeeWriter(sys.stdout, LogFileWriter(file_handle))
-                    tee_stderr = TeeWriter(sys.stderr, LogFileWriter(file_handle))
-                with contextlib.redirect_stdout(tee_stdout), contextlib.redirect_stderr(tee_stderr):
-                    if worker_cuda_visible_devices is not None:
-                        print(f"worker.CUDA_VISIBLE_DEVICES={worker_cuda_visible_devices}")
-                    try:
-                        result = _run_benchmark_pair(pair, device=device, **common_kwargs)
-                    except Exception as exc:
-                        if debug_errors:
-                            print(
-                                "Benchmark pair failed:",
-                                f"axon={pair.axon_file}",
-                                f"checkpoint={pair.checkpoint_id}",
-                            )
-                            print(traceback.format_exc())
-                        result = _error_result_for_pair(
-                            pair, exc, repo_root=cast(Path, common_kwargs["repo_root"])
-                        )
-                    print(f"result.axon={pair.axon_file.name}")
-                    print(f"result.checkpoint={pair.checkpoint_id}")
-                    print(f"result.model_dir={result['weights']}")
-                    print(f"result.fallback={result.get('fallback', 'none')}")
-                    print(f"result.masked_top1_eq={result.get('masked_top1_eq')}")
-                    print(f"result.masked_max_abs_diff={result.get('masked_max_diff')}")
-                    print(f"result.masked_max_rel_diff={result.get('masked_max_rel_diff')}")
-                results.append(result)
-                if stream_csv is not None:
-                    _append_stream_csv_row(stream_csv, _summary_row_from_result(result))
-                parent_logger.log(
-                    "child_finish "
-                    f"pair_index={pair_index} pid={os.getpid()} status=ok "
-                    f"masked_top1_eq={result.get('masked_top1_eq')} "
-                    f"masked_max_abs_diff={result.get('masked_max_diff')} "
-                    f"masked_max_rel_diff={result.get('masked_max_rel_diff')}"
+            for axon_backend in _backend_sequence(common_kwargs):
+                axon_log_name = f"{pair.axon_file.stem.replace(' ', '_')}__{axon_backend}"
+                model_log_name = pair.model_dir.name.replace(" ", "_")
+                log_path = worker_log_path(
+                    log_dir,
+                    axon_name=axon_log_name,
+                    model_name=model_log_name,
+                    pid=os.getpid(),
                 )
-            finally:
-                if file_handle is not None:
-                    file_handle.close()
-            progress.update(1)
+                display_log_path = worker_log_display_path(
+                    log_dir,
+                    axon_name=axon_log_name,
+                    model_name=model_log_name,
+                    pid=os.getpid(),
+                )
+                parent_logger.log(
+                    "child_start "
+                    f"pair_index={pair_index} backend={axon_backend} pid={os.getpid()} device={device} "
+                    f"axon={pair.axon_file.name} checkpoint={pair.checkpoint_id} model_dir={pair.model_dir} "
+                    f"log_path={display_log_path}"
+                )
+                file_handle: io.TextIOWrapper | None = None
+                tee_stdout: Any = sys.stdout
+                tee_stderr: Any = sys.stderr
+                try:
+                    if log_path is not None:
+                        log_path.parent.mkdir(parents=True, exist_ok=True)
+                        file_handle = log_path.open("w", encoding="utf-8", buffering=1)
+                        print(f"log_path={log_path.name}", file=file_handle)
+                        tee_stdout = TeeWriter(sys.stdout, LogFileWriter(file_handle))
+                        tee_stderr = TeeWriter(sys.stderr, LogFileWriter(file_handle))
+                    backend_kwargs = _backend_kwargs(common_kwargs, axon_backend)
+                    previous_jax_env = _set_jax_worker_env_if_needed(backend_kwargs)
+                    try:
+                        with contextlib.redirect_stdout(tee_stdout), contextlib.redirect_stderr(tee_stderr):
+                            if worker_cuda_visible_devices is not None:
+                                print(f"worker.CUDA_VISIBLE_DEVICES={worker_cuda_visible_devices}")
+                            try:
+                                result = _run_benchmark_pair(pair, device=device, **backend_kwargs)
+                            except Exception as exc:
+                                if debug_errors:
+                                    print(
+                                        "Benchmark pair failed:",
+                                        f"backend={axon_backend}",
+                                        f"axon={pair.axon_file}",
+                                        f"checkpoint={pair.checkpoint_id}",
+                                    )
+                                    print(traceback.format_exc())
+                                result = _error_result_for_pair(
+                                    pair,
+                                    exc,
+                                    repo_root=cast(Path, common_kwargs["repo_root"]),
+                                    axon_backend=axon_backend,
+                                )
+                            _log_result_summary(result)
+                    finally:
+                        _restore_env(previous_jax_env)
+                    results.append(result)
+                    if stream_csv is not None:
+                        _append_stream_csv_row(stream_csv, _summary_row_from_result(result))
+                    parent_logger.log(
+                        "child_finish "
+                        f"pair_index={pair_index} backend={axon_backend} pid={os.getpid()} status=ok "
+                        f"masked_top1_eq={result.get('masked_top1_eq')} "
+                        f"masked_max_abs_diff={result.get('masked_max_diff')} "
+                        f"masked_max_rel_diff={result.get('masked_max_rel_diff')}"
+                    )
+                finally:
+                    if file_handle is not None:
+                        file_handle.close()
+                progress.update(1)
         parent_logger.log(f"run_finish total_rows={len(results)}")
     finally:
-        _restore_env(previous_jax_env)
         if worker_cuda_visible_devices is not None:
             if previous_cuda_visible_devices is None:
                 os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -896,7 +1141,6 @@ def _run_benchmark_worker_loop(
     try:
         if worker_cuda_visible_devices is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = worker_cuda_visible_devices
-        previous_jax_env = _set_jax_worker_env_if_needed(common_kwargs)
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             file_handle = log_path.open("w", encoding="utf-8", buffering=1)
@@ -905,43 +1149,58 @@ def _run_benchmark_worker_loop(
         with contextlib.redirect_stdout(tee), contextlib.redirect_stderr(tee):
             if worker_cuda_visible_devices is not None:
                 print(f"worker.CUDA_VISIBLE_DEVICES={worker_cuda_visible_devices}")
-            try:
-                result = _run_benchmark_pair(pair, device=worker_device, **common_kwargs)
-                print(f"result.axon={pair.axon_file.name}")
-                print(f"result.checkpoint={pair.checkpoint_id}")
-                print(f"result.model_dir={result['weights']}")
-                print(f"result.fallback={result.get('fallback', 'none')}")
-                print(f"result.masked_top1_eq={result.get('masked_top1_eq')}")
-                print(f"result.masked_max_abs_diff={result.get('masked_max_diff')}")
-                print(f"result.masked_max_rel_diff={result.get('masked_max_rel_diff')}")
-                _write_worker_result_file(log_path, result)
-                result_queue.put(
-                    (
-                        pair_index,
-                        result,
-                        None,
-                        "",
-                        log_path.name if log_path else None,
-                    )
+            results: list[dict[str, Any]] = []
+            for axon_backend in _backend_sequence(common_kwargs):
+                backend_kwargs = _backend_kwargs(common_kwargs, axon_backend)
+                previous_jax_env = _set_jax_worker_env_if_needed(backend_kwargs)
+                try:
+                    try:
+                        result = _run_benchmark_pair(pair, device=worker_device, **backend_kwargs)
+                    except Exception as exc:
+                        print(
+                            "Benchmark pair failed:",
+                            f"backend={axon_backend}",
+                            f"axon={pair.axon_file}",
+                            f"checkpoint={pair.checkpoint_id}",
+                        )
+                        print(traceback.format_exc())
+                        result = _error_result_for_pair(
+                            pair,
+                            exc,
+                            repo_root=cast(Path, common_kwargs["repo_root"]),
+                            axon_backend=axon_backend,
+                        )
+                    _log_result_summary(result)
+                    results.append(result)
+                    _write_worker_result_file(log_path, results)
+                finally:
+                    _restore_env(previous_jax_env)
+            _write_worker_result_file(log_path, results)
+            result_queue.put(
+                (
+                    pair_index,
+                    results,
+                    None,
+                    "",
+                    log_path.name if log_path else None,
                 )
-            except Exception as exc:
-                result_queue.put(
-                    (
-                        pair_index,
-                        None,
-                        _BenchmarkWorkerError(
-                            exc_type=type(exc).__name__,
-                            message=str(exc),
-                            traceback_text=traceback.format_exc(),
-                            captured_output=capture.getvalue(),
-                        ),
-                        capture.getvalue(),
-                        log_path.name if log_path else None,
-                    )
-                )
+            )
+    except Exception as exc:
+        result_queue.put(
+            (
+                pair_index,
+                None,
+                _BenchmarkWorkerError(
+                    exc_type=type(exc).__name__,
+                    message=str(exc),
+                    traceback_text=traceback.format_exc(),
+                    captured_output=capture.getvalue(),
+                ),
+                capture.getvalue(),
+                log_path.name if log_path else None,
+            )
+        )
     finally:
-        if "previous_jax_env" in locals():
-            _restore_env(previous_jax_env)
         if worker_cuda_visible_devices is not None:
             if previous_cuda_visible_devices is None:
                 os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -974,8 +1233,10 @@ def _run_benchmark_jobs_parallel(
     active_processes: dict[int, Any] = {}
     active_worker_specs: dict[int, int] = {}
     retry_counts: dict[int, int] = {}
-    results_by_index: list[dict[str, Any] | None] = [None] * len(pairs)
-    progress = tqdm(total=len(pairs), desc="synapse axon-benchmark", unit="pair")
+    backend_sequence = _backend_sequence(common_kwargs)
+    total_rows = len(pairs) * len(backend_sequence)
+    results_by_index: list[list[dict[str, Any]] | None] = [None] * len(pairs)
+    progress = tqdm(total=total_rows, desc="synapse axon-benchmark", unit="row")
     parent_logger = ParentLogger(log_dir)
     pending_indices = list(range(len(pairs)))
     next_device_index = 0
@@ -983,7 +1244,7 @@ def _run_benchmark_jobs_parallel(
         print(f"Parent log: {parent_logger.path}")
     parent_logger.log(
         "run_start "
-        f"total_pairs={len(pairs)} "
+        f"total_pairs={len(pairs)} total_rows={total_rows} backends={list(backend_sequence)} "
         f"devices={[spec.label or spec.run_device for spec in resolved_worker_specs]} "
         f"max_concurrent={len(resolved_worker_specs)}"
     )
@@ -1058,24 +1319,28 @@ def _run_benchmark_jobs_parallel(
             except queue.Empty:
                 for active_pair_index, process in list(active_processes.items()):
                     pair = pairs[int(active_pair_index)]
+                    if process.is_alive():
+                        continue
+                    process.join(timeout=0.1)
                     actual_log_path = worker_log_path(
                         log_dir,
                         axon_name=pair.axon_file.stem.replace(" ", "_"),
                         model_name=pair.model_dir.name.replace(" ", "_"),
                         pid=process.pid,
                     )
-                    published_result = _read_worker_result_file(actual_log_path)
+                    published_result = _read_worker_results_file(actual_log_path)
                     if published_result is not None:
                         active_processes.pop(active_pair_index, None)
                         active_worker_specs.pop(active_pair_index, None)
                         process.join(timeout=1.0)
                         if process.is_alive():
                             process.terminate()
-                            process.join(timeout=5.0)
+                        process.join(timeout=5.0)
                         results_by_index[int(active_pair_index)] = published_result
                         if stream_csv is not None:
-                            _append_stream_csv_row(stream_csv, _summary_row_from_result(published_result))
-                        progress.update(1)
+                            for row in published_result:
+                                _append_stream_csv_row(stream_csv, _summary_row_from_result(row))
+                        progress.update(len(published_result))
                         parent_logger.log(
                             "child_finish "
                             f"pair_index={active_pair_index} pid={process.pid} status=success_result_file "
@@ -1083,9 +1348,6 @@ def _run_benchmark_jobs_parallel(
                             f"model_dir={pair.model_dir} log_path={actual_log_path.name if actual_log_path else None}"
                         )
                         continue
-                    if process.is_alive():
-                        continue
-                    process.join(timeout=0.1)
                     dead_exitcode = int(process.exitcode or 0)
                     log_path = worker_log_display_path(
                         log_dir,
@@ -1112,15 +1374,20 @@ def _run_benchmark_jobs_parallel(
                     )
                     if _requeue_pair(int(active_pair_index), reason=reason):
                         continue
-                    error_result = _error_result_for_pair(
-                        pair,
-                        RuntimeError(reason),
-                        repo_root=cast(Path, common_kwargs["repo_root"]),
-                    )
-                    results_by_index[int(active_pair_index)] = error_result
+                    error_results = [
+                        _error_result_for_pair(
+                            pair,
+                            RuntimeError(reason),
+                            repo_root=cast(Path, common_kwargs["repo_root"]),
+                            axon_backend=axon_backend,
+                        )
+                        for axon_backend in backend_sequence
+                    ]
+                    results_by_index[int(active_pair_index)] = error_results
                     if stream_csv is not None:
-                        _append_stream_csv_row(stream_csv, _summary_row_from_result(error_result))
-                    progress.update(1)
+                        for row in error_results:
+                            _append_stream_csv_row(stream_csv, _summary_row_from_result(row))
+                    progress.update(len(error_results))
                     parent_logger.log(
                         "child_result "
                         f"pair_index={active_pair_index} status=error_result "
@@ -1158,29 +1425,38 @@ def _run_benchmark_jobs_parallel(
                     reason=f"{error.exc_type}: {error.message}",
                 ):
                     continue
-                error_result = _error_result_for_pair(
-                    pair,
-                    error,
-                    repo_root=cast(Path, common_kwargs["repo_root"]),
-                )
-                results_by_index[int(pair_index)] = error_result
+                error_results = [
+                    _error_result_for_pair(
+                        pair,
+                        error,
+                        repo_root=cast(Path, common_kwargs["repo_root"]),
+                        axon_backend=axon_backend,
+                    )
+                    for axon_backend in backend_sequence
+                ]
+                results_by_index[int(pair_index)] = error_results
                 if stream_csv is not None:
-                    _append_stream_csv_row(stream_csv, _summary_row_from_result(error_result))
-                progress.update(1)
+                    for row in error_results:
+                        _append_stream_csv_row(stream_csv, _summary_row_from_result(row))
+                progress.update(len(error_results))
                 parent_logger.log(
                     "child_result "
                     f"pair_index={pair_index} status=error_result "
                     f"axon={pair.axon_file.name} checkpoint={pair.checkpoint_id}"
                 )
                 continue
-            assert isinstance(result, dict)
-            results_by_index[int(pair_index)] = result
+            if isinstance(result, list):
+                result_rows = cast(list[dict[str, Any]], result)
+            else:
+                result_rows = [cast(dict[str, Any], result)]
+            results_by_index[int(pair_index)] = result_rows
             if stream_csv is not None:
-                _append_stream_csv_row(stream_csv, _summary_row_from_result(result))
-            progress.update(1)
+                for row in result_rows:
+                    _append_stream_csv_row(stream_csv, _summary_row_from_result(row))
+            progress.update(len(result_rows))
             parent_logger.log(
                 "child_finish "
-                f"pair_index={pair_index} pid={getattr(process, 'pid', 'unknown')} status=success "
+                f"pair_index={pair_index} pid={getattr(process, 'pid', 'unknown')} status=success rows={len(result_rows)} "
                 f"exitcode={exitcode} axon={pair.axon_file.name} checkpoint={pair.checkpoint_id} "
                 f"model_dir={pair.model_dir} log_path={log_path}"
             )
@@ -1194,11 +1470,11 @@ def _run_benchmark_jobs_parallel(
         result_queue.close()
         result_queue.join_thread()
         parent_logger.log(
-            f"run_finish total_rows={len([r for r in results_by_index if r is not None])}"
+            f"run_finish total_rows={sum(len(rows) for rows in results_by_index if rows is not None)}"
         )
         parent_logger.close()
 
-    return [result for result in results_by_index if result is not None]
+    return [row for rows in results_by_index if rows is not None for row in rows]
 
 
 def run_axon_benchmark(
@@ -1232,11 +1508,14 @@ def run_axon_benchmark(
     compile_dynamic: bool = False,
     trust_remote_code: bool = False,
     axon_backend: str = "codegen2-torch",
+    axon_backends: str | Sequence[str] | None = None,
     axon_typechecker: str = "typecheck2",
     pipeline_parallel_size: int | None = None,
     optimize_ast: bool = False,
     optimize_graph: bool = False,
     graph_backend_intrinsics: str | None = None,
+    builtins_overlays: tuple[str, ...] | list[str] | None = None,
+    backend_builtins_overlays: str | Sequence[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
@@ -1255,25 +1534,12 @@ def run_axon_benchmark(
     max_billion_parameters: float | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    backend_token = str(axon_backend).strip().lower()
-    if backend_token == "single":
-        backend_token = "codegen2-torch"
-    valid_backends = {
-        "codegen2-torch",
-        "codegen2-tinygrad",
-        "codegen2-mlx",
-        "codegen2-jax",
-        "codegen2-triton",
-        "runtime2-torch",
-        "pipeline2-torch",
-    }
-    if backend_token not in valid_backends:
-        raise ValueError(
-            "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'codegen2-mlx', 'codegen2-jax', 'codegen2-triton', 'runtime2-torch', "
-            "or 'pipeline2-torch'"
-        )
-    axon_backend = backend_token
+    backend_sequence = _normalize_axon_backend_sequence(
+        axon_backend=axon_backend,
+        axon_backends=axon_backends,
+    )
+    backend_overlay_map = _normalize_backend_builtins_overlays(backend_builtins_overlays)
+    axon_backend = backend_sequence[0]
     typechecker_token = str(axon_typechecker).strip().lower()
     if typechecker_token != "typecheck2":
         raise ValueError("axon_typechecker must be 'typecheck2'")
@@ -1330,7 +1596,11 @@ def run_axon_benchmark(
         raise ValueError("No benchmark pairs remain after parameter-range filtering")
 
     if dry_run:
-        summary_rows = [_summary_row_from_pair(pair, fallback="DRY-RUN") for pair in pairs]
+        summary_rows = [
+            _summary_row_from_pair(pair, fallback="DRY-RUN", axon_backend=backend)
+            for pair in pairs
+            for backend in backend_sequence
+        ]
         if stream_csv is not None:
             _initialize_stream_csv(stream_csv)
             for row in summary_rows:
@@ -1339,6 +1609,7 @@ def run_axon_benchmark(
         print(_format_checkpoint_summary_table(summary_rows, table_format=table_format))
         return {
             "dry_run": True,
+            "axon_backends": backend_sequence,
             "pairs": [
                 {
                     "axon_file": pair.axon_file,
@@ -1376,10 +1647,13 @@ def run_axon_benchmark(
         "compile_dynamic": compile_dynamic,
         "trust_remote_code": trust_remote_code,
         "axon_backend": axon_backend,
+        "axon_backends": backend_sequence,
         "axon_typechecker": axon_typechecker,
         "optimize_ast": optimize_ast,
         "optimize_graph": optimize_graph,
         "graph_backend_intrinsics": graph_backend_intrinsics,
+        "builtins_overlays": builtins_overlays,
+        "backend_builtins_overlays": backend_overlay_map,
         "skip_hf": skip_hf,
         "hf_strict_dtype": hf_strict_dtype,
         "oom_cpu_fallback": oom_cpu_fallback,
@@ -1408,17 +1682,17 @@ def run_axon_benchmark(
         if processes <= 1:
             serial_cuda_visible_devices = pipeline_worker_specs[0].cuda_visible_devices
             effective_device = pipeline_worker_specs[0].run_device
-    elif axon_backend == "codegen2-tinygrad":
+    elif "codegen2-tinygrad" in backend_sequence:
         pipeline_worker_specs = _resolve_tinygrad_worker_specs(
             device=device,
             processes=max(1, int(processes)),
         )
-    elif axon_backend == "codegen2-mlx":
+    elif "codegen2-mlx" in backend_sequence:
         pipeline_worker_specs = _resolve_mlx_worker_specs(
             device=device,
             processes=max(1, int(processes)),
         )
-    elif axon_backend == "codegen2-jax":
+    elif "codegen2-jax" in backend_sequence:
         pipeline_worker_specs = _resolve_jax_worker_specs(
             device=device,
             processes=max(1, int(processes)),
@@ -1451,7 +1725,7 @@ def run_axon_benchmark(
     summary_rows = [_summary_row_from_result(row) for row in sorted_results]
     print()
     print(_format_checkpoint_summary_table(summary_rows, table_format=table_format))
-    return {"results": results}
+    return {"axon_backends": backend_sequence, "results": results}
 
 
 __all__ = ["run_axon_benchmark", "render_axon_benchmark_csv"]

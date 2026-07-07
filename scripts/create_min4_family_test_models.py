@@ -117,7 +117,7 @@ def _mutate_config(config: Any, *, vocab_size: int) -> None:
         for name in ("intermediate_size", "ffn_dim", "mlp_hidden_size"):
             _set_if_present(target, name, intermediate)
         for name in ("max_position_embeddings", "n_positions", "seq_length"):
-            _set_if_present(target, name, 512)
+            _set_if_present(target, name, 1024)
         for name in ("image_size", "input_size"):
             _set_if_present(target, name, 16)
         for name in ("patch_size",):

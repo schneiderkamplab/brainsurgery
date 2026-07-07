@@ -2,7 +2,7 @@
 {-# TASK "causal_lm" #-}
 
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 import Math (sqrt)
 import MoE (grouped_swiglu_ffn_separate, sparsemixer_router)
 import Params (has_root)
@@ -31,6 +31,7 @@ THETA <- Config.float @@rope_theta default=10000.0
 ROPE_MODE <- Config.str @@'rope_scaling.rope_type' default=(Config.str @@'rope_scaling.type' default="default")
 ROPE_ORIGINAL_CONTEXT <- Config.int @@'rope_scaling.original_max_position_embeddings' default=(Config.int @@original_max_position_embeddings default=4096)
 ROPE_MAX_CONTEXT <- Config.int @@max_position_embeddings default=131072
+MAX_POSITIONS = ROPE_MAX_CONTEXT
 ROPE_LONG_FACTOR <- Config.list @@'rope_scaling.long_factor' default=[]
 ROPE_SHORT_FACTOR <- Config.list @@'rope_scaling.short_factor' default=[]
 HAS_LONGROPE <- Config.has_key @@'rope_scaling.long_factor'
@@ -42,7 +43,7 @@ HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
 
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
 
-phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,ROPE_MAX_CONTEXT,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,ROPE_MAX_CONTEXT,DH])
 phimoe_block x pos_ids mask past_kv = do
   xn <- NN.layernorm@input_layernorm x eps=EPS bias=true
   a, new_kv <- scope@self_attn do
@@ -65,21 +66,26 @@ phimoe_block x pos_ids mask past_kv = do
     return m
   return x + m, new_kv
 
-phimoe :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+phimoe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,ROPE_MAX_CONTEXT,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,ROPE_MAX_CONTEXT,DH])
 phimoe input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WINDOW
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-    new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index past_kv i
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
       x, new_i <- phimoe_block x pos_ids mask past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
     x <- NN.layernorm@norm x eps=EPS bias=true
-    return x, new_kv
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
   logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE bias=HAS_LM_HEAD_BIAS) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false)
   return logits, new_kv

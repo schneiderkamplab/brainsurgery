@@ -28,8 +28,13 @@ class ResolveReport:
         return self.ast.pragmas
 
 
-def resolve_axon_program_from_path(path: Path, *, strict: bool = False) -> ResolveReport:
-    loaded = load_axon_files_from_path(path)
+def resolve_axon_program_from_path(
+    path: Path,
+    *,
+    strict: bool = False,
+    builtins_overlays: tuple[str, ...] | list[str] | None = None,
+) -> ResolveReport:
+    loaded = load_axon_files_from_path(path, builtins_overlays=builtins_overlays)
     ast, resolve_diagnostics = resolve_loaded_axon_files(loaded)
     diagnostics = (*resolve_diagnostics, *resolve_validation_diagnostics(loaded, ast))
     if strict:
@@ -37,8 +42,19 @@ def resolve_axon_program_from_path(path: Path, *, strict: bool = False) -> Resol
     return ResolveReport(ast=ast, diagnostics=diagnostics)
 
 
-def resolve_axon_program_to_source(path: Path, *, strict: bool = False) -> str:
-    return render_axon_file(resolve_axon_program_from_path(path, strict=strict).ast)
+def resolve_axon_program_to_source(
+    path: Path,
+    *,
+    strict: bool = False,
+    builtins_overlays: tuple[str, ...] | list[str] | None = None,
+) -> str:
+    return render_axon_file(
+        resolve_axon_program_from_path(
+            path,
+            strict=strict,
+            builtins_overlays=builtins_overlays,
+        ).ast
+    )
 
 
 __all__ = ["ResolveReport", "resolve_axon_program_from_path", "resolve_axon_program_to_source"]

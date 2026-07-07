@@ -3,7 +3,7 @@
 
 import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 import Math (mul)
 import Params (has_root)
 import Positions (position_ids, rope_pair_base, rope_pair_longrope)
@@ -38,7 +38,7 @@ HAS_LM_HEAD = has_root "lm_head"
 phi3minimedium_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 phi3minimedium_norm@path x = NN.rmsnorm@path x eps=EPS
 
-phi3minimedium_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+phi3minimedium_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,ROPE_MAX_CONTEXT,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,ROPE_MAX_CONTEXT,DH])
 phi3minimedium_block x pos_ids mask past_kv = do
   xn <- phi3minimedium_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -61,21 +61,26 @@ phi3minimedium_block x pos_ids mask past_kv = do
     return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
   return x + m, new_kv
 
-phi3minimedium :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+phi3minimedium :: TokenIds[B,S] -> ?Mask[B,K,ROPE_MAX_CONTEXT] -> ?Cache[B,KVH,P,ROPE_MAX_CONTEXT,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,ROPE_MAX_CONTEXT,DH])
 phi3minimedium input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask ROPE_MAX_CONTEXT
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WINDOW_LOCAL
-  x, new_kv <- scope@model do
+  work_kv <- Cache.prepare past_kv use_cache ROPE_MAX_CONTEXT
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-    new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index past_kv i
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
       x, new_i <- phi3minimedium_block x pos_ids mask past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
     x <- phi3minimedium_norm@norm x
-    return x, new_kv
+    return x, work_kv
   logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
   return logits, new_kv

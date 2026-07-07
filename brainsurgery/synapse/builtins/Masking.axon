@@ -21,18 +21,14 @@ export (
   causal_mask_for_input,
   mask_for_input,
   mask_length_for_input,
-  static_causal_mask_for_input,
-  static_causal_mask_for_input_active,
-  static_mask_for_input,
-  static_mask_length,
 )
 
-type StaticMask[B,C] = (Tensor[B,C], Dim)
+type Mask[B,K,C] = Tensor[B,K]
 
-mask_for_input :: Tensor[B,Q] -> ?Tensor[B,K] -> Dim -> ?Tensor[B,K]
+mask_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> ?Mask[B,K,C]
 mask_for_input x mask capacity = mask
 
-mask_length_for_input :: Tensor[B,Q] -> ?Tensor[B,K] -> Dim -> Dim
+mask_length_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> Dim
 mask_length_for_input x mask past_length = (mask == null) ? (past_length + Q) : K
 
 -- === CAUSAL MASK ===
@@ -84,69 +80,6 @@ causal_mask_for_input x K ?padding_mask=null ?window=null = if padding_mask == n
     causal_mask_for_input_keep x K window=window
   else
     causal_mask_for_input_masked x K padding_mask window=window
-
-static_mask_length :: ?StaticMask[B,C] -> Dim
-static_mask_length mask = (mask == null) ? 0 : do
-  _, length <- mask
-  return length
-
-
-static_mask_for_input :: Tensor[B,Q] -> ?StaticMask[B,C] -> Dim -> StaticMask[B,C]
-static_mask_for_input x mask capacity = (mask == null) ? ((full x shape=[B, capacity] value=true dtype="bool", Q) :: StaticMask[B,C]) : mask
-
-
-static_causal_mask_for_input_keep :: Tensor[B,Q] -> StaticMask[B,C] -> ?Dim -> Tensor[B,1,Q,C]
-static_causal_mask_for_input_keep x mask ?window=null = do
-  _, length <- mask
-  row_ids <- arange x start=0 end=Q |> reshape shape=[Q, 1]
-  col_ids <- arange x start=0 end=C |> reshape shape=[1, C]
-  aligned <- row_ids + (length - Q)
-  upper <- le col_ids aligned
-  valid <- le col_ids (length - 1)
-  causal <- and upper valid
-  keep_window <- (window == null) ? causal : (and causal (le (aligned - window + 1) col_ids))
-  keep <- reshape keep_window shape=[1, 1, Q, C]
-  return expand keep shape=[B, 1, Q, C]
-
-
-static_causal_mask_for_input_masked :: Tensor[B,Q] -> StaticMask[B,C] -> ?Dim -> Tensor[B,1,Q,C]
-static_causal_mask_for_input_masked x mask ?window=null = do
-  mask_values, length <- mask
-  keep <- static_causal_mask_for_input_keep x mask window=window
-  pad_keep <- cast mask_values dtype="bool" |> reshape shape=[B, 1, 1, C]
-  masked_keep <- and keep pad_keep
-  query_keep <- slice mask_values dim=-1 start=(length - Q) end=length |> cast dtype="bool" |> reshape shape=[B, 1, Q, 1]
-  col_ids <- arange x start=0 end=C |> reshape shape=[1, 1, 1, C]
-  dummy_keep <- and (eq col_ids 0) (eq query_keep false)
-  return where dummy_keep true masked_keep
-
-
-static_causal_mask_for_input :: Tensor[B,Q] -> ?StaticMask[B,C] -> ?Dim -> Tensor[B,1,Q,C]
-static_causal_mask_for_input x mask ?window=null = (mask == null)
-  ? causal_mask_for_input_keep x Q window=window
-  : static_causal_mask_for_input_masked x mask window=window
-
-static_causal_mask_for_input_active_keep :: Tensor[B,Q] -> StaticMask[B,C] -> ?Dim -> Tensor[B,1,Q,K]
-static_causal_mask_for_input_active_keep x mask ?window=null = do
-  _, length <- mask
-  return causal_mask_for_input_keep x length window=window
-
-
-static_causal_mask_for_input_active_masked :: Tensor[B,Q] -> StaticMask[B,C] -> ?Dim -> Tensor[B,1,Q,K]
-static_causal_mask_for_input_active_masked x mask ?window=null = do
-  mask_values, length <- mask
-  active_mask <- slice mask_values dim=-1 start=0 end=length
-  keep <- causal_mask_for_input_masked x length active_mask window=window
-  query_keep <- slice mask_values dim=-1 start=(length - Q) end=length |> cast dtype="bool" |> reshape shape=[B, 1, Q, 1]
-  col_ids <- arange x start=0 end=length |> reshape shape=[1, 1, 1, length]
-  dummy_keep <- and (eq col_ids 0) (eq query_keep false)
-  return where dummy_keep true keep
-
-
-static_causal_mask_for_input_active :: Tensor[B,Q] -> ?StaticMask[B,C] -> ?Dim -> Tensor[B,1,Q,K]
-static_causal_mask_for_input_active x mask ?window=null = (mask == null)
-  ? causal_mask_for_input_keep x Q window=window
-  : static_causal_mask_for_input_active_masked x mask window=window
 
 
 -- === BIDIRECTIONAL MASK ===

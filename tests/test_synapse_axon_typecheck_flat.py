@@ -221,6 +221,30 @@ f x = D
     assert isinstance(ret_stmt.values[0].inferred_type, TypeInt)
 
 
+def test_typecheck_flat_specialized_callee_dim_binders_are_hygienic(tmp_path: Path) -> None:
+    source = """
+import Tensor (reshape)
+
+KVH <- 4
+NUM_HEADS <- 16
+
+f :: Tensor[B,H,S,DH] -> Tensor[B,KVH,S,DH] -> Tensor[B,KVH,H / KVH,S,DH]
+f q k = do
+  groups <- H / KVH
+  return Tensor.reshape q shape=[B, KVH, groups, S, DH]
+
+main :: Tensor[B,NUM_HEADS,S,DH] -> Tensor[B,KVH,S,DH] -> Tensor[B,KVH,NUM_HEADS / KVH,S,DH]
+main q k = f q k
+"""
+    path = tmp_path / "hygienic_dims.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    text = render_axon_file(typed, show_types=True)
+    assert "NUM_HEADS / KVH" in text
+
+
 def test_typecheck_flat_rejects_bare_tensor_type() -> None:
     source = """
 main :: Tensor -> Tensor

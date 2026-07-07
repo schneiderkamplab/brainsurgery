@@ -3,7 +3,7 @@
 
 import Activations (gelu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (bidirectional_mask_for_input)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
 import Params (has_root)
 import Positions (position_ids, relative_bias_disentangled)
 import Config
@@ -57,8 +57,9 @@ deberta_modern_head x = do
     return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@lm_predictions.lm_head.bias
   return logits
 
-deberta_v2 :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,VOCAB_SIZE]
+deberta_v2 :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
 deberta_v2 input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
   pos_ids <- position_ids input_ids
   keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
   tok_type_ids <- input_ids - input_ids

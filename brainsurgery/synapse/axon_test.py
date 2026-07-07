@@ -100,6 +100,7 @@ def _format_checkpoint_summary_table(
 ) -> str:
     if table_format not in {"plain", "markdown", "html"}:
         raise ValueError("table_format must be 'plain', 'markdown', or 'html'")
+    include_backend = any("backend" in row for row in rows)
     headers = [
         "axon",
         "checkpoint",
@@ -109,8 +110,12 @@ def _format_checkpoint_summary_table(
         "masked max abs diff",
         "masked max rel diff",
     ]
+    if include_backend:
+        headers.insert(0, "backend")
     body = [
-        [
+        ([
+            str(row.get("backend", "")),
+        ] if include_backend else []) + [
             str(row["axon"]),
             str(row["checkpoint"]),
             str(row["model_dir"]),
@@ -837,7 +842,7 @@ def _load_state_dict(
                 tensor = tensor.to(device=device)
             out[key] = tensor
     materialize_mxfp4_aliases(out, dtype=dtype, drop_packed=True)
-    if param_devices:
+    if param_devices and len(param_devices) > 1:
         _drop_pipeline_duplicate_state_aliases(out)
 
     final_logits_bias = out.get("final_logits_bias")
@@ -2948,8 +2953,22 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
     t0 = time.perf_counter()
     with timing(message=label):
         out = fn()
+        _sync_device_output(out)
     dt = time.perf_counter() - t0
     return out, dt
+
+
+def _sync_device_output(value: Any) -> None:
+    if hasattr(value, "block_until_ready"):
+        value.block_until_ready()
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _sync_device_output(item)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _sync_device_output(item)
 
 
 def _time_generate_repeated(
@@ -2958,7 +2977,7 @@ def _time_generate_repeated(
     *,
     warmup: int,
     repeat: int,
-) -> tuple[Any, float, list[float]]:
+) -> tuple[Any, float, list[float], list[float]]:
     warmup = max(0, int(warmup))
     repeat = max(1, int(repeat))
     out: Any = None
@@ -2968,17 +2987,23 @@ def _time_generate_repeated(
             torch.cuda.synchronize()
 
     with timing(message=label):
+        warmup_samples: list[float] = []
         for _ in range(warmup):
-            out = fn()
             _sync_cuda()
+            t0 = time.perf_counter()
+            out = fn()
+            _sync_device_output(out)
+            _sync_cuda()
+            warmup_samples.append(time.perf_counter() - t0)
         samples: list[float] = []
         for _ in range(repeat):
             _sync_cuda()
             t0 = time.perf_counter()
             out = fn()
+            _sync_device_output(out)
             _sync_cuda()
             samples.append(time.perf_counter() - t0)
-    return out, sum(samples) / max(1, len(samples)), samples
+    return out, sum(samples) / max(1, len(samples)), samples, warmup_samples
 
 
 def _time_forward_repeated(
@@ -2987,7 +3012,7 @@ def _time_forward_repeated(
     *,
     warmup: int,
     repeat: int,
-) -> tuple[Any, float, list[float]]:
+) -> tuple[Any, float, list[float], list[float]]:
     warmup = max(0, int(warmup))
     repeat = max(1, int(repeat))
     out: Any = None
@@ -2996,17 +3021,23 @@ def _time_forward_repeated(
             torch.cuda.synchronize()
 
     with timing(message=label):
+        warmup_samples: list[float] = []
         for _ in range(warmup):
-            out = fn()
             _sync_cuda()
+            t0 = time.perf_counter()
+            out = fn()
+            _sync_device_output(out)
+            _sync_cuda()
+            warmup_samples.append(time.perf_counter() - t0)
         samples: list[float] = []
         for _ in range(repeat):
             _sync_cuda()
             t0 = time.perf_counter()
             out = fn()
+            _sync_device_output(out)
             _sync_cuda()
             samples.append(time.perf_counter() - t0)
-    return out, sum(samples) / max(1, len(samples)), samples
+    return out, sum(samples) / max(1, len(samples)), samples, warmup_samples
 
 
 def _call_generate_compatible(model: Any, **kwargs: Any) -> Any:
@@ -3176,6 +3207,10 @@ def _maybe_compile_model(
     dynamic: bool,
 ) -> Any:
     if not enabled:
+        return model
+    enable_jit = getattr(model, "enable_jit", None)
+    if callable(enable_jit):
+        enable_jit(True, reset=True)
         return model
     try:
         import mlx.core as mx
@@ -3385,6 +3420,7 @@ def _run_axon_test_single(
     optimize_ast: bool = False,
     optimize_graph: bool = False,
     graph_backend_intrinsics: str | None = None,
+    builtins_overlays: tuple[str, ...] | list[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
@@ -3539,7 +3575,10 @@ def _run_axon_test_single(
                 transformers_hub.HF_MODULES_CACHE = str(modules_cache)
 
         lowered_spec: dict[str, Any]
-        resolved_axon = resolve_axon_program_from_path(axon_file).ast
+        resolved_axon = resolve_axon_program_from_path(
+            axon_file,
+            builtins_overlays=builtins_overlays,
+        ).ast
         normalized_axon = normalize_closed_axon_file(resolved_axon)
         elaborated_axon = elaborate_closed_axon_file(normalized_axon)
         flat_axon = flatten_closed_axon_file(elaborated_axon)
@@ -4298,11 +4337,13 @@ def _run_axon_test_single(
             hf_gen: torch.Tensor | None = None
             hf_time = 0.0
             hf_forward_samples: list[float] = []
+            hf_forward_warmup_samples: list[float] = []
             hf_generate_samples: list[float] = []
+            hf_generate_warmup_samples: list[float] = []
             with _patch_transformers_mask_device_map_inputs(enabled=hf_device_map is not None):
                 if not run_generate_benchmark:
                     with torch.no_grad():
-                        hf_logits, hf_time, hf_forward_samples = _time_forward_repeated(
+                        hf_logits, hf_time, hf_forward_samples, hf_forward_warmup_samples = _time_forward_repeated(
                             "HF",
                             lambda model=hf: _run_hf_forward(model),
                             warmup=forward_warmup,
@@ -4413,7 +4454,7 @@ def _run_axon_test_single(
                                 use_cache=False,
                             )
 
-                    hf_gen, hf_time, hf_generate_samples = _time_generate_repeated(
+                    hf_gen, hf_time, hf_generate_samples, hf_generate_warmup_samples = _time_generate_repeated(
                         "HF",
                         lambda model=hf: _run_hf_generate(model),
                         warmup=generate_warmup,
@@ -4444,7 +4485,9 @@ def _run_axon_test_single(
                 "gen": hf_gen_cpu,
                 "time": hf_time,
                 "forward_samples": hf_forward_samples,
+                "forward_warmup_samples": hf_forward_warmup_samples,
                 "generate_samples": hf_generate_samples,
+                "generate_warmup_samples": hf_generate_warmup_samples,
                 "dummy_mask": dummy_mask,
                 "decoder_attention_mask": io.get("decoder_attention_mask"),
                 "layer_inputs": hf_layer_inputs,
@@ -4461,7 +4504,9 @@ def _run_axon_test_single(
         hf_layer_inputs: dict[int, torch.Tensor] = {}
         hf_layer_outputs: dict[int, torch.Tensor] = {}
         hf_forward_samples: list[float] = []
+        hf_forward_warmup_samples: list[float] = []
         hf_generate_samples: list[float] = []
+        hf_generate_warmup_samples: list[float] = []
         hf_exec_device_str = "skipped"
         state_ref_cpu: dict[str, torch.Tensor] | None = None
         decoder_attention_mask_for_metrics: torch.Tensor | None = None
@@ -4481,7 +4526,13 @@ def _run_axon_test_single(
             hf_gen = cast(torch.Tensor | None, hf_result["gen"])
             hf_time = float(hf_result["time"])
             hf_forward_samples = list(cast(Sequence[float], hf_result.get("forward_samples", [])))
+            hf_forward_warmup_samples = list(
+                cast(Sequence[float], hf_result.get("forward_warmup_samples", []))
+            )
             hf_generate_samples = list(cast(Sequence[float], hf_result.get("generate_samples", [])))
+            hf_generate_warmup_samples = list(
+                cast(Sequence[float], hf_result.get("generate_warmup_samples", []))
+            )
             hf_dummy_tokens_mask = cast(torch.Tensor | None, hf_result["dummy_mask"])
             hf_layer_inputs = cast(dict[int, torch.Tensor], hf_result["layer_inputs"])
             hf_layer_outputs = cast(dict[int, torch.Tensor], hf_result["layer_outputs"])
@@ -4528,10 +4579,14 @@ def _run_axon_test_single(
                     syn = model_cls.from_state_dict(local_state_dict).eval()
             elif axon_backend == "codegen2-jax":
                 if local_state_dict is None:
-                    syn = model_cls.from_safetensors(
+                    local_state_dict = _load_state_dict(
                         safetensors_files,
+                        device=torch.device("cpu"),
+                        dtype=resolved_dtype,
                         model_config=model_config,
-                    ).eval()
+                        storage_dtype=adapter_storage_dtype,
+                    )
+                    syn = model_cls.from_state_dict(local_state_dict).eval()
                 else:
                     syn = model_cls.from_state_dict(local_state_dict).eval()
             elif local_state_dict is None:
@@ -4679,10 +4734,12 @@ def _run_axon_test_single(
             syn_gen: torch.Tensor | None = None
             syn_time = 0.0
             syn_forward_samples: list[float] = []
+            syn_forward_warmup_samples: list[float] = []
             syn_generate_samples: list[float] = []
+            syn_generate_warmup_samples: list[float] = []
             if not run_generate_benchmark:
                 with torch.no_grad():
-                    syn_logits, syn_time, syn_forward_samples = _time_forward_repeated(
+                    syn_logits, syn_time, syn_forward_samples, syn_forward_warmup_samples = _time_forward_repeated(
                         "AxonDerived",
                         _run_syn_forward,
                         warmup=forward_warmup,
@@ -4705,7 +4762,7 @@ def _run_axon_test_single(
                             generate_kwargs["attention_mask"] = attention_mask
                     return model.generate(io["input_ids"], **generate_kwargs)
 
-                syn_gen, syn_time, syn_generate_samples = _time_generate_repeated(
+                syn_gen, syn_time, syn_generate_samples, syn_generate_warmup_samples = _time_generate_repeated(
                     "AxonDerived",
                     _run_syn_generate,
                     warmup=generate_warmup,
@@ -4740,7 +4797,9 @@ def _run_axon_test_single(
                 "gen": syn_gen_cpu,
                 "time": syn_time,
                 "forward_samples": syn_forward_samples,
+                "forward_warmup_samples": syn_forward_warmup_samples,
                 "generate_samples": syn_generate_samples,
+                "generate_warmup_samples": syn_generate_warmup_samples,
                 "layer_inputs": syn_layer_inputs,
                 "layer_outputs": syn_layer_outputs,
                 "device": str(target_device),
@@ -4765,7 +4824,13 @@ def _run_axon_test_single(
         syn_gen = cast(torch.Tensor | None, syn_result["gen"])
         syn_time = float(syn_result["time"])
         syn_forward_samples = list(cast(Sequence[float], syn_result.get("forward_samples", [])))
+        syn_forward_warmup_samples = list(
+            cast(Sequence[float], syn_result.get("forward_warmup_samples", []))
+        )
         syn_generate_samples = list(cast(Sequence[float], syn_result.get("generate_samples", [])))
+        syn_generate_warmup_samples = list(
+            cast(Sequence[float], syn_result.get("generate_warmup_samples", []))
+        )
         syn_layer_inputs = cast(dict[int, torch.Tensor], syn_result["layer_inputs"])
         syn_layer_outputs = cast(dict[int, torch.Tensor], syn_result["layer_outputs"])
         syn_exec_device_str = cast(str, syn_result["device"])
@@ -5140,10 +5205,14 @@ def _run_axon_test_single(
             "axon_time": syn_time,
             "hf_forward_samples": hf_forward_samples,
             "axon_forward_samples": syn_forward_samples,
+            "hf_forward_warmup_samples": hf_forward_warmup_samples,
+            "axon_forward_warmup_samples": syn_forward_warmup_samples,
             "forward_warmup": forward_warmup,
             "forward_repeat": forward_repeat,
             "hf_generate_samples": hf_generate_samples,
             "axon_generate_samples": syn_generate_samples,
+            "hf_generate_warmup_samples": hf_generate_warmup_samples,
+            "axon_generate_warmup_samples": syn_generate_warmup_samples,
             "generate_warmup": generate_warmup,
             "generate_repeat": generate_repeat,
             "speed_ratio_axon_over_hf": (
@@ -5221,6 +5290,7 @@ def run_axon_test(
     optimize_ast: bool = False,
     optimize_graph: bool = False,
     graph_backend_intrinsics: str | None = None,
+    builtins_overlays: tuple[str, ...] | list[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     profile_axon: bool = False,
@@ -5264,6 +5334,7 @@ def run_axon_test(
         optimize_ast=optimize_ast,
         optimize_graph=optimize_graph,
         graph_backend_intrinsics=graph_backend_intrinsics,
+        builtins_overlays=builtins_overlays,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
         profile_axon=profile_axon,

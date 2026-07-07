@@ -1,0 +1,53 @@
+import Math (PI, clamp, cos, exp, floor, log, sin, sqrt)
+import Masking (Mask)
+import NN (embedding, layernorm, linear)
+import Params param
+import Tensor (
+  and,
+  arange,
+  arange_step,
+  cast,
+  cast_like,
+  concat,
+  cumsum,
+  eq,
+  expand,
+  full,
+  gather,
+  le,
+  matmul,
+  permute,
+  reshape,
+  shape,
+  size,
+  slice,
+  tensor_like,
+  topk,
+  transpose,
+  unsqueeze,
+  where,
+  zeros,
+  zeros_like,
+)
+
+export (
+  linear_position_bias_for_input,
+  position_ids,
+)
+
+linear_position_bias_for_input :: Mask[B,K,C] -> Dim -> ?Float -> Tensor[B,H,1,C]
+linear_position_bias_for_input mask heads ?scale=1.0 = do
+  values, _ <- mask
+  return linear_position_bias values heads scale=scale
+
+position_ids_from_mask :: TokenIds[B,S] -> Mask[B,K,C] -> Int -> Tensor[B,S]
+position_ids_from_mask x mask pad_fill = do
+  values, length <- mask
+  pos <- cast values dtype="long" |> cumsum dim=-1
+  pos <- where (eq values 0) pad_fill (pos - 1)
+  return slice pos dim=-1 start=(length - S) end=length
+
+position_ids :: TokenIds[B,S] -> ?Mask[B,K,C] -> ?Dim -> ?Int -> Tensor[B,S]
+position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = (attn_mask == null)
+  ? (position_ids_nomask x past_length)
+  : (position_ids_from_mask x attn_mask pad_fill)

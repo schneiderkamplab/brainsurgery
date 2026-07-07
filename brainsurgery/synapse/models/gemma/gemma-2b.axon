@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "google/gemma-2b" #-}
+{-# CHECKPOINTS ["google/gemma-2b", "google/gemma-2b-it"] #-}
 
 {-# TASK "causal_lm" #-}
 
@@ -8,7 +8,7 @@ import Activations (gelu)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
 import Math (mul, sqrt)
 
@@ -16,7 +16,7 @@ import Params (has_root)
 
 import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
 
-import Cache (Cache, CacheLayer)
+import Cache
 
 import Config
 
@@ -24,38 +24,42 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 2048
+MODEL_DIM <- 2048
 
-VOCAB_SIZE = 256000
+MODEL_DIM_FLOAT <- 2048.0
 
-NUM_LAYERS = 18
+EMB_SCALE <- sqrt MODEL_DIM_FLOAT
 
-NUM_HEADS = 8
+VOCAB_SIZE <- 256000
 
-KVH = 1
+NUM_LAYERS <- 18
 
-HAS_HEAD_DIM = true
+NUM_HEADS <- 8
 
-MODEL_HEAD_DIM = HAS_HEAD_DIM ? (256) : (MODEL_DIM / NUM_HEADS)
+KVH <- 1
+
+HAS_HEAD_DIM <- true
+
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (256) : (MODEL_DIM / NUM_HEADS)
+
+FFN <- 16384
+
+EPS <- 1e-06
+
+THETA <- 10000.0
+
+MAX_POSITIONS <- 8192
 
 QD = NUM_HEADS * MODEL_HEAD_DIM
 
 KVD = KVH * MODEL_HEAD_DIM
-
-FFN = 16384
-
-EPS = 1e-06
-
-THETA = 10000.0
-
-MAX_POSITIONS = 8192
 
 HAS_LM_HEAD = has_root "lm_head"
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true unit_offset=true
 
-gemma_block :: Tensor[B,S,D] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+gemma_block :: Tensor[B,S,D] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,K] -> ?CacheLayer[B,H,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,MAX_POSITIONS,DH])
 gemma_block x rope_sin rope_cos mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -76,23 +80,27 @@ gemma_block x rope_sin rope_cos mask past_kv = do
     return gelu g |> mul u |> NN.linear@down_proj dim=MODEL_DIM
   return x + m, new_kv
 
-gemma :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+gemma :: Tensor.TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,H,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,MAX_POSITIONS,DH])
 gemma input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
   rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
-  logits, new_kv <- scope@model do
-    emb_scale <- _sqrt (2048.0)
-    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=emb_scale
-    new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index past_kv i
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  logits, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=EMB_SCALE
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
       x, new_i <- gemma_block x rope_sin rope_cos mask past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
     x <- rms@norm x
     logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE weight_path=@@lm_head.weight) : (NN.linear@embed_tokens x dim=VOCAB_SIZE)
-    return logits, new_kv
+    return logits, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
   return logits, new_kv

@@ -3,7 +3,7 @@
 
 import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 import Math (mul)
 import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
 import Cache
@@ -25,6 +25,7 @@ E <- Config.dim@@num_local_experts default=8
 EPT <- Config.int@@num_experts_per_tok default=2
 EPS <- Config.float@@rms_norm_eps default=1e-06
 THETA <- Config.float @@'rope_parameters.rope_theta' default=10000.0
+MAX_POSITIONS <- Config.dim@@max_position_embeddings default=4096
 ATTN_BIAS = false
 EMBED_MUL <- Config.float@@embedding_multiplier default=1.0
 LOGITS_SCALE <- Config.float@@logits_scaling default=1.0
@@ -44,7 +45,7 @@ granitemoe_moe hidden topk_scores topk_indices = do
   x_weighted <- x_upd * scale
   return Tensor.sum x_weighted dim=2 keepdim=false
 
-granitemoe_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+granitemoe_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
 granitemoe_block x mask rope_sin rope_cos past_kv = do
   xn <- granitemoe_norm@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -66,24 +67,29 @@ granitemoe_block x mask rope_sin rope_cos past_kv = do
     return granitemoe_moe xn topk_scores topk_indices
   return x + (m * RESID_MUL), new_kv
 
-granitemoe :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+granitemoe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
 granitemoe input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
-  key_len <- past_length + S
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
   rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask
-  x, new_kv <- scope@model do
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
     x <- x * EMBED_MUL
-    new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index past_kv i
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
       x, new_i <- granitemoe_block x mask rope_sin rope_cos past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
     x <- granitemoe_norm@norm x
-    return x, new_kv
+    return x, work_kv
   logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
   logits <- logits / LOGITS_SCALE
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
   return logits, new_kv

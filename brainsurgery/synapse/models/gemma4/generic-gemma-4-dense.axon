@@ -2,11 +2,11 @@
 
 import Activations (gelu_pytorch_tanh, tanh)
 import Attention (attention_scaled, merge_heads, reshape_heads)
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 import Math (mul, sqrt)
 import Params (has_root, param_scale)
 import Positions (position_ids, rope_pair_proportional_factors, rope_proportional_factors)
-import Cache (CacheAny, CacheLayer)
+import Cache
 import Config
 import NN
 import Tensor
@@ -66,7 +66,7 @@ gemma4_kv_separate xn kv_dim kv_heads hd = do
     NN.rmsnorm_noscale dim=hd cast_float=true
   return k, v
 
-gemma4_dense_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,GHD] -> Tensor[B,1,S,GHD] -> ?(Any, Any) -> (Tensor[B,S,D], ?(Any, Any))
+gemma4_dense_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,GHD] -> Tensor[B,1,S,GHD] -> ?Any -> (Tensor[B,S,D], ?Any)
 gemma4_dense_block x i pos_ids mask_local mask_full rope_sin_local rope_cos_local rope_sin_full rope_cos_full past_kv = do
   full <- ((i + 1) % ROPE_PERIOD) == 0
   use_global_kv <- full and ATTN_K_EQ_V
@@ -82,7 +82,7 @@ gemma4_dense_block x i pos_ids mask_local mask_full rope_sin_local rope_cos_loca
       NN.rmsnorm@q_norm dim=hd cast_float=true
     k, v <- if use_global_kv then gemma4_kv_shared xn kv_dim kv_heads hd else gemma4_kv_separate xn kv_dim kv_heads hd
     q, k <- full ? (rope_pair_proportional_factors q k rope_sin_full rope_cos_full) : (rope_pair_proportional_factors q k rope_sin_local rope_cos_local)
-    k, v, new_kv <- Cache.update (past_kv :: ?CacheLayer[B,kv_heads,P,hd]) k v
+    k, v, new_kv <- Cache.update (past_kv :: ?CacheLayer[B,kv_heads,P,WIN_FULL,hd]) k v
     k <- Tensor.repeat k repeats=(NUM_HEADS / kv_heads)
     v <- Tensor.repeat v repeats=(NUM_HEADS / kv_heads)
     mask <- full ? mask_full : mask_local
@@ -101,26 +101,31 @@ gemma4_dense_block x i pos_ids mask_local mask_full rope_sin_local rope_cos_loca
   x <- param_scale x
   return x, new_kv
 
-gemma4_dense :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?CacheAny -> ?Bool -> (Tensor[B,S,V], ?CacheAny)
+gemma4_dense :: Tensor.TokenIds[B,S] -> ?Mask[B,K,WIN_FULL] -> ?CacheAny -> ?Bool -> (Tensor[B,S,V], ?CacheAny)
 gemma4_dense input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length_any past_kv
+  attn_mask <- mask_for_input input_ids attn_mask WIN_FULL
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask_local <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WIN_LOCAL
   mask_full <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WIN_FULL
   rope_sin_local, rope_cos_local <- rope_proportional_factors pos_ids MODEL_HEAD_DIM theta=THETA_LOCAL
   rope_sin_full, rope_cos_full <- rope_proportional_factors pos_ids GHD theta=THETA_FULL scale_factor=ROPE_SCALE_FULL partial_rotary_factor=ROTARY_PARTIAL_FULL
+  work_kv <- Cache.prepare_any past_kv use_cache WIN_FULL
+  read_kv <- Cache.read_any past_kv work_kv
   logits, new_kv <- scope@model.language_model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=EMB_SCALE
-    new_kv <- use_cache ? Cache.init_any : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index_any past_kv i
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index_any read_kv i
       x, new_i <- gemma4_dense_block x i pos_ids mask_local mask_full rope_sin_local rope_cos_local rope_sin_full rope_cos_full past_i
-      new_kv <- Cache.append_any new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append_any work_kv new_i
+      yield x, work_kv
     logits <- rms@norm x |> NN.linear@embed_tokens
     logits <- logits / LOGIT_SOFTCAP
     logits <- tanh logits
     logits <- logits * LOGIT_SOFTCAP
-    return logits, new_kv
+    return logits, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish_any new_kv new_length
+  new_kv <- use_cache ? new_kv : null
   return logits, new_kv

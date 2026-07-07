@@ -392,7 +392,8 @@ deepseek_v4_experts@path hidden_states weights indices = do
 deepseek_v4_mlp :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor.TokenIds[B,S] -> String -> Tensor[B,S,MODEL_DIM]
 deepseek_v4_mlp@path x input_ids mlp_type = do
   is_hash <- mlp_type == "hash_moe"
-  weights, indices <- deepseek_v4_router@path x input_ids is_hash
+  routed_info <- deepseek_v4_router@path x input_ids is_hash
+  weights, indices <- routed_info
   routed <- deepseek_v4_experts@path x weights indices
   shared <- Tensor.reshape x shape=[B * S, MODEL_DIM] |> deepseek_v4_swiglu@shared_experts |> Tensor.reshape shape=[B, S, MODEL_DIM]
   return routed + shared

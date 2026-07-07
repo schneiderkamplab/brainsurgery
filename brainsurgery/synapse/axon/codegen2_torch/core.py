@@ -4160,9 +4160,10 @@ class _DirectTorchEmitter:
                     add(lines, 8, f"if torch.is_tensor({value.name}):")
                     add(lines, 12, f"__static_len_{value.name} = int({value.name}.shape[1])")
                     if capacity_expr is None:
-                        add(lines, 12, f"__static_capacity_{value.name} = max(int(self.config.get('n_positions', self.config.get('max_position_embeddings', __static_len_{value.name}))), __static_len_{value.name})")
+                        add(lines, 12, f"__static_declared_capacity_{value.name} = int(input_ids.shape[1]) if input_ids is not None else __static_len_{value.name}")
                     else:
-                        add(lines, 12, f"__static_capacity_{value.name} = max(int({capacity_expr}), __static_len_{value.name})")
+                        add(lines, 12, f"__static_declared_capacity_{value.name} = int({capacity_expr})")
+                    add(lines, 12, f"__static_capacity_{value.name} = max(__static_declared_capacity_{value.name}, __static_len_{value.name})")
                     add(lines, 12, f"__static_store_{value.name} = torch.zeros(({value.name}.shape[0], __static_capacity_{value.name}), dtype={value.name}.dtype, device={value.name}.device)")
                     add(lines, 12, f"__static_store_{value.name}[:, :__static_len_{value.name}] = {value.name}")
                     add(lines, 12, f"{value.name} = (__static_store_{value.name}, __static_len_{value.name})")

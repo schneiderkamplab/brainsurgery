@@ -8,7 +8,7 @@ import Activations (silu)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
 import Math (floor, mul)
 
@@ -24,44 +24,44 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 2048
+MODEL_DIM <- 2048
 
-VOCAB_SIZE = 59264
+VOCAB_SIZE <- 59264
 
-NUM_LAYERS = 28
+NUM_LAYERS <- 28
 
-NUM_HEADS = 16
+NUM_HEADS <- 16
 
-KVH = 4
+KVH <- 4
 
-MODEL_HEAD_DIM = 128
+MODEL_HEAD_DIM <- 128
 
-QD = NUM_HEADS * MODEL_HEAD_DIM
+FFN <- 6144
 
-KVD = KVH * MODEL_HEAD_DIM
+EPS <- 1e-05
 
-FFN = 6144
+THETA <- 10000.0
 
-EPS = 1e-05
-
-THETA = 10000.0
-
-MAX_POSITIONS = 8192
+MAX_POSITIONS <- 8192
 
 PROPE <- 1.0
 
 ROTARY_DIM <- floor (MODEL_HEAD_DIM * PROPE)
 
-ATTN_BIAS = false
+ATTN_BIAS <- false
+
+TIE <- true
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
 
 HAS_LM_HEAD = has_root "lm_head"
-
-TIE = true
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
-glm_edge_attn :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+glm_edge_attn :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
 glm_edge_attn x rope_sin rope_cos mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -85,7 +85,7 @@ glm_edge_ffn x = do
   g, u <- Tensor.split gu sizes=[FFN, FFN]
   return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM bias=false
 
-glm_edge_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+glm_edge_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
 glm_edge_block x rope_sin rope_cos mask past_kv = do
   x, new_kv <- glm_edge_attn x rope_sin rope_cos mask past_kv
   residual <- x
@@ -95,22 +95,28 @@ glm_edge_block x rope_sin rope_cos mask past_kv = do
   x <- residual + m
   return x, new_kv
 
-glm_edge :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+glm_edge :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
 glm_edge input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids past_length=past_length
   rope_sin, rope_cos <- rope_base_factors pos_ids ROTARY_DIM theta=THETA interleaved=true
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-    new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index past_kv i
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
       x, new_i <- glm_edge_block x rope_sin rope_cos mask past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
     x <- rms@norm x
-    return x, new_kv
-  logits <- HAS_LM_HEAD ? ((TIE == false) ? (NN.linear@lm_head x dim=VOCAB_SIZE bias=false) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  use_lm_head <- HAS_LM_HEAD and (TIE == false)
+  logits <- use_lm_head ? (NN.linear@lm_head x dim=VOCAB_SIZE bias=false) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
   return logits, new_kv

@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "HuggingFaceTB/SmolLM-135M" #-}
+{-# CHECKPOINTS ["HuggingFaceTB/SmolLM-135M", "HuggingFaceTB/SmolLM-135M-Instruct"] #-}
 
 {-# TASK "causal_lm" #-}
 
@@ -8,7 +8,7 @@ import Activations (silu)
 
 import Attention (attention_gqa_with_additive_mask, mask_to_additive_for_input, merge_heads, reshape_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
 import Math (mul)
 
@@ -24,38 +24,38 @@ import NN
 
 import Tensor
 
-HAS_TEXT_CONFIG = false
+HAS_TEXT_CONFIG <- false
+
+MODEL_DIM <- HAS_TEXT_CONFIG ? (576) : (576)
+
+VOCAB_SIZE <- HAS_TEXT_CONFIG ? (49152) : (49152)
+
+NUM_LAYERS <- HAS_TEXT_CONFIG ? (30) : (30)
+
+NUM_HEADS <- HAS_TEXT_CONFIG ? (9) : (9)
+
+KVH <- HAS_TEXT_CONFIG ? (3) : (3)
+
+HAS_HEAD_DIM <- HAS_TEXT_CONFIG ? (false) : (false)
+
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (HAS_TEXT_CONFIG ? (64) : (64)) : (MODEL_DIM / NUM_HEADS)
+
+FFN <- HAS_TEXT_CONFIG ? (1536) : (1536)
+
+EPS <- HAS_TEXT_CONFIG ? (1e-05) : (1e-05)
+
+THETA <- HAS_TEXT_CONFIG ? (10000.0) : (10000.0)
+
+MAX_POSITIONS <- HAS_TEXT_CONFIG ? (2048) : (2048)
 
 HAS_LANGUAGE_MODEL = has_root "language_model"
 
-MODEL_DIM = HAS_TEXT_CONFIG ? (576) : (576)
-
-VOCAB_SIZE = HAS_TEXT_CONFIG ? (49152) : (49152)
-
-NUM_LAYERS = HAS_TEXT_CONFIG ? (30) : (30)
-
-NUM_HEADS = HAS_TEXT_CONFIG ? (9) : (9)
-
-KVH = HAS_TEXT_CONFIG ? (3) : (3)
-
-HAS_HEAD_DIM = HAS_TEXT_CONFIG ? (false) : (false)
-
-MODEL_HEAD_DIM = HAS_HEAD_DIM ? (HAS_TEXT_CONFIG ? (64) : (64)) : (MODEL_DIM / NUM_HEADS)
-
 KVD = KVH * MODEL_HEAD_DIM
-
-FFN = HAS_TEXT_CONFIG ? (1536) : (1536)
-
-EPS = HAS_TEXT_CONFIG ? (1e-05) : (1e-05)
-
-THETA = HAS_TEXT_CONFIG ? (10000.0) : (10000.0)
-
-MAX_POSITIONS = HAS_TEXT_CONFIG ? (2048) : (2048)
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
-smollm_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,H,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+smollm_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,H,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
 smollm_block x rope_sin rope_cos mask additive_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -74,25 +74,30 @@ smollm_block x rope_sin rope_cos mask additive_mask past_kv = do
     return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
   return x + m, new_kv
 
-smollm_model :: Path -> TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,H,S,K] -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
-smollm_model@root input_ids attn_mask past_kv use_cache rope_sin rope_cos mask additive_mask = do
+smollm_model :: Path -> TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Cache[B,KVH,K,MAX_POSITIONS,DH] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,H,S,K] -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+smollm_model@root input_ids attn_mask read_kv work_kv rope_sin rope_cos mask additive_mask = do
   x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-  new_kv <- use_cache ? Cache.init : null
-  x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-    past_i <- Cache.index past_kv i
+  x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
     x, new_i <- smollm_block x rope_sin rope_cos mask additive_mask past_i
-    new_kv <- Cache.append new_kv new_i
-    yield x, new_kv
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
   logits <- rms@norm x |> NN.linear@embed_tokens dim=VOCAB_SIZE
-  return logits, new_kv
+  return logits, work_kv
 
-smollm :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+smollm :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
 smollm input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   rope_sin, rope_cos <- rope_base_factors pos_ids MODEL_HEAD_DIM THETA
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
   additive_mask <- mask_to_additive_for_input input_ids mask NUM_HEADS
-  logits, new_kv <- HAS_LANGUAGE_MODEL ? smollm_model@language_model.model input_ids attn_mask past_kv use_cache rope_sin rope_cos mask additive_mask : smollm_model@model input_ids attn_mask past_kv use_cache rope_sin rope_cos mask additive_mask
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  logits, new_kv <- HAS_LANGUAGE_MODEL ? smollm_model@language_model.model input_ids attn_mask read_kv work_kv rope_sin rope_cos mask additive_mask : smollm_model@model input_ids attn_mask read_kv work_kv rope_sin rope_cos mask additive_mask
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
   return logits, new_kv

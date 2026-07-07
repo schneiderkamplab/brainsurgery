@@ -3,7 +3,7 @@
 
 import Activations (relu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (bidirectional_mask, bidirectional_mask_for_input, causal_mask, causal_mask_for_input)
+import Masking (Mask, bidirectional_mask, bidirectional_mask_for_input, causal_mask, causal_mask_for_input, mask_for_input)
 import Math (sqrt)
 import Positions (relative_position_bias)
 import Config
@@ -71,8 +71,10 @@ t5_decoder_block x enc_hidden encoder_attention_mask decoder_attention_mask = do
   y <- x + ffn
   return y
 
-t5 :: TokenIds[B,SENC] -> ?Tensor[B,SENC] -> TokenIds[B,SDEC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,V]
+t5 :: TokenIds[B,SENC] -> ?Mask[B,SENC,SENC] -> TokenIds[B,SDEC] -> ?Mask[B,SDEC,SDEC] -> Tensor[B,SDEC,V]
 t5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
+  attention_mask <- mask_for_input input_ids attention_mask SENC
+  decoder_attention_mask <- mask_for_input decoder_input_ids decoder_attention_mask SDEC
   encoder_keep <- bidirectional_mask_for_input input_ids SENC padding_mask=attention_mask
   decoder_keep <- causal_mask_for_input decoder_input_ids SDEC padding_mask=decoder_attention_mask window=1048576
   cross_keep <- bidirectional_mask_for_input decoder_input_ids SENC padding_mask=attention_mask
