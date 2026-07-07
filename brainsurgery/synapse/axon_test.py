@@ -2982,9 +2982,14 @@ def _time_generate_repeated(
     repeat = max(1, int(repeat))
     out: Any = None
 
-    def _sync_cuda() -> None:
+    def _sync() -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        try:
+            import mlx.core as mx
+            mx.eval(mx.array(0))
+        except ImportError:
+            pass
 
     with timing(message=label):
         warmup_samples: list[float] = []
@@ -2997,7 +3002,7 @@ def _time_generate_repeated(
             warmup_samples.append(time.perf_counter() - t0)
         samples: list[float] = []
         for _ in range(repeat):
-            _sync_cuda()
+            _sync()
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
@@ -3016,9 +3021,14 @@ def _time_forward_repeated(
     warmup = max(0, int(warmup))
     repeat = max(1, int(repeat))
     out: Any = None
-    def _sync_cuda() -> None:
+    def _sync() -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        try:
+            import mlx.core as mx
+            mx.eval(mx.array(0))
+        except ImportError:
+            pass
 
     with timing(message=label):
         warmup_samples: list[float] = []
@@ -3031,7 +3041,7 @@ def _time_forward_repeated(
             warmup_samples.append(time.perf_counter() - t0)
         samples: list[float] = []
         for _ in range(repeat):
-            _sync_cuda()
+            _sync()
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
@@ -3205,6 +3215,7 @@ def _maybe_compile_model(
     mode: str | None,
     fullgraph: bool,
     dynamic: bool,
+    max_kv_length: int | None = None,
 ) -> Any:
     if not enabled:
         return model
@@ -3216,7 +3227,12 @@ def _maybe_compile_model(
         import mlx.core as mx
         import mlx.nn as mx_nn
         if isinstance(model, mx_nn.Module):
-            model._forward = mx.compile(model._forward)
+            compile_method = getattr(model, "compile", None)
+            if callable(compile_method):
+                kv_len = int(max_kv_length) if max_kv_length is not None else 2048
+                compile_method(max_kv_length=kv_len)
+            else:
+                model._forward = mx.compile(model._forward)
             return model
     except ImportError:
         pass
@@ -4451,7 +4467,7 @@ def _run_axon_test_single(
                                 pad_token_id=tokenizer_obj.eos_token_id,
                                 num_beams=1,
                                 do_sample=False,
-                                use_cache=False,
+                                use_cache=True,
                             )
 
                     hf_gen, hf_time, hf_generate_samples, hf_generate_warmup_samples = _time_generate_repeated(
@@ -4641,6 +4657,7 @@ def _run_axon_test_single(
                 mode=compile_mode,
                 fullgraph=compile_fullgraph,
                 dynamic=compile_dynamic,
+                max_kv_length=max(max_len, 1100),
             )
             syn_layer_inputs: dict[int, torch.Tensor] = {}
             syn_layer_outputs: dict[int, torch.Tensor] = {}

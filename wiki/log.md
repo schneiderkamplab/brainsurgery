@@ -60,3 +60,27 @@ confidence: high
 - Added native ordered multi-backend support to `brainsurgery synapse axon-benchmark` via `--axon-backends`, emitting one stream CSV row per backend with a new `backend` column.
 - Added `scripts/monitor_axon_benchmark.py` as a Rich live monitor for benchmark run directories, including recursive stream CSVs, parent logs, paired-runner status files, GPU memory/utilization, active jobs, and recent failures.
 - Validated by `brainsurgery synapse axon-benchmark ... --axon-backends codegen2-torch,codegen2-jax --dry-run --stream-csv ...` and `pytest -q tests/test_synapse_axon_import_loader.py tests/test_synapse_cli_optimize_flags.py`.
+
+## [2026-07-01] mlx codegen | 5 fixes + mx.compile implemented on feat-mlx
+
+- Cherry-picked all 5 MLX codegen fixes from `feat-serving` to `feat-mlx`:
+  1. `params_has_root` → `self._flat_tensors` (not torch parent's `state_dict_tensors`)
+  2. `list_length`/`list_append` → `0 if x is None else len(x)` / `x if x is not None else []`
+  3. `_path_template_part` → instance method with dict cache (`_path_cache`)
+  4. `_param`/`_optional_param` → `dict.get(key)` early-exit before `_materialize_expert_bank_for_path`
+  5. `use_cache`/`past_kv` `_to_mlx` skip in `forward()` and `_forward()`
+- Implemented `compile(max_kv_length)` method in MLX codegen: wraps `_forward` with `mx.compile`, pre-compiles KV shapes 0..max_kv_length via dummy decode warmup.
+- Updated `scripts/bench_raw_throughput_compare.py` with `mlx+compile` backend config.
+- Results on `feat-mlx` (Gemma-3-270M, 3 trials, 64 decode steps, warmup 1100 shapes):
+
+  | Backend | p=16 | p=64 | p=256 | p=512 | p=1024 |
+  |---------|------|------|-------|-------|--------|
+  | torch (MPS) | 42 | 42 | 41 | 40 | 40 |
+  | mlx | 600 | 595 | 587 | 577 | 461 |
+  | **mlx+compile** | **2091** | **2177** | **1858** | **1868** | **1840** |
+
+- MLX+compile is ~50x faster than torch MPS, ~3.5x faster than MLX baseline.
+- Warmup cost: ~6.1s for 1100 shapes. Per-shape compile: ~5.5ms.
+- Memory cost: ~61 KB/shape (small KV) to ~567 KB/shape (large KV). 1100 shapes ≈ 40 MB active + cache.
+- `feat-mlx` has `_mlx_rope` graph intrinsic bug (`bool()` on mlx array) when MLX backend intrinsics are enabled. Benchmark does not enable MLX intrinsics (matching `feat-serving` behavior).
+- Depends-on: the `_to_mlx` skip fix (without it, `mx.compile` recompiles every step because `np.asarray()` creates new Python objects that break tracing).
