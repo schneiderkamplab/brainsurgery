@@ -15,6 +15,7 @@ from brainsurgery.synapse.axon.ast import (
     render_axon_file,
 )
 from brainsurgery.synapse.axon.load import load_axon_files_from_path
+from brainsurgery.synapse.axon.load import resolve_import_path
 from brainsurgery.synapse.axon.parse import parse_axon_program_from_path
 from brainsurgery.synapse.axon.resolve import (
     resolve_axon_program_from_path,
@@ -78,6 +79,84 @@ def test_load_stage_returns_root_and_import_closure_as_parsed_ast_files(tmp_path
     assert [f.namespace for f in loaded.files] == ["Foo", None]
     assert loaded.files[0].ast.exports == ("bar",)
     assert loaded.files[1].ast.imports == ("Foo",)
+
+
+def test_builtin_overlay_imports_are_resolved_from_static_overlay(tmp_path: Path) -> None:
+    root = tmp_path / "root.axon"
+    _write(
+        root,
+        """
+        import Cache
+
+        main :: Int
+        main = 1
+        """,
+    )
+
+    loaded = load_axon_files_from_path(root, builtins_overlays=("static",))
+    cache_file = next(file for file in loaded.files if file.namespace == "Cache")
+
+    assert cache_file.path.name == "Cache.axon"
+    assert cache_file.path.parent.name == "static"
+    assert loaded.builtins_overlays == ("static",)
+
+
+def test_builtin_overlay_imports_check_multiple_overlays_in_order(tmp_path: Path) -> None:
+    builtins_dir = tmp_path / "builtins"
+    first = builtins_dir / "first"
+    second = builtins_dir / "second"
+    default = builtins_dir
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "Cache.axon").write_text("", encoding="utf-8")
+    (second / "Cache.axon").write_text("", encoding="utf-8")
+    (default / "Cache.axon").write_text("", encoding="utf-8")
+    root = tmp_path / "root.axon"
+    root.write_text("", encoding="utf-8")
+
+    resolved = resolve_import_path(
+        root,
+        "Cache",
+        builtins_dir.resolve(),
+        (),
+        ("first", "second"),
+    )
+
+    assert resolved == (first / "Cache.axon").resolve()
+
+
+def test_builtin_overlay_files_are_partial_overlays(tmp_path: Path) -> None:
+    import brainsurgery.synapse.axon.load.core as load_core
+
+    _write(
+        tmp_path / "Cache.axon",
+        """
+        export (
+          keep,
+          replace,
+        )
+
+        keep :: Int
+        keep = 1
+
+        replace :: Int
+        replace = 2
+        """,
+    )
+    _write(
+        tmp_path / "CacheOverlay.axon",
+        """
+        replace :: Int
+        replace = 3
+        """,
+    )
+    merged = load_core._merge_overlay_axon_files(
+        ((tmp_path / "Cache.axon").resolve(), (tmp_path / "CacheOverlay.axon").resolve())
+    )
+    modules = {module.name: module for module in merged.modules}
+
+    assert set(modules) == {"keep", "replace"}
+    assert merged.exports == ("keep", "replace")
 
 
 def test_load_stage_detects_import_cycles(tmp_path: Path) -> None:
@@ -287,7 +366,7 @@ def test_resolve_renders_valid_inline_do_branches(tmp_path: Path) -> None:
 
     assert "import " not in resolved
     assert "Cache.update ::" in resolved
-    assert "?CacheLayer[" in resolved
+    assert "CacheLayer[" in resolved
     assert ast_equal(reparsed, report.ast)
     assert render_axon_file(reparsed) == resolved
 

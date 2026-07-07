@@ -6,7 +6,7 @@ import Activations (gelu_pytorch_tanh)
 
 import Attention (attention_gqa_with_additive_mask, mask_to_additive_for_input, merge_heads, reshape_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
 import Math (mul, sqrt)
 
@@ -14,7 +14,7 @@ import Params (has_root)
 
 import Positions (position_ids, position_ids_scale, rope_base_factors, rope_pair_base_factors)
 
-import Cache (Cache, CacheLayer)
+import Cache
 
 import Config
 
@@ -22,33 +22,37 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 640
+MODEL_DIM <- 640
 
-VOCAB_SIZE = 262144
+MODEL_DIM_FLOAT <- 640.0
 
-NUM_LAYERS = 18
+EMB_SCALE <- sqrt MODEL_DIM_FLOAT
 
-NUM_HEADS = 4
+VOCAB_SIZE <- 262144
 
-KVH = 1
+NUM_LAYERS <- 18
 
-MODEL_HEAD_DIM = 256
+NUM_HEADS <- 4
 
-FFN = 2048
+KVH <- 1
 
-ROPE_PERIOD = 6
+MODEL_HEAD_DIM <- 256
 
-THETA_BASE = 10000.0
+FFN <- 2048
 
-THETA_LONG = 1000000.0
+ROPE_PERIOD <- 6
 
-ROPE_LONG_SCALE = 1.0
+THETA_BASE <- 10000.0
 
-WIN_LOCAL = 512
+THETA_LONG <- 1000000.0
 
-WIN_LONG = 32768
+ROPE_LONG_SCALE <- 1.0
 
-QUERY_PRE_ATTN_SCALAR = 256.0
+WIN_LOCAL <- 512
+
+WIN_LONG <- 32768
+
+QUERY_PRE_ATTN_SCALAR <- 256.0
 
 ATTN_SCALE = 1.0 / sqrt QUERY_PRE_ATTN_SCALAR
 
@@ -56,7 +60,7 @@ HAS_MODEL_LM_MODEL = has_root "model.language_model.model"
 
 HAS_LM_MODEL = has_root "language_model.model"
 
-gemma3_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,NUM_HEADS,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+gemma3_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,NUM_HEADS,S,K] -> ?CacheLayer[B,KVH,P,WIN_LONG,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,WIN_LONG,DH])
 gemma3_block x i rope_sin_local rope_cos_local rope_sin_long rope_cos_long mask_local mask_long additive_mask_local additive_mask_long past_kv = do
   xn <- NN.rmsnorm@input_layernorm x cast_float=true unit_offset=true
   a, new_kv <- scope@self_attn do
@@ -82,30 +86,33 @@ gemma3_block x i rope_sin_local rope_cos_local rope_sin_long rope_cos_long mask_
   m <- NN.rmsnorm@post_feedforward_layernorm m cast_float=true unit_offset=true
   return x + m, new_kv
 
-gemma3_body :: Path -> Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+gemma3_body :: Path -> Tensor.TokenIds[B,S] -> ?Mask[B,K,WIN_LONG] -> ?Cache[B,KVH,P,WIN_LONG,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,WIN_LONG,DH])
 gemma3_body@__scope input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask WIN_LONG
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
   pos_ids_long <- position_ids_scale pos_ids ROPE_LONG_SCALE
   rope_sin_local, rope_cos_local <- rope_base_factors pos_ids MODEL_HEAD_DIM THETA_BASE
   rope_sin_long, rope_cos_long <- rope_base_factors pos_ids_long MODEL_HEAD_DIM THETA_LONG
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask_local <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WIN_LOCAL
   mask_long <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WIN_LONG
   additive_mask_local <- mask_to_additive_for_input input_ids mask_local NUM_HEADS
   additive_mask_long <- mask_to_additive_for_input input_ids mask_long NUM_HEADS
-  emb_scale <- sqrt (640.0)
-  x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=emb_scale
-  new_kv <- use_cache ? Cache.init : null
-  x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-    past_i <- Cache.index past_kv i
+  x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=EMB_SCALE
+  work_kv <- Cache.prepare past_kv use_cache WIN_LONG
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
     x, new_i <- gemma3_block x i rope_sin_local rope_cos_local rope_sin_long rope_cos_long mask_local mask_long additive_mask_local additive_mask_long past_i
-    new_kv <- Cache.append new_kv new_i
-    yield x, new_kv
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  work_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? work_kv : null
   logits <- NN.rmsnorm@norm x cast_float=true unit_offset=true |> NN.linear@embed_tokens
   return logits, new_kv
 
-gemma3 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+gemma3 :: Tensor.TokenIds[B,S] -> ?Mask[B,K,WIN_LONG] -> ?Cache[B,KVH,P,WIN_LONG,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,WIN_LONG,DH])
 gemma3 input_ids attn_mask past_kv use_cache = do
   logits, new_kv <- HAS_MODEL_LM_MODEL ? (gemma3_body@model.language_model.model input_ids attn_mask past_kv use_cache) : (HAS_LM_MODEL ? (gemma3_body@language_model.model input_ids attn_mask past_kv use_cache) : (gemma3_body@model input_ids attn_mask past_kv use_cache))
   return logits, new_kv

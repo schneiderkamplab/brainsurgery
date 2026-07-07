@@ -4219,6 +4219,67 @@ def test_graph_ir_optimizer_rejects_stale_module_call_result_after_dim_binding()
         )
 
 
+def test_graph_ir_optimizer_ignores_placeholder_minus_one_dim_when_refreshing_call_result() -> None:
+    dim_t = TypeDim()
+    tensor_store = TypeTensor("Tensor", ("B", "H", "C", "DH"))
+    tensor_formal = TypeTensor("Tensor", ("B", "H", "key_length", "DH"))
+    tensor_stale = TypeTensor("Tensor", ("B", "H", -1, "DH"))
+    helper = GraphModule(
+        name="helper",
+        inputs=(GraphValue("x", tensor_store, tensor_store.dims), GraphValue("key_length", dim_t)),
+        outputs=(GraphValueRef("out", tensor_formal, tensor_formal.dims),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="helper:1",
+                op=GraphOp("core.ascribe"),
+                inputs=(GraphValueRef("x", tensor_store, tensor_store.dims),),
+                attrs={},
+                outputs=(GraphValue("out", tensor_formal, tensor_formal.dims),),
+                source_module="helper",
+                type_expr=tensor_formal,
+                dims=tensor_formal.dims,
+            ),
+        ),
+        return_type_expr=tensor_formal,
+    )
+    main = GraphModule(
+        name="main",
+        inputs=(GraphValue("x", tensor_store, tensor_store.dims), GraphValue("key_len", dim_t)),
+        outputs=(GraphValueRef("out", tensor_stale, tensor_stale.dims),),
+        output_names=("out",),
+        nodes=(
+            GraphNode(
+                id="main:1",
+                op=GraphOp("helper"),
+                inputs=(GraphValueRef("x", tensor_store, tensor_store.dims), GraphValueRef("key_len", dim_t)),
+                attrs={},
+                outputs=(GraphValue("out", tensor_stale, tensor_stale.dims),),
+                source_module="main",
+                type_expr=tensor_stale,
+                dims=tensor_stale.dims,
+            ),
+        ),
+        return_type_expr=tensor_stale,
+    )
+
+    optimized = optimize_graph_program(
+        GraphProgram(modules=(helper, main), main_module="main", pragmas={}),
+        config=GraphOptimizeConfig(
+            atomic_alias_cleanup=False,
+            dead_temp_elimination=False,
+            constant_folding=False,
+            specialize_definitions="off",
+            inline_safe=False,
+        ),
+    )
+
+    optimized_main = next(module for module in optimized.modules if module.name == "main")
+    assert isinstance(optimized_main.return_type_expr, TypeTensor)
+    assert optimized_main.return_type_expr.dims == ("B", "H", "key_len", "DH")
+    assert optimized_main.nodes[0].outputs[0].type_expr == optimized_main.return_type_expr
+
+
 def test_graph_ir_optimizer_inlines_path_operand_helper() -> None:
     path_t = TypePath()
     helper = GraphModule(

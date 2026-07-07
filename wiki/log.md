@@ -55,6 +55,12 @@ confidence: high
 - Updated `scripts/benchmark_report_3tables.py` and the `report` skill to emit four standard benchmark tables: progress, issue rows, generic-vs-materialized comparison, and `Axon/HF >= 1.0` timing outliers.
 - The progress table now includes timed row count, Axon faster count, and Axon/HF >= 1.0 count.
 
+## [2026-07-04] axon-benchmark | multi-backend rows and Rich monitor
+
+- Added native ordered multi-backend support to `brainsurgery synapse axon-benchmark` via `--axon-backends`, emitting one stream CSV row per backend with a new `backend` column.
+- Added `scripts/monitor_axon_benchmark.py` as a Rich live monitor for benchmark run directories, including recursive stream CSVs, parent logs, paired-runner status files, GPU memory/utilization, active jobs, and recent failures.
+- Validated by `brainsurgery synapse axon-benchmark ... --axon-backends codegen2-torch,codegen2-jax --dry-run --stream-csv ...` and `pytest -q tests/test_synapse_axon_import_loader.py tests/test_synapse_cli_optimize_flags.py`.
+
 ## [2026-07-01] mlx codegen | 5 fixes + mx.compile implemented on feat-mlx
 
 - Cherry-picked all 5 MLX codegen fixes from `feat-serving` to `feat-mlx`:

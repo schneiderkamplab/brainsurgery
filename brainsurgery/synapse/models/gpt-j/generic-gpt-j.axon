@@ -3,7 +3,7 @@
 
 import Activations (gelu_new)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 import Params (has_root)
 import Positions (position_ids, rope_base_factors, rope_pair_base_prefix_factors)
 import Cache
@@ -40,7 +40,7 @@ HAS_LM_HEAD <- do
 HAS_LM_HEAD_BIAS <- do
   return has_root "lm_head.bias"
 
-gptj_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
+gptj_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
 gptj_block x rope_sin rope_cos mask past_kv = do
   xn <- NN.layernorm@ln_1 x eps=EPS
   a, new_kv <- scope@attn do
@@ -56,21 +56,26 @@ gptj_block x rope_sin rope_cos mask past_kv = do
   x <- x + a + m
   return x, new_kv
 
-gpt_j :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,DH])
+gpt_j :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
 gpt_j input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids past_length=past_length
   rope_sin, rope_cos <- rope_base_factors pos_ids ROTARY_DIM THETA interleaved=true
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
   x <- NN.embedding@@transformer.wte input_ids dim=MODEL_DIM
-  new_kv <- use_cache ? Cache.init : null
-  x, new_kv <- for@transformer.h i <- [0..NUM_LAYERS) carry (x, new_kv) do
-    past_i <- Cache.index past_kv i
+  x, work_kv <- for@transformer.h i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
     x, new_i <- gptj_block x rope_sin rope_cos mask past_i
-    new_kv <- Cache.append new_kv new_i
-    yield x, new_kv
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
   x <- NN.layernorm@@transformer.ln_f x eps=EPS
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
   logits <- HAS_LM_HEAD
     ? NN.linear@lm_head x dim=VOCAB_SIZE bias=HAS_LM_HEAD_BIAS
     : NN.linear@@transformer.wte x dim=VOCAB_SIZE bias=false

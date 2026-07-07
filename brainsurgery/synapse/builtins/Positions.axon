@@ -1,5 +1,4 @@
 import Math (PI, clamp, cos, exp, floor, log, sin, sqrt)
-import Masking (StaticMask)
 import NN (embedding, layernorm, linear)
 import Params param
 import Tensor (
@@ -12,6 +11,7 @@ import Tensor (
   cumsum,
   eq,
   expand,
+  full,
   gather,
   le,
   matmul,
@@ -31,8 +31,8 @@ import Tensor (
 export (
   linear_position_bias,
   linear_position_bias_for_input,
+  linear_position_bias_for_length,
   position_ids,
-  position_ids_static,
   relative_bias_disentangled,
   relative_position_bias,
   rope_pair_base,
@@ -89,20 +89,6 @@ position_ids :: TokenIds[B,S] -> ?Tensor[B,SM] -> ?Dim -> ?Int -> Tensor[B,S]
 position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = (attn_mask == null)
   ? (position_ids_nomask x past_length)
   : (position_ids_masked x attn_mask pad_fill)
-
-position_ids_static_masked :: TokenIds[B,S] -> StaticMask[B,C] -> Int -> Tensor[B,S]
-position_ids_static_masked x attn_mask pad_fill = do
-  mask_values, length <- attn_mask
-  pos <- cast mask_values dtype="long" |> cumsum dim=-1
-  pos <- where (eq mask_values 0) pad_fill (pos - 1)
-  return slice pos dim=-1 start=(length - S) end=length
-
-
-position_ids_static :: TokenIds[B,S] -> ?StaticMask[B,C] -> ?Dim -> ?Int -> Tensor[B,S]
-position_ids_static x ?attn_mask=null ?past_length=0 ?pad_fill=0 = (attn_mask == null)
-  ? (position_ids_nomask x past_length)
-  : (position_ids_static_masked x attn_mask pad_fill)
-
 
 position_ids_scale :: Tensor[B,SM] -> Float -> Tensor[B,SM]
 position_ids_scale position_ids scale_factor = do
@@ -186,6 +172,11 @@ linear_position_bias attn_mask heads ?scale=1.0 = do
 linear_position_bias_for_input :: Tensor[B,T] -> Dim -> ?Float -> Tensor[B,H,1,T]
 linear_position_bias_for_input attn_mask heads ?scale=1.0 = do
   return linear_position_bias attn_mask heads scale=scale
+
+linear_position_bias_for_length :: Tensor[B,Q] -> Dim -> Dim -> ?Float -> Tensor[B,H,1,K]
+linear_position_bias_for_length x K heads ?scale=1.0 = do
+  mask <- full x shape=[B, K] value=true dtype="bool"
+  return linear_position_bias mask heads scale=scale
 
 
 -- === ROPE HELPERS ===
@@ -632,11 +623,12 @@ rope_attention_factor_longrope pos_ids original_context ?attention_factor=null ?
   use_long <- rope_longrope_use_long pos_ids original_context
   short_raw <- (short_mscale == null) ? 1.0 : short_mscale
   long_raw <- (long_mscale == null) ? short_raw : long_mscale
-  short_val <- tensor_like short_raw pos_ids dtype="float32"
-  long_val <- tensor_like long_raw pos_ids dtype="float32"
+  short_val <- tensor_like short_raw use_long dtype="float32"
+  long_val <- tensor_like long_raw use_long dtype="float32"
   base <- where use_long long_val short_val
-  value <- (attention_factor == null) ? base : (tensor_like attention_factor pos_ids dtype="float32")
-  return reshape value shape=[B, 1, SM, 1]
+  value <- (attention_factor == null) ? base : (tensor_like attention_factor use_long dtype="float32")
+  value <- reshape value shape=[1, 1, 1, 1]
+  return expand value shape=[B, 1, SM, 1]
 
 
 rope_longrope_factors :: Tensor[B,S] -> Dim -> Float -> Dim -> Any -> Any -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,1,S,rotary_dim], Tensor[B,1,S,rotary_dim])

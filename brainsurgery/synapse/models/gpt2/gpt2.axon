@@ -1,4 +1,4 @@
-{-# CHECKPOINTS "openai-community/gpt2" #-}
+{-# CHECKPOINTS ["openai-community/gpt2", "openai-community/gpt2-medium", "openai-community/gpt2-large", "openai-community/gpt2-xl"] #-}
 
 {-# TASK "causal_lm" #-}
 
@@ -8,11 +8,11 @@ import Activations (gelu_new)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
 import Positions (position_ids)
 
-import Cache (Cache, CacheLayer)
+import Cache
 
 import Config
 
@@ -30,7 +30,7 @@ NUM_HEADS <- (Config.dim @@n_head default=((12 :: Dim)))
 
 VOCAB_SIZE <- (Config.dim @@vocab_size default=((52057 :: Dim)))
 
-gpt2_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+gpt2_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,H,P,CONTEXT_SIZE,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,CONTEXT_SIZE,DH])
 gpt2_block x mask past_kv = do
   x1 <- NN.layernorm@ln_1 x
   a, new_kv <- scope@attn do
@@ -47,19 +47,24 @@ gpt2_block x mask past_kv = do
     return NN.linear@c_fc x3 dim=(4 * MODEL_DIM) bias=true transpose=true |> gelu_new |> NN.linear@c_proj dim=MODEL_DIM bias=true transpose=true
   return x + m, new_kv
 
-gpt2 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+gpt2 :: Tensor.TokenIds[B,S] -> ?Mask[B,K,CONTEXT_SIZE] -> ?Cache[B,NUM_HEADS,P,CONTEXT_SIZE,MODEL_DIM / NUM_HEADS] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,CONTEXT_SIZE,MODEL_DIM / NUM_HEADS])
 gpt2 input_ids attn_mask past_kv use_cache = do
   tok <- NN.embedding@wte input_ids dim=MODEL_DIM
-  past_length <- Cache.past_length past_kv
-  pos <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1 |> NN.embedding@wpe
+  past_len <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask CONTEXT_SIZE
+  pos <- position_ids input_ids attn_mask=attn_mask past_length=past_len pad_fill=1 |> NN.embedding@wpe
   x <- tok + pos
-  key_len <- (attn_mask == null) ? (past_length + S) : K
+  key_len <- mask_length_for_input input_ids attn_mask past_len
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=CONTEXT_SIZE
-  new_kv <- use_cache ? Cache.init : null
-  x, new_kv <- for@h i <- [0..NUM_LAYERS) carry (x, new_kv) do
-    past_i <- Cache.index past_kv i
+  work_kv <- Cache.prepare past_kv use_cache CONTEXT_SIZE
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- for@h i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
     x, new_i <- gpt2_block x mask past_i
-    new_kv <- Cache.append new_kv new_i
-    yield x, new_kv
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  new_length <- past_len + S
+  work_kv <- Cache.finish work_kv new_length
+  new_kv <- (use_cache ? work_kv : null)
   logits <- NN.layernorm@ln_f x |> NN.linear@wte
   return logits, new_kv

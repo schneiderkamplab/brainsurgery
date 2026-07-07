@@ -3109,11 +3109,18 @@ def _infer_expr(
                 expected_arity or 1,
             )
 
+        call_ctx = _TcCtx(
+            modules_by_name=ctx.modules_by_name,
+            type_aliases=ctx.type_aliases,
+            substitutions=dict(ctx.substitutions),
+            dim_substitutions=dict(ctx.dim_substitutions),
+            fresh_counter=ctx.fresh_counter,
+        )
         if recursive_env is not None and expr.callee in recursive_env.signatures:
             param_types, return_types = recursive_env.signatures[expr.callee]
             dim_instantiation_map: dict[str, DimToken] = {}
         else:
-            param_types, return_types = _instantiate_module_signature(callee, ctx)
+            param_types, return_types = _instantiate_module_signature(callee, call_ctx)
             dim_instantiation_map = _module_dim_instantiation_map(callee, return_types)
         param_names = [*callee.path_params, *(param.name for param in callee.params)]
         implicit_path_count = _implicit_leading_path_param_count(callee, arg_types, ctx)
@@ -3125,13 +3132,13 @@ def _infer_expr(
         ):
             param_type_idx = implicit_path_count + idx
             try:
-                _unify(arg_tp, param_tp, ctx)
+                _unify(arg_tp, param_tp, call_ctx)
             except ValueError as exc:
                 raise ValueError(
                     f"{expr.callee} positional arg {idx + 1}: {exc}; "
                     f"actual={arg_tp!r} expected={param_tp!r}"
                 ) from exc
-            typed_args[idx] = _retag_numeric_literals(typed_args[idx], param_tp, ctx)
+            typed_args[idx] = _retag_numeric_literals(typed_args[idx], param_tp, call_ctx)
             if param_type_idx >= len(callee.path_params):
                 param_idx = param_type_idx - len(callee.path_params)
                 if 0 <= param_idx < len(callee.params):
@@ -3139,7 +3146,7 @@ def _infer_expr(
                         expected_type=param_types[param_type_idx],
                         actual_type=arg_tp,
                         actual_expr=typed_args[idx],
-                        ctx=ctx,
+                        ctx=call_ctx,
                         subst=dim_subst,
                     )
                     raw_param_type = callee.params[param_idx].type_expr
@@ -3163,13 +3170,13 @@ def _infer_expr(
                 param_idx = param_names.index(key)
                 if param_idx < len(param_types):
                     try:
-                        _unify(value_tp, param_types[param_idx], ctx)
+                        _unify(value_tp, param_types[param_idx], call_ctx)
                     except ValueError as exc:
                         raise ValueError(f"{expr.callee} kwarg {key}: {exc}") from exc
                     typed_kwarg_expr = typed_kwargs.get(key)
                     if isinstance(typed_kwarg_expr, AxonExpr):
                         typed_kwargs[key] = _retag_numeric_literals(
-                            typed_kwarg_expr, param_types[param_idx], ctx
+                            typed_kwarg_expr, param_types[param_idx], call_ctx
                         )
                     if param_idx >= len(callee.path_params):
                         raw_param_idx = param_idx - len(callee.path_params)
@@ -3180,7 +3187,7 @@ def _infer_expr(
                                     expected_type=param_types[param_idx],
                                     actual_type=value_tp,
                                     actual_expr=raw_value,
-                                    ctx=ctx,
+                                    ctx=call_ctx,
                                     subst=dim_subst,
                                 )
                                 raw_param_type = callee.params[raw_param_idx].type_expr
@@ -3208,7 +3215,7 @@ def _infer_expr(
             arg_types=tuple(arg_types),
             typed_kwargs=typed_kwargs,
             kwarg_types=kwarg_types,
-            ctx=ctx,
+            ctx=call_ctx,
             module_name=module_name,
             recursive_env=recursive_env,
             expected_arity=expected_arity,
@@ -3222,7 +3229,7 @@ def _infer_expr(
                 if _type_specificity_score(refined_body_result) < _type_specificity_score(
                     return_types[0]
                 ):
-                    return_types = [_apply_subst(refined_body_result, ctx)]
+                    return_types = [_apply_subst(refined_body_result, call_ctx)]
             elif isinstance(refined_body_result, TypeTuple) and len(
                 refined_body_result.items
             ) == len(return_types):
@@ -3233,25 +3240,27 @@ def _infer_expr(
                     if _type_specificity_score(refined_item) < _type_specificity_score(
                         return_item
                     ):
-                        refined_items.append(_apply_subst(refined_item, ctx))
+                        refined_items.append(_apply_subst(refined_item, call_ctx))
                     else:
                         refined_items.append(return_item)
                 return_types = refined_items
         if len(return_types) == 1:
             call_result_type: TypeExpr = _resolve_type_dim_aliases(
-                _apply_subst(return_types[0], ctx), expr_defs
+                _apply_subst(return_types[0], call_ctx), expr_defs
             )
             arity = (
                 expected_arity
-                if isinstance(_expand_alias(call_result_type, ctx), TypeList) and expected_arity
+                if isinstance(_expand_alias(call_result_type, call_ctx), TypeList)
+                and expected_arity
                 else 1
             )
         else:
             call_result_type = _resolve_type_dim_aliases(
-                TypeTuple(items=tuple(_apply_subst(tp, ctx) for tp in return_types)),
+                TypeTuple(items=tuple(_apply_subst(tp, call_ctx) for tp in return_types)),
                 expr_defs,
             )
             arity = len(return_types)
+        ctx.fresh_counter = max(ctx.fresh_counter, call_ctx.fresh_counter)
         typed_call = replace(expr, args=tuple(typed_args), kwargs=typed_kwargs)
         return (
             _annotate_expr(typed_call, call_result_type, arity=arity, ctx=ctx),

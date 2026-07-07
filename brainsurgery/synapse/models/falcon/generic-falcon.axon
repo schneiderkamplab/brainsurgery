@@ -3,7 +3,7 @@
 
 import Activations (gelu)
 import Attention (attention, merge_heads, split_qkv_heads)
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 import NN (embedding, layernorm, linear)
 import Positions (linear_position_bias_for_input)
 import Cache
@@ -28,7 +28,7 @@ FFN <- do
 
 MAX_POSITIONS <- Config.int@max_position_embeddings default=2048
 
-falcon_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,NUM_HEADS,1,K] -> ?CacheLayer[B,NUM_HEADS,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,DH])
+falcon_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,NUM_HEADS,1,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
 falcon_block x keep pos_bias past_kv = do
   xn <- layernorm@input_layernorm x dim=MODEL_DIM
 
@@ -49,16 +49,23 @@ falcon_block x keep pos_bias past_kv = do
   x <- x + m
   return x, new_kv
 
-falcon :: TokenIds[B,S] -> Tensor[B,K] -> ?Cache[B,NUM_HEADS,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,DH])
+falcon :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
 falcon input_ids attn_mask past_kv use_cache = do
   x <- embedding@transformer.word_embeddings input_ids dim=MODEL_DIM
-  new_kv <- use_cache ? Cache.init : null
-  keep <- causal_mask_for_input input_ids K padding_mask=attn_mask window=MAX_POSITIONS
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  keep <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
   pos_bias <- linear_position_bias_for_input attn_mask heads=NUM_HEADS scale=0.125
-  x, new_kv <- for@transformer.h i <- [0..NUM_LAYERS) carry (x, new_kv) do
-    past_i <- Cache.index past_kv i
+  x, work_kv <- for@transformer.h i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
     x, new_i <- falcon_block x keep pos_bias past_i
-    new_kv <- Cache.append new_kv new_i
-    yield x, new_kv
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
   logits <- layernorm@transformer.ln_f x dim=MODEL_DIM |> linear@lm_head dim=VOCAB_SIZE
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
   return logits, new_kv

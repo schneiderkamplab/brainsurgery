@@ -8,7 +8,7 @@ import Activations (gelu, relu)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
 import Math (sqrt)
 
@@ -22,35 +22,26 @@ import Config
 
 import NN
 
-MODEL_DIM <- do
-  return (4096)
+MODEL_DIM <- (4096 :: Dim)
 
-VOCAB_SIZE <- do
-  return (256008)
+VOCAB_SIZE <- (256008 :: Dim)
 
-NUM_LAYERS <- do
-  return (32)
+NUM_LAYERS <- (32 :: Dim)
 
-NUM_HEADS <- do
-  return (32)
+NUM_HEADS <- (32 :: Dim)
 
 MODEL_HEAD_DIM <- do
   return MODEL_DIM / NUM_HEADS
 
-FFN <- do
-  return (16384)
+FFN <- (16384 :: Dim)
 
-EPS <- do
-  return (1e-05)
+EPS <- (1e-05)
 
-MAX_POSITIONS <- do
-  return (2048)
+MAX_POSITIONS <- (2048 :: Dim)
 
-ACT <- do
-  return ("gelu")
+ACT <- ("gelu")
 
-SCALE_EMB <- do
-  return (true)
+SCALE_EMB <- (true)
 
 EMB_SCALE <- do
   return SCALE_EMB ? (sqrt MODEL_DIM) : 1.0
@@ -64,7 +55,7 @@ HAS_POS <- do
 xglm_act :: Tensor[..S] -> Tensor[..S]
 xglm_act x = (ACT == "relu") ? (relu x) : (gelu x)
 
-xglm_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+xglm_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,H,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,MAX_POSITIONS,DH])
 xglm_block x mask past_kv = do
   xn <- NN.layernorm@self_attn_layer_norm x eps=EPS
   a, new_kv <- scope@self_attn do
@@ -80,23 +71,28 @@ xglm_block x mask past_kv = do
   x <- x + m
   return x, new_kv
 
-xglm :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+xglm :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,H,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,MAX_POSITIONS,DH])
 xglm input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=(-1)
   pos_ids_rope <- pos_ids + 2
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
   tok <- NN.embedding@@model.embed_tokens input_ids dim=MODEL_DIM
   x <- tok * EMB_SCALE
   pos <- HAS_POS ? (NN.embedding@@model.embed_positions pos_ids_rope dim=MODEL_DIM) : (sinusoidal_positions x pos_ids_rope theta=10000.0 offset=0 padding_idx=null)
   x <- x + pos
-  new_kv <- use_cache ? Cache.init : null
-  x, new_kv <- for@model.layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-    past_i <- Cache.index past_kv i
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- for@model.layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
     x, new_i <- xglm_block x mask past_i
-    new_kv <- Cache.append new_kv new_i
-    yield x, new_kv
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
   x <- NN.layernorm@@model.layer_norm x eps=EPS
   logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
   return logits, new_kv
