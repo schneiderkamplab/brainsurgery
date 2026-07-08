@@ -33,6 +33,7 @@ class VLLMLayerType(Enum):
     RMSNORM = "rmsnorm"
     LAYERNORM = "layernorm"
     ATTENTION = "attention"
+    MAMBA_MIXER = "mamba_mixer"
     DEFAULT = "default"
 
 
@@ -77,6 +78,7 @@ class VLLMLayerClassification:
     pli_embed_node_id: str | None = None
     pli_model_proj_node_id: str | None = None
     pli_proj_norm_node_id: str | None = None
+    mamba_mixer_module_names: set[str] = field(default_factory=set)
 
     def layer_type(self, node: GraphNode) -> VLLMLayerType:
         return self.node_types.get(node.id, VLLMLayerType.DEFAULT)
@@ -869,7 +871,7 @@ def _classify_norms(
         qkv_node_ids.add(g.k_node_id)
         qkv_node_ids.add(g.v_node_id)
     for module in program.modules:
-        if "." in module.name:
+        if "." in module.name and "__loop" not in module.name:
             continue
         for node in module.nodes:
             if node.op.name not in modules_by_name:
@@ -929,7 +931,15 @@ def _classify_repeated_modules(
                         classification.loop_index_param[node.op.name] = body_param_name
                         if scope_parts is not None:
                             classification.module_scope_parts[node.op.name] = scope_parts
-                    break
+                break
+            else:
+                # Loop variable not passed as a direct value input; check if
+                # it appears in the scope path (e.g. h.{i}).
+                if scope_parts is not None:
+                    loop_token = "{" + loop_var_name + "}"
+                    if any(loop_token in p for p in scope_parts):
+                        classification.repeated_module_names.add(node.op.name)
+                        classification.module_scope_parts[node.op.name] = scope_parts
             found_called = True
         # If the block was inlined into the loop body (no called module found),
         # treat the loop body module itself as the repeated module.
@@ -1251,6 +1261,65 @@ def _classify_qkv_deep_fallback(
                 return
 
 
+def _classify_ssm_mixers(
+    program: GraphProgram,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    """Detect SSM mixer modules by transitive presence of SSM primitive ops.
+
+    A module is classified as MAMBA_MIXER if it is a repeated module that
+    transitively calls modules containing SSM primitive operations
+    (SSM.mamba_scan_step, SSM.causal_conv1d_full).  This is structural
+    detection based on primitive operations, not definition names.
+    """
+    SSM_PRIMITIVES = {"SSM.mamba_scan_step", "SSM.causal_conv1d_full"}
+
+    direct_ssm: set[str] = set()
+    for name, mod in modules_by_name.items():
+        for node in mod.nodes:
+            if node.op.name in SSM_PRIMITIVES:
+                direct_ssm.add(name)
+                break
+    if not direct_ssm:
+        return
+
+    calls: dict[str, set[str]] = {}
+    for name, mod in modules_by_name.items():
+        called: set[str] = set()
+        for node in mod.nodes:
+            if node.op.name in modules_by_name and node.op.name != name:
+                called.add(node.op.name)
+            for inp in node.inputs:
+                if isinstance(inp, GraphExpr) and inp.op.name in modules_by_name:
+                    called.add(inp.op.name)
+        if "__loop_" in name and "_step_" in name:
+            parent = name.split("__loop_")[0]
+            if parent in modules_by_name:
+                calls.setdefault(parent, set()).add(name)
+        calls[name] = called
+
+    def transitive(start: str, visited: set[str] | None = None) -> set[str]:
+        if visited is None:
+            visited = set()
+        if start in visited:
+            return set()
+        visited.add(start)
+        result: set[str] = set()
+        for callee in calls.get(start, set()):
+            result.add(callee)
+            result |= transitive(callee, visited)
+        return result
+
+    for mod_name in classification.repeated_module_names:
+        if mod_name in direct_ssm:
+            classification.mamba_mixer_module_names.add(mod_name)
+            continue
+        reachable = transitive(mod_name)
+        if reachable & direct_ssm:
+            classification.mamba_mixer_module_names.add(mod_name)
+
+
 def classify_graph_for_vllm(program: GraphProgram) -> VLLMLayerClassification:
     modules_by_name = {module.name: module for module in program.modules}
     provenance = infer_graph_provenance(program)
@@ -1269,6 +1338,7 @@ def classify_graph_for_vllm(program: GraphProgram) -> VLLMLayerClassification:
     _classify_remaining_linears(program, modules_by_name, classification)
     _classify_per_layer_features(program, modules_by_name, classification)
     _classify_v_norms(program, modules_by_name, classification)
+    _classify_ssm_mixers(program, modules_by_name, classification)
     return classification
 
 

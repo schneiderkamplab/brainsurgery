@@ -158,7 +158,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             if module.name != name:
                 continue
             for node in module.nodes:
-                if node.op.name == "_config_int":
+                if node.op.name in ("_config_int", "_config_dim"):
                     path_inp = node.inputs[0] if node.inputs else None
                     default = _literal_value(node.inputs[1], None) if len(node.inputs) >= 2 else None
                     if isinstance(path_inp, GraphPath) and path_inp.parts:
@@ -477,7 +477,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         elif layer_type == VLLMLayerType.PARALLEL_LM_HEAD:
             if len(args) < 2:
                 return False
-            expr = f"{attr}({args[1]})"
+            expr = args[1]
         elif layer_type == VLLMLayerType.ATTENTION:
             if len(args) >= 3:
                 expr = f"{attr}({args[0]}, {args[1]}, {args[2]}, attn_metadata=self._attn_metadata)"
@@ -486,11 +486,17 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         elif layer_type == VLLMLayerType.RMSNORM:
             if len(args) < 1:
                 return False
-            expr = f"{attr}({args[0]})"
+            data_idx = 1 if (len(node.inputs) >= 2 and isinstance(node.inputs[0], GraphPath)) else 0
+            if data_idx >= len(args):
+                return False
+            expr = f"{attr}({args[data_idx]})"
         elif layer_type == VLLMLayerType.LAYERNORM:
             if len(args) < 1:
                 return False
-            expr = f"{attr}({args[0]})"
+            data_idx = 1 if (len(node.inputs) >= 2 and isinstance(node.inputs[0], GraphPath)) else 0
+            if data_idx >= len(args):
+                return False
+            expr = f"{attr}({args[data_idx]})"
         else:
             return False
 
@@ -601,7 +607,8 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         """Return ordered list of (node_id, attr_expr, uses_residual, fused) for non-QK norms."""
         norms: list[tuple[int, str]] = []
         for node in repeated_mod.nodes:
-            if classification.node_types.get(node.id) == VLLMLayerType.RMSNORM:
+            node_type = classification.node_types.get(node.id)
+            if node_type in (VLLMLayerType.RMSNORM, VLLMLayerType.LAYERNORM):
                 if node.id in classification.qk_norm_node_ids:
                     continue
                 if node.id in classification.v_norm_node_ids:
@@ -702,6 +709,9 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
 
         add(lines, indent, '"""Generated vLLM model from Axon Graph IR."""')
         add(lines, indent, "")
+        if self._needs_mamba_cache_placeholders(classification) or classification.mamba_mixer_module_names:
+            add(lines, indent, "is_attention_free = True")
+            add(lines, indent, "")
         has_merged_ffn = any(
             g.gate_node_id and g.up_node_id for g in classification.ffn_groups
         )
@@ -746,6 +756,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 2, "from vllm.model_executor.layers.layernorm import RMSNorm, LayerNorm")
         add(lines, indent * 2, "")
 
+        add(lines, indent * 2, "self.state_dict_tensors = {}")
         self._emit_vllm_layer_inits(lines, classification, indent * 2)
 
         # --- RoPE (rotary embedding) ---
@@ -791,7 +802,6 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         # --- Per-layer scalar ---
         if classification.per_layer_scalar_node_id:
             num_layers_expr = self._config_expr("num_hidden_layers")
-            add(lines, indent * 2, "import torch")
             add(lines, indent * 2, f"self.layer_scalars = nn.ParameterList([")
             add(lines, indent * 3, "nn.Parameter(torch.ones(1))")
             add(lines, indent * 3, f"for _ in range({num_layers_expr})")
@@ -844,6 +854,27 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             add(lines, indent * 2, "from vllm.model_executor.layers.activation import GeluAndMul")
             add(lines, indent * 2, "self._ffn_act = GeluAndMul(approximate='tanh')")
 
+        # Mamba/SSM state cache placeholder layers
+        if self._needs_mamba_cache_placeholders(classification):
+            mixer_prefix = self._derive_mamba_mixer_prefix(classification)
+            if mixer_prefix:
+                i_expr = self._config_expr("intermediate_size")
+                n_expr = self._config_expr("state_size")
+                k_expr = self._config_expr("conv_kernel")
+                num_layers_expr = self._config_expr("num_hidden_layers")
+                add(lines, indent * 2, f"self._mamba_placeholders = nn.ModuleList([")
+                add(lines, indent * 3, f"_MambaPlaceholderLayer(")
+                add(lines, indent * 4, f"prefix={mixer_prefix},")
+                add(lines, indent * 4, f"intermediate_size={i_expr},")
+                add(lines, indent * 4, f"state_size={n_expr},")
+                add(lines, indent * 4, f"conv_kernel={k_expr},")
+                add(lines, indent * 3, f")")
+                add(lines, indent * 3, f"for i in range({num_layers_expr})")
+                add(lines, indent * 2, "])")
+
+        add(lines, indent * 2, "self._build_state_dict_tensors()")
+        if not self._use_clean_forward:
+            add(lines, indent * 2, "self._eval_symbols()")
         add(lines, indent, "")
         add(lines, indent, "def embed_input_ids(self, input_ids):")
         for node_id in sorted(classification.embedding_node_ids):
@@ -923,6 +954,45 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 2, "):")
         add(lines, indent * 2, "return {}")
         add(lines, indent, "")
+        add(lines, indent, "def _build_state_dict_tensors(self):")
+        add(lines, indent * 2, "_num_layers = getattr(self.config, 'num_hidden_layers', 0)")
+        add(lines, indent * 2, "for _mod_name, _module in self.named_modules():")
+        add(lines, indent * 3, "_prefix = getattr(_module, 'prefix', None)")
+        add(lines, indent * 3, "if not _prefix:")
+        add(lines, indent * 4, "continue")
+        add(lines, indent * 3, "_resolved = _prefix")
+        add(lines, indent * 3, "if '{i}' in _prefix:")
+        add(lines, indent * 4, "_idx = None")
+        add(lines, indent * 4, "for _p in reversed(_mod_name.split('.')):")
+        add(lines, indent * 5, "if _p.isdigit():")
+        add(lines, indent * 6, "_idx = int(_p)")
+        add(lines, indent * 6, "break")
+        add(lines, indent * 4, "if _idx is not None:")
+        add(lines, indent * 5, "_resolved = _prefix.replace('{i}', str(_idx))")
+        add(lines, indent * 4, "else:")
+        add(lines, indent * 5, "continue")
+        add(lines, indent * 3, "for _pname, _param in _module.named_parameters(recurse=False):")
+        add(lines, indent * 4, "self.state_dict_tensors[f'{_resolved}.{_pname}'] = _param")
+        add(lines, indent * 3, "for _bname, _buf in _module.named_buffers(recurse=False):")
+        add(lines, indent * 4, "self.state_dict_tensors[f'{_resolved}.{_bname}'] = _buf")
+        if not self._use_clean_forward:
+            add(lines, indent, "")
+            add(lines, indent, "def _config(self, path, default=None):")
+            add(lines, indent * 2, "key = str(path).lstrip('@').strip('.')")
+            add(lines, indent * 2, "found = hasattr(self.config, key)")
+            add(lines, indent * 2, "value = getattr(self.config, key, None) if found else None")
+            add(lines, indent * 2, "if not found or value is None:")
+            add(lines, indent * 3, "value = self._model_config.get(key, default)")
+            add(lines, indent * 2, "return value if value is not None else default")
+            add(lines, indent, "")
+            add(lines, indent, "def _has_config(self, path):")
+            add(lines, indent * 2, "key = str(path).lstrip('@').strip('.')")
+            add(lines, indent * 2, "if hasattr(self.config, key):")
+            add(lines, indent * 3, "return getattr(self.config, key, None) is not None")
+            add(lines, indent * 2, "return key in self._model_config")
+            add(lines, indent, "")
+            self._emit_runtime_helpers(lines)
+        add(lines, indent, "")
 
     def _emit_forward(self, lines: list[str]) -> None:
         add = self._add
@@ -936,6 +1006,10 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
 
         if repeated_mod is None:
             self._emit_forward_legacy(lines)
+            return
+
+        if cls.mamba_mixer_module_names:
+            self._emit_forward_ssm(lines, cls)
             return
 
         # --- Analyze per-layer structure ---
@@ -1343,6 +1417,75 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             down_attr = self._vllm_attr_access(down_node)
             add(lines, indent, f"hidden_states = {down_attr}(hidden_states)[0]")
 
+    def _emit_forward_ssm(self, lines: list[str], cls: VLLMLayerClassification) -> None:
+        add = self._add
+        num_layers_expr = self._config_expr("num_hidden_layers")
+
+        # Find the pre-mixer norm: per-layer RMSNorm (repeated, not in mamba_mixer)
+        norm_attr = None
+        for nid in sorted(cls.rmsnorm_node_ids):
+            node = self._find_node_by_id(nid)
+            if node is None:
+                continue
+            mod_name = self._node_module_name(node)
+            if mod_name in cls.mamba_mixer_module_names:
+                continue
+            is_repeated = self._is_repeated_node(node) or '{i}' in self._node_prefix(node)
+            if is_repeated:
+                norm_attr = self._vllm_attr_access(node)
+                break
+
+        # Find final norm: non-repeated RMSNorm (not in any repeated module)
+        final_norm_attr = None
+        for nid in sorted(cls.rmsnorm_node_ids):
+            node = self._find_node_by_id(nid)
+            if node is None:
+                continue
+            mod_name = self._node_module_name(node)
+            if mod_name in cls.repeated_module_names:
+                continue
+            if mod_name in cls.mamba_mixer_module_names:
+                continue
+            is_repeated = self._is_repeated_node(node) or '{i}' in self._node_prefix(node)
+            if not is_repeated:
+                final_norm_attr = self._vllm_attr_access(node)
+                break
+
+        add(lines, 4, "def forward(")
+        add(lines, 8, "self,")
+        add(lines, 8, "input_ids: torch.Tensor | None = None,")
+        add(lines, 8, "positions: torch.Tensor | None = None,")
+        add(lines, 8, "intermediate_tensors=None,")
+        add(lines, 8, "inputs_embeds: torch.Tensor | None = None,")
+        add(lines, 8, "**kwargs,")
+        add(lines, 8, "):")
+        add(lines, 8, "if inputs_embeds is not None:")
+        add(lines, 12, "hidden_states = inputs_embeds")
+        add(lines, 8, "else:")
+        add(lines, 12, "hidden_states = self.embed_input_ids(input_ids)")
+        add(lines, 8, "")
+        add(lines, 8, "config = self.config")
+        add(lines, 8, f"_num_layers = {num_layers_expr}")
+        add(lines, 8, "residual = None")
+        add(lines, 8, "for i in range(_num_layers):")
+        if norm_attr is not None:
+            add(lines, 12, "if residual is not None:")
+            add(lines, 16, f"hidden_states, residual = {norm_attr}[i](hidden_states, residual)")
+            add(lines, 12, "else:")
+            add(lines, 16, "residual = hidden_states")
+            add(lines, 16, f"hidden_states = {norm_attr}[i](hidden_states)")
+        add(lines, 12, "output = torch.empty_like(hidden_states)")
+        add(lines, 12, "self._vllm_mamba_mixer[i](hidden_states, output)")
+        add(lines, 12, "hidden_states = output")
+        add(lines, 8, "")
+        if final_norm_attr is not None:
+            add(lines, 8, f"hidden_states, _ = {final_norm_attr}(hidden_states, residual)")
+        add(lines, 8, "")
+        if final_norm_attr is not None:
+            add(lines, 8, f"hidden_states = {final_norm_attr}(hidden_states)")
+        add(lines, 8, "return hidden_states")
+        add(lines, 4, "")
+
     def _emit_forward_legacy(self, lines: list[str]) -> None:
         add = self._add
         main = self.modules_by_name[self.program.main_module]
@@ -1362,7 +1505,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, 8, "self._attn_metadata = attn_metadata")
         add(lines, 8, "self._positions = positions")
         add(lines, 8, "")
+        add(lines, 8, "if input_ids is not None and input_ids.dim() == 1:")
+        add(lines, 12, "input_ids = input_ids.unsqueeze(0)")
         add(lines, 8, f"result = self.{self.method_names[main.name]}(input_ids=input_ids)")
+        add(lines, 8, "if isinstance(result, (tuple, list)):")
+        add(lines, 12, "result = result[0]")
+        add(lines, 8, "if result.dim() == 3:")
+        add(lines, 12, "result = result.reshape(-1, result.shape[-1])")
         add(lines, 8, "return result")
 
     def _emit_vllm_layer_inits(
@@ -1386,15 +1535,23 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 _layer_norms = self._analyze_layer_norms(_repeated_mod, classification)
                 if _layer_norms:
                     use_clean_forward = True
+        if classification.mamba_mixer_module_names:
+            use_clean_forward = True
+            for mamba_mod_name in classification.mamba_mixer_module_names:
+                mamba_mod = self.modules_by_name.get(mamba_mod_name)
+                if mamba_mod is not None:
+                    for node in mamba_mod.nodes:
+                        skip_node_ids.add(node.id)
         self._use_clean_forward = use_clean_forward
         if use_clean_forward:
             for g in classification.qkv_groups:
                 if g.q_node_id != g.k_node_id:
                     skip_node_ids.add(g.k_node_id)
                     skip_node_ids.add(g.v_node_id)
+                    _q_mod = g.q_node_id.split(":", 1)[0] if ":" in g.q_node_id else ""
                     for mod_name in [g.k_node_id, g.v_node_id]:
                         top = mod_name.split(":", 1)[0] if ":" in mod_name else ""
-                        if top and top in self.modules_by_name:
+                        if top and top in self.modules_by_name and top != _q_mod:
                             kv_mod = self.modules_by_name[top]
                             for kn in kv_mod.nodes:
                                 if _is_linear_call(kn, self.modules_by_name):
@@ -1451,7 +1608,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     continue
                 seen.add(node.id)
                 attr_name = self._vllm_layer_attr_name(node)
-                is_repeated = self._is_repeated_node(node)
+                is_repeated = self._is_repeated_node(node) or '{i}' in self._node_prefix(node)
                 inner: list[str] = []
                 self._emit_single_layer_init(inner, node, layer_type, classification, indent + 1)
                 if is_repeated:
@@ -1482,6 +1639,96 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     add(lines, indent + 1, f"_mod.prefix = {fixed_expr}")
                 else:
                     add(lines, indent, f"self.{attr_name}.prefix = {prefix_expr}")
+
+        if classification.mamba_mixer_module_names:
+            add(lines, indent, "from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer")
+            hidden_expr = self._config_expr("hidden_size")
+            state_expr = self._config_expr("state_size")
+            conv_k_expr = self._config_expr("conv_kernel")
+            inter_expr = self._config_expr("intermediate_size")
+            tsr_expr = self._config_expr("time_step_rank")
+            num_layers_expr = self._config_expr("num_hidden_layers")
+            eps_expr = "getattr(config, 'layer_norm_epsilon', getattr(config, 'rms_norm_eps', 1e-5))"
+            mixer_prefix = self._derive_mamba_mixer_prefix_from_scope(classification)
+            add(lines, indent, f"self._vllm_mamba_mixer = nn.ModuleList([")
+            add(lines, indent + 1, f"MambaMixer(")
+            add(lines, indent + 2, f"hidden_size={hidden_expr},")
+            add(lines, indent + 2, f"ssm_state_size={state_expr},")
+            add(lines, indent + 2, f"conv_kernel_size={conv_k_expr},")
+            add(lines, indent + 2, f"intermediate_size={inter_expr},")
+            add(lines, indent + 2, f"time_step_rank={tsr_expr},")
+            add(lines, indent + 2, f"use_conv_bias=getattr(config, 'use_conv_bias', True),")
+            add(lines, indent + 2, f"use_bias=getattr(config, 'use_bias', False),")
+            add(lines, indent + 2, f"use_rms_norm=False,")
+            add(lines, indent + 2, f"rms_norm_eps={eps_expr},")
+            add(lines, indent + 2, f"activation=getattr(config, 'hidden_act', 'silu'),")
+            add(lines, indent + 2, f"model_config=vllm_config.model_config,")
+            add(lines, indent + 2, f"cache_config=cache_config,")
+            add(lines, indent + 2, f"prefix={mixer_prefix},")
+            add(lines, indent + 1, f")")
+            add(lines, indent + 1, f"for i in range({num_layers_expr})")
+            add(lines, indent, "])")
+
+        # Emit non-vLLM parameters (Params.param nodes classified as DEFAULT)
+        # that are inside repeated modules. These need to be created as
+        # nn.ParameterList and registered in state_dict_tensors directly.
+        if not use_clean_forward:
+            legacy_params: list[tuple[str, str, list[str], bool]] = []
+            seen_param_paths: set[str] = set()
+            for module in self.program.modules:
+                for node in module.nodes:
+                    if node.op.name != 'Params.param':
+                        continue
+                    if classification.layer_type(node) != VLLMLayerType.DEFAULT:
+                        continue
+                    path_inp = node.inputs[0] if node.inputs else None
+                    if not isinstance(path_inp, GraphPath) or not path_inp.parts:
+                        continue
+                    path = '.'.join(path_inp.parts)
+                    if path in seen_param_paths:
+                        continue
+                    seen_param_paths.add(path)
+                    is_repeated = self._is_repeated_node(node) or '{i}' in self._node_prefix(node)
+                    attr_name = self._vllm_layer_attr_name(node)
+                    prefix_expr = self._layer_prefix(node)
+                    # Resolve shape from output type dims
+                    shape_parts: list[str] = []
+                    for out in node.outputs:
+                        if hasattr(out, 'dims') and out.dims:
+                            for d in out.dims:
+                                if isinstance(d, int):
+                                    shape_parts.append(str(d))
+                                else:
+                                    val = self._resolve_const_value(str(d))
+                                    if val is not None:
+                                        shape_parts.append(val)
+                                    else:
+                                        shape_parts.append(f"getattr(config, '{d}', 1)")
+                            break
+                    if not shape_parts:
+                        continue
+                    legacy_params.append((attr_name, prefix_expr, shape_parts, is_repeated))
+
+            for attr_name, prefix_expr, shape_parts, is_repeated in legacy_params:
+                shape_str = ', '.join(shape_parts)
+                if is_repeated:
+                    add(lines, indent, f"self.{attr_name} = nn.ParameterList([")
+                    add(lines, indent + 1, f"nn.Parameter(torch.zeros(({shape_str},), dtype=params_dtype))")
+                    add(lines, indent + 1, f"for i in range({num_layers_expr})")
+                    add(lines, indent, "])")
+                else:
+                    add(lines, indent, f"self.{attr_name} = nn.Parameter(torch.zeros(({shape_str},), dtype=params_dtype))")
+
+            # Register non-vLLM parameters in state_dict_tensors
+            if legacy_params:
+                add(lines, indent, "# Register non-vLLM parameters in state_dict_tensors")
+                for attr_name, prefix_expr, shape_parts, is_repeated in legacy_params:
+                    if is_repeated:
+                        fixed_expr = prefix_expr.replace("{i}", "{_i}")
+                        add(lines, indent, f"for _i, _param in enumerate(self.{attr_name}):")
+                        add(lines, indent + 1, f"self.state_dict_tensors[{fixed_expr}] = _param")
+                    else:
+                        add(lines, indent, f"self.state_dict_tensors[{prefix_expr}] = self.{attr_name}")
 
     def _emit_single_layer_init(
         self,
@@ -1607,11 +1854,15 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             add(lines, indent + 1, "cache_config=cache_config,")
             add(lines, indent + 1, "quant_config=quant_config,")
             add(lines, indent + 1, "logits_soft_cap=getattr(config, 'attn_logit_softcapping', None),")
-            add(lines, indent + 1, "per_layer_sliding_window=(")
-            add(lines, indent + 2, "getattr(config, 'sliding_window', None)")
-            add(lines, indent + 2, "if ((hasattr(config, 'layer_types') and i < len(config.layer_types) and config.layer_types[i] != 'full_attention')")
-            add(lines, indent + 2, "    or (not hasattr(config, 'layer_types') and getattr(config, 'sliding_window_pattern', 0) and (i + 1) % getattr(config, 'sliding_window_pattern', 0) != 0))")
-            add(lines, indent + 2, "else None),")
+            is_rep = self._is_repeated_node(node)
+            if is_rep:
+                add(lines, indent + 1, "per_layer_sliding_window=(")
+                add(lines, indent + 2, "getattr(config, 'sliding_window', None)")
+                add(lines, indent + 2, "if ((hasattr(config, 'layer_types') and i < len(config.layer_types) and config.layer_types[i] != 'full_attention')")
+                add(lines, indent + 2, "    or (not hasattr(config, 'layer_types') and getattr(config, 'sliding_window_pattern', 0) and (i + 1) % getattr(config, 'sliding_window_pattern', 0) != 0))")
+                add(lines, indent + 2, "else None),")
+            else:
+                add(lines, indent + 1, "per_layer_sliding_window=getattr(config, 'sliding_window', None),")
             # KV sharing: layers in the last num_kv_shared_layers reuse KV cache
             # from earlier layers of the same attention type.
             # Build target prefix by replacing {i} with the target index.
@@ -1623,10 +1874,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 attn_prefix = prefix.replace("{i}", "{i}.self_attn.attn")
             else:
                 attn_prefix = prefix
-            target_prefix = attn_prefix.replace("{i}", "{_kv_sharing_targets[i]}")
-            add(lines, indent + 1, "kv_sharing_target_layer_name=(")
-            add(lines, indent + 2, f"{target_prefix}")
-            add(lines, indent + 2, "if i in _kv_sharing_targets else None),")
+            if is_rep:
+                target_prefix = attn_prefix.replace("{i}", "{_kv_sharing_targets[i]}")
+                add(lines, indent + 1, "kv_sharing_target_layer_name=(")
+                add(lines, indent + 2, f"{target_prefix}")
+                add(lines, indent + 2, "if i in _kv_sharing_targets else None),")
+            else:
+                add(lines, indent + 1, "kv_sharing_target_layer_name=None,")
             add(lines, indent + 1, f"prefix={attn_prefix},")
             add(lines, indent, ")")
         elif layer_type == VLLMLayerType.RMSNORM:
@@ -1792,12 +2046,14 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         indent: int,
     ) -> None:
         add = self._add
+        add(lines, indent, "_orig_name = name")
         add(lines, indent, "for _pname, _wname, _sid in stacked_params_mapping:")
         add(lines, indent + 1, "if _wname not in name:")
         add(lines, indent + 2, "continue")
         add(lines, indent + 1, "name = name.replace(_wname, _pname)")
         add(lines, indent + 1, "name = _ckpt_to_model.get(name, name)")
         add(lines, indent + 1, "if name not in params_dict:")
+        add(lines, indent + 2, "self.state_dict_tensors[_orig_name] = loaded_weight")
         add(lines, indent + 2, "break")
         add(lines, indent + 1, "param = params_dict[name]")
         add(lines, indent + 1, "weight_loader = getattr(param, 'weight_loader', None)")
@@ -1806,10 +2062,12 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent + 1, "else:")
         add(lines, indent + 2, "param.data.copy_(loaded_weight)")
         add(lines, indent + 1, "loaded_params.add(name)")
+        add(lines, indent + 1, "self.state_dict_tensors[_orig_name] = loaded_weight")
         add(lines, indent + 1, "break")
         add(lines, indent, "else:")
         add(lines, indent + 1, "name = _ckpt_to_model.get(name, name)")
         add(lines, indent + 1, "if name not in params_dict:")
+        add(lines, indent + 2, "self.state_dict_tensors[_orig_name] = loaded_weight")
         add(lines, indent + 2, "continue")
         add(lines, indent + 1, "param = params_dict[name]")
         add(lines, indent + 1, "weight_loader = getattr(param, 'weight_loader', None)")
@@ -1818,6 +2076,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent + 1, "else:")
         add(lines, indent + 2, "param.data.copy_(loaded_weight)")
         add(lines, indent + 1, "loaded_params.add(name)")
+        add(lines, indent + 1, "self.state_dict_tensors[_orig_name] = loaded_weight")
 
     def _vllm_layer_attr_name(self, node: GraphNode) -> str:
         return f"_vllm_{_safe_ident(node.id)}"
@@ -1854,7 +2113,10 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
 
     def _layer_prefix(self, node: GraphNode) -> str:
         if not self._is_repeated_node(node):
-            return repr(self._node_prefix(node))
+            base = self._node_prefix(node)
+            if "{i}" in base:
+                return f'f"{base}"'
+            return repr(base)
         mod_name = self._node_module_name(node)
         scope_parts = self._vllm_classification.module_scope_parts.get(mod_name)
         if scope_parts is None:
@@ -1970,7 +2232,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         return self._config_expr("hidden_size")
 
     def _node_input_dim_from_type(self, node: GraphNode) -> str | None:
-        """Extract input dim from the node's input tensor type (last dim if int)."""
+        """Extract input dim from the node's input tensor type (last dim)."""
         if len(node.inputs) >= 2:
             inp = node.inputs[1]
             inp_dims = getattr(inp, "dims", None) or getattr(getattr(inp, "type_expr", None), "dims", None)
@@ -1978,6 +2240,17 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 last = inp_dims[-1]
                 if isinstance(last, int):
                     return str(last)
+                if isinstance(last, str):
+                    const = self._resolve_const_value(last)
+                    if const:
+                        return const
+                if hasattr(last, "op") and hasattr(last, "left") and hasattr(last, "right"):
+                    left = str(last.left) if isinstance(last.left, int) else (
+                        self._resolve_const_value(last.left) if isinstance(last.left, str) else None)
+                    right = str(last.right) if isinstance(last.right, int) else (
+                        self._resolve_const_value(last.right) if isinstance(last.right, str) else None)
+                    if left and right:
+                        return f"({left} {last.op} {right})"
         return None
 
     def _dim_expr_to_python(
@@ -2154,6 +2427,48 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, 4, "def generate(self, *args, **kwargs):")
         add(lines, 8, 'raise NotImplementedError("vLLM handles generation externally")')
 
+    def _needs_mamba_cache_placeholders(self, classification: VLLMLayerClassification) -> bool:
+        if classification.mamba_mixer_module_names:
+            return False
+        has_attention = any(
+            lt == VLLMLayerType.ATTENTION for lt in classification.node_types.values()
+        )
+        if has_attention:
+            return False
+        for module in self.program.modules:
+            for node in module.nodes:
+                if 'SSM' in node.op.name or 'ssm' in node.op.name:
+                    return True
+        return False
+
+    def _derive_mamba_mixer_prefix(self, classification: VLLMLayerClassification) -> str:
+        for module in self.program.modules:
+            for node in module.nodes:
+                lt = classification.node_types.get(node.id)
+                if lt in (VLLMLayerType.COLUMN_PARALLEL_LINEAR, VLLMLayerType.ROW_PARALLEL_LINEAR):
+                    prefix = self._layer_prefix(node)
+                    if '{i}' in prefix:
+                        prefix_str = prefix.strip('f"')
+                        parts = prefix_str.rsplit('.', 1)
+                        if len(parts) == 2:
+                            parent = parts[0]
+                            if '{i}' in parent:
+                                return f'f"{parent}"'
+        return ""
+
+    def _derive_mamba_mixer_prefix_from_scope(self, classification: VLLMLayerClassification) -> str:
+        for mod_name in classification.mamba_mixer_module_names:
+            scope_parts = classification.module_scope_parts.get(mod_name)
+            if scope_parts:
+                parts = []
+                for p in scope_parts:
+                    if p == "{i}":
+                        parts.append("{i}")
+                    else:
+                        parts.append(p)
+                return f'f"{".".join(parts)}"'
+        return 'f"backbone.layers.{i}.mixer"'
+
 
 def emit_model_code_from_graph_ir(
     program: GraphProgram,
@@ -2187,6 +2502,100 @@ def emit_model_code_from_graph_ir(
             "",
             f"_MODEL_CONFIG = {model_config!r}",
             "",
+        ]
+    )
+    if not emitter._use_clean_forward:
+        header.extend(
+            [
+                "def _common_compose_path(base, leaf):",
+                "    base_key = '' if base is None else str(base).strip().lstrip('@')",
+                "    leaf_text = '' if leaf is None else str(leaf).strip()",
+                "    if leaf_text.startswith('@@'):",
+                "        return leaf_text.lstrip('@')",
+                "    leaf_key = leaf_text.lstrip('@')",
+                "    if not base_key:",
+                "        return leaf_key",
+                "    if not leaf_key:",
+                "        return base_key",
+                "    return f'{base_key}.{leaf_key}'",
+                "",
+                "def _common_render_path(prefix, parts):",
+                "    clean = []",
+                "    for part in parts:",
+                "        if part is None:",
+                "            continue",
+                "        text = str(part).strip()",
+                "        if not text or text == 'None':",
+                "            continue",
+                "        clean.append(text.strip('@'))",
+                "    return str(prefix) + '.'.join(clean)",
+                "",
+                "def _common_required_state_value(state, path):",
+                "    key = str(path).lstrip('@')",
+                "    try:",
+                "        return state[key]",
+                "    except KeyError as exc:",
+                "        raise KeyError(f'missing parameter {key!r}') from exc",
+                "",
+                "def _common_require_value(value):",
+                "    if value is None:",
+                "        raise ValueError('require expected non-null value')",
+                "    return value",
+                "",
+                "def _materialize_joined_parameter(state, output_key, input_keys, *, dim, mode, remove_inputs=True):",
+                "    existing = state.get(output_key)",
+                "    if torch.is_tensor(existing):",
+                "        return existing",
+                "    tensors = [state.get(key) for key in input_keys]",
+                "    if not tensors or not all(torch.is_tensor(item) for item in tensors):",
+                "        return None",
+                "    if mode == 'cat':",
+                "        joined = torch.cat(tensors, dim=int(dim))",
+                "    elif mode == 'stack':",
+                "        joined = torch.stack(tensors, dim=int(dim))",
+                "    else:",
+                "        raise ValueError(f'unknown parameter join mode {mode!r}')",
+                "    state[output_key] = joined",
+                "    if remove_inputs:",
+                "        for key in input_keys:",
+                "            state.pop(key, None)",
+                "    return joined",
+                "",
+            ]
+        )
+    if emitter._needs_mamba_cache_placeholders(emitter._vllm_classification):
+        header.extend(
+            [
+                "",
+                "from vllm.model_executor.layers.mamba.abstract import MambaBase",
+                "from vllm.v1.attention.selector import get_mamba_attn_backend",
+                "",
+                "class _MambaPlaceholderLayer(nn.Module, MambaBase):",
+                "    def __init__(self, prefix, intermediate_size, state_size, conv_kernel, dtype=torch.float32):",
+                "        super().__init__()",
+                "        self.prefix = prefix",
+                "        self._intermediate_size = intermediate_size",
+                "        self._state_size = state_size",
+                "        self._conv_kernel = conv_kernel",
+                "        self._dtype = dtype",
+                "        self.kv_cache = ()",
+                "        from vllm.config import get_current_vllm_config",
+                "        _cc = get_current_vllm_config().compilation_config",
+                "        _cc.static_forward_context[prefix] = self",
+                "    def get_state_shape(self):",
+                "        return ((self._intermediate_size, self._conv_kernel), (self._intermediate_size, self._state_size))",
+                "    @property",
+                "    def mamba_type(self):",
+                "        return 'mamba1'",
+                "    def get_state_dtype(self):",
+                "        return (self._dtype, self._dtype)",
+                "    def get_attn_backend(self):",
+                "        return get_mamba_attn_backend('mamba1')",
+                "",
+            ]
+        )
+    header.extend(
+        [
             "from vllm.compilation.decorators import support_torch_compile",
             "",
             "@support_torch_compile",
