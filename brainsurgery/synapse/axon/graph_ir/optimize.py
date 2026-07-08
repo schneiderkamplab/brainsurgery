@@ -154,12 +154,18 @@ _TRITON_BACKEND_INTRINSICS = frozenset(
         "__triton_swiglu_activation",
     }
 )
+_VLLM_BACKEND_INTRINSICS = frozenset(
+    {
+        "__vllm_paged_attention",
+    }
+)
 _BACKEND_INTRINSICS_BY_TARGET = {
     "codegen2-torch": _TORCH_BACKEND_INTRINSICS,
     "codegen2-tinygrad": _TINYGRAD_BACKEND_INTRINSICS,
     "codegen2-mlx": _MLX_BACKEND_INTRINSICS,
     "codegen2-jax": _JAX_BACKEND_INTRINSICS,
     "codegen2-triton": _TRITON_BACKEND_INTRINSICS,
+    "codegen2-vllm": _VLLM_BACKEND_INTRINSICS,
 }
 _BACKEND_INTRINSIC_PREFIX_BY_TARGET = {
     "codegen2-torch": "__torch_",
@@ -167,6 +173,7 @@ _BACKEND_INTRINSIC_PREFIX_BY_TARGET = {
     "codegen2-mlx": "__mlx_",
     "codegen2-jax": "__jax_",
     "codegen2-triton": "__triton_",
+    "codegen2-vllm": "__vllm_",
 }
 _BACKEND_INTRINSIC_TARGETS = {None, *_BACKEND_INTRINSICS_BY_TARGET}
 _SMALL_INLINE_NODE_LIMIT = 4
@@ -14554,6 +14561,17 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_swiglu_activation_intrinsics")
+                current = candidate
+        if backend_intrinsic_target == "codegen2-vllm":
+            candidate = (
+                _rewrite_backend_sdpa_intrinsics(current, op_name="__vllm_paged_attention")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__vllm_paged_attention")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="vllm_paged_attention_intrinsics")
                 current = candidate
         if config.constant_folding:
             module_effects = infer_graph_module_effects(current.modules)

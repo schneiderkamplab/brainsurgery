@@ -1151,7 +1151,7 @@ def axon_benchmark(
         "--axon-backend",
         help=(
             "Axon execution backend (codegen2-torch, codegen2-tinygrad, "
-            "codegen2-mlx, codegen2-jax, codegen2-triton, runtime2-torch, or pipeline2-torch)."
+            "codegen2-mlx, codegen2-jax, codegen2-triton, codegen2-vllm, runtime2-torch, or pipeline2-torch)."
         ),
     ),
     axon_backends: str | None = typer.Option(

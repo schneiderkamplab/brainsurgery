@@ -63,6 +63,7 @@ from .axon.codegen2_torch import (
     graph_main_output_names as _graph_main_output_names,
     make_runtime2_model_class as make_runtime2_torch_model_class,
 )
+from .axon.codegen2_vllm import emit_model_code_from_graph_ir as emit_vllm_model_code_from_graph_ir
 from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
 from .axon_runner_common import is_cuda_oom as _is_cuda_oom
 from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
@@ -79,6 +80,8 @@ def _default_graph_backend_intrinsics(
         return graph_backend_intrinsics
     if axon_backend == "codegen2-triton":
         return "codegen2-triton"
+    if axon_backend == "codegen2-vllm":
+        return "codegen2-vllm"
     return None
 
 
@@ -3506,13 +3509,14 @@ def _run_axon_test_single(
         "codegen2-mlx",
         "codegen2-jax",
         "codegen2-triton",
+        "codegen2-vllm",
         "runtime2-torch",
         "pipeline2-torch",
     }
     if backend_token not in valid_backends:
         raise ValueError(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'codegen2-mlx', 'codegen2-jax', 'codegen2-triton', 'runtime2-torch', "
+            "'codegen2-mlx', 'codegen2-jax', 'codegen2-triton', 'codegen2-vllm', 'runtime2-torch', "
             "or 'pipeline2-torch'"
         )
     axon_backend = backend_token
@@ -3682,6 +3686,13 @@ def _run_axon_test_single(
                 )
             elif axon_backend == "codegen2-triton":
                 code = emit_triton_model_code_from_graph_ir(
+                    graph_program,
+                    class_name=class_name,
+                    model_config=model_config,
+                    profile=profile_axon,
+                )
+            elif axon_backend == "codegen2-vllm":
+                code = emit_vllm_model_code_from_graph_ir(
                     graph_program,
                     class_name=class_name,
                     model_config=model_config,
