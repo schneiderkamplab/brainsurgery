@@ -10,7 +10,7 @@ import Activations (silu)
 
 import Attention (attention_gqa_with_additive_mask, mask_to_additive_for_input, merge_heads, reshape_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
 import Math (mul)
 
@@ -68,7 +68,7 @@ MAX_POSITIONS <- (HAS_SLIDING_WINDOW ? (Config.dim@@sliding_window default=4096)
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
 
-mistral_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,NUM_HEADS,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+mistral_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,NUM_HEADS,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
 mistral_block x rope_sin rope_cos mask additive_mask past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- scope@self_attn do
@@ -87,23 +87,28 @@ mistral_block x rope_sin rope_cos mask additive_mask past_kv = do
     return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
   return x + m, new_kv
 
-mistral :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+mistral :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
 mistral input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
   rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
   additive_mask <- mask_to_additive_for_input input_ids mask NUM_HEADS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-    new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index past_kv i
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
       x, new_i <- mistral_block x rope_sin rope_cos mask additive_mask past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
     x <- rms@norm x
-    return x, new_kv
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
   logits <- NN.linear@lm_head x dim=VOCAB_SIZE
   return logits, new_kv

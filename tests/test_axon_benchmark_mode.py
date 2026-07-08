@@ -33,7 +33,7 @@ def test_benchmark_mode_generate_supports_seq2seq_but_not_encoder_only() -> None
         )
 
 
-def test_benchmark_mode_forward_overrides_causal_generation() -> None:
+def test_benchmark_mode_forward_overrides_causal_generation() -> None
     assert not _should_generate_for_benchmark(
         model_task="causal_lm",
         benchmark_mode=_resolve_benchmark_mode("forward"),

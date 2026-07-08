@@ -82,6 +82,14 @@ def _graph_path_pattern_key(path: GraphPath) -> str:
     return ".".join(part for part in path.parts if part)
 
 
+def _graph_path_template_replacement(operand: GraphOperand) -> str | None:
+    if isinstance(operand, GraphPath):
+        return _graph_path_pattern_key(operand)
+    if isinstance(operand, GraphLiteral) and isinstance(operand.value, str):
+        return str(operand.value).lstrip("@").strip(".")
+    return None
+
+
 def _packed_parameter_spec_payload(packed: GraphPackedParameter) -> dict[str, Any]:
     return {
         "output": _graph_path_pattern_key(packed.output),
@@ -358,6 +366,45 @@ def _is_static_mask_type(type_expr: Any) -> bool:
     ):
         return True
     return False
+
+
+def _static_mask_capacity_dim(type_expr: Any) -> Any | None:
+    if isinstance(type_expr, TypeOptional):
+        return _static_mask_capacity_dim(type_expr.inner)
+    if isinstance(type_expr, TypeNamed) and type_expr.name.endswith("StaticMask") and len(type_expr.args) >= 2:
+        return type_expr.args[1]
+    if (
+        isinstance(type_expr, TypeTuple)
+        and len(type_expr.items) == 2
+        and isinstance(type_expr.items[0], TypeTensor)
+        and len(type_expr.items[0].dims) == 2
+    ):
+        return type_expr.items[0].dims[1]
+    return None
+
+
+def _static_dim_runtime_expr(dim: Any, *, global_names: set[str]) -> str | None:
+    if type(dim) is int:
+        return repr(dim)
+    if isinstance(dim, str):
+        if dim in global_names:
+            return f"self._symbols[{dim!r}]"
+        return None
+    if isinstance(dim, DimExprBinary):
+        left = _static_dim_runtime_expr(dim.left, global_names=global_names)
+        right = _static_dim_runtime_expr(dim.right, global_names=global_names)
+        if left is None or right is None:
+            return None
+        op = "//" if dim.op == "/" else dim.op
+        return f"(({left}) {op} ({right}))"
+    return None
+
+
+def _static_mask_capacity_expr(type_expr: Any, *, global_names: set[str]) -> str | None:
+    dim = _static_mask_capacity_dim(type_expr)
+    if dim is None:
+        return None
+    return _static_dim_runtime_expr(dim, global_names=global_names)
 
 
 def _fresh_inline_dim(name: str, *, prefix: str) -> str:
@@ -2441,6 +2488,12 @@ class Codegen2GraphModel(nn.Module):
             return True
         if primitive == "matmul":
             left, right = self._align_pair(args[0], args[1], prefer="right")
+            if (
+                torch.is_tensor(left) and torch.is_tensor(right)
+                and left.is_floating_point() and right.is_floating_point()
+                and left.dtype != right.dtype
+            ):
+                left = left.to(dtype=right.dtype)
             out(torch.matmul(left, right))
             return True
         if primitive == "softmax":
@@ -3333,6 +3386,8 @@ class _DirectTorchEmitter:
             add(lines, 8, "if reset:")
             add(lines, 12, "self._profile_records = {}")
             add(lines, 8, "return self")
+
+        if self.profile:
             add(lines, 4, "")
             add(lines, 4, "def _profile_call(self, name, fn, *args, **kwargs):")
             add(lines, 8, "use_cuda = bool(self._profile_cuda and torch.cuda.is_available())")
@@ -4113,9 +4168,14 @@ class _DirectTorchEmitter:
                 else:
                     add(lines, 8, f"{value.name} = inputs.get({value.name!r}, None)")
                 if value.name in static_attention_inputs:
+                    capacity_expr = _static_mask_capacity_expr(value.type_expr, global_names=self.global_symbol_names)
                     add(lines, 8, f"if torch.is_tensor({value.name}):")
                     add(lines, 12, f"__static_len_{value.name} = int({value.name}.shape[1])")
-                    add(lines, 12, f"__static_capacity_{value.name} = max(int(self.config.get('n_positions', self.config.get('max_position_embeddings', __static_len_{value.name}))), __static_len_{value.name})")
+                    if capacity_expr is None:
+                        add(lines, 12, f"__static_declared_capacity_{value.name} = int(input_ids.shape[1]) if input_ids is not None else __static_len_{value.name}")
+                    else:
+                        add(lines, 12, f"__static_declared_capacity_{value.name} = int({capacity_expr})")
+                    add(lines, 12, f"__static_capacity_{value.name} = max(__static_declared_capacity_{value.name}, __static_len_{value.name})")
                     add(lines, 12, f"__static_store_{value.name} = torch.zeros(({value.name}.shape[0], __static_capacity_{value.name}), dtype={value.name}.dtype, device={value.name}.device)")
                     add(lines, 12, f"__static_store_{value.name}[:, :__static_len_{value.name}] = {value.name}")
                     add(lines, 12, f"{value.name} = (__static_store_{value.name}, __static_len_{value.name})")
@@ -4144,6 +4204,11 @@ class _DirectTorchEmitter:
         )
         uses_static_attention_mask = (
             attention_value is not None and _is_static_mask_type(attention_value.type_expr)
+        )
+        static_attention_capacity_expr = (
+            _static_mask_capacity_expr(attention_value.type_expr, global_names=self.global_symbol_names)
+            if attention_value is not None
+            else None
         )
         decoder_attention_name = (
             "decoder_attention_mask" if "decoder_attention_mask" in input_names else None
@@ -4223,7 +4288,10 @@ class _DirectTorchEmitter:
                 add(lines, 8, "if attention_mask is None:")
                 add(lines, 12, "attention_mask = _ones_like_ids(out)")
                 if uses_static_attention_mask:
-                    add(lines, 8, "static_capacity = max(int(self.config.get('n_positions', self.config.get('max_position_embeddings', out.shape[1] + limit))), int(out.shape[1]) + int(limit))")
+                    if static_attention_capacity_expr is None:
+                        add(lines, 8, "static_capacity = max(int(self.config.get('n_positions', self.config.get('max_position_embeddings', out.shape[1] + limit))), int(out.shape[1]) + int(limit))")
+                    else:
+                        add(lines, 8, f"static_capacity = max(int({static_attention_capacity_expr}), int(out.shape[1]) + int(limit))")
                     add(lines, 8, "attention_mask = _static_attention_mask(attention_mask, out, static_capacity)")
             if use_cache_name is not None:
                 add(lines, 8, f"kwargs.pop({use_cache_name!r}, None)")
@@ -4452,6 +4520,7 @@ class _DirectTorchEmitter:
             lines,
             then_operand,
             targets=targets,
+            target_outputs=node.outputs,
             module_name=module_name,
             indent=indent + 4,
             local=local,
@@ -4463,6 +4532,7 @@ class _DirectTorchEmitter:
             lines,
             else_operand,
             targets=targets,
+            target_outputs=node.outputs,
             module_name=module_name,
             indent=indent + 4,
             local=local,
@@ -4503,6 +4573,16 @@ class _DirectTorchEmitter:
         callee_module = self.modules_by_name.get(node.op.name)
         if callee_module is None:
             return False
+        if self._emit_one_node_forwarder_call(
+            lines,
+            node,
+            callee_module=callee_module,
+            module_name=module_name,
+            indent=indent,
+            local=local,
+            symbols_dict=symbols_dict,
+        ):
+            return True
         return self._emit_inline_module_body(
             lines,
             callee_module=callee_module,
@@ -4516,12 +4596,87 @@ class _DirectTorchEmitter:
             inline_prefix=f"__call_inline_{node.id.replace(':', '_')}",
         )
 
+    def _emit_one_node_forwarder_call(
+        self,
+        lines: list[str],
+        node: Any,
+        *,
+        callee_module: GraphModule,
+        module_name: str,
+        indent: int,
+        local: set[str],
+        symbols_dict: str,
+    ) -> bool:
+        if len(callee_module.nodes) != 1:
+            return False
+        inner_node = callee_module.nodes[0]
+        if len(callee_module.outputs) != len(inner_node.outputs) or len(node.outputs) != len(inner_node.outputs):
+            return False
+        for module_output, inner_output in zip(callee_module.outputs, inner_node.outputs, strict=True):
+            if not isinstance(module_output, GraphValueRef) or module_output.name != inner_output.name:
+                return False
+        param_subst: dict[str, GraphOperand] = {
+            param.name: arg
+            for param, arg in zip(callee_module.inputs, node.inputs, strict=True)
+        }
+
+        def rewrite_operand(operand: GraphOperand) -> GraphOperand:
+            if isinstance(operand, GraphValueRef) and operand.name in param_subst:
+                return param_subst[operand.name]
+            if isinstance(operand, GraphPath):
+                parts: list[str] = []
+                for part in operand.parts:
+                    rewritten_part = part
+                    for name, replacement in param_subst.items():
+                        if isinstance(replacement, GraphValueRef):
+                            rewritten_part = rewritten_part.replace(
+                                "{" + name + "}",
+                                "{" + replacement.name + "}",
+                            )
+                        else:
+                            replacement_text = _graph_path_template_replacement(replacement)
+                            if replacement_text is not None:
+                                rewritten_part = rewritten_part.replace(
+                                    "{" + name + "}",
+                                    replacement_text,
+                                )
+                    parts.append(rewritten_part)
+                return replace(operand, parts=tuple(parts))
+            if isinstance(operand, GraphExpr):
+                return replace(
+                    operand,
+                    inputs=tuple(rewrite_operand(item) for item in operand.inputs),
+                    attrs={key: rewrite_operand(value) for key, value in operand.attrs.items()},
+                )
+            return operand
+
+        rewritten_node = replace(
+            inner_node,
+            id=f"{node.id}:forward:{inner_node.id}",
+            inputs=tuple(rewrite_operand(item) for item in inner_node.inputs),
+            attrs={key: rewrite_operand(value) for key, value in inner_node.attrs.items()},
+            outputs=node.outputs,
+            source_module=module_name,
+            type_expr=node.type_expr,
+            dims=node.dims,
+        )
+        self._emit_node(
+            lines,
+            rewritten_node,
+            module_name=module_name,
+            indent=indent,
+            local=local,
+            symbols_dict=symbols_dict,
+        )
+        return True
+
     def _emit_select_branch(
         self,
         lines: list[str],
         operand: GraphOperand,
         *,
         targets: tuple[str, ...],
+        target_outputs: tuple[GraphValue, ...] | None,
         module_name: str,
         indent: int,
         local: set[str],
@@ -4532,6 +4687,7 @@ class _DirectTorchEmitter:
             lines,
             operand,
             targets=targets,
+            target_outputs=target_outputs,
             module_name=module_name,
             indent=indent,
             local=local,
@@ -4549,6 +4705,7 @@ class _DirectTorchEmitter:
         expr: GraphExpr,
         *,
         targets: tuple[str, ...],
+        target_outputs: tuple[GraphValue, ...] | None,
         module_name: str,
         indent: int,
         local: set[str],
@@ -4569,7 +4726,7 @@ class _DirectTorchEmitter:
             callee_module=callee_module,
             arg_operands=expr.inputs,
             targets=targets,
-            target_outputs=None,
+            target_outputs=target_outputs,
             module_name=module_name,
             indent=indent,
             local=local,
@@ -4615,6 +4772,13 @@ class _DirectTorchEmitter:
         )
         try:
             safe_prefix = _py_ident(inline_prefix)
+            callsite_output_by_callee_name: dict[str, GraphValue] = {}
+            if target_outputs is not None and len(callee_module.outputs) == len(target_outputs):
+                callsite_output_by_callee_name = {
+                    output.name: target_output
+                    for output, target_output in zip(callee_module.outputs, target_outputs, strict=True)
+                    if isinstance(output, GraphValue | GraphValueRef)
+                }
             dim_subst = _inline_dim_subst(
                 callee_module.inputs,
                 arg_operands,
@@ -4684,6 +4848,13 @@ class _DirectTorchEmitter:
                                     "{" + name + "}",
                                     "{" + replacement.name + "}",
                                 )
+                            else:
+                                replacement_text = _graph_path_template_replacement(replacement)
+                                if replacement_text is not None:
+                                    rewritten_part = rewritten_part.replace(
+                                        "{" + name + "}",
+                                        replacement_text,
+                                    )
                         parts.append(rewritten_part)
                     return replace(operand, parts=tuple(parts))
                 if isinstance(operand, GraphExpr):
@@ -4703,10 +4874,16 @@ class _DirectTorchEmitter:
                 pre_node_dim_subst.update(dim_name_subst)
                 for output in inner_node.outputs:
                     name = f"{safe_prefix}_{inner_index}_{_py_ident(output.name)}"
+                    output_type = output.type_expr
+                    output_dims = output.dims
+                    callsite_output = callsite_output_by_callee_name.get(output.name)
+                    if callsite_output is not None:
+                        output_type = callsite_output.type_expr
+                        output_dims = callsite_output.dims
                     rewritten = GraphValue(
                         name=name,
-                        type_expr=output.type_expr,
-                        dims=output.dims,
+                        type_expr=output_type,
+                        dims=output_dims,
                         optional=output.optional,
                     )
                     if pre_node_dim_subst:
@@ -4724,7 +4901,11 @@ class _DirectTorchEmitter:
                             pre_node_dim_subst,
                         ).outputs[0]
                     rewritten_outputs.append(rewritten)
-                    subst[output.name] = GraphValueRef(name=name, type_expr=output.type_expr, dims=output.dims)
+                    subst[output.name] = GraphValueRef(
+                        name=name,
+                        type_expr=rewritten.type_expr,
+                        dims=rewritten.dims,
+                    )
                     if isinstance(output.type_expr, TypeDim | TypeInt):
                         dim_name_subst[output.name] = name
                 rewritten_node = replace(
@@ -5233,6 +5414,13 @@ class _DirectTorchEmitter:
                                 "{" + name + "}",
                                 "{" + replacement.name + "}",
                             )
+                        else:
+                            replacement_text = _graph_path_template_replacement(replacement)
+                            if replacement_text is not None:
+                                rewritten_part = rewritten_part.replace(
+                                    "{" + name + "}",
+                                    replacement_text,
+                                )
                     parts.append(rewritten_part)
                 return replace(operand, parts=tuple(parts))
             if isinstance(operand, GraphExpr):
@@ -5811,9 +5999,9 @@ class _DirectTorchEmitter:
             "unsqueeze": lambda: f"torch.unsqueeze({args[0]}, {int_arg(1)})",
             "repeat": lambda: f"({args[0]} if {int_arg(1)} == 1 else torch.repeat_interleave({args[0]}, repeats={int_arg(1)}, dim=({int_arg(2)} if {int_arg(2)} >= 0 else {int_arg(2)} + {args[0]}.dim())))",
             "matmul": lambda: (
-                f"(lambda _a, _b: torch.matmul(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
+                f"(lambda _a, _b: torch.matmul(_a.to(dtype=_b.dtype) if _a.is_floating_point() and _b.is_floating_point() and _a.dtype != _b.dtype else _a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
                 if self.align_devices
-                else f"torch.matmul({args[0]}, {args[1]})"
+                else f"(lambda _a, _b: torch.matmul(_a.to(dtype=_b.dtype) if _a.is_floating_point() and _b.is_floating_point() and _a.dtype != _b.dtype else _a, _b))({args[0]}, {args[1]})"
             ),
             "softmax": lambda: f"F.softmax({args[0]}, dim={int_arg(1, '-1')})",
             "where": lambda: (

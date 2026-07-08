@@ -3,14 +3,45 @@
 \paragraph{Input and output.}
 Execution backends consume Graph IR and a checkpoint state dictionary and
 produce model outputs.  The active backend family includes
-\code{codegen2-torch}, \code{runtime2-torch}, \code{pipeline2-torch}, and
-\code{codegen2-tinygrad}.
+\code{codegen2-torch}, \code{codegen2-triton}, \code{codegen2-mlx},
+\code{runtime2-torch}, \code{pipeline2-torch}, and
+\code{codegen2-tinygrad}.  Backend selection is a runtime/CLI choice; the
+compiler pipeline up to validated Graph IR is shared.
 
 \paragraph{Torch code generation.}
 \code{codegen2-torch} emits direct Python/PyTorch code.  It is the primary
 fidelity baseline for compiler-stage changes because it has the broadest
 operator coverage and the closest numerical behavior to the reference
-Transformers implementation.
+Transformers implementation.  The generated module consumes only standard
+Python, PyTorch, the checkpoint state dictionary, and model configuration.
+Weights are read by string key from the state dictionary; parameter packing and
+banking decisions are made during state-dictionary setup, not by adding
+model-family branches to generated code.
+
+\paragraph{Triton-accelerated torch code generation.}
+\code{codegen2-triton} shares the torch backend ABI and generated model
+contract, but overrides selected backend intrinsics with generated Triton
+kernels.  The target is opt-in through graph optimization with
+\code{--graph-backend-intrinsics codegen2-triton}; benchmark paths default this
+selector when \code{--axon-backend codegen2-triton} is requested.  Supported
+Triton intrinsics in the current implementation are:
+\begin{itemize}[leftmargin=*]
+\item \code{\_\_triton\_rmsnorm\_noscale},
+      \code{\_\_triton\_rmsnorm\_scaled}, and
+      \code{\_\_triton\_rmsnorm\_unit\_offset\_scaled};
+\item \code{\_\_triton\_swiglu\_activation} and
+      \code{\_\_triton\_geglu\_tanh\_activation};
+\item \code{\_\_triton\_selected\_expert\_packed\_swiglu\_ffn}, which fuses
+      the selected-expert wrapper around top-k scores and SwiGLU activation but
+      deliberately uses the existing torch grouped expert matmul internally.
+\end{itemize}
+The backend also lowers the torch RoPE-pair intrinsic to a Triton kernel when
+that intrinsic appears in Graph IR.  A direct Triton grouped expert matmul was
+implemented experimentally, but is deprecated and unreachable: on real
+\code{Qwen/Qwen3-30B-A3B} it was stable around \(21.1\)--\(21.3\) seconds at
+max length 128, versus \(6.33\) seconds for the activation-only Triton baseline.
+This negative result is part of the backend contract: backend-local kernels
+must be benchmarked and may be disabled without changing frontend semantics.
 
 \paragraph{Runtime interpretation.}
 \code{runtime2-torch} interprets Graph IR without emitting a Python source
@@ -20,13 +51,26 @@ correctness from code-emission bugs.
 \paragraph{Pipeline execution.}
 \code{pipeline2-torch} partitions Graph IR for multi-device execution.  Its
 contract is graph-based; it should not depend on old Synapse YAML artifacts or
-surface Axon scope constructs.
+surface Axon scope constructs.  Pipeline parallelism is requested explicitly
+through the benchmark/runtime CLI, and the graph partitioning backend owns
+device placement for partitioned parameters and activations.
 
 \paragraph{Tinygrad code generation.}
 \code{codegen2-tinygrad} is a separate backend that targets tinygrad.  Backend
 fixes should be tinygrad-local unless they expose a generic Graph IR or Axon
 stage bug.  It must not weaken earlier validation contracts to make unsupported
-patterns run.
+patterns run.  The current graph-intrinsic hook for tinygrad is
+\code{\_\_tinygrad\_sdpa}; other tinygrad performance work remains backend-local
+or future Graph IR rewrites.
+
+\paragraph{MLX code generation.}
+\code{codegen2-mlx} emits MLX/MLX-NN Python code from Graph IR.  It converts
+safetensor or PyTorch state dictionaries to MLX arrays, can expose static
+parameter paths as generated module attributes, and includes backend-local JIT,
+profiling, unsupported-operation reporting, and optional Metal capture hooks.
+Its backend-specific graph intrinsics are \code{\_\_mlx\_sdpa} and
+\code{\_\_mlx\_rope}; all such intrinsics are introduced only by opt-in graph
+optimization for the MLX backend.
 
 \paragraph{Formal view.}
 An execution backend implements an interpretation function
@@ -44,5 +88,6 @@ _linear @@w x weight_path=@weight bias_path=@bias
 \end{verbatim}
 the torch backend emits a call to a generated helper that reads
 \code{w.weight} and optional \code{w.bias} from the state dictionary and applies
-PyTorch linear algebra.  The tinygrad backend emits analogous tinygrad tensor
-operations but must preserve the same path lookup and transpose semantics.
+PyTorch linear algebra.  The tinygrad and MLX backends emit analogous tensor
+library operations but must preserve the same path lookup and transpose
+semantics.

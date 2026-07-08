@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import re
 import subprocess
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from statistics import mean, median
 
 
 def _load_rows(log_root: Path) -> list[dict[str, str]]:
@@ -28,19 +30,51 @@ def _load_rows(log_root: Path) -> list[dict[str, str]]:
             reader = csv.DictReader(handle)
             for row in reader:
                 row["_stream_path"] = str(csv_path)
+                if not row.get("backend"):
+                    inferred_backend = _infer_backend_from_path(csv_path)
+                    if inferred_backend:
+                        row["backend"] = inferred_backend
                 rows.append(row)
     rows.extend(_load_result_json_rows(log_root))
     return rows
 
 
+def _infer_backend_from_path(path: Path) -> str:
+    for part in path.parts:
+        if part.startswith("codegen2-") or part.startswith("runtime2-") or part.startswith("pipeline2-"):
+            return part
+    return ""
+
+
 def _load_result_json_rows(log_root: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
 
-    def value(*names: str) -> str:
+    def value(data: dict[str, object], *names: str) -> str:
         for name in names:
             if name in data and data[name] is not None:
                 return str(data[name])
         return ""
+
+    def row_from_data(data: dict[str, object], path: Path) -> dict[str, str] | None:
+        axon = data.get("axon_file") or data.get("axon") or data.get("axon_path")
+        checkpoint = data.get("checkpoint_id") or data.get("checkpoint")
+        if not axon or not checkpoint:
+            return None
+        return {
+            "backend": value(data, "axon_backend", "backend"),
+            "axon": str(axon),
+            "checkpoint": str(checkpoint),
+            "model_dir": value(data, "hf_model_dir", "model_dir"),
+            "fallback": value(data, "fallback"),
+            "benchmark_path": value(data, "benchmark_path"),
+            "masked_top1_eq": value(data, "masked_top1_eq"),
+            "masked_max_abs_diff": value(data, "masked_max_diff", "masked_max_abs_diff"),
+            "masked_max_rel_diff": value(data, "masked_max_rel_diff"),
+            "hf_time": value(data, "hf_time", "hf_time_s"),
+            "axon_time": value(data, "axon_time", "axon_time_s"),
+            "speed_ratio_axon_over_hf": value(data, "speed_ratio_axon_over_hf"),
+            "_result_json_path": str(path),
+        }
 
     for path in sorted(log_root.glob("**/*.result.json")):
         if not path.exists() or path.stat().st_size == 0:
@@ -49,24 +83,17 @@ def _load_result_json_rows(log_root: Path) -> list[dict[str, str]]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        axon = data.get("axon_file") or data.get("axon") or data.get("axon_path")
-        checkpoint = data.get("checkpoint_id") or data.get("checkpoint")
-        if not axon or not checkpoint:
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    row = row_from_data(item, path)
+                    if row is not None:
+                        rows.append(row)
             continue
-        row = {
-            "axon": str(axon),
-            "checkpoint": str(checkpoint),
-            "model_dir": value("hf_model_dir", "model_dir"),
-            "fallback": value("fallback"),
-            "masked_top1_eq": value("masked_top1_eq"),
-            "masked_max_abs_diff": value("masked_max_diff", "masked_max_abs_diff"),
-            "masked_max_rel_diff": value("masked_max_rel_diff"),
-            "hf_time": value("hf_time", "hf_time_s"),
-            "axon_time": value("axon_time", "axon_time_s"),
-            "speed_ratio_axon_over_hf": value("speed_ratio_axon_over_hf"),
-            "_result_json_path": str(path),
-        }
-        rows.append(row)
+        if isinstance(data, dict):
+            row = row_from_data(data, path)
+            if row is not None:
+                rows.append(row)
     return rows
 
 
@@ -74,14 +101,25 @@ def _planned_groups(log_root: Path) -> int:
     manifest = log_root / "manifest.csv"
     if manifest.exists() and manifest.stat().st_size > 0:
         with manifest.open(encoding="utf-8", newline="") as handle:
-            return sum(1 for _ in csv.DictReader(handle))
+            manifest_rows = sum(1 for _ in csv.DictReader(handle))
+        status = log_root / "paired-status.csv"
+        if status.exists() and status.stat().st_size > 0:
+            with status.open(encoding="utf-8", newline="") as handle:
+                backends = {
+                    row.get("backend", "").strip()
+                    for row in csv.DictReader(handle)
+                    if row.get("backend", "").strip()
+                }
+            if backends:
+                return manifest_rows * len(backends)
+        return manifest_rows
     parent_logs = sorted(log_root.glob("**/parent-*.txt"))
-    run_start_re = re.compile(r"run_start\s+total_pairs=(\d+)")
+    run_start_re = re.compile(r"run_start\s+.*?(?:total_rows=(?P<rows>\d+)|total_pairs=(?P<pairs>\d+))")
     totals: list[int] = []
     for path in parent_logs:
         text = path.read_text(encoding="utf-8", errors="ignore")
         for m in run_start_re.finditer(text):
-            totals.append(int(m.group(1)))
+            totals.append(int(m.group("rows") or m.group("pairs") or "0"))
     if totals:
         return max(totals)
     return 0
@@ -99,22 +137,32 @@ def _get(row: dict[str, str], *names: str) -> str:
     return ""
 
 
-def _pair_key(row: dict[str, str]) -> tuple[str, str] | None:
+def _pair_key(row: dict[str, str]) -> tuple[str, str, str] | None:
+    backend = _get(row, "backend", "axon_backend")
     axon = _get(row, "axon")
     ckpt = _get(row, "checkpoint")
     if not axon or not ckpt:
         return None
-    return axon, ckpt
+    return backend, axon, ckpt
 
 
 def _latest_rows_by_pair(rows: list[dict[str, str]]) -> list[dict[str, str]]:
-    latest: dict[tuple[str, str], dict[str, str]] = {}
+    latest: dict[tuple[str, str, str], dict[str, str]] = {}
     for row in rows:
         key = _pair_key(row)
         if key is None:
             continue
         latest[key] = row
     return list(latest.values())
+
+
+def _drop_dry_run_rows_if_real_rows_exist(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    real_rows = [
+        row
+        for row in rows
+        if _get(row, "fallback", "masked_top1_eq", "masked_max_abs_diff") != "DRY-RUN"
+    ]
+    return real_rows or rows
 
 
 def _is_issue_row(row: dict[str, str], abs_threshold: float) -> bool:
@@ -185,6 +233,74 @@ def _timed_rows(rows: list[dict[str, str]]) -> list[tuple[dict[str, str], float,
     return out
 
 
+def _load_paired_status_rows(log_root: Path) -> list[dict[str, str]]:
+    path = log_root / "paired-status.csv"
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    with path.open(encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _quantile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    index = max(0, min(len(values) - 1, int(math.ceil(q * len(values))) - 1))
+    return values[index]
+
+
+def _paired_wall_time_summary(rows: list[dict[str, str]]) -> list[list[str]]:
+    by_backend: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        backend = _get(row, "backend")
+        seconds = _to_float(_get(row, "seconds"))
+        if backend and seconds is not None:
+            by_backend[backend].append(seconds)
+    out: list[list[str]] = []
+    for backend in sorted(by_backend):
+        values = sorted(by_backend[backend])
+        out.append(
+            [
+                backend,
+                str(len(values)),
+                f"{sum(values):.1f}s",
+                f"{mean(values):.2f}s",
+                f"{median(values):.2f}s",
+                f"{_quantile(values, 0.9):.2f}s",
+                f"{max(values):.2f}s",
+            ]
+        )
+    return out
+
+
+def _paired_backend_ratio_summary(rows: list[dict[str, str]]) -> list[str] | None:
+    by_index: dict[str, dict[str, float]] = defaultdict(dict)
+    for row in rows:
+        index = _get(row, "index")
+        backend = _get(row, "backend")
+        seconds = _to_float(_get(row, "seconds"))
+        if index and backend and seconds is not None:
+            by_index[index][backend] = seconds
+    ratios: list[float] = []
+    for per_backend in by_index.values():
+        torch_time = per_backend.get("codegen2-torch")
+        jax_time = per_backend.get("codegen2-jax")
+        if torch_time and jax_time:
+            ratios.append(jax_time / torch_time)
+    if not ratios:
+        return None
+    ratios = sorted(ratios)
+    return [
+        str(len(ratios)),
+        f"{mean(ratios):.2f}x",
+        f"{median(ratios):.2f}x",
+        f"{_quantile(ratios, 0.1):.2f}x",
+        f"{_quantile(ratios, 0.9):.2f}x",
+        f"{min(ratios):.2f}x",
+        f"{max(ratios):.2f}x",
+        str(sum(1 for ratio in ratios if ratio < 1.0)),
+    ]
+
+
 def _normalize_axon_path(raw: str) -> str:
     marker = "/brainsurgery/synapse/models/"
     if marker in raw:
@@ -214,6 +330,20 @@ def _detect_run_active(log_root: Path) -> str:
 
 
 def _parse_run_start(log_root: Path) -> datetime | None:
+    paired_log = log_root / "paired-runner.log"
+    if paired_log.exists():
+        paired_start_re = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+start\b")
+        starts: list[datetime] = []
+        for line in paired_log.read_text(encoding="utf-8", errors="ignore").splitlines():
+            m = paired_start_re.match(line.strip())
+            if m is None:
+                continue
+            try:
+                starts.append(datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+        if starts:
+            return min(starts)
     parent_logs = sorted(log_root.glob("**/parent-*.txt"))
     run_start_re = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+run_start\b")
     starts: list[datetime] = []
@@ -231,6 +361,24 @@ def _parse_run_start(log_root: Path) -> datetime | None:
     return max(starts)
 
 
+def _parse_run_end(log_root: Path) -> datetime | None:
+    paired_log = log_root / "paired-runner.log"
+    if paired_log.exists():
+        end_re = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(?:finish|paired run done)\b")
+        ends: list[datetime] = []
+        for line in paired_log.read_text(encoding="utf-8", errors="ignore").splitlines():
+            m = end_re.match(line.strip())
+            if m is None:
+                continue
+            try:
+                ends.append(datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+        if ends:
+            return max(ends)
+    return None
+
+
 def _fmt_duration(seconds: float) -> str:
     if seconds < 0:
         seconds = 0
@@ -245,12 +393,13 @@ def _fmt_duration(seconds: float) -> str:
 def _compute_elapsed_eta(
     *,
     run_start: datetime | None,
+    run_end: datetime | None,
     completed: int,
     planned: int,
 ) -> tuple[str, str]:
     if run_start is None:
         return "n/a", "n/a"
-    now = datetime.now()
+    now = run_end if run_end is not None and planned <= completed else datetime.now()
     elapsed_s = (now - run_start).total_seconds()
     elapsed = _fmt_duration(elapsed_s)
     if completed <= 0 or planned <= completed:
@@ -300,13 +449,20 @@ def main() -> int:
     args = parser.parse_args()
 
     log_root = args.log_root.resolve()
-    rows_raw = _load_rows(log_root)
+    rows_raw = _drop_dry_run_rows_if_real_rows_exist(_load_rows(log_root))
     rows = _latest_rows_by_pair(rows_raw)
+    paired_status_rows = _load_paired_status_rows(log_root)
     planned = _planned_groups(log_root)
     completed = _completed_groups(rows)
     run_active = _detect_run_active(log_root)
     run_start = _parse_run_start(log_root)
-    elapsed, eta = _compute_elapsed_eta(run_start=run_start, completed=completed, planned=planned)
+    run_end = _parse_run_end(log_root)
+    elapsed, eta = _compute_elapsed_eta(
+        run_start=run_start,
+        run_end=run_end,
+        completed=completed,
+        planned=planned,
+    )
     progress_label = args.label.strip() or log_root.name
 
     issue_rows = [row for row in rows if _is_issue_row(row, args.abs_threshold)]
@@ -374,12 +530,45 @@ def main() -> int:
     )
     print()
 
+    wall_time_rows = _paired_wall_time_summary(paired_status_rows)
+    if wall_time_rows:
+        _print_markdown_table(
+            [
+                "Backend",
+                "Rows",
+                "Total wall",
+                "Mean",
+                "Median",
+                "P90",
+                "Max",
+            ],
+            wall_time_rows,
+        )
+        ratio_row = _paired_backend_ratio_summary(paired_status_rows)
+        if ratio_row is not None:
+            print()
+            _print_markdown_table(
+                [
+                    "Paired rows",
+                    "Mean JAX/Torch",
+                    "Median JAX/Torch",
+                    "P10",
+                    "P90",
+                    "Min",
+                    "Max",
+                    "JAX faster",
+                ],
+                [ratio_row],
+            )
+        print()
+
     issue_table_rows: list[list[str]] = []
     for row in issue_rows[: args.max_rows]:
         axon = _normalize_axon_path(_get(row, "axon"))
         issue_table_rows.append(
             [
                 axon,
+                _get(row, "backend", "axon_backend"),
                 _get(row, "checkpoint"),
                 _get(row, "fallback"),
                 _get(row, "masked_top1_eq", "masked top-1 eq"),
@@ -391,6 +580,7 @@ def main() -> int:
     _print_markdown_table(
         [
             "Axon",
+            "Backend",
             "Checkpoint",
             "Fallback",
             "masked_top1_eq",
@@ -400,18 +590,19 @@ def main() -> int:
     )
     print()
 
-    by_ckpt: dict[str, dict[str, dict[str, str]]] = defaultdict(dict)
+    by_ckpt: dict[tuple[str, str], dict[str, dict[str, str]]] = defaultdict(dict)
     for row in rows:
+        backend = _get(row, "backend", "axon_backend")
         ckpt = _get(row, "checkpoint")
         axon = _get(row, "axon")
         if not ckpt or not axon:
             continue
         kind = "generic" if _is_generic_axon(axon) else "materialized"
-        by_ckpt[ckpt][kind] = row
+        by_ckpt[(backend, ckpt)][kind] = row
 
     mismatch_rows: list[list[str]] = []
-    for ckpt in sorted(by_ckpt):
-        pair = by_ckpt[ckpt]
+    for backend, ckpt in sorted(by_ckpt):
+        pair = by_ckpt[(backend, ckpt)]
         generic = pair.get("generic")
         materialized = pair.get("materialized")
         if generic is None or materialized is None:
@@ -425,6 +616,7 @@ def main() -> int:
         same_quality = "yes" if (g_top == m_top and g_abs == m_abs) else "no"
         mismatch_rows.append(
             [
+                backend,
                 ckpt,
                 g_abs,
                 m_abs,
@@ -434,9 +626,10 @@ def main() -> int:
         if len(mismatch_rows) >= args.max_rows:
             break
     if not mismatch_rows:
-        mismatch_rows = [["(none)", "", "", ""]]
+        mismatch_rows = [["(none)", "", "", "", ""]]
     _print_markdown_table(
         [
+            "Backend",
             "Checkpoint",
             "Generic max abs",
             "Materialized max abs",
@@ -456,6 +649,7 @@ def main() -> int:
         slower_table_rows.append(
             [
                 _normalize_axon_path(_get(row, "axon")),
+                _get(row, "backend", "axon_backend"),
                 _get(row, "checkpoint"),
                 f"{hf_time:.4f}s",
                 f"{axon_time:.4f}s",
@@ -465,10 +659,11 @@ def main() -> int:
             ]
         )
     if not slower_table_rows:
-        slower_table_rows = [["(none)", "", "", "", "", "", ""]]
+        slower_table_rows = [["(none)", "", "", "", "", "", "", ""]]
     _print_markdown_table(
         [
             "Axon",
+            "Backend",
             "Checkpoint",
             "HF time",
             "Axon time",

@@ -81,6 +81,8 @@ from ..typecheck_shared import (
     _reject_bare_tensor_types,
     _scoped_typevars,
     _simplify_dim_expr,
+    _substitute_expr_dim_names,
+    _substitute_statement_dim_names,
     _thread_interprocedural_call_guards,
     _type_dims,
     _type_expr_from_spec,
@@ -113,6 +115,7 @@ def _add_path_placeholder_refs(text: str, out: set[str], names: set[str]) -> Non
 
 @dataclass
 class _CallBinding:
+    module: AxonDefinition
     args: tuple[AxonExpr, ...]
     kwargs: dict[str, AxonKwargValue]
     param_types: dict[str, TypeExpr]
@@ -747,7 +750,7 @@ def _is_generic_named_type(tp: TypeExpr, ctx: _TcCtx) -> bool:
 
 def _instantiate_call_signature(
     module: AxonDefinition, state: _Tc2
-) -> tuple[list[TypeExpr], tuple[TypeExpr, ...] | None]:
+) -> tuple[AxonDefinition, list[TypeExpr], tuple[TypeExpr, ...] | None]:
     ctx = state.ctx
     dim_subst: dict[str, DimToken] = {}
     type_subst: dict[str, TypeVar] = {}
@@ -810,11 +813,28 @@ def _instantiate_call_signature(
         tp = rewrite_type(param.type_expr)
         param_types.append(TypeOptional(tp) if param.optional and not isinstance(tp, TypeOptional) else tp)
     return_tp = rewrite_type(module.return_type_expr) if module.return_type_expr is not None else None
+    instantiated_module = replace(
+        module,
+        params=tuple(
+            replace(param, type_expr=tp)
+            for param, tp in zip(module.params, param_types, strict=True)
+        ),
+        return_type_expr=return_tp,
+        body_expr=(
+            _substitute_expr_dim_names(module.body_expr, subst=dim_subst)
+            if module.body_expr is not None
+            else None
+        ),
+        statements=tuple(
+            _substitute_statement_dim_names(stmt, subst=dim_subst)
+            for stmt in module.statements
+        ),
+    )
     if return_tp is None:
-        return param_types, None
+        return instantiated_module, param_types, None
     if isinstance(return_tp, TypeTuple):
-        return param_types, return_tp.items
-    return param_types, (return_tp,)
+        return instantiated_module, param_types, return_tp.items
+    return instantiated_module, param_types, (return_tp,)
 
 
 def _target_type(tp: TypeExpr, arity: int, ctx: _TcCtx) -> tuple[TypeExpr, ...]:
@@ -1711,12 +1731,22 @@ def _store_typed_module(state: _Tc2, module: AxonDefinition) -> None:
 
 
 def _normalize_typed_module(module: AxonDefinition, ctx: _TcCtx) -> AxonDefinition:
+    return _normalize_typed_module_with_fresh_sources(module, ctx, fresh_dim_sources={})
+
+
+def _normalize_typed_module_with_fresh_sources(
+    module: AxonDefinition,
+    ctx: _TcCtx,
+    *,
+    fresh_dim_sources: dict[str, str],
+) -> AxonDefinition:
     protected_dim_names = _env_dim_names(_module_header_env(module, ctx))
     if module.return_type_expr is not None:
         protected_dim_names.update(_collect_dim_names(module.return_type_expr))
     ctx = _normalization_ctx_preserving_header_dims(
         ctx,
         protected_dim_names=protected_dim_names,
+        fresh_dim_sources=fresh_dim_sources,
     )
     normalized_params = tuple(
         replace(param, type_expr=_normalize_type_expr_for_module(param.type_expr, ctx))
@@ -1794,26 +1824,14 @@ def _normalization_ctx_preserving_header_dims(
     ctx: _TcCtx,
     *,
     protected_dim_names: set[str],
+    fresh_dim_sources: dict[str, str] | None = None,
 ) -> _TcCtx:
-    def uses_only_global_constants(dim: DimToken) -> bool:
-        names = dim_token_names(dim)
-        return bool(names) and all(
-            name in ctx.modules_by_name
-            and not ctx.modules_by_name[name].params
-            and not ctx.modules_by_name[name].path_params
-            and ctx.modules_by_name[name].path_param is None
-            for name in names
-        )
-
+    fresh_dim_sources = fresh_dim_sources or {}
     dim_substitutions: dict[str, DimToken | tuple[DimToken, ...]] = {}
     for name, value in ctx.dim_substitutions.items():
-        if (
-            name in protected_dim_names
-            and not isinstance(value, tuple)
-            and not uses_only_global_constants(value)
-        ):
+        if name in protected_dim_names:
             continue
-        if name in protected_dim_names and isinstance(value, tuple):
+        if fresh_dim_sources.get(name) in protected_dim_names:
             continue
         dim_substitutions[name] = value
     return _TcCtx(
@@ -2039,6 +2057,7 @@ def _canonicalize_fresh_module(module: AxonDefinition, state: _Tc2) -> AxonDefin
         ctx=_normalization_ctx_preserving_header_dims(
             state.ctx,
             protected_dim_names=protected_dim_names,
+            fresh_dim_sources=state.fresh_dim_sources,
         ),
     )
     bound = {
@@ -2432,7 +2451,9 @@ def _bind_call_args(
     path_types: dict[str, TypeExpr] = {}
     bound_expr_defs: dict[str, AxonExpr] = {}
     fresh_dim_sources_before = set(state.fresh_dim_sources)
-    instantiated_param_types, return_types = _instantiate_call_signature(module, state)
+    instantiated_module, instantiated_param_types, return_types = _instantiate_call_signature(
+        module, state
+    )
     local_fresh_dim_sources = {
         fresh_name: source_name
         for fresh_name, source_name in state.fresh_dim_sources.items()
@@ -2505,6 +2526,7 @@ def _bind_call_args(
         dim_bindings[source_name] = value
     return (
         _CallBinding(
+            instantiated_module,
             tuple(typed_args),
             typed_kwargs,
             param_types,
@@ -2927,6 +2949,7 @@ def _tc_user_call(
         return None
     binding, bound_args, bound_kwargs = _bind_call_args(state, module, expr.args, expr.kwargs, env, expr_defs)
     call_env = {**binding.path_types, **binding.param_types}
+    call_module = binding.module
     if module.name in state.active:
         returns = binding.return_types if binding.return_types is not None else _return_types(module, state.ctx)
         result: TypeExpr
@@ -2954,7 +2977,7 @@ def _tc_user_call(
             try:
                 typed_module, return_tp = _tc_definition(
                     state,
-                    module,
+                    call_module,
                     call_env,
                     call_expr_defs=binding.expr_defs,
                     expected_return_types=expected_for_body,
@@ -2971,11 +2994,12 @@ def _tc_user_call(
                 signature_result: TypeExpr = (
                     resolved_returns[0] if len(resolved_returns) == 1 else TypeTuple(items=resolved_returns)
                 )
-                result = (
+                computed_result = (
                     _resolve_return_type_dim_aliases(return_tp, binding.expr_defs, state.ctx)
-                    if return_tp is not None and _type_has_unresolved_generic(signature_result)
-                    else signature_result
+                    if return_tp is not None
+                    else None
                 )
+                result = computed_result if computed_result is not None else signature_result
             else:
                 result = (
                     _resolve_return_type_dim_aliases(return_tp, binding.expr_defs, state.ctx)
@@ -3389,6 +3413,15 @@ def _tc_definition(
         )
         _prefer_closed_constant_dim_names(state)
         return_tp = _final_return_type(returns, state.ctx)
+        statement_normalization_ctx = (
+            state.ctx
+            if specialize_signature
+            else _normalization_ctx_preserving_header_dims(
+                state.ctx,
+                protected_dim_names=protected_dim_names,
+                fresh_dim_sources=state.fresh_dim_sources,
+            )
+        )
         refined_params: list[AxonParam] = []
         for param in module.params:
             param_tp = (signature_env if specialize_signature else base_env).get(
@@ -3421,15 +3454,19 @@ def _tc_definition(
                 if signature_return_tp is not None
                 else None,
             )
-        return_type_expr = (
-            module.return_type_expr
-            if module.return_type_expr is not None and not specialize_signature
-            else signature_return_tp
+        keep_declared_return = (
+            module.return_type_expr is not None
+            and not specialize_signature
+            and not _is_generated_definition_name(module.name)
         )
+        return_type_expr = module.return_type_expr if keep_declared_return else signature_return_tp
         typed_module = replace(
             module,
             params=tuple(refined_params),
-            statements=tuple(_normalize_statement(stmt, state.ctx) for stmt in typed_statements),
+            statements=tuple(
+                _normalize_statement(stmt, statement_normalization_ctx)
+                for stmt in typed_statements
+            ),
             constraints=_collect_module_constraints(
                 module, statements=tuple(typed_statements), ctx=state.ctx
             ),
@@ -3501,20 +3538,28 @@ def _typecheck2_flat_axon_file_once(program: AxonFile, *, main_module: str | Non
         typed_by_name[module.name] = typed
     _prefer_closed_constant_dim_names(demand_state)
     typed_by_name = _align_loop_continue_signatures(typed_by_name)
-    typed_by_name = {
-        name: (
-            _canonicalize_equivalent_dim_module(normalized, state_by_name[name])
-            if _is_generated_definition_name(name)
-            else normalized
-        )
-        for name, module in typed_by_name.items()
-        for normalized in (
-            _canonicalize_fresh_module(
-                _normalize_typed_module(module, state_by_name[name].ctx),
-                state_by_name[name],
+    normalized_by_name: dict[str, AxonDefinition] = {}
+    for name, module in typed_by_name.items():
+        module_for_normalization = module
+        if name in roots:
+            original = modules_by_name[name]
+            module_for_normalization = replace(
+                module,
+                params=original.params,
+                return_type_expr=original.return_type_expr,
+            )
+        normalized = _canonicalize_fresh_module(
+            _normalize_typed_module_with_fresh_sources(
+                module_for_normalization,
+                state_by_name[name].ctx,
+                fresh_dim_sources=state_by_name[name].fresh_dim_sources,
             ),
+            state_by_name[name],
         )
-    }
+        if _is_generated_definition_name(name):
+            normalized = _canonicalize_equivalent_dim_module(normalized, state_by_name[name])
+        normalized_by_name[name] = normalized
+    typed_by_name = normalized_by_name
     for root in roots:
         original = modules_by_name[root]
         typed_by_name[root] = replace(

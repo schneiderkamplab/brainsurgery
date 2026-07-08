@@ -46,6 +46,7 @@ from .core import (
     graph_path_template_names,
     graph_type_compatible,
     validate_graph_program,
+    _instantiated_module_output_types as _core_instantiated_module_output_types,
     _value_ref_type,
 )
 from .domain import (
@@ -122,6 +123,27 @@ _TINYGRAD_BACKEND_INTRINSICS = frozenset(
         "__tinygrad_sdpa",
     }
 )
+_MLX_BACKEND_INTRINSICS = frozenset(
+    {
+        "__mlx_sdpa",
+        "__mlx_rmsnorm_scaled",
+        "__mlx_rope",
+    }
+)
+_JAX_BACKEND_INTRINSICS = frozenset(
+    {
+        "__jax_sdpa",
+        "__jax_expert_packed_swiglu_ffn",
+        "__jax_expert_swiglu_ffn",
+        "__jax_selected_expert_clamped_packed_swiglu_ffn",
+        "__jax_selected_expert_packed_gegelu_ffn",
+        "__jax_selected_expert_packed_swiglu_ffn",
+        "__jax_selected_expert_relu2_ffn",
+        "__jax_selected_expert_swiglu_ffn",
+        "__jax_swiglu_ffn",
+        "__jax_weighted_topk_sum",
+    }
+)
 _TRITON_BACKEND_INTRINSICS = frozenset(
     {
         "__triton_rmsnorm_noscale",
@@ -140,12 +162,16 @@ _VLLM_BACKEND_INTRINSICS = frozenset(
 _BACKEND_INTRINSICS_BY_TARGET = {
     "codegen2-torch": _TORCH_BACKEND_INTRINSICS,
     "codegen2-tinygrad": _TINYGRAD_BACKEND_INTRINSICS,
+    "codegen2-mlx": _MLX_BACKEND_INTRINSICS,
+    "codegen2-jax": _JAX_BACKEND_INTRINSICS,
     "codegen2-triton": _TRITON_BACKEND_INTRINSICS,
     "codegen2-vllm": _VLLM_BACKEND_INTRINSICS,
 }
 _BACKEND_INTRINSIC_PREFIX_BY_TARGET = {
     "codegen2-torch": "__torch_",
     "codegen2-tinygrad": "__tinygrad_",
+    "codegen2-mlx": "__mlx_",
+    "codegen2-jax": "__jax_",
     "codegen2-triton": "__triton_",
     "codegen2-vllm": "__vllm_",
 }
@@ -318,6 +344,17 @@ def _maybe_rewrite_node_to_backend_sdpa(
         keep_prov = _graph_value_ref_provenance(keep, local_provenance=local_provenance)
         if fact.additive_mask != fact.keep and not _has_additive_mask_from_keep_fact(additive_prov, keep_prov):
             continue
+        if fact.default_scale or fact.scale is None:
+            scale_operand: GraphOperand = GraphLiteral(value=None, type_expr=TypeNull())
+        elif fact.scale.kind == "input" and fact.scale.name in formal_to_actual:
+            scale_operand = formal_to_actual[fact.scale.name]
+        elif fact.scale.kind == "literal":
+            scale_operand = GraphLiteral(
+                value=fact.scale.value,
+                type_expr=TypeFloat() if isinstance(fact.scale.value, float) else TypeInt(),
+            )
+        else:
+            continue
         return replace(
             node,
             op=GraphOp(op_name),
@@ -326,7 +363,7 @@ def _maybe_rewrite_node_to_backend_sdpa(
                 k,
                 v,
                 additive_mask,
-                GraphLiteral(value=None, type_expr=TypeNull()),
+                scale_operand,
                 GraphLiteral(value=True, type_expr=TypeBool()),
             ),
             attrs={},
@@ -340,6 +377,7 @@ def _maybe_rewrite_node_to_torch_rope_apply_factors(
     module: GraphModule,
     modules_by_name: Mapping[str, GraphModule],
     provenance,
+    value_to_node: Mapping[str, GraphNode] | None = None,
 ) -> GraphNode | None:
     call_rewrite = _maybe_rewrite_call_to_torch_rope_apply_factors(
         node,
@@ -361,7 +399,7 @@ def _maybe_rewrite_node_to_torch_rope_apply_factors(
         for fact in graph_provenance_facts(output_provenance)
     ):
         return None
-    operands = _match_rope_apply_factors_operands(node)
+    operands = _match_rope_apply_factors_operands(node, value_to_node=value_to_node)
     if operands is None:
         return None
     x, sin, cos = operands
@@ -1545,7 +1583,11 @@ def _torch_swiglu_ffn_candidate(
     )
 
 
-def _rewrite_torch_swiglu_ffn_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_torch_swiglu_ffn_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str = "__torch_swiglu_ffn",
+) -> GraphProgram:
     parameter_path_counts = _direct_parameter_path_counts(graph)
     changed = False
     new_modules: list[GraphModule] = []
@@ -1575,7 +1617,7 @@ def _rewrite_torch_swiglu_ffn_intrinsics(graph: GraphProgram) -> GraphProgram:
             new_nodes.append(
                 replace(
                     down_node,
-                    op=GraphOp("__torch_swiglu_ffn"),
+                    op=GraphOp(op_name),
                     inputs=inputs,
                     attrs={},
                 )
@@ -2189,7 +2231,11 @@ def _torch_expert_swiglu_ffn_candidate(
     )
 
 
-def _rewrite_torch_expert_swiglu_ffn_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_torch_expert_swiglu_ffn_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str = "__torch_expert_swiglu_ffn",
+) -> GraphProgram:
     if not any(node.op.name == "_expert_linear" for module in graph.modules for node in module.nodes):
         return graph
     provenance = infer_graph_provenance(graph)
@@ -2232,7 +2278,7 @@ def _rewrite_torch_expert_swiglu_ffn_intrinsics(graph: GraphProgram) -> GraphPro
             new_nodes.append(
                 replace(
                     down_node,
-                    op=GraphOp("__torch_expert_swiglu_ffn"),
+                    op=GraphOp(op_name),
                     inputs=inputs,
                     attrs={},
                 )
@@ -2871,7 +2917,11 @@ def _torch_direct_selected_expert_swiglu_candidate(
     )
 
 
-def _rewrite_torch_expert_packed_swiglu_ffn_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_torch_expert_packed_swiglu_ffn_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str = "__torch_expert_packed_swiglu_ffn",
+) -> GraphProgram:
     if not any(node.op.name == "_expert_linear" for module in graph.modules for node in module.nodes):
         return graph
     provenance = infer_graph_provenance(graph)
@@ -2914,7 +2964,7 @@ def _rewrite_torch_expert_packed_swiglu_ffn_intrinsics(graph: GraphProgram) -> G
             new_nodes.append(
                 replace(
                     down_node,
-                    op=GraphOp("__torch_expert_packed_swiglu_ffn"),
+                    op=GraphOp(op_name),
                     inputs=inputs,
                     attrs={},
                 )
@@ -4660,7 +4710,11 @@ def _rewrite_torch_selected_expert_intrinsics(
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
-def _rewrite_torch_weighted_topk_sum_intrinsics(graph: GraphProgram) -> GraphProgram:
+def _rewrite_torch_weighted_topk_sum_intrinsics(
+    graph: GraphProgram,
+    *,
+    op_name: str = "__torch_weighted_topk_sum",
+) -> GraphProgram:
     has_candidate_shape = False
     for module in graph.modules:
         names = [node.op.name for node in module.nodes]
@@ -4700,7 +4754,7 @@ def _rewrite_torch_weighted_topk_sum_intrinsics(graph: GraphProgram) -> GraphPro
             new_nodes.append(
                 replace(
                     sum_node,
-                    op=GraphOp("__torch_weighted_topk_sum"),
+                    op=GraphOp(op_name),
                     inputs=inputs,
                     attrs={},
                 )
@@ -5143,6 +5197,7 @@ def _rewrite_torch_rope_intrinsics(
     changed = False
     new_modules: list[GraphModule] = []
     for module in graph.modules:
+        value_to_node = _build_value_to_node_map(module)
         new_nodes: list[GraphNode] = []
         for node in module.nodes:
             rewritten = _maybe_rewrite_node_to_torch_rope_apply_factors(
@@ -5150,6 +5205,7 @@ def _rewrite_torch_rope_intrinsics(
                 module=module,
                 modules_by_name=modules_by_name,
                 provenance=provenance,
+                value_to_node=value_to_node,
             )
             if rewritten is None:
                 new_nodes.append(node)
@@ -5159,6 +5215,132 @@ def _rewrite_torch_rope_intrinsics(
                 changed = True
                 new_nodes.append(rewritten)
         new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _maybe_rewrite_node_to_mlx_rope(
+    node: GraphNode,
+    *,
+    module: GraphModule,
+    modules_by_name: Mapping[str, GraphModule],
+    provenance,
+    value_to_node: Mapping[str, GraphNode] | None = None,
+) -> GraphNode | None:
+    call_rewrite = _maybe_rewrite_call_to_torch_rope_apply_factors(
+        node,
+        modules_by_name=modules_by_name,
+        provenance=provenance,
+    )
+    if call_rewrite is not None:
+        x = call_rewrite.inputs[0]
+        interleaved = call_rewrite.inputs[3]
+        return replace(
+            node,
+            op=GraphOp("__mlx_rope"),
+            inputs=(x, interleaved),
+            attrs={},
+        )
+    if len(node.outputs) != 1:
+        return None
+    local_provenance = provenance.module_local_provenance.get(module.name, {})
+    output_provenance = local_provenance.get(node.outputs[0].name)
+    if output_provenance is None:
+        return None
+    if not any(
+        fact.kind == "rope_apply_factors"
+        and isinstance(fact.value, GraphRopeApplyFactorsFact)
+        and not fact.value.interleaved
+        for fact in graph_provenance_facts(output_provenance)
+    ):
+        return None
+    operands = _match_rope_apply_factors_operands(node, value_to_node=value_to_node)
+    if operands is None:
+        return None
+    x, sin, cos = operands
+    return replace(
+        node,
+        op=GraphOp("__mlx_rope"),
+        inputs=(
+            x,
+            GraphLiteral(value=False, type_expr=TypeBool()),
+            sin,
+            cos,
+        ),
+        attrs={},
+    )
+
+
+def _rewrite_mlx_rope_intrinsics(
+    graph: GraphProgram,
+    *,
+    enabled_intrinsics: frozenset[str],
+) -> GraphProgram:
+    provenance = infer_graph_provenance(graph)
+    modules_by_name = {module.name: module for module in graph.modules}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        value_to_node = _build_value_to_node_map(module)
+        new_nodes: list[GraphNode] = []
+        for node in module.nodes:
+            rewritten = _maybe_rewrite_node_to_mlx_rope(
+                node,
+                module=module,
+                modules_by_name=modules_by_name,
+                provenance=provenance,
+                value_to_node=value_to_node,
+            )
+            if rewritten is None:
+                new_nodes.append(node)
+            elif not _backend_intrinsic_enabled(enabled_intrinsics, rewritten.op.name):
+                new_nodes.append(node)
+            else:
+                changed = True
+                new_nodes.append(rewritten)
+        new_modules.append(replace(module, nodes=tuple(new_nodes)))
+    return replace(graph, modules=tuple(new_modules)) if changed else graph
+
+
+def _rewrite_mlx_rmsnorm_scaled_intrinsics(graph: GraphProgram) -> GraphProgram:
+    modules_by_name = {m.name: m for m in graph.modules}
+    changed = False
+    new_modules: list[GraphModule] = []
+    for module in graph.modules:
+        if (
+            module.name in ("NN.rmsnorm", "NN.rmsnorm__s1")
+            and len(module.nodes) == 2
+            and module.nodes[0].op.name in ("NN.rmsnorm_noscale", "NN.rmsnorm_noscale__s1")
+            and module.nodes[1].op.name == "Params.param_scale"
+            and len(module.nodes[1].inputs) >= 2
+        ):
+            rmsnorm_node = module.nodes[0]
+            param_scale_node = module.nodes[1]
+            x = rmsnorm_node.inputs[0]
+            scale_path = param_scale_node.inputs[1]
+            rmsnorm_noscale_mod = modules_by_name.get(rmsnorm_node.op.name)
+            if (
+                rmsnorm_noscale_mod is not None
+                and len(rmsnorm_noscale_mod.nodes) == 1
+                and rmsnorm_noscale_mod.nodes[0].op.name == "_rmsnorm"
+                and len(rmsnorm_noscale_mod.nodes[0].inputs) >= 2
+            ):
+                eps = rmsnorm_noscale_mod.nodes[0].inputs[1]
+            else:
+                eps = GraphLiteral(value=1e-06, type_expr=TypeFloat())
+            new_node = replace(
+                param_scale_node,
+                op=GraphOp("__mlx_rmsnorm_scaled"),
+                inputs=(
+                    x,
+                    scale_path,
+                    eps,
+                ),
+                attrs={},
+            )
+            new_modules.append(replace(module, nodes=(new_node,)))
+            changed = True
+        else:
+            new_modules.append(module)
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
@@ -5203,16 +5385,49 @@ def _rewrite_assign_slice(graph: GraphProgram) -> GraphProgram:
     return replace(graph, modules=tuple(new_modules)) if changed else graph
 
 
+def _build_value_to_node_map(
+    module: GraphModule,
+) -> dict[str, GraphNode]:
+    result: dict[str, GraphNode] = {}
+    for node in module.nodes:
+        for output in node.outputs:
+            result[output.name] = node
+    return result
+
+
+def _resolve_value_ref(
+    operand: GraphOperand,
+    value_to_node: Mapping[str, GraphNode] | None,
+) -> GraphOperand:
+    if value_to_node is None or not isinstance(operand, GraphValueRef):
+        return operand
+    node = value_to_node.get(operand.name)
+    if node is None:
+        return operand
+    op_name = node.op.name
+    if op_name.startswith("Tensor."):
+        op_name = "_" + op_name[len("Tensor."):]
+    return GraphExpr(
+        op=GraphOp(op_name),
+        inputs=node.inputs,
+        attrs=node.attrs,
+        type_expr=node.type_expr,
+        dims=node.dims,
+    )
+
+
 def _match_rope_apply_factors_operands(
     node: GraphNode,
+    *,
+    value_to_node: Mapping[str, GraphNode] | None = None,
 ) -> tuple[GraphOperand, GraphOperand, GraphOperand] | None:
     if node.attrs:
         return None
     left, right = _match_graph_binary(node.op.name, node.inputs, "core.binary.+")
     if left is None or right is None:
         return None
-    first = _match_rope_scaled_operand(left)
-    second = _match_rope_scaled_operand(right)
+    first = _match_rope_scaled_operand(left, value_to_node=value_to_node)
+    second = _match_rope_scaled_operand(right, value_to_node=value_to_node)
     if first is None or second is None:
         return None
     x_a, factor_a, rotated_a = first
@@ -5226,26 +5441,31 @@ def _match_rope_apply_factors_operands(
 
 def _match_rope_scaled_operand(
     operand: GraphOperand,
+    *,
+    value_to_node: Mapping[str, GraphNode] | None = None,
 ) -> tuple[GraphOperand, GraphOperand, bool] | None:
     left, right = _match_graph_expr_binary(operand, "core.binary.*")
     if left is None or right is None:
         return None
-    left_rot = _match_rope_rotate_half_noninterleaved_operand(left)
+    left_rot = _match_rope_rotate_half_noninterleaved_operand(left, value_to_node=value_to_node)
     if left_rot is not None:
         return left_rot, right, True
-    right_rot = _match_rope_rotate_half_noninterleaved_operand(right)
+    right_rot = _match_rope_rotate_half_noninterleaved_operand(right, value_to_node=value_to_node)
     if right_rot is not None:
         return right_rot, left, True
-    if _is_expand_operand(right):
+    if _is_expand_operand(right, value_to_node=value_to_node):
         return left, right, False
-    if _is_expand_operand(left):
+    if _is_expand_operand(left, value_to_node=value_to_node):
         return right, left, False
     return None
 
 
 def _match_rope_rotate_half_noninterleaved_operand(
     operand: GraphOperand,
+    *,
+    value_to_node: Mapping[str, GraphNode] | None = None,
 ) -> GraphOperand | None:
+    operand = _resolve_value_ref(operand, value_to_node)
     if not isinstance(operand, GraphExpr):
         return None
     if operand.op.name != "_concat" or len(operand.inputs) < 3 or operand.attrs:
@@ -5253,8 +5473,8 @@ def _match_rope_rotate_half_noninterleaved_operand(
     first, second, dim = operand.inputs[:3]
     if not _is_literal_value(dim, -1):
         return None
-    negated = _match_negated_slice_operand(first)
-    plain = _match_slice_operand(second)
+    negated = _match_negated_slice_operand(first, value_to_node=value_to_node)
+    plain = _match_slice_operand(second, value_to_node=value_to_node)
     if negated is None or plain is None:
         return None
     x_hi, hi_dim, hi_start, _hi_end = negated
@@ -5272,16 +5492,22 @@ def _match_rope_rotate_half_noninterleaved_operand(
 
 def _match_negated_slice_operand(
     operand: GraphOperand,
+    *,
+    value_to_node: Mapping[str, GraphNode] | None = None,
 ) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    operand = _resolve_value_ref(operand, value_to_node)
     left, right = _match_graph_expr_binary(operand, "core.binary.-")
     if not _is_literal_value(left, 0) or right is None:
         return None
-    return _match_slice_operand(right)
+    return _match_slice_operand(right, value_to_node=value_to_node)
 
 
 def _match_slice_operand(
     operand: GraphOperand,
+    *,
+    value_to_node: Mapping[str, GraphNode] | None = None,
 ) -> tuple[GraphOperand, GraphOperand, GraphOperand, GraphOperand] | None:
+    operand = _resolve_value_ref(operand, value_to_node)
     if not isinstance(operand, GraphExpr):
         return None
     if operand.op.name != "_slice" or len(operand.inputs) < 4:
@@ -5289,7 +5515,12 @@ def _match_slice_operand(
     return operand.inputs[0], operand.inputs[1], operand.inputs[2], operand.inputs[3]
 
 
-def _is_expand_operand(operand: GraphOperand) -> bool:
+def _is_expand_operand(
+    operand: GraphOperand,
+    *,
+    value_to_node: Mapping[str, GraphNode] | None = None,
+) -> bool:
+    operand = _resolve_value_ref(operand, value_to_node)
     return isinstance(operand, GraphExpr) and operand.op.name == "_expand" and bool(operand.inputs)
 
 
@@ -5359,7 +5590,21 @@ def _canonical_specialization_operand(
     return operand
 
 
+def _is_placeholder_dim_specialization(actual: GraphOperand, formal: GraphValue) -> bool:
+    formal_type = formal.type_expr
+    if isinstance(formal_type, TypeOptional):
+        formal_type = formal_type.inner
+    return (
+        isinstance(actual, GraphLiteral)
+        and actual.value == -1
+        and isinstance(actual.type_expr, TypeDim)
+        and not isinstance(formal_type, TypeInt)
+    )
+
+
 def _specialization_actual_matches_formal(actual: GraphOperand, formal: GraphValue) -> bool:
+    if _is_placeholder_dim_specialization(actual, formal):
+        return False
     actual_type = graph_operand_type(actual)
     if formal.optional and isinstance(actual_type, TypeNull):
         return True
@@ -6321,14 +6566,24 @@ def _refine_select_inputs_from_condition(
 
 
 def _module_output_types(module: GraphModule) -> tuple[TypeExpr, ...]:
-    if module.return_type_expr is not None:
+    if (
+        module.return_type_expr is not None
+        and not _type_contains_inference_var(module.return_type_expr)
+    ):
         return _result_types(module.return_type_expr, len(module.outputs))
     return tuple(graph_operand_type(output) for output in module.outputs)
 
 
 def _module_output_types_for_arity(module: GraphModule, output_count: int) -> tuple[TypeExpr, ...]:
-    if module.return_type_expr is not None:
+    if (
+        module.return_type_expr is not None
+        and not _type_contains_inference_var(module.return_type_expr)
+    ):
         return _result_types(module.return_type_expr, output_count)
+    if output_count == 1 and len(module.outputs) == 1:
+        return (graph_operand_type(module.outputs[0]),)
+    if output_count == 1 and len(module.outputs) > 1:
+        return (TypeTuple(tuple(graph_operand_type(output) for output in module.outputs)),)
     if output_count == len(module.outputs):
         return tuple(graph_operand_type(output) for output in module.outputs)
     if len(module.outputs) == 1:
@@ -6407,12 +6662,17 @@ def _unify_dim_binding(
     dim_map: dict[str, DimToken],
 ) -> None:
     actual = substitute_dim_token(actual_dim, dim_map)
+    if actual == -1:
+        return
     existing = dim_map.get(formal_name)
     if existing is None:
         if actual != formal_name:
             _set_dim_binding_if_acyclic(dim_map, formal_name, actual)
         return
     existing = substitute_dim_token(existing, dim_map)
+    if existing == -1:
+        _set_dim_binding_if_acyclic(dim_map, formal_name, actual)
+        return
     if existing == actual:
         _set_dim_binding_if_acyclic(dim_map, formal_name, existing)
         return
@@ -6771,6 +7031,17 @@ def _instantiate_call_output_types(
     *,
     dim_values: Mapping[str, DimToken] | None = None,
 ) -> tuple[TypeExpr, ...]:
+    if (
+        callee.return_type_expr is not None
+        and _type_contains_inference_var(callee.return_type_expr)
+        and len(callee.nodes) <= 4
+    ):
+        return _core_instantiated_module_output_types(
+            callee,
+            actuals,
+            output_count,
+            dim_values=dim_values,
+        )
     dim_map, row_map = _call_type_substitutions(
         callee,
         actuals,
@@ -6914,6 +7185,10 @@ def _broadcast_graph_dim(left: DimToken, right: DimToken) -> DimToken | None:
     right = substitute_dim_token(right, {})
     if left == right:
         return left
+    if isinstance(left, str) and left.startswith("..") and right == 1:
+        return left
+    if isinstance(right, str) and right.startswith("..") and left == 1:
+        return right
     if left == 1:
         return right
     if right == 1:
@@ -7020,6 +7295,13 @@ def _more_specific_compatible_type(
         and len(existing.dims) == len(refreshed.dims)
         and graph_type_compatible(existing, refreshed)
     ):
+        if any(
+            isinstance(old, str)
+            and old.startswith("..")
+            and new == 1
+            for old, new in zip(existing.dims, refreshed.dims, strict=True)
+        ):
+            return existing
         if any(old == 1 and new != 1 for old, new in zip(existing.dims, refreshed.dims, strict=True)):
             return refreshed
         if any(
@@ -7049,6 +7331,12 @@ def _more_specific_compatible_type(
                 return existing
             if refreshed_preferred and not existing_preferred:
                 return refreshed
+    if graph_type_compatible(existing, refreshed) and existing_score == refreshed_score:
+        # Equal-specificity compatible types can differ only by arbitrary
+        # symbolic names (for example ..S vs ..R, or two equally valid broadcast
+        # aliases).  Replacing one with the other on every refresh iteration can
+        # make graph type refresh oscillate without adding information.
+        return existing
     return refreshed
 
 
@@ -7619,8 +7907,9 @@ def _refresh_graph_module_types(
             )
             type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
         elif node.op.name == "core.tuple":
-            output_types = tuple(graph_operand_type(item) for item in inputs)
-            type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
+            item_types = tuple(graph_operand_type(item) for item in inputs)
+            type_expr = item_types[0] if len(item_types) == 1 else TypeTuple(item_types)
+            output_types = (type_expr,) if len(node.outputs) == 1 else item_types
         elif node.op.name == "core.alias" and len(inputs) == 1:
             input_type = graph_operand_type(inputs[0])
             output_types = _result_types(input_type, len(node.outputs))
@@ -8032,7 +8321,8 @@ def _refresh_graph_program_types(graph: GraphProgram) -> GraphProgram:
     if cached is not None:
         return cached
     current = graph
-    for _ in range(16):
+    previous = graph
+    for _ in range(64):
         modules_by_name = {module.name: module for module in current.modules}
         global_dim_values = _atomic_int_constant_dims(current)
         globals_env = {
@@ -8062,8 +8352,38 @@ def _refresh_graph_program_types(graph: GraphProgram) -> GraphProgram:
                 _REFRESH_GRAPH_PROGRAM_TYPES_CACHE.clear()
             _REFRESH_GRAPH_PROGRAM_TYPES_CACHE[cache_key] = current
             return current
+        previous = current
         current = refreshed
-    raise RuntimeError("graph type refresh did not converge after 16 iterations")
+    modules_by_name = {module.name: module for module in current.modules}
+    previous_by_name = {module.name: module for module in previous.modules}
+    changed = sorted(
+        name for name, module in modules_by_name.items() if previous_by_name.get(name) != module
+    )
+    sample = ", ".join(changed[:12])
+    suffix = f"; changing modules include: {sample}" if sample else ""
+    if changed:
+        name = changed[0]
+        before = previous_by_name.get(name)
+        after = modules_by_name.get(name)
+        details: list[str] = []
+        if before is not None and after is not None:
+            before_nodes = {node.id: node for node in before.nodes}
+            for node in after.nodes:
+                old = before_nodes.get(node.id)
+                if old is None or old == node:
+                    continue
+                if old.type_expr != node.type_expr:
+                    details.append(f"{node.id}.type {old.type_expr!r} -> {node.type_expr!r}")
+                for old_output, new_output in zip(old.outputs, node.outputs, strict=False):
+                    if old_output.type_expr != new_output.type_expr:
+                        details.append(
+                            f"{node.id}.{new_output.name} {old_output.type_expr!r} -> {new_output.type_expr!r}"
+                        )
+                if len(details) >= 4:
+                    break
+        if details:
+            suffix += "; first changes: " + "; ".join(details[:4])
+    raise RuntimeError(f"graph type refresh did not converge after 64 iterations{suffix}")
 
 
 def _refresh_single_graph_module_in_program(graph: GraphProgram, module: GraphModule) -> GraphModule:
@@ -11127,6 +11447,13 @@ def _prune_dead_formals(graph: GraphProgram) -> GraphProgram:
         referenced = _dead_formal_referenced_names(module)
         drop_indices: set[int] = set()
         for index, formal in enumerate(module.inputs):
+            if isinstance(formal.type_expr, TypeDim | TypeAny | TypeVar):
+                # Dim or imprecisely typed generated formals can be used as
+                # shape evidence after type refresh even when local cleanup has
+                # removed an obvious term-level use. Dropping them risks
+                # replacing an unknown runtime dimension with placeholder
+                # metadata.
+                continue
             if formal.name in referenced:
                 continue
             if _formal_bound_dim_names(formal) & referenced:
@@ -12547,6 +12874,8 @@ def _can_inline_module(
         return False
     if module.name in recursive_modules:
         return False
+    if _module_signature_has_static_cache_types(module):
+        return False
     forwarding = _forwarding_node(module)
     if _module_signature_has_variadic_rows(module) and forwarding is None:
         return False
@@ -12565,6 +12894,26 @@ def _can_inline_module(
         if not allow_control_select:
             return False
     return _is_non_effectful(module_effects.get(module.name))
+
+
+def _module_signature_has_static_cache_types(module: GraphModule) -> bool:
+    return (
+        any(_type_has_static_cache_type(value.type_expr) for value in module.inputs)
+        or _type_has_static_cache_type(module.return_type_expr)
+        or any(_type_has_static_cache_type(graph_operand_type(output)) for output in module.outputs)
+    )
+
+
+def _type_has_static_cache_type(type_expr: TypeExpr | None) -> bool:
+    if isinstance(type_expr, TypeOptional):
+        return _type_has_static_cache_type(type_expr.inner)
+    if isinstance(type_expr, TypeList):
+        return _type_has_static_cache_type(type_expr.item)
+    if isinstance(type_expr, TypeTuple):
+        return any(_type_has_static_cache_type(item) for item in type_expr.items)
+    if isinstance(type_expr, TypeNamed):
+        return type_expr.name.startswith("StaticCache")
+    return False
 
 
 def _module_signature_has_variadic_rows(module: GraphModule) -> bool:
@@ -13564,7 +13913,7 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 forwarding is not None
                 and _can_inline_forwarded_call_node(node, callee, forwarding)
             ):
-                dim_subst = _call_node_dim_subst(callee, node)
+                dim_subst = _call_dim_subst(callee, node.inputs)
                 if not _can_inline_with_dim_subst(callee, dim_subst=dim_subst, caller_dim_refs=caller_dim_refs):
                     nodes.append(node)
                     continue
@@ -13600,7 +13949,7 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 forwarded_expr is not None
                 and _can_inline_call_node(node, callee)
             ):
-                dim_subst = _call_node_dim_subst(callee, node)
+                dim_subst = _call_dim_subst(callee, node.inputs)
                 if not _can_inline_with_dim_subst(callee, dim_subst=dim_subst, caller_dim_refs=caller_dim_refs):
                     nodes.append(node)
                     continue
@@ -13635,7 +13984,7 @@ def _inline_safe_modules(graph: GraphProgram, *, config: GraphOptimizeConfig) ->
                 nodes.append(node)
                 continue
             formal_subst = {formal.name: actual for formal, actual in zip(callee.inputs, node.inputs, strict=True)}
-            dim_subst = _call_node_dim_subst(callee, node)
+            dim_subst = _call_dim_subst(callee, node.inputs)
             renames: dict[str, str] = {}
             for inner in callee.nodes:
                 for output in inner.outputs:
@@ -14041,6 +14390,109 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="tinygrad_sdpa_intrinsics")
+                current = candidate
+        if backend_intrinsic_target == "codegen2-mlx":
+            candidate = (
+                _rewrite_backend_sdpa_intrinsics(current, op_name="__mlx_sdpa")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_sdpa")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_sdpa_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_mlx_rope_intrinsics(current, enabled_intrinsics=enabled_backend_intrinsics)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_rope")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_rope_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_mlx_rmsnorm_scaled_intrinsics(current)
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__mlx_rmsnorm_scaled")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="mlx_rmsnorm_scaled_intrinsics")
+                current = candidate
+        if backend_intrinsic_target == "codegen2-jax":
+            candidate = (
+                _rewrite_backend_sdpa_intrinsics(current, op_name="__jax_sdpa")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_sdpa")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_sdpa_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_swiglu_ffn_intrinsics(current, op_name="__jax_swiglu_ffn")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_swiglu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_swiglu_ffn_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_expert_swiglu_ffn_intrinsics(current, op_name="__jax_expert_swiglu_ffn")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_expert_swiglu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_expert_swiglu_ffn_intrinsics")
+                current = candidate
+            jax_selected_expert_intrinsics = {
+                "__jax_selected_expert_clamped_packed_swiglu_ffn",
+                "__jax_selected_expert_packed_gegelu_ffn",
+                "__jax_selected_expert_packed_swiglu_ffn",
+                "__jax_selected_expert_relu2_ffn",
+                "__jax_selected_expert_swiglu_ffn",
+            }
+            candidate = (
+                _rewrite_torch_selected_expert_intrinsics(
+                    current,
+                    enabled_intrinsics=enabled_backend_intrinsics,
+                    op_prefix="__jax",
+                )
+                if jax_selected_expert_intrinsics & enabled_backend_intrinsics
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_selected_expert_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_expert_packed_swiglu_ffn_intrinsics(current, op_name="__jax_expert_packed_swiglu_ffn")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_expert_packed_swiglu_ffn")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_expert_packed_swiglu_ffn_intrinsics")
+                current = candidate
+            candidate = (
+                _rewrite_torch_weighted_topk_sum_intrinsics(current, op_name="__jax_weighted_topk_sum")
+                if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_weighted_topk_sum")
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="jax_weighted_topk_sum_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-triton":
             candidate = (

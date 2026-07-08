@@ -55,6 +55,7 @@ from .axon import (
     typecheck2_flat_axon_file,
 )
 from .axon.ast import AxonFile, TypeOptional
+from .axon.codegen2_jax import emit_model_code_from_graph_ir as emit_jax_model_code_from_graph_ir
 from .axon.codegen2_tinygrad import emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir
 from .axon.codegen2_triton import emit_model_code_from_graph_ir as emit_triton_model_code_from_graph_ir
 from .axon.codegen2_torch import (
@@ -102,6 +103,7 @@ def _format_checkpoint_summary_table(
 ) -> str:
     if table_format not in {"plain", "markdown", "html"}:
         raise ValueError("table_format must be 'plain', 'markdown', or 'html'")
+    include_backend = any("backend" in row for row in rows)
     headers = [
         "axon",
         "checkpoint",
@@ -111,8 +113,12 @@ def _format_checkpoint_summary_table(
         "masked max abs diff",
         "masked max rel diff",
     ]
+    if include_backend:
+        headers.insert(0, "backend")
     body = [
-        [
+        ([
+            str(row.get("backend", "")),
+        ] if include_backend else []) + [
             str(row["axon"]),
             str(row["checkpoint"]),
             str(row["model_dir"]),
@@ -453,23 +459,48 @@ def _cleanup(device: torch.device) -> None:
         torch.mps.empty_cache()
 
 
+def _to_torch(value: Any) -> torch.Tensor | None:
+    if torch.is_tensor(value):
+        return value
+    try:
+        import mlx.core as mx
+        if isinstance(value, mx.array):
+            import numpy as np
+            return torch.from_numpy(np.asarray(value))
+    except ImportError:
+        pass
+    try:
+        import jax
+        if isinstance(value, jax.Array):
+            import numpy as np
+            return torch.from_numpy(np.asarray(value))
+    except ImportError:
+        pass
+    return None
+
 def _extract_logits(output: Any) -> torch.Tensor:
-    if torch.is_tensor(output):
-        return output
+    t = _to_torch(output)
+    if t is not None:
+        return t
     logits_attr = getattr(output, "logits", None)
-    if torch.is_tensor(logits_attr):
-        return logits_attr
+    t = _to_torch(logits_attr)
+    if t is not None:
+        return t
     if isinstance(output, dict):
         logits = output.get("logits")
-        if torch.is_tensor(logits):
-            return logits
+        t = _to_torch(logits)
+        if t is not None:
+            return t
         if len(output) == 1:
             only_value = next(iter(output.values()))
-            if torch.is_tensor(only_value):
-                return only_value
+            t = _to_torch(only_value)
+            if t is not None:
+                return t
         raise ValueError("Expected tensor logits in dict output")
-    if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
-        return output[0]
+    if isinstance(output, tuple) and output:
+        t = _to_torch(output[0])
+        if t is not None:
+            return t
     raise ValueError(
         f"Unsupported model output type for logits extraction: {type(output).__name__}"
     )
@@ -814,7 +845,7 @@ def _load_state_dict(
                 tensor = tensor.to(device=device)
             out[key] = tensor
     materialize_mxfp4_aliases(out, dtype=dtype, drop_packed=True)
-    if param_devices:
+    if param_devices and len(param_devices) > 1:
         _drop_pipeline_duplicate_state_aliases(out)
 
     final_logits_bias = out.get("final_logits_bias")
@@ -2925,8 +2956,41 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
     t0 = time.perf_counter()
     with timing(message=label):
         out = fn()
+        _sync_device_output(out)
     dt = time.perf_counter() - t0
     return out, dt
+
+
+def _sync_device_output(value: Any) -> None:
+    """Force evaluation of lazy arrays and sync the device.
+
+    Handles MLX (``mx.eval``), JAX (``block_until_ready``), and torch
+    (``cuda/mps.synchronize``).  MLX operations are lazy: ``mx.eval(mx.array(0))``
+    does NOT evaluate the model output — we must explicitly eval the returned array.
+    """
+    try:
+        import mlx.core as mx
+        if isinstance(value, mx.array):
+            mx.eval(value)
+            return
+    except ImportError:
+        pass
+    if hasattr(value, "block_until_ready"):
+        value.block_until_ready()
+        return
+    if torch.is_tensor(value):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.synchronize()
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _sync_device_output(item)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _sync_device_output(item)
 
 
 def _time_generate_repeated(
@@ -2935,27 +2999,38 @@ def _time_generate_repeated(
     *,
     warmup: int,
     repeat: int,
-) -> tuple[Any, float, list[float]]:
+) -> tuple[Any, float, list[float], list[float]]:
     warmup = max(0, int(warmup))
     repeat = max(1, int(repeat))
     out: Any = None
 
-    def _sync_cuda() -> None:
+    def _sync() -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.synchronize()
+        try:
+            import mlx.core as mx
+            mx.eval(mx.array(0))
+        except ImportError:
+            pass
 
     with timing(message=label):
+        warmup_samples: list[float] = []
         for _ in range(warmup):
-            out = fn()
-            _sync_cuda()
-        samples: list[float] = []
-        for _ in range(repeat):
-            _sync_cuda()
+            _sync()
             t0 = time.perf_counter()
             out = fn()
-            _sync_cuda()
+            _sync_device_output(out)
+            warmup_samples.append(time.perf_counter() - t0)
+        samples: list[float] = []
+        for _ in range(repeat):
+            _sync()
+            t0 = time.perf_counter()
+            out = fn()
+            _sync_device_output(out)
             samples.append(time.perf_counter() - t0)
-    return out, sum(samples) / max(1, len(samples)), samples
+    return out, sum(samples) / max(1, len(samples)), samples, warmup_samples
 
 
 def _time_forward_repeated(
@@ -2964,26 +3039,38 @@ def _time_forward_repeated(
     *,
     warmup: int,
     repeat: int,
-) -> tuple[Any, float, list[float]]:
+) -> tuple[Any, float, list[float], list[float]]:
     warmup = max(0, int(warmup))
     repeat = max(1, int(repeat))
     out: Any = None
-    def _sync_cuda() -> None:
+
+    def _sync() -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.synchronize()
+        try:
+            import mlx.core as mx
+            mx.eval(mx.array(0))
+        except ImportError:
+            pass
 
     with timing(message=label):
+        warmup_samples: list[float] = []
         for _ in range(warmup):
-            out = fn()
-            _sync_cuda()
-        samples: list[float] = []
-        for _ in range(repeat):
-            _sync_cuda()
+            _sync()
             t0 = time.perf_counter()
             out = fn()
-            _sync_cuda()
+            _sync_device_output(out)
+            warmup_samples.append(time.perf_counter() - t0)
+        samples: list[float] = []
+        for _ in range(repeat):
+            _sync()
+            t0 = time.perf_counter()
+            out = fn()
+            _sync_device_output(out)
             samples.append(time.perf_counter() - t0)
-    return out, sum(samples) / max(1, len(samples)), samples
+    return out, sum(samples) / max(1, len(samples)), samples, warmup_samples
 
 
 def _call_generate_compatible(model: Any, **kwargs: Any) -> Any:
@@ -3151,9 +3238,27 @@ def _maybe_compile_model(
     mode: str | None,
     fullgraph: bool,
     dynamic: bool,
+    max_kv_length: int | None = None,
 ) -> Any:
     if not enabled:
         return model
+    enable_jit = getattr(model, "enable_jit", None)
+    if callable(enable_jit):
+        enable_jit(True, reset=True)
+        return model
+    try:
+        import mlx.core as mx
+        import mlx.nn as mx_nn
+        if isinstance(model, mx_nn.Module):
+            compile_method = getattr(model, "compile", None)
+            if callable(compile_method):
+                kv_len = int(max_kv_length) if max_kv_length is not None else 2048
+                compile_method(max_kv_length=kv_len)
+            else:
+                model._forward = mx.compile(model._forward)
+            return model
+    except ImportError:
+        pass
     compile_fn = getattr(torch, "compile", None)
     if compile_fn is None:
         raise ValueError("torch.compile is not available in this PyTorch build")
@@ -3354,11 +3459,13 @@ def _run_axon_test_single(
     optimize_ast: bool = False,
     optimize_graph: bool = False,
     graph_backend_intrinsics: str | None = None,
+    builtins_overlays: tuple[str, ...] | list[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = True,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    metal_capture: bool = False,
     forward_warmup: int = 0,
     forward_repeat: int = 1,
     generate_warmup: int = 0,
@@ -3399,6 +3506,8 @@ def _run_axon_test_single(
     valid_backends = {
         "codegen2-torch",
         "codegen2-tinygrad",
+        "codegen2-mlx",
+        "codegen2-jax",
         "codegen2-triton",
         "codegen2-vllm",
         "runtime2-torch",
@@ -3407,7 +3516,8 @@ def _run_axon_test_single(
     if backend_token not in valid_backends:
         raise ValueError(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'codegen2-triton', 'codegen2-vllm', 'runtime2-torch', or 'pipeline2-torch'"
+            "'codegen2-mlx', 'codegen2-jax', 'codegen2-triton', 'codegen2-vllm', 'runtime2-torch', "
+            "or 'pipeline2-torch'"
         )
     axon_backend = backend_token
     typechecker_token = str(axon_typechecker).strip().lower()
@@ -3505,7 +3615,10 @@ def _run_axon_test_single(
                 transformers_hub.HF_MODULES_CACHE = str(modules_cache)
 
         lowered_spec: dict[str, Any]
-        resolved_axon = resolve_axon_program_from_path(axon_file).ast
+        resolved_axon = resolve_axon_program_from_path(
+            axon_file,
+            builtins_overlays=builtins_overlays,
+        ).ast
         normalized_axon = normalize_closed_axon_file(resolved_axon)
         elaborated_axon = elaborate_closed_axon_file(normalized_axon)
         flat_axon = flatten_closed_axon_file(elaborated_axon)
@@ -3549,6 +3662,23 @@ def _run_axon_test_single(
         else:
             if axon_backend == "codegen2-tinygrad":
                 code = emit_tinygrad_model_code_from_graph_ir(
+                    graph_program,
+                    class_name=class_name,
+                    model_config=model_config,
+                    profile=profile_axon,
+                )
+            elif axon_backend == "codegen2-mlx":
+                from brainsurgery.synapse.axon.codegen2_mlx import (
+                    emit_model_code_from_graph_ir as emit_mlx_model_code,
+                )
+                code = emit_mlx_model_code(
+                    graph_program,
+                    class_name=class_name,
+                    model_config=model_config,
+                    profile=profile_axon,
+                )
+            elif axon_backend == "codegen2-jax":
+                code = emit_jax_model_code_from_graph_ir(
                     graph_program,
                     class_name=class_name,
                     model_config=model_config,
@@ -4254,11 +4384,13 @@ def _run_axon_test_single(
             hf_gen: torch.Tensor | None = None
             hf_time = 0.0
             hf_forward_samples: list[float] = []
+            hf_forward_warmup_samples: list[float] = []
             hf_generate_samples: list[float] = []
+            hf_generate_warmup_samples: list[float] = []
             with _patch_transformers_mask_device_map_inputs(enabled=hf_device_map is not None):
                 if not run_generate_benchmark:
                     with torch.no_grad():
-                        hf_logits, hf_time, hf_forward_samples = _time_forward_repeated(
+                        hf_logits, hf_time, hf_forward_samples, hf_forward_warmup_samples = _time_forward_repeated(
                             "HF",
                             lambda model=hf: _run_hf_forward(model),
                             warmup=forward_warmup,
@@ -4366,10 +4498,10 @@ def _run_axon_test_single(
                                 pad_token_id=tokenizer_obj.eos_token_id,
                                 num_beams=1,
                                 do_sample=False,
-                                use_cache=False,
+                                use_cache=True,
                             )
 
-                    hf_gen, hf_time, hf_generate_samples = _time_generate_repeated(
+                    hf_gen, hf_time, hf_generate_samples, hf_generate_warmup_samples = _time_generate_repeated(
                         "HF",
                         lambda model=hf: _run_hf_generate(model),
                         warmup=generate_warmup,
@@ -4400,7 +4532,9 @@ def _run_axon_test_single(
                 "gen": hf_gen_cpu,
                 "time": hf_time,
                 "forward_samples": hf_forward_samples,
+                "forward_warmup_samples": hf_forward_warmup_samples,
                 "generate_samples": hf_generate_samples,
+                "generate_warmup_samples": hf_generate_warmup_samples,
                 "dummy_mask": dummy_mask,
                 "decoder_attention_mask": io.get("decoder_attention_mask"),
                 "layer_inputs": hf_layer_inputs,
@@ -4417,7 +4551,9 @@ def _run_axon_test_single(
         hf_layer_inputs: dict[int, torch.Tensor] = {}
         hf_layer_outputs: dict[int, torch.Tensor] = {}
         hf_forward_samples: list[float] = []
+        hf_forward_warmup_samples: list[float] = []
         hf_generate_samples: list[float] = []
+        hf_generate_warmup_samples: list[float] = []
         hf_exec_device_str = "skipped"
         state_ref_cpu: dict[str, torch.Tensor] | None = None
         decoder_attention_mask_for_metrics: torch.Tensor | None = None
@@ -4437,7 +4573,13 @@ def _run_axon_test_single(
             hf_gen = cast(torch.Tensor | None, hf_result["gen"])
             hf_time = float(hf_result["time"])
             hf_forward_samples = list(cast(Sequence[float], hf_result.get("forward_samples", [])))
+            hf_forward_warmup_samples = list(
+                cast(Sequence[float], hf_result.get("forward_warmup_samples", []))
+            )
             hf_generate_samples = list(cast(Sequence[float], hf_result.get("generate_samples", [])))
+            hf_generate_warmup_samples = list(
+                cast(Sequence[float], hf_result.get("generate_warmup_samples", []))
+            )
             hf_dummy_tokens_mask = cast(torch.Tensor | None, hf_result["dummy_mask"])
             hf_layer_inputs = cast(dict[int, torch.Tensor], hf_result["layer_inputs"])
             hf_layer_outputs = cast(dict[int, torch.Tensor], hf_result["layer_outputs"])
@@ -4474,6 +4616,26 @@ def _run_axon_test_single(
                     ).to(target_device).eval()
                 else:
                     syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
+            elif axon_backend == "codegen2-mlx":
+                if local_state_dict is None:
+                    syn = model_cls.from_safetensors(
+                        safetensors_files,
+                        model_config=model_config,
+                    ).eval()
+                else:
+                    syn = model_cls.from_state_dict(local_state_dict).eval()
+            elif axon_backend == "codegen2-jax":
+                if local_state_dict is None:
+                    local_state_dict = _load_state_dict(
+                        safetensors_files,
+                        device=torch.device("cpu"),
+                        dtype=resolved_dtype,
+                        model_config=model_config,
+                        storage_dtype=adapter_storage_dtype,
+                    )
+                    syn = model_cls.from_state_dict(local_state_dict).eval()
+                else:
+                    syn = model_cls.from_state_dict(local_state_dict).eval()
             elif local_state_dict is None:
                 local_state_dict = _load_state_dict(
                     safetensors_files,
@@ -4497,7 +4659,7 @@ def _run_axon_test_single(
                     local_state_dict,
                     param_devices=param_devices,
                 ).eval()
-            elif axon_backend != "codegen2-tinygrad":
+            elif axon_backend not in {"codegen2-tinygrad", "codegen2-mlx", "codegen2-jax"}:
                 syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
             if profile_axon:
                 enable_profile = getattr(syn, "enable_profile", None)
@@ -4526,6 +4688,7 @@ def _run_axon_test_single(
                 mode=compile_mode,
                 fullgraph=compile_fullgraph,
                 dynamic=compile_dynamic,
+                max_kv_length=max(max_len, 1100),
             )
             syn_layer_inputs: dict[int, torch.Tensor] = {}
             syn_layer_outputs: dict[int, torch.Tensor] = {}
@@ -4605,13 +4768,26 @@ def _run_axon_test_single(
                             return torch.cat(logits_parts, dim=0)
                 return _extract_logits(model(**io["syn_inputs"]))
 
+            import time as _time
+            _metal_capture: Any = None
+            if metal_capture and axon_backend == "codegen2-mlx":
+                try:
+                    import mlx.metal as _mx_metal
+                    _capture_path = f"mx_gputrace_{int(_time.time())}.gputrace"
+                    _mx_metal.start_capture(_capture_path)
+                    _metal_capture = _mx_metal
+                except Exception:
+                    pass
+
             syn_gen: torch.Tensor | None = None
             syn_time = 0.0
             syn_forward_samples: list[float] = []
+            syn_forward_warmup_samples: list[float] = []
             syn_generate_samples: list[float] = []
+            syn_generate_warmup_samples: list[float] = []
             if not run_generate_benchmark:
                 with torch.no_grad():
-                    syn_logits, syn_time, syn_forward_samples = _time_forward_repeated(
+                    syn_logits, syn_time, syn_forward_samples, syn_forward_warmup_samples = _time_forward_repeated(
                         "AxonDerived",
                         _run_syn_forward,
                         warmup=forward_warmup,
@@ -4634,7 +4810,7 @@ def _run_axon_test_single(
                             generate_kwargs["attention_mask"] = attention_mask
                     return model.generate(io["input_ids"], **generate_kwargs)
 
-                syn_gen, syn_time, syn_generate_samples = _time_generate_repeated(
+                syn_gen, syn_time, syn_generate_samples, syn_generate_warmup_samples = _time_generate_repeated(
                     "AxonDerived",
                     _run_syn_generate,
                     warmup=generate_warmup,
@@ -4652,8 +4828,16 @@ def _run_axon_test_single(
                 if callable(profile_summary):
                     profile_rows = list(profile_summary(profile_axon_top_n))
                     _print_axon_profile_summary(profile_rows)
+            if _metal_capture is not None:
+                try:
+                    _metal_capture.stop_capture()
+                except Exception:
+                    pass
+
+            if not torch.is_tensor(syn_logits):
+                syn_logits = _to_torch(syn_logits)
             syn_logits_cpu = syn_logits.detach().cpu()
-            syn_gen_cpu = None if syn_gen is None else syn_gen.detach().cpu()
+            syn_gen_cpu = None if syn_gen is None else (_to_torch(syn_gen).detach().cpu() if not torch.is_tensor(syn_gen) else syn_gen.detach().cpu())
             del syn
             _cleanup(target_device)
             return {
@@ -4661,7 +4845,9 @@ def _run_axon_test_single(
                 "gen": syn_gen_cpu,
                 "time": syn_time,
                 "forward_samples": syn_forward_samples,
+                "forward_warmup_samples": syn_forward_warmup_samples,
                 "generate_samples": syn_generate_samples,
+                "generate_warmup_samples": syn_generate_warmup_samples,
                 "layer_inputs": syn_layer_inputs,
                 "layer_outputs": syn_layer_outputs,
                 "device": str(target_device),
@@ -4686,7 +4872,13 @@ def _run_axon_test_single(
         syn_gen = cast(torch.Tensor | None, syn_result["gen"])
         syn_time = float(syn_result["time"])
         syn_forward_samples = list(cast(Sequence[float], syn_result.get("forward_samples", [])))
+        syn_forward_warmup_samples = list(
+            cast(Sequence[float], syn_result.get("forward_warmup_samples", []))
+        )
         syn_generate_samples = list(cast(Sequence[float], syn_result.get("generate_samples", [])))
+        syn_generate_warmup_samples = list(
+            cast(Sequence[float], syn_result.get("generate_warmup_samples", []))
+        )
         syn_layer_inputs = cast(dict[int, torch.Tensor], syn_result["layer_inputs"])
         syn_layer_outputs = cast(dict[int, torch.Tensor], syn_result["layer_outputs"])
         syn_exec_device_str = cast(str, syn_result["device"])
@@ -5061,10 +5253,14 @@ def _run_axon_test_single(
             "axon_time": syn_time,
             "hf_forward_samples": hf_forward_samples,
             "axon_forward_samples": syn_forward_samples,
+            "hf_forward_warmup_samples": hf_forward_warmup_samples,
+            "axon_forward_warmup_samples": syn_forward_warmup_samples,
             "forward_warmup": forward_warmup,
             "forward_repeat": forward_repeat,
             "hf_generate_samples": hf_generate_samples,
             "axon_generate_samples": syn_generate_samples,
+            "hf_generate_warmup_samples": hf_generate_warmup_samples,
+            "axon_generate_warmup_samples": syn_generate_warmup_samples,
             "generate_warmup": generate_warmup,
             "generate_repeat": generate_repeat,
             "speed_ratio_axon_over_hf": (
@@ -5142,10 +5338,12 @@ def run_axon_test(
     optimize_ast: bool = False,
     optimize_graph: bool = False,
     graph_backend_intrinsics: str | None = None,
+    builtins_overlays: tuple[str, ...] | list[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
+    metal_capture: bool = False,
     forward_warmup: int = 0,
     forward_repeat: int = 1,
     generate_warmup: int = 0,
@@ -5184,10 +5382,12 @@ def run_axon_test(
         optimize_ast=optimize_ast,
         optimize_graph=optimize_graph,
         graph_backend_intrinsics=graph_backend_intrinsics,
+        builtins_overlays=builtins_overlays,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
         profile_axon=profile_axon,
         profile_axon_top_n=profile_axon_top_n,
+        metal_capture=metal_capture,
         forward_warmup=forward_warmup,
         forward_repeat=forward_repeat,
         generate_warmup=generate_warmup,

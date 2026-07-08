@@ -8,7 +8,7 @@ from brainsurgery import app
 
 
 def _help(command: str) -> str:
-    result = CliRunner().invoke(app, ["synapse", command, "--help"])
+    result = CliRunner(env={"COLUMNS": "240"}).invoke(app, ["synapse", command, "--help"])
     assert result.exit_code == 0, result.output
     return result.output
 
@@ -17,6 +17,7 @@ def test_synapse_benchmark_exposes_ast_and_graph_optimizer_flags_only() -> None:
     help_text = _help("axon-benchmark")
     assert "--optimize-ast" in help_text
     assert "--optimize-graph" in help_text
+    assert "--builtins-overlay" in help_text
     assert "--canonicalize" not in help_text
     assert "--backend-required" not in help_text
     assert "--optimize-safe" not in help_text
@@ -135,6 +136,7 @@ def test_synapse_test_exposes_ast_and_graph_optimizer_flags_only() -> None:
     help_text = _help("axon-test")
     assert "--optimize-ast" in help_text
     assert "--optimize-graph" in help_text
+    assert "--builtins-overlay" in help_text
     assert "--canonicalize" not in help_text
     assert "--backend-required" not in help_text
     assert "--optimize-safe" not in help_text
@@ -148,6 +150,7 @@ def test_synapse_stage_dump_uses_current_codegen2_stage_flags() -> None:
     assert "--optimize-ast" in help_text
     assert "--optimize-graph" in help_text
     assert "--show-purity" in help_text
+    assert "--builtins-overlay" in help_text
     assert "--canonicalize" not in help_text
     assert "--backend-required" not in help_text
     assert "--optimize-safe" not in help_text
@@ -159,5 +162,6 @@ def test_synapse_codegen_dump_exposes_codegen2_flags() -> None:
     assert "--optimize-ast" in help_text
     assert "--optimize-graph" in help_text
     assert "--profile-code" in help_text
+    assert "--builtins-overlay" in help_text
     assert "codegen2-torch" in help_text
     assert "codegen2-triton" in help_text

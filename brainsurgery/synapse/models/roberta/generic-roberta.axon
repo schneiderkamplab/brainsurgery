@@ -3,7 +3,7 @@
 
 import Activations (gelu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (bidirectional_mask_for_input)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
 import Positions (position_ids)
 import Config
 import NN
@@ -33,8 +33,9 @@ roberta_block x keep = do
   y <- NN.layernorm@output.LayerNorm y eps=EPS
   return y
 
-roberta :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+roberta :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
 roberta input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
   pos_base <- position_ids input_ids attn_mask=attn_mask pad_fill=-1
   pos_shift <- PAD + 1
   pos_ids <- pos_base + pos_shift

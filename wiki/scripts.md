@@ -51,6 +51,7 @@ Depends-on: `scripts/axon_roundtrip_common.py` for shared path discovery, genera
 | Script | Purpose | Notes |
 |---|---|---|
 | `scripts/benchmark_report_3tables.py` | Render the standard 4 markdown tables from recursive `axon-benchmark` stream CSV and result JSON logs. | Use for `report`/`status` workflows. |
+| `scripts/monitor_axon_benchmark.py` | Rich live monitor for `axon-benchmark` run directories. | Reads recursive `stream.csv`, parent logs, and paired-runner `paired-status.csv`/`paired-runner.log`; shows progress, GPU memory/utilization, active jobs, and recent failures. |
 | `scripts/merge_benchmark_results.py` | Merge one or more `axon-benchmark` log directories into a latest-row CSV keyed by Axon file plus checkpoint. | Pass log dirs in precedence order; later logs overwrite stale rows from earlier logs. Adds `*_norm128` columns by dividing 1024-token timings by 8. |
 | `scripts/plot_axon_speedup_scatter.py` | Render an SVG log-log scatter plot of HF time vs Axon time from recursive `axon-benchmark` result JSON logs or a merged CSV. | Uses task color, model-kind marker, generic-vs-materialized fill/outline, a `y=x` parity line, and labels only outliers. Use `--normalized-128` with merged CSVs to plot `*_norm128` timing columns. |
 | `scripts/plot_axon_ratio_distributions.py` | Render SVG box and violin plots of Axon/HF runtime ratios from a merged benchmark CSV. | Groups by task, model kind, and generic/materialized source. Use `--normalized-128` with merged CSVs to plot `speed_ratio_axon_over_hf_norm128`. |
@@ -63,6 +64,15 @@ conda run --no-capture-output -n brainsurgery \
 ```
 
 Output tables: progress summary, issue rows, generic-vs-materialized mismatch rows, and Axon/HF >= 1.0 rows.
+
+Example live monitor:
+
+```bash
+conda run --no-capture-output -n brainsurgery \
+  python scripts/monitor_axon_benchmark.py log/<run-id> --refresh 2
+```
+
+Use `--no-watch` for a single non-interactive snapshot.
 
 Example merged CSV:
 
@@ -122,6 +132,32 @@ These are narrow helpers for previously investigated benchmark clusters.
 | `scripts/run_gemma4_affected_benchmark_py.py` | Runs selected Gemma4/Gemma4-MoE affected rows through `run_axon_benchmark`. | Uses a default top-level `log-gemma4-*` path; prefer overriding to `log/<run-id>`. |
 | `scripts/run_gemma4_moe_g45.py` | Targeted Gemma4 MoE derived-experts benchmark. | Legacy one-off; top-level log path. |
 | `scripts/run_rope_freqscale_max10b.py` | Targeted RoPE/frequency-scaling benchmark up to 10B. | Legacy one-off; top-level log path. |
+| `scripts/bench_gemma4_e2b_gpu_sweep.py` | Sweep `google/gemma-4-E2B-it` across `max_len` and Axon GPU backends (`torch`, `torch-compile`, `mlx`, `mlx-compile`) on Apple Silicon. | Writes `log/<run-id>/sweep_summary.csv` + per-run `stream.csv`/logs. |
+
+Example:
+
+```bash
+conda run --no-capture-output -n brainsurgery python scripts/bench_gemma4_e2b_gpu_sweep.py \
+  --run-id gemma4-e2b-it-gpu-sweep-<date> \
+  --lens 64,128,256,512 --backends torch,torch-compile,mlx,mlx-compile \
+  --device mps --dtype bfloat16 --warmup 1 --repeat 3
+```
+
+## Demo Scripts
+
+| Script | Purpose | Notes |
+|---|---|---|
+| `scripts/stream_tokens.py` | Stream model tokens to the terminal at actual generation speed for side-by-side speed demos. | Uses `run_axon_test` to measure, then replays tokens at measured per-token rate. `--quiet` suppresses benchmark diagnostics. Supports `--backend hf\|torch\|torch-compile\|mlx\|mlx-compile`. |
+
+Example:
+
+```bash
+# HF reference (slow, ~20 tok/s):
+conda run -n brainsurgery python scripts/stream_tokens.py --backend hf --quiet
+
+# Axon MLX+compile (fast, ~52 tok/s):
+conda run -n brainsurgery python scripts/stream_tokens.py --backend mlx-compile --quiet
+```
 
 ## Legacy Launch/Render Helpers
 

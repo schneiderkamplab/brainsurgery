@@ -20,6 +20,16 @@
 
 10. Refresh type-system claims after implementation stabilizes. `docs/axon-type-rules.md` was updated, and the paper type section is closer now, but it should be cross-checked again after the current typecheck2/roundtrip work settles.
 
-11. Add validation matrix. A compact table should list each stage, required input invariant, output invariant, validator/test, and current pass/fail status.
+11. Add validation matrix. Done for the current pass: the pipeline overview now
+    lists parse, load, materialize, resolve/closed validation, normalize,
+    elaborate, flatten, typecheck2, AST optimization, Graph IR lowering,
+    Graph IR validation/optimization, and backend execution.  A future pass can
+    still add concrete pytest/script names and latest pass/fail counts.
 
-12. Rebuild PDF after edits. `main.pdf` currently builds, but should be regenerated after the above documentation changes.
+12. Refresh backend section after backend changes. Done for the current pass:
+    the paper now lists `codegen2-triton` and `codegen2-mlx`, documents opt-in
+    backend intrinsics and Triton kernels, describes the deprecated Triton
+    grouped expert matmul experiment, and documents the active MLX backend,
+    including `__mlx_sdpa` and `__mlx_rope`.
+
+13. Rebuild PDF after edits. Regenerate `main.pdf` after the documentation changes in an environment with a LaTeX builder.

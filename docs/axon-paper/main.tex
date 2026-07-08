@@ -77,8 +77,8 @@ This document makes three system contributions.  First, it gives a stage
 contract for the active Axon compiler path, from source text to typed Graph IR.
 Second, it describes how typed metadata and symbolic shape information flow
 through the compiler without relying on rendered strings as semantic data.
-Third, it defines the backend boundary used by torch, pipeline, runtime, and
-tinygrad execution targets.
+Third, it defines the backend boundary used by torch, Triton, MLX, runtime,
+pipeline, and tinygrad execution targets.
 
 \section{Design Goals}
 
@@ -299,7 +299,8 @@ representations such as SSA~\citep{cytron1991ssa}.  Flattening uses an
 administrative-normal-form style decomposition of nested expressions into
 explicit binds, similar in spirit to ANF/CPS compiler normal forms
 \citep{sabry1992anf}.  Backend execution currently targets PyTorch
-\citep{paszke2019pytorch} and tinygrad.
+\citep{paszke2019pytorch}, a Triton-accelerated PyTorch ABI backend, MLX, and
+tinygrad.
 
 \section{Compiler Invariants}
 
@@ -331,13 +332,17 @@ work without either optimizer.
 \centering
 source Axon
 \(\rightarrow\) parse/load/materialize
-\(\rightarrow\) resolve/validate
+\(\rightarrow\) resolve/validate-closed
 \(\rightarrow\) normalize/elaborate
-\(\rightarrow\) flatten
+\(\rightarrow\) validate-normalized/elaborated
+\(\rightarrow\) flatten/validate-flat
 \(\rightarrow\) typecheck2
+\(\rightarrow\) validate-typed
 \(\rightarrow\) [optional optimize-ast]
 \(\rightarrow\) Graph IR
+\(\rightarrow\) Graph IR validation
 \(\rightarrow\) [optional optimize-graph]
+\(\rightarrow\) Graph IR validation
 \(\rightarrow\) backend execution
 \end{minipage}}
 \caption{Default Axon compilation path.  \code{optimize-ast} and
@@ -357,18 +362,18 @@ correctness-critical path.}
 \node[repbox] (src) {source\\Axon};
 \node[stagebox, right=1.2cm of src] (parse) {parse\\load\\materialize};
 \node[repbox, right=1.2cm of parse] (onefile) {one-file\\ASTs};
-\node[stagebox, below=1.0cm of onefile] (resolve) {resolve\\validate};
+\node[stagebox, below=1.0cm of onefile] (resolve) {resolve\\validate closed};
 \node[repbox, left=1.2cm of resolve] (closed) {closed\\AST};
-\node[stagebox, left=1.2cm of closed] (norm) {normalize\\elaborate};
+\node[stagebox, left=1.2cm of closed] (norm) {normalize\\elaborate\\validate};
 \node[repbox, below=1.0cm of norm] (normast) {normalized\\AST};
-\node[stagebox, right=1.2cm of normast] (flatten) {flatten};
+\node[stagebox, right=1.2cm of normast] (flatten) {flatten\\validate flat};
 \node[repbox, right=1.2cm of flatten] (flat) {flat\\AST};
-\node[stagebox, below=1.0cm of flat] (tc) {typecheck2};
+\node[stagebox, below=1.0cm of flat] (tc) {typecheck2\\validate typed};
 \node[repbox, left=1.2cm of tc] (typed) {typed flat\\AST};
-\node[stagebox, left=1.2cm of typed] (lower) {Graph IR\\lowering};
+\node[stagebox, left=1.2cm of typed] (lower) {Graph IR\\lowering\\validate};
 \node[repbox, below=1.0cm of lower] (graph) {typed\\Graph IR};
-\node[stagebox, right=1.2cm of graph] (graphopt) {optional\\optimize-graph};
-\node[stagebox, right=1.2cm of graphopt] (backend) {torch / runtime\\pipeline / tinygrad};
+\node[stagebox, right=1.2cm of graph] (graphopt) {optional\\optimize-graph\\validate};
+\node[stagebox, right=1.2cm of graphopt] (backend) {torch / Triton\\MLX / runtime\\pipeline / tinygrad};
 \node[repbox, right=1.2cm of backend] (exec) {executable\\model};
 \node[stagebox, below=0.9cm of typed] (astopt) {optional\\optimize-ast};
 
@@ -403,15 +408,18 @@ representations with stronger invariants than the previous representation.}
 \toprule
 Phase & Representation & Primary invariant \\
 \midrule
-Parse/load/materialize & one-file ASTs & syntactic structure and checkpoint defaults \\
-Resolve/validate & closed AST & no unresolved imports or names \\
-Normalize/elaborate & normalized AST & explicit call and default/defaultable structure \\
-Flatten & flat AST & no statement-level control or relative paths \\
-Typecheck2 & typed flat AST & expression types, arities, and dimensions \\
-Optimize-ast & typed flat AST & optional conservative AST cleanup \\
-Graph lowering & Graph IR & typed SSA-like graph modules \\
-Optimize-graph & Graph IR & optional graph cleanup and specialization \\
-Backend & generated/runtime code & executable tensor program \\
+Parse & one-file AST & syntactic structure and explicit MAIN pragma insertion \\
+Load & loaded AST set & imports and builtins located without rewriting semantics \\
+Materialize & one-file AST & optional checkpoint/config specialization for generic models \\
+Resolve/validate-closed & closed AST & no unresolved imports or names; unreachable definitions pruned from MAIN \\
+Normalize & normalized AST & call syntax, pipes, path sugar, and zero-arg call/name distinctions made explicit \\
+Elaborate/validate-elaborated & elaborated AST & default arguments filled and call arguments positionalized \\
+Flatten/validate-flat & flat AST & explicit evaluation order; flat calls and binds accepted by typecheck2 and Graph IR lowering \\
+Typecheck2/validate-typed & typed flat AST & expression types, arities, dimensions, and primitive rules applied to a fixpoint \\
+Optimize-ast & typed flat AST & optional conservative AST cleanup with retype/validation \\
+Graph lowering/validation & Graph IR & typed graph modules, multi-output nodes, structured paths, constraints, and metadata \\
+Optimize-graph/validation & Graph IR & optional graph cleanup, specialization, backend-neutral rewrites, and opt-in backend intrinsics \\
+Backend & generated/runtime code & executable tensor program consuming the validated Graph IR contract \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -550,8 +558,8 @@ module project(x: Tensor[B,S,D]) -> Tensor[B,S,O]
   return n2
 \end{verbatim}
 Backends receive this structured graph object, not a string-rendered Axon
-program.  Torch, pipeline, runtime, and tinygrad implementations therefore
-share the same typed operands, path values, and output types.
+program.  Torch, Triton, MLX, pipeline, runtime, and tinygrad implementations
+therefore share the same typed operands, path values, and output types.
 
 \begin{figure}[t]
 \centering
@@ -660,13 +668,36 @@ model-specific fixes in compiler layers.
 The active backends are:
 \begin{itemize}[leftmargin=*]
 \item \code{codegen2-torch}, a direct Python/PyTorch code generator from Graph IR;
+\item \code{codegen2-triton}, a PyTorch-ABI code generator that lowers selected
+validated Graph IR patterns to generated Triton kernels;
+\item \code{codegen2-mlx}, a direct MLX code generator from Graph IR;
 \item \code{runtime2-torch}, an interpreter for the same graph contract;
 \item \code{pipeline2-torch}, a graph partitioning backend for multi-device execution;
 \item \code{codegen2-tinygrad}, a newer tinygrad code-generation backend.
 \end{itemize}
-The tinygrad backend is intentionally separate and configurable; it should
-improve coverage and speed through backend-local implementations rather than by
-weakening earlier compiler invariants.
+The CLI and benchmark runner currently accept exactly these execution backends:
+\code{codegen2-torch}, \code{codegen2-triton}, \code{codegen2-mlx},
+\code{codegen2-tinygrad}, \code{runtime2-torch}, and
+\code{pipeline2-torch}.  The tinygrad, MLX, and Triton backends are
+intentionally separate and configurable; they should improve coverage and speed
+through backend-local implementations or explicit backend-intrinsic rewrites
+rather than by weakening earlier compiler invariants.
+
+Backend-specific intrinsics are represented as explicit \code{\_\_<backend>\_*}
+Graph IR operations introduced only by opt-in graph optimization.  The graph
+optimizer recognizes these patterns from typed Graph IR structure, primitive
+operations, provenance, constraints, and domain facts, not from ordinary Axon
+definition names.  Current torch intrinsics include RoPE-pair application,
+SDPA-shaped attention, dense and expert SwiGLU forms, selected-expert FFNs, and
+top-k reductions.  The tinygrad target currently exposes
+\code{\_\_tinygrad\_sdpa}.  The MLX target exposes \code{\_\_mlx\_sdpa} and
+\code{\_\_mlx\_rope}, in addition to direct MLX lowerings for a broad subset of
+shared tensor, activation, shape, and parameter primitives.
+The Triton target exposes RMSNorm variants, SwiGLU and GeGLU activation kernels,
+and a selected-expert packed SwiGLU wrapper that still delegates expert matmul
+to the faster torch grouped-matmul path.  A hand-written Triton grouped expert
+matmul experiment is intentionally deprecated after real Qwen3-MoE-30B
+benchmarks showed a stable slowdown.
 
 \section{Experimental Evaluation}
 

@@ -3,7 +3,7 @@
 
 import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 import Math (floor, log, mul, sqrt)
 import MoE (grouped_swiglu_ffn_basic, softmax_topk_router)
 import Positions (position_ids, rope_pair_yarn_factors, rope_yarn_factors_for_position_ids)
@@ -34,6 +34,7 @@ EPS <- Config.float @@'{CFG}.rms_norm_eps' default=1e-06
 THETA <- Config.float @@'{ROPE_CFG}.rope_theta' default=10000.0
 ROPE_FACTOR <- Config.float @@'{ROPE_CFG}.factor' default=128.0
 ROPE_CONTEXT <- Config.int @@'{ROPE_CFG}.original_max_position_embeddings' default=8192
+MAX_POSITIONS <- Config.int @@'{CFG}.max_position_embeddings' default=ROPE_CONTEXT
 ROPE_BETA_FAST <- Config.float @@'{ROPE_CFG}.beta_fast' default=32.0
 ROPE_BETA_SLOW <- Config.float @@'{ROPE_CFG}.beta_slow' default=1.0
 ROPE_MSCALE <- Config.float @@'{ROPE_CFG}.mscale' default=1.0
@@ -63,7 +64,7 @@ mistral4_query_scale pos_ids = do
   gain4 <- Tensor.unsqueeze gain3 dim=3
   return gain4
 
-mistral4_attn :: Tensor[B,S,D] -> Tensor[B,1,S,1] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,K] -> ?CacheLayerKV[B,NUM_HEADS,P,QKHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,QKHD,VHD])
+mistral4_attn :: Tensor[B,S,D] -> Tensor[B,1,S,1] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,K] -> ?CacheLayerKV[B,NUM_HEADS,P,MAX_POSITIONS,QKHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,MAX_POSITIONS,QKHD,VHD])
 mistral4_attn x q_scale rope_sin rope_cos mask past_kv = do
   a, new_kv <- scope@self_attn do
     q_low <- NN.linear@q_a_proj x dim=QLR bias=false
@@ -100,7 +101,7 @@ mistral4_moe xn = do
   routed <- grouped_swiglu_ffn_basic xn topk_weights topk_indices E
   return shared + routed
 
-mistral4_block :: Tensor[B,S,D] -> Tensor[B,1,S,1] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,K] -> ?CacheLayerKV[B,NUM_HEADS,P,QKHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,QKHD,VHD])
+mistral4_block :: Tensor[B,S,D] -> Tensor[B,1,S,1] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,K] -> ?CacheLayerKV[B,NUM_HEADS,P,MAX_POSITIONS,QKHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,MAX_POSITIONS,QKHD,VHD])
 mistral4_block x q_scale rope_sin rope_cos mask past_kv = do
   xn <- mistral4_norm@input_layernorm x
   a, new_kv <- mistral4_attn xn q_scale rope_sin rope_cos mask past_kv
@@ -110,24 +111,29 @@ mistral4_block x q_scale rope_sin rope_cos mask past_kv = do
     return mistral4_moe xn
   return x + m, new_kv
 
-mistral4 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?CacheKV[B,NUM_HEADS,P,QKHD,VHD] -> ?Bool -> (Tensor[B,S,V], ?CacheKV[B,NUM_HEADS,K,QKHD,VHD])
+mistral4 :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?CacheKV[B,NUM_HEADS,P,MAX_POSITIONS,QKHD,VHD] -> ?Bool -> (Tensor[B,S,V], ?CacheKV[B,NUM_HEADS,K,MAX_POSITIONS,QKHD,VHD])
 mistral4 input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length_kv past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
   q_scale <- mistral4_query_scale pos_ids
   rope_sin, rope_cos <- rope_yarn_factors_for_position_ids pos_ids QKROPE THETA ROPE_FACTOR ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM interleaved=true
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask
+  work_kv <- Cache.prepare_kv past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read_kv past_kv work_kv
   x, new_kv <- scope@language_model.model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-    new_kv <- use_cache ? Cache.init_kv : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index_kv past_kv i
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index_kv read_kv i
       x, new_i <- mistral4_block x q_scale rope_sin rope_cos mask past_i
-      new_kv <- Cache.append_kv new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append_kv work_kv new_i
+      yield x, work_kv
     x <- mistral4_norm@norm x
-    return x, new_kv
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish_kv new_kv new_length
+  new_kv <- use_cache ? new_kv : null
   logits <- scope@language_model do
     logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
     return logits

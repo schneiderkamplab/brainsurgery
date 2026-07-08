@@ -3,7 +3,7 @@
 
 import Activations (silu)
 import Attention (attention, merge_heads, reshape_heads)
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 import Math (log, mul, sqrt)
 import MoE (grouped_sigmoid_router, grouped_swiglu_ffn_basic)
 import Positions (position_ids, rope_base_factors, rope_pair_base_split_interleaved_factors, rope_pair_yarn_split_interleaved_factors, rope_yarn_factors_for_position_ids)
@@ -51,7 +51,7 @@ ATTN_SCALE = (1.0 / sqrt QHD) * ROPE_SOFTMAX_MSCALE * ROPE_SOFTMAX_MSCALE
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
 
-deepseek_v3_attn :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> ?CacheLayerKV[B,NUM_HEADS,P,QHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,QHD,VHD])
+deepseek_v3_attn :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> ?CacheLayerKV[B,NUM_HEADS,P,MAX_POSITIONS,QHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,MAX_POSITIONS,QHD,VHD])
 deepseek_v3_attn x mask base_sin base_cos yarn_sin yarn_cos past_kv = do
   a, new_kv <- scope@self_attn do
     q <- NN.linear@q_a_proj x dim=QLR bias=false |> rms@q_a_layernorm |> NN.linear@q_b_proj dim=(NUM_HEADS * QHD) bias=false |> reshape_heads heads=NUM_HEADS
@@ -74,7 +74,7 @@ deepseek_v3_attn x mask base_sin base_cos yarn_sin yarn_cos past_kv = do
     return a, new_kv
   return a, new_kv
 
-deepseek_v3_dense_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> ?CacheLayerKV[B,NUM_HEADS,P,QHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,QHD,VHD])
+deepseek_v3_dense_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> ?CacheLayerKV[B,NUM_HEADS,P,MAX_POSITIONS,QHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,MAX_POSITIONS,QHD,VHD])
 deepseek_v3_dense_block x mask base_sin base_cos yarn_sin yarn_cos past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- deepseek_v3_attn xn mask base_sin base_cos yarn_sin yarn_cos past_kv
@@ -86,7 +86,7 @@ deepseek_v3_dense_block x mask base_sin base_cos yarn_sin yarn_cos past_kv = do
     return gate |> silu |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
   return x + m, new_kv
 
-deepseek_v3_moe_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> ?CacheLayerKV[B,NUM_HEADS,P,QHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,QHD,VHD])
+deepseek_v3_moe_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> ?CacheLayerKV[B,NUM_HEADS,P,MAX_POSITIONS,QHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,MAX_POSITIONS,QHD,VHD])
 deepseek_v3_moe_block x mask base_sin base_cos yarn_sin yarn_cos past_kv = do
   xn <- rms@input_layernorm x
   a, new_kv <- deepseek_v3_attn xn mask base_sin base_cos yarn_sin yarn_cos past_kv
@@ -102,28 +102,33 @@ deepseek_v3_moe_block x mask base_sin base_cos yarn_sin yarn_cos past_kv = do
     return shared + routed
   return x + m, new_kv
 
-deepseek_v3 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?CacheKV[B,NUM_HEADS,P,QHD,VHD] -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?CacheKV[B,NUM_HEADS,K,QHD,VHD])
+deepseek_v3 :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?CacheKV[B,NUM_HEADS,P,MAX_POSITIONS,QHD,VHD] -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?CacheKV[B,NUM_HEADS,K,MAX_POSITIONS,QHD,VHD])
 deepseek_v3 input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length_kv past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
   base_sin, base_cos <- rope_base_factors pos_ids QKROPE theta=THETA interleaved=false
   yarn_sin, yarn_cos <- rope_yarn_factors_for_position_ids pos_ids QKROPE THETA ROPE_SCALE ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM interleaved=false
+  work_kv <- Cache.prepare_kv past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read_kv past_kv work_kv
   x, new_kv <- scope@model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-    new_kv <- use_cache ? Cache.init_kv : null
-    x, new_kv <- for@layers i <- [0..FIRST_DENSE) carry (x, new_kv) do
-      past_i <- Cache.index_kv past_kv i
+    x, work_kv <- for@layers i <- [0..FIRST_DENSE) carry (x, work_kv) do
+      past_i <- Cache.index_kv read_kv i
       x, new_i <- deepseek_v3_dense_block x mask base_sin base_cos yarn_sin yarn_cos past_i
-      new_kv <- Cache.append_kv new_kv new_i
-      yield x, new_kv
-    x, new_kv <- for@layers i <- [FIRST_DENSE..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index_kv past_kv i
+      work_kv <- Cache.append_kv work_kv new_i
+      yield x, work_kv
+    x, work_kv <- for@layers i <- [FIRST_DENSE..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index_kv read_kv i
       x, new_i <- deepseek_v3_moe_block x mask base_sin base_cos yarn_sin yarn_cos past_i
-      new_kv <- Cache.append_kv new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append_kv work_kv new_i
+      yield x, work_kv
     x <- rms@norm x
-    return x, new_kv
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish_kv new_kv new_length
+  new_kv <- use_cache ? new_kv : null
   logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
   return logits, new_kv

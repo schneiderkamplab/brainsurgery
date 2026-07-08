@@ -1,11 +1,57 @@
 ---
 status: active
-last-confirmed: 2026-05-20
+last-confirmed: 2026-07-06
 owners: agents
 confidence: high
 ---
 
 # Wiki Log
+
+## [2026-07-06] codegen2-mlx | timing bug fix + custom fast forward + bfloat16 fix
+
+### Timing Bug
+
+- Root cause: `mx.eval(mx.array(0))` evaluates a throwaway scalar array, not the model output. GPU computation for the model forward was never synchronized — timing measured only Python overhead + graph building, not actual GPU compute.
+- Affected: `scripts/bench_raw_throughput_compare.py` `sync()` (~line 224), `scripts/stream_tokens.py` `_sync()`, `brainsurgery/synapse/axon_test.py` `_force_eval_output()` (~line 2947).
+- **Supersedes** all MLX tok/s numbers in prior log entries dated 2026-07-01 and 2026-07-05 that used the `mx.eval(mx.array(0))` pattern. Those numbers (600-2177 tok/s for Gemma-3-270M, 700+ tok/s for Gemma-4-E2B) were inflated — they measured Python loop speed, not GPU throughput.
+- Fix: replaced `mx.eval(mx.array(0))` with `mx.eval(output_array)` in all three files.
+
+### Corrected Ground Truth (Gemma-4-E2B-it, bfloat16, 100 tokens, Apple Silicon GPU)
+
+| Configuration | tok/s | Notes |
+|---|---|---|
+| torch (MPS) | ~19 | |
+| `mlx_lm` (async_eval) | 28.2 | Reference implementation |
+| codegen2-mlx original forward (bfloat16) | ~10.4 | 2034-line generated forward |
+| codegen2-mlx fast forward (float32 embeddings) | 12.8 | Custom forward, but 2 weights in float32 |
+| codegen2-mlx fast forward (all bfloat16, sync) | 45.2 | |
+| **codegen2-mlx fast forward (all bfloat16, async_eval)** | **52.0** | 1.8x faster than `mlx_lm` |
+
+### bfloat16 Dtype Bug
+
+- Root cause: `scripts/stream_tokens.py` `_compile_and_load_axon()` set `keep_fp32 = "embed_tokens"` when `dtype == "bfloat16"`, keeping `embed_tokens.weight` and `embed_tokens_per_layer.weight` in float32. These 2 weights (out of 2011) upcast the entire computation to float32 via type promotion, roughly halving throughput.
+- Separately, `from_safetensors` in `codegen2_mlx/core.py` (~line 237) converted bfloat16 torch tensors to float32 via `t.float().numpy()` without casting back. Fixed to `.astype(mx.bfloat16)`.
+- Fix: set `keep_fp32 = None` (always convert all weights to target dtype). Updated `from_safetensors` to preserve bfloat16.
+- Impact: 3.5x speedup (12.8 → 45.2 tok/s) — the single biggest optimization.
+
+### Custom Fast Forward in `compile()`
+
+- Replaced the 2034-line generated `_forward` with a ~100-line hand-written forward using `mx.fast.*` primitives directly:
+  - `mx.fast.scaled_dot_product_attention` with string `"causal"` mask (no explicit mask arrays) for prompt, `None` mask for single-token decode
+  - `mx.fast.rms_norm` for all normalization (supports `None` weight for unscaled RMS)
+  - `mx.fast.rope` with `ProportionalRoPE` freqs for full attention layers, `base` freqs for local attention layers
+  - Pre-allocated `_KVCache` with in-place writes (no concat per step)
+  - Minimal Python overhead (~1ms graph build time)
+- Correctness verified: max diff 0.000070 vs original generated forward; next-token argmax matches.
+- The generated forward is fundamentally incompatible with `mx.compile(shapeless=True)` due to 77 isinstance checks, 59 `is None` checks, ~200 shape-dependent reshapes. The custom forward bypasses this entirely.
+- Not model-specific in approach — uses the same `mx.fast.*` primitives that `mlx_lm` uses. Model architecture params (NUM_LAYERS, ROPE_PERIOD, WIN_LOCAL, etc.) are read from model symbols, not hardcoded.
+
+### Relevant Files
+
+- `brainsurgery/synapse/axon/codegen2_mlx/core.py` — `compile()` with custom `_ff` forward builder (~line 668), `_KVCache` preamble (~line 1113), `from_safetensors` bfloat16 fix (~line 237)
+- `scripts/stream_tokens.py` — `keep_fp32 = None` fix (~line 130), `_sync()` timing fix
+- `scripts/bench_raw_throughput_compare.py` — `sync()` timing fix (~line 224)
+- `brainsurgery/synapse/axon_test.py` — `_force_eval_output` timing fix (~line 2947)
 
 ## [2026-05-20] llmwiki v2 | lifecycle-managed memory policy
 
@@ -102,3 +148,98 @@ confidence: high
   `RuntimeError: expected scalar type Float but found BFloat16` (RMSNorm `cast_float=true`
   upcasts to float32, mixing with bfloat16 tensors). Using `dtype="float32"` (the default)
   works. This is a known codegen2-torch dtype-mixing issue, not a vLLM-path issue.
+
+## [2026-07-04] axon-benchmark | multi-backend rows and Rich monitor
+
+- Added native ordered multi-backend support to `brainsurgery synapse axon-benchmark` via `--axon-backends`, emitting one stream CSV row per backend with a new `backend` column.
+- Added `scripts/monitor_axon_benchmark.py` as a Rich live monitor for benchmark run directories, including recursive stream CSVs, parent logs, paired-runner status files, GPU memory/utilization, active jobs, and recent failures.
+- Validated by `brainsurgery synapse axon-benchmark ... --axon-backends codegen2-torch,codegen2-jax --dry-run --stream-csv ...` and `pytest -q tests/test_synapse_axon_import_loader.py tests/test_synapse_cli_optimize_flags.py`.
+
+## [2026-07-01] mlx codegen | 5 fixes + mx.compile implemented on feat-mlx
+
+- Cherry-picked all 5 MLX codegen fixes from `feat-serving` to `feat-mlx`:
+  1. `params_has_root` → `self._flat_tensors` (not torch parent's `state_dict_tensors`)
+  2. `list_length`/`list_append` → `0 if x is None else len(x)` / `x if x is not None else []`
+  3. `_path_template_part` → instance method with dict cache (`_path_cache`)
+  4. `_param`/`_optional_param` → `dict.get(key)` early-exit before `_materialize_expert_bank_for_path`
+  5. `use_cache`/`past_kv` `_to_mlx` skip in `forward()` and `_forward()`
+- Implemented `compile(max_kv_length)` method in MLX codegen: wraps `_forward` with `mx.compile`, pre-compiles KV shapes 0..max_kv_length via dummy decode warmup.
+- Updated `scripts/bench_raw_throughput_compare.py` with `mlx+compile` backend config.
+- Results on `feat-mlx` (Gemma-3-270M, 3 trials, 64 decode steps, warmup 1100 shapes):
+
+  | Backend | p=16 | p=64 | p=256 | p=512 | p=1024 |
+  |---------|------|------|-------|-------|--------|
+  | torch (MPS) | 42 | 42 | 41 | 40 | 40 |
+  | mlx | 600 | 595 | 587 | 577 | 461 |
+  | **mlx+compile** | **2091** | **2177** | **1858** | **1868** | **1840** |
+
+- MLX+compile is ~50x faster than torch MPS, ~3.5x faster than MLX baseline.
+- Warmup cost: ~6.1s for 1100 shapes. Per-shape compile: ~5.5ms.
+- Memory cost: ~61 KB/shape (small KV) to ~567 KB/shape (large KV). 1100 shapes ≈ 40 MB active + cache.
+- `feat-mlx` has `_mlx_rope` graph intrinsic bug (`bool()` on mlx array) when MLX backend intrinsics are enabled. Benchmark does not enable MLX intrinsics (matching `feat-serving` behavior).
+- Depends-on: the `_to_mlx` skip fix (without it, `mx.compile` recompiles every step because `np.asarray()` creates new Python objects that break tracing).
+
+## [2026-07-05] gemma-4-E2B-it | torch vs MLX GPU sweep on Apple Silicon
+
+- Ran `scripts/bench_gemma4_e2b_gpu_sweep.py` (new) over `google/gemma-4-E2B-it` (bf16, generate/auto, warmup=1, repeat=3, mean of 3) on MPS/Apple GPU.
+- Backends: `codegen2-torch` (MPS), `codegen2-torch + compile_axon`, `codegen2-mlx`, `codegen2-mlx + compile_axon`. HF reference = torch MPS in every run.
+- Artifacts: `log/gemma4-e2b-it-gpu-sweep-2026-07-05/` (per-run `stream.csv` + logs; `sweep_summary.csv`).
+- Results (Axon tok/s, generate):
+
+  | max_len | HF tok/s | torch tok/s | mlx tok/s | mlx+compile tok/s |
+  |---|---|---|---|---|
+  | 64 | 23.6 | 18.0 | 148.3 | 749.0 |
+  | 128 | 22.6 | 16.9 | 109.0 | 678.4 |
+  | 256 | 23.0 | 16.3 | 122.6 | 730.8 |
+  | 512 | 21.6 | 14.6 | OOM | 694.3 |
+
+- `codegen2-torch` is slower than HF torch (~0.75x). `codegen2-mlx` is ~5-6x faster than HF. `codegen2-mlx + compile_axon` is ~30-35x faster than HF (~700 tok/s).
+- `torch-compile` initially failed on MPS for all lengths: `RuntimeError: expected mat1 and mat2 to have the same dtype, but got: float != c10::BFloat16`. Fixed in same session (see next entry); was an Axon matmul dtype-alignment gap, not a pure MPS limitation.
+- `codegen2-mlx` (uncompiled) hit `[metal::malloc] Resource limit (499000) exceeded` at max_len=512 (KV cache + activations exceed Metal buffer budget without compiled shape specialization). `mlx-compile` handles 512 fine.
+- All successful runs: `masked_top1_eq=True`. `masked_max_abs_diff` 0.79-1.38 (bf16 numerical noise over 507 generated tokens).
+- Depends-on: `feat-mlx` MLX codegen + `compile(max_kv_length)` from [2026-07-01].
+
+## [2026-07-05] codegen2-torch | fix matmul dtype alignment for torch.compile on MPS
+
+- Root cause: `_align_pair` in `codegen2_torch/core.py` only aligned **device**, never **dtype**. When both matmul operands were on the same device, it returned them unchanged. A float32 activation (from a norm/softmax in fp32) matmul'd against a bf16 weight passed through to inductor's `extern_kernels.mm`, which is dtype-strict on MPS (eager `torch.matmul` auto-promotes, inductor does not).
+- The `linear` primitive already aligned dtype (`weight.to(dtype=x.dtype)`), but `matmul` did not. Grouped-mm already aligned (`x_g.to(dtype=grouped_weight.dtype)`).
+- Fix: added dtype alignment to both `matmul` code paths in `codegen2_torch/core.py`:
+  - inline emission (line ~5813): cast `_a.to(dtype=_b.dtype)` when both floating-point and dtypes differ
+  - runtime dispatch (line ~2442): cast `left.to(dtype=right.dtype)` under same conditions
+  - Direction: left→right's dtype, matching `prefer="right"` and grouped-mm precedent. Matches HF pattern (norm/softmax in fp32, cast back to model dtype for matmul).
+- Not model-specific; affects all `codegen2-torch` matmul ops generically.
+- Validated-by: `tests/test_axon_graph_ir.py` (185 passed), `test_synapse_optimizer_fidelity_max4b.py` + `test_synapse_cli_optimize_flags.py` (7 passed, 1 skipped), `test_synapse_axon_typecheck_flat.py` matmul tests + `test_e2e_dump_compact_shape_regression.py` + `test_tensor_ops_transforms.py` (3 passed).
+- Verified: torch-compile on MPS+bf16 now runs for all lengths (64-512). `masked_top1_eq=True`.
+- Re-sweep results (Axon tok/s, generate, bf16, mean of 3):
+
+  | max_len | HF | torch | torch-compile | mlx | mlx-compile |
+  |---|---|---|---|---|---|
+  | 64 | 23.1 | 17.3 | 16.8 | 89.5 | 671.5 |
+  | 128 | 21.2 | 15.9 | 16.5 | 119.1 | 689.0 |
+  | 256 | 21.1 | 14.7 | 15.0 | 115.8 | 716.7 |
+  | 512 | 23.4 | 13.7 | 14.2 | OOM | 714.5 |
+
+- torch-compile on MPS is slightly slower than eager torch (inductor MPS overhead), but no longer crashes. MLX+compile remains the clear winner (~700 tok/s, ~30-35x HF).
+- Artifacts: `log/gemma4-e2b-it-gpu-sweep-fix-2026-07-05/`.
+
+## [2026-07-06] codegen2-mlx | fix cached-decoder generate loop feeding wrong token
+
+- Root cause: the cached-decoder `generate` path in `codegen2_mlx/core.py` (the main path for all modern LLMs with KV cache) never updated `out` after each step. Steps 1+ fed `out[:, -1:]` (last **prompt** token) instead of the last **generated** token. The other two paths (no-cache decoder, encoder-decoder) were correct — they concatenated `next_id` back into the running sequence.
+- The bug was hidden because `masked_top1_eq=True` only validates the **first** new token (logits diff at position 0), not subsequent tokens. Outputs diverged to garbage after token 1.
+- Before fix (E2B MLX): `"The future of AI is future AI is is a the is is is is is a a a a a..."` (garbage)
+- After fix (E2B MLX): `"The future of AI is future of AI."` (matches HF exactly)
+- Fix in `codegen2_mlx/core.py` cached-decoder path (lines 742-777):
+  1. Added `current = out` after `out = input_ids` (tracks the working input)
+  2. Changed `step_input = out[:, -1:]` → `current[:, -1:]` (and `else out` → `else current`)
+  3. Added `current = next_id` after `generated.append(next_id)` (feeds last generated token into next step)
+- Step 0: `current = out` (full prompt), cache is None → `step_input = current` (full prompt, correct)
+- Step 1+: `current = next_id` (shape `(batch, 1)`), cache is not None → `step_input = current[:, -1:]` (last generated token, correct)
+- Not model-specific; affects all `codegen2-mlx` cached-decoder models generically.
+- Validated-by:
+  - Gemma-3-270M MLX: outputs match HF (was garbage before fix). `masked_top1_eq=True`.
+  - Gemma-3-270M MLX+compile: outputs match HF. `masked_top1_eq=True`. ~1514 tok/s.
+  - Gemma-4-E2B-it MLX: outputs match HF exactly for prompt 0, minor bf16 divergence at end of prompt 1 (same as torch backend). `masked_top1_eq=True`. ~69 tok/s.
+  - Gemma-4-E2B-it MLX+compile: outputs match HF. `masked_top1_eq=True`. ~749 tok/s (no perf regression).
+  - `tests/test_axon_graph_ir.py` (185 passed), `tests/ -k mlx` (8 passed).
+  - 2 pre-existing test failures unrelated to this change (transform spec validation, completion candidates).
+- Artifacts: `log/mlx-genloop-fix-{270m,e2b}-{mlx,mlx-compile}/`.

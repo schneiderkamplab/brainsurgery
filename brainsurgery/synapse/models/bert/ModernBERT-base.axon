@@ -8,7 +8,7 @@ import Activations (gelu)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (bidirectional_mask_for_input)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
 
 import Math (mul)
 
@@ -66,8 +66,9 @@ modernbert_layer x i rope_sin_full rope_cos_full rope_sin_local rope_cos_local m
     return gelu u |> mul g |> NN.linear@Wo dim=MODEL_DIM bias=false
   return x + m
 
-modernbert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+modernbert :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
 modernbert input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
   pos_ids <- position_ids input_ids attn_mask
   rope_sin_full, rope_cos_full <- rope_base_factors pos_ids (MODEL_DIM / NUM_HEADS) THETA_FULL
   rope_sin_local, rope_cos_local <- rope_base_factors pos_ids (MODEL_DIM / NUM_HEADS) THETA_LOCAL

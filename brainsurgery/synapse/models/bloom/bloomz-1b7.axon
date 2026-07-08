@@ -8,7 +8,7 @@ import Activations (gelu_new)
 
 import Attention (attention, merge_heads, split_qkv_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
 import Math (sqrt)
 
@@ -24,34 +24,27 @@ import Config
 
 import NN
 
-MODEL_DIM <- do
-  return (true) ? (2048) : (1024)
+MODEL_DIM <- (true) ? (2048) : (1024)
 
-VOCAB_SIZE <- do
-  return 250880
+VOCAB_SIZE <- 250880
 
-NUM_LAYERS <- do
-  return 24
+NUM_LAYERS <- 24
 
-NUM_HEADS <- do
-  return 16
+NUM_HEADS <- 16
 
 FFN <- do
   return 4 * MODEL_DIM
 
-EPS <- do
-  return 1e-05
+EPS <- 1e-05
 
-MAX_CTX <- do
-  return 4096
+MAX_CTX <- 4096
 
-POST_LN_RESID <- do
-  return false
+POST_LN_RESID <- false
 
 HAS_LM_HEAD <- do
   return has_root "lm_head"
 
-bloom_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,HB,1,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+bloom_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,H,1,K] -> ?CacheLayer[B,H,P,MAX_CTX,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,MAX_CTX,DH])
 bloom_block x keep pos_bias past_kv = do
   xn <- NN.layernorm@input_layernorm x eps=EPS
   attn_res <- POST_LN_RESID ? xn : x
@@ -72,18 +65,24 @@ bloom_block x keep pos_bias past_kv = do
     return NN.linear@dense_4h_to_h h dim=MODEL_DIM bias=true
   return mlp_res + m, new_kv
 
-bloom :: TokenIds[B,S] -> Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+bloom :: TokenIds[B,S] -> ?Mask[B,K,MAX_CTX] -> ?Cache[B,H,P,MAX_CTX,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,MAX_CTX,DH])
 bloom input_ids attn_mask past_kv use_cache = do
   tok <- NN.embedding@word_embeddings input_ids dim=MODEL_DIM
   x <- NN.layernorm@word_embeddings_layernorm tok eps=EPS
-  new_kv <- use_cache ? Cache.init : null
-  keep <- causal_mask_for_input input_ids K padding_mask=attn_mask window=MAX_CTX
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_CTX
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  work_kv <- ((Cache.prepare past_kv use_cache MAX_CTX) :: ?Cache[B,H,K,MAX_CTX,DH])
+  read_kv <- ((Cache.read past_kv work_kv) :: ?Cache[B,H,P,MAX_CTX,DH])
+  keep <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_CTX
   pos_bias <- linear_position_bias_for_input attn_mask heads=NUM_HEADS
-  x, new_kv <- for@h i <- [0..NUM_LAYERS) carry (x, new_kv) do
-    past_i <- Cache.index past_kv i
+  x, work_kv <- for@h i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
     x, new_i <- bloom_block x keep pos_bias past_i
-    new_kv <- Cache.append new_kv new_i
-    yield x, new_kv
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  work_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? work_kv : null
   x <- NN.layernorm@ln_f x eps=EPS
   logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE) : (NN.linear@word_embeddings x dim=VOCAB_SIZE)
   return logits, new_kv

@@ -48,14 +48,15 @@ split_qkv_heads x ?heads=1 ?layout="packed" = do
       return q, k, v
 
 
-split_qkv_grouped :: Tensor[B,T,D] -> ?Dim -> ?Dim -> ?Dim -> (Tensor[B,heads,T,HD], Tensor[B,kv_heads,T,HD], Tensor[B,kv_heads,T,HD])
-split_qkv_grouped x ?heads=1 ?kv_heads=1 ?head_dim=null = do
-  q_per_kv <- heads / kv_heads
-  hd <- (head_dim == null) ? (D / (kv_heads * (q_per_kv + 2))) : head_dim
-  grouped <- Tensor.reshape x shape=[B, T, kv_heads, (q_per_kv + 2), hd]
+split_qkv_grouped :: Tensor[B,T,D] -> Dim -> Dim -> ?Dim -> (Tensor[B,heads,T,HD], Tensor[B,kv_heads,T,HD], Tensor[B,kv_heads,T,HD])
+split_qkv_grouped x heads kv_heads ?head_dim=null = do
+  q_per_kv <- ((heads / kv_heads) :: Dim)
+  groups <- ((q_per_kv + 2) :: Dim)
+  hd <- (((head_dim == null) ? (D / (kv_heads * groups)) : head_dim) :: Dim)
+  grouped <- Tensor.reshape x shape=[B, T, kv_heads, groups, hd]
   q <- Tensor.slice grouped dim=3 start=0 end=q_per_kv |> Tensor.reshape shape=[B, T, heads, hd] |> Tensor.permute dims=[0, 2, 1, 3]
   k <- Tensor.slice grouped dim=3 start=q_per_kv end=(q_per_kv + 1) |> Tensor.reshape shape=[B, T, kv_heads, hd] |> Tensor.permute dims=[0, 2, 1, 3]
-  v <- Tensor.slice grouped dim=3 start=(q_per_kv + 1) end=(q_per_kv + 2) |> Tensor.reshape shape=[B, T, kv_heads, hd] |> Tensor.permute dims=[0, 2, 1, 3]
+  v <- Tensor.slice grouped dim=3 start=(q_per_kv + 1) end=groups |> Tensor.reshape shape=[B, T, kv_heads, hd] |> Tensor.permute dims=[0, 2, 1, 3]
   return q, k, v
 
 
@@ -125,20 +126,20 @@ attention_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sink_lo
 
 attention_gqa_with_additive_mask :: Tensor[B,H,Q,HD] -> Tensor[B,KVH,K,HD] -> Tensor[B,KVH,K,VD] -> Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,VD]
 attention_gqa_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
-  groups <- H / KVH
-  qg <- Tensor.reshape q shape=[B, KVH, groups, Q, HD]
+  groups <- ((H / KVH) :: Dim)
+  qg <- ((Tensor.reshape q shape=[B, KVH, groups, Q, HD]) :: Tensor[B,KVH,H / KVH,Q,HD])
   kg <- Tensor.unsqueeze k 2
   vg <- Tensor.unsqueeze v 2
   scale_eff <- (scale == null) ? (1.0 / sqrt HD) : scale
   scores <- Tensor.matmul qg (Tensor.transpose kg dim1=3 dim2=4)
-  scores <- (scores :: Tensor[B,KVH,groups,Q,K])
+  scores <- (scores :: Tensor[B,KVH,H / KVH,Q,K])
   scores <- scores * scale_eff
   softcap_val <- (softcap == null) ? 0.0 : softcap
   scores <- ((softcap == null) or (softcap_val == 0.0)) ? scores : do
     scaled <- scores / softcap_val
     squashed <- tanh scaled
     return squashed * softcap_val
-  mask_g <- Tensor.reshape mask shape=[B, KVH, groups, Q, K]
+  mask_g <- ((Tensor.reshape mask shape=[B, KVH, groups, Q, K]) :: Tensor[B,KVH,H / KVH,Q,K])
   probs_in <- scores + mask_g
   probs_in <- (rel_bias == null) ? probs_in : (probs_in + (Tensor.reshape rel_bias shape=[B, KVH, groups, Q, K]))
   probs_in <- (sink_logits == null) ? probs_in : do
@@ -148,12 +149,12 @@ attention_gqa_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sin
   probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
   K <- Tensor.size v dim=-2
   probs <- slice probs dim=-1 start=0 end=K
-  probs <- (probs :: Tensor[B,KVH,groups,Q,K])
+  probs <- (probs :: Tensor[B,KVH,H / KVH,Q,K])
   keep_g <- Tensor.reshape keep shape=[B, 1, 1, Q, K] |> Tensor.expand shape=[B, KVH, groups, Q, K]
   probs <- zero_masked_after_softmax ? (Tensor.where keep_g probs 0) : probs
   v_work <- fp32_compute ? (Tensor.cast vg dtype="float32") : vg
   out <- Tensor.matmul probs v_work
-  out <- (out :: Tensor[B,KVH,groups,Q,VD])
+  out <- (out :: Tensor[B,KVH,H / KVH,Q,VD])
   out <- Tensor.reshape out shape=[B, H, Q, VD]
   return fp32_compute ? (Tensor.cast out dtype="float32") : out
 

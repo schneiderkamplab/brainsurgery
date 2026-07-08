@@ -51,11 +51,13 @@ from ..ast import (
 )
 from ..entrypoint import resolve_main_module
 from ..ast.types import dim_token_names
+from ..typecheck_shared import _PrimitiveTypeHelpers
 from ..validate import (
     validate_closed_axon_file,
     validate_flat_axon_file,
     validate_typed_axon_file,
 )
+from ...ops import get_op_type_rule
 
 
 @dataclass(frozen=True)
@@ -1348,8 +1350,17 @@ def _instantiated_module_output_types(
     dim_values: Mapping[str, DimToken] | None = None,
 ) -> tuple[TypeExpr, ...]:
     subst = _call_dim_substitution(callee, actuals, dim_values=dim_values)
-    if callee.return_type_expr is not None:
+    if (
+        callee.return_type_expr is not None
+        and not _type_contains_inference_var(callee.return_type_expr)
+    ):
         raw_types = _result_types(callee.return_type_expr, output_count)
+    elif (instantiated := _infer_module_output_types_from_body(callee, actuals, output_count, dim_values)) is not None:
+        raw_types = instantiated
+    elif output_count == 1 and len(callee.outputs) == 1:
+        raw_types = (_declared_operand_type(callee.outputs[0]),)
+    elif output_count == 1 and len(callee.outputs) > 1:
+        raw_types = (TypeTuple(tuple(_declared_operand_type(output) for output in callee.outputs)),)
     else:
         raw_types = _module_output_types(callee)
     return tuple(_substitute_type_expr(type_expr, subst) for type_expr in raw_types)
@@ -1378,8 +1389,232 @@ def graph_operand_type(operand: GraphOperand) -> TypeExpr:
     return _declared_operand_type(operand)
 
 
+def _type_dims(type_expr: TypeExpr) -> tuple[DimToken, ...] | None:
+    return type_expr.dims if isinstance(type_expr, TypeTensor) else None
+
+
+def _graph_operand_dim_token_for_type_rule(
+    operand: GraphOperand,
+    dim_values: Mapping[str, DimToken] | None,
+) -> DimToken | None:
+    if isinstance(operand, GraphLiteral):
+        if type(operand.value) is int:
+            return operand.value
+        if isinstance(operand.value, str) and isinstance(operand.type_expr, TypeDim | TypeInt):
+            return operand.value
+        return None
+    if isinstance(operand, GraphValueRef):
+        if dim_values is not None and operand.name in dim_values:
+            return dim_values[operand.name]
+        operand_type = operand.type_expr
+        if isinstance(operand_type, TypeOptional):
+            operand_type = operand_type.inner
+        if isinstance(operand_type, TypeDim | TypeInt):
+            return operand.name
+        return None
+    if isinstance(operand, GraphExpr):
+        if operand.op.name in {"core.alias", "core.ascribe"} and len(operand.inputs) == 1:
+            return _graph_operand_dim_token_for_type_rule(operand.inputs[0], dim_values)
+        if operand.op.name.startswith("core.binary.") and len(operand.inputs) == 2:
+            op = operand.op.name.removeprefix("core.binary.")
+            if op in {"+", "-", "*", "/"}:
+                left = _graph_operand_dim_token_for_type_rule(operand.inputs[0], dim_values)
+                right = _graph_operand_dim_token_for_type_rule(operand.inputs[1], dim_values)
+                if left is not None and right is not None:
+                    return _substitute_dim_token(DimExprBinary(op=op, left=left, right=right), {})
+        if not operand.inputs and not operand.attrs and isinstance(operand.type_expr, TypeDim | TypeInt):
+            return operand.op.name
+    return None
+
+
+def _choose_dim_representative(left: str, right: str) -> str:
+    if left == right:
+        return left
+    if left.startswith("__") and not right.startswith("__"):
+        return right
+    if right.startswith("__") and not left.startswith("__"):
+        return left
+    return min(left, right)
+
+
+def _unify_graph_dim_for_type_rule(left: DimToken, right: DimToken) -> DimToken:
+    left = _substitute_dim_token(left, {})
+    right = _substitute_dim_token(right, {})
+    if left == right:
+        return left
+    if isinstance(left, int) and isinstance(right, int):
+        raise ValueError(f"graph primitive dim mismatch {left!r} vs {right!r}")
+    if isinstance(left, str) and not left.startswith(".."):
+        return right if not isinstance(right, str) else _choose_dim_representative(left, right)
+    if isinstance(right, str) and not right.startswith(".."):
+        return left if not isinstance(left, str) else _choose_dim_representative(left, right)
+    if isinstance(left, DimExprBinary) and isinstance(right, DimExprBinary) and left.op == right.op:
+        return _substitute_dim_token(
+            DimExprBinary(
+                op=left.op,
+                left=_unify_graph_dim_for_type_rule(left.left, right.left),
+                right=_unify_graph_dim_for_type_rule(left.right, right.right),
+            ),
+            {},
+        )
+    raise ValueError(f"graph primitive dim mismatch {left!r} vs {right!r}")
+
+
+def _broadcast_graph_dim(left: DimToken, right: DimToken) -> DimToken | None:
+    left = _substitute_dim_token(left, {})
+    right = _substitute_dim_token(right, {})
+    if left == right:
+        return left
+    if isinstance(left, str) and left.startswith("..") and right == 1:
+        return left
+    if isinstance(right, str) and right.startswith("..") and left == 1:
+        return right
+    if left == 1:
+        return right
+    if right == 1:
+        return left
+    if isinstance(left, str) and left.startswith("..") and isinstance(right, str) and right.startswith(".."):
+        return None
+    if isinstance(left, str) and left.startswith(".."):
+        return right
+    if isinstance(right, str) and right.startswith(".."):
+        return left
+    if isinstance(left, str) and not isinstance(right, int):
+        return left
+    if isinstance(right, str) and not isinstance(left, int):
+        return right
+    return None
+
+
+def _broadcast_graph_dims(
+    left_dims: tuple[DimToken, ...],
+    right_dims: tuple[DimToken, ...],
+) -> tuple[DimToken, ...] | None:
+    out: list[DimToken] = []
+    left = list(left_dims)
+    right = list(right_dims)
+    while left or right:
+        left_dim = left.pop() if left else 1
+        right_dim = right.pop() if right else 1
+        dim = _broadcast_graph_dim(left_dim, right_dim)
+        if dim is None:
+            return None
+        out.append(dim)
+    return tuple(reversed(out))
+
+
+def _infer_primitive_graph_type(
+    op_name: str,
+    inputs: tuple[GraphOperand, ...],
+    attrs: Mapping[str, GraphOperand],
+    *,
+    dim_values: Mapping[str, DimToken] | None,
+) -> TypeExpr | None:
+    type_rule = get_op_type_rule(op_name[1:] if op_name.startswith("_") else op_name)
+    if type_rule is None:
+        return None
+    inferred = type_rule(
+        arg_types=tuple(graph_operand_type(item) for item in inputs),
+        kwarg_types={key: graph_operand_type(value) for key, value in attrs.items()},
+        args=inputs,
+        kwargs=dict(attrs),
+        helpers=_PrimitiveTypeHelpers(
+            type_dims=_type_dims,
+            expr_to_dim_token=lambda value: _graph_operand_dim_token_for_type_rule(value, dim_values)
+            if isinstance(value, GraphValueRef | GraphLiteral | GraphPath | GraphExpr)
+            else None,
+            type_tensor=lambda *, dims: TypeTensor(base="Tensor", dims=tuple(dims)),
+            resolve_name_expr=lambda name: GraphValueRef(name=name, type_expr=TypeDim())
+            if dim_values is not None and name in dim_values
+            else None,
+            broadcast_tensor_dims=lambda left, right: _broadcast_graph_dims(left, right),
+            dim_equivalent=lambda left, right: _substitute_dim_token(left, {}) == _substitute_dim_token(right, {}),
+            unify_dim=_unify_graph_dim_for_type_rule,
+        ),
+    )
+    return inferred if isinstance(inferred, TypeExpr) else None
+
+
+def _operand_with_instantiated_type(
+    operand: GraphOperand,
+    env: Mapping[str, GraphValue],
+) -> GraphOperand:
+    if isinstance(operand, GraphValueRef):
+        value = env.get(operand.name)
+        if value is None:
+            return operand
+        return replace(operand, type_expr=_value_ref_type(value), dims=value.dims)
+    if isinstance(operand, GraphExpr):
+        return replace(
+            operand,
+            inputs=tuple(_operand_with_instantiated_type(item, env) for item in operand.inputs),
+            attrs={key: _operand_with_instantiated_type(value, env) for key, value in operand.attrs.items()},
+        )
+    return operand
+
+
+def _infer_module_output_types_from_body(
+    callee: GraphModule,
+    actuals: tuple[GraphOperand, ...],
+    output_count: int,
+    dim_values: Mapping[str, DimToken] | None,
+) -> tuple[TypeExpr, ...] | None:
+    if len(actuals) != len(callee.inputs):
+        return None
+    env: dict[str, GraphValue] = {}
+    for formal, actual in zip(callee.inputs, actuals, strict=True):
+        actual_type = graph_operand_type(actual)
+        env[formal.name] = replace(
+            formal,
+            type_expr=actual_type,
+            dims=_type_dims(actual_type) or getattr(actual, "dims", None),
+            optional=isinstance(actual_type, TypeOptional),
+        )
+    for node in callee.nodes:
+        inputs = tuple(_operand_with_instantiated_type(item, env) for item in node.inputs)
+        attrs = {key: _operand_with_instantiated_type(value, env) for key, value in node.attrs.items()}
+        inferred = _infer_primitive_graph_type(
+            node.op.name,
+            inputs,
+            attrs,
+            dim_values=dim_values,
+        )
+        if inferred is None:
+            inferred = _substitute_type_expr(node.type_expr, _call_dim_substitution(callee, actuals, dim_values=dim_values))
+        node_types = _result_types(inferred, len(node.outputs))
+        for output, output_type in zip(node.outputs, node_types, strict=True):
+            env[output.name] = replace(
+                output,
+                type_expr=output_type,
+                dims=_type_dims(output_type) or output.dims,
+                optional=isinstance(output_type, TypeOptional),
+            )
+    outputs: list[TypeExpr] = []
+    for output in callee.outputs:
+        instantiated = _operand_with_instantiated_type(output, env)
+        outputs.append(graph_operand_type(instantiated))
+    if output_count == 1 and len(outputs) > 1:
+        return (TypeTuple(tuple(outputs)),)
+    if len(outputs) != output_count:
+        return None
+    return tuple(outputs)
+
+
 def graph_type_compatible(actual: TypeExpr, expected: TypeExpr) -> bool:
     return _type_compatible(actual, expected)
+
+
+
+def _type_contains_inference_var(type_expr: TypeExpr) -> bool:
+    if isinstance(type_expr, TypeAny | TypeVar):
+        return True
+    if isinstance(type_expr, TypeOptional):
+        return _type_contains_inference_var(type_expr.inner)
+    if isinstance(type_expr, TypeList):
+        return _type_contains_inference_var(type_expr.item)
+    if isinstance(type_expr, TypeTuple):
+        return any(_type_contains_inference_var(item) for item in type_expr.items)
+    return False
 
 
 def _result_types(type_expr: TypeExpr, output_count: int) -> tuple[TypeExpr, ...]:
@@ -1393,7 +1628,10 @@ def _result_types(type_expr: TypeExpr, output_count: int) -> tuple[TypeExpr, ...
 
 
 def _module_output_types(module: GraphModule) -> tuple[TypeExpr, ...]:
-    if module.return_type_expr is not None:
+    if (
+        module.return_type_expr is not None
+        and not _type_contains_inference_var(module.return_type_expr)
+    ):
         return _result_types(module.return_type_expr, len(module.outputs))
     return tuple(_declared_operand_type(output) for output in module.outputs)
 

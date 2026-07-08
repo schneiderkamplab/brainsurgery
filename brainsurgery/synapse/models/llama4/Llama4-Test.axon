@@ -8,7 +8,7 @@ import Activations (silu)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (causal_mask_for_input)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
 import Math (floor, log, mul, sqrt)
 
@@ -52,7 +52,7 @@ EPS = 1e-05
 
 THETA = 500000.0
 
-MAX_POSITIONS = 512
+MAX_POSITIONS = 1024
 
 ROPE_SCALE = 16.0
 
@@ -108,7 +108,7 @@ llama4_moe x = do
 llama4_rope :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Tensor[B,H,S,HD]
 llama4_rope x pos_ids = HAS_LLAMA3_FREQ_SPLIT ? (rope_apply_freq_scale x pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT interleaved=true) : (rope_apply_base x pos_ids theta=THETA scale_factor=ROPE_SCALE interleaved=true)
 
-llama4_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,DH])
+llama4_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
 llama4_block x i pos_ids mask_rope mask_no_rope past_kv = do
   use_rope <- ((i + 1) % NO_ROPE_INTERVAL) != 0
   xn <- llama4_norm@input_layernorm x
@@ -133,22 +133,27 @@ llama4_block x i pos_ids mask_rope mask_no_rope past_kv = do
     return llama4_moe xn
   return x + m, new_kv
 
-llama4 :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,KVH,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,DH])
+llama4 :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
 llama4 input_ids attn_mask past_kv use_cache = do
   past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
-  key_len <- past_length + S
+  key_len <- mask_length_for_input input_ids attn_mask past_length
   mask_rope <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=ATTN_CHUNK
   mask_no_rope <- causal_mask_for_input input_ids key_len padding_mask=attn_mask
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
   x, new_kv <- scope@language_model.model do
     x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
-    new_kv <- use_cache ? Cache.init : null
-    x, new_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
-      past_i <- Cache.index past_kv i
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
       x, new_i <- llama4_block x i pos_ids mask_rope mask_no_rope past_i
-      new_kv <- Cache.append new_kv new_i
-      yield x, new_kv
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
     x <- llama4_norm@norm x
-    return x, new_kv
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
   logits <- NN.linear@language_model.lm_head x dim=VOCAB_SIZE bias=false
   return logits, new_kv

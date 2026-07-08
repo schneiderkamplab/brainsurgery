@@ -20,16 +20,26 @@ def _axon_module() -> Any:
     return importlib.import_module("brainsurgery.synapse.axon")
 
 
-def _resolve_axon_to_text(axon_path: Path, *, strict: bool = False) -> str:
+def _resolve_axon_to_text(
+    axon_path: Path,
+    *,
+    strict: bool = False,
+    builtins_overlays: list[str] | tuple[str, ...] | None = None,
+) -> str:
     module = _synapse_module()
     resolve_fn = getattr(module, "resolve_axon_program_to_source")
-    return resolve_fn(axon_path, strict=strict)
+    return resolve_fn(axon_path, strict=strict, builtins_overlays=builtins_overlays)
 
 
-def _resolve_axon_program(axon_path: Path, *, strict: bool = False) -> Any:
+def _resolve_axon_program(
+    axon_path: Path,
+    *,
+    strict: bool = False,
+    builtins_overlays: list[str] | tuple[str, ...] | None = None,
+) -> Any:
     module = _synapse_module()
     resolve_fn = getattr(module, "resolve_axon_program_from_path")
-    return resolve_fn(axon_path, strict=strict)
+    return resolve_fn(axon_path, strict=strict, builtins_overlays=builtins_overlays)
 
 
 def _render_resolved_axon_program(program: Any) -> str:
@@ -64,6 +74,7 @@ def _dump_axon_stage_to_text(
     show_domain: bool,
     show_provenance: bool,
     graph_backend_intrinsics: str | None,
+    builtins_overlays: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     module = _axon_module()
     parse_fn = getattr(module, "parse_axon_program_from_path")
@@ -98,7 +109,7 @@ def _dump_axon_stage_to_text(
     if stage == "parse":
         return render_fn(parse_fn(axon_path), show_types=show_types, show_purity=show_purity)
 
-    report = resolve_fn(axon_path, strict=strict)
+    report = resolve_fn(axon_path, strict=strict, builtins_overlays=builtins_overlays)
     program = report.ast
     if stage == "resolve":
         return render_fn(program, show_types=show_types, show_purity=show_purity)
@@ -163,6 +174,7 @@ def _axon_graph_ir_to_dot(
     direction: str,
     show_data_labels: bool,
     show_control_flow: bool,
+    builtins_overlays: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     module = _axon_module()
     resolve_fn = getattr(module, "resolve_axon_program_from_path")
@@ -176,7 +188,7 @@ def _axon_graph_ir_to_dot(
     lower_graph_fn = getattr(module, "lower_axon_program_to_graph_ir")
     render_dot_fn = getattr(module, "render_graph_program_to_dot")
 
-    program = resolve_fn(axon_path, strict=strict).ast
+    program = resolve_fn(axon_path, strict=strict, builtins_overlays=builtins_overlays).ast
     program = normalize_fn(program, main_module=main_module)
     program = elaborate_fn(program, main_module=main_module)
     program = flatten_fn(program, main_module=main_module)
@@ -185,12 +197,9 @@ def _axon_graph_ir_to_dot(
         program = optimize_ast_fn(program, main_module=main_module)
     graph = lower_graph_fn(program, main_module=main_module)
     if optimize_graph:
-        effective_graph_backend_intrinsics = graph_backend_intrinsics
-        if effective_graph_backend_intrinsics is None and backend == "codegen2-triton":
-            effective_graph_backend_intrinsics = "codegen2-triton"
         graph = optimize_graph_fn(
             graph,
-            config=graph_optimize_config_cls(backend_intrinsics=effective_graph_backend_intrinsics),
+            config=graph_optimize_config_cls(backend_intrinsics=graph_backend_intrinsics),
         )
     return render_dot_fn(
         graph,
@@ -221,6 +230,7 @@ def _axon_codegen_dump_to_text(
     weights: Path | None,
     profile: bool,
     align_devices: bool = False,
+    builtins_overlays: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     axon_module = _axon_module()
     resolve_fn = getattr(axon_module, "resolve_axon_program_from_path")
@@ -234,14 +244,18 @@ def _axon_codegen_dump_to_text(
     lower_graph_fn = getattr(axon_module, "lower_axon_program_to_graph_ir")
 
     backend = backend.strip().lower()
-    if backend not in {"codegen2-torch", "codegen2-tinygrad", "codegen2-triton"}:
+    if backend not in {"codegen2-torch", "codegen2-tinygrad", "codegen2-mlx", "codegen2-jax", "codegen2-triton"}:
         raise typer.BadParameter(
-            "backend must be 'codegen2-torch', 'codegen2-tinygrad', or 'codegen2-triton'"
+            "backend must be 'codegen2-torch', 'codegen2-tinygrad', 'codegen2-mlx', "
+            "'codegen2-jax', or 'codegen2-triton'"
         )
-    if profile and backend not in {"codegen2-torch", "codegen2-triton"}:
+    if profile and backend not in {"codegen2-torch", "codegen2-jax", "codegen2-triton"}:
         raise typer.BadParameter(
-            "--profile-code is currently supported only for --backend codegen2-torch or codegen2-triton"
+            "--profile-code is currently supported only for --backend codegen2-torch, "
+            "codegen2-jax, or codegen2-triton"
         )
+    if backend in {"codegen2-mlx", "codegen2-jax"} and align_devices:
+        raise typer.BadParameter(f"--align-devices is not supported with --backend {backend}")
 
     model_dir = weights or (_checkpoint_model_dir(checkpoint) if checkpoint is not None else None)
     model_config = None
@@ -259,7 +273,7 @@ def _axon_codegen_dump_to_text(
             model_config=load_model_config(model_dir if model_dir.is_dir() else model_dir.parent),
         )
 
-    program = resolve_fn(axon_path, strict=strict).ast
+    program = resolve_fn(axon_path, strict=strict, builtins_overlays=builtins_overlays).ast
     program = normalize_fn(program, main_module=main_module)
     program = elaborate_fn(program, main_module=main_module)
     program = flatten_fn(program, main_module=main_module)
@@ -283,6 +297,14 @@ def _axon_codegen_dump_to_text(
             profile=profile,
             align_devices=align_devices,
         )
+    if backend == "codegen2-tinygrad":
+        emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_tinygrad")
+        emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
+        return emit_fn(graph, class_name=class_name, model_config=model_config)
+    if backend == "codegen2-jax":
+        emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_jax")
+        emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
+        return emit_fn(graph, class_name=class_name, model_config=model_config, profile=profile)
     if backend == "codegen2-triton":
         emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_triton")
         emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
@@ -293,7 +315,7 @@ def _axon_codegen_dump_to_text(
             profile=profile,
             align_devices=align_devices,
         )
-    emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_tinygrad")
+    emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_mlx")
     emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
     return emit_fn(graph, class_name=class_name, model_config=model_config)
 
@@ -330,6 +352,14 @@ def axon_resolve(
         "--strict",
         help="Fail when the resolver emits warnings.",
     ),
+    builtins_overlays: list[str] = typer.Option(
+        [],
+        "--builtins-overlay",
+        help=(
+            "Resolve builtin imports through builtins/<name>/ before default builtins. "
+            "Repeat to layer multiple overlays in order."
+        ),
+    ),
 ) -> None:
     """Resolve imports into one Axon file without import statements."""
     _ensure_overwrite_allowed(output_path, force=force)
@@ -337,7 +367,11 @@ def axon_resolve(
         raise typer.BadParameter("Output path must end with .axon")
 
     try:
-        program = _resolve_axon_program(axon_path, strict=strict)
+        program = _resolve_axon_program(
+            axon_path,
+            strict=strict,
+            builtins_overlays=builtins_overlays,
+        )
         text = _render_resolved_axon_program(program)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -404,6 +438,14 @@ def axon_stage_dump(
             "Default keeps Graph IR backend-neutral."
         ),
     ),
+    builtins_overlays: list[str] = typer.Option(
+        [],
+        "--builtins-overlay",
+        help=(
+            "Resolve builtin imports through builtins/<name>/ before default builtins. "
+            "Repeat to layer multiple overlays in order."
+        ),
+    ),
     show_types: bool = typer.Option(
         False,
         "--show-types/--no-show-types",
@@ -447,6 +489,7 @@ def axon_stage_dump(
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
+            builtins_overlays=builtins_overlays,
             show_types=show_types,
             show_purity=show_purity,
             show_domain=show_domain,
@@ -504,6 +547,14 @@ def axon_graph_ir_dot(
             "Default keeps Graph IR backend-neutral."
         ),
     ),
+    builtins_overlays: list[str] = typer.Option(
+        [],
+        "--builtins-overlay",
+        help=(
+            "Resolve builtin imports through builtins/<name>/ before default builtins. "
+            "Repeat to layer multiple overlays in order."
+        ),
+    ),
     direction: str = typer.Option(
         "top-down",
         "--direction",
@@ -540,6 +591,7 @@ def axon_graph_ir_dot(
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
+            builtins_overlays=builtins_overlays,
             direction=direction,
             show_data_labels=show_data_labels,
             show_control_flow=show_control_flow,
@@ -588,7 +640,10 @@ def axon_codegen_dump(
     backend: str = typer.Option(
         "codegen2-torch",
         "--backend",
-        help="Codegen backend: codegen2-torch, codegen2-tinygrad, or codegen2-triton.",
+        help=(
+            "Codegen backend: codegen2-torch, codegen2-tinygrad, "
+            "codegen2-mlx, codegen2-jax, or codegen2-triton."
+        ),
     ),
     class_name: str = typer.Option(
         "AxonGeneratedModel",
@@ -613,6 +668,14 @@ def axon_codegen_dump(
             "Use a backend name for all supported intrinsics, or "
             "backend:intrinsic[,intrinsic...] for an allow-list. "
             "Default keeps Graph IR backend-neutral."
+        ),
+    ),
+    builtins_overlays: list[str] = typer.Option(
+        [],
+        "--builtins-overlay",
+        help=(
+            "Resolve builtin imports through builtins/<name>/ before default builtins. "
+            "Repeat to layer multiple overlays in order."
         ),
     ),
     profile_code: bool = typer.Option(
@@ -646,6 +709,7 @@ def axon_codegen_dump(
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
+            builtins_overlays=builtins_overlays,
             backend=backend,
             class_name=class_name,
             checkpoint=checkpoint,
@@ -853,6 +917,14 @@ def axon_test(
             "backend:intrinsic[,intrinsic...] for an allow-list."
         ),
     ),
+    builtins_overlays: list[str] = typer.Option(
+        [],
+        "--builtins-overlay",
+        help=(
+            "Resolve builtin imports through builtins/<name>/ before default builtins. "
+            "Repeat to layer multiple overlays in order."
+        ),
+    ),
 ) -> None:
     """Run HF vs Axon-derived model benchmark for an Axon spec + weights."""
     module = _synapse_module()
@@ -895,6 +967,7 @@ def axon_test(
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
+            builtins_overlays=builtins_overlays,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1078,7 +1151,15 @@ def axon_benchmark(
         "--axon-backend",
         help=(
             "Axon execution backend (codegen2-torch, codegen2-tinygrad, "
-            "codegen2-triton, codegen2-vllm, runtime2-torch, or pipeline2-torch)."
+            "codegen2-mlx, codegen2-jax, codegen2-triton, codegen2-vllm, runtime2-torch, or pipeline2-torch)."
+        ),
+    ),
+    axon_backends: str | None = typer.Option(
+        None,
+        "--axon-backends",
+        help=(
+            "Comma-separated ordered Axon backend sequence to run for each Axon/checkpoint pair "
+            "(for example codegen2-torch,codegen2-jax). Overrides --axon-backend."
         ),
     ),
     axon_typechecker: str = typer.Option(
@@ -1114,6 +1195,22 @@ def axon_benchmark(
             "backend:intrinsic[,intrinsic...] for an allow-list."
         ),
     ),
+    builtins_overlays: list[str] = typer.Option(
+        [],
+        "--builtins-overlay",
+        help=(
+            "Resolve builtin imports through builtins/<name>/ before default builtins. "
+            "Repeat to layer multiple overlays in order."
+        ),
+    ),
+    backend_builtins_overlays: list[str] = typer.Option(
+        [],
+        "--backend-builtins-overlay",
+        help=(
+            "Resolve builtin imports through extra overlays only for one backend. "
+            "Use BACKEND:OVERLAY[,OVERLAY...] and repeat as needed."
+        ),
+    ),
     skip_hf: bool = typer.Option(
         False,
         "--skip-hf/--no-skip-hf",
@@ -1142,6 +1239,11 @@ def axon_benchmark(
         "--profile-axon-top-n",
         min=1,
         help="Number of Axon profiling regions to print when --profile-axon is enabled.",
+    ),
+    metal_capture: bool = typer.Option(
+        False,
+        "--metal-capture/--no-metal-capture",
+        help="Enable Metal GPU trace capture (mx.metal) during MLX backend inference. Writes .gputrace to log dir.",
     ),
     table_format: str = typer.Option(
         "markdown",
@@ -1216,16 +1318,20 @@ def axon_benchmark(
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
             axon_backend=axon_backend,
+            axon_backends=axon_backends,
             axon_typechecker=axon_typechecker,
             pipeline_parallel_size=pipeline_parallel_size,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
+            builtins_overlays=builtins_overlays,
+            backend_builtins_overlays=backend_builtins_overlays,
             skip_hf=skip_hf,
             hf_strict_dtype=hf_strict_dtype,
             oom_cpu_fallback=oom_cpu_fallback,
             profile_axon=profile_axon,
             profile_axon_top_n=profile_axon_top_n,
+            metal_capture=metal_capture,
             table_format=table_format,
             log_dir=log_dir,
             stream_csv=stream_csv,

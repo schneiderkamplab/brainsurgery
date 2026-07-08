@@ -8,7 +8,7 @@ import Activations (gelu_new)
 
 import Attention (attention, merge_heads, reshape_heads)
 
-import Masking (bidirectional_mask_for_input)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
 
 import Positions (position_ids)
 
@@ -45,8 +45,9 @@ albert_block x keep = do
   y <- NN.layernorm@full_layer_layer_norm y eps=EPS weight_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.full_layer_layer_norm.weight bias_path=@@albert.encoder.albert_layer_groups.0.albert_layers.0.full_layer_layer_norm.bias
   return y
 
-albert :: TokenIds[B,S] -> ?Tensor[B,S] -> Tensor[B,S,V]
+albert :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
 albert input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
   pos_ids <- position_ids input_ids
   keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
   tok_type_ids <- input_ids - input_ids

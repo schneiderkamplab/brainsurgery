@@ -1,0 +1,135 @@
+import Math (floor)
+import Tensor (
+  and,
+  arange,
+  cast,
+  dtype_value,
+  eq,
+  expand,
+  full,
+  le,
+  reshape,
+  size,
+  slice,
+  where,
+)
+
+export (
+  Mask,
+  bidirectional_mask_for_input,
+  blocksparse_mask,
+  causal_mask_for_input,
+  mask_for_input,
+  mask_length_for_input,
+)
+
+type Mask[B,K,C] = (Tensor[B,C], Dim)
+
+mask_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> Mask[B,K,C]
+mask_for_input x mask capacity = (mask == null)
+  ? ((full x shape=[B, capacity] value=true dtype="bool", Q) :: Mask[B,K,C])
+  : (mask :: Mask[B,K,C])
+
+mask_length_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> Dim
+mask_length_for_input x mask past_length = (mask == null) ? 0 : do
+  _, length <- mask
+  return length
+
+causal_mask_for_input_keep :: Tensor[B,Q] -> Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
+causal_mask_for_input_keep x mask ?window=null = do
+  _, length <- mask
+  row_ids <- arange x start=0 end=Q |> reshape shape=[Q, 1]
+  col_ids <- arange x start=0 end=C |> reshape shape=[1, C]
+  aligned <- row_ids + (length - Q)
+  upper <- le col_ids aligned
+  valid <- le col_ids (length - 1)
+  causal <- and upper valid
+  keep_window <- (window == null) ? causal : (and causal (le (aligned - window + 1) col_ids))
+  keep <- reshape keep_window shape=[1, 1, Q, C]
+  return expand keep shape=[B, 1, Q, C]
+
+causal_mask_for_input_masked :: Tensor[B,Q] -> Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
+causal_mask_for_input_masked x mask ?window=null = do
+  values, length <- mask
+  keep <- causal_mask_for_input_keep x mask window=window
+  pad_keep <- cast values dtype="bool" |> reshape shape=[B, 1, 1, C]
+  masked_keep <- and keep pad_keep
+  query_keep <- slice values dim=-1 start=(length - Q) end=length |> cast dtype="bool" |> reshape shape=[B, 1, Q, 1]
+  col_ids <- arange x start=0 end=C |> reshape shape=[1, 1, 1, C]
+  dummy_keep <- and (eq col_ids 0) (eq query_keep false)
+  return where dummy_keep true masked_keep
+
+causal_mask_for_input :: Tensor[B,Q] -> Dim -> ?Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
+causal_mask_for_input x key_length ?padding_mask=null ?window=null = (padding_mask == null)
+  ? do
+    mask <- mask_for_input x null key_length
+    return causal_mask_for_input_keep x mask window=window
+  : causal_mask_for_input_masked x padding_mask window=window
+
+bidirectional_mask_for_input_keep :: Tensor[B,Q] -> Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
+bidirectional_mask_for_input_keep x mask ?window=null = do
+  _, length <- mask
+  row_ids <- arange x start=0 end=Q |> reshape shape=[Q, 1]
+  col_ids <- arange x start=0 end=C |> reshape shape=[1, C]
+  valid <- le col_ids (length - 1)
+  keep_window <- (window == null)
+    ? (expand valid shape=[Q, C])
+    : do
+      aligned <- row_ids + (length - Q)
+      return and valid (and (le col_ids (aligned + window)) (le (aligned - window) col_ids))
+  keep <- reshape keep_window shape=[1, 1, Q, C]
+  return expand keep shape=[B, 1, Q, C]
+
+bidirectional_mask_for_input_masked :: Tensor[B,Q] -> Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
+bidirectional_mask_for_input_masked x mask ?window=null = do
+  values, _ <- mask
+  keep <- bidirectional_mask_for_input_keep x mask window=window
+  pad_keep <- cast values dtype="bool" |> reshape shape=[B, 1, 1, C]
+  return and keep pad_keep
+
+bidirectional_mask_for_input :: Tensor[B,Q] -> Dim -> ?Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
+bidirectional_mask_for_input x key_length ?padding_mask=null ?window=null = (padding_mask == null)
+  ? do
+    mask <- mask_for_input x null key_length
+    return bidirectional_mask_for_input_keep x mask window=window
+  : bidirectional_mask_for_input_masked x padding_mask window=window
+
+blocksparse_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Mask[B,KM,K] -> ?Dim -> ?Dim -> ?Dim -> ?Bool -> Tensor[B,H,Q,K]
+blocksparse_mask q k ?padding_mask=null ?block_size=64 ?local_blocks=16 ?vert_stride=8 ?homo_head=false = do
+  q_len <- size q dim=2
+  k_len <- size k dim=2
+  shift <- ((k_len - q_len) > 0) ? (k_len - q_len) : 0
+  q_pos <- arange q start=0 end=q_len |> reshape shape=[q_len, 1]
+  q_pos <- q_pos + shift
+  k_pos <- arange k start=0 end=k_len |> reshape shape=[1, k_len]
+  q_block <- floor (q_pos / block_size)
+  k_block <- floor (k_pos / block_size)
+  causal_token <- le k_pos q_pos
+  causal_block <- le k_block q_block
+  local_block <- le (q_block - (local_blocks - 1)) k_block
+  keep <- homo_head
+    ? do
+      strided <- eq ((k_block + 1) % vert_stride) 0 |> expand shape=[q_len, k_len]
+      local_or <- where local_block true strided
+      keep_homo <- and causal_block local_or
+      return reshape keep_homo shape=[1, 1, q_len, k_len]
+    : do
+      head_step_raw <- floor (vert_stride / (((H > 0) ? H : 1)))
+      head_step <- (head_step_raw > 0) ? head_step_raw : 1
+      head_idx <- arange q start=0 end=H |> reshape shape=[H, 1, 1]
+      k_block_h <- reshape k_block shape=[1, 1, k_len]
+      strided <- eq ((k_block_h + (head_idx * head_step) + 1) % vert_stride) 0 |> expand shape=[H, q_len, k_len]
+      local_h <- reshape local_block shape=[1, q_len, k_len] |> expand shape=[H, q_len, k_len]
+      causal_h <- reshape causal_block shape=[1, q_len, k_len] |> expand shape=[H, q_len, k_len]
+      local_or <- where local_h true strided
+      keep_h <- and causal_h local_or
+      return reshape keep_h shape=[1, H, q_len, k_len]
+  keep <- and keep (reshape causal_token shape=[1, 1, q_len, k_len])
+  keep <- expand keep shape=[B, H, q_len, k_len]
+  keep <- (padding_mask == null)
+    ? keep
+    : do
+      values, _ <- padding_mask
+      pad_keep <- cast values dtype="bool" |> reshape shape=[B, 1, 1, k_len]
+      return and keep pad_keep
+  return where keep 0.0 (dtype_value q "min")
