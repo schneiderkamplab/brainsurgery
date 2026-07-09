@@ -63,6 +63,7 @@ from .axon.codegen2_torch import (
     graph_main_output_names as _graph_main_output_names,
     make_runtime2_model_class as make_runtime2_torch_model_class,
 )
+from .axon.codegen2_vllm import emit_model_code_from_graph_ir as emit_vllm_model_code_from_graph_ir
 from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
 from .axon_runner_common import is_cuda_oom as _is_cuda_oom
 from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
@@ -90,6 +91,8 @@ def _default_graph_backend_intrinsics(
         return graph_backend_intrinsics
     if axon_backend == "codegen2-triton":
         return "codegen2-triton"
+    if axon_backend == "codegen2-vllm":
+        return "codegen2-vllm"
     return None
 
 
@@ -2976,8 +2979,27 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
 
 
 def _sync_device_output(value: Any) -> None:
+    """Force evaluation of lazy arrays and sync the device.
+
+    Handles MLX (``mx.eval``), JAX (``block_until_ready``), and torch
+    (``cuda/mps.synchronize``).  MLX operations are lazy: ``mx.eval(mx.array(0))``
+    does NOT evaluate the model output — we must explicitly eval the returned array.
+    """
+    try:
+        import mlx.core as mx
+        if isinstance(value, mx.array):
+            mx.eval(value)
+            return
+    except ImportError:
+        pass
     if hasattr(value, "block_until_ready"):
         value.block_until_ready()
+        return
+    if torch.is_tensor(value):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.synchronize()
         return
     if isinstance(value, dict):
         for item in value.values():
@@ -3002,6 +3024,8 @@ def _time_generate_repeated(
     def _sync() -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.synchronize()
         try:
             import mlx.core as mx
             mx.eval(mx.array(0))
@@ -3011,11 +3035,10 @@ def _time_generate_repeated(
     with timing(message=label):
         warmup_samples: list[float] = []
         for _ in range(warmup):
-            _sync_cuda()
+            _sync()
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
-            _sync_cuda()
             warmup_samples.append(time.perf_counter() - t0)
         samples: list[float] = []
         for _ in range(repeat):
@@ -3023,7 +3046,6 @@ def _time_generate_repeated(
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
-            _sync_cuda()
             samples.append(time.perf_counter() - t0)
     return out, sum(samples) / max(1, len(samples)), samples, warmup_samples
 
@@ -3038,9 +3060,12 @@ def _time_forward_repeated(
     warmup = max(0, int(warmup))
     repeat = max(1, int(repeat))
     out: Any = None
+
     def _sync() -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.synchronize()
         try:
             import mlx.core as mx
             mx.eval(mx.array(0))
@@ -3050,11 +3075,10 @@ def _time_forward_repeated(
     with timing(message=label):
         warmup_samples: list[float] = []
         for _ in range(warmup):
-            _sync_cuda()
+            _sync()
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
-            _sync_cuda()
             warmup_samples.append(time.perf_counter() - t0)
         samples: list[float] = []
         for _ in range(repeat):
@@ -3062,7 +3086,6 @@ def _time_forward_repeated(
             t0 = time.perf_counter()
             out = fn()
             _sync_device_output(out)
-            _sync_cuda()
             samples.append(time.perf_counter() - t0)
     return out, sum(samples) / max(1, len(samples)), samples, warmup_samples
 
@@ -3559,13 +3582,14 @@ def _run_axon_test_single(
         "codegen2-mlx",
         "codegen2-jax",
         "codegen2-triton",
+        "codegen2-vllm",
         "runtime2-torch",
         "pipeline2-torch",
     }
     if backend_token not in valid_backends:
         raise ValueError(
             "axon_backend must be 'codegen2-torch', 'codegen2-tinygrad', "
-            "'codegen2-mlx', 'codegen2-jax', 'codegen2-triton', 'runtime2-torch', "
+            "'codegen2-mlx', 'codegen2-jax', 'codegen2-triton', 'codegen2-vllm', 'runtime2-torch', "
             "or 'pipeline2-torch'"
         )
     axon_backend = backend_token
@@ -3757,6 +3781,13 @@ def _run_axon_test_single(
                 )
             elif axon_backend == "codegen2-triton":
                 code = emit_triton_model_code_from_graph_ir(
+                    graph_program,
+                    class_name=class_name,
+                    model_config=model_config,
+                    profile=profile_axon,
+                )
+            elif axon_backend == "codegen2-vllm":
+                code = emit_vllm_model_code_from_graph_ir(
                     graph_program,
                     class_name=class_name,
                     model_config=model_config,

@@ -102,6 +102,7 @@ _VALID_AXON_BENCHMARK_BACKENDS = {
     "codegen2-mlx",
     "codegen2-jax",
     "codegen2-triton",
+    "codegen2-vllm",
     "runtime2-torch",
     "pipeline2-torch",
 }

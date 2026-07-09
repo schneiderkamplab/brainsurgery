@@ -96,6 +96,7 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "cumsum",
     "_mlx_sdpa",
     "_mlx_rope",
+    "_mlx_rmsnorm_scaled",
 })
 
 NON_OBVIOUS_MLX_OPS: dict[str, str] = {}
@@ -196,17 +197,90 @@ def _path_joined(operand: Any) -> str | None:
     return joined or None
 
 
+def _inject_compiled_helpers(code: str) -> str:
+    gelu_pattern = r'0\.5 \* (\w+) \* \(1\.0 \+ mx\.tanh\(0\.7978845608028654 \* \(\1 \+ 0\.044715 \* \1 \* \1 \* \1\)\)\)'
+    has_gelu = bool(re.search(gelu_pattern, code))
+    softcap_pattern = (
+        r'(\w+) = \((\w+) / ([\d.]+)\)\n'
+        r'\s+\w+ = mx\.tanh\(\1\)\n'
+        r'\s+\w+ = \w+\n'
+        r'\s+(\w+) = \(\w+ \* \3\)'
+    )
+    has_softcap = bool(re.search(softcap_pattern, code))
+    if not has_gelu and not has_softcap:
+        return code
+    if has_gelu:
+        code = re.sub(gelu_pattern, r'_gelu_compiled(\1)', code)
+    if has_softcap:
+        code = re.sub(softcap_pattern, r'\4 = _logit_softcap_compiled(\3, \2)', code)
+    helpers = []
+    if has_gelu:
+        helpers.append(
+            "from functools import partial as _partial\n"
+            "def _gelu_impl(x):\n"
+            "    return (0.5) * x * ((1.0) + mx.tanh((0.7978845608028654) * (x + (0.044715) * x * x * x)))\n"
+            "_gelu_compiled = _partial(mx.compile, shapeless=True)(_gelu_impl)\n"
+        )
+    if has_softcap:
+        helpers.append(
+            "def _softcap_impl(softcap, x):\n"
+            "    return mx.tanh(x / softcap) * softcap\n"
+            "_logit_softcap_compiled = _partial(mx.compile, shapeless=True)(_softcap_impl)\n"
+        )
+    preamble = "\n".join(helpers) + "\n"
+    code = code.replace("class _KVCache:", preamble + "class _KVCache:", 1)
+    return code
+
+
 class _DirectMlxEmitter(_DirectTorchEmitter):
+    _MLX_CACHE_UPDATE_MODULES: frozenset[str] = frozenset({"Cache.update", "Cache.update_kv"})
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._static_param_ops: dict[str, str] = _collect_static_param_paths(self.program)
         self._emitted_module_attrs: list[str] = []
 
-    def emit(self) -> str:
-        return super().emit().replace(
-            f"class {self.class_name}(nn.Module):",
-            f"class {self.class_name}(nn.Module):",
+    def _can_inline_direct_module_call(
+        self,
+        callee: str,
+        *,
+        module_name: str,
+        attrs: Any,
+        visiting_inline: set[str] | None = None,
+    ) -> bool:
+        if callee in self._MLX_CACHE_UPDATE_MODULES:
+            return False
+        return super()._can_inline_direct_module_call(
+            callee,
+            module_name=module_name,
+            attrs=attrs,
+            visiting_inline=visiting_inline,
         )
+
+    def _emit_module(self, lines: list[str], module: Any) -> None:
+        if module.name in self._MLX_CACHE_UPDATE_MODULES:
+            self._emit_cache_update_module(lines, module)
+            return
+        super()._emit_module(lines, module)
+
+    def _emit_cache_update_module(self, lines: list[str], module: Any) -> None:
+        add = self._add
+        method_name = self.method_names[module.name]
+        add(lines, 4, f"def {method_name}(self, past=None, k=None, v=None):")
+        add(lines, 8, "if self._use_kv_cache and isinstance(past, _KVCache):")
+        add(lines, 12, "_keys, _values = past.update_and_fetch(k, v)")
+        add(lines, 12, "return ((_keys, _values, past),)")
+        add(lines, 8, "if self._use_kv_cache and past is None:")
+        add(lines, 12, "_kvc = _KVCache()")
+        add(lines, 12, "_keys, _values = _kvc.update_and_fetch(k, v)")
+        add(lines, 12, "return ((_keys, _values, _kvc),)")
+        add(lines, 8, "if past is None:")
+        add(lines, 12, "return ((k, v, (k, v)),)")
+        add(lines, 8, "_k_past, _v_past = past")
+        add(lines, 8, "_k_all = self._concat(_k_past, k, dim=-2)")
+        add(lines, 8, "_v_all = self._concat(_v_past, v, dim=-2)")
+        add(lines, 8, "return ((_k_all, _v_all, (_k_all, _v_all)),)")
+        add(lines, 4, "")
 
     def _emit_common(self, lines: list[str]) -> None:
         add = self._add
@@ -214,7 +288,13 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "super().__init__()")
         add(lines, 8, "object.__setattr__(self, '_flat_tensors', {})")
         add(lines, 8, "object.__setattr__(self, '_path_cache', {})")
+        add(lines, 8, "object.__setattr__(self, '_param_cache', {})")
+        add(lines, 8, "object.__setattr__(self, '_rope_freqs', {})")
+        add(lines, 8, "object.__setattr__(self, '_rope_inv_freqs', {})")
+        add(lines, 8, "object.__setattr__(self, '_rope_cached_off', None)")
+        add(lines, 8, "object.__setattr__(self, '_rope_cached_sin', None)")
         add(lines, 8, "object.__setattr__(self, '_compiled_fn', None)")
+        add(lines, 8, "object.__setattr__(self, '_use_kv_cache', True)")
         add(lines, 8, "object.__setattr__(self, 'config', dict(({} if _MODEL_CONFIG is None else _MODEL_CONFIG) if config is None else config))")
         add(lines, 8, "object.__setattr__(self, '_jit_enabled', False)")
         add(lines, 8, "object.__setattr__(self, '_quantized', False)")
@@ -234,7 +314,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 12, "with safe_open(str(path), framework='pt') as f:")
         add(lines, 16, "for key in f.keys():")
         add(lines, 20, "t = f.get_tensor(key)")
-        add(lines, 20, "state_dict[str(key)] = mx.array(t.float().numpy()) if t.dtype == __import__('torch').bfloat16 else mx.array(t.numpy())")
+        add(lines, 20, "state_dict[str(key)] = mx.array(t.float().numpy()).astype(mx.bfloat16) if t.dtype == __import__('torch').bfloat16 else mx.array(t.numpy())")
         add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config)")
         add(lines, 4, "")
         self._emit_load_state_dict(lines)
@@ -290,6 +370,38 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 4, "_render_path = staticmethod(_common_render_path)")
         add(lines, 4, "_require_value = staticmethod(_common_require_value)")
         add(lines, 4, "")
+        add(lines, 4, "def _mlx_rope_apply(self, x, sin, cos):")
+        add(lines, 8, "dim = x.shape[-1]")
+        add(lines, 8, "half = dim // 2")
+        add(lines, 8, "if dim not in self._rope_freqs:")
+        add(lines, 12, "S = sin.shape[2]")
+        add(lines, 12, "if S > 1:")
+        add(lines, 16, "inv_freq = mx.arctan2(sin[0, 0, 1, :half], cos[0, 0, 1, :half])")
+        add(lines, 16, "self._rope_inv_freqs[dim] = inv_freq")
+        add(lines, 16, "self._rope_freqs[dim] = mx.where(inv_freq == 0, mx.inf, 1.0 / inv_freq)")
+        add(lines, 12, "else:")
+        add(lines, 16, "x1 = x[..., :half]")
+        add(lines, 16, "x2 = x[..., half:]")
+        add(lines, 16, "rotated = mx.concatenate([-x2, x1], axis=-1)")
+        add(lines, 16, "return x * cos.astype(x.dtype) + rotated * sin.astype(x.dtype)")
+        add(lines, 8, "freqs = self._rope_freqs[dim]")
+        add(lines, 8, "inv_freq = self._rope_inv_freqs[dim]")
+        add(lines, 8, "S = sin.shape[2]")
+        add(lines, 8, "if S > 1:")
+        add(lines, 12, "return mx.fast.rope(x, dim, traditional=False, base=None, scale=1.0, offset=0, freqs=freqs)")
+        add(lines, 8, "else:")
+        add(lines, 12, "sid = id(sin)")
+        add(lines, 12, "if sid == self._rope_cached_sin and self._rope_cached_off is not None:")
+        add(lines, 16, "offset = self._rope_cached_off")
+        add(lines, 12, "else:")
+        add(lines, 16, "angles = mx.arctan2(sin[0, 0, 0, :half], cos[0, 0, 0, :half])")
+        add(lines, 16, "ratios = mx.where(inv_freq > 1e-10, angles / inv_freq, mx.array(0.0))")
+        add(lines, 16, "offset = mx.max(ratios).astype(mx.int32)")
+        add(lines, 16, "self._rope_cached_off = offset")
+        add(lines, 16, "self._rope_cached_sin = sid")
+        add(lines, 12, "return mx.fast.rope(x, dim, traditional=False, base=None, scale=1.0, offset=offset, freqs=freqs)")
+        add(lines, 4, "")
+        add(lines, 4, "")
         add(lines, 4, "def _path_template_part(self, value):")
         add(lines, 8, "cached = self._path_cache.get(value)")
         add(lines, 8, "if cached is not None:")
@@ -304,18 +416,32 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "return result")
         add(lines, 4, "")
         add(lines, 4, "def _param(self, path):")
+        add(lines, 8, "cached = self._param_cache.get(path)")
+        add(lines, 8, "if cached is not None:")
+        add(lines, 12, "return cached")
         add(lines, 8, "key = str(path).lstrip('@')")
         add(lines, 8, "if key in self._flat_tensors:")
-        add(lines, 12, "return self._flat_tensors[key]")
+        add(lines, 12, "result = self._flat_tensors[key]")
+        add(lines, 12, "self._param_cache[path] = result")
+        add(lines, 12, "return result")
         add(lines, 8, "self._materialize_expert_bank_for_path(key)")
-        add(lines, 8, "return _common_required_state_value(self._flat_tensors, path)")
+        add(lines, 8, "result = _common_required_state_value(self._flat_tensors, path)")
+        add(lines, 8, "self._param_cache[path] = result")
+        add(lines, 8, "return result")
         add(lines, 4, "")
         add(lines, 4, "def _optional_param(self, path):")
+        add(lines, 8, "cached = self._param_cache.get(path)")
+        add(lines, 8, "if cached is not None:")
+        add(lines, 12, "return cached")
         add(lines, 8, "key = str(path).lstrip('@')")
         add(lines, 8, "if key in self._flat_tensors:")
-        add(lines, 12, "return self._flat_tensors[key]")
+        add(lines, 12, "result = self._flat_tensors[key]")
+        add(lines, 12, "self._param_cache[path] = result")
+        add(lines, 12, "return result")
         add(lines, 8, "self._materialize_expert_bank_for_path(key)")
-        add(lines, 8, "return _common_optional_state_value(self._flat_tensors, path)")
+        add(lines, 8, "result = _common_optional_state_value(self._flat_tensors, path)")
+        add(lines, 8, "self._param_cache[path] = result")
+        add(lines, 8, "return result")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _collapse_one_numeric_segment(key):")
@@ -654,25 +780,27 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 4, "")
         add(lines, 4, "def forward(self, input_ids=None, **inputs):")
         add(lines, 8, "input_ids = self._to_mlx(input_ids, mx.int64) if input_ids is not None else None")
+        add(lines, 8, "_past_kv = inputs.pop('past_kv', None)")
+        add(lines, 8, "_use_cache = inputs.pop('use_cache', False)")
         add(lines, 8, "for _k, _v in list(inputs.items()):")
-        add(lines, 12, "if _k in ('use_cache', 'past_kv'):")
-        add(lines, 16, "continue")
         add(lines, 12, "inputs[_k] = self._to_mlx(_v)")
         add(lines, 8, "if self._compiled_fn is not None:")
-        add(lines, 12, "result = self._compiled_fn(input_ids, **inputs)")
+        add(lines, 12, "if _past_kv is not None:")
+        add(lines, 16, "_past_kv = _unwrap_kv_cache(_past_kv)")
+        add(lines, 12, "result = self._compiled_fn(input_ids, past_kv=_past_kv, use_cache=_use_cache, **inputs)")
         add(lines, 12, "if isinstance(result, (list, tuple)):")
         add(lines, 16, f"return {{{', '.join(f'{name!r}: result[{idx}]' for idx, name in enumerate(names))}}}")
         add(lines, 12, "return result")
-        add(lines, 8, "return self._forward(input_ids, **inputs)")
+        add(lines, 8, "return self._forward(input_ids, past_kv=_past_kv, use_cache=_use_cache, **inputs)")
         add(lines, 4, "")
         add(lines, 4, "def compile(self, max_kv_length=2048):")
-        add(lines, 8, "\"\"\"Compile _forward with mx.compile and warmup KV shapes 0..max_kv_length.\"\"\"")
+        add(lines, 8, "\"\"\"Compile _forward with mx.compile.\"\"\"")
         add(lines, 8, "if self._compiled_fn is not None:")
         add(lines, 12, "return self._compiled_fn")
+        add(lines, 8, "object.__setattr__(self, '_use_kv_cache', False)")
         add(lines, 8, "self._compiled_fn = mx.compile(self._forward)")
-        add(lines, 8, "prompt_ids = mx.zeros((1, 1), dtype=mx.int64)")
         add(lines, 8, "kv = None")
-        add(lines, 8, "for length in range(1, max_kv_length + 1):")
+        add(lines, 8, "for length in range(1, min(max_kv_length + 1, 5)):")
         add(lines, 12, "inp = mx.array([[0]], dtype=mx.int64)")
         add(lines, 12, "result = self._compiled_fn(inp, past_kv=kv, use_cache=True)")
         add(lines, 12, "if isinstance(result, (list, tuple)):")
@@ -752,6 +880,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             if use_cache_name is not None:
                 add(lines, 8, f"kwargs.pop({use_cache_name!r}, None)")
             add(lines, 8, "generated = []")
+            add(lines, 8, "_kv_caches = None")
             if attention_name is not None:
                 add(lines, 8, "mask_capacity = int(out.shape[1]) + int(limit)")
                 add(lines, 8, "mask_store = mx.zeros((out.shape[0], mask_capacity), dtype=mx.int64)")
@@ -760,7 +889,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             add(lines, 8, "for step in range(limit):")
             add(lines, 12, "step_input = current[:, -1:] if cache is not None else current")
             add(lines, 12, "forward_kwargs = dict(kwargs)")
-            add(lines, 12, f"forward_kwargs[{cache_name!r}] = cache")
+            add(lines, 12, f"forward_kwargs[{cache_name!r}] = _kv_caches if _kv_caches is not None else cache")
             if use_cache_name is not None:
                 add(lines, 12, f"forward_kwargs[{use_cache_name!r}] = True")
             if attention_name is not None:
@@ -771,6 +900,8 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             add(lines, 16, "result = self._forward(step_input, **forward_kwargs)")
             add(lines, 12, "if isinstance(result, dict): cache = result.get(" + repr(cache_output_name) + ", cache)")
             add(lines, 12, "else: cache = result[1] if isinstance(result, (list, tuple)) and len(result) > 1 else cache")
+            add(lines, 12, "if _kv_caches is None and cache is not None:")
+            add(lines, 16, "_kv_caches = _wrap_kv_cache(cache)")
             add(lines, 12, "next_id = _next_id(_logits(result))")
             add(lines, 12, "next_id, finished = _apply_eos(next_id, eos, pad, finished)")
             add(lines, 12, "generated.append(next_id)")
@@ -848,6 +979,20 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             expert = args[5] if len(args) > 5 else "None"
             weight_leaf = args[6] if len(args) > 6 else "'weight'"
             bias_leaf = args[7] if len(args) > 7 else "'bias'"
+            if expert == "None":
+                if weight_leaf == "'weight'":
+                    w_expr = f"self._param(self._compose_path({args[0]}, {weight_leaf}))"
+                else:
+                    w_expr = f"self._param({weight_leaf})"
+                if transpose == "False":
+                    w_expr = f"{w_expr}.swapaxes(-1, -2)"
+                if bias == "False":
+                    return f"({args[1]} @ {w_expr})"
+                if bias_leaf == "'bias'":
+                    b_expr = f"self._optional_param(self._compose_path({args[0]}, {bias_leaf}))"
+                else:
+                    b_expr = f"self._optional_param({bias_leaf})"
+                return f"mx.addmm({b_expr}, {args[1]}, {w_expr})"
             return (
                 f"(lambda _w, _b: "
                 f"(mx.addmm(_b, {args[1]}, _w.swapaxes(-1, -2)) if _b is not None else ({args[1]} @ _w.swapaxes(-1, -2)))"
@@ -895,11 +1040,12 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         if primitive == "rmsnorm":
             x = args[0]
             eps = args[1] if len(args) > 1 else "1e-6"
-            cast_float = args[3] if len(args) > 3 else "False"
-            return (
-                f"(mx.fast.rms_norm({x}.astype(mx.float32), None, float({eps})).astype({x}.dtype) "
-                f"if {cast_float} else mx.fast.rms_norm({x}, None, float({eps})))"
-            )
+            return f"mx.fast.rms_norm({x}, None, float({eps}))"
+        if primitive == "_mlx_rmsnorm_scaled":
+            x = args[0]
+            scale = args[1]
+            eps = args[2]
+            return f"mx.fast.rms_norm({x}, self._param({scale}), float({eps}))"
         if primitive == "tensor_like":
             dtype = args[2] if len(args) > 2 else "None"
             return f"({args[0]}.astype(self._dtype_from_name({dtype}) or {args[1]}.dtype) if isinstance({args[0]}, mx.array) else mx.array({args[0]}, dtype=(self._dtype_from_name({dtype}) or {args[1]}.dtype)))"
@@ -920,6 +1066,8 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             dim = f"(({args[1]})+{ndim})%{ndim}"
             return f"({args[0]})[(slice(None),)*({dim}) + (slice({args[2]}, {args[3]}),) + (slice(None),)*({ndim}-({dim})-1)]"
         if primitive == "_mlx_rope":
+            if len(args) >= 4:
+                return f"self._mlx_rope_apply({args[0]}, {args[2]}, {args[3]})"
             return f"mx.fast.rope({args[0]}, dims={args[0]}.shape[-1], traditional=bool({args[1]}))"
         if primitive == "params_has_root":
             return f"any(k == {args[0]} or k.startswith(str({args[0]}) + '.') for k in self._flat_tensors)"
@@ -1109,7 +1257,7 @@ def emit_model_code_from_graph_ir(
         )
     emitter = _DirectMlxEmitter(program=graph, class_name=class_name, profile=profile)
     body = emitter.emit()
-    return "\n".join(
+    code = "\n".join(
         [
             "from __future__ import annotations",
             "",
@@ -1128,9 +1276,77 @@ def emit_model_code_from_graph_ir(
             "",
             f"_MODEL_CONFIG = {model_config!r}",
             "",
+            "class _KVCache:",
+            '    """Pre-allocated KV cache buffer — O(n) vs O(n²) for concatenate."""',
+            "    step = 256",
+            "    def __init__(self):",
+            "        self.keys = None",
+            "        self.values = None",
+            "        self.offset = 0",
+            "        self._k_view = None",
+            "        self._v_view = None",
+            "    def update_and_fetch(self, keys, values):",
+            "        prev = self.offset",
+            "        if self.keys is None or (prev + keys.shape[2]) > self.keys.shape[2]:",
+            "            B, n_kv_heads, _, k_head_dim = keys.shape",
+            "            v_head_dim = values.shape[3]",
+            "            n_steps = (self.step + keys.shape[2] - 1) // self.step",
+            "            k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)",
+            "            v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)",
+            "            new_k = mx.zeros(k_shape, keys.dtype)",
+            "            new_v = mx.zeros(v_shape, values.dtype)",
+            "            if self.keys is not None:",
+            "                if prev % self.step != 0:",
+            "                    self.keys = self.keys[..., :prev, :]",
+            "                    self.values = self.values[..., :prev, :]",
+            "                self.keys = mx.concatenate([self.keys, new_k], axis=2)",
+            "                self.values = mx.concatenate([self.values, new_v], axis=2)",
+            "            else:",
+            "                self.keys, self.values = new_k, new_v",
+            "        self.offset += keys.shape[2]",
+            "        self.keys[..., prev:self.offset, :] = keys",
+            "        self.values[..., prev:self.offset, :] = values",
+            "        self._k_view = self.keys[..., :self.offset, :]",
+            "        self._v_view = self.values[..., :self.offset, :]",
+            "        return self._k_view, self._v_view",
+            "    def __getitem__(self, idx):",
+            "        if idx == 0: return self._k_view",
+            "        if idx == 1: return self._v_view",
+            "        raise IndexError(idx)",
+            "",
+            "def _wrap_kv_cache(new_kv):",
+            '    """Convert concatenate-based cache to _KVCache objects."""',
+            "    if new_kv is None:",
+            "        return None",
+            "    caches = []",
+            "    for layer_cache in new_kv:",
+            "        if layer_cache is None:",
+            "            caches.append(None)",
+            "            continue",
+            "        k, v = layer_cache[0], layer_cache[1]",
+            "        kvc = _KVCache()",
+            "        kvc.update_and_fetch(k, v)",
+            "        caches.append(kvc)",
+            "    return caches",
+            "",
+            "def _unwrap_kv_cache(kv):",
+            '    """Convert _KVCache objects to plain tuples for mx.compile."""',
+            "    if kv is None:",
+            "        return None",
+            "    result = []",
+            "    for layer in kv:",
+            "        if layer is None:",
+            "            result.append(None)",
+            "        elif isinstance(layer, _KVCache):",
+            "            result.append((layer._k_view, layer._v_view))",
+            "        else:",
+            "            result.append(layer)",
+            "    return result",
+            "",
             body,
         ]
     )
+    return _inject_compiled_helpers(code)
 
 
 def torch_state_dict_to_mlx(state_dict: dict[str, Any]) -> dict[str, Any]:

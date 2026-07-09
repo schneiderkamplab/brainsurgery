@@ -135,6 +135,7 @@ class GraphSdpaGqaFact:
     additive_mask: str
     keep: str
     default_scale: bool = True
+    scale: GraphProvenance | None = None  # None = default 1/sqrt(HD)
 
 
 @dataclass(frozen=True)
@@ -1014,7 +1015,9 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     if scores is None or scale is None:
         return None
     if not _is_default_scale(scale):
-        return None
+        is_default = False
+    else:
+        is_default = True
     q_name, k_name = _match_qk_scores(scores)
     if q_name is None or k_name is None:
         return None
@@ -1024,7 +1027,8 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
         v=v_name,
         additive_mask=additive_mask_name,
         keep=keep_name,
-        default_scale=True,
+        default_scale=is_default,
+        scale=None if is_default else scale,
     )
 
 
@@ -1057,18 +1061,20 @@ def _standard_sdpa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     if additive_keep is None or additive_keep != keep_name:
         return None
     scores, scale = _match_binary_op(scores_scaled, "core.binary.*")
-    if scores is None or scale is None or not _is_default_scale(scale):
+    if scores is None or scale is None:
         return None
     q_name, k_name = _match_standard_qk_scores(scores)
     if q_name is None or k_name is None:
         return None
+    is_default = _is_default_scale(scale)
     return GraphSdpaGqaFact(
         q=q_name,
         k=k_name,
         v=v_name,
         additive_mask=keep_name,
         keep=keep_name,
-        default_scale=True,
+        default_scale=is_default,
+        scale=None if is_default else scale,
     )
 
 

@@ -132,6 +132,32 @@ These are narrow helpers for previously investigated benchmark clusters.
 | `scripts/run_gemma4_affected_benchmark_py.py` | Runs selected Gemma4/Gemma4-MoE affected rows through `run_axon_benchmark`. | Uses a default top-level `log-gemma4-*` path; prefer overriding to `log/<run-id>`. |
 | `scripts/run_gemma4_moe_g45.py` | Targeted Gemma4 MoE derived-experts benchmark. | Legacy one-off; top-level log path. |
 | `scripts/run_rope_freqscale_max10b.py` | Targeted RoPE/frequency-scaling benchmark up to 10B. | Legacy one-off; top-level log path. |
+| `scripts/bench_gemma4_e2b_gpu_sweep.py` | Sweep `google/gemma-4-E2B-it` across `max_len` and Axon GPU backends (`torch`, `torch-compile`, `mlx`, `mlx-compile`) on Apple Silicon. | Writes `log/<run-id>/sweep_summary.csv` + per-run `stream.csv`/logs. |
+
+Example:
+
+```bash
+conda run --no-capture-output -n brainsurgery python scripts/bench_gemma4_e2b_gpu_sweep.py \
+  --run-id gemma4-e2b-it-gpu-sweep-<date> \
+  --lens 64,128,256,512 --backends torch,torch-compile,mlx,mlx-compile \
+  --device mps --dtype bfloat16 --warmup 1 --repeat 3
+```
+
+## Demo Scripts
+
+| Script | Purpose | Notes |
+|---|---|---|
+| `scripts/stream_tokens.py` | Stream model tokens to the terminal at actual generation speed for side-by-side speed demos. | Uses `run_axon_test` to measure, then replays tokens at measured per-token rate. `--quiet` suppresses benchmark diagnostics. Supports `--backend hf\|torch\|torch-compile\|mlx\|mlx-compile`. |
+
+Example:
+
+```bash
+# HF reference (slow, ~20 tok/s):
+conda run -n brainsurgery python scripts/stream_tokens.py --backend hf --quiet
+
+# Axon MLX+compile (fast, ~52 tok/s):
+conda run -n brainsurgery python scripts/stream_tokens.py --backend mlx-compile --quiet
+```
 
 ## Legacy Launch/Render Helpers
 
