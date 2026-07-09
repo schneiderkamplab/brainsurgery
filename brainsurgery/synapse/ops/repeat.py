@@ -44,6 +44,18 @@ def _expr_to_dim_token(expr: Any, helpers: Any, seen: frozenset[str] = frozenset
     return token
 
 
+def _expr_to_int(expr: Any, helpers: Any) -> int | None:
+    token = _expr_to_dim_token(expr, helpers)
+    if type(token) is int:
+        return token
+    raw = _unwrap_expr(expr)
+    if isinstance(raw, AxonExprInt):
+        return raw.value
+    if type(raw) is int:
+        return raw
+    return None
+
+
 def type_rule(
     *,
     arg_types: tuple[Any, ...],
@@ -61,12 +73,8 @@ def type_rule(
     repeats = _expr_to_dim_token(args[1], helpers)
     if repeats is None:
         return None
-    raw_dim = _unwrap_expr(args[2])
-    if isinstance(raw_dim, AxonExprInt):
-        dim_value = raw_dim.value
-    elif isinstance(raw_dim, int):
-        dim_value = raw_dim
-    else:
+    dim_value = _expr_to_int(args[2], helpers)
+    if dim_value is None:
         return None
     rank = len(dims)
     dim = dim_value if dim_value >= 0 else rank + dim_value

@@ -72,6 +72,7 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
 
 def _stream_rows(run_dir: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
+    rows.extend(_read_csv_rows(run_dir / "results.csv"))
     for path in sorted(run_dir.rglob("stream.csv")):
         rows.extend(_read_csv_rows(path))
     return rows
@@ -316,6 +317,10 @@ def _parent_running(run_dir: Path) -> tuple[list[RunningJob], datetime | None]:
     for line in _iter_lines(_parent_log_paths(run_dir)):
         start = _PARENT_START_RE.search(line)
         if start:
+            if first_ts is None:
+                parts = line.split(maxsplit=2)
+                if len(parts) >= 2:
+                    first_ts = _parse_time(f"{parts[0]} {parts[1]}")
             key = (start.group("index"), start.group("backend") or "")
             backend = start.group("backend") or ""
             lane = _display_lane(start.group("device") or "worker")

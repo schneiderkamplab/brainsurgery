@@ -344,19 +344,7 @@ deepseek_v4_router@path hidden_states input_ids is_hash = do
 
 deepseek_v4_experts :: Path -> Tensor[B,S,MODEL_DIM] -> Any -> Any -> Tensor[B,S,MODEL_DIM]
 deepseek_v4_experts@path hidden_states weights indices = do
-  routed <- hidden_states * 0.0
-  routed <- for e <- [0..NUM_EXPERTS) carry (routed) do
-    selected, token_idx, topk_pos, sel_scores <- MoE.select hidden_states weights indices e
-    gate_up <- NN.linear@experts selected dim=(2 * MOE_DIM) bias=false expert=e weight_path=@experts.gate_up_proj
-    gate, up <- Tensor.chunk gate_up dim=-1 parts=2
-    gate <- clamp gate max=SWIGLU_LIMIT
-    up <- clamp up min=(0.0 - SWIGLU_LIMIT) max=SWIGLU_LIMIT
-    gate <- silu gate
-    upd <- gate * up
-    upd <- NN.linear@experts upd dim=MODEL_DIM bias=false expert=e weight_path=@experts.down_proj
-    routed <- MoE.scatter_add routed token_idx upd sel_scores
-    yield routed
-  return routed
+  return MoE.grouped_clamped_swiglu_ffn_basic hidden_states weights indices NUM_EXPERTS SWIGLU_LIMIT gate_up_weight=@experts.gate_up_proj out_weight=@experts.down_proj
 
 deepseek_v4_mlp :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor.TokenIds[B,S] -> String -> Tensor[B,S,MODEL_DIM]
 deepseek_v4_mlp@path x input_ids mlp_type = do

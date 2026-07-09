@@ -5,8 +5,9 @@ import re
 import time
 from difflib import unified_diff
 from contextlib import contextmanager
-from dataclasses import replace
-from typing import Mapping
+from dataclasses import fields, is_dataclass, replace
+from pathlib import Path
+from typing import Any, Mapping
 
 from ..analysis import PurityEffect, axon_expr_effect
 from ..ast import (
@@ -48,17 +49,20 @@ from ..ast import (
     TypeDim,
     TypeExpr,
     TypeList,
+    TypeNamed,
     TypeNull,
     TypeOptional,
     TypePath,
     TypeTensor,
     TypeTuple,
+    TypeVar,
     ast_equal,
 )
 from ..ast.render import render_axon_file
 from ..entrypoint import resolve_main_module
 from ..resolve import prune_unreachable_definitions
 from ..typecheck2 import typecheck2_flat_axon_file
+from ..typecheck_shared import _is_generated_dim_name
 from ..validate import (
     validate_flat_axon_file,
     validate_typed_axon_file,
@@ -1670,12 +1674,74 @@ def _is_non_effectful_expr(expr: AxonExpr) -> bool:
     return axon_expr_effect(expr) != PurityEffect.EFFECTFUL
 
 
+def _control_name_uses_expr(expr: AxonExpr, names: set[str]) -> None:
+    if isinstance(expr, AxonExprIf | AxonExprTernary):
+        names.update(_expr_names(expr.cond))
+        _control_name_uses_expr(expr.true_expr, names)
+        _control_name_uses_expr(expr.false_expr, names)
+        return
+    if isinstance(expr, AxonExprBinary):
+        _control_name_uses_expr(expr.left, names)
+        _control_name_uses_expr(expr.right, names)
+        return
+    if isinstance(expr, AxonExprBind):
+        _control_name_uses_expr(expr.value, names)
+        _control_name_uses_expr(expr.body, names)
+        return
+    if isinstance(expr, AxonExprCall):
+        for arg in expr.args:
+            _control_name_uses_expr(arg, names)
+        for value in expr.kwargs.values():
+            if isinstance(value, AxonExpr):
+                _control_name_uses_expr(value, names)
+        return
+    if isinstance(expr, AxonExprDo):
+        _control_name_uses_stmts(expr.body, names)
+        return
+    if isinstance(expr, AxonExprLambda):
+        _control_name_uses_expr(expr.body, names)
+        return
+    if isinstance(expr, AxonExprAscribe):
+        _control_name_uses_expr(expr.expr, names)
+        return
+    if isinstance(expr, AxonExprList | AxonExprTuple):
+        for item in expr.items:
+            _control_name_uses_expr(item, names)
+        return
+    if isinstance(expr, AxonExprParen):
+        _control_name_uses_expr(expr.inner, names)
+        return
+    if isinstance(expr, AxonExprPipe):
+        _control_name_uses_expr(expr.value, names)
+        for stage in expr.stages:
+            _control_name_uses_expr(stage, names)
+
+
+def _control_name_uses_stmts(statements: tuple[AxonStatement, ...], names: set[str]) -> None:
+    for stmt in statements:
+        if isinstance(stmt, AxonBind):
+            _control_name_uses_expr(stmt.expr, names)
+        elif isinstance(stmt, AxonReturn | AxonYield):
+            for value in stmt.values:
+                _control_name_uses_expr(value, names)
+        elif isinstance(stmt, AxonCond):
+            names.update(_expr_names(stmt.cond))
+            _control_name_uses_stmts(stmt.true_body, names)
+            _control_name_uses_stmts(stmt.false_body, names)
+        elif isinstance(stmt, AxonRepeat):
+            _control_name_uses_stmts(stmt.body, names)
+        elif isinstance(stmt, AxonScopeBind):
+            _control_name_uses_stmts(stmt.body, names)
+
+
 def _inline_atomic_alias_statements(
     statements: tuple[AxonStatement, ...],
 ) -> tuple[AxonStatement, ...]:
     with _opt_debug_time("inline_atomic_alias_statements"):
         counts: dict[str, int] = {}
         _count_name_uses_stmts(statements, counts)
+        control_names: set[str] = set()
+        _control_name_uses_stmts(statements, control_names)
         return_names = _return_position_names(statements)
         subst: dict[str, AxonExpr] = {}
         rewritten: list[AxonStatement] = []
@@ -1687,6 +1753,7 @@ def _inline_atomic_alias_statements(
                 and current.targets[0] != "_"
                 and _is_atomic_expr(current.expr)
                 and counts.get(current.targets[0], 0) <= 1
+                and current.targets[0] not in control_names
                 and (isinstance(current.expr, AxonExprName) or current.targets[0] not in return_names)
             ):
                 subst[current.targets[0]] = current.expr
@@ -3764,6 +3831,108 @@ def _prune_unreachable_modules(program: AxonFile, *, main_module: str | None) ->
         )
 
 
+def _generated_symbol_alpha_key(value: Any) -> Any:
+    """Canonical key that ignores only fresh generated type/dim symbol names."""
+
+    dim_names: dict[str, str] = {}
+    type_names: dict[str, str] = {}
+
+    def _canon_dim(dim: DimToken) -> DimToken:
+        if isinstance(dim, str):
+            if _is_generated_dim_name(dim):
+                variadic = dim.startswith("..")
+                inner = dim[2:] if variadic else dim
+                mapped = dim_names.get(inner)
+                if mapped is None:
+                    mapped = f"__gen_dim_{len(dim_names) + 1}"
+                    dim_names[inner] = mapped
+                return f"..{mapped}" if variadic else mapped
+            return dim
+        if isinstance(dim, int):
+            return dim
+        return DimExprBinary(op=dim.op, left=_canon_dim(dim.left), right=_canon_dim(dim.right))
+
+    def _canon_type(tp: TypeExpr | None) -> Any:
+        if tp is None:
+            return None
+        if isinstance(tp, TypeOptional):
+            return ("TypeOptional", _canon_type(tp.inner))
+        if isinstance(tp, TypeList):
+            return ("TypeList", _canon_type(tp.item))
+        if isinstance(tp, TypeTuple):
+            return ("TypeTuple", tuple(_canon_type(item) for item in tp.items))
+        if isinstance(tp, TypeTensor):
+            return ("TypeTensor", tp.base, tuple(_canon_dim(dim) for dim in tp.dims))
+        if isinstance(tp, TypeNamed):
+            return ("TypeNamed", tp.name, tuple(_canon_dim(dim) for dim in tp.args))
+        if isinstance(tp, TypeVar):
+            if _is_generated_dim_name(tp.name) or "::" in tp.name:
+                mapped = type_names.get(tp.name)
+                if mapped is None:
+                    mapped = f"__gen_type_{len(type_names) + 1}"
+                    type_names[tp.name] = mapped
+                return ("TypeVar", mapped)
+            return ("TypeVar", tp.name)
+        return (type(tp).__name__,)
+
+    def _canon_constraint_operand(operand: Any) -> Any:
+        if isinstance(operand, tuple):
+            return tuple(_canon_constraint_operand(item) for item in operand)
+        if isinstance(operand, str | int | bool) or operand is None:
+            return _canon_dim(operand) if isinstance(operand, str | int | DimExprBinary) else operand
+        if isinstance(operand, DimExprBinary):
+            return _canon_dim(operand)
+        return _canon(operand)
+
+    def _canon(inner: Any) -> Any:
+        if isinstance(inner, Path):
+            return str(inner)
+        if isinstance(inner, TypeOptional | TypeList | TypeTuple | TypeTensor | TypeNamed | TypeVar):
+            return _canon_type(inner)
+        if isinstance(inner, DimExprBinary):
+            return _canon_dim(inner)
+        if isinstance(inner, Constraint):
+            return (
+                "Constraint",
+                inner.relation,
+                _canon_constraint_operand(inner.left),
+                _canon_constraint_operand(inner.right),
+                tuple(_canon(item) for item in inner.guards),
+            )
+        if isinstance(inner, AxonFile):
+            return (
+                "AxonFile",
+                tuple(_canon(module) for module in inner.modules),
+                inner.imports,
+                tuple((k, v) for k, v in inner.imported_members.items()),
+                inner.exports,
+                tuple((k, _canon(v)) for k, v in inner.pragmas.items()),
+                tuple((k, _canon(v)) for k, v in inner.type_aliases.items()),
+            )
+        if is_dataclass(inner):
+            return (
+                type(inner).__name__,
+                tuple(
+                    (field.name, _canon(getattr(inner, field.name)))
+                    for field in fields(inner)
+                    if not (type(inner).__name__ == "AxonFile" and field.name == "origin_path")
+                ),
+            )
+        if isinstance(inner, tuple):
+            return tuple(_canon(item) for item in inner)
+        if isinstance(inner, list):
+            return tuple(_canon(item) for item in inner)
+        if isinstance(inner, dict):
+            return tuple((key, _canon(val)) for key, val in inner.items())
+        return inner
+
+    return _canon(value)
+
+
+def _ast_equal_mod_generated_symbols(left: Any, right: Any) -> bool:
+    return _generated_symbol_alpha_key(left) == _generated_symbol_alpha_key(right)
+
+
 def optimize_flat_typed_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
     program = _prune_unreachable_modules(program, main_module=main_module)
     validate_typed_axon_file(program, main_module=main_module)
@@ -3870,10 +4039,21 @@ def optimize_safe_flat_typed_axon_file(
             ),
         )
         validate_flat_axon_file(rewritten, main_module=selected_main)
+        if ast_equal(current, rewritten):
+            validate_typed_axon_file(current, main_module=selected_main)
+            return current
+        try:
+            validate_typed_axon_file(rewritten, main_module=selected_main)
+        except ValueError:
+            pass
+        else:
+            current = prune_unreachable_definitions(rewritten, entrypoint=selected_main)
+            validate_typed_axon_file(current, main_module=selected_main)
+            continue
         retyped = typecheck2_flat_axon_file(rewritten, main_module=selected_main)
         retyped = prune_unreachable_definitions(retyped, entrypoint=selected_main)
         validate_typed_axon_file(retyped, main_module=selected_main)
-        if ast_equal(current, retyped):
+        if ast_equal(current, retyped) or _ast_equal_mod_generated_symbols(current, retyped):
             return retyped
         current = retyped
     raise RuntimeError(

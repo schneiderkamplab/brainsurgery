@@ -65,7 +65,7 @@ mask_to_additive :: Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> Tensor[B,H,Q,K]
 mask_to_additive ref keep = Tensor.where keep (Tensor.zeros_like ref) (Tensor.min_like ref)
 
 
-mask_to_additive_for_input :: Tensor[B,Q] -> Tensor[B,HM,Q,K] -> Dim -> ?String -> Tensor[B,H,Q,K]
+mask_to_additive_for_input :: Tensor[B,Q] -> Tensor[B,HM,Q,K] -> Dim -> ?String -> Tensor[B,heads,Q,K]
 mask_to_additive_for_input ref keep heads ?dtype="float32" = do
   zero <- Tensor.zeros ref shape=[B, heads, Q, K] dtype=dtype
   return Tensor.where keep zero (Tensor.min_like zero)
@@ -124,6 +124,14 @@ attention_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sink_lo
   return fp32_compute ? (Tensor.cast out dtype="float32") : out
 
 
+attention_gqa_apply_sink_logits :: Tensor[B,H,Q,1] -> Dim -> Tensor[B,KVH,G,Q,K] -> Tensor[B,KVH,G,Q,K]
+attention_gqa_apply_sink_logits sink_logits groups probs_in = do
+  sink_logits_g <- ((Tensor.reshape sink_logits shape=[B, KVH, groups, Q, 1]) :: Tensor[B,KVH,G,Q,1])
+  combined <- concat probs_in sink_logits_g dim=-1
+  row_max, _ <- Tensor.topk combined 1 dim=-1 largest=true sorted=false
+  return combined - row_max
+
+
 attention_gqa_with_additive_mask :: Tensor[B,H,Q,HD] -> Tensor[B,KVH,K,HD] -> Tensor[B,KVH,K,VD] -> Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,VD]
 attention_gqa_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null ?zero_masked_after_softmax=true ?fp32_compute=false = do
   groups <- ((H / KVH) :: Dim)
@@ -142,10 +150,7 @@ attention_gqa_with_additive_mask q k v mask keep ?rel_bias=null ?scale=null ?sin
   mask_g <- ((Tensor.reshape mask shape=[B, KVH, groups, Q, K]) :: Tensor[B,KVH,H / KVH,Q,K])
   probs_in <- scores + mask_g
   probs_in <- (rel_bias == null) ? probs_in : (probs_in + (Tensor.reshape rel_bias shape=[B, KVH, groups, Q, K]))
-  probs_in <- (sink_logits == null) ? probs_in : do
-    combined <- concat probs_in (Tensor.reshape sink_logits shape=[B, KVH, groups, Q, 1]) dim=-1
-    row_max, _ <- Tensor.topk combined 1 dim=-1 largest=true sorted=false
-    return combined - row_max
+  probs_in <- (sink_logits == null) ? probs_in : attention_gqa_apply_sink_logits sink_logits groups probs_in
   probs <- fp32_compute ? (softmax probs_in dim=-1 dtype="float32") : (softmax probs_in dim=-1)
   K <- Tensor.size v dim=-2
   probs <- slice probs dim=-1 start=0 end=K
