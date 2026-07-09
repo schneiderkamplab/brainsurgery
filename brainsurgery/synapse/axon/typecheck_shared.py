@@ -288,6 +288,18 @@ def _substitute_type_dims(
     return tp
 
 
+def _substitute_type_vars(tp: TypeExpr, *, subst: Mapping[str, TypeExpr]) -> TypeExpr:
+    if isinstance(tp, TypeVar):
+        return _clone_type_expr(subst.get(tp.name, tp))
+    if isinstance(tp, TypeOptional):
+        return TypeOptional(inner=_substitute_type_vars(tp.inner, subst=subst))
+    if isinstance(tp, TypeList):
+        return TypeList(item=_substitute_type_vars(tp.item, subst=subst))
+    if isinstance(tp, TypeTuple):
+        return TypeTuple(items=tuple(_substitute_type_vars(item, subst=subst) for item in tp.items))
+    return tp
+
+
 def _has_variadic_dims(dims: tuple[DimToken, ...]) -> bool:
     return any(isinstance(dim, str) and dim.startswith("..") for dim in dims)
 
@@ -2273,6 +2285,45 @@ def _collect_statement_dim_names(statements: tuple[AxonStatement, ...]) -> set[s
     return names
 
 
+def _collect_statement_bound_names(statements: tuple[AxonStatement, ...]) -> set[str]:
+    names: set[str] = set()
+
+    def _visit_stmt(stmt: AxonStatement) -> None:
+        if isinstance(stmt, AxonBind):
+            names.update(target for target in stmt.targets if target != "_")
+            return
+        if isinstance(stmt, AxonCond):
+            for item in stmt.true_body:
+                _visit_stmt(item)
+            for item in stmt.false_body:
+                _visit_stmt(item)
+            return
+        if isinstance(stmt, AxonRepeat):
+            names.add(stmt.var)
+            names.update(target for target in (stmt.targets or ()) if target != "_")
+            names.update(name for name in (stmt.carry or ()) if name != "_")
+            for item in stmt.body:
+                _visit_stmt(item)
+            return
+        if isinstance(stmt, AxonScopeBind):
+            names.update(target for target in stmt.targets if target != "_")
+            for item in stmt.body:
+                _visit_stmt(item)
+
+    for statement in statements:
+        _visit_stmt(statement)
+    return names
+
+
+def _module_bound_value_names(module: AxonDefinition) -> frozenset[str]:
+    names = {param.name for param in module.params}
+    names.update(module.path_params)
+    if module.path_param is not None:
+        names.add(module.path_param)
+    names.update(_collect_statement_bound_names(module.statements))
+    return frozenset(names)
+
+
 def _bind_header_dim_preferences_from_tokens(
     expected: DimToken,
     actual: DimToken,
@@ -4067,15 +4118,16 @@ def _normalize_expr(
             expr.type_expr, ctx, preferred_dim_roots
         )
         assert normalized_type_expr is not None
+        normalized_type_expr = _expand_alias(normalized_type_expr, ctx)
         return _replace_expr_annotations(
             replace(
                 expr,
                 expr=_normalize_expr(expr.expr, ctx, preferred_dim_roots=preferred_dim_roots),
                 type_expr=normalized_type_expr,
             ),
-            inferred_type=inferred_type,
+            inferred_type=normalized_type_expr,
             inferred_arity=inferred_arity,
-            inferred_dims=inferred_dims,
+            inferred_dims=_type_dims(normalized_type_expr, ctx),
         )
     if isinstance(expr, AxonExprDo):
         return _replace_expr_annotations(
@@ -4160,10 +4212,18 @@ def _normalize_statement(
 
 
 def _substitute_expr_dim_names(
-    expr: AxonExpr, *, subst: Mapping[str, DimToken | tuple[DimToken, ...]]
+    expr: AxonExpr,
+    *,
+    subst: Mapping[str, DimToken | tuple[DimToken, ...]],
+    type_subst: Mapping[str, TypeExpr] | None = None,
+    protected_names: frozenset[str] = frozenset(),
 ) -> AxonExpr:
     def sub_type(tp: TypeExpr | None) -> TypeExpr | None:
-        return _substitute_type_dims(tp, subst=subst) if tp is not None else None
+        if tp is None:
+            return None
+        if type_subst:
+            tp = _substitute_type_vars(tp, subst=type_subst)
+        return _substitute_type_dims(tp, subst=subst)
 
     def sub_dims(dims: tuple[DimToken, ...] | None) -> tuple[DimToken, ...] | None:
         if dims is None:
@@ -4190,7 +4250,7 @@ def _substitute_expr_dim_names(
         )
 
     if isinstance(expr, AxonExprName):
-        mapped = subst.get(expr.name)
+        mapped = None if expr.name in protected_names else subst.get(expr.name)
         if isinstance(mapped, str):
             return retag(replace(expr, name=mapped))
         if isinstance(mapped, int):
@@ -4200,14 +4260,27 @@ def _substitute_expr_dim_names(
         kwargs: dict[str, AxonKwargValue] = {}
         for key, raw_value in expr.kwargs.items():
             kwargs[key] = (
-                _substitute_expr_dim_names(raw_value, subst=subst)
+                _substitute_expr_dim_names(
+                    raw_value,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                )
                 if isinstance(raw_value, AxonExpr)
                 else raw_value
             )
         return retag(
             replace(
                 expr,
-                args=tuple(_substitute_expr_dim_names(arg, subst=subst) for arg in expr.args),
+                args=tuple(
+                    _substitute_expr_dim_names(
+                        arg,
+                        subst=subst,
+                        type_subst=type_subst,
+                        protected_names=protected_names,
+                    )
+                    for arg in expr.args
+                ),
                 kwargs=kwargs,
             )
         )
@@ -4215,91 +4288,244 @@ def _substitute_expr_dim_names(
         return retag(
             replace(
                 expr,
-                items=tuple(_substitute_expr_dim_names(item, subst=subst) for item in expr.items),
+                items=tuple(
+                    _substitute_expr_dim_names(
+                        item,
+                        subst=subst,
+                        type_subst=type_subst,
+                        protected_names=protected_names,
+                    )
+                    for item in expr.items
+                ),
             )
         )
     if isinstance(expr, AxonExprBinary):
         return retag(
             replace(
                 expr,
-                left=_substitute_expr_dim_names(expr.left, subst=subst),
-                right=_substitute_expr_dim_names(expr.right, subst=subst),
+                left=_substitute_expr_dim_names(
+                    expr.left,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                ),
+                right=_substitute_expr_dim_names(
+                    expr.right,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                ),
             )
         )
     if isinstance(expr, AxonExprIf | AxonExprTernary):
         return retag(
             replace(
                 expr,
-                cond=_substitute_expr_dim_names(expr.cond, subst=subst),
-                true_expr=_substitute_expr_dim_names(expr.true_expr, subst=subst),
-                false_expr=_substitute_expr_dim_names(expr.false_expr, subst=subst),
+                cond=_substitute_expr_dim_names(
+                    expr.cond,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                ),
+                true_expr=_substitute_expr_dim_names(
+                    expr.true_expr,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                ),
+                false_expr=_substitute_expr_dim_names(
+                    expr.false_expr,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                ),
             )
         )
     if isinstance(expr, AxonExprAscribe):
+        ascribed_type = sub_type(expr.type_expr) or expr.type_expr
+        inferred_type = sub_type(expr.inferred_type) or ascribed_type
+        return _replace_expr_annotations(
+            replace(
+                expr,
+                expr=_substitute_expr_dim_names(
+                    expr.expr,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                ),
+                type_expr=ascribed_type,
+            ),
+            inferred_type=inferred_type,
+            inferred_arity=1,
+            inferred_dims=sub_dims(expr.inferred_dims),
+        )
+    if isinstance(expr, AxonExprParen):
         return retag(
             replace(
                 expr,
-                expr=_substitute_expr_dim_names(expr.expr, subst=subst),
-                type_expr=_substitute_type_dims(expr.type_expr, subst=subst),
+                inner=_substitute_expr_dim_names(
+                    expr.inner,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                ),
             )
         )
-    if isinstance(expr, AxonExprParen):
-        return retag(replace(expr, inner=_substitute_expr_dim_names(expr.inner, subst=subst)))
     if isinstance(expr, AxonExprBind):
         return retag(
             replace(
                 expr,
-                value=_substitute_expr_dim_names(expr.value, subst=subst),
-                body=_substitute_expr_dim_names(expr.body, subst=subst),
+                value=_substitute_expr_dim_names(
+                    expr.value,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                ),
+                body=_substitute_expr_dim_names(
+                    expr.body,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names | frozenset({expr.var}),
+                ),
             )
         )
     if isinstance(expr, AxonExprLambda):
-        return retag(replace(expr, body=_substitute_expr_dim_names(expr.body, subst=subst)))
+        return retag(
+            replace(
+                expr,
+                body=_substitute_expr_dim_names(
+                    expr.body,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names | frozenset({expr.var}),
+                ),
+            )
+        )
     if isinstance(expr, AxonExprDo):
         return retag(
             replace(
                 expr,
-                body=tuple(_substitute_statement_dim_names(stmt, subst=subst) for stmt in expr.body),
+                body=tuple(
+                    _substitute_statement_dim_names(
+                        stmt,
+                        subst=subst,
+                        type_subst=type_subst,
+                        protected_names=protected_names,
+                    )
+                    for stmt in expr.body
+                ),
             )
         )
     return retag(expr)
 
 
 def _substitute_statement_dim_names(
-    stmt: AxonStatement, *, subst: Mapping[str, DimToken | tuple[DimToken, ...]]
+    stmt: AxonStatement,
+    *,
+    subst: Mapping[str, DimToken | tuple[DimToken, ...]],
+    type_subst: Mapping[str, TypeExpr] | None = None,
+    protected_names: frozenset[str] = frozenset(),
 ) -> AxonStatement:
     if isinstance(stmt, AxonBind):
-        return replace(stmt, expr=_substitute_expr_dim_names(stmt.expr, subst=subst))
+        return replace(
+            stmt,
+            expr=_substitute_expr_dim_names(
+                stmt.expr,
+                subst=subst,
+                type_subst=type_subst,
+                protected_names=protected_names,
+            ),
+        )
     if isinstance(stmt, AxonReturn | AxonYield):
         return replace(
             stmt,
-            values=tuple(_substitute_expr_dim_names(value, subst=subst) for value in stmt.values),
+            values=tuple(
+                _substitute_expr_dim_names(
+                    value,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                )
+                for value in stmt.values
+            ),
         )
     if isinstance(stmt, AxonCond):
         return replace(
             stmt,
-            cond=_substitute_expr_dim_names(stmt.cond, subst=subst),
-            true_body=tuple(_substitute_statement_dim_names(item, subst=subst) for item in stmt.true_body),
-            false_body=tuple(_substitute_statement_dim_names(item, subst=subst) for item in stmt.false_body),
+            cond=_substitute_expr_dim_names(
+                stmt.cond,
+                subst=subst,
+                type_subst=type_subst,
+                protected_names=protected_names,
+            ),
+            true_body=tuple(
+                _substitute_statement_dim_names(
+                    item,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                )
+                for item in stmt.true_body
+            ),
+            false_body=tuple(
+                _substitute_statement_dim_names(
+                    item,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                )
+                for item in stmt.false_body
+            ),
         )
     if isinstance(stmt, AxonRepeat):
         return replace(
             stmt,
-            from_expr=_substitute_expr_dim_names(stmt.from_expr, subst=subst),
-            to_expr=_substitute_expr_dim_names(stmt.to_expr, subst=subst),
-            step_expr=_substitute_expr_dim_names(stmt.step_expr, subst=subst),
-            body=tuple(_substitute_statement_dim_names(item, subst=subst) for item in stmt.body),
+            from_expr=_substitute_expr_dim_names(
+                stmt.from_expr,
+                subst=subst,
+                type_subst=type_subst,
+                protected_names=protected_names,
+            ),
+            to_expr=_substitute_expr_dim_names(
+                stmt.to_expr,
+                subst=subst,
+                type_subst=type_subst,
+                protected_names=protected_names,
+            ),
+            step_expr=_substitute_expr_dim_names(
+                stmt.step_expr,
+                subst=subst,
+                type_subst=type_subst,
+                protected_names=protected_names,
+            ),
+            body=tuple(
+                _substitute_statement_dim_names(
+                    item,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names | frozenset({stmt.var}),
+                )
+                for item in stmt.body
+            ),
         )
     if isinstance(stmt, AxonScopeBind):
         return replace(
             stmt,
             kwargs={
-                key: _substitute_expr_dim_names(value, subst=subst)
+                key: _substitute_expr_dim_names(value, subst=subst, type_subst=type_subst)
                 if isinstance(value, AxonExpr)
                 else value
                 for key, value in stmt.kwargs.items()
             },
-            body=tuple(_substitute_statement_dim_names(item, subst=subst) for item in stmt.body),
+            body=tuple(
+                _substitute_statement_dim_names(
+                    item,
+                    subst=subst,
+                    type_subst=type_subst,
+                    protected_names=protected_names,
+                )
+                for item in stmt.body
+            ),
         )
     return stmt
 
@@ -4318,8 +4544,13 @@ def _normalize_module(
         raw_params, normalized_statements
     )
     if header_dim_preferences:
+        module_bound_names = _module_bound_value_names(module)
         normalized_statements = tuple(
-            _substitute_statement_dim_names(stmt, subst=header_dim_preferences)
+            _substitute_statement_dim_names(
+                stmt,
+                subst=header_dim_preferences,
+                protected_names=module_bound_names,
+            )
             for stmt in normalized_statements
         )
     param_type_refinements = _collect_param_type_refinements_from_uses(
@@ -4328,7 +4559,7 @@ def _normalize_module(
     preferred_dim_roots = _preferred_dim_roots_for_module(
         ctx,
         _preferred_module_dim_names(raw_params, refined_return),
-        _collect_statement_dim_names(normalized_statements),
+        set() if _is_generated_helper(module.name) else _collect_statement_dim_names(normalized_statements),
     )
     if preferred_dim_roots:
         normalized_statements = tuple(
@@ -4418,8 +4649,13 @@ def _normalize_module(
         collect_signature_subst(raw_param.type_expr, normalized_param_type)
     collect_signature_subst(refined_return, normalized_return_type)
     if signature_dim_subst:
+        module_bound_names = _module_bound_value_names(module)
         normalized_statements = tuple(
-            _substitute_statement_dim_names(stmt, subst=signature_dim_subst)
+            _substitute_statement_dim_names(
+                stmt,
+                subst=signature_dim_subst,
+                protected_names=module_bound_names,
+            )
             for stmt in normalized_statements
         )
     return replace(
@@ -4467,7 +4703,11 @@ def _typed_module_raw(
             )
             for param in module.params
         ]
-        expected_returns = _module_return_types(module, module_ctx, freshen_generics=False)
+        expected_returns = (
+            None
+            if _is_generated_helper(module.name)
+            else _module_return_types(module, module_ctx, freshen_generics=False)
+        )
     else:
         scoped_param_types = [tp for tp in shared_signature[0][len(module.path_params) :]]
         expected_returns = tuple(shared_signature[1])
@@ -5033,6 +5273,39 @@ def _apply_callsite_param_refinements(
     if not refinements:
         return module
     refined_params: list[AxonParam] = []
+    dim_subst: dict[str, DimToken | tuple[DimToken, ...]] = {}
+    type_subst: dict[str, TypeExpr] = {}
+
+    def collect_body_subst(current: TypeExpr | None, refined: TypeExpr | None) -> None:
+        if current is None or refined is None:
+            return
+        if isinstance(current, TypeOptional) and isinstance(refined, TypeOptional):
+            collect_body_subst(current.inner, refined.inner)
+            return
+        if isinstance(current, TypeOptional):
+            collect_body_subst(current.inner, refined)
+            return
+        if isinstance(refined, TypeOptional):
+            collect_body_subst(current, refined.inner)
+            return
+        if isinstance(current, TypeVar) and not isinstance(refined, TypeVar):
+            type_subst.setdefault(current.name, _clone_type_expr(refined))
+            return
+        if isinstance(current, TypeList) and isinstance(refined, TypeList):
+            collect_body_subst(current.item, refined.item)
+            return
+        if isinstance(current, TypeTuple) and isinstance(refined, TypeTuple):
+            for current_item, refined_item in zip(current.items, refined.items, strict=False):
+                collect_body_subst(current_item, refined_item)
+            return
+        if isinstance(current, TypeTensor) and isinstance(refined, TypeTensor):
+            _bind_dim_tokens(current.dims, refined.dims, subst=dim_subst)
+            return
+        if isinstance(current, TypeNamed) and isinstance(refined, TypeNamed):
+            if current.name != refined.name or len(current.args) != len(refined.args):
+                return
+            _bind_dim_tokens(current.args, refined.args, subst=dim_subst)
+
     for param in module.params:
         refined = refinements.get(param.name)
         if refined is None:
@@ -5081,7 +5354,30 @@ def _apply_callsite_param_refinements(
                 type_expr=_apply_subst(joined, join_ctx),
             )
         )
-    return replace(module, params=tuple(refined_params))
+        collect_body_subst(current, _apply_subst(joined, join_ctx))
+    return replace(
+        module,
+        params=tuple(refined_params),
+        statements=tuple(
+            _substitute_statement_dim_names(
+                statement,
+                subst=dim_subst,
+                type_subst=type_subst,
+                protected_names=_module_bound_value_names(module),
+            )
+            for statement in module.statements
+        )
+        if dim_subst or type_subst
+        else module.statements,
+        return_type_expr=(
+            _substitute_type_dims(
+                _substitute_type_vars(module.return_type_expr, subst=type_subst),
+                subst=dim_subst,
+            )
+            if module.return_type_expr is not None and (dim_subst or type_subst)
+            else module.return_type_expr
+        ),
+    )
 
 
 def _loop_helper_return_arity(module: AxonDefinition) -> int:
@@ -5118,11 +5414,7 @@ def _prefer_signature_interface(
                 collect_dim_subst(old_item, new_item, out)
             return
         if isinstance(old_tp, TypeTensor) and isinstance(new_tp, TypeTensor):
-            if len(old_tp.dims) != len(new_tp.dims):
-                return
-            for old_dim, new_dim in zip(old_tp.dims, new_tp.dims, strict=True):
-                if isinstance(old_dim, str) and old_dim != new_dim:
-                    out.setdefault(old_dim, new_dim)
+            _bind_dim_tokens(old_tp.dims, new_tp.dims, subst=out)
             return
         if isinstance(old_tp, TypeNamed) and isinstance(new_tp, TypeNamed):
             if old_tp.name != new_tp.name or len(old_tp.args) != len(new_tp.args):
@@ -5150,7 +5442,11 @@ def _prefer_signature_interface(
         module,
         params=tuple(params),
         statements=tuple(
-            _substitute_statement_dim_names(statement, subst=dim_subst)
+            _substitute_statement_dim_names(
+                statement,
+                subst=dim_subst,
+                protected_names=_module_bound_value_names(module),
+            )
             for statement in module.statements
         )
         if dim_subst
@@ -5476,7 +5772,7 @@ def _apply_global_generated_callsite_refinements(program: AxonFile) -> tuple[Axo
     changed = False
     refined_modules: list[AxonDefinition] = []
     for module in program.modules:
-        if not _is_generated_helper(module.name) or _is_loop_helper(module.name):
+        if not _is_generated_helper(module.name):
             refined_modules.append(module)
             continue
         refined = _apply_callsite_param_refinements(
@@ -5605,6 +5901,7 @@ def _specialize_module_from_callsite(
     module: AxonDefinition, callsite: _CallsiteTypes
 ) -> AxonDefinition:
     dim_subst: dict[str, DimToken | tuple[DimToken, ...]] = {}
+    type_subst: dict[str, TypeExpr] = {}
 
     def collect_dim_subst(old_tp: TypeExpr | None, new_tp: TypeExpr | None) -> None:
         if isinstance(old_tp, TypeOptional) and isinstance(new_tp, TypeOptional):
@@ -5619,16 +5916,15 @@ def _specialize_module_from_callsite(
         if isinstance(old_tp, TypeList) and isinstance(new_tp, TypeList):
             collect_dim_subst(old_tp.item, new_tp.item)
             return
+        if isinstance(old_tp, TypeVar) and new_tp is not None and not isinstance(new_tp, TypeVar):
+            type_subst.setdefault(old_tp.name, _clone_type_expr(new_tp))
+            return
         if isinstance(old_tp, TypeTuple) and isinstance(new_tp, TypeTuple):
             for old_item, new_item in zip(old_tp.items, new_tp.items, strict=False):
                 collect_dim_subst(old_item, new_item)
             return
         if isinstance(old_tp, TypeTensor) and isinstance(new_tp, TypeTensor):
-            if len(old_tp.dims) != len(new_tp.dims):
-                return
-            for old_dim, new_dim in zip(old_tp.dims, new_tp.dims, strict=True):
-                if isinstance(old_dim, str) and old_dim != new_dim:
-                    dim_subst.setdefault(old_dim, new_dim)
+            _bind_dim_tokens(old_tp.dims, new_tp.dims, subst=dim_subst)
             return
         if isinstance(old_tp, TypeNamed) and isinstance(new_tp, TypeNamed):
             if old_tp.name != new_tp.name or len(old_tp.args) != len(new_tp.args):
@@ -5660,13 +5956,33 @@ def _specialize_module_from_callsite(
         module,
         params=tuple(params),
         statements=tuple(
-            _substitute_statement_dim_names(statement, subst=dim_subst)
+            _substitute_statement_dim_names(
+                statement,
+                subst=dim_subst,
+                type_subst=type_subst,
+                protected_names=_module_bound_value_names(module),
+            )
             for statement in module.statements
         )
-        if dim_subst
+        if dim_subst or type_subst
         else module.statements,
-        return_type_expr=_return_type_from_callsite_result(preferred_return)
-        or module.return_type_expr,
+        return_type_expr=(
+            _substitute_type_dims(
+                _substitute_type_vars(
+                    _return_type_from_callsite_result(preferred_return) or module.return_type_expr,
+                    subst=type_subst,
+                ),
+                subst=dim_subst,
+            )
+            if (dim_subst or type_subst)
+            and (
+                _return_type_from_callsite_result(preferred_return)
+                or module.return_type_expr
+            )
+            is not None
+            else _return_type_from_callsite_result(preferred_return)
+            or module.return_type_expr
+        ),
     )
 
 

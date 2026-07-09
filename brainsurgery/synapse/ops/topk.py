@@ -45,6 +45,8 @@ def type_rule(
         axis_value = raw_axis.value
     elif isinstance(raw_axis, int):
         axis_value = raw_axis
+    elif type(getattr(raw_axis, "value", None)) is int:
+        axis_value = raw_axis.value
     else:
         return None
     rank = len(input_dims)

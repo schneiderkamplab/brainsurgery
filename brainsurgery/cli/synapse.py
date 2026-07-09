@@ -74,6 +74,7 @@ def _dump_axon_stage_to_text(
     show_domain: bool,
     show_provenance: bool,
     graph_backend_intrinsics: str | None,
+    debug_optimize_timings: bool = False,
     builtins_overlays: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     module = _axon_module()
@@ -137,7 +138,10 @@ def _dump_axon_stage_to_text(
         if optimize_graph:
             graph_program = optimize_graph_fn(
                 graph_program,
-                config=graph_optimize_config_cls(backend_intrinsics=graph_backend_intrinsics),
+                config=graph_optimize_config_cls(
+                    backend_intrinsics=graph_backend_intrinsics,
+                    debug_timings=debug_optimize_timings,
+                ),
             )
         graph_axon = graph_to_axon_fn(graph_program)
         definition_comments: dict[str, tuple[str, ...]] = {}
@@ -174,6 +178,7 @@ def _axon_graph_ir_to_dot(
     direction: str,
     show_data_labels: bool,
     show_control_flow: bool,
+    debug_optimize_timings: bool = False,
     builtins_overlays: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     module = _axon_module()
@@ -199,7 +204,10 @@ def _axon_graph_ir_to_dot(
     if optimize_graph:
         graph = optimize_graph_fn(
             graph,
-            config=graph_optimize_config_cls(backend_intrinsics=graph_backend_intrinsics),
+            config=graph_optimize_config_cls(
+                backend_intrinsics=graph_backend_intrinsics,
+                debug_timings=debug_optimize_timings,
+            ),
         )
     return render_dot_fn(
         graph,
@@ -230,6 +238,7 @@ def _axon_codegen_dump_to_text(
     weights: Path | None,
     profile: bool,
     align_devices: bool = False,
+    debug_optimize_timings: bool = False,
     builtins_overlays: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     axon_module = _axon_module()
@@ -284,7 +293,10 @@ def _axon_codegen_dump_to_text(
     if optimize_graph:
         graph = optimize_graph_fn(
             graph,
-            config=graph_optimize_config_cls(backend_intrinsics=graph_backend_intrinsics),
+            config=graph_optimize_config_cls(
+                backend_intrinsics=graph_backend_intrinsics,
+                debug_timings=debug_optimize_timings,
+            ),
         )
 
     if backend == "codegen2-torch":
@@ -438,6 +450,11 @@ def axon_stage_dump(
             "Default keeps Graph IR backend-neutral."
         ),
     ),
+    debug_optimize_timings: bool = typer.Option(
+        False,
+        "--debug-optimize-timings/--no-debug-optimize-timings",
+        help="Print graph optimizer phase timings to stderr.",
+    ),
     builtins_overlays: list[str] = typer.Option(
         [],
         "--builtins-overlay",
@@ -489,6 +506,7 @@ def axon_stage_dump(
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
+            debug_optimize_timings=debug_optimize_timings,
             builtins_overlays=builtins_overlays,
             show_types=show_types,
             show_purity=show_purity,
@@ -547,6 +565,11 @@ def axon_graph_ir_dot(
             "Default keeps Graph IR backend-neutral."
         ),
     ),
+    debug_optimize_timings: bool = typer.Option(
+        False,
+        "--debug-optimize-timings/--no-debug-optimize-timings",
+        help="Print graph optimizer phase timings to stderr.",
+    ),
     builtins_overlays: list[str] = typer.Option(
         [],
         "--builtins-overlay",
@@ -592,6 +615,7 @@ def axon_graph_ir_dot(
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
             builtins_overlays=builtins_overlays,
+            debug_optimize_timings=debug_optimize_timings,
             direction=direction,
             show_data_labels=show_data_labels,
             show_control_flow=show_control_flow,
@@ -670,6 +694,11 @@ def axon_codegen_dump(
             "Default keeps Graph IR backend-neutral."
         ),
     ),
+    debug_optimize_timings: bool = typer.Option(
+        False,
+        "--debug-optimize-timings/--no-debug-optimize-timings",
+        help="Print graph optimizer phase timings to stderr.",
+    ),
     builtins_overlays: list[str] = typer.Option(
         [],
         "--builtins-overlay",
@@ -710,6 +739,7 @@ def axon_codegen_dump(
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
             builtins_overlays=builtins_overlays,
+            debug_optimize_timings=debug_optimize_timings,
             backend=backend,
             class_name=class_name,
             checkpoint=checkpoint,
@@ -894,7 +924,7 @@ def axon_test(
         help="Force HF floating tensors to exactly match --dtype and disable HF quantization overrides when needed.",
     ),
     oom_cpu_fallback: bool = typer.Option(
-        True,
+        False,
         "--oom-cpu-fallback/--no-oom-cpu-fallback",
         help="On CUDA OOM, retry HF/Axon on CPU (disable to fail fast on OOM).",
     ),
@@ -1222,7 +1252,7 @@ def axon_benchmark(
         help="Force HF floating tensors to exactly match --dtype and disable HF quantization overrides when needed.",
     ),
     oom_cpu_fallback: bool = typer.Option(
-        True,
+        False,
         "--oom-cpu-fallback/--no-oom-cpu-fallback",
         help="On CUDA OOM, retry HF/Axon on CPU (disable to fail fast on OOM).",
     ),

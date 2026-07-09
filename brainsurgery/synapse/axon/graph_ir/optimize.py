@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import math
 import hashlib
+import os
+import sys
+import time
+from contextlib import contextmanager
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -78,6 +82,7 @@ from .substitute import (
     replace_constraint_refs,
     rename_operand,
     replace_operand_refs,
+    _resolved_dim_token_operand,
     substitute_dim_token,
     substitute_graph_module_dims,
     substitute_graph_node_dims,
@@ -98,6 +103,7 @@ class GraphOptimizeConfig:
     inline_safe: bool = True
     backend_intrinsics: str | None = None
     max_iterations: int = 64
+    debug_timings: bool = False
 
 
 _SPECIALIZE_MODES = {"off", "single-callsite", "monomorphize"}
@@ -169,6 +175,32 @@ _BACKEND_INTRINSIC_PREFIX_BY_TARGET = {
 }
 _BACKEND_INTRINSIC_TARGETS = {None, *_BACKEND_INTRINSICS_BY_TARGET}
 _SMALL_INLINE_NODE_LIMIT = 4
+
+
+def _debug_optimize_timings_enabled(config: GraphOptimizeConfig) -> bool:
+    if config.debug_timings:
+        return True
+    return os.environ.get("AXON_GRAPH_OPT_TIMINGS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _graph_node_count(graph: GraphProgram) -> int:
+    return sum(len(module.nodes) for module in graph.modules)
+
+
+@contextmanager
+def _graph_opt_timing(enabled: bool, *, iteration: int | None, phase: str, graph: GraphProgram | None = None):
+    start = time.perf_counter() if enabled else 0.0
+    try:
+        yield
+    finally:
+        if enabled:
+            elapsed = time.perf_counter() - start
+            prefix = "[graph-opt]"
+            iter_text = "setup" if iteration is None else f"iter={iteration}"
+            size_text = ""
+            if graph is not None:
+                size_text = f" modules={len(graph.modules)} nodes={_graph_node_count(graph)}"
+            print(f"{prefix} {iter_text} phase={phase} seconds={elapsed:.6f}{size_text}", file=sys.stderr)
 
 
 def _normalize_backend_intrinsic_name(name: str, *, target: str) -> str:
@@ -489,6 +521,23 @@ def _maybe_rewrite_node_to_assign_slice(
     src = _provenance_to_graph_operand(src_prov, provenance_to_operand=provenance_to_operand)
     if base is None or dim is None or fill_value is None or src is None:
         return None
+    fill_dtype = None
+    if len(index_prov.args) >= 3:
+        fill_dtype_operand = _provenance_to_graph_operand(
+            index_prov.args[2],
+            provenance_to_operand=provenance_to_operand,
+        )
+        if isinstance(fill_dtype_operand, GraphLiteral):
+            fill_dtype = fill_dtype_operand.value
+    if (
+        isinstance(fill_dtype, str)
+        and fill_dtype.strip().lower() in {"int", "int32", "int64", "long"}
+        and isinstance(fill_value, GraphLiteral)
+        and isinstance(fill_value.value, int | float)
+        and not isinstance(fill_value.value, bool)
+        and float(fill_value.value).is_integer()
+    ):
+        fill_value = GraphLiteral(value=int(fill_value.value), type_expr=TypeInt())
     base_type = getattr(base, "type_expr", None)
     if base_type is None or not graph_type_compatible(node.outputs[0].type_expr, base_type):
         return None
@@ -3177,6 +3226,9 @@ def _find_op_provenance(
     op_name: str,
     memo: dict[tuple[str, int, object], object] | None = None,
 ) -> GraphProvenance | None:
+    if memo is not None:
+        indexed = _provenance_op_index(root, memo).get(op_name, ())
+        return indexed[0] if indexed else None
     key = ("find_op", id(root), op_name)
     if memo is not None and key in memo:
         found = memo[key]
@@ -3196,6 +3248,58 @@ def _find_op_provenance(
     if memo is not None:
         memo[key] = None
     return None
+
+
+def _provenance_op_index(
+    root: GraphProvenance,
+    memo: dict[tuple[str, int, object], object],
+) -> Mapping[str, tuple[GraphProvenance, ...]]:
+    key = ("op_index", id(root), None)
+    cached = memo.get(key)
+    if isinstance(cached, dict):
+        return cached
+    index: dict[str, list[GraphProvenance]] = {}
+    seen: set[int] = set()
+
+    def visit(provenance: GraphProvenance) -> None:
+        provenance_id = id(provenance)
+        if provenance_id in seen:
+            return
+        seen.add(provenance_id)
+        if provenance.kind == "op" and provenance.op is not None:
+            index.setdefault(provenance.op, []).append(provenance)
+        for arg in provenance.args:
+            visit(arg)
+
+    visit(root)
+    frozen = {op: tuple(values) for op, values in index.items()}
+    memo[key] = frozen
+    return frozen
+
+
+def _graph_operand_op_names(operand: GraphOperand) -> set[str]:
+    if not isinstance(operand, GraphExpr):
+        return set()
+    names = {operand.op.name}
+    for child in operand.inputs:
+        names.update(_graph_operand_op_names(child))
+    for child in operand.attrs.values():
+        names.update(_graph_operand_op_names(child))
+    return names
+
+
+def _graph_op_names(graph: GraphProgram) -> set[str]:
+    names: set[str] = set()
+    for module in graph.modules:
+        for node in module.nodes:
+            names.add(node.op.name)
+            for operand in node.inputs:
+                names.update(_graph_operand_op_names(operand))
+            for operand in node.attrs.values():
+                names.update(_graph_operand_op_names(operand))
+        for output in module.outputs:
+            names.update(_graph_operand_op_names(output))
+    return names
 
 
 def _match_packed_swiglu_linear_provenance(
@@ -4502,12 +4606,15 @@ def _torch_selected_expert_relu2_candidate(
 
 
 def _has_torch_selected_expert_intrinsic_candidates(graph: GraphProgram) -> bool:
-    del graph
     # This is only a cost prefilter; the rewrite itself is guarded by
-    # primitive-level provenance.  Wrapper-preserving optimized graphs may not
-    # expose `_expert_linear` as a direct node op even when provenance proves the
-    # selected-expert pattern, so do not reject here based on surface op names.
-    return True
+    # primitive-level provenance.  Selected-expert candidates may use either
+    # banked expert linear primitives or ordinary path-templated linear
+    # primitives inside an expert loop.  `_where_indices` alone is not enough and
+    # would trigger expensive no-op provenance searches in unrelated indexing
+    # code.
+    # Do not filter on module names or higher-level helper definitions.
+    names = _graph_op_names(graph)
+    return "_where_indices" in names and ("_expert_linear" in names or "_linear" in names)
 
 
 def _rewrite_torch_selected_expert_intrinsics(
@@ -5916,6 +6023,7 @@ def _validate_optimizer_call_result(
         actuals,
         len(call.outputs) if isinstance(call, GraphNode) else 1,
         dim_values=dim_values,
+        modules_by_name=modules_by_name,
     )
     actual_types = (
         tuple(output.type_expr for output in call.outputs)
@@ -6223,6 +6331,10 @@ def _destructured_list_output_types(
 def _type_contains_inference_var(type_expr: TypeExpr) -> bool:
     if isinstance(type_expr, TypeAny | TypeVar):
         return True
+    if _is_graph_type_variable_like(type_expr):
+        return True
+    if isinstance(type_expr, TypeTensor):
+        return any(isinstance(dim, str) and dim.startswith("..") for dim in type_expr.dims)
     if isinstance(type_expr, TypeOptional):
         return _type_contains_inference_var(type_expr.inner)
     if isinstance(type_expr, TypeList):
@@ -6239,6 +6351,12 @@ def _type_contains_unbound_dim(type_expr: TypeExpr, bound_dim_names: set[str]) -
             for dim in type_expr.dims
             for name in dim_token_names(dim)
         )
+    if isinstance(type_expr, TypeNamed):
+        return any(
+            isinstance(name, str) and (name.startswith("..") or name not in bound_dim_names)
+            for dim in type_expr.args
+            for name in dim_token_names(dim)
+        )
     if isinstance(type_expr, TypeOptional):
         return _type_contains_unbound_dim(type_expr.inner, bound_dim_names)
     if isinstance(type_expr, TypeList):
@@ -6246,6 +6364,45 @@ def _type_contains_unbound_dim(type_expr: TypeExpr, bound_dim_names: set[str]) -
     if isinstance(type_expr, TypeTuple):
         return any(_type_contains_unbound_dim(item, bound_dim_names) for item in type_expr.items)
     return False
+
+
+def _module_bound_dim_names(module: GraphModule) -> set[str]:
+    def add_constraint_operand(operand: ConstraintOperand | None, out: set[str]) -> None:
+        if operand is None:
+            return
+        if isinstance(operand, tuple):
+            for item in operand:
+                add_constraint_operand(item, out)
+            return
+        out.update(dim_token_names(operand))
+
+    def add_constraint(constraint: Constraint, out: set[str]) -> None:
+        add_constraint_operand(constraint.left, out)
+        add_constraint_operand(constraint.right, out)
+        for guard in constraint.guards:
+            add_constraint(guard, out)
+
+    names: set[str] = set()
+    for value in module.inputs:
+        names.update(_type_dim_refs(value.type_expr))
+        if value.dims is not None:
+            for dim in value.dims:
+                names.update(dim_token_names(dim))
+        if isinstance(value.type_expr, TypeDim):
+            names.add(value.name)
+    for constraint in module.constraints:
+        add_constraint(constraint, names)
+    return {name for name in names if isinstance(name, str)}
+
+
+def _module_return_type_needs_body_inference(module: GraphModule) -> bool:
+    return (
+        module.return_type_expr is not None
+        and (
+            _type_contains_inference_var(module.return_type_expr)
+            or _type_contains_unbound_dim(module.return_type_expr, _module_bound_dim_names(module))
+        )
+    )
 
 
 def _type_references_any_dim_name(type_expr: TypeExpr | None, names: set[str]) -> bool:
@@ -6449,7 +6606,7 @@ def _refine_select_inputs_from_condition(
 def _module_output_types(module: GraphModule) -> tuple[TypeExpr, ...]:
     if (
         module.return_type_expr is not None
-        and not _type_contains_inference_var(module.return_type_expr)
+        and not _module_return_type_needs_body_inference(module)
     ):
         return _result_types(module.return_type_expr, len(module.outputs))
     return tuple(graph_operand_type(output) for output in module.outputs)
@@ -6458,7 +6615,7 @@ def _module_output_types(module: GraphModule) -> tuple[TypeExpr, ...]:
 def _module_output_types_for_arity(module: GraphModule, output_count: int) -> tuple[TypeExpr, ...]:
     if (
         module.return_type_expr is not None
-        and not _type_contains_inference_var(module.return_type_expr)
+        and not _module_return_type_needs_body_inference(module)
     ):
         return _result_types(module.return_type_expr, output_count)
     if output_count == 1 and len(module.outputs) == 1:
@@ -6486,6 +6643,10 @@ def _is_plain_dim_symbol(dim: DimToken) -> bool:
 
 
 def _choose_dim_representative(left: DimToken, right: DimToken) -> DimToken:
+    if _is_plain_dim_symbol(left) and type(right) is int:
+        return left
+    if _is_plain_dim_symbol(right) and type(left) is int:
+        return right
     if type(left) is int or type(right) is int:
         return left if type(left) is int else right
     if isinstance(left, str) and _is_plain_dim_symbol(left) and not isinstance(right, str):
@@ -6693,6 +6854,59 @@ def _bind_type_dim_map(
             )
 
 
+def _is_graph_type_variable_like(type_expr: TypeExpr) -> bool:
+    return isinstance(type_expr, TypeVar) or (
+        isinstance(type_expr, TypeNamed)
+        and not type_expr.args
+        and (type_expr.name.startswith("_") or type_expr.name[:1].isupper())
+    )
+
+
+def _type_variable_name(type_expr: TypeExpr) -> str | None:
+    if isinstance(type_expr, TypeVar):
+        return type_expr.name
+    if isinstance(type_expr, TypeNamed) and not type_expr.args:
+        return type_expr.name
+    return None
+
+
+def _bind_type_variable_map(
+    formal: TypeExpr,
+    actual: TypeExpr,
+    type_map: dict[str, TypeExpr],
+) -> None:
+    if _is_graph_type_variable_like(formal):
+        name = _type_variable_name(formal)
+        if name is None or isinstance(actual, TypeAny):
+            return
+        existing = type_map.get(name)
+        if existing is None:
+            type_map[name] = actual
+            return
+        type_map[name] = _refined_compatible_type(existing, actual)
+        return
+    if isinstance(formal, TypeOptional) and isinstance(actual, TypeOptional):
+        _bind_type_variable_map(formal.inner, actual.inner, type_map)
+        return
+    if isinstance(formal, TypeOptional):
+        _bind_type_variable_map(formal.inner, actual, type_map)
+        return
+    if isinstance(actual, TypeOptional):
+        _bind_type_variable_map(formal, actual.inner, type_map)
+        return
+    if isinstance(formal, TypeList) and isinstance(actual, TypeList):
+        _bind_type_variable_map(formal.item, actual.item, type_map)
+        return
+    if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple):
+        for formal_item, actual_item in zip(formal.items, actual.items, strict=False):
+            _bind_type_variable_map(formal_item, actual_item, type_map)
+        return
+    if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor):
+        return
+    if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed) and formal.name == actual.name:
+        return
+
+
 def _operand_dim_token(
     operand: GraphOperand,
     dim_values: Mapping[str, DimToken] | None = None,
@@ -6832,8 +7046,11 @@ def _call_node_dim_subst(
     node: GraphNode,
     *,
     dim_values: Mapping[str, DimToken] | None = None,
+    bind_return: bool = True,
 ) -> dict[str, DimToken]:
     dim_map = _call_dim_subst(callee, node.inputs, dim_values=dim_values)
+    if not bind_return:
+        return dim_map
     formal_return = _return_type_expr_from_outputs(callee.outputs)
     actual_return = _return_type_expr_from_outputs(
         tuple(
@@ -6859,18 +7076,38 @@ def _call_type_substitutions(
     actuals: tuple[GraphOperand, ...],
     *,
     dim_values: Mapping[str, DimToken] | None = None,
-) -> tuple[dict[str, DimToken], dict[str, tuple[DimToken, ...]]]:
+) -> tuple[dict[str, DimToken], dict[str, tuple[DimToken, ...]], dict[str, TypeExpr]]:
     dim_map: dict[str, DimToken] = {}
     row_map: dict[str, tuple[DimToken, ...]] = {}
+    type_map: dict[str, TypeExpr] = {}
     for formal, actual in zip(callee.inputs, actuals, strict=False):
+        actual_type = graph_operand_type(actual)
+        _bind_type_variable_map(formal.type_expr, actual_type, type_map)
         _bind_type_dim_map(
             formal.type_expr,
-            graph_operand_type(actual),
+            actual_type,
             dim_map,
             row_map=row_map,
         )
         _bind_value_dim_map(formal, actual, dim_map, dim_values=dim_values)
-    return dim_map, row_map
+    return dim_map, row_map, type_map
+
+
+def _call_bound_dim_names_from_actuals(
+    actuals: tuple[GraphOperand, ...],
+    *,
+    dim_values: Mapping[str, DimToken] | None = None,
+) -> set[str]:
+    bound: set[str] = set()
+    for actual in actuals:
+        bound.update(_type_dim_refs(graph_operand_type(actual)))
+        bound.update(_dims_dim_refs(getattr(actual, "dims", None)))
+        actual_dim = _operand_dim_token(actual, dim_values)
+        if isinstance(actual_dim, str):
+            bound.add(actual_dim)
+        elif actual_dim is not None:
+            bound.update(name for name in dim_token_names(actual_dim) if isinstance(name, str))
+    return bound
 
 
 def _substitute_type_expr_graph(
@@ -6878,7 +7115,12 @@ def _substitute_type_expr_graph(
     *,
     dim_map: Mapping[str, DimToken],
     row_map: Mapping[str, tuple[DimToken, ...]],
+    type_map: Mapping[str, TypeExpr] | None = None,
 ) -> TypeExpr:
+    if _is_graph_type_variable_like(type_expr):
+        name = _type_variable_name(type_expr)
+        if name is not None and type_map is not None and name in type_map:
+            return type_map[name]
     if isinstance(type_expr, TypeTensor):
         dims: list[DimToken] = []
         for dim in type_expr.dims:
@@ -6889,18 +7131,38 @@ def _substitute_type_expr_graph(
         return TypeTensor(base=type_expr.base, dims=tuple(dims))
     if isinstance(type_expr, TypeOptional):
         return TypeOptional(
-            _substitute_type_expr_graph(type_expr.inner, dim_map=dim_map, row_map=row_map)
+            _substitute_type_expr_graph(
+                type_expr.inner,
+                dim_map=dim_map,
+                row_map=row_map,
+                type_map=type_map,
+            )
         )
     if isinstance(type_expr, TypeList):
         return TypeList(
-            _substitute_type_expr_graph(type_expr.item, dim_map=dim_map, row_map=row_map)
+            _substitute_type_expr_graph(
+                type_expr.item,
+                dim_map=dim_map,
+                row_map=row_map,
+                type_map=type_map,
+            )
         )
     if isinstance(type_expr, TypeTuple):
         return TypeTuple(
             tuple(
-                _substitute_type_expr_graph(item, dim_map=dim_map, row_map=row_map)
+                _substitute_type_expr_graph(
+                    item,
+                    dim_map=dim_map,
+                    row_map=row_map,
+                    type_map=type_map,
+                )
                 for item in type_expr.items
             )
+        )
+    if isinstance(type_expr, TypeNamed):
+        return TypeNamed(
+            type_expr.name,
+            tuple(substitute_dim_token(dim, dim_map) for dim in type_expr.args),
         )
     return substitute_type_expr(type_expr, dim_map)
 
@@ -6911,27 +7173,90 @@ def _instantiate_call_output_types(
     output_count: int,
     *,
     dim_values: Mapping[str, DimToken] | None = None,
+    modules_by_name: Mapping[str, GraphModule] | None = None,
 ) -> tuple[TypeExpr, ...]:
-    if (
-        callee.return_type_expr is not None
-        and _type_contains_inference_var(callee.return_type_expr)
-        and len(callee.nodes) <= 4
-    ):
-        return _core_instantiated_module_output_types(
-            callee,
-            actuals,
-            output_count,
-            dim_values=dim_values,
-        )
-    dim_map, row_map = _call_type_substitutions(
+    dim_map, row_map, type_map = _call_type_substitutions(
         callee,
         actuals,
         dim_values=dim_values,
     )
-    return tuple(
-        _substitute_type_expr_graph(type_expr, dim_map=dim_map, row_map=row_map)
-        for type_expr in _module_output_types_for_arity(callee, output_count)
+    raw_declared_outputs = (
+        _result_types(callee.return_type_expr, output_count)
+        if callee.return_type_expr is not None
+        else _module_output_types_for_arity(callee, output_count)
     )
+    declared_outputs = tuple(
+        _substitute_type_expr_graph(
+            type_expr,
+            dim_map=dim_map,
+            row_map=row_map,
+            type_map=type_map,
+        )
+        for type_expr in raw_declared_outputs
+    )
+    bound_dim_names = _call_bound_dim_names_from_actuals(actuals, dim_values=dim_values)
+    if all(
+        not _type_contains_inference_var(type_expr)
+        and not _type_contains_unbound_dim(type_expr, bound_dim_names)
+        for type_expr in declared_outputs
+    ):
+        return declared_outputs
+    if (
+        len(callee.nodes) == 1
+        and output_count == len(callee.nodes[0].outputs)
+        and not callee.is_global_binding
+    ):
+        synthetic = GraphNode(
+            id=f"{callee.name}:call",
+            op=GraphOp(callee.name),
+            inputs=actuals,
+            attrs={},
+            outputs=tuple(
+                GraphValue(
+                    name=f"__out_{index}",
+                    type_expr=declared_outputs[index],
+                    dims=declared_outputs[index].dims
+                    if isinstance(declared_outputs[index], TypeTensor)
+                    else None,
+                )
+                for index in range(output_count)
+            ),
+            source_module=None,
+            type_expr=declared_outputs[0]
+            if output_count == 1
+            else TypeTuple(declared_outputs),
+            dims=declared_outputs[0].dims
+            if output_count == 1 and isinstance(declared_outputs[0], TypeTensor)
+            else None,
+        )
+        forwarded = _rewrite_forwarded_call_node(
+            synthetic,
+            callee,
+            callee.nodes[0],
+            fold=True,
+        )
+        forwarded_types = tuple(output.type_expr for output in forwarded.outputs)
+        if (
+            len(forwarded_types) == output_count
+            and forwarded_types
+            and not any(_type_contains_inference_var(type_expr) for type_expr in forwarded_types)
+        ):
+            return forwarded_types
+    if (
+        callee.return_type_expr is not None
+        and _module_return_type_needs_body_inference(callee)
+        and len(callee.nodes) <= 4
+    ):
+        inferred = _core_instantiated_module_output_types(
+            callee,
+            actuals,
+            output_count,
+            dim_values=dim_values,
+            modules_by_name=modules_by_name,
+        )
+        if inferred is not None:
+            return inferred
+    return declared_outputs
 
 
 def _dim_specificity_score(dim: DimToken) -> int:
@@ -7038,6 +7363,67 @@ def _infer_primitive_graph_type(
     return inferred if isinstance(inferred, TypeExpr) else None
 
 
+def _dim_product_token(dims: tuple[DimToken, ...]) -> DimToken:
+    result: DimToken = 1
+    for dim in dims:
+        if result == 1:
+            result = dim
+        elif dim == 1:
+            continue
+        else:
+            result = DimExprBinary(op="*", left=result, right=dim)
+    return substitute_dim_token(result, {})
+
+
+def _reshape_shape_tokens(shape_operand: GraphOperand) -> tuple[DimToken, ...] | None:
+    if not isinstance(shape_operand, GraphExpr) or shape_operand.op.name != "core.list":
+        return None
+    dims: list[DimToken] = []
+    for item in shape_operand.inputs:
+        token = _graph_operand_dim_token_for_type_rule(item, None)
+        if token is None:
+            return None
+        dims.append(token)
+    return tuple(dims)
+
+
+def _reshape_split_last_dim_inputs(inputs: tuple[GraphOperand, ...]) -> tuple[GraphOperand, ...]:
+    if len(inputs) != 2:
+        return inputs
+    src_type = graph_operand_type(inputs[0])
+    if not isinstance(src_type, TypeTensor) or not src_type.dims:
+        return inputs
+    shape_dims = _reshape_shape_tokens(inputs[1])
+    if shape_dims is None:
+        return inputs
+    if len(shape_dims) > len(src_type.dims):
+        prefix_len = len(src_type.dims) - 1
+        suffix_dims = shape_dims[prefix_len:]
+        if substitute_dim_token(_dim_product_token(suffix_dims), {}) != substitute_dim_token(src_type.dims[-1], {}):
+            return inputs
+        refined_dims = (*src_type.dims[:-1], *suffix_dims)
+    elif len(shape_dims) < len(src_type.dims):
+        prefix_len = len(shape_dims) - 1
+        if prefix_len < 2:
+            return inputs
+        if tuple(substitute_dim_token(dim, {}) for dim in shape_dims[1:prefix_len]) != tuple(
+            substitute_dim_token(dim, {}) for dim in src_type.dims[1:prefix_len]
+        ):
+            return inputs
+        refined_dims = (*src_type.dims[:prefix_len], *shape_dims[prefix_len:])
+    else:
+        return inputs
+    if refined_dims == shape_dims:
+        return inputs
+    shape_operand = inputs[1]
+    assert isinstance(shape_operand, GraphExpr)
+    refined_shape = replace(
+        shape_operand,
+        inputs=tuple(_resolved_dim_token_operand(dim) for dim in refined_dims),
+    )
+    return (inputs[0], refined_shape)
+
+
 def _unify_graph_dim_for_type_rule(left: DimToken, right: DimToken) -> DimToken:
     left = substitute_dim_token(left, {})
     right = substitute_dim_token(right, {})
@@ -7133,6 +7519,10 @@ def _core_binary_result_type(
         dims = _broadcast_graph_dims(left_dims, right_dims)
         if dims is not None:
             return TypeTensor(base="Tensor", dims=dims)
+    if _is_graph_type_variable_like(left) and isinstance(right, TypeFloat | TypeInt | TypeDim):
+        return left
+    if _is_graph_type_variable_like(right) and isinstance(left, TypeFloat | TypeInt | TypeDim):
+        return right
     if isinstance(left, TypeFloat) or isinstance(right, TypeFloat):
         return TypeFloat()
     if isinstance(left, TypeDim) or isinstance(right, TypeDim):
@@ -7258,6 +7648,10 @@ def _select_result_type(existing: TypeExpr, true_type: TypeExpr, false_type: Typ
         )
     if isinstance(true_type, TypeList) and isinstance(false_type, TypeList):
         return TypeList(_select_result_type(true_type.item, true_type.item, false_type.item))
+    if isinstance(true_type, TypeFloat) and isinstance(false_type, TypeDim | TypeInt):
+        return true_type
+    if isinstance(false_type, TypeFloat) and isinstance(true_type, TypeDim | TypeInt):
+        return false_type
     if graph_type_compatible(true_type, false_type):
         return _more_specific_compatible_type(true_type, false_type)
     if graph_type_compatible(false_type, true_type):
@@ -7407,9 +7801,9 @@ def _preserve_unbound_output_dims(
         and len(instantiated.dims) == len(candidate.dims)
     ):
         dims = tuple(
-            instantiated_dim
+            candidate_dim
             if _dim_has_unbound_names(instantiated_dim, bound_dim_names)
-            else candidate_dim
+            else instantiated_dim
             for instantiated_dim, candidate_dim in zip(instantiated.dims, candidate.dims, strict=True)
         )
         return replace(candidate, dims=dims)
@@ -7496,7 +7890,12 @@ def _refresh_graph_operand_types(
         if value is None:
             refreshed = operand
         else:
-            refreshed = replace(operand, type_expr=_value_ref_type(value), dims=value.dims)
+            refreshed_type = _value_ref_type(value)
+            refreshed = replace(
+                operand,
+                type_expr=refreshed_type,
+                dims=refreshed_type.dims if isinstance(refreshed_type, TypeTensor) else value.dims,
+            )
         if local_domain_facts:
             refreshed = _refine_operand_types_from_domain_facts(refreshed, local_domain_facts)
         return refreshed
@@ -7576,6 +7975,8 @@ def _refresh_graph_operand_types(
     preferred_dim_names = set(globals_env) | refreshed_dim_names
     callee = modules_by_name.get(operand.op.name)
     if callee is None:
+        if operand.op.name == "_reshape":
+            inputs = _reshape_split_last_dim_inputs(inputs)
         primitive_type = _infer_primitive_graph_type(
             operand.op.name,
             inputs,
@@ -7627,6 +8028,7 @@ def _refresh_graph_operand_types(
         _call_actuals(call, callee),
         1,
         dim_values=dim_values,
+        modules_by_name=modules_by_name,
     )
     if len(result_types) != 1:
         return replace(call, type_expr=TypeTuple(result_types))
@@ -7758,14 +8160,21 @@ def _refresh_graph_module_types(
         }
         type_expr = node.type_expr
         output_types = _result_types(type_expr, len(node.outputs))
+        authoritative_output_types = False
         callee = modules_by_name.get(node.op.name)
         if callee is not None:
             call = replace(node, inputs=inputs, attrs=attrs)
+            call_actuals = _call_actuals(call, callee)
+            call_bound_dim_names = _call_bound_dim_names_from_actuals(
+                call_actuals,
+                dim_values=dim_values,
+            )
             output_types = _instantiate_call_output_types(
                 callee,
-                _call_actuals(call, callee),
+                call_actuals,
                 len(node.outputs),
                 dim_values=dim_values,
+                modules_by_name=modules_by_name,
             )
             output_types = tuple(
                 _module_call_result_type(
@@ -7779,7 +8188,7 @@ def _refresh_graph_module_types(
                         else node.outputs[index].type_expr
                     ),
                     output_type,
-                    bound_dim_names=_module_input_dim_symbols(callee),
+                    bound_dim_names=call_bound_dim_names,
                     preferred_dim_names=preferred_dim_names,
                 )
                 if index < len(node.outputs)
@@ -7791,10 +8200,12 @@ def _refresh_graph_module_types(
             item_types = tuple(graph_operand_type(item) for item in inputs)
             type_expr = item_types[0] if len(item_types) == 1 else TypeTuple(item_types)
             output_types = (type_expr,) if len(node.outputs) == 1 else item_types
+            authoritative_output_types = True
         elif node.op.name == "core.alias" and len(inputs) == 1:
             input_type = graph_operand_type(inputs[0])
             output_types = _result_types(input_type, len(node.outputs))
             type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
+            authoritative_output_types = True
         elif node.op.name == "core.ascribe" and len(inputs) == 1:
             output_types = _result_types(type_expr, len(node.outputs))
         elif node.op.name.startswith("core.binary.") and len(inputs) == 2:
@@ -7831,6 +8242,7 @@ def _refresh_graph_module_types(
                         for item in inputs
                     )
                 output_types = (type_expr,)
+                authoritative_output_types = True
         elif node.op.name == "core.select" and len(inputs) == 3:
             inputs = _refine_select_inputs_from_condition(inputs, conditions=conditions)
             type_expr = _select_result_type(
@@ -7842,10 +8254,12 @@ def _refresh_graph_module_types(
                 type_expr = _refined_compatible_type(
                     type_expr,
                     desired_output_types[node.outputs[0].name],
-                )
+            )
             inputs = _refine_select_inputs_from_result(inputs, type_expr)
             output_types = _result_types(type_expr, len(node.outputs))
         else:
+            if node.op.name == "_reshape":
+                inputs = _reshape_split_last_dim_inputs(inputs)
             primitive_type = _infer_primitive_graph_type(
                 node.op.name,
                 inputs,
@@ -7861,9 +8275,11 @@ def _refresh_graph_module_types(
                 if destructured_types is not None:
                     output_types = destructured_types
                     type_expr = TypeTuple(output_types)
+                    authoritative_output_types = True
                 else:
                     type_expr = type_expr if isinstance(primitive_type, TypeAny) else primitive_type
                     output_types = _result_types(type_expr, len(node.outputs))
+                    authoritative_output_types = not isinstance(primitive_type, TypeAny)
         value_dependent_output_types = _primitive_value_dependent_output_types(
             replace(
                 node,
@@ -7886,11 +8302,14 @@ def _refresh_graph_module_types(
         if value_dependent_output_types is not None:
             output_types = value_dependent_output_types
             type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
+            authoritative_output_types = True
         outputs = tuple(
             replace(
                 output,
                 type_expr=(
-                    _refined_compatible_type(output_types[index], desired_output_types[output.name])
+                    output_types[index]
+                    if authoritative_output_types
+                    else _refined_compatible_type(output_types[index], desired_output_types[output.name])
                     if index < len(output_types) and output.name in desired_output_types
                     else output_types[index]
                     if index < len(output_types)
@@ -7898,19 +8317,23 @@ def _refresh_graph_module_types(
                 ),
                 dims=(
                     (
-                        _refined_compatible_type(
-                            output_types[index],
-                            desired_output_types[output.name],
-                        ).dims
-                        if output.name in desired_output_types
-                        and isinstance(
+                        output_types[index].dims
+                        if authoritative_output_types
+                        else (
                             _refined_compatible_type(
                                 output_types[index],
                                 desired_output_types[output.name],
-                            ),
-                            TypeTensor,
+                            ).dims
+                            if output.name in desired_output_types
+                            and isinstance(
+                                _refined_compatible_type(
+                                    output_types[index],
+                                    desired_output_types[output.name],
+                                ),
+                                TypeTensor,
+                            )
+                            else output_types[index].dims
                         )
-                        else output_types[index].dims
                     )
                     if index < len(output_types) and isinstance(output_types[index], TypeTensor)
                     else output.dims
@@ -8041,11 +8464,27 @@ def _refresh_graph_module_types(
         )
         for output in module.outputs
     )
+    inferred_return_type = _return_type_expr_from_outputs(outputs)
+    if module.return_type_expr is None:
+        return_type_expr = inferred_return_type
+    elif not _module_return_type_needs_body_inference(module):
+        return_type_expr = module.return_type_expr
+    elif (
+        _type_contains_inference_var(inferred_return_type)
+        or _type_contains_unbound_dim(inferred_return_type, _module_bound_dim_names(module))
+    ):
+        # A generic wrapper can only be made precise once concrete call-site
+        # operands are known.  Do not replace a declared generic return such as
+        # Tensor[..R] with an equally generic body-local row such as Tensor[..S],
+        # because that destroys later call-site primitive inference.
+        return_type_expr = module.return_type_expr
+    else:
+        return_type_expr = inferred_return_type
     return replace(
         module,
         nodes=tuple(nodes),
         outputs=outputs,
-        return_type_expr=_return_type_expr_from_outputs(outputs),
+        return_type_expr=return_type_expr,
     )
 
 
@@ -8078,14 +8517,10 @@ def _repeat_call_actuals_for_refresh(
             carry_index = int(role.removeprefix("carry:"))
             if carry_index < 0 or carry_index >= carry_count:
                 return None
-            carry_name = _repeat_attr_value(node, f"carry_{carry_index}")
-            actuals.append(
-                GraphValueRef(
-                    name=carry_name if isinstance(carry_name, str) else node.outputs[carry_index].name,
-                    type_expr=node.outputs[carry_index].type_expr,
-                    dims=node.outputs[carry_index].dims,
-                )
-            )
+            input_index = 3 + carry_index
+            if input_index >= len(node.inputs):
+                return None
+            actuals.append(node.inputs[input_index])
             continue
         if role.startswith("input:"):
             input_index = int(role.removeprefix("input:"))
@@ -8144,20 +8579,34 @@ def _refine_repeat_callee_signatures(graph: GraphProgram) -> GraphProgram:
             continue
         repeat_node, actuals = calls[0]
         inputs: list[GraphValue] = []
+        input_ref_subst: dict[str, GraphOperand] = {}
         for formal, actual in zip(module.inputs, actuals, strict=True):
             actual_type = graph_operand_type(actual)
             refined_type = _refined_compatible_type(formal.type_expr, actual_type)
+            if (
+                isinstance(formal.type_expr, TypeAny | TypeVar)
+                and not isinstance(actual_type, TypeAny | TypeVar)
+                and (
+                    graph_type_compatible(formal.type_expr, actual_type)
+                    or graph_type_compatible(actual_type, formal.type_expr)
+                )
+            ):
+                refined_type = actual_type
+            refined_formal = formal
             if refined_type != formal.type_expr:
                 changed = True
-                inputs.append(
-                    replace(
-                        formal,
-                        type_expr=refined_type,
-                        dims=refined_type.dims if isinstance(refined_type, TypeTensor) else formal.dims,
-                    )
+                refined_formal = replace(
+                    formal,
+                    type_expr=refined_type,
+                    dims=refined_type.dims if isinstance(refined_type, TypeTensor) else formal.dims,
                 )
-            else:
-                inputs.append(formal)
+            inputs.append(refined_formal)
+            if refined_formal != formal:
+                input_ref_subst[formal.name] = GraphValueRef(
+                    name=refined_formal.name,
+                    type_expr=refined_formal.type_expr,
+                    dims=refined_formal.dims,
+                )
         outputs: list[GraphOperand] = []
         for index, output in enumerate(module.outputs):
             if index >= len(repeat_node.outputs):
@@ -8180,6 +8629,34 @@ def _refine_repeat_callee_signatures(graph: GraphProgram) -> GraphProgram:
             if refined_output != output:
                 changed = True
             outputs.append(refined_output)
+        nodes = module.nodes
+        constraints = module.constraints
+        if input_ref_subst:
+            nodes = tuple(
+                replace(
+                    node,
+                    inputs=tuple(
+                        _replace_operand_refs(item, input_ref_subst, fold=False)
+                        for item in node.inputs
+                    ),
+                    attrs={
+                        key: _replace_operand_refs(value, input_ref_subst, fold=False)
+                        for key, value in node.attrs.items()
+                    },
+                )
+                for node in module.nodes
+            )
+            outputs = [
+                _replace_operand_refs(output, input_ref_subst, fold=False)
+                for output in outputs
+            ]
+            try:
+                constraints = tuple(
+                    replace_constraint_refs(constraint, input_ref_subst)
+                    for constraint in module.constraints
+                )
+            except UnsupportedConstraintSubstitution:
+                constraints = module.constraints
         return_type_expr = (
             outputs[0].type_expr
             if len(outputs) == 1 and isinstance(outputs[0], GraphValueRef | GraphExpr)
@@ -8190,7 +8667,9 @@ def _refine_repeat_callee_signatures(graph: GraphProgram) -> GraphProgram:
                 module,
                 inputs=tuple(inputs),
                 outputs=tuple(outputs),
+                nodes=nodes,
                 return_type_expr=return_type_expr,
+                constraints=constraints,
             )
         )
     return replace(graph, modules=tuple(rewritten_modules)) if changed else graph
@@ -8324,7 +8803,12 @@ def _atomic_literal_constants(graph: GraphProgram) -> dict[str, GraphLiteral]:
         if name in evaluating:
             return None
         module = modules_by_name.get(name)
-        if module is None or module.inputs or len(module.outputs) != 1:
+        if (
+            module is None
+            or not module.is_global_binding
+            or module.inputs
+            or len(module.outputs) != 1
+        ):
             return None
         evaluating.add(name)
         env: dict[str, GraphLiteral] = {}
@@ -8357,6 +8841,8 @@ def _atomic_literal_constants(graph: GraphProgram) -> dict[str, GraphLiteral]:
         return None
 
     for module in graph.modules:
+        if not module.is_global_binding:
+            continue
         value = eval_module(module.name)
         if value is not None:
             memo[module.name] = value
@@ -8693,6 +9179,14 @@ def _preserve_unchanged_module_types(
     *,
     main_module: str,
 ) -> tuple[GraphModule, ...]:
+    repeat_callees: set[str] = set()
+    for module in pre_refresh_modules:
+        for node in module.nodes:
+            if node.op.name != "core.repeat":
+                continue
+            callee = _repeat_attr_value(node, "callee")
+            if isinstance(callee, str):
+                repeat_callees.add(callee)
     return tuple(
         replace(
             refreshed_module,
@@ -8702,6 +9196,7 @@ def _preserve_unchanged_module_types(
         )
         if (
             original_module.name != main_module
+            and original_module.name not in repeat_callees
             and
             pre_refresh_module.inputs == original_module.inputs
             and pre_refresh_module.outputs == original_module.outputs
@@ -13023,9 +13518,11 @@ def _can_inline_forwarded_call_node(node: GraphNode, callee: GraphModule, inner:
     forwarded_output_types = _forwarded_node_output_types(forwarded, len(node.outputs))
     if _module_signature_has_variadic_rows(callee):
         return (
-            len(node.outputs) > 1
-            and
-            forwarded_output_types is not None
+            (
+                len(node.outputs) > 1
+                or forwarded.op.name in {"_reshape", "_permute", "_transpose", "_matmul", "_repeat"}
+            )
+            and forwarded_output_types is not None
             and len(forwarded_output_types) == len(node.outputs)
             and not any(_type_has_variadic_rows(output_type) for output_type in forwarded_output_types)
             and _inline_call_substitution_is_closed(callee, node.inputs)
@@ -13079,6 +13576,11 @@ def _forwarded_node_output_types(
     forwarded: GraphNode,
     output_count: int,
 ) -> tuple[TypeExpr, ...] | None:
+    if forwarded.op.name == "_reshape":
+        forwarded = replace(
+            forwarded,
+            inputs=_reshape_split_last_dim_inputs(forwarded.inputs),
+        )
     primitive_type = _infer_primitive_graph_type(
         forwarded.op.name,
         forwarded.inputs,
@@ -13314,7 +13816,7 @@ def _rewrite_forwarded_call_node(
         formal.name: actual
         for formal, actual in zip(callee.inputs, node.inputs, strict=True)
     }
-    dim_subst = _call_node_dim_subst(callee, node)
+    dim_subst = _call_node_dim_subst(callee, node, bind_return=False)
     rewritten = replace(
         node,
         op=inner.op,
@@ -13328,6 +13830,11 @@ def _rewrite_forwarded_call_node(
         },
     )
     rewritten = substitute_graph_node_dims(rewritten, dim_subst) if dim_subst else rewritten
+    if rewritten.op.name == "_reshape":
+        rewritten = replace(
+            rewritten,
+            inputs=_reshape_split_last_dim_inputs(rewritten.inputs),
+        )
     output_types = _forwarded_node_output_types(rewritten, len(node.outputs))
     outputs = node.outputs
     type_expr = node.type_expr
@@ -13396,7 +13903,7 @@ def _rewrite_forwarded_expr_call_node(
         formal.name: actual
         for formal, actual in zip(callee.inputs, node.inputs, strict=True)
     }
-    dim_subst = _call_node_dim_subst(callee, node)
+    dim_subst = _call_node_dim_subst(callee, node, bind_return=False)
     rewritten_expr = _replace_operand_refs(expr, formal_subst, fold=fold)
     rewritten_expr = substitute_graph_operand_dims(rewritten_expr, dim_subst) if dim_subst else rewritten_expr
     if not isinstance(rewritten_expr, GraphExpr):
@@ -14020,105 +14527,94 @@ def optimize_graph_program(
             "GraphOptimizeConfig.specialize_definitions must be one of: "
             + ", ".join(sorted(_SPECIALIZE_MODES))
         )
+    debug_timings = _debug_optimize_timings_enabled(config)
     backend_intrinsic_target, enabled_backend_intrinsics = _parse_backend_intrinsics(config.backend_intrinsics)
-    graph = _alpha_rename_shadowed_type_dims(graph)
-    graph = _sanitize_graph_constraints(graph)
-    _validate_optimizer_graph(graph, phase="input")
-    current = prune_graph_to_main(graph) if config.prune_to_main else graph
-    current = _alpha_rename_shadowed_type_dims(current)
-    _validate_optimizer_graph(current, phase="initial_prune" if config.prune_to_main else "initial")
-    for _ in range(config.max_iterations):
+    with _graph_opt_timing(debug_timings, iteration=None, phase="prepare_input", graph=graph):
+        graph = _alpha_rename_shadowed_type_dims(graph)
+        graph = _sanitize_graph_constraints(graph)
+        _validate_optimizer_graph(graph, phase="input")
+    with _graph_opt_timing(debug_timings, iteration=None, phase="initial_prune", graph=graph):
+        current = prune_graph_to_main(graph) if config.prune_to_main else graph
         current = _alpha_rename_shadowed_type_dims(current)
+        current = _refresh_graph_program_types(current)
+        current = _alpha_rename_shadowed_type_dims(current)
+        _validate_optimizer_graph(current, phase="initial_prune" if config.prune_to_main else "initial")
+    for iteration in range(config.max_iterations):
+        iteration_start = time.perf_counter() if debug_timings else 0.0
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="alpha_rename_start", graph=current):
+            current = _alpha_rename_shadowed_type_dims(current)
         before = current
         if config.constant_dim_substitution:
-            current = _substitute_atomic_constant_dims_local(current)
-            current = _alpha_rename_shadowed_type_dims(current)
-            _validate_optimizer_graph(current, phase="constant_dim_substitution")
+            with _graph_opt_timing(
+                debug_timings,
+                iteration=iteration,
+                phase="constant_dim_substitution",
+                graph=current,
+            ):
+                current = _substitute_atomic_constant_dims_local(current)
+                current = _alpha_rename_shadowed_type_dims(current)
+                _validate_optimizer_graph(current, phase="constant_dim_substitution")
         if config.constant_folding:
-            current = _simplify_symbolic_graph_dims(current)
-            current = _alpha_rename_shadowed_type_dims(current)
-        module_effects = infer_graph_module_effects(current.modules)
-        module_usages = infer_graph_module_usages(current.modules)
-        current = _promote_total_pure_zero_arg_modules_to_globals(
-            current,
-            module_effects=module_effects,
-            module_usages=module_usages,
-        )
-        current = _alpha_rename_shadowed_type_dims(current)
-        _validate_optimizer_graph(current, phase="promote_zero_arg_globals")
-        current = _optimize_modules_local_with_fresh_domain_facts(
-            current,
-            config=config,
-            phase="local_cleanup",
-        )
-        current = _alpha_rename_shadowed_type_dims(current)
-        current = _prune_dead_formals(current)
-        current = _alpha_rename_shadowed_type_dims(current)
-        if config.constant_folding:
+            with _graph_opt_timing(debug_timings, iteration=iteration, phase="simplify_symbolic_dims", graph=current):
+                current = _simplify_symbolic_graph_dims(current)
+                current = _alpha_rename_shadowed_type_dims(current)
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="infer_effects_usages", graph=current):
             module_effects = infer_graph_module_effects(current.modules)
             module_usages = infer_graph_module_usages(current.modules)
-            modules_by_name = {module.name: module for module in current.modules}
-            pre_refresh_modules = tuple(
-                _inline_single_use_total_pure_exprs_module(
-                    module,
-                    module_effects=module_effects,
-                    module_usages=module_usages,
-                    modules_by_name=modules_by_name,
-                )
-                for module in current.modules
-            )
-            candidate = replace(current, modules=pre_refresh_modules)
-            candidate = _refresh_graph_program_types(candidate)
-            candidate = _alpha_rename_shadowed_type_dims(candidate)
-            candidate = replace(
-                candidate,
-                modules=_preserve_unchanged_module_types(
-                    current.modules,
-                    pre_refresh_modules,
-                    candidate.modules,
-                    main_module=current.main_module,
-                ),
-            )
-            candidate = _alpha_rename_shadowed_type_dims(candidate)
-            candidate = _sanitize_graph_constraints(candidate)
-            try:
-                _validate_optimizer_graph(candidate, phase="inline_single_use_exprs")
-            except ValueError:
-                pass
-            else:
-                current = candidate
-        if config.common_subexpression_elimination:
-            module_effects = infer_graph_module_effects(current.modules)
-            module_usages = infer_graph_module_usages(current.modules)
-            candidate = replace(
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="promote_zero_arg_globals", graph=current):
+            current = _promote_total_pure_zero_arg_modules_to_globals(
                 current,
-                modules=tuple(
-                    _common_subexpression_eliminate_module(
+                module_effects=module_effects,
+                module_usages=module_usages,
+            )
+            current = _alpha_rename_shadowed_type_dims(current)
+            _validate_optimizer_graph(current, phase="promote_zero_arg_globals")
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="local_cleanup", graph=current):
+            current = _optimize_modules_local_with_fresh_domain_facts(
+                current,
+                config=config,
+                phase="local_cleanup",
+            )
+            current = _alpha_rename_shadowed_type_dims(current)
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="prune_dead_formals", graph=current):
+            current = _prune_dead_formals(current)
+            current = _alpha_rename_shadowed_type_dims(current)
+        if config.constant_folding:
+            with _graph_opt_timing(debug_timings, iteration=iteration, phase="inline_single_use_exprs", graph=current):
+                module_effects = infer_graph_module_effects(current.modules)
+                module_usages = infer_graph_module_usages(current.modules)
+                modules_by_name = {module.name: module for module in current.modules}
+                pre_refresh_modules = tuple(
+                    _inline_single_use_total_pure_exprs_module(
                         module,
                         module_effects=module_effects,
                         module_usages=module_usages,
-                        fold=config.constant_folding,
+                        modules_by_name=modules_by_name,
                     )
                     for module in current.modules
-                ),
-            )
-            candidate = _refresh_graph_program_types(candidate)
-            candidate = _alpha_rename_shadowed_type_dims(candidate)
-            candidate = _sanitize_graph_constraints(candidate)
-            try:
-                _validate_optimizer_graph(candidate, phase="common_subexpression_elimination")
-            except ValueError:
-                pass
-            else:
-                current = candidate
-        current = _specialize_definitions_to_fixpoint(current, config=config)
-        current = _alpha_rename_shadowed_type_dims(current)
-        _validate_optimizer_graph(current, phase="specialize")
-        if config.inline_safe:
-            current = _inline_safe_modules(current, config=config)
-            current = _alpha_rename_shadowed_type_dims(current)
-            _validate_optimizer_graph(current, phase="inline")
-            if config.common_subexpression_elimination:
+                )
+                candidate = replace(current, modules=pre_refresh_modules)
+                candidate = _refresh_graph_program_types(candidate)
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = replace(
+                    candidate,
+                    modules=_preserve_unchanged_module_types(
+                        current.modules,
+                        pre_refresh_modules,
+                        candidate.modules,
+                        main_module=current.main_module,
+                    ),
+                )
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                try:
+                    _validate_optimizer_graph(candidate, phase="inline_single_use_exprs")
+                except ValueError:
+                    pass
+                else:
+                    current = candidate
+        if config.common_subexpression_elimination:
+            with _graph_opt_timing(debug_timings, iteration=iteration, phase="common_subexpression_elimination", graph=current):
                 module_effects = infer_graph_module_effects(current.modules)
                 module_usages = infer_graph_module_usages(current.modules)
                 candidate = replace(
@@ -14137,36 +14633,72 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 try:
-                    _validate_optimizer_graph(candidate, phase="post_inline_cse")
+                    _validate_optimizer_graph(candidate, phase="common_subexpression_elimination")
                 except ValueError:
                     pass
                 else:
                     current = candidate
-        candidate = _rewrite_assign_slice(current)
-        if candidate != current:
-            candidate = _refresh_graph_program_types(candidate)
-            candidate = _alpha_rename_shadowed_type_dims(candidate)
-            candidate = _sanitize_graph_constraints(candidate)
-            try:
-                _validate_optimizer_graph(candidate, phase="assign_slice")
-            except ValueError:
-                pass
-            else:
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="specialize", graph=current):
+            current = _specialize_definitions_to_fixpoint(current, config=config)
+            current = _alpha_rename_shadowed_type_dims(current)
+            _validate_optimizer_graph(current, phase="specialize")
+        if config.inline_safe:
+            with _graph_opt_timing(debug_timings, iteration=iteration, phase="inline_safe", graph=current):
+                current = _inline_safe_modules(current, config=config)
+                current = _alpha_rename_shadowed_type_dims(current)
+                _validate_optimizer_graph(current, phase="inline")
+            if config.common_subexpression_elimination:
+                with _graph_opt_timing(debug_timings, iteration=iteration, phase="post_inline_cse", graph=current):
+                    module_effects = infer_graph_module_effects(current.modules)
+                    module_usages = infer_graph_module_usages(current.modules)
+                    candidate = replace(
+                        current,
+                        modules=tuple(
+                            _common_subexpression_eliminate_module(
+                                module,
+                                module_effects=module_effects,
+                                module_usages=module_usages,
+                                fold=config.constant_folding,
+                            )
+                            for module in current.modules
+                        ),
+                    )
+                    candidate = _refresh_graph_program_types(candidate)
+                    candidate = _alpha_rename_shadowed_type_dims(candidate)
+                    candidate = _sanitize_graph_constraints(candidate)
+                    try:
+                        _validate_optimizer_graph(candidate, phase="post_inline_cse")
+                    except ValueError:
+                        pass
+                    else:
+                        current = candidate
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="graph_rewrites", graph=current):
+            candidate = _rewrite_assign_slice(current)
+            if candidate != current:
+                candidate = _refresh_graph_program_types(candidate)
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                try:
+                    _validate_optimizer_graph(candidate, phase="assign_slice")
+                except ValueError:
+                    pass
+                else:
+                    current = candidate
+            candidate = _rewrite_linear_projection_packs(current)
+            if candidate != current:
+                candidate = _refresh_graph_program_types(candidate)
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="linear_projection_pack")
                 current = candidate
-        candidate = _rewrite_linear_projection_packs(current)
-        if candidate != current:
-            candidate = _refresh_graph_program_types(candidate)
-            candidate = _alpha_rename_shadowed_type_dims(candidate)
-            candidate = _sanitize_graph_constraints(candidate)
-            _validate_optimizer_graph(candidate, phase="linear_projection_pack")
-            current = candidate
-        candidate = _rewrite_dense_gate_up_linear_pairs(current)
-        if candidate != current:
-            candidate = _refresh_graph_program_types(candidate)
-            candidate = _alpha_rename_shadowed_type_dims(candidate)
-            candidate = _sanitize_graph_constraints(candidate)
-            _validate_optimizer_graph(candidate, phase="dense_gate_up_linear_pair")
-            current = candidate
+            candidate = _rewrite_dense_gate_up_linear_pairs(current)
+            if candidate != current:
+                candidate = _refresh_graph_program_types(candidate)
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="dense_gate_up_linear_pair")
+                current = candidate
+        backend_start = time.perf_counter() if debug_timings else 0.0
         if backend_intrinsic_target == "codegen2-torch":
             candidate = (
                 _rewrite_torch_rope_intrinsics(current, enabled_intrinsics=enabled_backend_intrinsics)
@@ -14294,31 +14826,58 @@ def optimize_graph_program(
                 _validate_optimizer_graph(candidate, phase="mlx_rope_intrinsics")
                 current = candidate
         if backend_intrinsic_target == "codegen2-jax":
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
             candidate = (
                 _rewrite_backend_sdpa_intrinsics(current, op_name="__jax_sdpa")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_sdpa")
                 else current
             )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_sdpa_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
             if candidate != current:
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="jax_sdpa_intrinsics")
                 current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
             candidate = (
                 _rewrite_torch_swiglu_ffn_intrinsics(current, op_name="__jax_swiglu_ffn")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_swiglu_ffn")
                 else current
             )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_swiglu_ffn_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
             if candidate != current:
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="jax_swiglu_ffn_intrinsics")
                 current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
             candidate = (
                 _rewrite_torch_expert_swiglu_ffn_intrinsics(current, op_name="__jax_expert_swiglu_ffn")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_expert_swiglu_ffn")
                 else current
             )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_expert_swiglu_ffn_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
             if candidate != current:
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
@@ -14331,6 +14890,7 @@ def optimize_graph_program(
                 "__jax_selected_expert_relu2_ffn",
                 "__jax_selected_expert_swiglu_ffn",
             }
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
             candidate = (
                 _rewrite_torch_selected_expert_intrinsics(
                     current,
@@ -14340,26 +14900,52 @@ def optimize_graph_program(
                 if jax_selected_expert_intrinsics & enabled_backend_intrinsics
                 else current
             )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_selected_expert_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
             if candidate != current:
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="jax_selected_expert_intrinsics")
                 current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
             candidate = (
                 _rewrite_torch_expert_packed_swiglu_ffn_intrinsics(current, op_name="__jax_expert_packed_swiglu_ffn")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_expert_packed_swiglu_ffn")
                 else current
             )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_expert_packed_swiglu_ffn_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
             if candidate != current:
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="jax_expert_packed_swiglu_ffn_intrinsics")
                 current = candidate
+            jax_sub_start = time.perf_counter() if debug_timings else 0.0
             candidate = (
                 _rewrite_torch_weighted_topk_sum_intrinsics(current, op_name="__jax_weighted_topk_sum")
                 if _backend_intrinsic_enabled(enabled_backend_intrinsics, "__jax_weighted_topk_sum")
                 else current
             )
+            if debug_timings:
+                print(
+                    "[graph-opt] "
+                    f"iter={iteration} phase=jax_weighted_topk_sum_rewrite "
+                    f"seconds={time.perf_counter() - jax_sub_start:.6f} "
+                    f"modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                    file=sys.stderr,
+                )
             if candidate != current:
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
@@ -14433,66 +15019,86 @@ def optimize_graph_program(
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="triton_swiglu_activation_intrinsics")
                 current = candidate
-        if config.constant_folding:
-            module_effects = infer_graph_module_effects(current.modules)
-            module_usages = infer_graph_module_usages(current.modules)
-            hoist_candidate = _hoist_eager_nested_exprs(
-                current,
-                module_effects=module_effects,
-                module_usages=module_usages,
+        if debug_timings:
+            elapsed = time.perf_counter() - backend_start
+            print(
+                "[graph-opt] "
+                f"iter={iteration} phase=backend_intrinsics.{backend_intrinsic_target or 'none'} "
+                f"seconds={elapsed:.6f} modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                file=sys.stderr,
             )
-            hoist_candidate = _refresh_graph_program_types(hoist_candidate)
-            hoist_candidate = _alpha_rename_shadowed_type_dims(hoist_candidate)
-            hoist_candidate = _sanitize_graph_constraints(hoist_candidate)
-            try:
-                _validate_optimizer_graph(hoist_candidate, phase="hoist_eager_nested_exprs")
-            except ValueError:
-                pass
-            else:
-                current = hoist_candidate
-            module_effects = infer_graph_module_effects(current.modules)
-            module_usages = infer_graph_module_usages(current.modules)
-            modules_by_name = {module.name: module for module in current.modules}
-            pre_refresh_modules = tuple(
-                _inline_single_use_total_pure_exprs_module(
-                    module,
+        if config.constant_folding:
+            with _graph_opt_timing(debug_timings, iteration=iteration, phase="hoist_and_post_inline", graph=current):
+                module_effects = infer_graph_module_effects(current.modules)
+                module_usages = infer_graph_module_usages(current.modules)
+                hoist_candidate = _hoist_eager_nested_exprs(
+                    current,
                     module_effects=module_effects,
                     module_usages=module_usages,
-                    modules_by_name=modules_by_name,
                 )
-                for module in current.modules
-            )
-            candidate = replace(current, modules=pre_refresh_modules)
-            candidate = _refresh_graph_program_types(candidate)
-            candidate = _alpha_rename_shadowed_type_dims(candidate)
-            candidate = replace(
-                candidate,
-                modules=_preserve_unchanged_module_types(
-                    current.modules,
-                    pre_refresh_modules,
-                    candidate.modules,
-                    main_module=current.main_module,
-                ),
-            )
-            candidate = _alpha_rename_shadowed_type_dims(candidate)
-            candidate = _sanitize_graph_constraints(candidate)
-            try:
-                _validate_optimizer_graph(candidate, phase="post_hoist_inline_single_use_exprs")
-            except ValueError:
-                pass
-            else:
-                current = candidate
+                hoist_candidate = _refresh_graph_program_types(hoist_candidate)
+                hoist_candidate = _alpha_rename_shadowed_type_dims(hoist_candidate)
+                hoist_candidate = _sanitize_graph_constraints(hoist_candidate)
+                try:
+                    _validate_optimizer_graph(hoist_candidate, phase="hoist_eager_nested_exprs")
+                except ValueError:
+                    pass
+                else:
+                    current = hoist_candidate
+                module_effects = infer_graph_module_effects(current.modules)
+                module_usages = infer_graph_module_usages(current.modules)
+                modules_by_name = {module.name: module for module in current.modules}
+                pre_refresh_modules = tuple(
+                    _inline_single_use_total_pure_exprs_module(
+                        module,
+                        module_effects=module_effects,
+                        module_usages=module_usages,
+                        modules_by_name=modules_by_name,
+                    )
+                    for module in current.modules
+                )
+                candidate = replace(current, modules=pre_refresh_modules)
+                candidate = _refresh_graph_program_types(candidate)
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = replace(
+                    candidate,
+                    modules=_preserve_unchanged_module_types(
+                        current.modules,
+                        pre_refresh_modules,
+                        candidate.modules,
+                        main_module=current.main_module,
+                    ),
+                )
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                try:
+                    _validate_optimizer_graph(candidate, phase="post_hoist_inline_single_use_exprs")
+                except ValueError:
+                    pass
+                else:
+                    current = candidate
         if config.prune_to_main:
-            current = prune_graph_to_main(current)
+            with _graph_opt_timing(debug_timings, iteration=iteration, phase="prune", graph=current):
+                current = prune_graph_to_main(current)
+                current = _alpha_rename_shadowed_type_dims(current)
+                _validate_optimizer_graph(current, phase="prune")
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="canonicalize_module_names", graph=current):
+            current = _canonicalize_generated_module_names(current)
             current = _alpha_rename_shadowed_type_dims(current)
-            _validate_optimizer_graph(current, phase="prune")
-        current = _canonicalize_generated_module_names(current)
-        current = _alpha_rename_shadowed_type_dims(current)
-        _validate_optimizer_graph(current, phase="canonicalize_module_names")
-        current = _canonicalize_generated_value_names(current)
-        current = _alpha_rename_shadowed_type_dims(current)
-        _validate_optimizer_graph(current, phase="canonicalize_value_names")
-        _validate_optimizer_graph(current, phase="iteration")
+            _validate_optimizer_graph(current, phase="canonicalize_module_names")
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="canonicalize_value_names", graph=current):
+            current = _canonicalize_generated_value_names(current)
+            current = _alpha_rename_shadowed_type_dims(current)
+            _validate_optimizer_graph(current, phase="canonicalize_value_names")
+        with _graph_opt_timing(debug_timings, iteration=iteration, phase="iteration_validate", graph=current):
+            _validate_optimizer_graph(current, phase="iteration")
+        if debug_timings:
+            print(
+                "[graph-opt] "
+                f"iter={iteration} phase=iteration_total seconds={time.perf_counter() - iteration_start:.6f} "
+                f"changed={current != before} modules={len(current.modules)} nodes={_graph_node_count(current)}",
+                file=sys.stderr,
+            )
         if current == before:
             return current
     raise RuntimeError(

@@ -23,6 +23,7 @@ from ..ast import (
     TypeInt,
     TypeList,
     TypeNamed,
+    TypeNull,
     TypeOptional,
     TypeTensor,
     TypeTuple,
@@ -436,13 +437,9 @@ def _bind_inline_dim_subst(
                     subst.setdefault(name, _fresh_inline_dim(name, prefix=fresh_prefix))
         return
     if isinstance(formal, TypeOptional):
-        _bind_inline_dim_subst(
-            formal.inner,
-            actual.inner if isinstance(actual, TypeOptional) else actual,
-            subst,
-            fresh_prefix=fresh_prefix,
-            protected=protected,
-        )
+        # Optional tensor dimensions cannot be safely bound eagerly: the runtime
+        # value may be null at this call site. Guarded shape-symbol binding will
+        # recover these dimensions inside `if value is not None` blocks.
         return
     if isinstance(actual, TypeOptional):
         _bind_inline_dim_subst(
@@ -887,7 +884,7 @@ def _operand_may_be_none(operand: GraphOperand) -> bool:
     if isinstance(operand, GraphLiteral):
         return operand.value is None
     operand_type = graph_operand_type(operand)
-    return isinstance(operand_type, TypeOptional)
+    return isinstance(operand_type, TypeNull | TypeOptional)
 
 
 def _module_value_required_shape_dim_names(
@@ -1194,6 +1191,7 @@ def _emit_bind_nested_shape_symbols(
     protected: set[str],
     required_names: set[str] | None = None,
     indent: int = 8,
+    guard_nullable: bool = False,
 ) -> None:
     if isinstance(type_expr, TypeOptional):
         nested_lines: list[str] = []
@@ -1202,6 +1200,24 @@ def _emit_bind_nested_shape_symbols(
             nested_lines,
             add=add,
             type_expr=type_expr.inner,
+            value_expr=value_expr,
+            local=nested_local,
+            protected=protected,
+            required_names=required_names,
+            indent=indent + 4,
+            guaranteed=True,
+        )
+        if nested_lines:
+            add(lines, indent, f"if {value_expr} is not None:")
+            lines.extend(nested_lines)
+        return
+    if guard_nullable:
+        nested_lines: list[str] = []
+        nested_local = set(local)
+        _emit_bind_nested_shape_symbols_inner(
+            nested_lines,
+            add=add,
+            type_expr=type_expr,
             value_expr=value_expr,
             local=nested_local,
             protected=protected,
@@ -3203,7 +3219,6 @@ class _DirectTorchEmitter:
                 "add",
                 "sub",
                 "unsqueeze",
-                "reshape",
                 "activations_silu",
             }
         ):
@@ -4114,7 +4129,7 @@ class _DirectTorchEmitter:
                         lines,
                         add=add,
                         type_expr=output_type,
-                        value_expr=output.name,
+                        value_expr=_value_ident(output),
                         local=local,
                         protected=self.global_symbol_names,
                         required_names=required_shape_dims_by_value.get(output.name, set()),
@@ -4462,6 +4477,12 @@ class _DirectTorchEmitter:
                 add(lines, indent, f"{joined} = self._profile_call({label!r}, lambda: {expr})")
             else:
                 add(lines, indent, f"{joined} = {expr}")
+        for output in node.outputs:
+            if isinstance(output.type_expr, TypeInt):
+                value_name = _py_ident(output.name)
+                dim_name = _dim_ident(output.name)
+                if dim_name != value_name:
+                    add(lines, indent, f"{dim_name} = {value_name}")
 
     def _literal_bool_arg(self, operand: GraphOperand) -> bool | None:
         if isinstance(operand, GraphLiteral) and type(operand.value) is bool:
@@ -4760,10 +4781,6 @@ class _DirectTorchEmitter:
             callee_module,
             global_names=self.global_symbol_names,
         )
-        callee_required_shape_dims_by_value = _module_value_required_shape_dim_names(
-            callee_module,
-            global_names=self.global_symbol_names,
-        )
         try:
             safe_prefix = _py_ident(inline_prefix)
             callsite_output_by_callee_name: dict[str, GraphValue] = {}
@@ -4792,15 +4809,22 @@ class _DirectTorchEmitter:
                 )
                 if isinstance(param.type_expr, TypeDim | TypeInt):
                     dim_name_subst[param.name] = temp_name
+                actual_bind_type = graph_operand_type(operand)
+                if (
+                    (_operand_may_be_none(operand) or isinstance(param.type_expr, TypeOptional))
+                    and not isinstance(actual_bind_type, TypeOptional)
+                ):
+                    actual_bind_type = TypeOptional(actual_bind_type)
                 _emit_bind_nested_shape_symbols(
                     lines,
                     add=self._add,
-                    type_expr=graph_operand_type(operand),
+                    type_expr=actual_bind_type,
                     value_expr=temp_name,
                     local=inline_local,
                     protected=self.global_symbol_names,
                     required_names=callee_required_dim_names,
                     indent=indent,
+                    guard_nullable=_operand_may_be_none(operand) or isinstance(param.type_expr, TypeOptional),
                 )
                 formal_ref = GraphValueRef(name=temp_name, type_expr=param.type_expr, dims=param.dims)
                 if dim_subst:
@@ -4817,6 +4841,7 @@ class _DirectTorchEmitter:
                     protected=self.global_symbol_names,
                     required_names=None,
                     indent=indent,
+                    guard_nullable=_operand_may_be_none(operand) or isinstance(param.type_expr, TypeOptional),
                 )
 
             def rewrite_operand(operand: GraphOperand) -> GraphOperand:
@@ -4957,7 +4982,7 @@ class _DirectTorchEmitter:
                         lines,
                         add=self._add,
                         type_expr=output_type,
-                        value_expr=output.name,
+                        value_expr=_value_ident(output),
                         local=inline_local,
                         protected=self.global_symbol_names,
                         required_names=callee_required_shape_dims_by_value.get(original_name, set()),
@@ -5316,11 +5341,12 @@ class _DirectTorchEmitter:
                 arg_operands.append(GraphValueRef(name=loop_var, type_expr=TypeInt(), dims=None))
             elif role.startswith("carry:"):
                 carry_index = int(role.removeprefix("carry:"))
+                carry_input = node.inputs[3 + carry_index]
                 arg_operands.append(
                     GraphValueRef(
                         name=targets[carry_index],
-                        type_expr=node.outputs[carry_index].type_expr,
-                        dims=node.outputs[carry_index].dims,
+                        type_expr=graph_operand_type(carry_input),
+                        dims=carry_input.dims if isinstance(carry_input, GraphValueRef | GraphExpr) else None,
                     )
                 )
             elif role.startswith("input:"):
@@ -5358,15 +5384,22 @@ class _DirectTorchEmitter:
             )
             if isinstance(param.type_expr, TypeDim | TypeInt):
                 dim_name_subst[param.name] = temp_name
+            actual_bind_type = graph_operand_type(operand)
+            if (
+                (_operand_may_be_none(operand) or isinstance(param.type_expr, TypeOptional))
+                and not isinstance(actual_bind_type, TypeOptional)
+            ):
+                actual_bind_type = TypeOptional(actual_bind_type)
             _emit_bind_nested_shape_symbols(
                 lines,
                 add=self._add,
-                type_expr=graph_operand_type(operand),
+                type_expr=actual_bind_type,
                 value_expr=temp_name,
                 local=inline_local,
                 protected=self.global_symbol_names,
                 required_names=callee_required_dim_names,
                 indent=indent,
+                guard_nullable=_operand_may_be_none(operand) or isinstance(param.type_expr, TypeOptional),
             )
             formal_ref = GraphValueRef(name=temp_name, type_expr=param.type_expr, dims=param.dims)
             if dim_subst:
@@ -5383,6 +5416,7 @@ class _DirectTorchEmitter:
                 protected=self.global_symbol_names,
                 required_names=None,
                 indent=indent,
+                guard_nullable=_operand_may_be_none(operand) or isinstance(param.type_expr, TypeOptional),
             )
 
         def rewrite_operand(operand: GraphOperand) -> GraphOperand:
@@ -5508,7 +5542,7 @@ class _DirectTorchEmitter:
                     lines,
                     add=self._add,
                     type_expr=output_type,
-                    value_expr=output.name,
+                    value_expr=_value_ident(output),
                     local=inline_local,
                     protected=self.global_symbol_names,
                     required_names=callee_required_shape_dims_by_value.get(original_name, set()),
@@ -6165,9 +6199,9 @@ class _DirectTorchEmitter:
         if isinstance(dim, str):
             if dim.startswith(".."):
                 return None
-            name = _dim_ident(dim)
             if dim in local:
-                return name
+                return _dim_ident(dim)
+            name = _dim_ident(dim)
             if dim in self.global_symbol_names:
                 return f"{symbols_dict}[{dim!r}]"
             return None

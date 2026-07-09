@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from brainsurgery.synapse.axon.ast import TypeInt
+from brainsurgery.synapse.axon.ast import TypeAny, TypeInt
 
 
 OP_NAME = "floor"
@@ -30,6 +30,8 @@ def type_rule(
     input_dims = helpers.type_dims(arg_types[0])
     if input_dims is not None:
         return helpers.type_tensor(dims=input_dims)
+    if isinstance(arg_types[0], TypeAny):
+        return TypeAny()
     return TypeInt()
 
 

@@ -177,14 +177,14 @@ update_kv past k v ?key_length=null = (past == null)
 append :: ?Cache[B,H,K,C,DH] -> ?CacheLayer[B,H,K,C,DH] -> ?Cache[B,H,K,C,DH]
 append cache layer = (cache == null) ? null : do
   read_layers, write_layers, length, capacity <- (cache :: Cache[B,H,K,C,DH])
-  layer <- ((layer == null) ? ((null, null, length, capacity) :: CacheLayer[B,H,K,C,DH]) : (layer :: CacheLayer[B,H,K,C,DH]))
+  layer <- (((layer == null) ? ((null, null, length, capacity) :: CacheLayer[B,H,K,C,DH]) : (layer :: CacheLayer[B,H,K,C,DH])) :: CacheLayer[B,H,K,C,DH])
   write_layers <- List.append write_layers ((layer :: ?Any))
   return (read_layers, write_layers, length, capacity)
 
 append_kv :: ?CacheKV[B,H,K,C,DK,DV] -> ?CacheLayerKV[B,H,K,C,DK,DV] -> ?CacheKV[B,H,K,C,DK,DV]
 append_kv cache layer = (cache == null) ? null : do
   read_layers, write_layers, length, capacity <- (cache :: CacheKV[B,H,K,C,DK,DV])
-  layer <- ((layer == null) ? ((null, null, length, capacity) :: CacheLayerKV[B,H,K,C,DK,DV]) : (layer :: CacheLayerKV[B,H,K,C,DK,DV]))
+  layer <- (((layer == null) ? ((null, null, length, capacity) :: CacheLayerKV[B,H,K,C,DK,DV]) : (layer :: CacheLayerKV[B,H,K,C,DK,DV])) :: CacheLayerKV[B,H,K,C,DK,DV])
   write_layers <- List.append write_layers ((layer :: ?Any))
   return (read_layers, write_layers, length, capacity)
 

@@ -24,37 +24,39 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 6144
+MODEL_DIM <- 6144
 
-VOCAB_SIZE = 32768
+VOCAB_SIZE <- 32768
 
-NUM_LAYERS = 56
+NUM_LAYERS <- 56
 
-NUM_HEADS = 48
+NUM_HEADS <- 48
 
-KVH = 8
+KVH <- 8
 
-HAS_HEAD_DIM = false
+HAS_HEAD_DIM <- false
 
-MODEL_HEAD_DIM = HAS_HEAD_DIM ? (128) : (MODEL_DIM / NUM_HEADS)
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (128) : (MODEL_DIM / NUM_HEADS)
+
+FFN <- 16384
+
+E <- 8
+
+EPT <- 2
+
+EPS <- 1e-05
+
+THETA <- 1000000.0
+
+MAXPOS <- 65536
+
+HAS_SLIDING_WINDOW <- false
+
+WINDOW <- HAS_SLIDING_WINDOW ? (Config.int@@sliding_window default=32768) : MAX_POSITIONS
 
 KVD = KVH * MODEL_HEAD_DIM
 
-FFN = 16384
-
-E = 8
-
-EPT = 2
-
-EPS = 1e-05
-
-THETA = 1000000.0
-
-MAXPOS = 65536
-
-HAS_SLIDING_WINDOW = false
-
-MAX_POSITIONS <- HAS_SLIDING_WINDOW ? (Config.int@@sliding_window default=32768) : MAXPOS
+MAX_POSITIONS = MAXPOS
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS
@@ -91,7 +93,7 @@ mixtral input_ids attn_mask past_kv use_cache = do
   pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
   rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
   key_len <- mask_length_for_input input_ids attn_mask past_length
-  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WINDOW
   work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
   read_kv <- Cache.read past_kv work_kv
   x, new_kv <- scope@model do

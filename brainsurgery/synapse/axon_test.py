@@ -76,6 +76,17 @@ def _default_graph_backend_intrinsics(
     graph_backend_intrinsics: str | None,
 ) -> str | None:
     if graph_backend_intrinsics is not None:
+        requested = str(graph_backend_intrinsics).strip()
+        if requested.partition(":")[0].strip() == axon_backend:
+            return requested
+        if "," in requested:
+            for item in (part.strip() for part in requested.split(",")):
+                if not item:
+                    continue
+                target = item.partition(":")[0].strip()
+                if target == axon_backend:
+                    return item
+            return None
         return graph_backend_intrinsics
     if axon_backend == "codegen2-triton":
         return "codegen2-triton"
@@ -841,8 +852,14 @@ def _load_state_dict(
             else:
                 tensor = tensor.to(device=device)
             out[key] = tensor
-    materialize_mxfp4_aliases(out, dtype=dtype, drop_packed=True)
-    if param_devices and len(param_devices) > 1:
+    pipeline_param_devices = bool(param_devices and len(param_devices) > 1)
+    materialize_mxfp4_aliases(
+        out,
+        dtype=dtype,
+        drop_packed=True,
+        expert_index_aliases=not pipeline_param_devices,
+    )
+    if pipeline_param_devices:
         _drop_pipeline_duplicate_state_aliases(out)
 
     final_logits_bias = out.get("final_logits_bias")
@@ -3153,6 +3170,61 @@ def _normalize_hf_experts_implementation(token: str | None) -> str | None:
     return normalized
 
 
+def _config_value_is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _config_section_requests_grouped_hf_moe(config: Mapping[str, Any]) -> bool:
+    top_k = config.get("num_experts_per_tok", config.get("experts_per_token"))
+    if not _config_value_is_positive_int(top_k):
+        return False
+    local_experts = config.get("num_local_experts")
+    if _config_value_is_positive_int(local_experts):
+        return True
+    experts = config.get("num_experts")
+    if _config_value_is_positive_int(experts):
+        return True
+    routed_experts = config.get("n_routed_experts")
+    return _config_value_is_positive_int(routed_experts)
+
+
+def _config_requests_grouped_hf_moe(config: Mapping[str, Any] | None) -> bool:
+    if config is None:
+        return False
+    if _config_section_requests_grouped_hf_moe(config):
+        return True
+    return any(
+        _config_section_requests_grouped_hf_moe(value)
+        for value in config.values()
+        if isinstance(value, Mapping)
+    )
+
+
+def _hf_auto_model_supports_experts_implementation(config: Any, *, model_task: str) -> bool:
+    if config is None:
+        return False
+    auto_classes: tuple[Any, ...]
+    if model_task == "seq2seq_lm":
+        auto_classes = (AutoModelForSeq2SeqLM,)
+    elif model_task == "causal_lm":
+        auto_classes = (AutoModelForCausalLM,)
+    else:
+        auto_classes = (AutoModelForCausalLM, AutoModelForSeq2SeqLM)
+    for auto_cls in auto_classes:
+        try:
+            model_cls = auto_cls._model_mapping[type(config)]
+        except Exception:
+            continue
+        can_set = getattr(model_cls, "_can_set_experts_implementation", None)
+        if callable(can_set):
+            try:
+                return bool(can_set())
+            except Exception:
+                return False
+        return False
+    return False
+
+
 def _apply_hf_experts_implementation(config: Any | None, token: str | None) -> None:
     if config is None or token is None:
         return
@@ -3439,7 +3511,7 @@ def _run_axon_test_single(
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
-    oom_cpu_fallback: bool = True,
+    oom_cpu_fallback: bool = False,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
     metal_capture: bool = False,
@@ -3459,6 +3531,7 @@ def _run_axon_test_single(
     resolved_hf_experts_implementation = _normalize_hf_experts_implementation(
         hf_experts_implementation
     )
+    hf_experts_implementation_was_explicit = resolved_hf_experts_implementation is not None
     align_mask_contract = bool(hf_align_bf16_profile or hf_align_mask_contract)
     align_position_ids = bool(hf_align_bf16_profile or hf_align_position_ids)
     align_add_fp32 = bool(hf_align_bf16_profile or hf_align_add_fp32_accum)
@@ -3530,7 +3603,14 @@ def _run_axon_test_single(
         if isinstance(model_config, dict)
         else ""
     )
-    if resolved_hf_experts_implementation is None and resolved_model_type == "gpt_oss":
+    if resolved_hf_experts_implementation is None and resolved_model_type in {"flex_olmo", "gpt_oss"}:
+        resolved_hf_experts_implementation = "grouped_mm"
+    if (
+        resolved_hf_experts_implementation is None
+        and axon_backend == "pipeline2-torch"
+        and isinstance(model_config, Mapping)
+        and _config_requests_grouped_hf_moe(model_config)
+    ):
         resolved_hf_experts_implementation = "grouped_mm"
     adapter_storage_dtype = (
         resolved_dtype
@@ -3552,6 +3632,21 @@ def _run_axon_test_single(
     if effective_trust_remote_code:
         _prime_tiktoken_cache_from_model_dir(resolved_hf_model_dir)
         _ensure_einops_import_compat()
+    if (
+        resolved_hf_experts_implementation is not None
+        and not hf_experts_implementation_was_explicit
+        and not skip_hf
+        and resolved_model_task in {"causal_lm", "seq2seq_lm"}
+    ):
+        probe_config = _load_auto_config_with_compat_fallback(
+            resolved_hf_model_dir,
+            trust_remote_code=effective_trust_remote_code,
+        )
+        if not _hf_auto_model_supports_experts_implementation(
+            probe_config,
+            model_task=resolved_model_task,
+        ):
+            resolved_hf_experts_implementation = None
     declared_tokenizer = _tokenizer_pragma_for_checkpoint(
         axon_file=axon_file,
         checkpoint_id=str(resolved_hf_model_dir.relative_to(_repo_root() / "models"))
@@ -4594,6 +4689,12 @@ def _run_axon_test_single(
                 else:
                     syn = model_cls.from_state_dict(local_state_dict).eval()
             elif axon_backend == "codegen2-jax":
+                jax_param_devices_env = os.environ.get("AXON_JAX_PARAM_DEVICES")
+                jax_param_devices = (
+                    tuple(part.strip() for part in jax_param_devices_env.split(",") if part.strip())
+                    if jax_param_devices_env
+                    else None
+                )
                 if local_state_dict is None:
                     local_state_dict = _load_state_dict(
                         safetensors_files,
@@ -4602,9 +4703,15 @@ def _run_axon_test_single(
                         model_config=model_config,
                         storage_dtype=adapter_storage_dtype,
                     )
-                    syn = model_cls.from_state_dict(local_state_dict).eval()
+                    syn = model_cls.from_state_dict(
+                        local_state_dict,
+                        param_devices=jax_param_devices,
+                    ).eval()
                 else:
-                    syn = model_cls.from_state_dict(local_state_dict).eval()
+                    syn = model_cls.from_state_dict(
+                        local_state_dict,
+                        param_devices=jax_param_devices,
+                    ).eval()
             elif local_state_dict is None:
                 local_state_dict = _load_state_dict(
                     safetensors_files,

@@ -329,11 +329,22 @@ main values value = do
     flat = _flatten(parse_axon_program(source), main_module="main")
 
     helper = next(module for module in flat.modules if module.name.startswith("main__cond_else"))
-    params = {param.name: param for param in helper.params}
-    assert params["value"].optional
-    assert isinstance(params["value"].type_expr, TypeInt)
-    assert not params["values"].optional
-    assert params["values"].type_expr == TypeList(TypeInt())
+    main = next(module for module in flat.modules if module.name == "main")
+    helper_call = next(
+        expr
+        for stmt in main.statements
+        for expr in _walk_stmt(stmt)
+        if isinstance(expr, AxonExprCall) and expr.callee == helper.name
+    )
+    arg_to_param = {
+        arg.name: param
+        for arg, param in zip(helper_call.args, helper.params, strict=True)
+        if isinstance(arg, AxonExprName)
+    }
+    assert arg_to_param["value"].optional
+    assert isinstance(arg_to_param["value"].type_expr, TypeInt)
+    assert not arg_to_param["values"].optional
+    assert arg_to_param["values"].type_expr == TypeList(TypeInt())
 
 
 def test_flatten_threads_explicit_path_param_into_absolute_templates() -> None:

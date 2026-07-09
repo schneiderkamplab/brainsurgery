@@ -678,13 +678,19 @@ def lower_axon_program_to_graph_ir(
     return graph
 
 
+def _dim_token_value_names(dim: DimToken) -> set[str]:
+    if isinstance(dim, str) and dim.startswith(".."):
+        return set()
+    return dim_token_names(dim)
+
+
 def _type_dim_names(type_expr: TypeExpr) -> set[str]:
     from ..ast import TypeNamed, TypeOptional, TypeTensor
 
     if isinstance(type_expr, TypeTensor):
         names: set[str] = set()
         for dim in type_expr.dims:
-            names.update(dim_token_names(dim))
+            names.update(_dim_token_value_names(dim))
         return names
     if isinstance(type_expr, TypeTuple):
         tuple_names: set[str] = set()
@@ -698,7 +704,7 @@ def _type_dim_names(type_expr: TypeExpr) -> set[str]:
     if isinstance(type_expr, TypeNamed):
         named_names: set[str] = set()
         for dim in type_expr.args:
-            named_names.update(dim_token_names(dim))
+            named_names.update(_dim_token_value_names(dim))
         return named_names
     return set()
 
@@ -708,7 +714,7 @@ def _value_dim_names(value: GraphValue | GraphValueRef) -> set[str]:
     names.update(_type_dim_names(value.type_expr))
     if value.dims is not None:
         for dim in value.dims:
-            names.update(dim_token_names(dim))
+            names.update(_dim_token_value_names(dim))
     if isinstance(value.type_expr, TypeDim):
         names.add(value.name)
     return names
@@ -1219,32 +1225,61 @@ def _bind_dim_substitution_from_types(
     formal: TypeExpr,
     actual: TypeExpr,
     subst: dict[str, DimToken],
+    row_subst: dict[str, tuple[DimToken, ...]] | None = None,
 ) -> None:
     if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor) and formal.base == actual.base:
-        _bind_dim_substitution_from_sequences(formal.dims, actual.dims, subst)
+        _bind_dim_substitution_from_sequences(formal.dims, actual.dims, subst, row_subst)
         return
     if isinstance(formal, TypeNamed) and isinstance(actual, TypeNamed) and formal.name == actual.name:
-        _bind_dim_substitution_from_sequences(formal.args, actual.args, subst)
+        _bind_dim_substitution_from_sequences(formal.args, actual.args, subst, row_subst)
         return
     if isinstance(formal, TypeList) and isinstance(actual, TypeList):
-        _bind_dim_substitution_from_types(formal.item, actual.item, subst)
+        _bind_dim_substitution_from_types(formal.item, actual.item, subst, row_subst)
         return
     if isinstance(formal, TypeOptional) and isinstance(actual, TypeOptional):
-        _bind_dim_substitution_from_types(formal.inner, actual.inner, subst)
+        _bind_dim_substitution_from_types(formal.inner, actual.inner, subst, row_subst)
         return
     if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple) and len(formal.items) == len(actual.items):
         for formal_item, actual_item in zip(formal.items, actual.items, strict=True):
-            _bind_dim_substitution_from_types(formal_item, actual_item, subst)
+            _bind_dim_substitution_from_types(formal_item, actual_item, subst, row_subst)
 
 
 def _bind_dim_substitution_from_sequences(
     formal_dims: tuple[DimToken, ...],
     actual_dims: tuple[DimToken, ...],
     subst: dict[str, DimToken],
+    row_subst: dict[str, tuple[DimToken, ...]] | None = None,
 ) -> None:
-    if len(formal_dims) != len(actual_dims):
+    variadic_indexes = [
+        index
+        for index, dim in enumerate(formal_dims)
+        if isinstance(dim, str) and dim.startswith("..")
+    ]
+    if len(variadic_indexes) > 1:
         return
-    for formal_dim, actual_dim in zip(formal_dims, actual_dims, strict=True):
+    if variadic_indexes:
+        variadic_index = variadic_indexes[0]
+        prefix = formal_dims[:variadic_index]
+        suffix = formal_dims[variadic_index + 1 :]
+        if len(actual_dims) < len(prefix) + len(suffix):
+            return
+        if row_subst is not None and not any(
+            isinstance(dim, str) and dim.startswith("..")
+            for dim in actual_dims
+        ):
+            row_subst.setdefault(
+                formal_dims[variadic_index],
+                actual_dims[len(prefix) : len(actual_dims) - len(suffix) if suffix else len(actual_dims)],
+            )
+        pairs = [
+            *zip(prefix, actual_dims[: len(prefix)], strict=False),
+            *zip(suffix, actual_dims[-len(suffix) :] if suffix else (), strict=False),
+        ]
+    else:
+        if len(formal_dims) != len(actual_dims):
+            return
+        pairs = list(zip(formal_dims, actual_dims, strict=True))
+    for formal_dim, actual_dim in pairs:
         _bind_dim_substitution_from_dim(formal_dim, actual_dim, subst)
 
 
@@ -1301,16 +1336,42 @@ def _call_dim_substitution(
     callee: GraphModule,
     actuals: tuple[GraphOperand, ...],
     dim_values: Mapping[str, DimToken] | None = None,
-) -> dict[str, DimToken]:
+) -> tuple[dict[str, DimToken], dict[str, tuple[DimToken, ...]]]:
     subst: dict[str, DimToken] = {}
+    row_subst: dict[str, tuple[DimToken, ...]] = {}
     dim_values = dim_values or {}
     for formal, actual in zip(callee.inputs, actuals, strict=True):
         if isinstance(formal.type_expr, TypeDim):
             actual_dim = _operand_dim_token_for_validation(actual, dim_values)
             if actual_dim is not None:
                 subst[formal.name] = actual_dim
-        _bind_dim_substitution_from_types(formal.type_expr, _declared_operand_type(actual), subst)
-    return subst
+        _bind_dim_substitution_from_types(
+            formal.type_expr,
+            _declared_operand_type(actual),
+            subst,
+            row_subst,
+        )
+    return subst, row_subst
+
+
+def _call_bound_dim_names_from_actuals(
+    actuals: tuple[GraphOperand, ...],
+    *,
+    dim_values: Mapping[str, DimToken] | None = None,
+) -> set[str]:
+    bound: set[str] = set()
+    dim_values = dim_values or {}
+    for actual in actuals:
+        bound.update(_type_dim_names(_declared_operand_type(actual)))
+        if isinstance(actual, GraphValueRef | GraphExpr) and actual.dims is not None:
+            for dim in actual.dims:
+                bound.update(dim_token_names(dim))
+        actual_dim = _operand_dim_token_for_validation(actual, dim_values)
+        if isinstance(actual_dim, str):
+            bound.add(actual_dim)
+        elif actual_dim is not None:
+            bound.update(name for name in dim_token_names(actual_dim) if isinstance(name, str))
+    return bound
 
 
 def _substitute_dim_token(dim: DimToken, subst: dict[str, DimToken]) -> DimToken:
@@ -1343,19 +1404,81 @@ def _substitute_type_expr(type_expr: TypeExpr, subst: dict[str, DimToken]) -> Ty
     return type_expr
 
 
+def _substitute_type_expr_with_rows(
+    type_expr: TypeExpr,
+    subst: dict[str, DimToken],
+    row_subst: dict[str, tuple[DimToken, ...]],
+) -> TypeExpr:
+    if isinstance(type_expr, TypeTensor):
+        dims: list[DimToken] = []
+        for dim in type_expr.dims:
+            if isinstance(dim, str) and dim in row_subst:
+                dims.extend(row_subst[dim])
+            else:
+                dims.append(_substitute_dim_token(dim, subst))
+        return TypeTensor(type_expr.base, tuple(dims))
+    if isinstance(type_expr, TypeNamed):
+        args: list[DimToken] = []
+        for dim in type_expr.args:
+            if isinstance(dim, str) and dim in row_subst:
+                args.extend(row_subst[dim])
+            else:
+                args.append(_substitute_dim_token(dim, subst))
+        return TypeNamed(type_expr.name, tuple(args))
+    if isinstance(type_expr, TypeList):
+        return TypeList(_substitute_type_expr_with_rows(type_expr.item, subst, row_subst))
+    if isinstance(type_expr, TypeOptional):
+        return TypeOptional(_substitute_type_expr_with_rows(type_expr.inner, subst, row_subst))
+    if isinstance(type_expr, TypeTuple):
+        return TypeTuple(
+            tuple(_substitute_type_expr_with_rows(item, subst, row_subst) for item in type_expr.items)
+        )
+    return type_expr
+
+
 def _instantiated_module_output_types(
     callee: GraphModule,
     actuals: tuple[GraphOperand, ...],
     output_count: int,
     dim_values: Mapping[str, DimToken] | None = None,
+    modules_by_name: Mapping[str, GraphModule] | None = None,
+    _seen: tuple[str, ...] = (),
 ) -> tuple[TypeExpr, ...]:
-    subst = _call_dim_substitution(callee, actuals, dim_values=dim_values)
+    subst, row_subst = _call_dim_substitution(callee, actuals, dim_values=dim_values)
+    if callee.return_type_expr is not None:
+        raw_declared_types = _result_types(callee.return_type_expr, output_count)
+    elif output_count == 1 and len(callee.outputs) == 1:
+        raw_declared_types = (_declared_operand_type(callee.outputs[0]),)
+    elif output_count == 1 and len(callee.outputs) > 1:
+        raw_declared_types = (TypeTuple(tuple(_declared_operand_type(output) for output in callee.outputs)),)
+    else:
+        raw_declared_types = _module_output_types(callee)
+    declared_types = tuple(
+        _substitute_type_expr_with_rows(type_expr, subst, row_subst)
+        for type_expr in raw_declared_types
+    )
+    bound_dim_names = _call_bound_dim_names_from_actuals(actuals, dim_values=dim_values)
+    if all(
+        not _type_contains_inference_var(type_expr)
+        and not _type_contains_unbound_dim(type_expr, bound_dim_names)
+        for type_expr in declared_types
+    ):
+        return declared_types
     if (
         callee.return_type_expr is not None
-        and not _type_contains_inference_var(callee.return_type_expr)
+        and not _module_return_type_needs_body_inference(callee)
     ):
         raw_types = _result_types(callee.return_type_expr, output_count)
-    elif (instantiated := _infer_module_output_types_from_body(callee, actuals, output_count, dim_values)) is not None:
+    elif (
+        instantiated := _infer_module_output_types_from_body(
+            callee,
+            actuals,
+            output_count,
+            dim_values,
+            modules_by_name=modules_by_name,
+            _seen=_seen,
+        )
+    ) is not None:
         raw_types = instantiated
     elif output_count == 1 and len(callee.outputs) == 1:
         raw_types = (_declared_operand_type(callee.outputs[0]),)
@@ -1363,7 +1486,7 @@ def _instantiated_module_output_types(
         raw_types = (TypeTuple(tuple(_declared_operand_type(output) for output in callee.outputs)),)
     else:
         raw_types = _module_output_types(callee)
-    return tuple(_substitute_type_expr(type_expr, subst) for type_expr in raw_types)
+    return tuple(_substitute_type_expr_with_rows(type_expr, subst, row_subst) for type_expr in raw_types)
 
 
 def _declared_operand_type(operand: GraphOperand) -> TypeExpr:
@@ -1538,17 +1661,27 @@ def _infer_primitive_graph_type(
 def _operand_with_instantiated_type(
     operand: GraphOperand,
     env: Mapping[str, GraphValue],
+    operand_env: Mapping[str, GraphOperand] | None = None,
 ) -> GraphOperand:
     if isinstance(operand, GraphValueRef):
+        if operand_env is not None:
+            actual = operand_env.get(operand.name)
+            if actual is not None:
+                return actual
         value = env.get(operand.name)
         if value is None:
             return operand
-        return replace(operand, type_expr=_value_ref_type(value), dims=value.dims)
+        value_type = _value_ref_type(value)
+        return replace(
+            operand,
+            type_expr=value_type,
+            dims=_type_dims(value_type) or value.dims,
+        )
     if isinstance(operand, GraphExpr):
         return replace(
             operand,
-            inputs=tuple(_operand_with_instantiated_type(item, env) for item in operand.inputs),
-            attrs={key: _operand_with_instantiated_type(value, env) for key, value in operand.attrs.items()},
+            inputs=tuple(_operand_with_instantiated_type(item, env, operand_env) for item in operand.inputs),
+            attrs={key: _operand_with_instantiated_type(value, env, operand_env) for key, value in operand.attrs.items()},
         )
     return operand
 
@@ -1558,10 +1691,17 @@ def _infer_module_output_types_from_body(
     actuals: tuple[GraphOperand, ...],
     output_count: int,
     dim_values: Mapping[str, DimToken] | None,
+    *,
+    modules_by_name: Mapping[str, GraphModule] | None = None,
+    _seen: tuple[str, ...] = (),
 ) -> tuple[TypeExpr, ...] | None:
     if len(actuals) != len(callee.inputs):
         return None
+    if callee.name in _seen:
+        return None
+    seen = (*_seen, callee.name)
     env: dict[str, GraphValue] = {}
+    operand_env: dict[str, GraphOperand] = {}
     for formal, actual in zip(callee.inputs, actuals, strict=True):
         actual_type = graph_operand_type(actual)
         env[formal.name] = replace(
@@ -1570,17 +1710,45 @@ def _infer_module_output_types_from_body(
             dims=_type_dims(actual_type) or getattr(actual, "dims", None),
             optional=isinstance(actual_type, TypeOptional),
         )
+        operand_env[formal.name] = actual
     for node in callee.nodes:
-        inputs = tuple(_operand_with_instantiated_type(item, env) for item in node.inputs)
-        attrs = {key: _operand_with_instantiated_type(value, env) for key, value in node.attrs.items()}
+        inputs = tuple(_operand_with_instantiated_type(item, env, operand_env) for item in node.inputs)
+        attrs = {key: _operand_with_instantiated_type(value, env, operand_env) for key, value in node.attrs.items()}
         inferred = _infer_primitive_graph_type(
             node.op.name,
             inputs,
             attrs,
             dim_values=dim_values,
         )
+        if inferred is None and modules_by_name is not None:
+            nested = modules_by_name.get(node.op.name)
+            if nested is not None and nested.name not in seen:
+                try:
+                    nested_actuals = _call_actuals_for_callee(
+                        op_name=node.op.name,
+                        inputs=inputs,
+                        attrs=attrs,
+                        callee=nested,
+                        context=f"graph IR node {node.id!r}",
+                    )
+                except ValueError:
+                    nested_actuals = ()
+                if nested_actuals:
+                    nested_types = _instantiated_module_output_types(
+                        nested,
+                        nested_actuals,
+                        len(node.outputs),
+                        dim_values=dim_values,
+                        modules_by_name=modules_by_name,
+                        _seen=seen,
+                    )
+                    if len(nested_types) == 1:
+                        inferred = nested_types[0]
+                    elif nested_types:
+                        inferred = TypeTuple(nested_types)
         if inferred is None:
-            inferred = _substitute_type_expr(node.type_expr, _call_dim_substitution(callee, actuals, dim_values=dim_values))
+            subst, row_subst = _call_dim_substitution(callee, actuals, dim_values=dim_values)
+            inferred = _substitute_type_expr_with_rows(node.type_expr, subst, row_subst)
         node_types = _result_types(inferred, len(node.outputs))
         for output, output_type in zip(node.outputs, node_types, strict=True):
             env[output.name] = replace(
@@ -1591,10 +1759,12 @@ def _infer_module_output_types_from_body(
             )
     outputs: list[TypeExpr] = []
     for output in callee.outputs:
-        instantiated = _operand_with_instantiated_type(output, env)
+        instantiated = _operand_with_instantiated_type(output, env, operand_env)
         outputs.append(graph_operand_type(instantiated))
     if output_count == 1 and len(outputs) > 1:
         return (TypeTuple(tuple(outputs)),)
+    if len(outputs) == 1 and output_count != 1:
+        return _result_types(outputs[0], output_count)
     if len(outputs) != output_count:
         return None
     return tuple(outputs)
@@ -1608,6 +1778,8 @@ def graph_type_compatible(actual: TypeExpr, expected: TypeExpr) -> bool:
 def _type_contains_inference_var(type_expr: TypeExpr) -> bool:
     if isinstance(type_expr, TypeAny | TypeVar):
         return True
+    if isinstance(type_expr, TypeTensor):
+        return any(isinstance(dim, str) and dim.startswith("..") for dim in type_expr.dims)
     if isinstance(type_expr, TypeOptional):
         return _type_contains_inference_var(type_expr.inner)
     if isinstance(type_expr, TypeList):
@@ -1615,6 +1787,47 @@ def _type_contains_inference_var(type_expr: TypeExpr) -> bool:
     if isinstance(type_expr, TypeTuple):
         return any(_type_contains_inference_var(item) for item in type_expr.items)
     return False
+
+
+def _module_bound_dim_names(module: GraphModule) -> set[str]:
+    names: set[str] = set()
+    for value in module.inputs:
+        names.update(_value_dim_names(value))
+    for constraint in module.constraints:
+        names.update(_constraint_names(constraint))
+    return names
+
+
+def _type_contains_unbound_dim(type_expr: TypeExpr, bound_dim_names: set[str]) -> bool:
+    if isinstance(type_expr, TypeTensor):
+        return any(
+            isinstance(name, str) and (name.startswith("..") or name not in bound_dim_names)
+            for dim in type_expr.dims
+            for name in dim_token_names(dim)
+        )
+    if isinstance(type_expr, TypeNamed):
+        return any(
+            isinstance(name, str) and (name.startswith("..") or name not in bound_dim_names)
+            for dim in type_expr.args
+            for name in dim_token_names(dim)
+        )
+    if isinstance(type_expr, TypeOptional):
+        return _type_contains_unbound_dim(type_expr.inner, bound_dim_names)
+    if isinstance(type_expr, TypeList):
+        return _type_contains_unbound_dim(type_expr.item, bound_dim_names)
+    if isinstance(type_expr, TypeTuple):
+        return any(_type_contains_unbound_dim(item, bound_dim_names) for item in type_expr.items)
+    return False
+
+
+def _module_return_type_needs_body_inference(module: GraphModule) -> bool:
+    return (
+        module.return_type_expr is not None
+        and (
+            _type_contains_inference_var(module.return_type_expr)
+            or _type_contains_unbound_dim(module.return_type_expr, _module_bound_dim_names(module))
+        )
+    )
 
 
 def _result_types(type_expr: TypeExpr, output_count: int) -> tuple[TypeExpr, ...]:
@@ -1630,7 +1843,7 @@ def _result_types(type_expr: TypeExpr, output_count: int) -> tuple[TypeExpr, ...
 def _module_output_types(module: GraphModule) -> tuple[TypeExpr, ...]:
     if (
         module.return_type_expr is not None
-        and not _type_contains_inference_var(module.return_type_expr)
+        and not _module_return_type_needs_body_inference(module)
     ):
         return _result_types(module.return_type_expr, len(module.outputs))
     return tuple(_declared_operand_type(output) for output in module.outputs)
@@ -1791,7 +2004,12 @@ def _validate_core_repeat_node(
             formal,
             context=f"{context} arg {formal.name!r}",
         )
-    expected_types = _instantiated_module_output_types(callee, tuple(actuals), len(node.outputs))
+    expected_types = _instantiated_module_output_types(
+        callee,
+        tuple(actuals),
+        len(node.outputs),
+        modules_by_name=modules_by_name,
+    )
     if len(expected_types) != len(node.outputs):
         raise ValueError(f"{context}: core.repeat output arity mismatch")
     for index, (output, expected) in enumerate(zip(node.outputs, expected_types, strict=True)):
@@ -1890,7 +2108,12 @@ def _operand_type_checked(
                     f"{context}: call to {operand.op.name!r} cannot be used as "
                     f"single expression with {expected_output_count} results"
                 )
-            expected_types = _instantiated_module_output_types(callee, actuals, expected_output_count)
+            expected_types = _instantiated_module_output_types(
+                callee,
+                actuals,
+                expected_output_count,
+                modules_by_name=modules_by_name,
+            )
             expected_type = (
                 expected_types[0] if expected_output_count == 1 else TypeTuple(expected_types)
             )
@@ -1968,13 +2191,13 @@ def _validate_graph_module(
             _validate_operand_defined(
                 operand,
                 defined=defined | set(globals_env),
-                dim_symbols=dim_symbols,
+                dim_symbols=node_local_dim_symbols,
                 context=f"graph IR node {node.id!r}",
             )
             _require_operand_metadata_coherent(operand, context=f"graph IR node {node.id!r} input")
             _validate_operand_dim_closure(
                 operand,
-                dim_symbols=dim_symbols,
+                dim_symbols=node_local_dim_symbols,
                 context=f"graph IR node {node.id!r} input",
                 typevar_names=typevar_names,
                 defined_names=defined | set(globals_env),
@@ -1983,13 +2206,13 @@ def _validate_graph_module(
             _validate_operand_defined(
                 operand,
                 defined=defined | set(globals_env),
-                dim_symbols=dim_symbols,
+                dim_symbols=node_local_dim_symbols,
                 context=f"graph IR node {node.id!r}",
             )
             _require_operand_metadata_coherent(operand, context=f"graph IR node {node.id!r} attr")
             _validate_operand_dim_closure(
                 operand,
-                dim_symbols=dim_symbols,
+                dim_symbols=node_local_dim_symbols,
                 context=f"graph IR node {node.id!r} attr",
                 typevar_names=typevar_names,
                 defined_names=defined | set(globals_env),
@@ -2022,7 +2245,7 @@ def _validate_graph_module(
                 operand,
                 env=env,
                 globals_env=globals_env,
-                dim_symbols=dim_symbols,
+                dim_symbols=node_local_dim_symbols,
                 modules_by_name=modules_by_name,
                 context=f"graph IR node {node.id!r} input",
             )
@@ -2033,7 +2256,7 @@ def _validate_graph_module(
                 operand,
                 env=env,
                 globals_env=globals_env,
-                dim_symbols=dim_symbols,
+                dim_symbols=node_local_dim_symbols,
                 modules_by_name=modules_by_name,
                 context=f"graph IR node {node.id!r} attr {key!r}",
             )
@@ -2052,7 +2275,7 @@ def _validate_graph_module(
                     actual,
                     env=env,
                     globals_env=globals_env,
-                    dim_symbols=dim_symbols,
+                    dim_symbols=node_local_dim_symbols,
                     modules_by_name=modules_by_name,
                     context=f"graph IR node {node.id!r} arg {formal.name!r}",
                 )
@@ -2066,6 +2289,7 @@ def _validate_graph_module(
                 actuals,
                 len(node.outputs),
                 dim_values=dim_values,
+                modules_by_name=modules_by_name,
             )
             if len(node.outputs) != len(expected_callee_types):
                 raise ValueError(
@@ -2085,7 +2309,7 @@ def _validate_graph_module(
                 node,
                 env=env,
                 globals_env=globals_env,
-                dim_symbols=dim_symbols,
+                dim_symbols=node_local_dim_symbols,
                 modules_by_name=modules_by_name,
                 context=f"graph IR node {node.id!r}",
             )

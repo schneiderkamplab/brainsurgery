@@ -281,15 +281,20 @@ def _resolve_mlx_worker_specs(*, device: str, processes: int) -> list[_WorkerSpe
     return None
 
 
-def _resolve_jax_worker_specs(*, device: str, processes: int) -> list[_WorkerSpec] | None:
+def _resolve_jax_worker_specs(
+    *, device: str, processes: int, pipeline_parallel_size: int | None
+) -> list[_WorkerSpec] | None:
     normalized = str(device).strip().lower()
-    if processes <= 1 or not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
+    if (
+        processes <= 1
+        and (pipeline_parallel_size is None or pipeline_parallel_size <= 1)
+    ) or not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
         return None
     return _resolve_pipeline_worker_specs(
         backend="codegen2-jax",
         device=device,
         processes=processes,
-        pipeline_parallel_size=1,
+        pipeline_parallel_size=pipeline_parallel_size or 1,
     )
 
 
@@ -305,6 +310,19 @@ def _set_jax_worker_env_if_needed(common_kwargs: dict[str, Any]) -> dict[str, st
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.18")
     os.environ.setdefault("JAX_DEFAULT_MATMUL_PRECISION", "highest")
     return previous
+
+
+def _jax_param_devices_for_worker(
+    worker_cuda_visible_devices: str | None,
+    *,
+    enabled: bool,
+) -> str | None:
+    if not enabled or not worker_cuda_visible_devices:
+        return None
+    count = len([part for part in worker_cuda_visible_devices.split(",") if part.strip()])
+    if count <= 1:
+        return None
+    return ",".join(f"cuda:{index}" for index in range(count))
 
 
 def _restore_env(previous: dict[str, str | None]) -> None:
@@ -814,6 +832,7 @@ def _read_worker_results_file(log_path: Path | None) -> list[dict[str, Any]] | N
 def _backend_kwargs(common_kwargs: dict[str, Any], axon_backend: str) -> dict[str, Any]:
     backend_kwargs = dict(common_kwargs)
     backend_kwargs.pop("axon_backends", None)
+    backend_kwargs.pop("jax_pipeline_parallel_enabled", None)
     backend_overlay_map = cast(
         dict[str, tuple[str, ...]],
         backend_kwargs.pop("backend_builtins_overlays", {}),
@@ -928,7 +947,7 @@ def _run_benchmark_pair(
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
-    oom_cpu_fallback: bool = True,
+    oom_cpu_fallback: bool = False,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
     metal_capture: bool = False,
@@ -1065,10 +1084,20 @@ def _run_benchmark_jobs_serial(
                         tee_stderr = TeeWriter(sys.stderr, LogFileWriter(file_handle))
                     backend_kwargs = _backend_kwargs(common_kwargs, axon_backend)
                     previous_jax_env = _set_jax_worker_env_if_needed(backend_kwargs)
+                    previous_jax_param_devices = os.environ.get("AXON_JAX_PARAM_DEVICES")
+                    jax_param_devices = _jax_param_devices_for_worker(
+                        worker_cuda_visible_devices,
+                        enabled=bool(common_kwargs.get("jax_pipeline_parallel_enabled"))
+                        and axon_backend == "codegen2-jax",
+                    )
+                    if jax_param_devices is not None:
+                        os.environ["AXON_JAX_PARAM_DEVICES"] = jax_param_devices
                     try:
                         with contextlib.redirect_stdout(tee_stdout), contextlib.redirect_stderr(tee_stderr):
                             if worker_cuda_visible_devices is not None:
                                 print(f"worker.CUDA_VISIBLE_DEVICES={worker_cuda_visible_devices}")
+                            if jax_param_devices is not None:
+                                print(f"worker.AXON_JAX_PARAM_DEVICES={jax_param_devices}")
                             try:
                                 result = _run_benchmark_pair(pair, device=device, **backend_kwargs)
                             except Exception as exc:
@@ -1088,6 +1117,10 @@ def _run_benchmark_jobs_serial(
                                 )
                             _log_result_summary(result)
                     finally:
+                        if previous_jax_param_devices is None:
+                            os.environ.pop("AXON_JAX_PARAM_DEVICES", None)
+                        else:
+                            os.environ["AXON_JAX_PARAM_DEVICES"] = previous_jax_param_devices
                         _restore_env(previous_jax_env)
                     results.append(result)
                     if stream_csv is not None:
@@ -1153,8 +1186,18 @@ def _run_benchmark_worker_loop(
             for axon_backend in _backend_sequence(common_kwargs):
                 backend_kwargs = _backend_kwargs(common_kwargs, axon_backend)
                 previous_jax_env = _set_jax_worker_env_if_needed(backend_kwargs)
+                previous_jax_param_devices = os.environ.get("AXON_JAX_PARAM_DEVICES")
+                jax_param_devices = _jax_param_devices_for_worker(
+                    worker_cuda_visible_devices,
+                    enabled=bool(common_kwargs.get("jax_pipeline_parallel_enabled"))
+                    and axon_backend == "codegen2-jax",
+                )
+                if jax_param_devices is not None:
+                    os.environ["AXON_JAX_PARAM_DEVICES"] = jax_param_devices
                 try:
                     try:
+                        if jax_param_devices is not None:
+                            print(f"worker.AXON_JAX_PARAM_DEVICES={jax_param_devices}")
                         result = _run_benchmark_pair(pair, device=worker_device, **backend_kwargs)
                     except Exception as exc:
                         print(
@@ -1174,6 +1217,10 @@ def _run_benchmark_worker_loop(
                     results.append(result)
                     _write_worker_result_file(log_path, results)
                 finally:
+                    if previous_jax_param_devices is None:
+                        os.environ.pop("AXON_JAX_PARAM_DEVICES", None)
+                    else:
+                        os.environ["AXON_JAX_PARAM_DEVICES"] = previous_jax_param_devices
                     _restore_env(previous_jax_env)
             _write_worker_result_file(log_path, results)
             result_queue.put(
@@ -1518,7 +1565,7 @@ def run_axon_benchmark(
     backend_builtins_overlays: str | Sequence[str] | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
-    oom_cpu_fallback: bool = True,
+    oom_cpu_fallback: bool = False,
     profile_axon: bool = False,
     profile_axon_top_n: int = 40,
     metal_capture: bool = False,
@@ -1549,8 +1596,8 @@ def run_axon_benchmark(
     forward_repeat = max(1, int(forward_repeat))
     generate_warmup = max(0, int(generate_warmup))
     generate_repeat = max(1, int(generate_repeat))
-    if axon_backend != "pipeline2-torch" and pipeline_parallel_size is not None:
-        raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2-torch")
+    if axon_backend not in {"pipeline2-torch", "codegen2-jax"} and pipeline_parallel_size is not None:
+        raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2-torch or codegen2-jax")
     repo_root = _repo_root()
     checkpoint_filter = {str(item).strip() for item in (checkpoints or ()) if str(item).strip()}
     exclude_filter = {str(item).strip() for item in (exclude or ()) if str(item).strip()}
@@ -1654,6 +1701,11 @@ def run_axon_benchmark(
         "graph_backend_intrinsics": graph_backend_intrinsics,
         "builtins_overlays": builtins_overlays,
         "backend_builtins_overlays": backend_overlay_map,
+        "jax_pipeline_parallel_enabled": (
+            axon_backend == "codegen2-jax"
+            and pipeline_parallel_size is not None
+            and int(pipeline_parallel_size) > 1
+        ),
         "skip_hf": skip_hf,
         "hf_strict_dtype": hf_strict_dtype,
         "oom_cpu_fallback": oom_cpu_fallback,
@@ -1696,7 +1748,11 @@ def run_axon_benchmark(
         pipeline_worker_specs = _resolve_jax_worker_specs(
             device=device,
             processes=max(1, int(processes)),
+            pipeline_parallel_size=pipeline_parallel_size,
         )
+        if processes <= 1 and pipeline_worker_specs:
+            serial_cuda_visible_devices = pipeline_worker_specs[0].cuda_visible_devices
+            effective_device = pipeline_worker_specs[0].run_device
 
     if processes <= 1:
         results = _run_benchmark_jobs_serial(

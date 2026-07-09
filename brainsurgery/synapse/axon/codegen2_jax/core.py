@@ -5,11 +5,12 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional
+from ..ast import DimExprBinary, TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional
 from ..ast import TypeTensor
 from ..codegen2_common import normalize_primitive_op
 from ..codegen2_torch.core import (
     _DirectTorchEmitter,
+    _dim_ident,
     _graph_uses_expert_linear,
     _is_static_mask_type,
     _static_mask_capacity_dim,
@@ -353,7 +354,7 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
 
     def _emit_common(self, lines: list[str]) -> None:
         add = self._add
-        add(lines, 4, "def __init__(self, state_dict: dict[str, jax.Array], config: dict | None = None):")
+        add(lines, 4, "def __init__(self, state_dict: dict[str, jax.Array], config: dict | None = None, param_devices=None):")
         add(lines, 8, "object.__setattr__(self, '_flat_tensors', {})")
         add(lines, 8, "object.__setattr__(self, '_path_cache', {})")
         add(lines, 8, "object.__setattr__(self, '_compiled_fn', None)")
@@ -366,11 +367,11 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 8, "object.__setattr__(self, '_profile_enabled', False)")
         add(lines, 8, "object.__setattr__(self, '_profile_records', {})")
         add(lines, 8, "object.__setattr__(self, '_symbols', {})")
-        add(lines, 8, "self.load_state_dict(state_dict)")
+        add(lines, 8, "self.load_state_dict(state_dict, param_devices=param_devices)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
-        add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None):")
-        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config)")
+        add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None, param_devices=None):")
+        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config, param_devices=param_devices)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def from_safetensors(cls, safetensors_files, *, model_config=None, dtype=None):")
@@ -476,6 +477,66 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 4, f"_STATE_KEY_FILTER_PREFIXES = {self.state_key_filter_prefixes!r}")
         add(lines, 4, f"_PACKED_PARAMETER_SPECS = {tuple(_packed_parameter_spec_payload(item) for item in self.program.packed_parameters)!r}")
         add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _packed_parameter_candidates(spec, keys):")
+        add(lines, 8, "output_pattern = str(spec['output'])")
+        add(lines, 8, "regex = _jax_path_pattern_regex(output_pattern)")
+        add(lines, 8, "candidates = []")
+        add(lines, 8, "literal = '{' not in output_pattern")
+        add(lines, 8, "if literal:")
+        add(lines, 12, "candidates.append((output_pattern, {}))")
+        add(lines, 8, "else:")
+        add(lines, 12, "for key in keys:")
+        add(lines, 16, "match = regex.match(str(key))")
+        add(lines, 16, "if match is not None:")
+        add(lines, 20, "candidates.append((str(key), match.groupdict()))")
+        add(lines, 12, "input_patterns = tuple(str(item) for item in spec['inputs'])")
+        add(lines, 12, "if input_patterns:")
+        add(lines, 16, "input_regex = _jax_path_pattern_regex(input_patterns[0])")
+        add(lines, 16, "for key in keys:")
+        add(lines, 20, "match = input_regex.match(str(key))")
+        add(lines, 20, "if match is None:")
+        add(lines, 24, "continue")
+        add(lines, 20, "values = match.groupdict()")
+        add(lines, 20, "candidates.append((_jax_format_path_pattern(output_pattern, values), values))")
+        add(lines, 8, "seen = set()")
+        add(lines, 8, "out = []")
+        add(lines, 8, "for output_key, values in candidates:")
+        add(lines, 12, "candidate_key = (output_key, tuple(sorted(values.items())))")
+        add(lines, 12, "if candidate_key in seen:")
+        add(lines, 16, "continue")
+        add(lines, 12, "seen.add(candidate_key)")
+        add(lines, 12, "out.append((output_key, values))")
+        add(lines, 8, "return out")
+        add(lines, 4, "")
+        add(lines, 4, "def _materialize_packed_parameters_from_state_dict(self, state_dict, tensors):")
+        add(lines, 8, "available_keys = {str(key) for key in state_dict}")
+        add(lines, 8, "skipped_sources = set()")
+        add(lines, 8, "for spec in self._PACKED_PARAMETER_SPECS:")
+        add(lines, 12, "if not bool(spec.get('remove_inputs', True)):")
+        add(lines, 16, "continue")
+        add(lines, 12, "for output_key, values in self._packed_parameter_candidates(spec, available_keys | set(tensors)):")
+        add(lines, 16, "if output_key in tensors:")
+        add(lines, 20, "continue")
+        add(lines, 16, "input_keys = [_jax_format_path_pattern(str(item), values) for item in spec['inputs']]")
+        add(lines, 16, "if not input_keys or not all((key in tensors) or (key in state_dict) for key in input_keys):")
+        add(lines, 20, "continue")
+        add(lines, 16, "items = []")
+        add(lines, 16, "for key in input_keys:")
+        add(lines, 20, "items.append(tensors[key] if key in tensors else self._state_array_from_numpy(state_dict[key]))")
+        add(lines, 16, "mode = str(spec.get('mode', 'cat'))")
+        add(lines, 16, "dim = int(spec['dim'])")
+        add(lines, 16, "if mode == 'cat':")
+        add(lines, 20, "joined = jnp.concatenate(items, axis=dim)")
+        add(lines, 16, "elif mode == 'stack':")
+        add(lines, 20, "joined = jnp.stack(items, axis=dim)")
+        add(lines, 16, "else:")
+        add(lines, 20, "raise ValueError(f'unknown parameter join mode {mode!r}')")
+        add(lines, 16, "tensors[output_key] = joined")
+        add(lines, 16, "skipped_sources.update(input_keys)")
+        add(lines, 16, "del items")
+        add(lines, 8, "return skipped_sources")
+        add(lines, 4, "")
         add(lines, 4, "@classmethod")
         add(lines, 4, "def _keep_state_key(cls, key):")
         add(lines, 8, "prefixes = cls._STATE_KEY_FILTER_PREFIXES")
@@ -532,6 +593,21 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 4, "def _collapsed_numeric_segments(key):")
         add(lines, 8, "parts = str(key).split('.')")
         add(lines, 8, "return [('.'.join(parts[:index] + parts[index + 1:]), int(part), index) for index, part in enumerate(parts) if part.isdigit()]")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _drop_collapsed_numeric_state_aliases(cls, state_dict):")
+        add(lines, 8, "for key in list(state_dict):")
+        add(lines, 12, "value = state_dict.get(key)")
+        add(lines, 12, "value_shape = tuple(getattr(value, 'shape', ()))")
+        add(lines, 12, "for collapsed_key, index, _segment_index in cls._collapsed_numeric_segments(str(key)):")
+        add(lines, 16, "bank = state_dict.get(collapsed_key)")
+        add(lines, 16, "bank_shape = tuple(getattr(bank, 'shape', ()))")
+        add(lines, 16, "if not bank_shape or int(index) >= int(bank_shape[0]):")
+        add(lines, 20, "continue")
+        add(lines, 16, "if tuple(bank_shape[1:]) == value_shape:")
+        add(lines, 20, "state_dict.pop(key, None)")
+        add(lines, 20, "break")
+        add(lines, 8, "return state_dict")
         add(lines, 4, "")
         add(lines, 4, "def _keys_for_collapsed_bank(self, bank_key):")
         add(lines, 8, "items = {}")
@@ -634,6 +710,82 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 8, "import numpy as np")
         add(lines, 8, "return jnp.asarray(np.asarray(value))")
         add(lines, 4, "")
+        add(lines, 4, "def _state_array_from_numpy(self, value):")
+        add(lines, 8, "if isinstance(value, jax.Array):")
+        add(lines, 12, "return value")
+        add(lines, 8, "import numpy as np")
+        add(lines, 8, "return jnp.asarray(np.asarray(value))")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _resolve_param_devices(param_devices):")
+        add(lines, 8, "if not param_devices:")
+        add(lines, 12, "return ()")
+        add(lines, 8, "available = list(jax.devices())")
+        add(lines, 8, "out = []")
+        add(lines, 8, "for item in param_devices:")
+        add(lines, 12, "if hasattr(item, 'platform'):")
+        add(lines, 16, "out.append(item)")
+        add(lines, 16, "continue")
+        add(lines, 12, "text = str(item).strip().lower()")
+        add(lines, 12, "if text in {'', 'none'}:")
+        add(lines, 16, "continue")
+        add(lines, 12, "if text.startswith('cuda:') or text.startswith('gpu:'):")
+        add(lines, 16, "index = int(text.split(':', 1)[1])")
+        add(lines, 16, "gpu_devices = [device for device in available if device.platform in {'gpu', 'cuda'}]")
+        add(lines, 16, "out.append(gpu_devices[index])")
+        add(lines, 12, "elif text == 'cuda' or text == 'gpu':")
+        add(lines, 16, "gpu_devices = [device for device in available if device.platform in {'gpu', 'cuda'}]")
+        add(lines, 16, "out.append(gpu_devices[0])")
+        add(lines, 12, "elif text.startswith('cpu:') or text == 'cpu':")
+        add(lines, 16, "cpu_devices = [device for device in available if device.platform == 'cpu']")
+        add(lines, 16, "out.append(cpu_devices[int(text.split(':', 1)[1])] if ':' in text else cpu_devices[0])")
+        add(lines, 12, "else:")
+        add(lines, 16, "out.append(available[int(text)])")
+        add(lines, 8, "return tuple(out)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _numeric_segments(key):")
+        add(lines, 8, "out = []")
+        add(lines, 8, "for part in str(key).split('.'):")
+        add(lines, 12, "if part.isdigit():")
+        add(lines, 16, "out.append(int(part))")
+        add(lines, 8, "return out")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _param_stage_index(cls, key, stage_count, layer_span):")
+        add(lines, 8, "if stage_count <= 1 or layer_span is None:")
+        add(lines, 12, "return 0")
+        add(lines, 8, "segments = cls._numeric_segments(key)")
+        add(lines, 8, "if not segments:")
+        add(lines, 12, "return 0")
+        add(lines, 8, "layer_min, layer_max = layer_span")
+        add(lines, 8, "layer_count = int(layer_max) - int(layer_min) + 1")
+        add(lines, 8, "if layer_count <= 0:")
+        add(lines, 12, "return 0")
+        add(lines, 8, "for value in segments:")
+        add(lines, 12, "if int(layer_min) <= int(value) <= int(layer_max):")
+        add(lines, 16, "relative = int(value) - int(layer_min)")
+        add(lines, 16, "return min(stage_count - 1, max(0, (relative * stage_count) // layer_count))")
+        add(lines, 8, "return 0")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _infer_layer_span(cls, keys):")
+        add(lines, 8, "values = []")
+        add(lines, 8, "for key in keys:")
+        add(lines, 12, "segments = cls._numeric_segments(key)")
+        add(lines, 12, "if segments:")
+        add(lines, 16, "values.append(segments[0])")
+        add(lines, 8, "if not values:")
+        add(lines, 12, "return None")
+        add(lines, 8, "return (min(values), max(values))")
+        add(lines, 4, "")
+        add(lines, 4, "@classmethod")
+        add(lines, 4, "def _place_param_array(cls, key, value, devices, layer_span):")
+        add(lines, 8, "if not devices:")
+        add(lines, 12, "return value")
+        add(lines, 8, "stage = cls._param_stage_index(key, len(devices), layer_span)")
+        add(lines, 8, "return jax.device_put(value, devices[stage])")
+        add(lines, 4, "")
         add(lines, 4, "def _to_jax(self, value, dtype=None):")
         add(lines, 8, "if value is None:")
         add(lines, 12, "return None")
@@ -676,6 +828,18 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 8, "if not isinstance(cond, jax.Array):")
         add(lines, 12, "return yes if cond else no")
         add(lines, 8, "return jnp.where(cond, yes, no)")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _matmul(left, right):")
+        add(lines, 8, "if isinstance(left, jax.Array) and isinstance(right, jax.Array) and len(left.shape) == 4 and len(right.shape) == 4:")
+        add(lines, 12, "lh = int(left.shape[1])")
+        add(lines, 12, "rh = int(right.shape[1])")
+        add(lines, 12, "if lh != rh:")
+        add(lines, 16, "if lh > rh and rh > 0 and lh % rh == 0:")
+        add(lines, 20, "right = jnp.repeat(right, lh // rh, axis=1)")
+        add(lines, 16, "elif rh > lh and lh > 0 and rh % lh == 0:")
+        add(lines, 20, "left = jnp.repeat(left, rh // lh, axis=1)")
+        add(lines, 8, "return left @ right")
         add(lines, 4, "")
         add(lines, 4, "def _where_indices(self, x):")
         add(lines, 8, "if isinstance(x, jax.Array):")
@@ -951,9 +1115,20 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
         add(lines, 4, "def _sdpa(q, k, v, mask=None, scale=None):")
+        add(lines, 8, "if q.shape[1] != k.shape[1]:")
+        add(lines, 12, "if q.shape[1] > k.shape[1] and k.shape[1] > 0 and q.shape[1] % k.shape[1] == 0:")
+        add(lines, 16, "repeat = q.shape[1] // k.shape[1]")
+        add(lines, 16, "k = jnp.repeat(k, repeat, axis=1)")
+        add(lines, 16, "v = jnp.repeat(v, repeat, axis=1)")
+        add(lines, 12, "elif k.shape[1] > q.shape[1] and q.shape[1] > 0 and k.shape[1] % q.shape[1] == 0:")
+        add(lines, 16, "q = jnp.repeat(q, k.shape[1] // q.shape[1], axis=1)")
         add(lines, 8, "scale_value = (1.0 / (q.shape[-1] ** 0.5)) if scale is None else float(scale)")
         add(lines, 8, "scores = (q @ jnp.swapaxes(k, -1, -2)) * scale_value")
-        add(lines, 8, "if mask is not None: scores = scores + mask")
+        add(lines, 8, "if mask is not None:")
+        add(lines, 12, "if getattr(mask, 'dtype', None) == jnp.bool_:")
+        add(lines, 16, "scores = jnp.where(mask, scores, jnp.finfo(scores.dtype).min)")
+        add(lines, 12, "else:")
+        add(lines, 16, "scores = scores + mask")
         add(lines, 8, "return nn.softmax(scores, axis=-1) @ v")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
@@ -992,17 +1167,30 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 4, "")
     def _emit_load_state_dict(self, lines: list[str]) -> None:
         add = self._add
-        add(lines, 4, "def load_state_dict(self, state_dict, *, quantize=False):")
+        add(lines, 4, "def load_state_dict(self, state_dict, *, quantize=False, param_devices=None):")
         add(lines, 8, "del quantize")
         add(lines, 8, "state_dict = self._filter_state_dict(state_dict)")
         add(lines, 8, "state_dict = self._materialize_state_aliases(state_dict)")
+        add(lines, 8, "state_dict = self._drop_collapsed_numeric_state_aliases(state_dict)")
+        add(lines, 8, "devices = self._resolve_param_devices(param_devices)")
         add(lines, 8, "tensors = {}")
+        add(lines, 8, "packed_source_keys = self._materialize_packed_parameters_from_state_dict(state_dict, tensors)")
+        add(lines, 8, "layer_span = self._infer_layer_span(set(state_dict) | set(tensors))")
+        add(lines, 8, "if devices:")
+        add(lines, 12, "for key, value in list(tensors.items()):")
+        add(lines, 16, "tensors[key] = self._place_param_array(key, value, devices, layer_span)")
         add(lines, 8, "for k, v in state_dict.items():")
+        add(lines, 12, "if str(k) in packed_source_keys:")
+        add(lines, 16, "continue")
         add(lines, 12, "if isinstance(v, jax.Array):")
-        add(lines, 16, "tensors[str(k)] = v")
+        add(lines, 16, "array = v")
         add(lines, 12, "else:")
-        add(lines, 16, "tensors[str(k)] = self._from_numpy(v)")
+        add(lines, 16, "array = self._state_array_from_numpy(v)")
+        add(lines, 12, "tensors[str(k)] = self._place_param_array(str(k), array, devices, layer_span)")
         add(lines, 8, "_jax_materialize_packed_parameters(tensors, self._PACKED_PARAMETER_SPECS)")
+        add(lines, 8, "if devices:")
+        add(lines, 12, "for key, value in list(tensors.items()):")
+        add(lines, 16, "tensors[key] = self._place_param_array(key, value, devices, layer_span)")
         add(lines, 8, "self._flat_tensors = tensors")
         add(lines, 8, "self._materialize_expert_banks()")
         add(lines, 8, "")
@@ -1045,11 +1233,19 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 4, "def _forward(self, input_ids=None, **inputs):")
         args: list[str] = []
         first_input = main.inputs[0].name if main.inputs else None
+        input_names = {value.name for value in main.inputs}
         static_attention_inputs = {
             value.name
             for value in main.inputs
             if value.name in {"attn_mask", "attention_mask", "decoder_attention_mask"}
             and _is_static_mask_type(value.type_expr)
+        }
+        static_attention_capacity_symbols = {
+            value.name: capacity_dim
+            for value in main.inputs
+            if value.name in static_attention_inputs
+            for capacity_dim in (_static_mask_capacity_dim(value.type_expr),)
+            if isinstance(capacity_dim, str) and capacity_dim in self.global_symbol_names
         }
         for value in main.inputs:
             if value.name == "input_ids":
@@ -1088,14 +1284,46 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
                         add(lines, 12, f"__static_declared_capacity_{value.name} = int(input_ids.shape[1]) if input_ids is not None else __static_len_{value.name}")
                     else:
                         add(lines, 12, f"__static_declared_capacity_{value.name} = int({capacity_expr})")
-                    add(lines, 12, f"__static_capacity_{value.name} = max(__static_declared_capacity_{value.name}, __static_len_{value.name})")
+                    add(lines, 12, f"if __static_len_{value.name} > __static_declared_capacity_{value.name}:")
+                    add(lines, 16, f"raise ValueError(f'requested JAX static input capacity {{__static_len_{value.name}}} exceeds declared capacity {{__static_declared_capacity_{value.name}}}')")
+                    add(lines, 12, f"__static_capacity_{value.name} = __static_len_{value.name}")
                     add(lines, 12, f"__static_store_{value.name} = jnp.zeros(({value.name}.shape[0], __static_capacity_{value.name}), dtype={value.name}.dtype)")
                     add(lines, 12, f"__static_store_{value.name} = jax.lax.dynamic_update_slice(__static_store_{value.name}, {value.name}, (0, 0))")
                     add(lines, 12, f"{value.name} = (__static_store_{value.name}, __static_len_{value.name})")
+                    add(lines, 8, f"elif {value.name} is not None:")
+                    add(lines, 12, f"__static_capacity_{value.name} = int({value.name}[0].shape[1])")
+                    add(lines, 8, "else:")
+                    add(lines, 12, f"__static_capacity_{value.name} = int(input_ids.shape[1]) if input_ids is not None else 0")
+                    add(lines, 12, f"__static_store_{value.name} = jnp.ones((input_ids.shape[0], __static_capacity_{value.name}), dtype=jnp.bool_)")
+                    add(lines, 12, f"{value.name} = (__static_store_{value.name}, __static_capacity_{value.name})")
                 else:
                     add(lines, 8, f"{value.name} = self._to_jax({value.name})")
                 args.append(value.name)
-        add(lines, 8, f"result = self.{self.method_names[main.name]}({', '.join(args)})")
+        if "past_kv" in input_names and static_attention_inputs:
+            capacity_source = sorted(static_attention_inputs)[0]
+            add(lines, 8, "if past_kv is None:")
+            add(lines, 12, f"past_kv = ([], [], 0, __static_capacity_{capacity_source})")
+        static_capacity_overrides = [
+            (name, symbol)
+            for name, symbol in sorted(static_attention_capacity_symbols.items())
+        ]
+        if static_capacity_overrides:
+            add(lines, 8, "__static_capacity_old = {}")
+            add(lines, 8, "try:")
+            for name, symbol in static_capacity_overrides:
+                add(lines, 12, f"__static_capacity_old[{symbol!r}] = self._symbols.get({symbol!r})")
+                add(lines, 12, f"self._symbols[{symbol!r}] = __static_capacity_{name}")
+            call_indent = 12
+        else:
+            call_indent = 8
+        add(lines, call_indent, f"result = self.{self.method_names[main.name]}({', '.join(args)})")
+        if static_capacity_overrides:
+            add(lines, 8, "finally:")
+            for _, symbol in static_capacity_overrides:
+                add(lines, 12, f"if __static_capacity_old[{symbol!r}] is None:")
+                add(lines, 16, f"self._symbols.pop({symbol!r}, None)")
+                add(lines, 12, "else:")
+                add(lines, 16, f"self._symbols[{symbol!r}] = __static_capacity_old[{symbol!r}]")
         names = graph_main_output_names(self.program, main)
         if len(names) == 1:
             add(lines, 8, "return result[0]")
@@ -1263,7 +1491,7 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
                         add(lines, 8, f"declared_static_capacity = int({static_attention_capacity_expr})")
                     add(lines, 8, "if requested_static_capacity > declared_static_capacity:")
                     add(lines, 12, "raise ValueError(f'requested JAX static generation capacity {requested_static_capacity} exceeds declared capacity {declared_static_capacity}')")
-                    add(lines, 8, "static_capacity = declared_static_capacity")
+                    add(lines, 8, "static_capacity = requested_static_capacity")
                     add(lines, 8, "attention_mask = _static_attention_mask(attention_mask, out, static_capacity)")
             if use_cache_name is not None:
                 add(lines, 8, f"kwargs.pop({use_cache_name!r}, None)")
@@ -1489,7 +1717,7 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
                 return (
                     f"self._sdpa("
                     f"{args[0]}, {args[1]}, {args[2]}, "
-                    f"mask={args[3]}, scale=1.0)"
+                    f"mask={args[3]}, scale=None)"
                 )
             return (
                 f"self._sdpa("
@@ -1557,12 +1785,21 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
                     dim_expr = self._dim_token_expr(output_type.dims[axis], local=local, symbols_dict=symbols_dict)
                     if dim_expr is not None:
                         size_expr = dim_expr
-            if size_expr == "None" and len(args) >= 4:
+            if len(args) >= 4:
+                start_operand = node.inputs[2] if len(node.inputs) > 2 else None
+                end_operand = node.inputs[3] if len(node.inputs) > 3 else None
                 start_expr = args[2].strip()
                 end_expr = args[3].strip()
                 match = re.fullmatch(r"\((?P<end>.+) - (?P<size>.+)\)", start_expr)
-                if match is not None and match.group("end").strip() == end_expr:
+                if size_expr == "None" and match is not None and match.group("end").strip() == end_expr:
                     size_expr = match.group("size").strip()
+                elif size_expr == "None" and isinstance(start_operand, GraphLiteral) and start_operand.value == 0:
+                    size_expr = end_expr
+                elif size_expr == "None":
+                    start_type = getattr(start_operand, "type_expr", None)
+                    end_type = getattr(end_operand, "type_expr", None)
+                    if isinstance(start_type, TypeInt | TypeDim) and isinstance(end_type, TypeInt | TypeDim):
+                        size_expr = f"({end_expr} - {start_expr})"
             return f"self._slice({args[0]}, {args[1]}, {args[2]}, {args[3]}, size={size_expr})"
         if primitive == "assign_slice":
             return f"self._assign_slice({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})"
@@ -1587,7 +1824,7 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             "transpose": lambda: f"jnp.swapaxes({args[0]}, int({args[1]}), int({args[2]}))",
             "unsqueeze": lambda: f"self._unsqueeze({args[0]}, {args[1]})",
             "repeat": lambda: f"jnp.repeat({args[0]}, int({args[1]}), axis=(int({args[2]}) if int({args[2]}) >= 0 else int({args[2]}) + len({args[0]}.shape)))",
-            "matmul": lambda: f"({args[0]} @ {args[1]})",
+            "matmul": lambda: f"self._matmul({args[0]}, {args[1]})",
             "where": lambda: f"self._where({args[0]}, {args[1]}, {args[2]})",
             "where_indices": lambda: f"self._where_indices({args[0]})",
             "require": lambda: f"self._require_value({args[0]})",
@@ -1740,6 +1977,28 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         symbols_dict: str,
     ) -> bool:
         return False
+
+    def _dim_token_expr(self, dim: Any, *, local: set[str], symbols_dict: str) -> str | None:
+        if isinstance(dim, bool):
+            return repr(int(dim))
+        if isinstance(dim, int):
+            return repr(dim)
+        if isinstance(dim, str):
+            if dim.startswith(".."):
+                return None
+            if dim in local:
+                return _dim_ident(dim)
+            if dim in self.global_symbol_names:
+                return f"{symbols_dict}[{dim!r}]"
+            return None
+        if isinstance(dim, DimExprBinary):
+            left = self._dim_token_expr(dim.left, local=local, symbols_dict=symbols_dict)
+            right = self._dim_token_expr(dim.right, local=local, symbols_dict=symbols_dict)
+            if left is None or right is None:
+                return None
+            op = "//" if dim.op == "/" else dim.op
+            return f"({left} {op} {right})"
+        return repr(dim)
 
 
 def emit_model_code_from_graph_ir(

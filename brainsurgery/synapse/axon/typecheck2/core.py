@@ -1741,6 +1741,14 @@ def _normalize_typed_module_with_fresh_sources(
     fresh_dim_sources: dict[str, str],
 ) -> AxonDefinition:
     protected_dim_names = _env_dim_names(_module_header_env(module, ctx))
+    protected_dim_names.update(
+        name
+        for name, definition in ctx.modules_by_name.items()
+        if not definition.params
+        and not definition.path_params
+        and definition.path_param is None
+        and isinstance(definition.return_type_expr, TypeDim | TypeInt)
+    )
     if module.return_type_expr is not None:
         protected_dim_names.update(_collect_dim_names(module.return_type_expr))
     ctx = _normalization_ctx_preserving_header_dims(
@@ -3525,6 +3533,7 @@ def _typecheck2_flat_axon_file_once(program: AxonFile, *, main_module: str | Non
         should_emit_generic = (
             module.name not in roots
             and not _is_loop_generated_definition_name(module.name)
+            and not _is_generated_definition_name(module.name)
         )
         if should_emit_generic or typed is None or (
             module.name in demand_state.specialization_conflicts
@@ -3584,7 +3593,13 @@ def typecheck2_flat_axon_file(program: AxonFile, *, main_module: str | None = No
     current = program
     seen: dict[str, AxonFile] = {}
     for _ in range(5):
-        typed = _typecheck2_flat_axon_file_once(current, main_module=main_module)
+        try:
+            typed = _typecheck2_flat_axon_file_once(current, main_module=main_module)
+        except ValueError:
+            if previous is not None:
+                validate_typed_axon_file(previous, main_module=main_module)
+                return previous
+            raise
         key = repr(typed)
         if previous is not None and typed == previous:
             return typed

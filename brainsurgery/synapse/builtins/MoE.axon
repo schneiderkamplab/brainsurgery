@@ -30,6 +30,7 @@ import Tensor (
 )
 export (
   grouped_sigmoid_router,
+  grouped_clamped_swiglu_ffn_basic,
   grouped_swiglu_ffn_basic,
   grouped_swiglu_ffn_separate,
   scatter_add,
@@ -135,6 +136,19 @@ grouped_swiglu_ffn_basic hidden topk_scores topk_indices experts ?gate_up_weight
   x_in <- pre_scale_input ? (x_sel * scale) : x_sel
   gate_up <- expert_linear@w1 x_in topk_indices dim=null bias=false transpose=transpose weight_path=gate_up_weight
   gate, up <- chunk gate_up parts=2
+  x_upd <- gate |> silu |> mul up |> expert_linear@w2 topk_indices dim=D bias=false transpose=transpose weight_path=out_weight
+  x_weighted <- pre_scale_input ? x_upd : (x_upd * scale)
+  return sum x_weighted dim=2 keepdim=false
+
+grouped_clamped_swiglu_ffn_basic :: Tensor[B,T,D] -> Tensor[B,T,TOPK] -> IdxTensor[B,T,TOPK] -> Dim -> Float -> ?Path -> ?Path -> ?Bool -> ?Bool -> Tensor[B,T,D]
+grouped_clamped_swiglu_ffn_basic hidden topk_scores topk_indices experts limit ?gate_up_weight=@experts.gate_up_proj ?out_weight=@experts.down_proj ?transpose=false ?pre_scale_input=false = do
+  x_sel <- unsqueeze hidden 2 |> expand shape=[B, T, TOPK, D]
+  scale <- unsqueeze topk_scores -1
+  x_in <- pre_scale_input ? (x_sel * scale) : x_sel
+  gate_up <- expert_linear@w1 x_in topk_indices dim=null bias=false transpose=transpose weight_path=gate_up_weight
+  gate, up <- chunk gate_up parts=2
+  gate <- clamp gate max=limit
+  up <- clamp up min=(0.0 - limit) max=limit
   x_upd <- gate |> silu |> mul up |> expert_linear@w2 topk_indices dim=D bias=false transpose=transpose weight_path=out_weight
   x_weighted <- pre_scale_input ? x_upd : (x_upd * scale)
   return sum x_weighted dim=2 keepdim=false

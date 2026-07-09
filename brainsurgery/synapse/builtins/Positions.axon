@@ -151,14 +151,12 @@ linear_position_bias attn_mask heads ?scale=1.0 = do
   ratio <- (0.0 - 8.0) / cp2
   powers <- arange attn_mask start=1 end=(cp2 + 1)
   slopes <- exp (ln2 * (powers * ratio))
-  slopes <- (cp2 == heads)
-    ? slopes
-    : do
-      remain <- ((heads - cp2) > cp2) ? cp2 : (heads - cp2)
-      extra_powers <- arange_step attn_mask start=1 end=(1 + (2 * remain)) stride=2
-      extra_ratio <- (0.0 - 4.0) / cp2
-      extra_slopes <- exp (ln2 * (extra_powers * extra_ratio))
-      return concat slopes extra_slopes dim=0
+  remain <- ((heads - cp2) > cp2) ? cp2 : (heads - cp2)
+  extra_powers <- arange_step attn_mask start=1 end=(1 + (2 * remain)) stride=2
+  extra_ratio <- (0.0 - 4.0) / cp2
+  extra_slopes <- exp (ln2 * (extra_powers * extra_ratio))
+  slopes_all <- concat slopes extra_slopes dim=0
+  slopes <- (cp2 == heads) ? slopes : slopes_all
   arange_tensor <- cast attn_mask dtype="float32"
   arange_tensor <- cumsum arange_tensor dim=-1
   arange_tensor <- arange_tensor - 1.0

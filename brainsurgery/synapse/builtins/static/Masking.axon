@@ -6,7 +6,6 @@ import Tensor (
   dtype_value,
   eq,
   expand,
-  full,
   le,
   reshape,
   size,
@@ -25,9 +24,18 @@ export (
 
 type Mask[B,K,C] = (Tensor[B,C], Dim)
 
+mask_values :: Tensor[B,Q] -> Dim -> Tensor[B,C]
+mask_values x capacity = do
+  ids <- arange x start=0 end=capacity
+  values <- le ids capacity
+  values <- reshape values shape=[1, capacity]
+  return expand values shape=[B, capacity]
+
 mask_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> Mask[B,K,C]
 mask_for_input x mask capacity = (mask == null)
-  ? ((full x shape=[B, capacity] value=true dtype="bool", Q) :: Mask[B,K,C])
+  ? do
+    values <- mask_values x capacity
+    return ((values, Q) :: Mask[B,K,C])
   : (mask :: Mask[B,K,C])
 
 mask_length_for_input :: Tensor[B,Q] -> ?Mask[B,K,C] -> Dim -> Dim
@@ -62,7 +70,8 @@ causal_mask_for_input_masked x mask ?window=null = do
 causal_mask_for_input :: Tensor[B,Q] -> Dim -> ?Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
 causal_mask_for_input x key_length ?padding_mask=null ?window=null = (padding_mask == null)
   ? do
-    mask <- mask_for_input x null key_length
+    values <- mask_values x C
+    mask <- ((values, key_length) :: Mask[B,K,C])
     return causal_mask_for_input_keep x mask window=window
   : causal_mask_for_input_masked x padding_mask window=window
 
@@ -90,7 +99,8 @@ bidirectional_mask_for_input_masked x mask ?window=null = do
 bidirectional_mask_for_input :: Tensor[B,Q] -> Dim -> ?Mask[B,K,C] -> ?Dim -> Tensor[B,1,Q,C]
 bidirectional_mask_for_input x key_length ?padding_mask=null ?window=null = (padding_mask == null)
   ? do
-    mask <- mask_for_input x null key_length
+    values <- mask_values x C
+    mask <- ((values, key_length) :: Mask[B,K,C])
     return bidirectional_mask_for_input_keep x mask window=window
   : bidirectional_mask_for_input_masked x padding_mask window=window
 
