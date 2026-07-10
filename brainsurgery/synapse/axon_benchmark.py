@@ -861,6 +861,8 @@ def _log_result_summary(result: dict[str, Any]) -> None:
     print(f"result.masked_top1_eq={result.get('masked_top1_eq')}")
     print(f"result.masked_max_abs_diff={result.get('masked_max_diff')}")
     print(f"result.masked_max_rel_diff={result.get('masked_max_rel_diff')}")
+    if result.get("error"):
+        print(f"result.error={result['error']}")
 
 
 def render_axon_benchmark_csv(*, csv_path: Path, table_format: str = "markdown") -> str:
@@ -1102,14 +1104,13 @@ def _run_benchmark_jobs_serial(
                             try:
                                 result = _run_benchmark_pair(pair, device=device, **backend_kwargs)
                             except Exception as exc:
-                                if debug_errors:
-                                    print(
-                                        "Benchmark pair failed:",
-                                        f"backend={axon_backend}",
-                                        f"axon={pair.axon_file}",
-                                        f"checkpoint={pair.checkpoint_id}",
-                                    )
-                                    print(traceback.format_exc())
+                                print(
+                                    "Benchmark pair failed:",
+                                    f"backend={axon_backend}",
+                                    f"axon={pair.axon_file}",
+                                    f"checkpoint={pair.checkpoint_id}",
+                                )
+                                print(traceback.format_exc())
                                 result = _error_result_for_pair(
                                     pair,
                                     exc,
@@ -1224,12 +1225,13 @@ def _run_benchmark_worker_loop(
                         os.environ["AXON_JAX_PARAM_DEVICES"] = previous_jax_param_devices
                     _restore_env(previous_jax_env)
             _write_worker_result_file(log_path, results)
+            has_errors = any(isinstance(r, dict) and r.get("error") for r in results)
             result_queue.put(
                 (
                     pair_index,
                     results,
                     None,
-                    "",
+                    capture.getvalue() if has_errors else "",
                     log_path.name if log_path else None,
                 )
             )
@@ -1497,6 +1499,8 @@ def _run_benchmark_jobs_parallel(
                 result_rows = cast(list[dict[str, Any]], result)
             else:
                 result_rows = [cast(dict[str, Any], result)]
+            if captured_output and any(isinstance(r, dict) and r.get("error") for r in result_rows):
+                print(captured_output.rstrip())
             results_by_index[int(pair_index)] = result_rows
             if stream_csv is not None:
                 for row in result_rows:

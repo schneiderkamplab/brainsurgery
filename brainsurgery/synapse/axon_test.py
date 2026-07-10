@@ -2981,14 +2981,17 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
 def _sync_device_output(value: Any) -> None:
     """Force evaluation of lazy arrays and sync the device.
 
-    Handles MLX (``mx.eval``), JAX (``block_until_ready``), and torch
-    (``cuda/mps.synchronize``).  MLX operations are lazy: ``mx.eval(mx.array(0))``
-    does NOT evaluate the model output — we must explicitly eval the returned array.
+    Handles MLX (``mx.eval`` + ``mx.synchronize``), JAX
+    (``block_until_ready``), and torch (``cuda/mps.synchronize``).
+    MLX operations are lazy: ``mx.eval(mx.array(0))`` does NOT flush
+    pending GPU work — we must explicitly eval the returned array
+    and then synchronize the stream.
     """
     try:
         import mlx.core as mx
         if isinstance(value, mx.array):
             mx.eval(value)
+            mx.synchronize()
             return
     except ImportError:
         pass
@@ -3028,8 +3031,8 @@ def _time_generate_repeated(
             torch.mps.synchronize()
         try:
             import mlx.core as mx
-            mx.eval(mx.array(0))
-        except ImportError:
+            mx.synchronize()
+        except (ImportError, AttributeError):
             pass
 
     with timing(message=label):
@@ -3068,8 +3071,8 @@ def _time_forward_repeated(
             torch.mps.synchronize()
         try:
             import mlx.core as mx
-            mx.eval(mx.array(0))
-        except ImportError:
+            mx.synchronize()
+        except (ImportError, AttributeError):
             pass
 
     with timing(message=label):
