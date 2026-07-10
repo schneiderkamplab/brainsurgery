@@ -3,9 +3,9 @@ from __future__ import annotations
 import gc
 import hashlib
 import html
-import inspect
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import math
 import os
@@ -13,9 +13,9 @@ import re
 import shutil
 import sys
 import time
-from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, suppress
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MethodType, ModuleType
@@ -26,7 +26,6 @@ import torch
 from accelerate import dispatch_model, init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 from mltiming import timing
-from omegaconf import OmegaConf
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -57,12 +56,20 @@ from .axon import (
 )
 from .axon.ast import AxonFile, TypeOptional
 from .axon.codegen2_jax import emit_model_code_from_graph_ir as emit_jax_model_code_from_graph_ir
-from .axon.codegen2_tinygrad import emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir
-from .axon.codegen2_triton import emit_model_code_from_graph_ir as emit_triton_model_code_from_graph_ir
+from .axon.codegen2_tinygrad import (
+    emit_model_code_from_graph_ir as emit_tinygrad_model_code_from_graph_ir,
+)
 from .axon.codegen2_torch import (
     emit_model_code_from_graph_ir as emit_torch_model_code_from_graph_ir,
+)
+from .axon.codegen2_torch import (
     graph_main_output_names as _graph_main_output_names,
+)
+from .axon.codegen2_torch import (
     make_runtime2_model_class as make_runtime2_torch_model_class,
+)
+from .axon.codegen2_triton import (
+    emit_model_code_from_graph_ir as emit_triton_model_code_from_graph_ir,
 )
 from .axon.codegen2_vllm import emit_model_code_from_graph_ir as emit_vllm_model_code_from_graph_ir
 from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
@@ -128,9 +135,14 @@ def _format_checkpoint_summary_table(
     if include_backend:
         headers.insert(0, "backend")
     body = [
-        ([
-            str(row.get("backend", "")),
-        ] if include_backend else []) + [
+        (
+            [
+                str(row.get("backend", "")),
+            ]
+            if include_backend
+            else []
+        )
+        + [
             str(row["axon"]),
             str(row["checkpoint"]),
             str(row["model_dir"]),
@@ -476,19 +488,24 @@ def _to_torch(value: Any) -> torch.Tensor | None:
         return value
     try:
         import mlx.core as mx
+
         if isinstance(value, mx.array):
             import numpy as np
+
             return torch.from_numpy(np.asarray(value))
     except ImportError:
         pass
     try:
         import jax
+
         if isinstance(value, jax.Array):
             import numpy as np
+
             return torch.from_numpy(np.asarray(value))
     except ImportError:
         pass
     return None
+
 
 def _extract_logits(output: Any) -> torch.Tensor:
     t = _to_torch(output)
@@ -1074,7 +1091,10 @@ def _augment_model_config_from_checkpoint(
     safetensors_files: Sequence[Path],
     model_config: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    if isinstance(model_config, dict) and str(model_config.get("model_type", "")).strip().lower() == "deepseek_v4":
+    if (
+        isinstance(model_config, dict)
+        and str(model_config.get("model_type", "")).strip().lower() == "deepseek_v4"
+    ):
         enriched = dict(model_config)
         n_layers = int(enriched.get("num_hidden_layers", 0) or 0)
         if n_layers > 0 and not isinstance(enriched.get("layer_types"), list):
@@ -1099,7 +1119,11 @@ def _augment_model_config_from_checkpoint(
                 ][:n_layers]
         if n_layers > 0 and not isinstance(enriched.get("mlp_layer_types"), list):
             n_hash_raw = enriched.get("num_hash_layers", 3)
-            n_hash = int(n_hash_raw) if isinstance(n_hash_raw, int) and not isinstance(n_hash_raw, bool) else 3
+            n_hash = (
+                int(n_hash_raw)
+                if isinstance(n_hash_raw, int) and not isinstance(n_hash_raw, bool)
+                else 3
+            )
             enriched["mlp_layer_types"] = [
                 *(["hash_moe"] * min(n_layers, n_hash)),
                 *(["moe"] * max(0, n_layers - n_hash)),
@@ -1278,7 +1302,9 @@ def _align_hf_parameterless_tensor_helpers_to_parent_devices(model: Any) -> int:
             continue
         has_tensor_state = False
         with suppress(Exception):
-            has_tensor_state = any(torch.is_tensor(value) for value in module.buffers(recurse=False))
+            has_tensor_state = any(
+                torch.is_tensor(value) for value in module.buffers(recurse=False)
+            )
         if not has_tensor_state:
             for value in vars(module).values():
                 if torch.is_tensor(value):
@@ -1576,9 +1602,8 @@ def _normalize_rope_numeric_fields(config: Any) -> Any:
     rope_parameters = getattr(config, "rope_parameters", None)
     _normalize_dict(rope_parameters)
     if not isinstance(rope_parameters, dict):
-        if (
-            str(getattr(config, "model_type", "")).strip().lower() == "phi3small"
-            and not isinstance(rope_scaling, dict)
+        if str(getattr(config, "model_type", "")).strip().lower() == "phi3small" and not isinstance(
+            rope_scaling, dict
         ):
             if hasattr(config, "rope_parameters"):
                 setattr(config, "rope_parameters", None)
@@ -1653,7 +1678,9 @@ def _move_hf_tensor_tree_to_device(
             return value
         return value.to(device=device, dtype=target_dtype)
     if isinstance(value, tuple):
-        return tuple(_move_hf_tensor_tree_to_device(item, device=device, dtype=dtype) for item in value)
+        return tuple(
+            _move_hf_tensor_tree_to_device(item, device=device, dtype=dtype) for item in value
+        )
     if isinstance(value, list):
         return [_move_hf_tensor_tree_to_device(item, device=device, dtype=dtype) for item in value]
     if isinstance(value, dict):
@@ -1811,7 +1838,9 @@ def _patch_hf_shared_modules_for_device_map(model: Any) -> list[Any]:
             continue
         has_tensor_state = False
         with suppress(Exception):
-            has_tensor_state = any(torch.is_tensor(value) for value in module.buffers(recurse=False))
+            has_tensor_state = any(
+                torch.is_tensor(value) for value in module.buffers(recurse=False)
+            )
         if not has_tensor_state:
             for value in vars(module).values():
                 if torch.is_tensor(value):
@@ -2054,17 +2083,15 @@ def _patch_transformers_mask_device_map_inputs(enabled: bool) -> Any:
         if attention_mask is None and len(args) >= 3:
             attention_mask = args[2]
             attention_mask_arg_index = 2
-        reference = encoder_hidden_states if torch.is_tensor(encoder_hidden_states) else inputs_embeds
+        reference = (
+            encoder_hidden_states if torch.is_tensor(encoder_hidden_states) else inputs_embeds
+        )
         if torch.is_tensor(attention_mask) and torch.is_tensor(reference):
             # Transformers' SDPA mask helpers close over 2D padding masks and index
             # them with helper tensors allocated from a separate reference device.
             # CPU padding masks are valid for indexing from any device and avoid
             # device-map splits leaking into the closure.
-            target_device = (
-                torch.device("cpu")
-                if attention_mask.ndim == 2
-                else reference.device
-            )
+            target_device = torch.device("cpu") if attention_mask.ndim == 2 else reference.device
             moved_attention_mask = (
                 attention_mask.to(device=target_device)
                 if attention_mask.device != target_device
@@ -2141,11 +2168,7 @@ def _patch_torch_equal_for_cross_device_hf_load(enabled: bool) -> Any:
     original_equal = torch.equal
 
     def _equal_device_safe(left: Any, right: Any) -> bool:
-        if (
-            torch.is_tensor(left)
-            and torch.is_tensor(right)
-            and left.device != right.device
-        ):
+        if torch.is_tensor(left) and torch.is_tensor(right) and left.device != right.device:
             return bool(original_equal(left.detach().cpu(), right.detach().cpu()))
         return bool(original_equal(left, right))
 
@@ -2682,7 +2705,9 @@ def _first_numeric_path_segment(key: str) -> int | None:
     return None
 
 
-def _axon_param_placement_plan(keys: Sequence[str], devices: Sequence[torch.device]) -> dict[str, torch.device]:
+def _axon_param_placement_plan(
+    keys: Sequence[str], devices: Sequence[torch.device]
+) -> dict[str, torch.device]:
     if not devices:
         return {}
     layer_ids = sorted(
@@ -2789,7 +2814,9 @@ def _load_dequantized_deepseek_v4_fp8_state_dict(
             device=gate_device,
             dtype=storage_dtype,
         )
-        down = torch.empty((num_experts, *first_down.shape), device=down_device, dtype=storage_dtype)
+        down = torch.empty(
+            (num_experts, *first_down.shape), device=down_device, dtype=storage_dtype
+        )
 
         def fill_expert(expert: int, proj_keys: dict[str, str]) -> None:
             if not {"w1", "w2", "w3"}.issubset(proj_keys):
@@ -2814,7 +2841,9 @@ def _load_dequantized_deepseek_v4_fp8_state_dict(
                 _read_safetensor_indexed(index, w2_key[: -len(".weight")] + ".scale"),
                 dtype=storage_dtype,
             )
-            gate_up[expert].copy_(torch.cat([gate, up], dim=0).to(device=gate_device, dtype=storage_dtype))
+            gate_up[expert].copy_(
+                torch.cat([gate, up], dim=0).to(device=gate_device, dtype=storage_dtype)
+            )
             down[expert].copy_(down_weight.to(device=down_device, dtype=storage_dtype))
 
         for expert, proj_keys in sorted(experts.items()):
@@ -2865,7 +2894,9 @@ def _load_hf_causal_lm_from_dequantized_deepseek_v4_fp8_state(
         value = _read_safetensor_indexed(index, raw_key)
         scale_key = raw_key[: -len(".weight")] + ".scale" if raw_key.endswith(".weight") else ""
         if scale_key in index:
-            value = _deepseek_v4_dequantize_fp8_weight(value, _read_safetensor_indexed(index, scale_key), dtype=dtype)
+            value = _deepseek_v4_dequantize_fp8_weight(
+                value, _read_safetensor_indexed(index, scale_key), dtype=dtype
+            )
 
         mapped = _deepseek_v4_hf_base_key(raw_key)
         if mapped not in expected:
@@ -2890,14 +2921,20 @@ def _load_hf_causal_lm_from_dequantized_deepseek_v4_fp8_state(
         down_name = f"model.layers.{layer}.mlp.experts.down_proj"
         if gate_name not in expected or down_name not in expected:
             continue
-        gate_device = _device_for_hf_tensor_name(gate_name, device_map=device_map, default_device=target_device)
-        down_device = _device_for_hf_tensor_name(down_name, device_map=device_map, default_device=target_device)
+        gate_device = _device_for_hf_tensor_name(
+            gate_name, device_map=device_map, default_device=target_device
+        )
+        down_device = _device_for_hf_tensor_name(
+            down_name, device_map=device_map, default_device=target_device
+        )
         gate_up = torch.empty(state_shapes[gate_name], device=gate_device, dtype=dtype)
         down = torch.empty(state_shapes[down_name], device=down_device, dtype=dtype)
         for expert in range(gate_up.shape[0]):
             proj_keys = experts.get(expert)
             if proj_keys is None or not {"w1", "w2", "w3"}.issubset(proj_keys):
-                raise KeyError(f"DeepSeek-V4 missing FP8 expert tensors for layer={layer} expert={expert}")
+                raise KeyError(
+                    f"DeepSeek-V4 missing FP8 expert tensors for layer={layer} expert={expert}"
+                )
             w1_key = proj_keys["w1"]
             w2_key = proj_keys["w2"]
             w3_key = proj_keys["w3"]
@@ -2935,7 +2972,9 @@ def _load_hf_causal_lm_from_dequantized_deepseek_v4_fp8_state(
     if missing:
         preview = ", ".join(missing[:8])
         suffix = "" if len(missing) <= 8 else f", ... ({len(missing)} total)"
-        raise RuntimeError(f"dequantized DeepSeek-V4 FP8 HF load left meta parameters: {preview}{suffix}")
+        raise RuntimeError(
+            f"dequantized DeepSeek-V4 FP8 HF load left meta parameters: {preview}{suffix}"
+        )
 
     if device_map is not None:
         model = dispatch_model(model, device_map=device_map)
@@ -3269,14 +3308,18 @@ def _time_generate(label: str, fn: Any) -> tuple[Any, float]:
 def _sync_device_output(value: Any) -> None:
     """Force evaluation of lazy arrays and sync the device.
 
-    Handles MLX (``mx.eval``), JAX (``block_until_ready``), and torch
-    (``cuda/mps.synchronize``).  MLX operations are lazy: ``mx.eval(mx.array(0))``
-    does NOT evaluate the model output — we must explicitly eval the returned array.
+    Handles MLX (``mx.eval`` + ``mx.synchronize``), JAX
+    (``block_until_ready``), and torch (``cuda/mps.synchronize``).
+    MLX operations are lazy: ``mx.eval(mx.array(0))`` does NOT flush
+    pending GPU work — we must explicitly eval the returned array
+    and then synchronize the stream.
     """
     try:
         import mlx.core as mx
+
         if isinstance(value, mx.array):
             mx.eval(value)
+            mx.synchronize()
             return
     except ImportError:
         pass
@@ -3316,8 +3359,9 @@ def _time_generate_repeated(
             torch.mps.synchronize()
         try:
             import mlx.core as mx
-            mx.eval(mx.array(0))
-        except ImportError:
+
+            mx.synchronize()
+        except (ImportError, AttributeError):
             pass
 
     with timing(message=label):
@@ -3356,8 +3400,9 @@ def _time_forward_repeated(
             torch.mps.synchronize()
         try:
             import mlx.core as mx
-            mx.eval(mx.array(0))
-        except ImportError:
+
+            mx.synchronize()
+        except (ImportError, AttributeError):
             pass
 
     with timing(message=label):
@@ -3624,9 +3669,7 @@ def _compare_vllm_top_logprobs_with_hf_prefill(
                 continue
             vllm_probs = prompt_positions[pos_idx]
             hf_pos_idx = (
-                physical_positions[pos_idx - 1]
-                if physical_positions is not None
-                else pos_idx - 1
+                physical_positions[pos_idx - 1] if physical_positions is not None else pos_idx - 1
             )
             source = "prompt_last"
         if not isinstance(vllm_probs, Mapping) or not vllm_probs:
@@ -3733,9 +3776,13 @@ def _call_generate_compatible(model: Any, **kwargs: Any) -> Any:
                     setattr(model_cls, "forward", original_forward)
             if restore_update_model_kwargs:
                 with suppress(Exception):
-                    setattr(model, "_update_model_kwargs_for_generation", original_update_model_kwargs)
+                    setattr(
+                        model, "_update_model_kwargs_for_generation", original_update_model_kwargs
+                    )
     try:
-        if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        if any(
+            param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
+        ):
             return generate(**kwargs)
         accepted = {
             name
@@ -3821,7 +3868,10 @@ def _call_generate_or_forward_greedy(
             )
         generated = torch.cat([generated, next_token.reshape(-1, 1)], dim=-1)
         attention_mask = torch.cat(
-            [attention_mask, torch.ones_like(next_token.reshape(-1, 1), dtype=attention_mask.dtype)],
+            [
+                attention_mask,
+                torch.ones_like(next_token.reshape(-1, 1), dtype=attention_mask.dtype),
+            ],
             dim=-1,
         )
         if eos_token_id is not None:
@@ -4017,10 +4067,7 @@ def _print_axon_profile_summary(rows: Sequence[Mapping[str, Any]]) -> None:
         seconds = float(row.get("seconds", 0.0))
         count = int(row.get("count", 0))
         avg_ms = float(row.get("avg_seconds", 0.0)) * 1000.0
-        print(
-            f"| {rank} | {row.get('name', '')} | {count} | "
-            f"{seconds:.6f} | {avg_ms:.3f} |"
-        )
+        print(f"| {rank} | {row.get('name', '')} | {count} | {seconds:.6f} | {avg_ms:.3f} |")
 
 
 def _maybe_compile_model(
@@ -4042,6 +4089,7 @@ def _maybe_compile_model(
     try:
         import mlx.core as mx
         import mlx.nn as mx_nn
+
         if isinstance(model, mx_nn.Module):
             compile_method = getattr(model, "compile", None)
             if callable(compile_method):
@@ -4188,9 +4236,7 @@ def _declared_checkpoints_from_axon(
     if raw is None:
         raw = (getattr(parsed, "pragmas", None) or {}).get("checkpoints")
     if raw is None:
-        raise ValueError(
-            f"No CHECKPOINTS pragma declared in {axon_file}"
-        )
+        raise ValueError(f"No CHECKPOINTS pragma declared in {axon_file}")
     checkpoints: tuple[str, ...]
     if isinstance(raw, str):
         checkpoints = (raw,)
@@ -4327,7 +4373,9 @@ def _run_axon_test_single(
                 "causal_lm, masked_lm, and seq2seq_lm models"
             )
         if not str(device).startswith("cuda"):
-            raise ValueError("axon_backend='pipeline2-torch' currently requires a CUDA device target")
+            raise ValueError(
+                "axon_backend='pipeline2-torch' currently requires a CUDA device target"
+            )
         if compile_axon:
             raise ValueError("compile_axon is not supported with axon_backend='pipeline2-torch'")
         if trace_layers:
@@ -4367,7 +4415,10 @@ def _run_axon_test_single(
         if isinstance(model_config, dict)
         else ""
     )
-    if resolved_hf_experts_implementation is None and resolved_model_type in {"flex_olmo", "gpt_oss"}:
+    if resolved_hf_experts_implementation is None and resolved_model_type in {
+        "flex_olmo",
+        "gpt_oss",
+    }:
         resolved_hf_experts_implementation = "grouped_mm"
     if (
         resolved_hf_experts_implementation is None
@@ -4436,7 +4487,6 @@ def _run_axon_test_single(
 
     with TemporaryDirectory(prefix="axon_benchmark_") as tmp_dir:
         tmp_path = Path(tmp_dir)
-        synapse_yaml_path = tmp_path / "lowered_synapse.yaml"
         generated_py_path = tmp_path / "generated_model.py"
         if effective_trust_remote_code and not os.environ.get("HF_MODULES_CACHE"):
             modules_cache = resolved_hf_model_dir.parent / ".hf_modules_cache"
@@ -4506,6 +4556,7 @@ def _run_axon_test_single(
                 from brainsurgery.synapse.axon.codegen2_mlx import (
                     emit_model_code_from_graph_ir as emit_mlx_model_code,
                 )
+
                 code = emit_mlx_model_code(
                     graph_program,
                     class_name=class_name,
@@ -4580,9 +4631,7 @@ def _run_axon_test_single(
             reference_quant_config = _build_reference_quantization_config(hf_config)
             from_pretrained_quant_config = reference_quant_config
             if hf_strict_dtype and reference_quant_config is not None:
-                print(
-                    "HF strict dtype enabled; not passing quantization_config to from_pretrained"
-                )
+                print("HF strict dtype enabled; not passing quantization_config to from_pretrained")
                 from_pretrained_quant_config = None
             if hf_strict_dtype and getattr(hf_config, "quantization_config", None) is not None:
                 print("HF strict dtype enabled; removing config.quantization_config")
@@ -4907,12 +4956,8 @@ def _run_axon_test_single(
                     "device_map": hf_device_map,
                 }
                 if resolved_hf_experts_implementation is not None:
-                    seq2seq_kwargs["experts_implementation"] = (
-                        resolved_hf_experts_implementation
-                    )
-                with _patch_torch_equal_for_cross_device_hf_load(
-                    enabled=hf_device_map is not None
-                ):
+                    seq2seq_kwargs["experts_implementation"] = resolved_hf_experts_implementation
+                with _patch_torch_equal_for_cross_device_hf_load(enabled=hf_device_map is not None):
                     hf_model = AutoModelForSeq2SeqLM.from_pretrained(
                         str(resolved_hf_model_dir),
                         **seq2seq_kwargs,
@@ -4946,7 +4991,9 @@ def _run_axon_test_single(
                         and reference_quant_config is not None
                         and bool(getattr(reference_quant_config, "dequantize", False))
                     ):
-                        print("HF: loading dequantized MXFP4 checkpoint via explicit state-dict path")
+                        print(
+                            "HF: loading dequantized MXFP4 checkpoint via explicit state-dict path"
+                        )
                         hf_model = _load_hf_causal_lm_from_dequantized_mxfp4_state(
                             safetensors_files=safetensors_files,
                             dtype=resolved_dtype,
@@ -4957,8 +5004,7 @@ def _run_axon_test_single(
                             model_config=model_config,
                         )
                     elif (
-                        str(getattr(hf_config, "model_type", "")).strip().lower()
-                        == "deepseek_v4"
+                        str(getattr(hf_config, "model_type", "")).strip().lower() == "deepseek_v4"
                         and reference_quant_method == "fp8"
                         and reference_quant_config is not None
                         and bool(getattr(reference_quant_config, "dequantize", False))
@@ -5228,18 +5274,17 @@ def _run_axon_test_single(
             with _patch_transformers_mask_device_map_inputs(enabled=hf_device_map is not None):
                 if not run_generate_benchmark:
                     with torch.no_grad():
-                        hf_logits, hf_time, hf_forward_samples, hf_forward_warmup_samples = _time_forward_repeated(
-                            "HF",
-                            lambda model=hf: _run_hf_forward(model),
-                            warmup=forward_warmup,
-                            repeat=forward_repeat,
+                        hf_logits, hf_time, hf_forward_samples, hf_forward_warmup_samples = (
+                            _time_forward_repeated(
+                                "HF",
+                                lambda model=hf: _run_hf_forward(model),
+                                warmup=forward_warmup,
+                                repeat=forward_repeat,
+                            )
                         )
                 else:
-                    hf_forward_time = 0.0
                     with torch.no_grad():
-                        hf_t0 = time.perf_counter()
                         hf_logits = _run_hf_forward(hf)
-                        hf_forward_time = time.perf_counter() - hf_t0
                         if _is_deepseek_family_model_type(resolved_model_type) and not bool(
                             torch.isfinite(hf_logits).all()
                         ):
@@ -5270,9 +5315,7 @@ def _run_axon_test_single(
                                     "DeepSeek HF logits still non-finite after per-prompt retry; "
                                     "retrying one additional full forward pass"
                                 )
-                                hf_t0 = time.perf_counter()
                                 hf_logits = _run_hf_forward(hf)
-                                hf_forward_time = time.perf_counter() - hf_t0
 
                     hf_max_new_tokens = (
                         max(1, max_len)
@@ -5301,7 +5344,9 @@ def _run_axon_test_single(
                                         ):
                                             sample_value = value[batch_idx : batch_idx + 1]
                                             if key in {"input_ids", "attention_mask"}:
-                                                mask = io["attention_mask"][batch_idx : batch_idx + 1]
+                                                mask = io["attention_mask"][
+                                                    batch_idx : batch_idx + 1
+                                                ]
                                                 keep = mask.to(dtype=torch.bool)[0]
                                                 sample_value = sample_value[:, keep]
                                             sample_inputs[key] = sample_value
@@ -5338,11 +5383,13 @@ def _run_axon_test_single(
                                 use_cache=True,
                             )
 
-                    hf_gen, hf_time, hf_generate_samples, hf_generate_warmup_samples = _time_generate_repeated(
-                        "HF",
-                        lambda model=hf: _run_hf_generate(model),
-                        warmup=generate_warmup,
-                        repeat=generate_repeat,
+                    hf_gen, hf_time, hf_generate_samples, hf_generate_warmup_samples = (
+                        _time_generate_repeated(
+                            "HF",
+                            lambda model=hf: _run_hf_generate(model),
+                            warmup=generate_warmup,
+                            repeat=generate_repeat,
+                        )
                     )
             hf_logits_cpu = hf_logits.detach().cpu()
             hf_gen_cpu = None if hf_gen is None else hf_gen.detach().cpu()
@@ -5444,7 +5491,9 @@ def _run_axon_test_single(
 
                 arch_name = f"{class_name}VLLM"
                 generated_module_name = generated_py_path.stem
-                plugin_name = f"axon_vllm_plugin_{hashlib.sha1(arch_name.encode()).hexdigest()[:12]}"
+                plugin_name = (
+                    f"axon_vllm_plugin_{hashlib.sha1(arch_name.encode()).hexdigest()[:12]}"
+                )
                 plugin_root = tmp_path / "vllm_plugin"
                 _prepare_vllm_registration_plugin(
                     plugin_root=plugin_root,
@@ -5537,9 +5586,7 @@ def _run_axon_test_single(
                         vllm_effective_dtype = "bfloat16"
                     else:
                         raise
-                prompts_for_vllm = [
-                    {"prompt_token_ids": prompt_ids} for prompt_ids in prompt_rows
-                ]
+                prompts_for_vllm = [{"prompt_token_ids": prompt_ids} for prompt_ids in prompt_rows]
 
                 def _run_vllm_generate() -> dict[str, Any]:
                     outputs = llm.generate(
@@ -5612,11 +5659,15 @@ def _run_axon_test_single(
             )
             if axon_backend == "codegen2-tinygrad":
                 if local_state_dict is None:
-                    syn = model_cls.from_safetensors(
-                        safetensors_files,
-                        model_config=model_config,
-                        dtype=str(resolved_dtype).removeprefix("torch."),
-                    ).to(target_device).eval()
+                    syn = (
+                        model_cls.from_safetensors(
+                            safetensors_files,
+                            model_config=model_config,
+                            dtype=str(resolved_dtype).removeprefix("torch."),
+                        )
+                        .to(target_device)
+                        .eval()
+                    )
                 else:
                     syn = model_cls.from_state_dict(local_state_dict).to(target_device).eval()
             elif axon_backend == "codegen2-mlx":
@@ -5679,7 +5730,9 @@ def _run_axon_test_single(
             if profile_axon:
                 enable_profile = getattr(syn, "enable_profile", None)
                 if not callable(enable_profile):
-                    raise ValueError(f"--profile-axon is not supported with axon_backend={axon_backend!r}")
+                    raise ValueError(
+                        f"--profile-axon is not supported with axon_backend={axon_backend!r}"
+                    )
                 enable_profile(True, cuda=target_device.type == "cuda", reset=True)
             if local_state_dict is not None and local_state_dict is not state_ref_cpu:
                 local_state_dict.clear()
@@ -5784,10 +5837,12 @@ def _run_axon_test_single(
                 return _extract_logits(model(**io["syn_inputs"]))
 
             import time as _time
+
             _metal_capture: Any = None
             if metal_capture and axon_backend == "codegen2-mlx":
                 try:
                     import mlx.metal as _mx_metal
+
                     _capture_path = f"mx_gputrace_{int(_time.time())}.gputrace"
                     _mx_metal.start_capture(_capture_path)
                     _metal_capture = _mx_metal
@@ -5802,11 +5857,13 @@ def _run_axon_test_single(
             syn_generate_warmup_samples: list[float] = []
             if not run_generate_benchmark:
                 with torch.no_grad():
-                    syn_logits, syn_time, syn_forward_samples, syn_forward_warmup_samples = _time_forward_repeated(
-                        "AxonDerived",
-                        _run_syn_forward,
-                        warmup=forward_warmup,
-                        repeat=forward_repeat,
+                    syn_logits, syn_time, syn_forward_samples, syn_forward_warmup_samples = (
+                        _time_forward_repeated(
+                            "AxonDerived",
+                            _run_syn_forward,
+                            warmup=forward_warmup,
+                            repeat=forward_repeat,
+                        )
                     )
             else:
                 with torch.no_grad():
@@ -5825,11 +5882,13 @@ def _run_axon_test_single(
                             generate_kwargs["attention_mask"] = attention_mask
                     return model.generate(io["input_ids"], **generate_kwargs)
 
-                syn_gen, syn_time, syn_generate_samples, syn_generate_warmup_samples = _time_generate_repeated(
-                    "AxonDerived",
-                    _run_syn_generate,
-                    warmup=generate_warmup,
-                    repeat=generate_repeat,
+                syn_gen, syn_time, syn_generate_samples, syn_generate_warmup_samples = (
+                    _time_generate_repeated(
+                        "AxonDerived",
+                        _run_syn_generate,
+                        warmup=generate_warmup,
+                        repeat=generate_repeat,
+                    )
                 )
             if (
                 trace_layers
@@ -5852,7 +5911,15 @@ def _run_axon_test_single(
             if not torch.is_tensor(syn_logits):
                 syn_logits = _to_torch(syn_logits)
             syn_logits_cpu = syn_logits.detach().cpu()
-            syn_gen_cpu = None if syn_gen is None else (_to_torch(syn_gen).detach().cpu() if not torch.is_tensor(syn_gen) else syn_gen.detach().cpu())
+            syn_gen_cpu = (
+                None
+                if syn_gen is None
+                else (
+                    _to_torch(syn_gen).detach().cpu()
+                    if not torch.is_tensor(syn_gen)
+                    else syn_gen.detach().cpu()
+                )
+            )
             del syn
             _cleanup(target_device)
             return {
@@ -6211,12 +6278,7 @@ def _run_axon_test_single(
                         f"samples={[round(item, 6) for item in syn_forward_samples]}"
                     )
         print()
-        if (
-            (not skip_hf)
-            and run_generate_benchmark
-            and hf_gen is not None
-            and syn_gen is not None
-        ):
+        if (not skip_hf) and run_generate_benchmark and hf_gen is not None and syn_gen is not None:
             for idx, prompt in enumerate(prompts):
                 print(f"Prompt[{idx}]: {prompt!r}")
                 print("HF completion:")
@@ -6227,7 +6289,9 @@ def _run_axon_test_single(
         if skip_hf:
             print("Logits diff:    skipped (HF reference disabled)")
         elif syn_logits is None:
-            print("Logits diff:    unavailable (Axon/vLLM generate backend does not expose full logits)")
+            print(
+                "Logits diff:    unavailable (Axon/vLLM generate backend does not expose full logits)"
+            )
             if vllm_top_logprobs_metrics is not None:
                 print(
                     "vLLM top-logprobs | k/positions/top1_eq/hf_topk_covered/mean_abs/max_abs:",

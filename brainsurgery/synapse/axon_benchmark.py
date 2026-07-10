@@ -160,11 +160,11 @@ def _normalize_backend_builtins_overlays(
             )
         backend_text, overlays_text = text.split(":", 1)
         backend = _normalize_axon_backend_token(backend_text)
-        overlays = tuple(part.strip().strip("/") for part in overlays_text.split(",") if part.strip())
+        overlays = tuple(
+            part.strip().strip("/") for part in overlays_text.split(",") if part.strip()
+        )
         if not overlays:
-            raise ValueError(
-                "--backend-builtins-overlay entries must specify at least one overlay"
-            )
+            raise ValueError("--backend-builtins-overlay entries must specify at least one overlay")
         if backend in mapping:
             mapping[backend] = (*mapping[backend], *overlays)
         else:
@@ -270,7 +270,9 @@ def _resolve_pipeline_worker_specs(
 
 def _resolve_tinygrad_worker_specs(*, device: str, processes: int) -> list[_WorkerSpec] | None:
     normalized = str(device).strip().lower()
-    if processes <= 1 or not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
+    if processes <= 1 or not (
+        normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"
+    ):
         return None
     return _resolve_pipeline_worker_specs(
         backend="codegen2-tinygrad",
@@ -282,7 +284,9 @@ def _resolve_tinygrad_worker_specs(*, device: str, processes: int) -> list[_Work
 
 def _resolve_vllm_worker_specs(*, device: str, processes: int) -> list[_WorkerSpec] | None:
     normalized = str(device).strip().lower()
-    if processes <= 1 or not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
+    if processes <= 1 or not (
+        normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"
+    ):
         return None
     return _resolve_pipeline_worker_specs(
         backend="codegen2-vllm",
@@ -302,10 +306,9 @@ def _resolve_jax_worker_specs(
     *, device: str, processes: int, pipeline_parallel_size: int | None
 ) -> list[_WorkerSpec] | None:
     normalized = str(device).strip().lower()
-    if (
-        processes <= 1
-        and (pipeline_parallel_size is None or pipeline_parallel_size <= 1)
-    ) or not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
+    if (processes <= 1 and (pipeline_parallel_size is None or pipeline_parallel_size <= 1)) or not (
+        normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"
+    ):
         return None
     return _resolve_pipeline_worker_specs(
         backend="codegen2-jax",
@@ -605,6 +608,7 @@ def _summary_row_from_result(row: dict[str, Any]) -> dict[str, object]:
         masked_top1_eq_text = str(masked_top1_eq)
     else:
         masked_top1_eq_text = str(masked_top1_eq)
+
     def _format_optional_float(value: object) -> str:
         if value is None:
             return ""
@@ -655,7 +659,9 @@ def _summary_row_from_result(row: dict[str, Any]) -> dict[str, object]:
             "axon_forward_warmup_samples", "axon_generate_warmup_samples"
         ),
         "axon_profile_top_region": "" if profile_top is None else str(profile_top.get("name", "")),
-        "axon_profile_top_seconds": "" if profile_top is None else _format_optional_float(profile_top.get("seconds")),
+        "axon_profile_top_seconds": ""
+        if profile_top is None
+        else _format_optional_float(profile_top.get("seconds")),
         "axon_profile_top_calls": "" if profile_top is None else str(profile_top.get("count", "")),
         "masked_top1_eq": masked_top1_eq_text,
         "masked_max_abs_diff": _format_metric_value(row.get("masked_max_diff")),
@@ -663,9 +669,7 @@ def _summary_row_from_result(row: dict[str, Any]) -> dict[str, object]:
         "vllm_logprobs": "" if row.get("vllm_logprobs") is None else str(row.get("vllm_logprobs")),
         "vllm_top_logprobs_top1_eq": str(vllm_metrics.get("top1_eq", "")),
         "vllm_top_logprobs_hf_topk_covered": str(vllm_metrics.get("hf_topk_covered", "")),
-        "vllm_top_logprobs_max_abs_diff": _format_optional_float(
-            vllm_metrics.get("max_abs_diff")
-        ),
+        "vllm_top_logprobs_max_abs_diff": _format_optional_float(vllm_metrics.get("max_abs_diff")),
     }
 
 
@@ -892,6 +896,8 @@ def _log_result_summary(result: dict[str, Any]) -> None:
     if isinstance(vllm_metrics, Mapping):
         print(f"result.vllm_top_logprobs_top1_eq={vllm_metrics.get('top1_eq')}")
         print(f"result.vllm_top_logprobs_max_abs_diff={vllm_metrics.get('max_abs_diff')}")
+    if result.get("error"):
+        print(f"result.error={result['error']}")
 
 
 def render_axon_benchmark_csv(*, csv_path: Path, table_format: str = "markdown") -> str:
@@ -1129,7 +1135,10 @@ def _run_benchmark_jobs_serial(
                     if jax_param_devices is not None:
                         os.environ["AXON_JAX_PARAM_DEVICES"] = jax_param_devices
                     try:
-                        with contextlib.redirect_stdout(tee_stdout), contextlib.redirect_stderr(tee_stderr):
+                        with (
+                            contextlib.redirect_stdout(tee_stdout),
+                            contextlib.redirect_stderr(tee_stderr),
+                        ):
                             if worker_cuda_visible_devices is not None:
                                 print(f"worker.CUDA_VISIBLE_DEVICES={worker_cuda_visible_devices}")
                             if jax_param_devices is not None:
@@ -1137,14 +1146,13 @@ def _run_benchmark_jobs_serial(
                             try:
                                 result = _run_benchmark_pair(pair, device=device, **backend_kwargs)
                             except Exception as exc:
-                                if debug_errors:
-                                    print(
-                                        "Benchmark pair failed:",
-                                        f"backend={axon_backend}",
-                                        f"axon={pair.axon_file}",
-                                        f"checkpoint={pair.checkpoint_id}",
-                                    )
-                                    print(traceback.format_exc())
+                                print(
+                                    "Benchmark pair failed:",
+                                    f"backend={axon_backend}",
+                                    f"axon={pair.axon_file}",
+                                    f"checkpoint={pair.checkpoint_id}",
+                                )
+                                print(traceback.format_exc())
                                 result = _error_result_for_pair(
                                     pair,
                                     exc,
@@ -1259,12 +1267,13 @@ def _run_benchmark_worker_loop(
                         os.environ["AXON_JAX_PARAM_DEVICES"] = previous_jax_param_devices
                     _restore_env(previous_jax_env)
             _write_worker_result_file(log_path, results)
+            has_errors = any(isinstance(r, dict) and r.get("error") for r in results)
             result_queue.put(
                 (
                     pair_index,
                     results,
                     None,
-                    "",
+                    capture.getvalue() if has_errors else "",
                     log_path.name if log_path else None,
                 )
             )
@@ -1532,6 +1541,8 @@ def _run_benchmark_jobs_parallel(
                 result_rows = cast(list[dict[str, Any]], result)
             else:
                 result_rows = [cast(dict[str, Any], result)]
+            if captured_output and any(isinstance(r, dict) and r.get("error") for r in result_rows):
+                print(captured_output.rstrip())
             results_by_index[int(pair_index)] = result_rows
             if stream_csv is not None:
                 for row in result_rows:
@@ -1634,8 +1645,13 @@ def run_axon_benchmark(
     forward_repeat = max(1, int(forward_repeat))
     generate_warmup = max(0, int(generate_warmup))
     generate_repeat = max(1, int(generate_repeat))
-    if axon_backend not in {"pipeline2-torch", "codegen2-jax"} and pipeline_parallel_size is not None:
-        raise ValueError("--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2-torch or codegen2-jax")
+    if (
+        axon_backend not in {"pipeline2-torch", "codegen2-jax"}
+        and pipeline_parallel_size is not None
+    ):
+        raise ValueError(
+            "--pipeline-parallel-size/--pp is only valid with --axon-backend pipeline2-torch or codegen2-jax"
+        )
     repo_root = _repo_root()
     checkpoint_filter = {str(item).strip() for item in (checkpoints or ()) if str(item).strip()}
     exclude_filter = {str(item).strip() for item in (exclude or ()) if str(item).strip()}
