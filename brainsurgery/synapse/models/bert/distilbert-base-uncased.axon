@@ -1,0 +1,61 @@
+{-# CHECKPOINTS "distilbert/distilbert-base-uncased" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "distilbert" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Positions (position_ids)
+
+import Config
+
+import NN
+
+MODEL_DIM = 768
+
+VOCAB_SIZE = 30522
+
+NUM_LAYERS = 6
+
+NUM_HEADS = 12
+
+FFN = 3072
+
+EPS = 1e-12
+
+distil_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+distil_block x keep = do
+  a <- scope@attention do
+    q <- NN.linear@q_lin x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_lin x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@v_lin x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    return attention q k v keep |> merge_heads |> NN.linear@out_lin dim=MODEL_DIM bias=true
+  x <- x + a
+  x <- NN.layernorm@sa_layer_norm x eps=EPS
+  m <- NN.linear@ffn.lin1 x dim=FFN bias=true |> gelu
+  m <- NN.linear@ffn.lin2 m dim=MODEL_DIM bias=true
+  y <- x + m
+  y <- NN.layernorm@output_layer_norm y eps=EPS
+  return y
+
+distilbert :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
+distilbert input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok <- NN.embedding@distilbert.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@distilbert.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- NN.layernorm@distilbert.embeddings.LayerNorm x eps=EPS
+  x <- for@distilbert.transformer.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- distil_block x keep
+    yield x
+  x <- NN.linear@vocab_transform x dim=MODEL_DIM bias=true |> gelu
+  x <- NN.layernorm@vocab_layer_norm x eps=EPS
+  logits <- NN.linear@vocab_projector x dim=VOCAB_SIZE bias=true weight_path=@@distilbert.embeddings.word_embeddings.weight
+  return logits

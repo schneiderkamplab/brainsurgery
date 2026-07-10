@@ -9,7 +9,7 @@ from ..specs import (
     TransformError,
     ensure_mapping_payload,
     parse_slice,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from .transform import (
     BinaryMappingSpec,
@@ -154,11 +154,11 @@ class DeclarativeBinaryTransform(BinaryMappingTransform[BinarySpecT]):
         if self.spec_builder is None:
             return super().compile(payload, default_model)
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
         from_ref, to_ref = self.parse_refs(payload, default_model)
         self.validate_refs(from_ref, to_ref)

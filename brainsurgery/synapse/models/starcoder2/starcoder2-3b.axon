@@ -1,0 +1,108 @@
+{-# CHECKPOINTS "bigcode/starcoder2-3b" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "starcoder2" #-}
+
+import Activations (gelu, gelu_pytorch_tanh)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Params (has_root)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- 3072
+
+VOCAB_SIZE <- 49152
+
+NUM_LAYERS <- 30
+
+NUM_HEADS <- 24
+
+KVH <- 2
+
+FFN <- 12288
+
+EPS <- 1e-05
+
+MAX_POSITIONS <- 16384
+
+HAS_SLIDING_WINDOW <- true
+
+SW <- HAS_SLIDING_WINDOW ? (4096) : MAX_POSITIONS
+
+HAS_ROPE_THETA <- true
+
+THETA <- HAS_ROPE_THETA ? (999999.4420358813) : 10000.0
+
+ACT <- "gelu_pytorch_tanh"
+
+MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+KVD = KVH * MODEL_HEAD_DIM
+
+HAS_LM_HEAD = has_root "lm_head"
+
+HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
+
+starcoder2_ln :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+starcoder2_ln@path x = NN.layernorm@path x eps=EPS
+
+starcoder2_mlp_act :: Tensor[B,S,FFN] -> Tensor[B,S,FFN]
+starcoder2_mlp_act x = (ACT == "gelu_pytorch_tanh") ? (gelu_pytorch_tanh x) : (gelu x)
+
+starcoder2_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+starcoder2_block x rope_sin rope_cos mask past_kv = do
+  xn <- starcoder2_ln@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=true
+    return a, new_kv
+  x <- x + a
+  xn2 <- starcoder2_ln@post_attention_layernorm x
+  m <- scope@mlp do
+    h <- NN.linear@c_fc xn2 dim=FFN bias=true
+    return starcoder2_mlp_act h |> NN.linear@c_proj dim=MODEL_DIM bias=true
+  return x + m, new_kv
+
+starcoder2 :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+starcoder2 input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids MODEL_HEAD_DIM theta=THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=SW
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- starcoder2_block x rope_sin rope_cos mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- starcoder2_ln@norm x
+    return x, work_kv
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE bias=HAS_LM_HEAD_BIAS) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  return logits, new_kv

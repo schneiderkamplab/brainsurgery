@@ -1,0 +1,131 @@
+{-# CHECKPOINTS ["google/gemma-2-27b", "google/gemma-2-27b-it"] #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "gemma2" #-}
+
+import Activations (gelu_pytorch_tanh, tanh)
+
+import Attention (attention_gqa_with_additive_mask, mask_to_additive_for_input, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul, sqrt)
+
+import Params (has_root)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- 4608
+
+MODEL_DIM_FLOAT <- 4608.0
+
+EMB_SCALE <- sqrt MODEL_DIM_FLOAT
+
+VOCAB_SIZE <- 256000
+
+NUM_LAYERS <- 46
+
+NUM_HEADS <- 32
+
+KVH <- 16
+
+HAS_HEAD_DIM <- true
+
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (128) : (MODEL_DIM / NUM_HEADS)
+
+FFN <- 36864
+
+EPS <- 1e-06
+
+THETA <- 10000.0
+
+HAS_SLIDING_WINDOW <- true
+
+C_LOCAL <- HAS_SLIDING_WINDOW ? (4096) : (8192)
+
+C_FULL <- 8192
+
+ATTN_LOGIT_SOFTCAP <- 50.0
+
+LOGIT_SOFTCAP <- 30.0
+
+QUERY_PRE_ATTN_SCALAR <- 144.0
+
+ATTN_IMPL <- "eager"
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+ATTN_SCALE = 1.0 / (_sqrt QUERY_PRE_ATTN_SCALAR)
+
+ATTN_EAGER = ATTN_IMPL == "eager"
+
+HAS_LM_HEAD = has_root "lm_head"
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true unit_offset=true
+
+gemma2_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,C_FULL,MODEL_HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,C_FULL,MODEL_HEAD_DIM])
+gemma2_block x i rope_sin rope_cos additive_mask_local additive_mask_full keep_local keep_full past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD |> reshape_heads heads=KVH
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    additive_mask <- (i % 2) == 0 ? additive_mask_local : additive_mask_full
+    keep <- (i % 2) == 0 ? keep_local : keep_full
+    a <- ATTN_EAGER ? (attention_gqa_with_additive_mask q k v additive_mask keep scale=ATTN_SCALE softcap=ATTN_LOGIT_SOFTCAP fp32_compute=true) : (attention_gqa_with_additive_mask q k v additive_mask keep scale=ATTN_SCALE)
+    a <- a |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM
+    return a, new_kv
+  a <- rms@post_attention_layernorm a
+  x <- x + a
+  xn <- rms@pre_feedforward_layernorm x
+  m <- scope@mlp do
+    g <- NN.linear@gate_proj xn dim=FFN
+    u <- NN.linear@up_proj xn dim=FFN
+    return gelu_pytorch_tanh g |> mul u |> NN.linear@down_proj dim=MODEL_DIM
+  m <- rms@post_feedforward_layernorm m
+  return x + m, new_kv
+
+gemma2 :: Tensor.TokenIds[B,S] -> ?Mask[B,K,C_FULL] -> ?Cache[B,KVH,P,C_FULL,MODEL_HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,C_FULL,MODEL_HEAD_DIM])
+gemma2 input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask C_FULL
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask_local <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=C_LOCAL
+  mask_full <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=C_FULL
+  additive_mask_local <- mask_to_additive_for_input input_ids mask_local NUM_HEADS
+  additive_mask_full <- mask_to_additive_for_input input_ids mask_full NUM_HEADS
+  work_kv <- Cache.prepare past_kv use_cache C_FULL
+  read_kv <- Cache.read past_kv work_kv
+  logits, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=EMB_SCALE
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- gemma2_block x i rope_sin rope_cos additive_mask_local additive_mask_full mask_local mask_full past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- rms@norm x
+    logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE weight_path=@@lm_head.weight) : (NN.linear@embed_tokens x dim=VOCAB_SIZE)
+    logits <- logits / LOGIT_SOFTCAP
+    logits <- tanh logits
+    logits <- logits * LOGIT_SOFTCAP
+    return logits, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  return logits, new_kv

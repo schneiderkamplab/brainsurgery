@@ -1,22 +1,23 @@
-D    = 2048      -- hidden dimension
-V    = 128256    -- vocabulary size
-L    = 16        -- number of decoder layers
-H    = 32        -- number of query attention heads
-KVH  = 8         -- number of key/value heads
-HD   = 64        -- per-head dimension
-KVD  = 512       -- key/value projection dimension (KVH * HD)
-FFN  = 8192      -- feed-forward intermediate dimension
-EPS  = 1e-05     -- RMSNorm epsilon
-THETA = 500000.0 -- RoPE base theta
-C    = 131072    -- max context window
-ROPE_SCALE = 32.0
-ROPE_LOW_FREQ = 1.0
-ROPE_HIGH_FREQ = 4.0
-ROPE_CONTEXT = 8192
-
+import Config
 import Activations silu
 import Cache past_length
 import Cache
+
+D    = Config.int "hidden_size" default=2048      -- hidden dimension
+V    = Config.int "vocab_size" default=128256     -- vocabulary size
+L    = Config.int "num_hidden_layers" default=16  -- number of decoder layers
+H    = Config.int "num_attention_heads" default=32 -- number of query attention heads
+KVH  = Config.int "num_key_value_heads" default=8 -- number of key/value heads
+HD   = Config.int "head_dim" default=64           -- per-head dimension
+KVD  = KVH * HD                                   -- key/value projection dimension (KVH * HD)
+FFN  = Config.int "intermediate_size" default=8192 -- feed-forward intermediate dimension
+EPS  = Config.float "rms_norm_eps" default=1e-05 -- RMSNorm epsilon
+THETA = Config.float "rope_theta" default=500000.0 -- RoPE base theta
+C    = Config.int "max_position_embeddings" default=131072 -- max context window
+ROPE_SCALE = Config.float "rope_scaling.factor" default=32.0        -- RoPE long-context scale factor
+ROPE_LOW_FREQ = Config.float "rope_scaling.low_freq_factor" default=1.0 -- low-frequency scaling factor
+ROPE_HIGH_FREQ = Config.float "rope_scaling.high_freq_factor" default=4.0 -- high-frequency scaling factor
+ROPE_CONTEXT = Config.int "rope_scaling.original_max_position_embeddings" default=8192 -- original RoPE training context
 
 rms :: @Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = rmsnorm@path x eps=EPS

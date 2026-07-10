@@ -1,0 +1,4 @@
+interface:
+  display_name: "Axon Benchmark"
+  short_description: "Run Axon benchmark sweeps and targeted fidelity reruns"
+  default_prompt: "Use $benchmark to run an Axon benchmark with correct log-dir, stream CSV, backend, dtype, and reporting conventions."

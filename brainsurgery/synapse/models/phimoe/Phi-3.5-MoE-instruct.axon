@@ -1,0 +1,124 @@
+{-# CHECKPOINTS "microsoft/Phi-3.5-MoE-instruct" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "phimoe" #-}
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (sqrt)
+
+import MoE (grouped_swiglu_ffn_separate, sparsemixer_router)
+
+import Params (has_root)
+
+import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- 4096
+
+VOCAB_SIZE <- 32064
+
+NUM_LAYERS <- 32
+
+NUM_HEADS <- 32
+
+KVH <- 8
+
+HAS_HEAD_DIM <- false
+
+MODEL_HEAD_DIM <- HAS_HEAD_DIM ? (128) : (MODEL_DIM / NUM_HEADS)
+
+FFN <- 6400
+
+E <- 16
+
+EPT <- 2
+
+EPS <- 1e-05
+
+THETA <- 10000.0
+
+ROPE_MODE <- "longrope"
+
+ROPE_ORIGINAL_CONTEXT <- 4096
+
+ROPE_MAX_CONTEXT <- 131072
+
+ROPE_LONG_FACTOR <- [1.0199999809265137, 1.0299999713897705, 1.0399999618530273, 1.0499999523162842, 1.0499999523162842, 1.0499999523162842, 1.059999942779541, 1.059999942779541, 1.059999942779541, 1.059999942779541, 1.059999942779541, 1.059999942779541, 1.0999999046325684, 1.1799999475479126, 1.1799999475479126, 1.3700000047683716, 1.4899998903274536, 2.109999895095825, 2.8899998664855957, 3.9499998092651367, 4.299999713897705, 6.429999828338623, 8.09000015258789, 10.690000534057617, 12.050000190734863, 18.229999542236328, 18.84000015258789, 19.899999618530273, 21.420000076293945, 26.200000762939453, 34.28000259399414, 34.590003967285156, 38.730003356933594, 40.22000503540039, 42.54000473022461, 44.000003814697266, 47.590003967285156, 54.750003814697266, 56.19000244140625, 57.44000244140625, 57.4900016784668, 61.20000076293945, 61.540000915527344, 61.75, 61.779998779296875, 62.06999969482422, 63.11000061035156, 63.43000030517578, 63.560001373291016, 63.71000289916992, 63.92000198364258, 63.94000244140625, 63.94000244140625, 63.96000289916992, 63.980003356933594, 64.0300064086914, 64.0300064086914, 64.0300064086914, 64.04000854492188, 64.10000610351562, 64.19000244140625, 64.20999908447266, 64.75, 64.95999908447266]
+
+ROPE_SHORT_FACTOR <- [1.0, 1.0399999618530273, 1.0399999618530273, 1.0399999618530273, 1.0499999523162842, 1.0499999523162842, 1.0499999523162842, 1.0499999523162842, 1.0499999523162842, 1.0499999523162842, 1.0499999523162842, 1.0499999523162842, 1.0499999523162842, 1.0499999523162842, 1.059999942779541, 1.059999942779541, 1.0699999332427979, 1.0699999332427979, 1.0699999332427979, 1.0699999332427979, 1.1399999856948853, 1.159999966621399, 1.159999966621399, 1.159999966621399, 1.159999966621399, 1.1799999475479126, 1.1999999284744263, 1.3199999332427979, 1.3399999141693115, 1.3499999046325684, 1.3999998569488525, 1.4799998998641968, 1.4999998807907104, 1.589999794960022, 1.6499998569488525, 1.71999990940094, 1.8999998569488525, 1.9099998474121094, 1.9099998474121094, 1.9899998903274536, 1.9999998807907104, 1.9999998807907104, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.009999990463257, 2.0999999046325684, 2.319999933242798, 2.419999837875366, 2.5899999141693115, 2.7899999618530273]
+
+HAS_LONGROPE <- true
+
+ROPE_ATTENTION_FACTOR <- 1.243163121016122
+
+WINDOW <- 131072
+
+ROUTER_JITTER <- 0.01
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+MAX_POSITIONS = ROPE_MAX_CONTEXT
+
+HAS_LM_HEAD = has_root "lm_head"
+
+HAS_LM_HEAD_BIAS = has_root "lm_head.bias"
+
+ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
+
+phimoe_block :: Tensor[B,S,D] -> IdxTensor[B,S] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,ROPE_MAX_CONTEXT,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,ROPE_MAX_CONTEXT,DH])
+phimoe_block x pos_ids mask past_kv = do
+  xn <- NN.layernorm@input_layernorm x eps=EPS bias=true
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    q, k <- HAS_LONGROPE ? (rope_pair_longrope q k pos_ids THETA ROPE_ORIGINAL_CONTEXT ROPE_MAX_CONTEXT ROPE_LONG_FACTOR ROPE_SHORT_FACTOR attention_factor=ROPE_ATTENTION_FACTOR) : (rope_pair_base q k pos_ids THETA)
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=true
+    return a, new_kv
+  x <- x + a
+  xn <- NN.layernorm@post_attention_layernorm x eps=EPS bias=true
+  m <- scope@block_sparse_moe do
+    topk_scores, topk_indices <- sparsemixer_router xn E ROUTER_JITTER
+    m <- grouped_swiglu_ffn_separate xn topk_scores topk_indices E FFN gate_weight=@experts.w1.weight up_weight=@experts.w3.weight out_weight=@experts.w2.weight
+    return m
+  return x + m, new_kv
+
+phimoe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,ROPE_MAX_CONTEXT,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,ROPE_MAX_CONTEXT,DH])
+phimoe input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WINDOW
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- phimoe_block x pos_ids mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- NN.layernorm@norm x eps=EPS bias=true
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE bias=HAS_LM_HEAD_BIAS) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false)
+  return logits, new_kv

@@ -1,0 +1,173 @@
+{-# CHECKPOINTS "nemotron3" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# PADDING_SIDE "right" #-}
+
+{-# MAIN "nemotron_h" #-}
+
+import Activations (relu2, silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (sqrt)
+
+import MoE (grouped_sigmoid_router, scatter_add, select)
+
+import SSM (causal_conv1d, mamba2_scan)
+
+import Cache
+
+import Config
+
+import NN
+
+import Params
+
+import Tensor
+
+MODEL_D = 2688
+
+VOCAB_SIZE = 131072
+
+NUM_LAYERS = 52
+
+NUM_HEADS = 32
+
+KVH = 2
+
+MODEL_HEAD_DIM = 128
+
+ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
+
+MAX_POSITIONS = 262144
+
+EPS = 1e-05
+
+M_H = 64
+
+M_HD = 64
+
+M_G = 8
+
+M_N = 128
+
+M_I = M_H * M_HD
+
+M_CONV = M_I + 2 * M_G * M_N
+
+E = 128
+
+EPT = 6
+
+N_GROUP = 1
+
+TOPK_GROUP = 1
+
+NORM_TOPK_PROB = 1
+
+FFN = 1856
+
+SFFN = 3712
+
+ROUTE_SCALE = 2.5
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+expert_ffn :: Tensor[N,D] -> Tensor[N,D]
+expert_ffn x = do
+  up <- NN.linear@up_proj x dim=FFN bias=false
+  return up |> relu2 |> NN.linear@down_proj dim=MODEL_D bias=false
+
+shared_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+shared_ffn x = do
+  up <- NN.linear@up_proj x dim=SFFN bias=false
+  return up |> relu2 |> NN.linear@down_proj dim=MODEL_D bias=false
+
+shared_relu2_moe :: Path -> Tensor[B,S,D] -> Int -> Int -> Int -> Float -> Bool -> Tensor[B,S,D]
+shared_relu2_moe@path hidden top_k n_group topk_group routed_scaling_factor norm_topk_prob = do
+  gate_w <- scope@gate do
+    return Params.param path=@weight
+  experts <- Tensor.size gate_w 0
+  topk_weights, topk_indices <- grouped_sigmoid_router@gate hidden experts top_k n_group=n_group topk_group=topk_group norm_topk_prob=norm_topk_prob routed_scaling_factor=routed_scaling_factor
+  routed <- Tensor.zeros_like hidden
+  routed <- for@experts e <- [0..experts) carry (routed) do
+    x_sel, token_idx, topk_pos, sel_scores <- select hidden topk_weights topk_indices e
+    up <- NN.linear@up_proj x_sel dim=FFN bias=false
+    x_upd <- up |> relu2 |> NN.linear@down_proj dim=MODEL_D bias=false
+    routed <- scatter_add routed token_idx x_upd sel_scores
+    yield routed
+  shared <- scope@shared_experts do
+    up <- NN.linear@up_proj hidden dim=SFFN bias=false
+    return up |> relu2 |> NN.linear@down_proj dim=MODEL_D bias=false
+  return routed + shared
+
+nemotron_h_is_attention :: Int -> Bool
+nemotron_h_is_attention i = (i == 5) or (i == 12) or (i == 19) or (i == 26) or (i == 33) or (i == 42)
+
+nemotron_h_attention_index :: Int -> Int
+nemotron_h_attention_index i = (i == 5) ? 0 : ((i == 12) ? 1 : ((i == 19) ? 2 : ((i == 26) ? 3 : ((i == 33) ? 4 : 5))))
+
+nemotron_h_is_mamba :: Int -> Bool
+nemotron_h_is_mamba i = (i == 0) or (i == 2) or (i == 4) or (i == 7) or (i == 9) or (i == 11) or (i == 14) or (i == 16) or (i == 18) or (i == 21) or (i == 23) or (i == 25) or (i == 28) or (i == 30) or (i == 32) or (i == 35) or (i == 37) or (i == 39) or (i == 41) or (i == 44) or (i == 46) or (i == 48) or (i == 50)
+
+nemotron_h_attention :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayerKV[B,H,P,MAX_POSITIONS,DK,DV] -> (Tensor[B,S,D], ?CacheLayerKV[B,H,K,MAX_POSITIONS,DK,DV])
+nemotron_h_attention@path x mask past_kv = do
+  q <- NN.linear@q_proj x dim=(NUM_HEADS * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@k_proj x dim=(KVH * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=KVH
+  v <- NN.linear@v_proj x dim=(KVH * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=KVH
+  k, v, new_kv <- Cache.update_kv past_kv k v
+  k_rep <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+  v_rep <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+  a <- attention q k_rep v_rep mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_D bias=false
+  return a, new_kv
+
+nemotron_h_moe :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+nemotron_h_moe@path xn = do
+  return shared_relu2_moe@path xn top_k=EPT n_group=N_GROUP topk_group=TOPK_GROUP routed_scaling_factor=ROUTE_SCALE norm_topk_prob=(NORM_TOPK_PROB != 0)
+
+nemotron_h_mamba :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+nemotron_h_mamba@path xn = do
+  proj <- NN.linear@in_proj xn dim=(M_I + M_CONV + M_H) bias=false
+  gate, conv_in, dt <- Tensor.split proj sizes=[M_I, M_CONV, M_H]
+  conv_all <- causal_conv1d@conv1d conv_in activation="silu" weight_path=@conv1d.weight bias_path=@conv1d.bias
+  u, b, c <- Tensor.split conv_all sizes=[M_I, M_G * M_N, M_G * M_N]
+  scan <- mamba2_scan u gate dt b c a_path=@A_log d_path=@D dt_bias_path=@dt_bias norm_weight_path=@norm.weight n_groups=M_G head_dim=M_HD time_step_min=0.0 time_step_max=1e30
+  return NN.linear@out_proj scan dim=MODEL_D bias=false
+
+nemotron_h_non_attention :: Path -> Tensor[B,S,D] -> Int -> (Tensor[B,S,D], ?CacheLayerKV[B,H,K,MAX_POSITIONS,DK,DV])
+nemotron_h_non_attention@path xn i = do
+  y <- (nemotron_h_is_mamba i) ? (nemotron_h_mamba@path xn) : (nemotron_h_moe@path xn)
+  return y, null
+
+nemotron_h_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayerKV[B,H,P,MAX_POSITIONS,DK,DV] -> Int -> (Tensor[B,S,D], ?CacheLayerKV[B,H,K,MAX_POSITIONS,DK,DV])
+nemotron_h_block x mask past_kv i = do
+  xn <- rms@norm x
+  y, new_kv <- (nemotron_h_is_attention i) ? (nemotron_h_attention@mixer xn mask past_kv) : (nemotron_h_non_attention@mixer xn i)
+  return x + y, new_kv
+
+nemotron_h :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?CacheKV[B,H,P,MAX_POSITIONS,DK,DV] -> ?Bool -> (Tensor[B,S,V], ?CacheKV[B,H,K,MAX_POSITIONS,DK,DV])
+nemotron_h input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length_kv past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare_kv past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read_kv past_kv work_kv
+  x <- NN.embedding@backbone.embeddings input_ids dim=MODEL_D
+  x, work_kv <- for@backbone.layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    is_attn <- nemotron_h_is_attention i
+    attn_i <- nemotron_h_attention_index i
+    past_i <- is_attn ? (Cache.index_kv read_kv attn_i) : null
+    x, new_i <- nemotron_h_block x mask past_i i
+    work_kv <- is_attn ? (Cache.append_kv work_kv new_i) : work_kv
+    yield x, work_kv
+  x <- rms@backbone.norm_f x
+  new_length <- past_length + S
+  new_kv <- Cache.finish_kv work_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

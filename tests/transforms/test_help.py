@@ -8,7 +8,18 @@ _module = import_module("brainsurgery.transforms.help")
 HelpSpec = _module.HelpSpec
 HelpTransform = _module.HelpTransform
 HelpTransformError = _module.HelpTransformError
+TransformPayloadSchema = _module.TransformPayloadSchema
 TransformError = _module.TransformError
+
+
+class _SchemaOnlyTransform:
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(),
+            common_allowed=set(),
+        )
 
 
 def test_help_compile_rejects_multi_key_mapping() -> None:
@@ -42,7 +53,7 @@ def test_help_print_command_help_emits_unavailable_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     lines: list[str] = []
-    monkeypatch.setattr(_module, "get_transform", lambda _: object())
+    monkeypatch.setattr(_module, "get_transform", lambda _: _SchemaOnlyTransform())
     monkeypatch.setattr(_module, "emit_line", lines.append)
 
     HelpTransform()._print_command_help("noop")
@@ -50,7 +61,9 @@ def test_help_print_command_help_emits_unavailable_metadata(
     output = "\n".join(lines)
     assert "Help for noop" in output
     assert "Command: noop" in output
-    assert "Key metadata: unavailable" in output
+    assert "Required keys: none" in output
+    assert "Optional keys: none" in output
+    assert "All allowed keys: none" in output
 
 
 def test_help_print_assert_expr_help_emits_required_optional_and_allowed(
@@ -188,7 +201,15 @@ def test_help_print_command_help_unknown_and_with_help_text(
     monkeypatch.setattr(
         _module,
         "get_transform",
-        lambda _: SimpleNamespace(help_text="help text", required_keys=set(), allowed_keys=set()),
+        lambda _: SimpleNamespace(
+            help_text="help text",
+            payload_schema=lambda: TransformPayloadSchema(
+                mode_key=None,
+                default_mode="default",
+                common_required=set(),
+                common_allowed=set(),
+            ),
+        ),
     )
     monkeypatch.setattr(_module, "emit_line", lines.append)
     HelpTransform()._print_command_help("copy")

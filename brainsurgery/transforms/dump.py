@@ -14,7 +14,7 @@ from ..core import (
     register_transform,
     state_dict_for_ref,
     unary_view_for_ref_name,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from ..engine import emit_line, emit_verbose_unary_activity, render_tree, summarize_tensor, tqdm
 
@@ -66,11 +66,11 @@ class DumpTransform(UnaryTransform[DumpSpec]):  # type: ignore[type-var]
 
     def compile(self, payload: dict, default_model: str | None) -> DumpSpec:
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
 
         target_ref: TensorRef | None = None

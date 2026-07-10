@@ -1,0 +1,117 @@
+{-# CHECKPOINTS "test/GLM4-Dense-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "glm4_dense" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (floor, mul)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_prefix_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- 128
+
+VOCAB_SIZE <- 151343
+
+NUM_LAYERS <- 4
+
+NUM_HEADS <- 4
+
+KVH <- 2
+
+MODEL_HEAD_DIM <- 32
+
+FFN <- 256
+
+EPS <- 1e-05
+
+THETA <- 10000.0
+
+MAX_POSITIONS <- 512
+
+PROPE <- 0.5
+
+ROTARY_DIM <- floor (MODEL_HEAD_DIM * PROPE)
+
+ATTN_BIAS <- true
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS
+
+glm4_dense_attn :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+glm4_dense_attn x rope_sin rope_cos mask past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=ATTN_BIAS
+    q <- reshape_heads q heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=ATTN_BIAS
+    k <- reshape_heads k heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD bias=ATTN_BIAS
+    v <- reshape_heads v heads=KVH
+    q, k <- rope_pair_base_prefix_factors q k rope_sin rope_cos ROTARY_DIM interleaved=true
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+    return a, new_kv
+  a <- rms@post_self_attn_layernorm a
+  return x + a, new_kv
+
+glm4_dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+glm4_dense_ffn x = do
+  gu <- NN.linear@gate_up_proj x dim=(2 * FFN) bias=false
+  g, u <- Tensor.split gu sizes=[FFN, FFN]
+  return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+glm4_dense_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+glm4_dense_block x rope_sin rope_cos mask past_kv = do
+  x, new_kv <- glm4_dense_attn x rope_sin rope_cos mask past_kv
+  residual <- x
+  xn <- rms@post_attention_layernorm residual
+  m <- scope@mlp do
+    return glm4_dense_ffn xn
+  m <- rms@post_mlp_layernorm m
+  x <- residual + m
+  return x, new_kv
+
+glm4_dense :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+glm4_dense input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids ROTARY_DIM theta=THETA interleaved=true
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- glm4_dense_block x rope_sin rope_cos mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- rms@norm x
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

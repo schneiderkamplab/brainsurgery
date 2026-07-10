@@ -1,0 +1,88 @@
+import Math (clamp, exp, log)
+import Params (param)
+import Tensor (le, reshape, size, slice, where)
+export (
+  gegelu,
+  gelu,
+  gelu_new,
+  gelu_pytorch_tanh,
+  relu,
+  relu2,
+  sigmoid,
+  silu,
+  swiglu,
+  tanh,
+  xielu,
+)
+
+
+sigmoid :: Tensor[..S] -> Tensor[..S]
+sigmoid x = 1.0 / (1.0 + (exp (0.0 - x)))
+
+
+tanh :: Tensor[..S] -> Tensor[..S]
+tanh x = (2.0 * (sigmoid (2.0 * x))) - 1.0
+
+
+relu :: Tensor[..S] -> Tensor[..S]
+relu x = do
+  zero <- x * 0.0
+  return where (le x zero) zero x
+
+
+relu2 :: Tensor[..S] -> Tensor[..S]
+relu2 x = do
+  y <- relu x
+  return y * y
+
+
+silu :: Tensor[..S] -> Tensor[..S]
+silu x = x * (sigmoid x)
+
+
+swiglu :: Tensor[..S] -> Tensor[..S]
+swiglu x = (silu x) * x
+
+
+gelu_new :: Tensor[..S] -> Tensor[..S]
+gelu_new x = 0.5 * x * (1.0 + (tanh (0.7978845608028654 * (x + (0.044715 * x * x * x)))))
+
+
+gelu_pytorch_tanh :: Tensor[..S] -> Tensor[..S]
+gelu_pytorch_tanh x = gelu_new x
+
+
+-- Derived approximation; uses the tanh form.
+gelu :: Tensor[..S] -> Tensor[..S]
+gelu x = gelu_new x
+
+
+gegelu :: Tensor[..S] -> ?Float -> Tensor[..R]
+gegelu x ?limit=null = do
+  d <- size x -1
+  pair <- reshape x shape=[-1, (d / 2), 2]
+  x_gelu <- slice pair dim=-1 start=0 end=1 |> reshape shape=[-1, (d / 2)]
+  x_linear <- slice pair dim=-1 start=1 end=2 |> reshape shape=[-1, (d / 2)]
+  x_gelu <- (limit == null) ? x_gelu : (clamp x_gelu max=limit)
+  x_linear <- (limit == null) ? x_linear : (clamp x_linear min=(0.0 - limit) max=limit)
+  return x_gelu * (sigmoid (1.702 * x_gelu)) * (x_linear + 1.0)
+
+
+xielu_basic :: Tensor[..S] -> Tensor[..A] -> Tensor[..B] -> Tensor[..C] -> Tensor[..D] -> Tensor[..S]
+xielu_basic x alpha_p_raw alpha_n_raw beta eps = do
+  alpha_p <- log ((exp alpha_p_raw) + 1.0)
+  alpha_n <- beta + (log ((exp alpha_n_raw) + 1.0))
+  pos <- (alpha_p * x * x) + (beta * x)
+  zero <- x * 0.0
+  x_cap <- where (le x eps) x eps
+  neg <- ((exp x_cap - 1.0) - x) * alpha_n + (beta * x)
+  return where (le x zero) neg pos
+
+
+xielu :: Path -> Tensor[..S] -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor[..S]
+xielu@path x ?alpha_p_path=null ?alpha_n_path=null ?beta_path=null ?eps_path=null = do
+  alpha_p <- (alpha_p_path == null) ? (param @'{path}.alpha_p') : (param alpha_p_path)
+  alpha_n <- (alpha_n_path == null) ? (param @'{path}.alpha_n') : (param alpha_n_path)
+  beta <- (beta_path == null) ? (param @'{path}.beta') : (param beta_path)
+  eps <- (eps_path == null) ? (param @'{path}.eps') : (param eps_path)
+  return xielu_basic x alpha_p alpha_n beta eps

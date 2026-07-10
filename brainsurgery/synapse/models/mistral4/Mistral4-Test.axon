@@ -1,0 +1,173 @@
+{-# CHECKPOINTS "test/Mistral4-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "mistral4" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (floor, log, mul, sqrt)
+
+import MoE (grouped_swiglu_ffn_basic, softmax_topk_router)
+
+import Positions (position_ids, rope_pair_yarn_factors, rope_yarn_factors_for_position_ids)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+CFG = (false) ? "text_config" : ""
+
+ROPE_CFG = (CFG == "") ? "rope_parameters" : "text_config.rope_parameters"
+
+MODEL_DIM = 128
+
+VOCAB_SIZE = 131072
+
+NUM_LAYERS = 4
+
+NUM_HEADS = 4
+
+QKNOPE = 24
+
+QKROPE = 8
+
+QKHD = QKNOPE + QKROPE
+
+VHD = 32
+
+QLR = 32
+
+KVR = 32
+
+EM = 64
+
+E = 4
+
+EPT = 2
+
+SE = 1
+
+EPS = 1e-06
+
+THETA = 10000.0
+
+ROPE_FACTOR = 128.0
+
+ROPE_CONTEXT = 256
+
+MAX_POSITIONS = 256
+
+ROPE_BETA_FAST = 32.0
+
+ROPE_BETA_SLOW = 1.0
+
+ROPE_MSCALE = 1.0
+
+ROPE_MSCALE_ALL_DIM = 1.0
+
+Q_SCALE_BETA = 0.1
+
+ROUTE_SCALE = 1.0
+
+ATTN_SCALE = 1.0 / sqrt QKHD
+
+mistral4_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+mistral4_norm@path x = NN.rmsnorm@path x eps=EPS
+
+mistral4_q_norm :: Path -> Tensor[B,S,QLR] -> Tensor[B,S,QLR]
+mistral4_q_norm@path x = NN.rmsnorm@path x eps=EPS
+
+mistral4_kv_norm :: Path -> Tensor[B,S,KVR] -> Tensor[B,S,KVR]
+mistral4_kv_norm@path x = NN.rmsnorm@path x eps=EPS
+
+mistral4_query_scale :: Tensor[B,S] -> Tensor[B,1,S,1]
+mistral4_query_scale pos_ids = do
+  scaled <- pos_ids / ROPE_CONTEXT
+  bucket <- floor scaled
+  shifted <- bucket + 1.0
+  logged <- log shifted
+  beta_scaled <- logged * Q_SCALE_BETA
+  gain <- beta_scaled + 1.0
+  gain3 <- Tensor.unsqueeze gain dim=1
+  gain4 <- Tensor.unsqueeze gain3 dim=3
+  return gain4
+
+mistral4_attn :: Tensor[B,S,D] -> Tensor[B,1,S,1] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,K] -> ?CacheLayerKV[B,NUM_HEADS,P,MAX_POSITIONS,QKHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,MAX_POSITIONS,QKHD,VHD])
+mistral4_attn x q_scale rope_sin rope_cos mask past_kv = do
+  a, new_kv <- scope@self_attn do
+    q_low <- NN.linear@q_a_proj x dim=QLR bias=false
+    q_low <- mistral4_q_norm@q_a_layernorm q_low
+    q <- NN.linear@q_b_proj q_low dim=(NUM_HEADS * QKHD) bias=false |> reshape_heads heads=NUM_HEADS
+    q_pass, q_rot <- Tensor.split q sizes=[QKNOPE, QKROPE]
+    kv_comp <- NN.linear@kv_a_proj_with_mqa x dim=(KVR + QKROPE) bias=false
+    kv_latent, k_rot_base <- Tensor.split kv_comp sizes=[KVR, QKROPE]
+    kv_latent <- mistral4_kv_norm@kv_a_layernorm kv_latent
+    kv <- NN.linear@kv_b_proj kv_latent dim=(NUM_HEADS * (QKNOPE + VHD)) bias=false |> reshape_heads heads=NUM_HEADS
+    k_pass, v <- Tensor.split kv sizes=[QKNOPE, VHD]
+    k_rot <- reshape_heads k_rot_base heads=1 |> Tensor.repeat repeats=NUM_HEADS
+    q_rot, k_rot <- rope_pair_yarn_factors q_rot k_rot rope_sin rope_cos interleaved=true
+    q <- Tensor.concat q_pass q_rot dim=-1
+    k <- Tensor.concat k_pass k_rot dim=-1
+    q <- q * q_scale
+    k, v, new_kv <- Cache.update_kv past_kv k v
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads
+    a <- NN.linear@o_proj a dim=MODEL_DIM bias=false
+    return a, new_kv
+  return a, new_kv
+
+mistral4_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
+mistral4_moe xn = do
+  shared <- scope@shared_experts do
+    gate <- NN.linear@gate_proj xn dim=(EM * SE) bias=false
+    up <- NN.linear@up_proj xn dim=(EM * SE) bias=false
+    return gate |> silu |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+  topk_weights, topk_indices <- softmax_topk_router@gate xn top_k=EPT routed_scaling_factor=ROUTE_SCALE
+  routed <- grouped_swiglu_ffn_basic xn topk_weights topk_indices E
+  return shared + routed
+
+mistral4_block :: Tensor[B,S,D] -> Tensor[B,1,S,1] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,QKROPE] -> Tensor[B,1,S,K] -> ?CacheLayerKV[B,NUM_HEADS,P,MAX_POSITIONS,QKHD,VHD] -> (Tensor[B,S,D], ?CacheLayerKV[B,NUM_HEADS,K,MAX_POSITIONS,QKHD,VHD])
+mistral4_block x q_scale rope_sin rope_cos mask past_kv = do
+  xn <- mistral4_norm@input_layernorm x
+  a, new_kv <- mistral4_attn xn q_scale rope_sin rope_cos mask past_kv
+  x <- x + a
+  xn <- mistral4_norm@post_attention_layernorm x
+  m <- scope@mlp do
+    return mistral4_moe xn
+  return x + m, new_kv
+
+mistral4 :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?CacheKV[B,NUM_HEADS,P,MAX_POSITIONS,QKHD,VHD] -> ?Bool -> (Tensor[B,S,V], ?CacheKV[B,NUM_HEADS,K,MAX_POSITIONS,QKHD,VHD])
+mistral4 input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length_kv past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  q_scale <- mistral4_query_scale pos_ids
+  rope_sin, rope_cos <- rope_yarn_factors_for_position_ids pos_ids QKROPE THETA ROPE_FACTOR ROPE_BETA_FAST ROPE_BETA_SLOW ROPE_CONTEXT mscale=ROPE_MSCALE mscale_all_dim=ROPE_MSCALE_ALL_DIM interleaved=true
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask
+  work_kv <- Cache.prepare_kv past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read_kv past_kv work_kv
+  x, new_kv <- scope@language_model.model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index_kv read_kv i
+      x, new_i <- mistral4_block x q_scale rope_sin rope_cos mask past_i
+      work_kv <- Cache.append_kv work_kv new_i
+      yield x, work_kv
+    x <- mistral4_norm@norm x
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish_kv new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- scope@language_model do
+    logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+    return logits
+  return logits, new_kv

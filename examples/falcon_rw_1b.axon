@@ -1,12 +1,13 @@
-D   = 2048   -- hidden dimension
-V   = 50304  -- vocab size
-L   = 24     -- decoder layers
-H   = 32     -- attention heads
-FFN = 8192   -- mlp hidden size
-C   = 2048   -- effective context for this checkpoint family
-
+import Config
 import Activations gelu
 import Cache
+
+D   = Config.int "hidden_size" default=2048    -- hidden dimension
+V   = Config.int "vocab_size" default=50304    -- vocab size
+L   = Config.int "num_hidden_layers" default=24 -- decoder layers
+H   = Config.int "num_attention_heads" default=32 -- attention heads
+FFN = 4 * D                                    -- mlp hidden size
+C   = 2048                                     -- effective context for this checkpoint family
 
 falcon_block :: Tensor[B,S,D] -> Tensor[B,S] -> ?CacheLayer -> (Tensor[B,S,D], ?CacheLayer)
 falcon_block x attn_mask past_kv = do

@@ -76,6 +76,40 @@ def test_load_compile_additional_validation_paths() -> None:
         load_module.parse_model_expr = original_parse_model_expr
 
 
+def test_load_compile_backend_axon_validation_paths() -> None:
+    tr = LoadTransform()
+    with pytest.raises(Exception, match="load.path is required"):
+        tr.compile({"backend": "axon"}, default_model=None)
+    with pytest.raises(LoadTransformError, match="point to a .axon file"):
+        tr.compile({"backend": "axon", "path": "/tmp/model.txt"}, default_model=None)
+    with pytest.raises(LoadTransformError, match="unknown keys"):
+        tr.compile(
+            {"backend": "axon", "path": "/tmp/model.axon", "to": "m::x"},
+            default_model=None,
+        )
+    with pytest.raises(LoadTransformError, match="not supported for axon model load mode"):
+        tr.compile(
+            {"backend": "axon", "path": "/tmp/model.axon", "format": "torch"},
+            default_model=None,
+        )
+    with pytest.raises(LoadTransformError, match="must be one of: auto, axon, checkpoint, tensor"):
+        tr.compile(
+            {"backend": "invalid", "path": "/tmp/model.axon"},
+            default_model=None,
+        )
+    with pytest.raises(LoadTransformError, match="requires load.to"):
+        tr.compile({"backend": "tensor", "path": "/tmp/model.npy"}, default_model=None)
+    spec = tr.compile(
+        {"backend": "axon", "path": "/tmp/model.axon", "weights": "/tmp/w", "alias": "m"},
+        default_model=None,
+    )
+    assert spec.backend == "axon"
+    assert spec.mode == "axon"
+    assert spec.path == Path("/tmp/model.axon")
+    assert spec.weights == Path("/tmp/w")
+    assert spec.alias == "m"
+
+
 def test_load_apply_additional_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     state_spec = LoadSpec(
         path=Path("/tmp/x.safetensors"), alias="a", tensor_name=None, format="auto"
@@ -121,6 +155,147 @@ def test_load_apply_additional_error_paths(monkeypatch: pytest.MonkeyPatch) -> N
         LoadTransform().apply(tensor_spec, provider)
 
 
+def test_load_apply_backend_axon_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    tr = LoadTransform()
+    provider = InMemoryStateDictProvider({}, max_io_workers=1)
+
+    missing_weights_spec = LoadSpec(
+        path=Path("/tmp/model.axon"),
+        alias="axon_model",
+        tensor_name=None,
+        format="auto",
+        backend="axon",
+        mode="axon",
+        weights=None,
+    )
+    with pytest.raises(
+        LoadTransformError, match="requires load.weights when alias does not already exist"
+    ):
+        tr.apply(missing_weights_spec, provider)
+
+    called = {"loaded": False}
+    sd = _InMemoryStateDict()
+    sd["x"] = torch.ones(1)
+    monkeypatch.setattr(
+        provider,
+        "load_alias_from_path",
+        lambda alias, path: (called.__setitem__("loaded", True), sd)[1],
+    )
+    load_spec = LoadSpec(
+        path=Path("/tmp/model.axon"),
+        alias="axon_model",
+        tensor_name=None,
+        format="auto",
+        backend="axon",
+        mode="axon",
+        weights=Path("/tmp/w.safetensors"),
+    )
+    result = tr.apply(load_spec, provider)
+    assert result.count == 1
+    assert called["loaded"] is True
+    assert provider.get_model_runtime_metadata("axon_model") == {
+        "runtime": "synapse",
+        "program": "/tmp/model.axon",
+    }
+
+    existing = provider.get_or_create_alias_state_dict("existing")
+    existing["w"] = torch.zeros(1)
+    conflict_spec = LoadSpec(
+        path=Path("/tmp/model.axon"),
+        alias="existing",
+        tensor_name=None,
+        format="auto",
+        backend="axon",
+        mode="axon",
+        weights=Path("/tmp/w.safetensors"),
+    )
+    with pytest.raises(
+        LoadTransformError, match="received both an existing alias and load.weights"
+    ):
+        tr.apply(conflict_spec, provider)
+
+    reuse_spec = LoadSpec(
+        path=Path("/tmp/model.axon"),
+        alias="existing",
+        tensor_name=None,
+        format="auto",
+        backend="axon",
+        mode="axon",
+        weights=None,
+    )
+    reuse_result = tr.apply(reuse_spec, provider)
+    assert reuse_result.count == 0
+    assert provider.get_model_runtime_metadata("existing") == {
+        "runtime": "synapse",
+        "program": "/tmp/model.axon",
+    }
+
+
+def test_load_checkpoint_directory_sets_hf_runtime_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = InMemoryStateDictProvider({}, max_io_workers=1)
+    sd = _InMemoryStateDict()
+    sd["x"] = torch.ones(1)
+    monkeypatch.setattr(provider, "load_alias_from_path", lambda alias, path: sd)
+
+    model_dir = tmp_path / "hf_model"
+    model_dir.mkdir()
+    spec = LoadSpec(path=model_dir, alias="hf_alias", tensor_name=None, format="auto")
+    result = LoadTransform().apply(spec, provider)
+
+    assert result.count == 1
+    assert provider.get_model_runtime_metadata("hf_alias") == {
+        "runtime": "hf",
+        "program": str(model_dir),
+    }
+
+
+def test_load_checkpoint_file_in_hf_directory_sets_hf_runtime_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = InMemoryStateDictProvider({}, max_io_workers=1)
+    sd = _InMemoryStateDict()
+    sd["x"] = torch.ones(1)
+    monkeypatch.setattr(provider, "load_alias_from_path", lambda alias, path: sd)
+
+    model_dir = tmp_path / "hf_model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    checkpoint = model_dir / "model.safetensors"
+    checkpoint.write_bytes(b"fake")
+
+    spec = LoadSpec(path=checkpoint, alias="hf_alias", tensor_name=None, format="auto")
+    result = LoadTransform().apply(spec, provider)
+
+    assert result.count == 1
+    assert provider.get_model_runtime_metadata("hf_alias") == {
+        "runtime": "hf",
+        "program": str(model_dir),
+    }
+
+
+def test_load_checkpoint_file_without_hf_config_does_not_set_runtime_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = InMemoryStateDictProvider({}, max_io_workers=1)
+    sd = _InMemoryStateDict()
+    sd["x"] = torch.ones(1)
+    monkeypatch.setattr(provider, "load_alias_from_path", lambda alias, path: sd)
+
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.write_bytes(b"fake")
+
+    spec = LoadSpec(path=checkpoint, alias="plain_alias", tensor_name=None, format="auto")
+    result = LoadTransform().apply(spec, provider)
+
+    assert result.count == 1
+    assert provider.get_model_runtime_metadata("plain_alias") is None
+
+
 def test_load_apply_dry_run_uses_checkpoint_loader_and_tensor_alias_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -162,3 +337,18 @@ def test_load_apply_dry_run_uses_checkpoint_loader_and_tensor_alias_fallback(
     assert provider.has_model_alias("new_alias") is False
 
     reset_runtime_flags_for_scope(RuntimeFlagLifecycleScope.CLI_RUN)
+
+
+def test_load_completion_backend_candidates() -> None:
+    tr = LoadTransform()
+    assert tr.completion_value_candidates("backend", "a", []) == ["auto", "axon"]
+
+
+def test_load_compile_auto_mode_infers_axon_vs_tensor_vs_checkpoint() -> None:
+    tr = LoadTransform()
+    axon_spec = tr.compile({"path": "/tmp/model.axon"}, default_model=None)
+    assert axon_spec.mode == "axon"
+    tensor_spec = tr.compile({"path": "/tmp/t.npy", "to": "m::x"}, default_model=None)
+    assert tensor_spec.mode == "tensor"
+    checkpoint_spec = tr.compile({"path": "/tmp/model.safetensors"}, default_model=None)
+    assert checkpoint_spec.mode == "checkpoint"

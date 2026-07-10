@@ -1,20 +1,60 @@
-gelu :: Tensor[B,T,D] -> Tensor[B,T,D]
-gelu = _activations_gelu
+import Params (param)
+import Math (exp, log, pow)
+export (
+  gegelu,
+  gelu,
+  gelu_new,
+  gelu_pytorch_tanh,
+  relu,
+  relu2,
+  sigmoid,
+  silu,
+  softplus,
+  sqrtsoftplus,
+  tanh,
+  xielu,
+)
 
-gelu_new :: Tensor[B,T,D] -> Tensor[B,T,D]
-gelu_new = _activations_gelu_new
+gelu :: Tensor[..S] -> Tensor[..S]
+gelu x = _activations_gelu x
 
-gelu_pytorch_tanh :: Tensor[B,T,D] -> Tensor[B,T,D]
-gelu_pytorch_tanh = _activations_gelu_pytorch_tanh
+gelu_new :: Tensor[..S] -> Tensor[..S]
+gelu_new x = _activations_gelu_new x
 
-relu :: Tensor[B,T,D] -> Tensor[B,T,D]
-relu = _activations_relu
+gelu_pytorch_tanh :: Tensor[..S] -> Tensor[..S]
+gelu_pytorch_tanh x = _activations_gelu_pytorch_tanh x
 
-sigmoid :: Tensor[B,T,D] -> Tensor[B,T,D]
-sigmoid = _activations_sigmoid
+gegelu :: Tensor[..S,D] -> ?Float -> Tensor[..S,D / 2]
+gegelu x ?limit=null = _activations_gegelu x limit
 
-silu :: Tensor[B,T,D] -> Tensor[B,T,D]
-silu = _activations_silu
+relu :: Tensor[..S] -> Tensor[..S]
+relu x = _activations_relu x
 
-swiglu :: Tensor[B,T,D] -> Tensor[B,T,D]
-swiglu = _activations_swiglu
+relu2 :: Tensor[..S] -> Tensor[..S]
+relu2 x = _activations_relu2 x
+
+sigmoid :: Tensor[..S] -> Tensor[..S]
+sigmoid x = _activations_sigmoid x
+
+tanh :: Tensor[..S] -> Tensor[..S]
+tanh x = _activations_tanh x
+
+silu :: Tensor[..S] -> Tensor[..S]
+silu x = _activations_silu x
+
+softplus :: Tensor[..S] -> Tensor[..S]
+softplus x = log (1.0 + exp x)
+
+sqrtsoftplus :: Tensor[..S] -> Tensor[..S]
+sqrtsoftplus x = pow (softplus x) 0.5
+
+swiglu :: Tensor[..S] -> Tensor[..S]
+swiglu x = _activations_swiglu x
+
+xielu :: Path -> Tensor[..S] -> ?Path -> ?Path -> ?Path -> ?Path -> Tensor[..S]
+xielu@path x ?alpha_p_path=null ?alpha_n_path=null ?beta_path=null ?eps_path=null = do
+  alpha_p <- (alpha_p_path == null) ? (param @'{path}.alpha_p') : (param alpha_p_path)
+  alpha_n <- (alpha_n_path == null) ? (param @'{path}.alpha_n') : (param alpha_n_path)
+  beta <- (beta_path == null) ? (param @'{path}.beta') : (param beta_path)
+  eps <- (eps_path == null) ? (param @'{path}.eps') : (param eps_path)
+  return _activations_xielu x alpha_p alpha_n beta eps

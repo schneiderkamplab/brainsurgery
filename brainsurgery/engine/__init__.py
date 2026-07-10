@@ -23,22 +23,26 @@ from .plan import (
 )
 from .provider_utils import (
     find_alias_mapping,
+    get_model_runtime_metadata,
     get_or_create_alias_state_dict,
     iter_alias_mappings,
     list_loaded_tensor_names,
     list_model_aliases,
     new_empty_state_dict,
     resolve_single_model_alias,
+    set_model_runtime_metadata,
 )
 from .providers import (
     BaseStateDictProvider,
     create_state_dict_provider,
+    wrap_provider_with_gpu_cache,
 )
 from .render import render_tree, summarize_tensor
 from .runtime_flags_policy import (
     RuntimeFlagLifecycleScope,
     reset_runtime_flags_for_scope,
 )
+from .state_dicts import GpuCacheConfig
 from .summary import (
     executed_plan_summary_doc,
     executed_plan_summary_yaml,

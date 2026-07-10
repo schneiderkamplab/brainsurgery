@@ -73,6 +73,11 @@ def _transform_items() -> list[dict[str, Any]]:
                 "iterating": bool(spec and spec["iterating"]),
                 "allowed_keys": spec["allowed_keys"] if spec else [],
                 "required_keys": spec["required_keys"] if spec else [],
+                "mode_key": spec["mode_key"] if spec else None,
+                "default_mode": spec["default_mode"] if spec else "default",
+                "modes": spec["modes"] if spec else ["default"],
+                "mode_allowed_keys": spec["mode_allowed_keys"] if spec else {},
+                "mode_required_keys": spec["mode_required_keys"] if spec else {},
                 "reference_keys": spec["reference_keys"] if spec else [],
                 "to_must_exist": bool(spec and spec["to_must_exist"]),
                 "help_commands": spec["help_commands"] if spec else [],
@@ -89,8 +94,11 @@ def _transform_specs() -> dict[str, dict[str, Any]]:
     specs: dict[str, dict[str, Any]] = {}
     for name in list_transforms():
         transform = get_transform(name)
-        allowed = sorted(getattr(transform, "allowed_keys", set()) or set())
-        required = sorted(getattr(transform, "required_keys", set()) or set())
+        schema = transform.payload_schema()
+        default_mode = str(schema.default_mode)
+        mode_names = sorted(schema.modes())
+        allowed = sorted(schema.allowed_keys_for_mode(default_mode))
+        required = sorted(schema.required_keys_for_mode(default_mode))
         ref_keys = [key for key in transform.completion_reference_keys() if isinstance(key, str)]
         if allowed:
             ref_keys = [key for key in ref_keys if key in set(allowed)]
@@ -109,6 +117,15 @@ def _transform_specs() -> dict[str, dict[str, Any]]:
             "iterating": isinstance(transform, IteratingTransform),
             "allowed_keys": allowed,
             "required_keys": required,
+            "mode_key": schema.mode_key,
+            "default_mode": default_mode,
+            "modes": mode_names,
+            "mode_allowed_keys": {
+                mode: sorted(schema.allowed_keys_for_mode(mode)) for mode in mode_names
+            },
+            "mode_required_keys": {
+                mode: sorted(schema.required_keys_for_mode(mode)) for mode in mode_names
+            },
             "reference_keys": ref_keys,
             "to_must_exist": destination_policy is DestinationPolicy.MUST_EXIST,
             "help_commands": sorted(list_transforms()) if name == "help" else [],

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from brainsurgery.synapse import run_axon_test
-from tests.model_downloads import MATRIX_AXON_TO_MODEL_DIR
+from tests.model_downloads import MATRIX_AXON_MODEL_DIR_PAIRS
 from tests.test_flags import LONG_TEST_ENV, run_long_tests_enabled
 
 
@@ -16,7 +16,7 @@ def _matrix_pairs(repo_root: Path) -> list[tuple[Path, Path]]:
     models_dir = repo_root / "models"
     return [
         (examples_dir / f"{axon_stem}.axon", models_dir / model_dir_name)
-        for axon_stem, model_dir_name in sorted(MATRIX_AXON_TO_MODEL_DIR.items())
+        for axon_stem, model_dir_name in MATRIX_AXON_MODEL_DIR_PAIRS
     ]
 
 

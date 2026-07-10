@@ -20,13 +20,14 @@ from ..specs import (
     StateDictProvider,
     TensorRef,
     TransformError,
+    TransformPayloadSchema,
     ensure_mapping_payload,
     format_tensor_ref,
     must_model,
     parse_model_expr,
     parse_slice,
     require_expr,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 
 
@@ -91,6 +92,41 @@ class BaseTransform(ABC):
     def completion_committed_next_candidates(self, value_key: str | None) -> list[str] | None:
         del value_key
         return None
+
+    @abstractmethod
+    def payload_schema(self) -> TransformPayloadSchema:
+        raise NotImplementedError
+
+    def resolve_payload_mode(self, payload: dict) -> str:
+        return self.payload_schema().resolve_mode(payload, op_name=self.name)
+
+    def payload_required_keys(
+        self,
+        *,
+        payload: dict | None = None,
+        mode: str | None = None,
+    ) -> set[str]:
+        schema = self.payload_schema()
+        if mode is None:
+            if payload is None:
+                mode = schema.default_mode
+            else:
+                mode = schema.resolve_mode(payload, op_name=self.name)
+        return schema.required_keys_for_mode(mode)
+
+    def payload_allowed_keys(
+        self,
+        *,
+        payload: dict | None = None,
+        mode: str | None = None,
+    ) -> set[str]:
+        schema = self.payload_schema()
+        if mode is None:
+            if payload is None:
+                mode = schema.default_mode
+            else:
+                mode = schema.resolve_mode(payload, op_name=self.name)
+        return schema.allowed_keys_for_mode(mode)
 
 
 SpecT = TypeVar("SpecT")
@@ -280,13 +316,21 @@ class UnaryTransform(IteratingTransform[UnarySpecT, str], ABC, Generic[UnarySpec
     def completion_reference_keys(self) -> list[str]:
         return [self.target_key]
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(self.required_keys),
+            common_allowed=set(self.allowed_keys),
+        )
+
     def compile(self, payload: dict, default_model: str | None) -> UnarySpecT:
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
 
         raw_target = self.require_target_expr(payload)
@@ -362,13 +406,21 @@ class BinaryMappingTransform(
     def completion_reference_keys(self) -> list[str]:
         return ["from", "to"]
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(self.required_keys),
+            common_allowed=set(self.allowed_keys),
+        )
+
     def compile(self, payload: dict, default_model: str | None) -> BinarySpecT:
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
 
         from_ref, to_ref = self.parse_refs(payload, default_model)
@@ -482,13 +534,21 @@ class TernaryMappingTransform(
     def completion_reference_keys(self) -> list[str]:
         return ["from_a", "from_b", "to"]
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(self.required_keys),
+            common_allowed=set(self.allowed_keys),
+        )
+
     def compile(self, payload: dict, default_model: str | None) -> TernarySpecT:
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
 
         from_a_ref, from_b_ref, to_ref = self.parse_refs(payload, default_model)

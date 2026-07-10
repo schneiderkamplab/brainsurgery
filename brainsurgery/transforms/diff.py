@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 
@@ -8,6 +8,7 @@ from ..core import (
     StateDictProvider,
     TensorRef,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     ensure_mapping_payload,
@@ -19,7 +20,7 @@ from ..core import (
     register_transform,
     require_nonempty_string,
     state_dict_for_ref,
-    validate_payload_keys,
+    validate_payload_schema,
     view_for_ref_name,
 )
 from ..engine import emit_line, emit_verbose_event
@@ -47,7 +48,6 @@ class DiffTransform(TypedTransform[DiffSpec]):
     name = "diff"
     error_type = DiffTransformError
     spec_type = DiffSpec
-    allowed_keys = {"mode", "left", "right", "left_alias", "right_alias", "eps"}
     help_text = (
         "Compares two tensor sets and reports missing names on both sides plus tensors "
         "whose contents differ.\n"
@@ -66,37 +66,40 @@ class DiffTransform(TypedTransform[DiffSpec]):
         "  diff: { mode: aliases, left_alias: base, right_alias: edited }"
     )
 
-    def compile(self, payload: Any, default_model: str | None) -> DiffSpec:
-        payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
-            payload,
-            op_name=self.name,
-            allowed_keys=self.allowed_keys,
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key="mode",
+            default_mode="refs",
+            common_required=set(),
+            common_allowed={"mode", "eps"},
+            mode_required={
+                "refs": {"left", "right"},
+                "aliases": {"left_alias", "right_alias"},
+            },
+            mode_allowed_extra={},
         )
 
-        raw_mode = payload.get("mode", "refs")
-        if not isinstance(raw_mode, str) or not raw_mode:
-            raise DiffTransformError("diff.mode must be a non-empty string when provided")
-        mode = raw_mode.strip().lower()
-        if mode not in {"refs", "aliases"}:
-            raise DiffTransformError("diff.mode must be one of: refs, aliases")
+    def compile(self, payload: Any, default_model: str | None) -> DiffSpec:
+        payload = ensure_mapping_payload(payload, self.name)
+        mode = cast(
+            DiffMode,
+            validate_payload_schema(
+                payload,
+                op_name=self.name,
+                schema=self.payload_schema(),
+                error_type=self.error_type,
+            ),
+        )
 
         eps = _compile_eps(payload.get("eps"))
 
         if mode == "refs":
-            _require_only_keys(payload, allowed={"mode", "left", "right", "eps"})
-            if "left" not in payload:
-                raise DiffTransformError("diff.left is required")
-            if "right" not in payload:
-                raise DiffTransformError("diff.right is required")
-
             left_ref = parse_model_expr(payload["left"], default_model=default_model)
             right_ref = parse_model_expr(payload["right"], default_model=default_model)
             _validate_slice(left_ref)
             _validate_slice(right_ref)
             return DiffSpec(left_ref=left_ref, right_ref=right_ref, eps=eps, mode="refs")
 
-        _require_only_keys(payload, allowed={"mode", "left_alias", "right_alias", "eps"})
         left_alias = require_nonempty_string(payload, op_name=self.name, key="left_alias")
         right_alias = require_nonempty_string(payload, op_name=self.name, key="right_alias")
         return DiffSpec(
@@ -182,12 +185,6 @@ def _compile_eps(raw_eps: Any) -> float | None:
     if eps < 0:
         raise DiffTransformError("diff.eps must be a non-negative number")
     return eps
-
-
-def _require_only_keys(payload: dict[str, object], *, allowed: set[str]) -> None:
-    unexpected = set(payload) - allowed
-    if unexpected:
-        raise DiffTransformError(f"diff received unknown keys for this mode: {sorted(unexpected)}")
 
 
 def _validate_slice(ref: TensorRef) -> None:

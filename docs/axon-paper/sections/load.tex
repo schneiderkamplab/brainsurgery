@@ -1,0 +1,37 @@
+\section{Load}
+
+\paragraph{Input and output.}
+The load stage consumes a root one-file AST plus origin-path information and
+returns the root program together with the imported Axon files needed by that
+program.
+
+\paragraph{Contract.}
+Loading is responsible for file discovery and import-root policy.  It does not
+merge modules, rewrite references, prune unreachable definitions, or infer
+types.  The output is still a collection of one-file ASTs.
+
+\paragraph{Rationale.}
+Separating loading from parsing keeps source-text parsing deterministic and
+lets resolution operate over an explicit import set.  This also makes it easier
+to test imported builtins and model files without hiding file-system effects in
+the parser.
+
+\paragraph{Formal view.}
+For a root AST \(A_0\), an origin path \(p\), and an import search policy
+\(\mathcal{I}\), loading computes a finite import closure:
+\[
+  \mathsf{load}(A_0,p,\mathcal{I}) = [A_0,A_1,\ldots,A_n].
+\]
+The result is ordered only for deterministic processing; it is not yet a
+single linked program.
+
+\paragraph{Example.}
+If a model file imports
+\begin{verbatim}
+import NN
+import Attention (attention, reshape_heads)
+\end{verbatim}
+load finds the corresponding builtin Axon files and parses them.  The model AST
+still contains import declarations, and the imported ASTs remain separate
+files.  Qualified names such as \code{Attention.attention} are not resolved
+until the next stage.

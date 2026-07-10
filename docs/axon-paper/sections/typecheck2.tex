@@ -1,0 +1,53 @@
+\section{Typecheck2}
+
+\paragraph{Input and output.}
+Typecheck2 consumes a flat closed AST and emits a fully typed flat closed AST.
+
+\paragraph{Contract.}
+Every expression receives inferred type and arity metadata.  Tensor types carry
+symbolic shape variables, optional types preserve nullability, and primitive
+calls are checked against declared signatures plus primitive-specific type
+rules.  Function calls are checked through signature binding and unification,
+including call-site specialization where the definition contract permits it.
+
+\paragraph{Constraints.}
+The type system records symbolic relationships over dimensions, integers,
+booleans, and nullability when they are available from the program structure.
+These constraints are metadata for later validation and optimization; they do
+not license backends to guess missing types.
+
+\paragraph{Rationale.}
+Typed flat Axon is the last AST-level representation before Graph IR.  Its
+metadata must be strong enough that lowering does not need compatibility
+fallbacks or model-specific inference.
+
+\paragraph{Formal view.}
+Typecheck2 is a judgment over flat definitions:
+\[
+  \Gamma;\Phi \vdash e : \tau, a, \Delta
+\]
+where \(\Gamma\) maps term names to types, \(\Phi\) stores known symbolic
+constraints, \(\tau\) is the inferred type, \(a\) is arity, and \(\Delta\)
+contains inferred dimension metadata.  A checked program is a flat AST whose
+expression nodes are annotated with these results.
+
+\paragraph{Example: tensor unification.}
+If
+\begin{verbatim}
+tok :: Tensor[B,S,D]
+pos :: Tensor[B,S,D2]
+x <- tok + pos
+\end{verbatim}
+then the primitive rule for addition requires compatible tensor shapes.  The
+typechecker unifies \code{D2} with \code{D} and annotates the result as
+\code{Tensor[B,S,D]}.  This avoids leaving downstream stages with unrelated
+fresh dimensions for tensors that must be equal.
+
+\paragraph{Example: optional cache types.}
+A value of type
+\begin{verbatim}
+?CacheLayer[B,H,T,DH]
+\end{verbatim}
+is either \code{null} or a cache layer with the stated tensor shape.  Typecheck2
+preserves that inner shape through null checks and cache-update primitives so
+that graph lowering can retain cache metadata.

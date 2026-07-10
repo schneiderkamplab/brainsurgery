@@ -1,0 +1,86 @@
+{-# CHECKPOINTS "answerdotai/ModernBERT-base" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "modernbert" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Math (mul)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM = 768
+
+VOCAB_SIZE = 50368
+
+NUM_LAYERS = 22
+
+NUM_HEADS = 12
+
+FFN = 1152
+
+EPS = 1e-05
+
+FULL_EVERY = 3
+
+LOCAL_ATTN = 128
+
+LOCAL_WIN = 64
+
+THETA_FULL = 160000.0
+
+THETA_LOCAL = 10000.0
+
+modernbert_layer :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+modernbert_layer x i rope_sin_full rope_cos_full rope_sin_local rope_cos_local mask_full mask_local = do
+  xn <- (i == 0) ? x : NN.layernorm@attn_norm x eps=EPS bias=false
+  a <- scope@attn do
+    qkv <- NN.linear@Wqkv xn dim=(3 * MODEL_DIM) bias=false
+    q, k, v <- Tensor.chunk qkv parts=3
+    q <- reshape_heads q heads=NUM_HEADS
+    k <- reshape_heads k heads=NUM_HEADS
+    v <- reshape_heads v heads=NUM_HEADS
+    full <- (FULL_EVERY <= 0) or ((i % FULL_EVERY) == 0)
+    q_full, k_full <- rope_pair_base_factors q k rope_sin_full rope_cos_full
+    q_local, k_local <- rope_pair_base_factors q k rope_sin_local rope_cos_local
+    q <- full ? q_full : q_local
+    k <- full ? k_full : k_local
+    mask <- full ? mask_full : mask_local
+    return attention q k v mask |> merge_heads |> NN.linear@Wo dim=MODEL_DIM bias=false
+  x <- x + a
+  xn <- NN.layernorm@mlp_norm x eps=EPS bias=false
+  m <- scope@mlp do
+    wi <- NN.linear@Wi xn dim=(2 * FFN) bias=false
+    u, g <- Tensor.chunk wi parts=2
+    return gelu u |> mul g |> NN.linear@Wo dim=MODEL_DIM bias=false
+  return x + m
+
+modernbert :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
+modernbert input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids attn_mask
+  rope_sin_full, rope_cos_full <- rope_base_factors pos_ids (MODEL_DIM / NUM_HEADS) THETA_FULL
+  rope_sin_local, rope_cos_local <- rope_base_factors pos_ids (MODEL_DIM / NUM_HEADS) THETA_LOCAL
+  mask_full <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  mask_local <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask window=LOCAL_WIN
+  x <- NN.embedding@model.embeddings.tok_embeddings input_ids dim=MODEL_DIM
+  x <- NN.layernorm@model.embeddings.norm x eps=EPS bias=false
+  x <- for@model.layers i <- [0..NUM_LAYERS) carry (x) do
+    x <- modernbert_layer x i rope_sin_full rope_cos_full rope_sin_local rope_cos_local mask_full mask_local
+    yield x
+  x <- NN.layernorm@model.final_norm x eps=EPS bias=false
+  x <- NN.linear@head.dense x dim=MODEL_DIM bias=false |> gelu
+  x <- NN.layernorm@head.norm x eps=EPS bias=false
+  logits <- NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@model.embeddings.tok_embeddings.weight
+  return logits

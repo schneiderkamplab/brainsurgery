@@ -1,0 +1,44 @@
+\section{Normalize}
+
+\paragraph{Input and output.}
+Normalize consumes a validated closed AST and emits a normalized closed AST.
+
+\paragraph{Contract.}
+The stage removes call and control sugar that would otherwise complicate
+flattening.  Callee path suffixes become ordinary \code{Path}-typed arguments,
+pipe syntax becomes ordinary calls, callable-name expressions that denote
+zero-argument calls become explicit calls, and loop bodies receive explicit
+yield/carry protocol structure.
+
+\paragraph{Exclusions.}
+Normalize does not globally expand default arguments.  Defaults are handled by
+the elaboration stage and by type-aware binding where appropriate.
+
+\paragraph{Rationale.}
+Normalize is the boundary between surface authoring syntax and a regularized
+AST.  It keeps later stages from duplicating parser-level sugar handling.
+
+\paragraph{Formal view.}
+Normalize is a total transformation over validated closed ASTs:
+\[
+  \mathsf{normalize}: A_c \rightarrow A_n .
+\]
+It preserves denotation while reducing the number of syntactic forms.  The
+validator for \(A_n\) checks that eliminated sugar does not reappear.
+
+\paragraph{Example: path and pipe sugar.}
+The surface expression
+\begin{verbatim}
+x <- input |> NN.layernorm@ln_f eps=1e-5
+\end{verbatim}
+normalizes to an ordinary call whose path is an explicit argument:
+\begin{verbatim}
+x <- NN.layernorm @ln_f input eps=1e-5
+\end{verbatim}
+The exact rendered form may differ, but the AST no longer represents either a
+pipe expression or callee-attached path sugar.
+
+\paragraph{Example: loop protocol.}
+A source loop with implied carry/yield is normalized so that the loop body has
+an explicit final yield.  Flattening therefore sees one loop protocol rather
+than several authoring conveniences.

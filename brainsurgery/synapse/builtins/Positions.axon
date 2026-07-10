@@ -1,0 +1,913 @@
+import Math (PI, clamp, cos, exp, floor, log, sin, sqrt)
+import NN (embedding, layernorm, linear)
+import Params param
+import Tensor (
+  and,
+  arange,
+  arange_step,
+  cast,
+  cast_like,
+  concat,
+  cumsum,
+  eq,
+  expand,
+  full,
+  gather,
+  le,
+  matmul,
+  permute,
+  reshape,
+  shape,
+  size,
+  slice,
+  tensor_like,
+  topk,
+  transpose,
+  unsqueeze,
+  where,
+  zeros,
+  zeros_like,
+)
+export (
+  linear_position_bias,
+  linear_position_bias_for_input,
+  linear_position_bias_for_length,
+  position_ids,
+  relative_bias_disentangled,
+  relative_position_bias,
+  rope_pair_base,
+  rope_apply_base,
+  rope_base_factors,
+  rope_freq_scale_factors,
+  rope_freq_scale_factors_for_position_ids,
+  rope_hf_yarn_factors,
+  rope_apply_factors,
+  rope_pair_hf_yarn_factors,
+  rope_apply_prefix_factors,
+  rope_pair_base_prefix,
+  rope_pair_base_factors,
+  rope_pair_base_split_interleaved_factors,
+  rope_pair_base_prefix_factors,
+  rope_pair_base_split_interleaved,
+  rope_pair_freq_scale,
+  rope_apply_freq_scale,
+  rope_longrope_factors,
+  rope_pair_hf_yarn,
+  rope_pair_longrope,
+  rope_proportional_factors,
+  rope_pair_proportional_factors,
+  rope_pair_proportional,
+  rope_yarn_factors,
+  rope_yarn_factors_for_position_ids,
+  rope_pair_yarn_factors,
+  rope_pair_yarn,
+  rope_pair_yarn_split_interleaved,
+  rope_pair_yarn_split_interleaved_factors,
+  rope_apply_trailing_yarn_inverse,
+  rope_apply_trailing_yarn,
+  rope_apply_trailing_inverse,
+  rope_apply_trailing,
+  sinusoidal_positions,
+)
+
+position_ids_masked :: TokenIds[B,S] -> Tensor[B,SM] -> Int -> Tensor[B,S]
+position_ids_masked x attn_mask pad_fill = do
+  pos <- cast attn_mask dtype="long" |> cumsum dim=-1
+  pos <- where (eq attn_mask 0) pad_fill (pos - 1)
+  return slice pos dim=-1 start=(SM - S) end=SM
+
+
+position_ids_nomask :: TokenIds[B,S] -> Dim -> Tensor[B,S]
+position_ids_nomask x past_length = do
+  return arange x start=past_length end=(past_length + S) |>
+    cast dtype="long" |>
+    reshape shape=[1, S] |>
+    expand shape=[B, S]
+
+
+position_ids :: TokenIds[B,S] -> ?Tensor[B,SM] -> ?Dim -> ?Int -> Tensor[B,S]
+position_ids x ?attn_mask=null ?past_length=0 ?pad_fill=0 = (attn_mask == null)
+  ? (position_ids_nomask x past_length)
+  : (position_ids_masked x attn_mask pad_fill)
+
+position_ids_scale :: Tensor[B,SM] -> Float -> Tensor[B,SM]
+position_ids_scale position_ids scale_factor = do
+  pos <- cast position_ids dtype="float32"
+  return pos / scale_factor
+
+
+sinusoidal_positions :: Tensor[B,S,D] -> Tensor[B,S] -> ?Float -> ?Int -> ?Int -> ?String -> Tensor[B,S,D]
+sinusoidal_positions ref position_ids ?theta=10000.0 ?offset=2 ?padding_idx=null ?mode=null = do
+  theta <- (theta == null) ? 10000.0 : theta
+  offset <- (offset == null) ? 2 : offset
+  mode <- (mode == null) ? "legacy" : mode
+  half <- D / 2
+  pos <- cast position_ids dtype="float32"
+  pos <- pos + offset
+  pos <- reshape pos shape=[B, S, 1]
+  freq_idx <- arange ref start=0 end=half |> cast dtype="float32"
+  inv_freq <- (mode == "rope")
+    ? do
+      inv_shape <- freq_idx / half
+      return exp (0 - ((log theta) * inv_shape))
+    : do
+      den <- (((half - 1) > 0) ? (half - 1) : 1)
+      inv_shape <- freq_idx / den
+      return exp (0 - ((log theta) * inv_shape))
+  inv_freq <- reshape inv_freq shape=[1, 1, half]
+  angles <- pos * inv_freq
+  sin_part <- sin angles
+  cos_part <- cos angles
+  emb <- concat sin_part cos_part dim=-1
+  emb <- ((D % 2) == 0)
+    ? emb
+    : do
+      pad <- (slice ref dim=-1 start=0 end=1) * 0.0
+      padded <- concat emb pad dim=-1
+      ref_shape <- shape ref
+      return reshape padded shape=ref_shape
+  emb <- (padding_idx == null)
+    ? emb
+    : do
+      mask <- eq position_ids padding_idx |> unsqueeze dim=-1
+      return where mask (zeros_like emb) emb
+  return cast_like emb ref
+
+
+linear_position_bias :: Tensor[B,T] -> Dim -> ?Float -> Tensor[B,H,1,T]
+linear_position_bias attn_mask heads ?scale=1.0 = do
+  cp2 <- 1
+  cp2 <- for i <- [0..heads) carry (cp2) do
+    cp2 <- (((cp2 * 2) <= heads) ? (cp2 * 2) : cp2)
+    yield cp2
+  cp2_log2 <- 0
+  cp2_tmp <- cp2
+  cp2_tmp, cp2_log2 <- for i <- [0..heads) carry (cp2_tmp, cp2_log2) do
+    reduce <- cp2_tmp > 1
+    cp2_tmp <- reduce ? (cp2_tmp / 2) : cp2_tmp
+    cp2_log2 <- reduce ? (cp2_log2 + 1) : cp2_log2
+    yield cp2_tmp, cp2_log2
+  ln2 <- log 2.0
+  ratio <- (0.0 - 8.0) / cp2
+  powers <- arange attn_mask start=1 end=(cp2 + 1)
+  slopes <- exp (ln2 * (powers * ratio))
+  remain <- ((heads - cp2) > cp2) ? cp2 : (heads - cp2)
+  extra_powers <- arange_step attn_mask start=1 end=(1 + (2 * remain)) stride=2
+  extra_ratio <- (0.0 - 4.0) / cp2
+  extra_slopes <- exp (ln2 * (extra_powers * extra_ratio))
+  slopes_all <- concat slopes extra_slopes dim=0
+  slopes <- (cp2 == heads) ? slopes : slopes_all
+  arange_tensor <- cast attn_mask dtype="float32"
+  arange_tensor <- cumsum arange_tensor dim=-1
+  arange_tensor <- arange_tensor - 1.0
+  arange_tensor <- arange_tensor * (cast attn_mask dtype="float32")
+  slopes <- cast slopes dtype="float32"
+  slopes <- reshape slopes shape=[1, heads, 1, 1]
+  arange_tensor <- reshape arange_tensor shape=[B, 1, 1, -1]
+  return (scale * (slopes * arange_tensor))
+
+
+linear_position_bias_for_input :: Tensor[B,T] -> Dim -> ?Float -> Tensor[B,H,1,T]
+linear_position_bias_for_input attn_mask heads ?scale=1.0 = do
+  return linear_position_bias attn_mask heads scale=scale
+
+linear_position_bias_for_length :: Tensor[B,Q] -> Dim -> Dim -> ?Float -> Tensor[B,H,1,K]
+linear_position_bias_for_length x K heads ?scale=1.0 = do
+  mask <- full x shape=[B, K] value=true dtype="bool"
+  return linear_position_bias mask heads scale=scale
+
+
+-- === ROPE HELPERS ===
+rope_rotate_half_noninterleaved :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
+rope_rotate_half_noninterleaved x = do
+  x1 <- slice x dim=-1 start=0 end=(R / 2)
+  x2 <- slice x dim=-1 start=(R / 2) end=R
+  return concat (0 - x2) x1 dim=-1
+
+
+rope_rotate_half_interleaved :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
+rope_rotate_half_interleaved x = do
+  pair <- reshape x shape=[B, H, S, (R / 2), 2]
+  even <- slice pair dim=-1 start=0 end=1 |> reshape shape=[B, H, S, (R / 2)]
+  odd <- slice pair dim=-1 start=1 end=2 |> reshape shape=[B, H, S, (R / 2)]
+  neg_odd <- reshape (0 - odd) shape=[B, H, S, (R / 2), 1]
+  even <- reshape even shape=[B, H, S, (R / 2), 1]
+  return concat neg_odd even dim=-1 |> reshape shape=[B, H, S, R]
+
+
+rope_rotate_half :: Tensor[B,H,S,R] -> ?Bool -> Tensor[B,H,S,R]
+rope_rotate_half x ?interleaved=false = interleaved
+  ? (rope_rotate_half_interleaved x)
+  : (rope_rotate_half_noninterleaved x)
+
+
+rope_split_interleaved_to_half :: Tensor[B,H,S,R] -> Tensor[B,H,S,R]
+rope_split_interleaved_to_half x = do
+  pair <- reshape x shape=[B, H, S, (R / 2), 2]
+  return transpose pair dim1=3 dim2=4 |> reshape shape=[B, H, S, R]
+
+
+rope_expand_half :: Tensor[B,HM,S,RH] -> Tensor[B,HM,S,2 * RH]
+rope_expand_half x = do
+  xx <- concat x x dim=-1
+  b <- size x dim=0
+  hm <- size x dim=1
+  s <- size x dim=2
+  rh <- size x dim=-1
+  r <- 2 * rh
+  return reshape xx shape=[b, hm, s, r]
+
+
+rope_expand_half_interleaved :: Tensor[B,HM,S,RH] -> Tensor[B,HM,S,2 * RH]
+rope_expand_half_interleaved x = do
+  b <- size x dim=0
+  hm <- size x dim=1
+  s <- size x dim=2
+  rh <- size x dim=-1
+  pair <- reshape x shape=[b, hm, s, rh, 1]
+  pair <- concat pair pair dim=-1
+  r <- 2 * rh
+  return reshape pair shape=[b, hm, s, r]
+
+
+rope_apply_raw :: Tensor[B,H,S,R] -> Tensor[B,S] -> Float -> ?Bool -> Tensor[B,H,S,R]
+rope_apply_raw x position_ids theta ?interleaved=false = do
+  ref <- slice x dim=1 start=0 end=1 |> reshape shape=[B, S, R]
+  emb <- sinusoidal_positions ref position_ids theta=theta offset=0 padding_idx=null mode="rope"
+  sin_half <- slice emb dim=-1 start=0 end=(R / 2)
+  cos_half <- slice emb dim=-1 start=(R / 2) end=R
+  sin_half <- reshape sin_half shape=[B, 1, S, (R / 2)]
+  cos_half <- reshape cos_half shape=[B, 1, S, (R / 2)]
+  sin <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin <- expand sin shape=[B, H, S, R]
+  cos <- expand cos shape=[B, H, S, R]
+  return (x * cos) + ((rope_rotate_half x interleaved=interleaved) * sin)
+
+
+rope_base_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Bool -> ?Float -> (Tensor[B,1,S,R], Tensor[B,1,S,R])
+rope_base_factors position_ids rotary_dim ?theta=10000.0 ?interleaved=false ?scale_factor=null = do
+  position_ids <- (scale_factor == null) ? position_ids : (position_ids_scale position_ids scale_factor)
+  ref <- zeros position_ids shape=[B, S, rotary_dim] dtype="float32"
+  emb <- sinusoidal_positions ref position_ids theta=theta offset=0 padding_idx=null mode="rope"
+  half <- ((floor (rotary_dim / 2)) :: Dim)
+  sin_half <- slice emb dim=-1 start=0 end=half
+  cos_half <- slice emb dim=-1 start=half end=rotary_dim
+  sin_half <- reshape sin_half shape=[B, 1, S, half]
+  cos_half <- reshape cos_half shape=[B, 1, S, half]
+  sin <- interleaved
+    ? do
+      pair <- reshape sin_half shape=[B, 1, S, half, 1]
+      pair <- concat pair pair dim=-1
+      return reshape pair shape=[B, 1, S, rotary_dim]
+    : do
+      xx <- concat sin_half sin_half dim=-1
+      return reshape xx shape=[B, 1, S, rotary_dim]
+  cos <- interleaved
+    ? do
+      pair <- reshape cos_half shape=[B, 1, S, half, 1]
+      pair <- concat pair pair dim=-1
+      return reshape pair shape=[B, 1, S, rotary_dim]
+    : do
+      xx <- concat cos_half cos_half dim=-1
+      return reshape xx shape=[B, 1, S, rotary_dim]
+  return sin, cos
+
+
+rope_freq_scale_factors :: Tensor[B,HM,S,HD] -> Tensor[B,S] -> Float -> Float -> Float -> Float -> Dim -> ?Bool -> (Tensor[B,HM,S,HD], Tensor[B,HM,S,HD])
+rope_freq_scale_factors ref position_ids theta scale_factor low_freq_factor high_freq_factor original_context ?interleaved=false = do
+  inv_freq <- rope_inv_freq_freq_scale ref theta scale_factor low_freq_factor high_freq_factor original_context
+  pos <- cast position_ids dtype="float32" |> reshape shape=[B, 1, S, 1]
+  inv_half <- size inv_freq 0
+  inv <- reshape inv_freq shape=[1, 1, 1, inv_half]
+  pos <- expand pos shape=[B, HM, S, inv_half]
+  inv <- expand inv shape=[B, HM, S, inv_half]
+  angles <- pos * inv
+  sin_half <- ((sin angles) :: Tensor[B,HM,S,HD / 2])
+  cos_half <- ((cos angles) :: Tensor[B,HM,S,HD / 2])
+  sin <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin <- (sin :: Tensor[B,HM,S,HD])
+  cos <- (cos :: Tensor[B,HM,S,HD])
+  return sin, cos
+
+
+rope_freq_scale_factors_for_position_ids :: Tensor[B,S] -> Dim -> Float -> Float -> Float -> Float -> Dim -> ?Bool -> (Tensor[B,1,S,head_dim], Tensor[B,1,S,head_dim])
+rope_freq_scale_factors_for_position_ids position_ids head_dim theta scale_factor low_freq_factor high_freq_factor original_context ?interleaved=false = do
+  ref <- zeros position_ids shape=[B, 1, S, head_dim] dtype="float32"
+  sin, cos <- rope_freq_scale_factors ref position_ids theta scale_factor low_freq_factor high_freq_factor original_context interleaved=interleaved
+  return sin, cos
+
+
+rope_apply_factors :: Tensor[B,H,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> Tensor[B,H,S,R]
+rope_apply_factors x sin cos ?interleaved=false = do
+  sin <- expand sin shape=[B, H, S, R]
+  cos <- expand cos shape=[B, H, S, R]
+  return (x * cos) + ((rope_rotate_half x interleaved=interleaved) * sin)
+
+rope_apply_prefix_factors :: Tensor[B,H,S,HD] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> Dim -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_prefix_factors x sin cos rot ?interleaved=false = do
+  x_rot <- slice x dim=-1 start=0 end=rot
+  x_tail <- slice x dim=-1 start=rot end=HD
+  x_rot <- rope_apply_factors x_rot sin cos interleaved=interleaved
+  return concat x_rot x_tail dim=-1
+
+rope_apply_raw_inverse :: Tensor[B,H,S,R] -> Tensor[B,S] -> Float -> ?Bool -> Tensor[B,H,S,R]
+rope_apply_raw_inverse x position_ids theta ?interleaved=false = do
+  ref <- slice x dim=1 start=0 end=1 |> reshape shape=[B, S, R]
+  emb <- sinusoidal_positions ref position_ids theta=theta offset=0 padding_idx=null mode="rope"
+  sin_half <- slice emb dim=-1 start=0 end=(R / 2)
+  cos_half <- slice emb dim=-1 start=(R / 2) end=R
+  sin_half <- reshape sin_half shape=[B, 1, S, (R / 2)]
+  cos_half <- reshape cos_half shape=[B, 1, S, (R / 2)]
+  sin <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin <- expand sin shape=[B, H, S, R]
+  cos <- expand cos shape=[B, H, S, R]
+  return (x * cos) - ((rope_rotate_half x interleaved=interleaved) * sin)
+
+
+rope_apply_prefix :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> Dim -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_prefix x position_ids theta rot ?interleaved=false = do
+  x_rot <- slice x dim=-1 start=0 end=rot
+  x_tail <- slice x dim=-1 start=rot end=HD
+  x_rot <- rope_apply_raw x_rot position_ids theta interleaved=interleaved
+  return concat x_rot x_tail dim=-1
+
+rope_apply_trailing :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> Dim -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_trailing x position_ids theta rot ?interleaved=false = do
+  x_head <- slice x dim=-1 start=0 end=(HD - rot)
+  x_rot <- slice x dim=-1 start=(HD - rot) end=HD
+  x_rot <- rope_apply_raw x_rot position_ids theta interleaved=interleaved
+  return concat x_head x_rot dim=-1
+
+rope_apply_trailing_inverse :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> Dim -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_trailing_inverse x position_ids theta rot ?interleaved=false = do
+  x_head <- slice x dim=-1 start=0 end=(HD - rot)
+  x_rot <- slice x dim=-1 start=(HD - rot) end=HD
+  x_rot <- rope_apply_raw_inverse x_rot position_ids theta interleaved=interleaved
+  return concat x_head x_rot dim=-1
+
+
+rope_apply_with_partial :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> Float -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_with_partial x position_ids theta partial_rotary_factor ?interleaved=false = do
+  rot <- ((floor (HD * partial_rotary_factor)) :: Dim)
+  rot <- (rot < 0) ? 0 : rot
+  rot <- (rot > HD) ? HD : rot
+  return (rot <= 0) ? x : (
+    (rot >= HD) ? (rope_apply_raw x position_ids theta interleaved=interleaved) : (rope_apply_prefix x position_ids theta rot interleaved=interleaved)
+  )
+
+
+rope_apply :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> ?Float -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply x position_ids theta ?partial_rotary_factor=null ?interleaved=false = (partial_rotary_factor == null)
+  ? (rope_apply_raw x position_ids theta interleaved=interleaved)
+  : (rope_apply_with_partial x position_ids theta partial_rotary_factor interleaved=interleaved)
+
+
+-- === ROPE BASE ===
+rope_pair_base :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
+rope_pair_base q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null ?interleaved=false = do
+  position_ids_eff <- (scale_factor == null) ? position_ids : (position_ids_scale position_ids scale_factor)
+  q_rot <- rope_apply q position_ids_eff theta partial_rotary_factor=partial_rotary_factor interleaved=interleaved
+  k_rot <- rope_apply k position_ids_eff theta partial_rotary_factor=partial_rotary_factor interleaved=interleaved
+  return q_rot, k_rot
+
+rope_apply_base :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_base x position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null ?interleaved=false = do
+  position_ids_eff <- (scale_factor == null) ? position_ids : (position_ids_scale position_ids scale_factor)
+  return rope_apply x position_ids_eff theta partial_rotary_factor=partial_rotary_factor interleaved=interleaved
+
+
+rope_pair_base_prefix :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,SM] -> Dim -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
+rope_pair_base_prefix q k position_ids rot ?theta=10000.0 ?scale_factor=null ?interleaved=false = do
+  position_ids_eff <- (scale_factor == null) ? position_ids : (position_ids_scale position_ids scale_factor)
+  q_rot <- rope_apply_prefix q position_ids_eff theta rot interleaved=interleaved
+  k_rot <- rope_apply_prefix k position_ids_eff theta rot interleaved=interleaved
+  return q_rot, k_rot
+
+
+rope_pair_base_factors :: Tensor[B,HQ,S,R] -> Tensor[B,HK,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> (Tensor[B,HQ,S,R], Tensor[B,HK,S,R])
+rope_pair_base_factors q k sin cos ?interleaved=false = do
+  q_rot <- rope_apply_factors q sin cos interleaved=interleaved
+  k_rot <- rope_apply_factors k sin cos interleaved=interleaved
+  return q_rot, k_rot
+
+
+rope_pair_base_split_interleaved_factors :: Tensor[B,HQ,S,R] -> Tensor[B,HK,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> (Tensor[B,HQ,S,R], Tensor[B,HK,S,R])
+rope_pair_base_split_interleaved_factors q k sin cos = do
+  q <- rope_split_interleaved_to_half q
+  k <- rope_split_interleaved_to_half k
+  return rope_pair_base_factors q k sin cos interleaved=false
+
+
+rope_pair_base_prefix_factors :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> Dim -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
+rope_pair_base_prefix_factors q k sin cos rot ?interleaved=false = do
+  q_rot <- rope_apply_prefix_factors q sin cos rot interleaved=interleaved
+  k_rot <- rope_apply_prefix_factors k sin cos rot interleaved=interleaved
+  return q_rot, k_rot
+
+
+rope_pair_base_split_interleaved :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
+rope_pair_base_split_interleaved q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=null = do
+  q <- rope_split_interleaved_to_half q
+  k <- rope_split_interleaved_to_half k
+  return rope_pair_base q k position_ids theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=false
+
+
+rope_apply_proportional :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_proportional x position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false ?prefix_only=false = do
+  rot <- ((floor (HD * partial_rotary_factor)) :: Dim)
+  rot <- (rot < 0) ? 0 : rot
+  rot <- (rot > HD) ? HD : rot
+  return (prefix_only ? (rot <= 0) : false) ? x : do
+    sin, cos <- rope_proportional_factors position_ids HD theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved prefix_only=prefix_only
+    return prefix_only ? (rope_apply_prefix_factors x sin cos rot interleaved=interleaved) : (rope_apply_factors x sin cos interleaved=interleaved)
+
+
+rope_proportional_prefix_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,1,S,R], Tensor[B,1,S,R])
+rope_proportional_prefix_factors position_ids head_dim ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false = do
+  rot <- ((floor (head_dim * partial_rotary_factor)) :: Dim)
+  rot <- (rot < 0) ? 0 : rot
+  rot <- (rot > head_dim) ? head_dim : rot
+  idx <- arange position_ids start=0 end=(rot / 2) |> cast dtype="float32"
+  inv <- exp (0 - ((log theta) * ((2.0 * idx) / rot)))
+  inv <- (scale_factor == null) ? inv : (inv / scale_factor)
+  pos <- cast position_ids dtype="float32" |> reshape shape=[B, S, 1]
+  ang <- pos * (reshape inv shape=[1, 1, (rot / 2)])
+  sin_half <- sin ang |> reshape shape=[B, 1, S, (rot / 2)]
+  cos_half <- cos ang |> reshape shape=[B, 1, S, (rot / 2)]
+  sin <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin <- (sin :: Tensor[B,1,S,rot])
+  cos <- (cos :: Tensor[B,1,S,rot])
+  return sin, cos
+
+
+rope_proportional_masked_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,1,S,head_dim], Tensor[B,1,S,head_dim])
+rope_proportional_masked_factors position_ids head_dim ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false = do
+  idx <- arange position_ids start=0 end=(head_dim / 2) |> cast dtype="float32"
+  rot_half <- ((floor ((head_dim * partial_rotary_factor) / 2)) :: Dim)
+  keep <- le idx (rot_half - 1)
+  inv <- exp (0 - ((log theta) * ((2.0 * idx) / head_dim)))
+  inv <- (scale_factor == null) ? inv : (inv / scale_factor)
+  inv <- where keep inv 0.0
+  pos <- cast position_ids dtype="float32" |> reshape shape=[B, S, 1]
+  ang <- pos * (reshape inv shape=[1, 1, (head_dim / 2)])
+  sin_half <- sin ang |> reshape shape=[B, 1, S, (head_dim / 2)]
+  cos_half <- cos ang |> reshape shape=[B, 1, S, (head_dim / 2)]
+  sin <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin <- (sin :: Tensor[B,1,S,head_dim])
+  cos <- (cos :: Tensor[B,1,S,head_dim])
+  return sin, cos
+
+
+rope_proportional_factors :: Tensor[B,S] -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> ?Bool -> (Tensor[B,1,S,R], Tensor[B,1,S,R])
+rope_proportional_factors position_ids head_dim ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false ?prefix_only=false = do
+  return prefix_only
+    ? (rope_proportional_prefix_factors position_ids head_dim theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved)
+    : (rope_proportional_masked_factors position_ids head_dim theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved)
+
+
+rope_pair_proportional_factors :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
+rope_pair_proportional_factors q k sin cos ?interleaved=false ?prefix_only=false = do
+  q_rot <- prefix_only ? (rope_apply_prefix_factors q sin cos R interleaved=interleaved) : (rope_apply_factors q sin cos interleaved=interleaved)
+  k_rot <- prefix_only ? (rope_apply_prefix_factors k sin cos R interleaved=interleaved) : (rope_apply_factors k sin cos interleaved=interleaved)
+  return q_rot, k_rot
+
+
+rope_pair_proportional :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,SM] -> ?Float -> ?Float -> ?Float -> ?Bool -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
+rope_pair_proportional q k position_ids ?theta=10000.0 ?scale_factor=null ?partial_rotary_factor=1.0 ?interleaved=false ?prefix_only=false = do
+  q_rot <- rope_apply_proportional q position_ids theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved prefix_only=prefix_only
+  k_rot <- rope_apply_proportional k position_ids theta=theta scale_factor=scale_factor partial_rotary_factor=partial_rotary_factor interleaved=interleaved prefix_only=prefix_only
+  return q_rot, k_rot
+
+
+rope_inv_freq_base :: Tensor[B,H,S,HD] -> Float -> Tensor[HD / 2]
+rope_inv_freq_base q theta = do
+  idx <- arange q start=0 end=(HD / 2) |> cast dtype="float32"
+  inv_shape <- (2.0 * idx) / HD
+  return exp (0 - ((log theta) * inv_shape))
+
+
+rope_inv_freq_freq_scale :: Tensor[B,H,S,HD] -> Float -> Float -> Float -> Float -> Dim -> Tensor[HD / 2]
+rope_inv_freq_freq_scale q theta scale_factor low_freq_factor high_freq_factor original_context = do
+  inv_freq <- rope_inv_freq_base q theta
+  wavelen <- (2.0 * PI) / inv_freq
+  low_freq_wavelen <- original_context / low_freq_factor
+  high_freq_wavelen <- original_context / high_freq_factor
+  inv_scaled <- where (le low_freq_wavelen wavelen) (inv_freq / scale_factor) inv_freq
+  same_band <- high_freq_factor == low_freq_factor
+  band_denom <- same_band ? 1.0 : (high_freq_factor - low_freq_factor)
+  smooth <- ((original_context / wavelen) - low_freq_factor) / band_denom
+  smoothed <- (1.0 - smooth) * (inv_scaled / scale_factor) + smooth * inv_scaled
+  is_medium <- and (le high_freq_wavelen wavelen) (le wavelen low_freq_wavelen)
+  return same_band ? inv_scaled : (where is_medium smoothed inv_scaled)
+
+
+rope_apply_inv_freq :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Tensor[HD / 2] -> Tensor[..D] -> Any -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_inv_freq x pos_ids inv_freq dtype_ref attention_factor ?interleaved=false = do
+  pos <- cast pos_ids dtype="float32" |> reshape shape=[B, 1, S, 1]
+  inv_half <- size inv_freq 0
+  inv <- reshape inv_freq shape=[1, 1, 1, inv_half]
+  angles <- pos * inv
+  attn <- tensor_like attention_factor angles dtype="float32"
+  sin_half <- (sin angles) * attn |> cast_like dtype_ref
+  cos_half <- (cos angles) * attn |> cast_like dtype_ref
+  sin_full <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos_full <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin_full <- expand sin_full shape=[B, H, S, HD]
+  cos_full <- expand cos_full shape=[B, H, S, HD]
+  return (x * cos_full) + ((rope_rotate_half x interleaved=interleaved) * sin_full)
+
+
+rope_apply_inv_freq_inverse :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Tensor[HD / 2] -> Tensor[..D] -> Any -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_inv_freq_inverse x pos_ids inv_freq dtype_ref attention_factor ?interleaved=false = do
+  pos <- cast pos_ids dtype="float32" |> reshape shape=[B, 1, S, 1]
+  inv_half <- size inv_freq 0
+  inv <- reshape inv_freq shape=[1, 1, 1, inv_half]
+  angles <- pos * inv
+  attn <- tensor_like attention_factor angles dtype="float32"
+  sin_half <- (sin angles) * attn |> cast_like dtype_ref
+  cos_half <- (cos angles) * attn |> cast_like dtype_ref
+  sin_full <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos_full <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin_full <- expand sin_full shape=[B, H, S, HD]
+  cos_full <- expand cos_full shape=[B, H, S, HD]
+  return (x * cos_full) - ((rope_rotate_half x interleaved=interleaved) * sin_full)
+
+
+rope_apply_inv_freq_prefix :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Tensor[rot / 2] -> Tensor[..D] -> Dim -> Any -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_inv_freq_prefix x pos_ids inv_freq dtype_ref rot attention_factor ?interleaved=false = do
+  hd <- size x dim=-1
+  x_rot <- slice x dim=-1 start=0 end=rot
+  x_tail <- slice x dim=-1 start=rot end=hd
+  x_rot <- rope_apply_inv_freq x_rot pos_ids inv_freq dtype_ref attention_factor=attention_factor interleaved=interleaved
+  return concat x_rot x_tail dim=-1
+
+
+rope_apply_inv_freq_with_partial :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Tensor[rot / 2] -> Tensor[..D] -> Float -> Any -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_inv_freq_with_partial x pos_ids inv_freq dtype_ref partial_rotary_factor attention_factor ?interleaved=false = do
+  hd <- size x dim=-1
+  rot <- ((floor (hd * partial_rotary_factor)) :: Dim)
+  rot <- (rot < 0) ? 0 : rot
+  rot <- (rot > hd) ? hd : rot
+  return (rot <= 0)
+    ? x
+    : ((rot >= hd)
+      ? (rope_apply_inv_freq x pos_ids inv_freq dtype_ref attention_factor=attention_factor interleaved=interleaved)
+      : (rope_apply_inv_freq_prefix x pos_ids inv_freq dtype_ref rot attention_factor interleaved=interleaved))
+
+
+rope_pair_freq_scale :: Tensor[B,HQ,S,HDQ] -> Tensor[B,HK,S,HDK] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Dim -> ?Bool -> (Tensor[B,HQ,S,HDQ], Tensor[B,HK,S,HDK])
+rope_pair_freq_scale q k pos_ids theta scale_factor low_freq_factor high_freq_factor original_context ?interleaved=false = do
+  q_inv_freq <- rope_inv_freq_freq_scale q theta scale_factor low_freq_factor high_freq_factor original_context
+  k_inv_freq <- rope_inv_freq_freq_scale k theta scale_factor low_freq_factor high_freq_factor original_context
+  q_rot <- rope_apply_inv_freq q pos_ids q_inv_freq q 1.0 interleaved=interleaved
+  k_rot <- rope_apply_inv_freq k pos_ids k_inv_freq k 1.0 interleaved=interleaved
+  return q_rot, k_rot
+
+rope_apply_freq_scale :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Dim -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_freq_scale x pos_ids theta scale_factor low_freq_factor high_freq_factor original_context ?interleaved=false = do
+  inv_freq <- rope_inv_freq_freq_scale x theta scale_factor low_freq_factor high_freq_factor original_context
+  return rope_apply_inv_freq x pos_ids inv_freq x 1.0 interleaved=interleaved
+
+
+rope_max_pos :: Tensor[B,SM] -> Tensor[1,1]
+rope_max_pos pos_ids = do
+  row_max, _ <- topk pos_ids 1 dim=-1
+  all_max, _ <- topk row_max 1 dim=0
+  return all_max
+
+
+rope_longrope_use_long :: Tensor[B,SM] -> Dim -> Tensor[1,1]
+rope_longrope_use_long pos_ids original_context = do
+  max_pos <- rope_max_pos pos_ids
+  return le original_context max_pos
+
+
+rope_inv_freq_longrope :: Tensor[B,H,S,HD] -> Tensor[B,SM] -> Float -> Dim -> Any -> Any -> ?Float -> Tensor[HD / 2]
+rope_inv_freq_longrope q pos_ids theta original_context long_factor short_factor ?partial_rotary_factor=null = do
+  hd <- size q dim=-1
+  rot <- (partial_rotary_factor == null) ? hd : ((floor (hd * partial_rotary_factor)) :: Dim)
+  rot <- (rot < 0) ? 0 : rot
+  rot <- (rot > hd) ? hd : rot
+  long_f <- tensor_like long_factor q dtype="float32" |> reshape shape=[(rot / 2)]
+  short_f <- tensor_like short_factor q dtype="float32" |> reshape shape=[(rot / 2)]
+  use_long <- rope_longrope_use_long pos_ids original_context
+  ext_f <- where use_long long_f short_f |> tensor_like q dtype="float32" |> reshape shape=[(rot / 2)]
+  idx <- arange q start=0 end=(rot / 2) |> cast dtype="float32"
+  inv_shape <- idx / (rot / 2)
+  theta_pow <- exp ((log theta) * inv_shape)
+  return 1.0 / (ext_f * theta_pow)
+
+
+rope_inv_freq_longrope_for_position_ids :: Tensor[B,SM] -> Dim -> Float -> Dim -> Any -> Any -> Tensor[rotary_dim / 2]
+rope_inv_freq_longrope_for_position_ids pos_ids rotary_dim theta original_context long_factor short_factor = do
+  half <- ((rotary_dim / 2) :: Dim)
+  long_f <- tensor_like long_factor pos_ids dtype="float32" |> reshape shape=[half]
+  short_f <- tensor_like short_factor pos_ids dtype="float32" |> reshape shape=[half]
+  use_long <- rope_longrope_use_long pos_ids original_context
+  ext_f <- where use_long long_f short_f |> tensor_like pos_ids dtype="float32" |> reshape shape=[half]
+  idx <- arange pos_ids start=0 end=half |> cast dtype="float32"
+  inv_shape <- idx / half
+  theta_pow <- exp ((log theta) * inv_shape)
+  return 1.0 / (ext_f * theta_pow)
+
+
+rope_attention_factor_longrope :: Tensor[B,SM] -> Dim -> ?Float -> ?Float -> ?Float -> Tensor[B,1,SM,1]
+rope_attention_factor_longrope pos_ids original_context ?attention_factor=null ?long_mscale=null ?short_mscale=null = do
+  use_long <- rope_longrope_use_long pos_ids original_context
+  short_raw <- (short_mscale == null) ? 1.0 : short_mscale
+  long_raw <- (long_mscale == null) ? short_raw : long_mscale
+  short_val <- tensor_like short_raw use_long dtype="float32"
+  long_val <- tensor_like long_raw use_long dtype="float32"
+  base <- where use_long long_val short_val
+  value <- (attention_factor == null) ? base : (tensor_like attention_factor use_long dtype="float32")
+  value <- reshape value shape=[1, 1, 1, 1]
+  return expand value shape=[B, 1, SM, 1]
+
+
+rope_longrope_factors :: Tensor[B,S] -> Dim -> Float -> Dim -> Any -> Any -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,1,S,rotary_dim], Tensor[B,1,S,rotary_dim])
+rope_longrope_factors pos_ids rotary_dim theta original_context long_factor short_factor ?attention_factor=null ?long_mscale=null ?short_mscale=null ?interleaved=false = do
+  inv_freq <- rope_inv_freq_longrope_for_position_ids pos_ids rotary_dim theta original_context long_factor short_factor
+  attn <- rope_attention_factor_longrope pos_ids original_context attention_factor=attention_factor long_mscale=long_mscale short_mscale=short_mscale
+  pos <- cast pos_ids dtype="float32" |> reshape shape=[B, 1, S, 1]
+  inv_half <- size inv_freq 0
+  inv <- ((reshape inv_freq shape=[1, 1, 1, inv_half]) :: Tensor[1,1,1,rotary_dim / 2])
+  angles <- ((pos * inv) :: Tensor[B,1,S,rotary_dim / 2])
+  sin_half <- (((sin angles) * attn) :: Tensor[B,1,S,rotary_dim / 2])
+  cos_half <- (((cos angles) * attn) :: Tensor[B,1,S,rotary_dim / 2])
+  sin <- ((interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)) :: Tensor[B,1,S,rotary_dim])
+  cos <- ((interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)) :: Tensor[B,1,S,rotary_dim])
+  return sin, cos
+
+
+rope_pair_longrope :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> Float -> Dim -> Dim -> Any -> Any -> ?Float -> ?Float -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
+rope_pair_longrope q k pos_ids theta original_context max_context long_factor short_factor ?attention_factor=null ?long_mscale=null ?short_mscale=null ?partial_rotary_factor=null ?interleaved=false = do
+  inv_freq <- rope_inv_freq_longrope q pos_ids theta original_context long_factor short_factor partial_rotary_factor=partial_rotary_factor
+  attn <- rope_attention_factor_longrope pos_ids original_context attention_factor=attention_factor long_mscale=long_mscale short_mscale=short_mscale
+  q_rot <- (partial_rotary_factor == null)
+    ? (rope_apply_inv_freq q pos_ids inv_freq q attn interleaved=interleaved)
+    : (rope_apply_inv_freq_with_partial q pos_ids inv_freq q partial_rotary_factor attn interleaved=interleaved)
+  k_rot <- (partial_rotary_factor == null)
+    ? (rope_apply_inv_freq k pos_ids inv_freq q attn interleaved=interleaved)
+    : (rope_apply_inv_freq_with_partial k pos_ids inv_freq q partial_rotary_factor attn interleaved=interleaved)
+  return q_rot, k_rot
+
+
+rope_inv_freq_yarn :: Tensor[B,H,S,HD] -> Float -> Float -> Float -> Float -> Dim -> Tensor[HD / 2]
+rope_inv_freq_yarn q theta scale_factor beta_fast beta_slow original_context = do
+  idx <- arange q start=0 end=(HD / 2) |> cast dtype="float32"
+  dim <- 2.0 * (HD / 2)
+  pos_freqs <- exp ((log theta) * ((2.0 * idx) / dim))
+  inv_extrapolation <- 1.0 / pos_freqs
+  inv_interpolation <- 1.0 / (scale_factor * pos_freqs)
+  low <- floor ((dim * log (original_context / (beta_fast * 2.0 * PI))) / (2.0 * log theta))
+  high_raw <- (dim * log (original_context / (beta_slow * 2.0 * PI))) / (2.0 * log theta)
+  high_floor <- floor high_raw
+  high <- high_floor + ((high_raw > high_floor) ? 1.0 : 0.0)
+  low <- low < 0 ? 0 : low
+  high <- high > (HD - 1) ? (HD - 1) : high
+  high <- (high == low) ? (high + 0.001) : high
+  ramp_den <- high - low
+  ramp <- (idx - low) / ramp_den
+  ramp <- where (ramp < 0.0) 0.0 ramp
+  ramp <- where (ramp > 1.0) 1.0 ramp
+  extra_factor <- 1.0 - ramp
+  return (inv_interpolation * (1.0 - extra_factor)) + (inv_extrapolation * extra_factor)
+
+
+rope_attention_factor_yarn :: Float -> ?Float -> ?Float -> Float
+rope_attention_factor_yarn scale_factor ?mscale=null ?mscale_all_dim=null = do
+  base <- (scale_factor <= 1.0) ? 1.0 : ((0.1 * log scale_factor) + 1.0)
+  return (mscale == null)
+    ? base
+    : rope_attention_factor_yarn_mscale scale_factor base mscale mscale_all_dim
+
+
+rope_attention_factor_yarn_mscale :: Float -> Float -> Float -> ?Float -> Float
+rope_attention_factor_yarn_mscale scale_factor base mscale mscale_all_dim = do
+  return (mscale_all_dim == null)
+    ? base
+    : ((scale_factor <= 1.0)
+      ? base
+      : (((0.1 * mscale * log scale_factor) + 1.0) / ((0.1 * mscale_all_dim * log scale_factor) + 1.0)))
+
+
+rope_pair_yarn :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Dim -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
+rope_pair_yarn q k pos_ids theta scale_factor beta_fast beta_slow original_context ?mscale=null ?mscale_all_dim=null ?interleaved=false = do
+  inv_freq <- rope_inv_freq_yarn q theta scale_factor beta_fast beta_slow original_context
+  rope_attention_factor <- rope_attention_factor_yarn scale_factor mscale=mscale mscale_all_dim=mscale_all_dim
+  q_rot <- rope_apply_inv_freq q pos_ids inv_freq q rope_attention_factor interleaved=interleaved
+  k_rot <- rope_apply_inv_freq k pos_ids inv_freq q rope_attention_factor interleaved=interleaved
+  return q_rot, k_rot
+
+
+rope_yarn_factors :: Tensor[B,HM,S,HD] -> Tensor[B,S] -> Float -> Float -> Float -> Float -> Dim -> ?Float -> ?Float -> ?Bool -> (Tensor[B,HM,S,HD], Tensor[B,HM,S,HD])
+rope_yarn_factors ref pos_ids theta scale_factor beta_fast beta_slow original_context ?mscale=null ?mscale_all_dim=null ?interleaved=false = do
+  inv_freq <- rope_inv_freq_yarn ref theta scale_factor beta_fast beta_slow original_context
+  rope_attention_factor <- rope_attention_factor_yarn scale_factor mscale=mscale mscale_all_dim=mscale_all_dim
+  pos <- cast pos_ids dtype="float32" |> reshape shape=[B, 1, S, 1]
+  inv_half <- size inv_freq 0
+  inv <- reshape inv_freq shape=[1, 1, 1, inv_half]
+  pos <- expand pos shape=[B, HM, S, inv_half]
+  inv <- expand inv shape=[B, HM, S, inv_half]
+  angles <- pos * inv
+  attn <- tensor_like rope_attention_factor angles dtype="float32"
+  sin_half <- ((sin angles) * attn) |> cast_like ref
+  cos_half <- ((cos angles) * attn) |> cast_like ref
+  sin <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin <- (sin :: Tensor[B,HM,S,HD])
+  cos <- (cos :: Tensor[B,HM,S,HD])
+  return sin, cos
+
+
+rope_yarn_factors_for_position_ids :: Tensor[B,S] -> Dim -> Float -> Float -> Float -> Float -> Dim -> ?Float -> ?Float -> ?Bool -> (Tensor[B,1,S,head_dim], Tensor[B,1,S,head_dim])
+rope_yarn_factors_for_position_ids pos_ids head_dim theta scale_factor beta_fast beta_slow original_context ?mscale=null ?mscale_all_dim=null ?interleaved=false = do
+  ref <- zeros pos_ids shape=[B, 1, S, head_dim] dtype="float32"
+  sin, cos <- rope_yarn_factors ref pos_ids theta scale_factor beta_fast beta_slow original_context mscale=mscale mscale_all_dim=mscale_all_dim interleaved=interleaved
+  return sin, cos
+
+
+rope_pair_yarn_factors :: Tensor[B,HQ,S,R] -> Tensor[B,HK,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> (Tensor[B,HQ,S,R], Tensor[B,HK,S,R])
+rope_pair_yarn_factors q k sin cos ?interleaved=false = do
+  q_rot <- rope_apply_factors q sin cos interleaved=interleaved
+  k_rot <- rope_apply_factors k sin cos interleaved=interleaved
+  return q_rot, k_rot
+
+
+rope_pair_yarn_split_interleaved_factors :: Tensor[B,HQ,S,R] -> Tensor[B,HK,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> (Tensor[B,HQ,S,R], Tensor[B,HK,S,R])
+rope_pair_yarn_split_interleaved_factors q k sin cos = do
+  q <- rope_split_interleaved_to_half q
+  k <- rope_split_interleaved_to_half k
+  return rope_pair_yarn_factors q k sin cos interleaved=false
+
+
+rope_apply_trailing_yarn :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> Dim -> Float -> Float -> Float -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_trailing_yarn x pos_ids theta rot scale_factor beta_fast beta_slow original_context ?attention_factor=null ?mscale=null ?mscale_all_dim=null ?interleaved=false = do
+  x_head <- slice x dim=-1 start=0 end=(HD - rot)
+  x_rot <- slice x dim=-1 start=(HD - rot) end=HD
+  inv_freq <- rope_inv_freq_yarn x_rot theta scale_factor beta_fast beta_slow original_context
+  rope_attention_factor <- (attention_factor == null) ? (rope_attention_factor_yarn scale_factor mscale=mscale mscale_all_dim=mscale_all_dim) : attention_factor
+  x_rot <- rope_apply_inv_freq x_rot pos_ids inv_freq x_rot rope_attention_factor interleaved=interleaved
+  return concat x_head x_rot dim=-1
+
+
+rope_apply_trailing_yarn_inverse :: Tensor[B,H,S,HD] -> Tensor[B,S] -> Float -> Dim -> Float -> Float -> Float -> Dim -> ?Float -> ?Float -> ?Float -> ?Bool -> Tensor[B,H,S,HD]
+rope_apply_trailing_yarn_inverse x pos_ids theta rot scale_factor beta_fast beta_slow original_context ?attention_factor=null ?mscale=null ?mscale_all_dim=null ?interleaved=false = do
+  x_head <- slice x dim=-1 start=0 end=(HD - rot)
+  x_rot <- slice x dim=-1 start=(HD - rot) end=HD
+  inv_freq <- rope_inv_freq_yarn x_rot theta scale_factor beta_fast beta_slow original_context
+  rope_attention_factor <- (attention_factor == null) ? (rope_attention_factor_yarn scale_factor mscale=mscale mscale_all_dim=mscale_all_dim) : attention_factor
+  x_rot <- rope_apply_inv_freq_inverse x_rot pos_ids inv_freq x_rot rope_attention_factor interleaved=interleaved
+  return concat x_head x_rot dim=-1
+
+
+rope_pair_yarn_split_interleaved :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Dim -> ?Float -> ?Float -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
+rope_pair_yarn_split_interleaved q k pos_ids theta scale_factor beta_fast beta_slow original_context ?mscale=null ?mscale_all_dim=null = do
+  q <- rope_split_interleaved_to_half q
+  k <- rope_split_interleaved_to_half k
+  return rope_pair_yarn q k pos_ids theta scale_factor beta_fast beta_slow original_context mscale=mscale mscale_all_dim=mscale_all_dim interleaved=false
+
+
+rope_inv_freq_hf_yarn :: Tensor[B,H,S,HD] -> Float -> Float -> Float -> Float -> Dim -> ?Bool -> Tensor[HD / 2]
+rope_inv_freq_hf_yarn q theta scale_factor low_freq_factor high_freq_factor original_context ?truncate=true = do
+  idx <- arange q start=0 end=(HD / 2) |> cast dtype="float32"
+  dim <- 2.0 * (HD / 2)
+  pos_freqs <- exp ((log theta) * ((2.0 * idx) / dim))
+  inv_extrapolation <- 1.0 / pos_freqs
+  inv_interpolation <- inv_extrapolation / scale_factor
+  low_raw <- (dim * log (original_context / (high_freq_factor * 2.0 * PI))) / (2.0 * log theta)
+  high_raw <- (dim * log (original_context / (low_freq_factor * 2.0 * PI))) / (2.0 * log theta)
+  low <- truncate ? (floor low_raw) : low_raw
+  high_floor <- floor high_raw
+  high_ceil <- high_floor + ((high_raw <= high_floor) ? 0.0 : 1.0)
+  high <- truncate ? high_ceil : high_raw
+  low <- low < 0.0 ? 0.0 : low
+  high <- high > (dim - 1.0) ? (dim - 1.0) : high
+  high <- (high == low) ? (high + 0.001) : high
+  ramp <- (idx - low) / (high - low)
+  ramp <- where (ramp < 0.0) 0.0 ramp
+  ramp <- where (ramp > 1.0) 1.0 ramp
+  extrapolation_factor <- 1.0 - ramp
+  return (inv_interpolation * (1.0 - extrapolation_factor)) + (inv_extrapolation * extrapolation_factor)
+
+
+rope_pair_hf_yarn :: Tensor[B,HQ,S,HD] -> Tensor[B,HK,S,HD] -> Tensor[B,SM] -> Float -> Float -> Float -> Float -> Dim -> ?Float -> ?Bool -> ?Bool -> (Tensor[B,HQ,S,HD], Tensor[B,HK,S,HD])
+rope_pair_hf_yarn q k pos_ids theta scale_factor low_freq_factor high_freq_factor original_context ?attention_factor=1.0 ?truncate=true ?interleaved=false = do
+  inv_freq <- rope_inv_freq_hf_yarn q theta scale_factor low_freq_factor high_freq_factor original_context truncate=truncate
+  q_rot <- rope_apply_inv_freq q pos_ids inv_freq q attention_factor interleaved=interleaved
+  k_rot <- rope_apply_inv_freq k pos_ids inv_freq q attention_factor interleaved=interleaved
+  return q_rot, k_rot
+
+
+rope_hf_yarn_factors :: Tensor[B,HM,S,HD] -> Tensor[B,S] -> Float -> Float -> Float -> Float -> Dim -> ?Float -> ?Bool -> ?Bool -> (Tensor[B,HM,S,HD], Tensor[B,HM,S,HD])
+rope_hf_yarn_factors ref pos_ids theta scale_factor low_freq_factor high_freq_factor original_context ?attention_factor=1.0 ?truncate=true ?interleaved=false = do
+  inv_freq <- rope_inv_freq_hf_yarn ref theta scale_factor low_freq_factor high_freq_factor original_context truncate=truncate
+  pos <- cast pos_ids dtype="float32" |> reshape shape=[B, 1, S, 1]
+  inv_half <- size inv_freq 0
+  inv <- reshape inv_freq shape=[1, 1, 1, inv_half]
+  pos <- expand pos shape=[B, HM, S, inv_half]
+  inv <- expand inv shape=[B, HM, S, inv_half]
+  angles <- pos * inv
+  attn <- tensor_like attention_factor angles dtype="float32"
+  sin_half <- ((sin angles) * attn) |> cast_like ref
+  cos_half <- ((cos angles) * attn) |> cast_like ref
+  sin <- interleaved ? (rope_expand_half_interleaved sin_half) : (rope_expand_half sin_half)
+  cos <- interleaved ? (rope_expand_half_interleaved cos_half) : (rope_expand_half cos_half)
+  sin <- (sin :: Tensor[B,HM,S,HD])
+  cos <- (cos :: Tensor[B,HM,S,HD])
+  return sin, cos
+
+
+rope_apply_hf_yarn_factors :: Tensor[B,H,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> Tensor[B,H,S,R]
+rope_apply_hf_yarn_factors x sin cos ?interleaved=false = do
+  sin <- expand sin shape=[B, H, S, R]
+  cos <- expand cos shape=[B, H, S, R]
+  return (x * cos) + ((rope_rotate_half x interleaved=interleaved) * sin)
+
+
+rope_pair_hf_yarn_factors :: Tensor[B,HQ,S,R] -> Tensor[B,HK,S,R] -> Tensor[B,HM,S,R] -> Tensor[B,HM,S,R] -> ?Bool -> (Tensor[B,HQ,S,R], Tensor[B,HK,S,R])
+rope_pair_hf_yarn_factors q k sin cos ?interleaved=false = do
+  q_rot <- rope_apply_hf_yarn_factors q sin cos interleaved=interleaved
+  k_rot <- rope_apply_hf_yarn_factors k sin cos interleaved=interleaved
+  return q_rot, k_rot
+
+
+-- === RELATIVE POSITION BIAS ===
+relative_position_buckets :: Tensor[Q,K] -> Dim -> Dim -> Bool -> Tensor[Q,K]
+relative_position_buckets relative_position num_buckets max_distance bidirectional = do
+  half_buckets <- num_buckets / 2
+  bucket_count <- bidirectional ? half_buckets : num_buckets
+  rel_base <- bidirectional ? where (le relative_position 0) 0 half_buckets : zeros_like relative_position
+  rel_pos_abs <- where (le relative_position 0) (0 - relative_position) relative_position
+  rel_pos <- bidirectional ? rel_pos_abs : where (le relative_position 0) rel_pos_abs 0
+  max_exact <- bucket_count / 2
+  max_exact <- (max_exact < 1) ? 1 : max_exact
+  is_small <- le rel_pos (max_exact - 1)
+  rel_pos_large_input <- where (le rel_pos max_exact) max_exact rel_pos
+  log_scale <- log (max_distance / max_exact)
+  rel_pos_large_ratio <- rel_pos_large_input / max_exact
+  rel_pos_large_log <- log rel_pos_large_ratio
+  rel_pos_if_large <- max_exact + floor ((rel_pos_large_log / log_scale) * (bucket_count - max_exact))
+  rel_pos_if_large <- where (le rel_pos_if_large (bucket_count - 1)) rel_pos_if_large (bucket_count - 1)
+  return rel_base + where is_small rel_pos rel_pos_if_large
+
+
+relative_position_bias :: Path -> Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Dim -> ?Dim -> ?Bool -> Tensor[1,H,Q,K]
+relative_position_bias@path q k ?num_buckets=32 ?max_distance=128 ?bidirectional=true = do
+  row_ids <- arange q start=0 |> reshape shape=[-1, 1]
+  col_ids <- arange k start=0 |> reshape shape=[1, -1]
+  buckets <- col_ids - row_ids |> relative_position_buckets num_buckets max_distance bidirectional |> cast dtype="int64"
+  return embedding@path buckets dim=H |> permute dims=[2, 0, 1] |> expand shape=[1, -1, -1, -1]
+
+relative_bias_disentangled :: Path -> Tensor[B,H,T,HD] -> Tensor[B,H,T,HD] -> ?Dim -> ?Dim -> ?Float -> ?Path -> ?Path -> ?Path -> Tensor[B,H,T,T]
+relative_bias_disentangled@path q k ?position_buckets=256 ?max_relative_positions=512 ?rel_norm_eps=1e-7 ?weight_path=@rel_embeddings.weight ?ln_weight_path=@LayerNorm.weight ?ln_bias_path=@LayerNorm.bias = do
+  att_span <- (position_buckets > 0) ? position_buckets : max_relative_positions
+  bh <- B * H
+  rel <- param path=weight_path |> slice 0 0 (att_span * 2)
+  rel <- layernorm@path rel eps=rel_norm_eps dim=null weight_path=ln_weight_path bias=true bias_path=ln_bias_path
+  rel <- unsqueeze rel 0
+  q_proj <- linear@path rel dim=null bias=true weight_path=@query_proj.weight bias_path=@query_proj.bias
+  k_proj <- linear@path rel dim=null bias=true weight_path=@key_proj.weight bias_path=@key_proj.bias
+  q_proj <- reshape q_proj shape=[1, (att_span * 2), H, HD] |> permute dims=[0, 2, 1, 3] |> reshape shape=[H, (att_span * 2), HD]
+  k_proj <- reshape k_proj shape=[1, (att_span * 2), H, HD] |> permute dims=[0, 2, 1, 3] |> reshape shape=[H, (att_span * 2), HD]
+  pos_query <- unsqueeze q_proj 0 |> expand shape=[B, H, (att_span * 2), HD] |> reshape shape=[bh, (att_span * 2), HD]
+  pos_key <- unsqueeze k_proj 0 |> expand shape=[B, H, (att_span * 2), HD] |> reshape shape=[bh, (att_span * 2), HD]
+  q_flat <- reshape q shape=[bh, T, HD]
+  k_flat <- reshape k shape=[bh, T, HD]
+  row_ids <- arange q start=0 end=T |> reshape shape=[T, 1] |> expand shape=[T, T]
+  col_ids <- arange k start=0 end=T |> reshape shape=[1, T] |> expand shape=[T, T]
+  rel_pos <- row_ids - col_ids
+  rel_pos <- ((position_buckets > 0) and (max_relative_positions > 0))
+    ? do
+      mid <- position_buckets / 2
+      rel_le_mid <- le rel_pos (mid - 1)
+      rel_ge_neg_mid <- le ((0 - mid) + 1) rel_pos
+      rel_small <- and rel_le_mid rel_ge_neg_mid
+      rel_abs <- where (le rel_pos 0) (0 - rel_pos) rel_pos
+      rel_for_log <- where rel_small (mid - 1) rel_abs
+      rel_sign <- where (eq rel_pos 0) 0 (where (le rel_pos 0) -1 1)
+      log_base <- log ((max_relative_positions - 1.0) / mid)
+      rel_for_log_f <- cast rel_for_log dtype="float32"
+      rel_log <- log (rel_for_log_f / mid)
+      rel_large <- (rel_log / log_base) * (mid - 1)
+      rel_large_neg <- 0 - rel_large |> floor
+      rel_large <- 0 - rel_large_neg
+      rel_bucket <- where (le rel_for_log mid) rel_pos ((rel_large + mid) * rel_sign)
+      return cast rel_bucket dtype="int64"
+    : cast rel_pos dtype="int64"
+  rel_pos <- unsqueeze rel_pos 0
+  scale <- sqrt (HD * 3)
+  score <- matmul q_flat (transpose k_flat 1 2) * 0.0
+  c2p_idx <- clamp (rel_pos + att_span) 0 ((att_span * 2) - 1) |> expand shape=[bh, T, T]
+  c2p_att <- matmul q_flat (transpose pos_key 1 2) |> gather c2p_idx -1
+  score <- score + (c2p_att / scale)
+  r_pos <- rel_pos
+  p2c_idx <- clamp ((0 - r_pos) + att_span) 0 ((att_span * 2) - 1) |> expand shape=[bh, T, T]
+  p2c_att <- matmul k_flat (transpose pos_query 1 2) |> gather p2c_idx -1 |> transpose 1 2
+  score <- score + (p2c_att / scale)
+  return reshape score shape=[B, H, T, T]

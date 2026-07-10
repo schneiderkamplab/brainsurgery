@@ -4,11 +4,12 @@ from typing import Any
 from ..core import (
     StateDictProvider,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     ensure_mapping_payload,
     register_transform,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from ..engine import emit_line, emit_verbose_event, get_runtime_flags, set_runtime_flag
 
@@ -52,6 +53,14 @@ class SetTransform(TypedTransform[SetSpec]):
         "  set: { dry-run: False, preview: true, verbose: true }"
     )
 
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(),
+            common_allowed=set(self.allowed_keys),
+        )
+
     def compile(self, payload: Any, default_model: str | None) -> SetSpec:
         del default_model
 
@@ -60,10 +69,11 @@ class SetTransform(TypedTransform[SetSpec]):
         except TransformError as exc:
             raise SetTransformError(str(exc)) from exc
         try:
-            validate_payload_keys(
+            validate_payload_schema(
                 payload,
                 op_name=self.name,
-                allowed_keys=self.allowed_keys,
+                schema=self.payload_schema(),
+                error_type=self.error_type,
             )
         except TransformError as exc:
             raise SetTransformError(str(exc)) from exc

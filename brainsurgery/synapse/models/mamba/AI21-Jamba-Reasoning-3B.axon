@@ -1,0 +1,208 @@
+{-# CHECKPOINTS "ai21labs/AI21-Jamba-Reasoning-3B" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# PADDING_SIDE "right" #-}
+
+{-# MAIN "jamba_3b" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (causal_mask)
+
+import Math (exp, mul, sqrt)
+
+import SSM (causal_conv1d_full, mamba_scan_step)
+
+import Config
+
+import List
+
+import NN
+
+import Params (param)
+
+import Tensor
+
+type AttnLayerCache[B, H, T, DH] = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
+
+type MambaLayerCache[B, C, K, D, N] = (Tensor[B,C,K], Tensor[B,D,N])
+
+type JambaLayerCache[B, H, T, DH, C, K, D, N] = (?AttnLayerCache[B,H,T,DH], ?MambaLayerCache[B,C,K,D,N])
+
+type JambaCache[B, H, T, DH, C, K, D, N] = List[JambaLayerCache[B,H,T,DH,C,K,D,N]]
+
+MODEL_DIM = 2560
+
+VOCAB_SIZE = 65536
+
+NUM_LAYERS = 28
+
+NUM_HEADS = 20
+
+KVH = 1
+
+MODEL_HEAD_DIM = 128
+
+SCALE = 1.0 / sqrt MODEL_HEAD_DIM
+
+FF = 8192
+
+I = MODEL_DIM * (2)
+
+N = 16
+
+R = 160
+
+ATTN_PERIOD = 14
+
+ATTN_OFFSET = 7
+
+EPS = 1e-06
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+dense_ffn x = do
+  gate <- NN.linear@feed_forward.gate_proj x dim=FF
+  up <- NN.linear@feed_forward.up_proj x dim=FF
+  return gate |> silu |> mul up |> NN.linear@feed_forward.down_proj dim=MODEL_DIM
+
+attn_update_nonnull :: AttnLayerCache[B,H,P,DH] -> Tensor[B,H,S,DH] -> Tensor[B,H,S,DH] -> (Tensor[B,H,K,DH], Tensor[B,H,K,DH], AttnLayerCache[B,H,K,DH])
+attn_update_nonnull past k v = do
+  k_past, v_past <- past
+  k_all <- Tensor.concat k_past k dim=-2
+  v_all <- Tensor.concat v_past v dim=-2
+  return k_all, v_all, (k_all, v_all)
+
+attn_core :: Tensor[B,S,D] -> Tensor[B,K] -> ?AttnLayerCache[B,NUM_HEADS,P,MODEL_HEAD_DIM] -> (Tensor[B,S,D], AttnLayerCache[B,NUM_HEADS,K,MODEL_HEAD_DIM])
+attn_core x attn_mask past = do
+  x_norm <- rms@input_layernorm x
+  q <- NN.linear@self_attn.q_proj x_norm dim=(NUM_HEADS * MODEL_HEAD_DIM) |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@self_attn.k_proj x_norm dim=(KVH * MODEL_HEAD_DIM) |> reshape_heads heads=KVH
+  k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+  v <- NN.linear@self_attn.v_proj x_norm dim=(KVH * MODEL_HEAD_DIM) |> reshape_heads heads=KVH
+  v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+  k, v, new_attn <- (past == null) ? (k, v, (k, v)) : attn_update_nonnull (past :: AttnLayerCache[B,NUM_HEADS,P,MODEL_HEAD_DIM]) k v
+  keep <- causal_mask q k padding_mask=attn_mask
+  a <- attention q k v keep scale=SCALE |> merge_heads
+  a <- NN.linear@self_attn.o_proj a dim=MODEL_DIM
+  return x + a, new_attn
+
+sequence_mask :: Tensor[B,S,C] -> ?Tensor[B,S] -> Tensor[B,S,C]
+sequence_mask x mask = (mask == null) ? x : (x * (Tensor.unsqueeze mask dim=-1))
+
+causal_conv1d_cached :: Tensor[B,S,C] -> ?Tensor[B,C,K] -> Tensor[C,1,K] -> Tensor[C] -> ?Tensor[B,S] -> String -> (Tensor[B,S,C], Tensor[B,C,K])
+causal_conv1d_cached x past w b attn_mask activation = do
+  x <- sequence_mask x attn_mask
+  x_c <- Tensor.transpose x dim1=1 dim2=2
+  kernel <- Tensor.size w dim=-1
+  zero_prefix <- Tensor.zeros x_c shape=[B, C, kernel - 1]
+  prefix <- (past == null) ? zero_prefix : Tensor.slice past dim=-1 start=1 end=kernel
+  conv_input <- Tensor.concat prefix x_c dim=-1
+  y_all <- causal_conv1d_full (Tensor.transpose conv_input dim1=1 dim2=2) w b activation
+  y <- Tensor.slice y_all dim=1 start=(kernel - 1) end=(kernel - 1 + S)
+  total <- Tensor.size conv_input dim=-1
+  state_start <- total - kernel
+  conv_state <- Tensor.slice conv_input dim=-1 start=state_start end=total
+  return sequence_mask y attn_mask, conv_state
+
+causal_conv1d_cached_step :: Tensor[B,S,C] -> Tensor[B,C,K] -> Tensor[C,1,K] -> Tensor[C] -> String -> (Tensor[B,S,C], Tensor[B,C,K])
+causal_conv1d_cached_step x past w b activation = do
+  x_c <- Tensor.transpose x dim1=1 dim2=2
+  kernel <- Tensor.size w dim=-1
+  past_tail <- Tensor.slice past dim=-1 start=1 end=kernel
+  conv_state <- Tensor.concat past_tail x_c dim=-1
+  y_all <- causal_conv1d_full (Tensor.transpose conv_state dim1=1 dim2=2) w b activation
+  y <- Tensor.slice y_all dim=1 start=(kernel - 1) end=kernel
+  y <- Tensor.reshape y shape=[B, S, C]
+  return y, conv_state
+
+mamba_scan_cached :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S,N] -> Tensor[B,S,N] -> ?Tensor[B,D,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,S,D], Tensor[B,D,N])
+mamba_scan_cached u delta b c past_state a d = do
+  u_t0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B, D]
+  b_t0 <- Tensor.slice b dim=1 start=0 end=1 |> Tensor.reshape shape=[B, N]
+  zero_state <- ((Tensor.unsqueeze u_t0 dim=-1) * (Tensor.unsqueeze b_t0 dim=1)) * 0.0
+  state <- (past_state == null) ? zero_state : past_state
+  y_all <- Tensor.zeros_like u
+  state, y_all <- for t <- [0..S) carry (state, y_all) do
+    u_t <- Tensor.slice u dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, D]
+    delta_t <- Tensor.slice delta dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, D]
+    b_t <- Tensor.slice b dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, N]
+    c_t <- Tensor.slice c dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, N]
+    state, y_t <- mamba_scan_step state u_t delta_t b_t c_t a d
+    y_step <- Tensor.reshape y_t shape=[B, 1, D]
+    idx <- Tensor.fill y_step t dtype="long"
+    y_all <- Tensor.scatter y_all idx y_step dim=1
+    yield state, y_all
+  return y_all, state
+
+mamba_scan_cached_step :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S,N] -> Tensor[B,S,N] -> Tensor[B,D,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,S,D], Tensor[B,D,N])
+mamba_scan_cached_step u delta b c past_state a d = do
+  u_t <- Tensor.reshape u shape=[B, D]
+  delta_t <- Tensor.reshape delta shape=[B, D]
+  b_t <- Tensor.reshape b shape=[B, N]
+  c_t <- Tensor.reshape c shape=[B, N]
+  state, y_t <- mamba_scan_step past_state u_t delta_t b_t c_t a d
+  y <- Tensor.reshape y_t shape=[B, S, D]
+  return y, state
+
+mamba_core :: Tensor[B,S,D] -> Tensor[B,S] -> ?MambaLayerCache[B,I,CK,I,N] -> (Tensor[B,S,D], MambaLayerCache[B,I,CK,I,N])
+mamba_core x attn_mask past = do
+  x_norm <- rms@input_layernorm x
+  in_proj <- NN.linear@mamba.in_proj x_norm dim=(2 * I)
+  u, gate <- Tensor.split in_proj sizes=[I, I]
+  past_conv, past_state <- (past == null) ? (null, null) : past
+  w <- param @mamba.conv1d.weight
+  b_conv <- param @mamba.conv1d.bias
+  seq <- Tensor.size u dim=1
+  cached_step <- (past_conv != null) and (seq == 1)
+  step_mask <- (past_conv == null) ? attn_mask : null
+  u_conv, conv_state <- cached_step ? causal_conv1d_cached_step u (past_conv :: Tensor[B,I,CK]) (w :: Tensor[I,1,CK]) (b_conv :: Tensor[I]) "silu" : causal_conv1d_cached u past_conv (w :: Tensor[I,1,CK]) (b_conv :: Tensor[I]) step_mask "silu"
+  params <- NN.linear@mamba.x_proj u_conv dim=(R + 2 * N)
+  dt, b, c <- Tensor.split params sizes=[R, N, N]
+  dt <- NN.rmsnorm@mamba.dt_layernorm dt eps=EPS cast_float=true
+  b <- NN.rmsnorm@mamba.b_layernorm b eps=EPS cast_float=true
+  c <- NN.rmsnorm@mamba.c_layernorm c eps=EPS cast_float=true
+  delta <- NN.linear@mamba.dt_proj dt dim=I bias=true
+  a_raw <- param @mamba.A_log
+  a_exp <- exp (a_raw :: Tensor[I,N])
+  a <- 0.0 - a_exp
+  d <- param @mamba.D
+  cached_scan_step <- (past_state != null) and (seq == 1)
+  y_scan, scan_state <- cached_scan_step ? mamba_scan_cached_step u_conv delta b c (past_state :: Tensor[B,I,N]) a (d :: Tensor[I]) : mamba_scan_cached u_conv delta b c past_state a (d :: Tensor[I])
+  y <- y_scan |> mul (silu gate) |> NN.linear@mamba.out_proj dim=MODEL_DIM
+  new_state <- ((conv_state, scan_state) :: MambaLayerCache[B,I,CK,I,N])
+  return x + y, new_state
+
+jamba_layer :: Tensor[B,S,D] -> Tensor[B,K] -> ?JambaLayerCache[B,NUM_HEADS,P,MODEL_HEAD_DIM,I,CK,I,N] -> Int -> (Tensor[B,S,D], JambaLayerCache[B,NUM_HEADS,K,MODEL_HEAD_DIM,I,CK,I,N])
+jamba_layer x attn_mask past i = do
+  past_layer <- (past == null) ? (((null :: ?AttnLayerCache[B,NUM_HEADS,P,MODEL_HEAD_DIM]), (null :: ?MambaLayerCache[B,I,CK,I,N])) :: JambaLayerCache[B,NUM_HEADS,P,MODEL_HEAD_DIM,I,CK,I,N]) : (past :: JambaLayerCache[B,NUM_HEADS,P,MODEL_HEAD_DIM,I,CK,I,N])
+  past_attn, past_mamba <- past_layer
+  is_attn <- ((i % ATTN_PERIOD) == ATTN_OFFSET)
+  x, new_layer <- is_attn
+        ? do
+            x, new_attn <- attn_core x attn_mask past_attn
+            return x, ((new_attn, (null :: ?MambaLayerCache[B,I,CK,I,N])) :: JambaLayerCache[B,NUM_HEADS,K,MODEL_HEAD_DIM,I,CK,I,N])
+        : do
+            x, new_mamba <- mamba_core x attn_mask past_mamba
+            return x, (((null :: ?AttnLayerCache[B,NUM_HEADS,K,MODEL_HEAD_DIM]), new_mamba) :: JambaLayerCache[B,NUM_HEADS,K,MODEL_HEAD_DIM,I,CK,I,N])
+  x_ff <- rms@pre_ff_layernorm x
+  m <- dense_ffn x_ff
+  return x + m, new_layer
+
+jamba_3b :: TokenIds[B,S] -> Tensor[B,K] -> ?JambaCache[B,NUM_HEADS,P,MODEL_HEAD_DIM,I,CK,I,N] -> ?Bool -> (Tensor[B,S,V], ?JambaCache[B,NUM_HEADS,K,MODEL_HEAD_DIM,I,CK,I,N])
+jamba_3b input_ids attn_mask past_kv use_cache = do
+  x <- NN.embedding@model.embed_tokens input_ids dim=MODEL_DIM
+  new_kv <- use_cache ? List.init : null
+  x, new_kv <- for@model.layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
+    past_i <- (past_kv == null) ? (null :: ?JambaLayerCache[B,NUM_HEADS,P,MODEL_HEAD_DIM,I,CK,I,N]) : ((List.index past_kv i) :: JambaLayerCache[B,NUM_HEADS,P,MODEL_HEAD_DIM,I,CK,I,N])
+    x, new_i <- jamba_layer x attn_mask past_i i
+    new_kv <- (new_kv == null) ? null : List.append new_kv new_i
+    yield x, new_kv
+  x <- rms@model.final_layernorm x
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE
+  return logits, new_kv

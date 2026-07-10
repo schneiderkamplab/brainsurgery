@@ -88,6 +88,7 @@ def _interactive_completion(
                     payload_candidates = _collect_payload_candidates(
                         active_transform=active_transform,
                         state_dict_provider=state_dict_provider,
+                        line_buffer=line_buffer,
                     )
                     matches = _match_payload_candidates(
                         text=text,
@@ -103,6 +104,7 @@ def _interactive_completion(
                 payload_candidates = _collect_payload_candidates(
                     active_transform=active_transform,
                     state_dict_provider=state_dict_provider,
+                    line_buffer=line_buffer,
                 )
                 matches = _match_payload_candidates(
                     text=text,

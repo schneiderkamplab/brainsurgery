@@ -92,3 +92,35 @@ def test_main_default_cli_reorders_options_after_config_items(monkeypatch) -> No
     brainsurgery.main(["examples/gpt2.yaml", "-i"])
 
     assert calls == [(["cli", "-i", "examples/gpt2.yaml"], "brainsurgery")]
+
+
+def test_main_reorders_long_gpu_cache_options_after_config_items(monkeypatch) -> None:
+    calls: list[tuple[list[str], str]] = []
+
+    def _fake_app(*, args, prog_name):  # type: ignore[no-untyped-def]
+        calls.append((list(args), prog_name))
+
+    monkeypatch.setattr(brainsurgery, "app", _fake_app)
+
+    brainsurgery.main(
+        [
+            "cli",
+            "examples/gpt2_kv_infer_eat_my.yaml",
+            "--gpu-cache-debug",
+            "--gpu-cache-bytes",
+            "10485760",
+        ]
+    )
+
+    assert calls == [
+        (
+            [
+                "cli",
+                "--gpu-cache-debug",
+                "--gpu-cache-bytes",
+                "10485760",
+                "examples/gpt2_kv_infer_eat_my.yaml",
+            ],
+            "brainsurgery",
+        )
+    ]

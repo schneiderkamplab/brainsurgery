@@ -2,169 +2,101 @@ from __future__ import annotations
 
 from typing import Any
 
-import torch
-from torch.nn import functional as F
+from ..axon.ast import AxonExprAscribe, AxonExprParen, DimExprBinary
+
 
 OP_NAME = "activation"
-LOWERING_ARITY = (1, 1)
-LOWERING_ALLOWED_KWARGS: set[str] = {"fp32_accum"}
-LOWERING_REQUIRED_KWARGS: set[str] = set()
-LOWERING_KWARG_KINDS: dict[str, Any] = {"fp32_accum": "bool"}
 
 
-def uses_node_path(emitter: Any, node_spec: dict[str, Any]) -> bool:
-    del emitter, node_spec
-    return False
+LOWERING_TYPE_SIGNATURE = {
+    "args": ("Any",),
+    "kwargs": {},
+    "returns": "dynamic",
+}
+LOWERING_PARAM_NAMES_BY_OP = {
+    "activations_gegelu": ("x", "limit"),
+    "activations_gelu": ("x",),
+    "activations_gelu_new": ("x",),
+    "activations_gelu_pytorch_tanh": ("x",),
+    "activations_relu": ("x",),
+    "activations_relu2": ("x",),
+    "activations_sigmoid": ("x",),
+    "activations_silu": ("x",),
+    "activations_swiglu": ("x",),
+    "activations_tanh": ("x",),
+    "activations_xielu": ("x", "alpha_p", "alpha_n", "beta", "eps"),
+}
 
 
-def lowering_infer_metadata(
+def type_rule(
     *,
-    args: list[str],
-    out: str | list[str],
+    arg_types: tuple[Any, ...],
+    kwarg_types: dict[str, Any],
+    args: tuple[Any, ...],
     kwargs: dict[str, Any],
-    ctx: Any,
-) -> bool:
-    del kwargs
-    if not isinstance(out, str):
-        return False
-    first_in = args[0].strip() if args else None
-    if isinstance(first_in, str) and first_in.isidentifier():
-        first_dim = ctx.tensor_last_dim.get(first_in)
-        if first_dim is not None:
-            ctx.tensor_last_dim[out] = first_dim
-    return True
+    helpers: Any,
+) -> Any | None:
+    del kwarg_types, args, kwargs
+    if len(arg_types) < 1:
+        return None
+    input_dims = helpers.type_dims(arg_types[0])
+    if input_dims is None:
+        return None
+    return helpers.type_tensor(dims=input_dims)
 
 
-def interpret(
-    model: Any,
-    node_spec: dict[str, Any],
-    env: dict[str, Any],
+def _gegelu_type_rule(
     *,
-    node_path: str,
-    scope: str,
-    symbols: dict[str, int],
-) -> None:
-    x = model._read_tensor_input(node_spec.get("_args"), env)
-    op_name = node_spec.get("_op")
-    if not isinstance(op_name, str) or not op_name.startswith("activations_"):
-        raise ValueError("legacy activation node name; use _op: activations_<kind>")
-    kind = op_name[len("activations_") :]
-    out = model._require_name(node_spec.get("_bind"), field="activation._bind")
-    align_activation_fp32 = bool(node_spec.get("fp32_accum", False))
-    if kind == "gelu_new" or kind == "gelu_pytorch_tanh":
-        if (
-            align_activation_fp32
-            and x.is_floating_point()
-            and x.dtype in {torch.float16, torch.bfloat16}
-        ):
-            x_fp32 = x.float()
-            y_fp32 = (
-                0.5
-                * x_fp32
-                * (
-                    1.0
-                    + torch.tanh(
-                        0.7978845608028654 * (x_fp32 + 0.044715 * x_fp32 * x_fp32 * x_fp32)
-                    )
-                )
-            )
-            env[out] = y_fp32.to(dtype=x.dtype)
-        else:
-            env[out] = 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
-    elif kind == "gelu":
-        if (
-            align_activation_fp32
-            and x.is_floating_point()
-            and x.dtype in {torch.float16, torch.bfloat16}
-        ):
-            env[out] = F.gelu(x.float()).to(dtype=x.dtype)
-        else:
-            env[out] = F.gelu(x)
-    elif kind == "relu":
-        env[out] = F.relu(x)
-    elif kind == "silu":
-        env[out] = F.silu(x)
-    elif kind == "swiglu":
-        env[out] = F.silu(x) * x
-    elif kind == "sigmoid":
-        env[out] = torch.sigmoid(x)
-    else:
-        raise ValueError(f"Unsupported activation kind: {kind}")
-    return
+    arg_types: tuple[Any, ...],
+    kwarg_types: dict[str, Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    helpers: Any,
+) -> Any | None:
+    del kwarg_types, args, kwargs
+    if len(arg_types) < 1:
+        return None
+    input_dims = helpers.type_dims(arg_types[0])
+    if input_dims is None or not input_dims:
+        return None
+    out_dims = (*input_dims[:-1], _dim_div(input_dims[-1], 2))
+    return helpers.type_tensor(dims=out_dims)
 
 
-def compile(
-    emitter: Any,
-    node_spec: dict[str, Any],
-    env: dict[str, str],
-    *,
-    node_path_var: str,
-    scope_var: str,
-    indent: str,
-) -> list[str]:
-    lines: list[str] = []
+def _dim_div(left: Any, right: Any) -> Any:
+    while isinstance(left, AxonExprAscribe | AxonExprParen):
+        left = left.expr if isinstance(left, AxonExprAscribe) else left.inner
+    if right == 1:
+        return left
+    if isinstance(left, int) and left % right == 0:
+        return left // right
+    if isinstance(left, DimExprBinary) and left.op == "*":
+        if left.left == right:
+            return left.right
+        if left.right == right:
+            return left.left
+        if isinstance(left.left, int) and left.left % right == 0:
+            quotient = left.left // right
+            if quotient == 1:
+                return left.right
+            return DimExprBinary(op="*", left=quotient, right=left.right)
+        if isinstance(left.right, int) and left.right % right == 0:
+            quotient = left.right // right
+            if quotient == 1:
+                return left.left
+            return DimExprBinary(op="*", left=left.left, right=quotient)
+    return DimExprBinary(op="/", left=left, right=right)
 
-    def assign_out_var(out_name: str) -> str:
-        return emitter._assign_out_var(env, out_name)
 
-    def read(name: str) -> str:
-        return emitter._read_env_var(env, name)
-
-    src = read(str(node_spec.get("_args")))
-    out_name = str(node_spec.get("_bind"))
-    op_name = node_spec.get("_op")
-    if not isinstance(op_name, str) or not op_name.startswith("activations_"):
-        raise ValueError("legacy activation node name; use _op: activations_<kind>")
-    kind = op_name[len("activations_") :]
-    out_var = assign_out_var(out_name)
-    if kind in {"gelu_new", "gelu_pytorch_tanh"}:
-        if bool(node_spec.get("fp32_accum", False)):
-            lines.append(
-                f"{indent}if {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
-            )
-            lines.append(f"{indent}    _x_fp32 = {src}.float()")
-            lines.append(
-                f"{indent}    {out_var} = (0.5 * _x_fp32 * (1.0 + torch.tanh(0.7978845608028654 * (_x_fp32 + 0.044715 * _x_fp32 * _x_fp32 * _x_fp32)))).to(dtype={src}.dtype)"
-            )
-            lines.append(f"{indent}else:")
-            lines.append(
-                f"{indent}    {out_var} = 0.5 * {src} * (1.0 + torch.tanh(0.7978845608028654 * ({src} + 0.044715 * {src} * {src} * {src})))"
-            )
-        else:
-            lines.append(
-                f"{indent}{out_var} = 0.5 * {src} * (1.0 + torch.tanh(0.7978845608028654 * ({src} + 0.044715 * {src} * {src} * {src})))"
-            )
-    elif kind == "gelu":
-        if bool(node_spec.get("fp32_accum", False)):
-            lines.append(
-                f"{indent}if {src}.is_floating_point() and {src}.dtype in {{torch.float16, torch.bfloat16}}:"
-            )
-            lines.append(f"{indent}    {out_var} = F.gelu({src}.float()).to(dtype={src}.dtype)")
-            lines.append(f"{indent}else:")
-            lines.append(f"{indent}    {out_var} = F.gelu({src})")
-        else:
-            lines.append(f"{indent}{out_var} = F.gelu({src})")
-    elif kind == "relu":
-        lines.append(f"{indent}{out_var} = F.relu({src})")
-    elif kind == "silu":
-        lines.append(f"{indent}{out_var} = F.silu({src})")
-    elif kind == "swiglu":
-        lines.append(f"{indent}{out_var} = F.silu({src}) * {src}")
-    elif kind == "sigmoid":
-        lines.append(f"{indent}{out_var} = torch.sigmoid({src})")
-    else:
-        raise ValueError(f"Unsupported activation kind: {kind}")
-    return lines
+TYPE_RULES_BY_OP = {
+    "activations_gegelu": _gegelu_type_rule,
+}
 
 
 __all__ = [
-    "LOWERING_ARITY",
-    "LOWERING_ALLOWED_KWARGS",
-    "LOWERING_REQUIRED_KWARGS",
-    "LOWERING_KWARG_KINDS",
     "OP_NAME",
-    "lowering_infer_metadata",
-    "interpret",
-    "compile",
-    "uses_node_path",
+    "LOWERING_TYPE_SIGNATURE",
+    "LOWERING_PARAM_NAMES_BY_OP",
+    "TYPE_RULES_BY_OP",
+    "type_rule",
 ]

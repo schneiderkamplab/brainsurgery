@@ -1,21 +1,116 @@
 import List
+import Tensor
+export (
+  append,
+  append_any,
+  append_kv,
+  index,
+  index_any,
+  index_kv,
+  finish_any,
+  past_length,
+  past_length_any,
+  past_length_kv,
+  prepare,
+  prepare_any,
+  prepare_kv,
+  read,
+  read_any,
+  read_kv,
+  finish,
+  finish_kv,
+  update,
+  update_kv,
+)
 
-update :: ?Cache -> Tensor[B,H,T,D] -> Tensor[B,H,T,D] -> (Tensor[B,H,T,D], Tensor[B,H,T,D], ?Cache)
-update past k v = _cache_update past k v
+type CacheLayer[B,H,T,C,DH] = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
+type Cache[B,H,T,C,DH] = List[(Tensor[B,H,T,DH], Tensor[B,H,T,DH])]
+type CacheLayerKV[B,H,T,C,DK,DV] = (Tensor[B,H,T,DK], Tensor[B,H,T,DV])
+type CacheKV[B,H,T,C,DK,DV] = List[(Tensor[B,H,T,DK], Tensor[B,H,T,DV])]
+type CacheAny = List[(Any, Any)]
 
-seq_len :: ?Tensor[B,H,T,D] -> I
-seq_len k = _cache_seq_len k
+update :: ?CacheLayer[B,H,P,C,DH] -> Tensor[B,H,S,DH] -> Tensor[B,H,S,DH] -> ?Dim -> (Tensor[B,H,key_length,DH], Tensor[B,H,key_length,DH], ?CacheLayer[B,H,key_length,C,DH])
+update past k v ?key_length=null = (past == null)
+  ? do
+    return k, v, (k, v)
+  : do
+    k_past, v_past <- (past :: CacheLayer[B,H,P,C,DH])
+    k_all <- Tensor.concat k_past k dim=-2
+    v_all <- Tensor.concat v_past v dim=-2
+    return k_all, v_all, (k_all, v_all)
 
-init :: Cache
-init = List.init
+update_kv :: ?CacheLayerKV[B,H,P,C,DK,DV] -> Tensor[B,H,S,DK] -> Tensor[B,H,S,DV] -> ?Dim -> (Tensor[B,H,key_length,DK], Tensor[B,H,key_length,DV], ?CacheLayerKV[B,H,key_length,C,DK,DV])
+update_kv past k v ?key_length=null = (past == null)
+  ? do
+    return k, v, (k, v)
+  : do
+    k_past, v_past <- (past :: CacheLayerKV[B,H,P,C,DK,DV])
+    k_all <- Tensor.concat k_past k dim=-2
+    v_all <- Tensor.concat v_past v dim=-2
+    return k_all, v_all, (k_all, v_all)
 
-index :: ?Cache -> I -> ?CacheLayer
-index = List.index
+prepare_any :: ?CacheAny -> ?Bool -> Dim -> ?CacheAny
+prepare_any past use_cache capacity = use_cache ? List.init : null
 
-append :: ?Cache -> CacheLayer -> ?Cache
-append = List.append
+read_any :: ?CacheAny -> ?CacheAny -> ?CacheAny
+read_any past work = past
 
-past_length :: ?Cache -> I
-past_length cache = do
-  first <- _list_index cache 0
-  return _cache_seq_len first
+index :: ?Cache[B,H,T,C,DH] -> Int -> ?CacheLayer[B,H,T,C,DH]
+index values i = (values == null) ? null : (((List.length (values :: Cache[B,H,T,C,DH])) == 0) ? null : List.index (values :: Cache[B,H,T,C,DH]) i)
+
+index_any :: ?CacheAny -> Int -> ?(Any, Any)
+index_any values i = (values == null) ? null : (((List.length (values :: CacheAny)) == 0) ? null : List.index (values :: CacheAny) i)
+
+index_kv :: ?CacheKV[B,H,T,C,DK,DV] -> Int -> ?CacheLayerKV[B,H,T,C,DK,DV]
+index_kv values i = (values == null) ? null : (((List.length (values :: CacheKV[B,H,T,C,DK,DV])) == 0) ? null : List.index (values :: CacheKV[B,H,T,C,DK,DV]) i)
+
+append :: ?Cache[B,H,T,C,DH] -> ?CacheLayer[B,H,T,C,DH] -> ?Cache[B,H,T,C,DH]
+append values value = (values == null) ? null : ((value == null) ? values : List.append values value)
+
+append_any :: ?CacheAny -> ?(Any, Any) -> ?CacheAny
+append_any values value = (values == null) ? null : ((value == null) ? values : List.append values value)
+
+finish_any :: ?CacheAny -> Dim -> ?CacheAny
+finish_any cache length = cache
+
+append_kv :: ?CacheKV[B,H,T,C,DK,DV] -> ?CacheLayerKV[B,H,T,C,DK,DV] -> ?CacheKV[B,H,T,C,DK,DV]
+append_kv values value = (values == null) ? null : ((value == null) ? values : List.append values value)
+
+past_length :: ?Cache[B,H,T,C,DH] -> Dim
+past_length cache = (cache == null) ? 0 : (((List.length (cache :: Cache[B,H,T,C,DH])) == 0) ? 0 : do
+  layer <- List.index (cache :: Cache[B,H,T,C,DH]) 0
+  k, _ <- layer
+  return Tensor.size k -2
+)
+
+past_length_any :: ?CacheAny -> Dim
+past_length_any cache = (cache == null) ? 0 : (((List.length (cache :: CacheAny)) == 0) ? 0 : do
+  layer <- List.index (cache :: CacheAny) 0
+  k, _ <- layer
+  return Tensor.size k -2
+)
+
+past_length_kv :: ?CacheKV[B,H,T,C,DK,DV] -> Dim
+past_length_kv cache = (cache == null) ? 0 : (((List.length (cache :: CacheKV[B,H,T,C,DK,DV])) == 0) ? 0 : do
+  layer <- List.index (cache :: CacheKV[B,H,T,C,DK,DV]) 0
+  k, _ <- layer
+  return Tensor.size k -2
+)
+
+prepare :: ?Cache[B,H,P,C,DH] -> ?Bool -> Dim -> ?Cache[B,H,K,C,DH]
+prepare past use_cache capacity = use_cache ? List.init : null
+
+prepare_kv :: ?CacheKV[B,H,P,C,DK,DV] -> ?Bool -> Dim -> ?CacheKV[B,H,K,C,DK,DV]
+prepare_kv past use_cache capacity = use_cache ? List.init : null
+
+read :: ?Cache[B,H,P,C,DH] -> ?Cache[B,H,K,C,DH] -> ?Cache[B,H,P,C,DH]
+read past work = past
+
+read_kv :: ?CacheKV[B,H,P,C,DK,DV] -> ?CacheKV[B,H,K,C,DK,DV] -> ?CacheKV[B,H,P,C,DK,DV]
+read_kv past work = past
+
+finish :: ?Cache[B,H,K,C,DH] -> Dim -> ?Cache[B,H,K,C,DH]
+finish cache length = cache
+
+finish_kv :: ?CacheKV[B,H,K,C,DK,DV] -> Dim -> ?CacheKV[B,H,K,C,DK,DV]
+finish_kv cache length = cache

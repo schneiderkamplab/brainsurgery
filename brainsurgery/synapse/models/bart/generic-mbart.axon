@@ -1,0 +1,96 @@
+{-# CHECKPOINTS ["facebook/mbart-large-50-many-to-many-mmt"] #-}
+{-# TASK "seq2seq_lm" #-}
+
+import Activations (relu)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, bidirectional_mask_for_input, causal_mask_for_input, mask_for_input)
+import Math (sqrt)
+import Config
+import NN
+import Tensor
+
+
+
+MODEL_DIM <- Config.int@d_model default=1024
+VOCAB_SIZE <- Config.int@vocab_size default=250054
+L_ENC <- Config.int@encoder_layers default=12
+L_DEC <- Config.int@decoder_layers default=12
+H_ENC <- Config.int@encoder_attention_heads default=16
+H_DEC <- Config.int@decoder_attention_heads default=16
+FFN_ENC <- Config.int@encoder_ffn_dim default=4096
+FFN_DEC <- Config.int@decoder_ffn_dim default=4096
+EPS <- Config.float@layernorm_embedding_eps default=1e-05
+POS_OFFSET <- Config.int@learned_pos_offset default=2
+EMB_SCALE_DERIVED = sqrt MODEL_DIM
+EMB_SCALE <- Config.float@embed_scale default=EMB_SCALE_DERIVED
+
+mbart_encoder_layer :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+mbart_encoder_layer x keep = do
+  x_norm <- NN.layernorm@self_attn_layer_norm x eps=EPS
+  a <- scope@self_attn do
+    q <- NN.linear@q_proj x_norm dim=MODEL_DIM bias=true |> reshape_heads heads=H_ENC
+    k <- NN.linear@k_proj x_norm dim=MODEL_DIM bias=true |> reshape_heads heads=H_ENC
+    v <- NN.linear@v_proj x_norm dim=MODEL_DIM bias=true |> reshape_heads heads=H_ENC
+    return attention q k v keep |> merge_heads |> NN.linear@out_proj dim=MODEL_DIM bias=true
+  x <- x + a
+  x_norm <- NN.layernorm@final_layer_norm x eps=EPS
+  h <- NN.linear@fc1 x_norm dim=FFN_ENC bias=true |> relu
+  m <- NN.linear@fc2 h dim=MODEL_DIM bias=true
+  x <- x + m
+  return x
+
+mbart_decoder_layer :: Tensor[B,SDEC,D] -> Tensor[B,SENC,D] -> Tensor[B,1,SDEC,SDEC] -> Tensor[B,1,SDEC,SENC] -> Tensor[B,SDEC,D]
+mbart_decoder_layer x enc_hidden decoder_keep cross_keep = do
+  x_norm <- NN.layernorm@self_attn_layer_norm x eps=EPS
+  a <- scope@self_attn do
+    q <- NN.linear@q_proj x_norm dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    k <- NN.linear@k_proj x_norm dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    v <- NN.linear@v_proj x_norm dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    return attention q k v decoder_keep |> merge_heads |> NN.linear@out_proj dim=MODEL_DIM bias=true
+  x <- x + a
+
+  x_norm <- NN.layernorm@encoder_attn_layer_norm x eps=EPS
+  a <- scope@encoder_attn do
+    q <- NN.linear@q_proj x_norm dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    k <- NN.linear@k_proj enc_hidden dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    v <- NN.linear@v_proj enc_hidden dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    return attention q k v cross_keep |> merge_heads |> NN.linear@out_proj dim=MODEL_DIM bias=true
+  x <- x + a
+
+  x_norm <- NN.layernorm@final_layer_norm x eps=EPS
+  h <- NN.linear@fc1 x_norm dim=FFN_DEC bias=true |> relu
+  m <- NN.linear@fc2 h dim=MODEL_DIM bias=true
+  x <- x + m
+  return x
+
+mbart :: TokenIds[B,SENC] -> ?Mask[B,SENC,SENC] -> TokenIds[B,SDEC] -> ?Mask[B,SDEC,SDEC] -> Tensor[B,SDEC,V]
+mbart input_ids attention_mask decoder_input_ids decoder_attention_mask = do
+  attention_mask <- mask_for_input input_ids attention_mask SENC
+  decoder_attention_mask <- mask_for_input decoder_input_ids decoder_attention_mask SDEC
+  encoder_keep <- bidirectional_mask_for_input input_ids SENC padding_mask=attention_mask
+  decoder_keep <- causal_mask_for_input decoder_input_ids SDEC padding_mask=decoder_attention_mask window=1048576
+  cross_keep <- bidirectional_mask_for_input decoder_input_ids SENC padding_mask=attention_mask
+  enc_pos_ids <- Tensor.arange input_ids start=0 end=SENC |> Tensor.reshape shape=[1, SENC] |> Tensor.expand shape=[B, SENC]
+  enc_pos_ids <- enc_pos_ids + POS_OFFSET
+  enc_tok <- NN.embedding@model.shared input_ids dim=MODEL_DIM scale=EMB_SCALE
+  enc_pos <- NN.embedding@model.encoder.embed_positions enc_pos_ids dim=MODEL_DIM
+  enc_hidden <- enc_tok + enc_pos
+  enc_hidden <- NN.layernorm@model.encoder.layernorm_embedding enc_hidden eps=EPS
+  enc_hidden <- for@model.encoder.layers i <- [0..L_ENC) carry (enc_hidden) do
+    enc_hidden <- mbart_encoder_layer enc_hidden encoder_keep
+    yield enc_hidden
+  enc_hidden <- NN.layernorm@model.encoder.layer_norm enc_hidden eps=EPS
+
+  dec_pos_ids <- Tensor.arange decoder_input_ids start=0 end=SDEC |> Tensor.reshape shape=[1, SDEC] |> Tensor.expand shape=[B, SDEC]
+  dec_pos_ids <- dec_pos_ids + POS_OFFSET
+  dec_tok <- NN.embedding@model.shared decoder_input_ids dim=MODEL_DIM scale=EMB_SCALE
+  dec_pos <- NN.embedding@model.decoder.embed_positions dec_pos_ids dim=MODEL_DIM
+  dec_hidden <- dec_tok + dec_pos
+  dec_hidden <- NN.layernorm@model.decoder.layernorm_embedding dec_hidden eps=EPS
+  dec_hidden <- for@model.decoder.layers i <- [0..L_DEC) carry (dec_hidden) do
+    dec_hidden <- mbart_decoder_layer dec_hidden enc_hidden decoder_keep cross_keep
+    yield dec_hidden
+  dec_hidden <- NN.layernorm@model.decoder.layer_norm dec_hidden eps=EPS
+
+  logits <- NN.linear@model.shared dec_hidden dim=VOCAB_SIZE bias=false
+  return logits
