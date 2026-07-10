@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import ModuleType
+from types import MethodType, ModuleType
 from typing import Any, cast
 
 import safetensors
@@ -36,6 +36,7 @@ from transformers import (
     AutoModelForSeq2SeqLM,
 )
 from transformers.generation import GenerationConfig, GenerationMixin
+from transformers.utils import ModelOutput
 from transformers.utils import import_utils as transformers_import_utils
 from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Config
 
@@ -1230,6 +1231,86 @@ def _phi3small_longrope_buffer_is_invalid(
     return False
 
 
+def _hf_module_runtime_device(module: Any) -> torch.device | None:
+    annotated_device = getattr(module, "_axon_hf_parent_execution_device", None)
+    if annotated_device is not None:
+        with suppress(Exception):
+            device = torch.device(annotated_device)
+            if device.type != "meta":
+                return device
+    hook = getattr(module, "_hf_hook", None)
+    execution_device = getattr(hook, "execution_device", None)
+    if execution_device is not None:
+        with suppress(Exception):
+            device = torch.device(execution_device)
+            if device.type != "meta":
+                return device
+    with suppress(Exception):
+        for value in module.parameters(recurse=False):
+            if torch.is_tensor(value) and value.device.type != "meta":
+                return value.device
+    with suppress(Exception):
+        for value in module.buffers(recurse=False):
+            if torch.is_tensor(value) and value.device.type != "meta":
+                return value.device
+    return None
+
+
+def _align_hf_parameterless_tensor_helpers_to_parent_devices(model: Any) -> int:
+    named_modules = list(model.named_modules())
+    module_by_name = {name: module for name, module in named_modules}
+    changed = 0
+
+    def _parent_device(module_name: str) -> torch.device | None:
+        parts = [part for part in module_name.split(".") if part]
+        while parts:
+            parts.pop()
+            parent = module_by_name.get(".".join(parts))
+            device = _module_parameter_device(parent)
+            if device is not None and device.type != "meta":
+                return device
+        return None
+
+    for module_name, module in named_modules:
+        if not module_name:
+            continue
+        if _module_parameter_device(module) is not None:
+            continue
+        has_tensor_state = False
+        with suppress(Exception):
+            has_tensor_state = any(torch.is_tensor(value) for value in module.buffers(recurse=False))
+        if not has_tensor_state:
+            for value in vars(module).values():
+                if torch.is_tensor(value):
+                    has_tensor_state = True
+                    break
+        if not has_tensor_state and not callable(getattr(module, "_set_cos_sin_cache", None)):
+            continue
+        device = _parent_device(module_name)
+        if device is None:
+            continue
+        setattr(module, "_axon_hf_parent_execution_device", device)
+        hook = getattr(module, "_hf_hook", None)
+        if hook is not None and hasattr(hook, "execution_device"):
+            with suppress(Exception):
+                hook.execution_device = device
+        for name, buffer in module.named_buffers(recurse=False):
+            if torch.is_tensor(buffer) and buffer.device != device:
+                with suppress(Exception):
+                    set_module_tensor_to_device(module, name, device, value=buffer)
+        for name, value in tuple(vars(module).items()):
+            if (
+                torch.is_tensor(value)
+                and value.device != device
+                and name not in getattr(module, "_parameters", {})
+                and name not in getattr(module, "_buffers", {})
+            ):
+                with suppress(Exception):
+                    setattr(module, name, value.to(device=device))
+        changed += 1
+    return changed
+
+
 def _rebuild_hf_phi3small_longrope_buffers(model: Any) -> int:
     """Rebuild Phi-3-small LongRoPE buffers from config when HF load corrupts them."""
 
@@ -1253,10 +1334,10 @@ def _rebuild_hf_phi3small_longrope_buffers(model: Any) -> int:
             or not isinstance(long_factor, list)
         ):
             continue
-        target_device = torch.device("cpu")
+        target_device = _hf_module_runtime_device(module) or torch.device("cpu")
         for attr_name in ("range_vector", "short_factors", "long_factors"):
             value = getattr(module, attr_name, None)
-            if torch.is_tensor(value):
+            if target_device.type == "cpu" and torch.is_tensor(value):
                 target_device = value.device
                 break
         if target_device.type == "meta":
@@ -1560,6 +1641,45 @@ def _get_nested_attr(obj: Any, path: str) -> Any:
     return cur
 
 
+def _move_hf_tensor_tree_to_device(
+    value: Any,
+    *,
+    device: torch.device,
+    dtype: torch.dtype | None = None,
+) -> Any:
+    if torch.is_tensor(value):
+        target_dtype = dtype if dtype is not None and value.is_floating_point() else value.dtype
+        if value.device == device and value.dtype == target_dtype:
+            return value
+        return value.to(device=device, dtype=target_dtype)
+    if isinstance(value, tuple):
+        return tuple(_move_hf_tensor_tree_to_device(item, device=device, dtype=dtype) for item in value)
+    if isinstance(value, list):
+        return [_move_hf_tensor_tree_to_device(item, device=device, dtype=dtype) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _move_hf_tensor_tree_to_device(item, device=device, dtype=dtype)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _first_hf_tensor_in_tree(value: Any) -> torch.Tensor | None:
+    if torch.is_tensor(value):
+        return value
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            found = _first_hf_tensor_in_tree(item)
+            if found is not None:
+                return found
+    if isinstance(value, dict):
+        for item in value.values():
+            found = _first_hf_tensor_in_tree(item)
+            if found is not None:
+                return found
+    return None
+
+
 def _iter_hf_layer_stack_candidates(model: Any) -> list[Any]:
     stacks: list[Any] = []
     for path in (
@@ -1582,9 +1702,12 @@ def _iter_hf_layer_stack_candidates(model: Any) -> list[Any]:
 def _patch_hf_shared_modules_for_device_map(model: Any) -> list[Any]:
     handles: list[Any] = []
     seen_modules: set[int] = set()
+    direct_parameter_hooked: set[int] = set()
+    _align_hf_parameterless_tensor_helpers_to_parent_devices(model)
     for module in model.modules():
         if not isinstance(module, torch.nn.Embedding):
             continue
+        direct_parameter_hooked.add(id(module))
         weight = getattr(module, "weight", None)
         hook = getattr(module, "_hf_hook", None)
         if torch.is_tensor(weight) and hook is not None and hasattr(hook, "execution_device"):
@@ -1599,6 +1722,23 @@ def _patch_hf_shared_modules_for_device_map(model: Any) -> list[Any]:
             weight = getattr(module, "weight", None)
             if not torch.is_tensor(weight):
                 return args, kwargs
+            for name, param in module.named_parameters(recurse=False):
+                if torch.is_tensor(param) and param.device != weight.device:
+                    with suppress(Exception):
+                        set_module_tensor_to_device(module, name, weight.device, value=param)
+            for name, buffer in module.named_buffers(recurse=False):
+                if torch.is_tensor(buffer) and buffer.device != weight.device:
+                    with suppress(Exception):
+                        set_module_tensor_to_device(module, name, weight.device, value=buffer)
+            for name, value in tuple(vars(module).items()):
+                if (
+                    torch.is_tensor(value)
+                    and value.device != weight.device
+                    and name not in getattr(module, "_parameters", {})
+                    and name not in getattr(module, "_buffers", {})
+                ):
+                    with suppress(Exception):
+                        setattr(module, name, value.to(device=weight.device))
             args_out = args
             kwargs_out = kwargs
             if args and torch.is_tensor(args[0]) and args[0].device != weight.device:
@@ -1610,6 +1750,101 @@ def _patch_hf_shared_modules_for_device_map(model: Any) -> list[Any]:
             return args_out, kwargs_out
 
         handles.append(module.register_forward_pre_hook(_move_embedding_input, with_kwargs=True))
+
+    for module in model.modules():
+        if id(module) in direct_parameter_hooked:
+            continue
+        target_device = _module_parameter_device(module)
+        if target_device is None:
+            continue
+        direct_parameter_hooked.add(id(module))
+        hook = getattr(module, "_hf_hook", None)
+        if hook is not None and hasattr(hook, "execution_device"):
+            with suppress(Exception):
+                hook.execution_device = target_device
+        target_dtype: torch.dtype | None = None
+        with suppress(Exception):
+            for value in module.parameters(recurse=False):
+                if value.is_floating_point():
+                    target_dtype = value.dtype
+                    break
+
+        def _move_direct_parameter_module_inputs(
+            module: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+            *,
+            _target_device: torch.device = target_device,
+            _target_dtype: torch.dtype | None = target_dtype,
+        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            del module
+            args_out = tuple(
+                _move_hf_tensor_tree_to_device(
+                    item,
+                    device=_target_device,
+                    dtype=_target_dtype,
+                )
+                for item in args
+            )
+            kwargs_out = {
+                key: _move_hf_tensor_tree_to_device(
+                    value,
+                    device=_target_device,
+                    dtype=_target_dtype,
+                )
+                for key, value in kwargs.items()
+            }
+            return args_out, kwargs_out
+
+        handles.append(
+            module.register_forward_pre_hook(
+                _move_direct_parameter_module_inputs,
+                with_kwargs=True,
+            )
+        )
+
+    tensor_helper_hooked: set[int] = set()
+    for module in model.modules():
+        if id(module) in direct_parameter_hooked or id(module) in tensor_helper_hooked:
+            continue
+        if _module_parameter_device(module) is not None:
+            continue
+        has_tensor_state = False
+        with suppress(Exception):
+            has_tensor_state = any(torch.is_tensor(value) for value in module.buffers(recurse=False))
+        if not has_tensor_state:
+            for value in vars(module).values():
+                if torch.is_tensor(value):
+                    has_tensor_state = True
+                    break
+        if not has_tensor_state and not callable(getattr(module, "_set_cos_sin_cache", None)):
+            continue
+        tensor_helper_hooked.add(id(module))
+
+        def _move_parameterless_helper_outputs(
+            module: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+            output: Any,
+        ) -> Any:
+            del module
+            reference = _first_hf_tensor_in_tree(args)
+            if reference is None:
+                reference = _first_hf_tensor_in_tree(kwargs)
+            if reference is None:
+                return output
+            return _move_hf_tensor_tree_to_device(
+                output,
+                device=reference.device,
+                dtype=None,
+            )
+
+        handles.append(
+            module.register_forward_hook(
+                _move_parameterless_helper_outputs,
+                with_kwargs=True,
+            )
+        )
 
     for path in ("model.encoder", "model.decoder", "encoder", "decoder"):
         module = _get_nested_attr(model, path)
@@ -1692,10 +1927,34 @@ def _patch_hf_shared_modules_for_device_map(model: Any) -> list[Any]:
                     return args, kwargs
                 target_device = hidden_states.device
                 target_dtype = hidden_states.dtype if hidden_states.is_floating_point() else None
+            hook = getattr(module, "_hf_hook", None)
+            if hook is not None and hasattr(hook, "execution_device"):
+                with suppress(Exception):
+                    hook.execution_device = target_device
             args_out = args
+            if args:
+                moved_first = _move_hf_tensor_tree_to_device(
+                    args[0],
+                    device=target_device,
+                    dtype=target_dtype,
+                )
+                if moved_first is not args[0]:
+                    args_list = list(args_out)
+                    args_list[0] = moved_first
+                    args_out = tuple(args_list)
+            hidden_states_kw = kwargs.get("hidden_states")
+            kwargs_out = kwargs
+            if torch.is_tensor(hidden_states_kw) and hidden_states_kw.device != target_device:
+                kwargs_out = dict(kwargs_out)
+                kwargs_out["hidden_states"] = hidden_states_kw.to(
+                    device=target_device,
+                    dtype=target_dtype if target_dtype is not None else hidden_states_kw.dtype,
+                )
             position_embeddings = kwargs.get("position_embeddings")
+            position_embeddings_from_args = False
             if position_embeddings is None and len(args) >= 6:
                 position_embeddings = args[5]
+                position_embeddings_from_args = True
             if (
                 isinstance(position_embeddings, tuple)
                 and len(position_embeddings) == 2
@@ -1723,21 +1982,44 @@ def _patch_hf_shared_modules_for_device_map(model: Any) -> list[Any]:
                     args_list = list(args)
                     args_list[5] = moved_position_embeddings
                     args_out = tuple(args_list)
-                kwargs_out = dict(kwargs)
-                kwargs_out["position_embeddings"] = moved_position_embeddings
+                if not position_embeddings_from_args:
+                    if kwargs_out is kwargs:
+                        kwargs_out = dict(kwargs)
+                    kwargs_out["position_embeddings"] = moved_position_embeddings
             else:
-                kwargs_out = kwargs
+                kwargs_out = kwargs_out
             attention_mask = kwargs.get("attention_mask")
+            attention_mask_from_args = False
             if attention_mask is None and len(args) >= 2:
                 attention_mask = args[1]
+                attention_mask_from_args = True
             if torch.is_tensor(attention_mask) and attention_mask.device != target_device:
                 if len(args) >= 2:
                     args_list = list(args_out)
                     args_list[1] = attention_mask.to(target_device)
                     args_out = tuple(args_list)
-                if kwargs_out is kwargs:
-                    kwargs_out = dict(kwargs)
-                kwargs_out["attention_mask"] = attention_mask.to(target_device)
+                if not attention_mask_from_args:
+                    if kwargs_out is kwargs:
+                        kwargs_out = dict(kwargs)
+                    kwargs_out["attention_mask"] = attention_mask.to(target_device)
+            for key, value in tuple(kwargs_out.items()):
+                if key in {
+                    "attention_mask",
+                    "encoder_attention_mask",
+                    "decoder_attention_mask",
+                    "position_ids",
+                    "cache_position",
+                    "encoder_hidden_states",
+                }:
+                    moved_value = _move_hf_tensor_tree_to_device(
+                        value,
+                        device=target_device,
+                        dtype=target_dtype,
+                    )
+                    if moved_value is not value:
+                        if kwargs_out is kwargs:
+                            kwargs_out = dict(kwargs)
+                        kwargs_out[key] = moved_value
             return args_out, kwargs_out
 
         handles.append(layer.register_forward_pre_hook(_move_shared_kwargs, with_kwargs=True))
@@ -1812,15 +2094,12 @@ def _patch_transformers_mask_device_map_inputs(enabled: bool) -> Any:
                 and result[1].ndim == 2
             ):
                 return result
-            encoder_hidden_states = kwargs.get("encoder_hidden_states")
-            if encoder_hidden_states is None and len(args) >= 7:
-                encoder_hidden_states = args[6]
-            if (
-                torch.is_tensor(encoder_hidden_states)
-                and result[1].device != encoder_hidden_states.device
-            ):
+            inputs_embeds = kwargs.get("inputs_embeds")
+            if inputs_embeds is None and len(args) >= 2:
+                inputs_embeds = args[1]
+            if torch.is_tensor(inputs_embeds) and result[1].device != inputs_embeds.device:
                 result_list = list(result)
-                result_list[1] = result[1].to(device=encoder_hidden_states.device)
+                result_list[1] = result[1].to(device=inputs_embeds.device)
                 return tuple(result_list)
             return result
 
@@ -2725,7 +3004,16 @@ def _refresh_hf_rotary_caches_if_needed(model: Any, *, dtype: torch.dtype) -> in
                         inv_freq = expected_inv
                     except Exception:
                         pass
-        target_device = inv_freq.device if torch.is_tensor(inv_freq) else torch.device("cpu")
+        target_device = _hf_module_runtime_device(module)
+        if target_device is None:
+            target_device = inv_freq.device if torch.is_tensor(inv_freq) else torch.device("cpu")
+        if torch.is_tensor(inv_freq) and inv_freq.device != target_device:
+            with suppress(Exception):
+                module.register_buffer(
+                    "inv_freq",
+                    inv_freq.to(device=target_device),
+                    persistent=False,
+                )
         try:
             set_cache(seq_len=int(max_seq_len), device=target_device, dtype=dtype)
             refreshed += 1
@@ -3090,24 +3378,457 @@ def _time_forward_repeated(
     return out, sum(samples) / max(1, len(samples)), samples, warmup_samples
 
 
+def _prepare_vllm_model_dir(
+    *,
+    source_model_dir: Path,
+    target_model_dir: Path,
+    architecture: str,
+) -> None:
+    """Create a vLLM-loadable view of a checkpoint with a generated architecture."""
+
+    target_model_dir.mkdir(parents=True, exist_ok=True)
+    for item in source_model_dir.iterdir():
+        if item.name == "config.json":
+            continue
+        target = target_model_dir / item.name
+        if target.exists() or target.is_symlink():
+            continue
+        try:
+            target.symlink_to(item, target_is_directory=item.is_dir())
+        except OSError:
+            if item.is_dir():
+                shutil.copytree(item, target, symlinks=True)
+            else:
+                shutil.copy2(item, target)
+
+    def _sanitize_vllm_rope_schema(value: Any) -> None:
+        if isinstance(value, dict):
+            rope_type = value.get("rope_type")
+            legacy_type = value.get("type")
+            if (
+                isinstance(rope_type, str)
+                and isinstance(legacy_type, str)
+                and rope_type != legacy_type
+            ):
+                # vLLM rejects configs carrying both modern and legacy schema keys
+                # with different values. Keep the modern Transformers key.
+                value.pop("type", None)
+            for child in value.values():
+                _sanitize_vllm_rope_schema(child)
+        elif isinstance(value, list):
+            for child in value:
+                _sanitize_vllm_rope_schema(child)
+
+    def _sanitize_vllm_layer_type_schema(value: Any) -> None:
+        allowed = {
+            "full_attention",
+            "sliding_attention",
+            "chunked_attention",
+            "compressed_sparse_attention",
+            "heavily_compressed_attention",
+            "linear_attention",
+            "conv",
+            "mamba",
+            "attention",
+            "sparse",
+            "dense",
+            "hybrid",
+            "moe",
+        }
+        if isinstance(value, dict):
+            for key, child in list(value.items()):
+                if key.endswith("layer_types") and isinstance(child, list):
+                    normalized: list[Any] = []
+                    changed = False
+                    for item in child:
+                        if isinstance(item, str) and item not in allowed and "moe" in item:
+                            normalized.append("moe")
+                            changed = True
+                        else:
+                            normalized.append(item)
+                    if changed:
+                        value[key] = normalized
+                else:
+                    _sanitize_vllm_layer_type_schema(child)
+        elif isinstance(value, list):
+            for child in value:
+                _sanitize_vllm_layer_type_schema(child)
+
+    config_path = source_model_dir / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    config["architectures"] = [architecture]
+    _sanitize_vllm_rope_schema(config)
+    _sanitize_vllm_layer_type_schema(config)
+    (target_model_dir / "config.json").write_text(
+        json.dumps(config, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _prepare_vllm_registration_plugin(
+    *,
+    plugin_root: Path,
+    plugin_name: str,
+    architecture: str,
+    module_name: str,
+    class_name: str,
+) -> None:
+    """Create a temporary vLLM general plugin for spawned engine processes."""
+
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    module_path = plugin_root / f"{plugin_name}.py"
+    module_path.write_text(
+        "\n".join(
+            [
+                "def register():",
+                "    from vllm.model_executor.models.registry import ModelRegistry",
+                f"    ModelRegistry.register_model({architecture!r}, {module_name + ':' + class_name!r})",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dist_info = plugin_root / f"{plugin_name}-0.0.0.dist-info"
+    dist_info.mkdir(parents=True, exist_ok=True)
+    (dist_info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {plugin_name}\nVersion: 0.0.0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "entry_points.txt").write_text(
+        f"[vllm.general_plugins]\n{plugin_name} = {plugin_name}:register\n",
+        encoding="utf-8",
+    )
+
+
+def _with_added_env_list_value(raw: str | None, value: str) -> str:
+    if raw is None:
+        return value
+    parts = [part for part in raw.split(",") if part]
+    if value not in parts:
+        parts.append(value)
+    return ",".join(parts)
+
+
+def _vllm_outputs_to_tensor(outputs: Any, *, pad_token_id: int | None) -> torch.Tensor:
+    rows: list[list[int]] = []
+    for item in outputs:
+        prompt_ids = list(getattr(item, "prompt_token_ids", None) or [])
+        completions = list(getattr(item, "outputs", None) or [])
+        generated_ids: list[int] = []
+        if completions:
+            generated_ids = list(getattr(completions[0], "token_ids", None) or [])
+        rows.append([int(x) for x in (*prompt_ids, *generated_ids)])
+    if not rows:
+        return torch.empty((0, 0), dtype=torch.long)
+    pad = int(0 if pad_token_id is None else pad_token_id)
+    width = max(len(row) for row in rows)
+    return torch.tensor(
+        [row + [pad] * (width - len(row)) for row in rows],
+        dtype=torch.long,
+    )
+
+
+def _normalize_vllm_logprobs_one_position(raw: Any) -> dict[int, float]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[int, float] = {}
+    for token_id, value in raw.items():
+        try:
+            logprob = getattr(value, "logprob", value)
+            out[int(token_id)] = float(logprob)
+        except Exception:
+            continue
+    return out
+
+
+def _extract_vllm_top_logprobs(outputs: Any) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for item in outputs:
+        prompt_positions = [
+            _normalize_vllm_logprobs_one_position(pos)
+            for pos in (getattr(item, "prompt_logprobs", None) or [])
+        ]
+        generated_positions: list[dict[int, float]] = []
+        completions = list(getattr(item, "outputs", None) or [])
+        if completions:
+            generated_positions = [
+                _normalize_vllm_logprobs_one_position(pos)
+                for pos in (getattr(completions[0], "logprobs", None) or [])
+            ]
+        rows.append(
+            {
+                "prompt": prompt_positions,
+                "generated": generated_positions,
+            }
+        )
+    return {"rows": rows}
+
+
+def _compare_vllm_top_logprobs_with_hf_prefill(
+    *,
+    hf_logits: torch.Tensor | None,
+    vllm_top_logprobs: dict[str, Any] | None,
+    prompt_lengths: Sequence[int],
+    attention_mask: torch.Tensor | None = None,
+    top_k: int | None,
+) -> dict[str, Any] | None:
+    if hf_logits is None or vllm_top_logprobs is None or top_k is None or int(top_k) == 0:
+        return None
+    rows = vllm_top_logprobs.get("rows")
+    if not isinstance(rows, Sequence):
+        return None
+    k = int(top_k)
+    if k < 0:
+        k = int(hf_logits.shape[-1])
+    compared = 0
+    top1_matches = 0
+    coverage_count = 0
+    intersection_count = 0
+    abs_diffs: list[float] = []
+    for row_idx, row in enumerate(rows):
+        if row_idx >= int(hf_logits.shape[0]) or row_idx >= len(prompt_lengths):
+            continue
+        prompt_len = int(prompt_lengths[row_idx])
+        if prompt_len <= 0:
+            continue
+        prompt_positions = row.get("prompt") if isinstance(row, Mapping) else None
+        if not isinstance(prompt_positions, Sequence):
+            continue
+        generated_positions = row.get("generated") if isinstance(row, Mapping) else None
+        physical_positions: list[int] | None = None
+        if attention_mask is not None and row_idx < int(attention_mask.shape[0]):
+            row_mask = attention_mask[row_idx].detach().to(dtype=torch.bool).cpu()
+            physical_positions = [
+                int(idx) for idx, keep in enumerate(row_mask.tolist()) if bool(keep)
+            ]
+            if len(physical_positions) != prompt_len:
+                physical_positions = None
+
+        if isinstance(generated_positions, Sequence) and generated_positions:
+            # First generated token is predicted from the full prompt, matching
+            # HF logits at the last prompt position.
+            vllm_probs = generated_positions[0]
+            hf_pos_idx = (
+                physical_positions[prompt_len - 1]
+                if physical_positions is not None
+                else prompt_len - 1
+            )
+            source = "generated_first"
+        else:
+            # vLLM prompt_logprobs[i] is P(prompt[i] | prompt[:i]), so it
+            # matches HF logits at i-1. The first prompt token has no context.
+            pos_idx = min(prompt_len - 1, len(prompt_positions) - 1)
+            if pos_idx <= 0:
+                continue
+            vllm_probs = prompt_positions[pos_idx]
+            hf_pos_idx = (
+                physical_positions[pos_idx - 1]
+                if physical_positions is not None
+                else pos_idx - 1
+            )
+            source = "prompt_last"
+        if not isinstance(vllm_probs, Mapping) or not vllm_probs:
+            continue
+        hf_pos = hf_logits[row_idx, hf_pos_idx].detach().float().cpu()
+        hf_log_probs = torch.log_softmax(hf_pos, dim=-1)
+        hf_top_values, hf_top_ids = torch.topk(hf_log_probs, k=min(k, int(hf_log_probs.numel())))
+        hf_top_set = {int(token_id) for token_id in hf_top_ids.tolist()}
+        vllm_top_set = set(int(token_id) for token_id in vllm_probs.keys())
+        hf_top1 = int(hf_top_ids[0].item())
+        vllm_top1 = max(vllm_probs.items(), key=lambda item: float(item[1]))[0]
+        compared += 1
+        if int(vllm_top1) == hf_top1:
+            top1_matches += 1
+        if hf_top_set.issubset(vllm_top_set):
+            coverage_count += 1
+        for token_id in sorted(hf_top_set & vllm_top_set):
+            intersection_count += 1
+            diff = abs(float(vllm_probs[token_id]) - float(hf_log_probs[token_id].item()))
+            abs_diffs.append(diff)
+    if compared == 0:
+        return None
+    return {
+        "k": int(top_k),
+        "source": source,
+        "positions": compared,
+        "top1_eq": top1_matches == compared,
+        "top1_matches": top1_matches,
+        "hf_topk_covered": coverage_count == compared,
+        "hf_topk_covered_positions": coverage_count,
+        "intersection_count": intersection_count,
+        "mean_abs_diff": (sum(abs_diffs) / len(abs_diffs)) if abs_diffs else None,
+        "max_abs_diff": max(abs_diffs) if abs_diffs else None,
+    }
+
+
 def _call_generate_compatible(model: Any, **kwargs: Any) -> Any:
     """Call HF/reference generate with only supported keyword arguments."""
 
     generate = model.generate
+    model_cls = model.__class__
+    original_call = getattr(model_cls, "__call__", None)
+    original_forward = getattr(model_cls, "forward", None)
+    original_update_model_kwargs = getattr(model, "_update_model_kwargs_for_generation", None)
+
+    def _call_model_output_compatible(self: Any, *args: Any, **call_kwargs: Any) -> Any:
+        if not callable(original_call):
+            raise TypeError("HF model __call__ is not callable")
+        output = original_call(self, *args, **call_kwargs)
+        if isinstance(output, dict) and not isinstance(output, ModelOutput):
+            return ModelOutput(output)
+        return output
+
+    def _forward_model_output_compatible(*args: Any, **forward_kwargs: Any) -> Any:
+        if not callable(original_forward):
+            raise TypeError("HF model forward is not callable")
+        output = original_forward(*args, **forward_kwargs)
+        if isinstance(output, dict) and not isinstance(output, ModelOutput):
+            return ModelOutput(output)
+        return output
+
+    restore_call = False
+    if callable(original_call):
+        with suppress(Exception):
+            setattr(model_cls, "__call__", _call_model_output_compatible)
+            restore_call = True
+    restore_forward = False
+    if callable(original_forward):
+        with suppress(Exception):
+            setattr(model_cls, "forward", _forward_model_output_compatible)
+            restore_forward = True
+    restore_update_model_kwargs = False
+    if callable(original_update_model_kwargs):
+
+        def _update_model_kwargs_output_compatible(
+            self: Any,
+            outputs: Any,
+            *args: Any,
+            **update_kwargs: Any,
+        ) -> Any:
+            del self
+            if isinstance(outputs, dict) and not isinstance(outputs, ModelOutput):
+                outputs = ModelOutput(outputs)
+            return original_update_model_kwargs(outputs, *args, **update_kwargs)
+
+        with suppress(Exception):
+            setattr(
+                model,
+                "_update_model_kwargs_for_generation",
+                MethodType(_update_model_kwargs_output_compatible, model),
+            )
+            restore_update_model_kwargs = True
     try:
         signature = inspect.signature(generate)
     except (TypeError, ValueError):
-        return generate(**kwargs)
-    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
-        return generate(**kwargs)
-    accepted = {
-        name
-        for name, param in signature.parameters.items()
-        if name != "self"
-        and param.kind
-        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        try:
+            return generate(**kwargs)
+        finally:
+            if restore_call:
+                with suppress(Exception):
+                    setattr(model_cls, "__call__", original_call)
+            if restore_forward:
+                with suppress(Exception):
+                    setattr(model_cls, "forward", original_forward)
+            if restore_update_model_kwargs:
+                with suppress(Exception):
+                    setattr(model, "_update_model_kwargs_for_generation", original_update_model_kwargs)
+    try:
+        if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+            return generate(**kwargs)
+        accepted = {
+            name
+            for name, param in signature.parameters.items()
+            if name != "self"
+            and param.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        return generate(**{key: value for key, value in kwargs.items() if key in accepted})
+    finally:
+        if restore_call:
+            with suppress(Exception):
+                setattr(model_cls, "__call__", original_call)
+        if restore_forward:
+            with suppress(Exception):
+                setattr(model_cls, "forward", original_forward)
+        if restore_update_model_kwargs:
+            with suppress(Exception):
+                setattr(model, "_update_model_kwargs_for_generation", original_update_model_kwargs)
+
+
+def _call_generate_or_forward_greedy(
+    model: Any,
+    *,
+    max_new_tokens: int,
+    eos_token_id: int | None,
+    pad_token_id: int | None,
+    use_cache: bool,
+    **kwargs: Any,
+) -> torch.Tensor:
+    """Call HF generate, falling back to forward-greedy for known generate rank bugs."""
+
+    try:
+        return _call_generate_compatible(
+            model,
+            **kwargs,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            num_beams=1,
+            do_sample=False,
+            use_cache=use_cache,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if "Tensors must have same number of dimensions" not in message:
+            raise
+
+    input_ids = kwargs.get("input_ids")
+    if not torch.is_tensor(input_ids):
+        raise RuntimeError("forward-greedy generate fallback requires tensor input_ids")
+    generated = input_ids.clone()
+    attention_mask = kwargs.get("attention_mask")
+    if torch.is_tensor(attention_mask):
+        attention_mask = attention_mask.clone()
+    else:
+        attention_mask = torch.ones_like(generated, dtype=torch.long)
+
+    static_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if key not in {"input_ids", "attention_mask", "decoder_input_ids", "decoder_attention_mask"}
     }
-    return generate(**{key: value for key, value in kwargs.items() if key in accepted})
+    finished = torch.zeros((int(generated.shape[0]),), device=generated.device, dtype=torch.bool)
+    for _ in range(max(0, int(max_new_tokens))):
+        forward_kwargs = dict(static_kwargs)
+        forward_kwargs["input_ids"] = generated
+        forward_kwargs["attention_mask"] = attention_mask
+        forward_kwargs["use_cache"] = False
+        try:
+            logits = _extract_logits(model(**forward_kwargs))
+        except TypeError:
+            forward_kwargs.pop("use_cache", None)
+            logits = _extract_logits(model(**forward_kwargs))
+        next_token = logits[:, -1, :].argmax(dim=-1)
+        while torch.is_tensor(next_token) and next_token.ndim > 1:
+            next_token = next_token[..., -1]
+        if pad_token_id is not None and eos_token_id is not None:
+            next_token = torch.where(
+                finished,
+                torch.full_like(next_token, int(pad_token_id)),
+                next_token,
+            )
+        generated = torch.cat([generated, next_token.reshape(-1, 1)], dim=-1)
+        attention_mask = torch.cat(
+            [attention_mask, torch.ones_like(next_token.reshape(-1, 1), dtype=attention_mask.dtype)],
+            dim=-1,
+        )
+        if eos_token_id is not None:
+            finished = finished | (next_token == int(eos_token_id))
+            if bool(finished.all()):
+                break
+    return generated
 
 
 def _module_parameter_device(module: Any) -> torch.device | None:
@@ -3532,6 +4253,8 @@ def _run_axon_test_single(
     optimize_graph: bool = False,
     graph_backend_intrinsics: str | None = None,
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
+    vllm_gpu_memory_utilization: float | None = None,
+    vllm_logprobs: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = False,
@@ -3611,6 +4334,23 @@ def _run_axon_test_single(
             raise ValueError("trace_layers is not supported with axon_backend='pipeline2-torch'")
     if axon_backend == "runtime2-torch" and trace_layers:
         raise ValueError(f"trace_layers is not supported with axon_backend={axon_backend!r}")
+    if axon_backend == "codegen2-vllm":
+        if resolved_model_task != "causal_lm":
+            raise ValueError("axon_backend='codegen2-vllm' currently supports only causal_lm")
+        if resolved_benchmark_mode == "forward":
+            raise ValueError("axon_backend='codegen2-vllm' supports generate benchmarking only")
+        if trace_layers:
+            raise ValueError("trace_layers is not supported with axon_backend='codegen2-vllm'")
+        if compile_axon:
+            raise ValueError("compile_axon is not supported with axon_backend='codegen2-vllm'")
+        if not str(device).startswith("cuda"):
+            raise ValueError("axon_backend='codegen2-vllm' currently requires a CUDA device target")
+        if vllm_gpu_memory_utilization is not None and not (
+            0.0 < float(vllm_gpu_memory_utilization) <= 1.0
+        ):
+            raise ValueError("--vllm-gpu-memory-utilization must be in the interval (0, 1]")
+        if vllm_logprobs is not None and int(vllm_logprobs) < -1:
+            raise ValueError("--vllm-logprobs must be non-negative, -1, or omitted")
     if profile_axon and compile_axon:
         raise ValueError("--profile-axon is not supported together with --compile-axon")
 
@@ -4395,6 +5135,9 @@ def _run_axon_test_single(
                 print(
                     f"HF: patched Mistral4 experts from checkpoint ({patched_mistral4_experts} tensors)"
                 )
+            aligned_hf_helpers = _align_hf_parameterless_tensor_helpers_to_parent_devices(hf)
+            if aligned_hf_helpers > 0 and hf_device_map is not None:
+                print(f"HF: aligned parameterless tensor helpers ({aligned_hf_helpers} modules)")
             rebuilt_phi3small_longrope = _rebuild_hf_phi3small_longrope_buffers(hf)
             if rebuilt_phi3small_longrope > 0:
                 print(
@@ -4541,7 +5284,10 @@ def _run_axon_test_single(
                         with _preserve_requested_hf_experts_during_generate(
                             model, resolved_hf_experts_implementation
                         ):
-                            if _is_deepseek_family_model_type(resolved_model_type):
+                            if (
+                                _is_deepseek_family_model_type(resolved_model_type)
+                                or axon_backend == "codegen2-vllm"
+                            ):
                                 pad_id = tokenizer_obj.eos_token_id
                                 generated: list[torch.Tensor] = []
                                 batch_size = int(io["input_ids"].shape[0])
@@ -4562,14 +5308,12 @@ def _run_axon_test_single(
                                         else:
                                             sample_inputs[key] = value
                                     generated.append(
-                                        _call_generate_compatible(
+                                        _call_generate_or_forward_greedy(
                                             model,
                                             **sample_inputs,
                                             max_new_tokens=hf_max_new_tokens,
                                             eos_token_id=tokenizer_obj.eos_token_id,
                                             pad_token_id=pad_id,
-                                            num_beams=1,
-                                            do_sample=False,
                                             use_cache=False,
                                         )[0]
                                     )
@@ -4583,7 +5327,7 @@ def _run_axon_test_single(
                                     for item in generated
                                 ]
                                 return torch.stack(padded, dim=0)
-                            return _call_generate_compatible(
+                            return _call_generate_or_forward_greedy(
                                 model,
                                 **_move_hf_token_inputs_to_embedding_devices(
                                     model, io["hf_generate_inputs"]
@@ -4591,8 +5335,6 @@ def _run_axon_test_single(
                                 max_new_tokens=hf_max_new_tokens,
                                 eos_token_id=tokenizer_obj.eos_token_id,
                                 pad_token_id=tokenizer_obj.eos_token_id,
-                                num_beams=1,
-                                do_sample=False,
                                 use_cache=True,
                             )
 
@@ -4689,6 +5431,172 @@ def _run_axon_test_single(
         def _run_syn_side(target_device_str: str) -> dict[str, Any]:
             target_device = _resolve_device(target_device_str)
             io = _build_io_for_device(target_device)
+            if axon_backend == "codegen2-vllm":
+                if not run_generate_benchmark:
+                    raise ValueError("codegen2-vllm supports generate benchmarking only")
+                try:
+                    from vllm import LLM, SamplingParams
+                    from vllm.model_executor.models.registry import ModelRegistry
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "axon_backend='codegen2-vllm' requires the vllm package in this environment"
+                    ) from exc
+
+                arch_name = f"{class_name}VLLM"
+                generated_module_name = generated_py_path.stem
+                plugin_name = f"axon_vllm_plugin_{hashlib.sha1(arch_name.encode()).hexdigest()[:12]}"
+                plugin_root = tmp_path / "vllm_plugin"
+                _prepare_vllm_registration_plugin(
+                    plugin_root=plugin_root,
+                    plugin_name=plugin_name,
+                    architecture=arch_name,
+                    module_name=generated_module_name,
+                    class_name=class_name,
+                )
+                old_pythonpath = os.environ.get("PYTHONPATH")
+                old_vllm_plugins = os.environ.get("VLLM_PLUGINS")
+                old_flashinfer_sampler = os.environ.get("VLLM_USE_FLASHINFER_SAMPLER")
+                pythonpath_parts = [str(generated_py_path.parent), str(plugin_root)]
+                if old_pythonpath:
+                    pythonpath_parts.append(old_pythonpath)
+                os.environ["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+                for path_item in reversed(pythonpath_parts[:2]):
+                    if path_item not in sys.path:
+                        sys.path.insert(0, path_item)
+                os.environ["VLLM_PLUGINS"] = _with_added_env_list_value(
+                    os.environ.get("VLLM_PLUGINS"),
+                    plugin_name,
+                )
+                # Avoid requiring FlashInfer's JIT sampler toolchain (notably curand.h)
+                # for Axon/vLLM smoke and benchmark runs. This changes only vLLM
+                # sampling implementation selection, not the generated Axon model.
+                os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+                ModelRegistry.register_model(arch_name, f"{generated_module_name}:{class_name}")
+                vllm_model_dir = tmp_path / "vllm_model"
+                _prepare_vllm_model_dir(
+                    source_model_dir=resolved_hf_model_dir,
+                    target_model_dir=vllm_model_dir,
+                    architecture=arch_name,
+                )
+
+                prompt_rows: list[list[int]] = []
+                attention_cpu = attention_mask_cpu
+                for row_idx in range(int(input_ids_cpu.shape[0])):
+                    row = input_ids_cpu[row_idx]
+                    if attention_cpu is not None:
+                        keep = attention_cpu[row_idx].to(dtype=torch.bool)
+                        row = row[keep]
+                    prompt_rows.append([int(x) for x in row.tolist()])
+
+                max_prompt_len = max((len(row) for row in prompt_rows), default=0)
+                max_new_tokens = max(1, int(max_len) - int(max_prompt_len))
+                sampling_params = SamplingParams(
+                    max_tokens=max_new_tokens,
+                    temperature=0.0,
+                    logprobs=vllm_logprobs,
+                    prompt_logprobs=vllm_logprobs,
+                    detokenize=False,
+                )
+
+                llm_kwargs: dict[str, Any] = {}
+                if vllm_logprobs is not None:
+                    llm_kwargs["max_logprobs"] = int(vllm_logprobs)
+                requested_vllm_dtype = str(resolved_dtype).removeprefix("torch.")
+
+                def _new_vllm_llm(dtype_name: str) -> Any:
+                    return LLM(
+                        model=str(vllm_model_dir),
+                        dtype=dtype_name,
+                        gpu_memory_utilization=(
+                            0.9
+                            if vllm_gpu_memory_utilization is None
+                            else float(vllm_gpu_memory_utilization)
+                        ),
+                        max_model_len=max(1, int(max_len)),
+                        skip_tokenizer_init=True,
+                        tensor_parallel_size=1,
+                        trust_remote_code=True,
+                        **llm_kwargs,
+                    )
+
+                vllm_effective_dtype = requested_vllm_dtype
+                try:
+                    llm = _new_vllm_llm(requested_vllm_dtype)
+                except Exception as exc:
+                    message = str(exc)
+                    if (
+                        requested_vllm_dtype == "float32"
+                        and "not supported for quantization method" in message
+                        and "bfloat16" in message
+                    ):
+                        print(
+                            "AxonDerived/vLLM: requested float32 is unsupported "
+                            "for checkpoint quantization; retrying with bfloat16"
+                        )
+                        llm = _new_vllm_llm("bfloat16")
+                        vllm_effective_dtype = "bfloat16"
+                    else:
+                        raise
+                prompts_for_vllm = [
+                    {"prompt_token_ids": prompt_ids} for prompt_ids in prompt_rows
+                ]
+
+                def _run_vllm_generate() -> dict[str, Any]:
+                    outputs = llm.generate(
+                        prompts_for_vllm,
+                        sampling_params,
+                        use_tqdm=False,
+                    )
+                    return {
+                        "generated": _vllm_outputs_to_tensor(
+                            outputs,
+                            pad_token_id=tokenizer_obj.eos_token_id,
+                        ),
+                        "top_logprobs": (
+                            _extract_vllm_top_logprobs(outputs)
+                            if vllm_logprobs is not None
+                            else None
+                        ),
+                    }
+
+                vllm_out, syn_time, syn_generate_samples, syn_generate_warmup_samples = (
+                    _time_generate_repeated(
+                        "AxonDerived/vLLM",
+                        _run_vllm_generate,
+                        warmup=generate_warmup,
+                        repeat=generate_repeat,
+                    )
+                )
+                syn_gen = cast(torch.Tensor, vllm_out["generated"])
+                del llm
+                _cleanup(target_device)
+                for key, old_value in {
+                    "PYTHONPATH": old_pythonpath,
+                    "VLLM_PLUGINS": old_vllm_plugins,
+                    "VLLM_USE_FLASHINFER_SAMPLER": old_flashinfer_sampler,
+                }.items():
+                    if old_value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = old_value
+                return {
+                    "logits": None,
+                    "gen": syn_gen.detach().cpu(),
+                    "vllm_top_logprobs": vllm_out.get("top_logprobs"),
+                    "vllm_logprobs": vllm_logprobs,
+                    "vllm_effective_dtype": vllm_effective_dtype,
+                    "vllm_prompt_lengths": [len(row) for row in prompt_rows],
+                    "time": syn_time,
+                    "forward_samples": [],
+                    "forward_warmup_samples": [],
+                    "generate_samples": syn_generate_samples,
+                    "generate_warmup_samples": syn_generate_warmup_samples,
+                    "layer_inputs": {},
+                    "layer_outputs": {},
+                    "device": str(target_device),
+                    "profile": [],
+                }
+
             local_state_dict = state_ref_cpu
             param_devices = (
                 [f"cuda:{idx}" for idx in range(max(1, torch.cuda.device_count()))]
@@ -4975,7 +5883,7 @@ def _run_axon_test_single(
             print(f"CUDA OOM on {exec_device_str}; retrying AxonDerived on cpu")
             syn_result = _run_syn_side("cpu")
 
-        syn_logits = cast(torch.Tensor, syn_result["logits"])
+        syn_logits = cast(torch.Tensor | None, syn_result["logits"])
         syn_gen = cast(torch.Tensor | None, syn_result["gen"])
         syn_time = float(syn_result["time"])
         syn_forward_samples = list(cast(Sequence[float], syn_result.get("forward_samples", [])))
@@ -4990,6 +5898,9 @@ def _run_axon_test_single(
         syn_layer_outputs = cast(dict[int, torch.Tensor], syn_result["layer_outputs"])
         syn_exec_device_str = cast(str, syn_result["device"])
         syn_profile = cast(list[dict[str, Any]], syn_result.get("profile", []))
+        vllm_top_logprobs = cast(dict[str, Any] | None, syn_result.get("vllm_top_logprobs"))
+        vllm_logprobs_value = cast(int | None, syn_result.get("vllm_logprobs"))
+        vllm_prompt_lengths = list(cast(Sequence[int], syn_result.get("vllm_prompt_lengths", [])))
         requested_device_str = str(resolved_device)
         requested_cuda = requested_device_str.startswith("cuda")
         hf_fallback = bool((not skip_hf) and requested_cuda and hf_exec_device_str == "cpu")
@@ -5019,7 +5930,7 @@ def _run_axon_test_single(
         gen_syn = _generated_token_count(syn_gen)
 
         hf_nan_count = 0 if hf_logits is None else int(torch.isnan(hf_logits).sum().item())
-        syn_nan_count = int(torch.isnan(syn_logits).sum().item())
+        syn_nan_count = 0 if syn_logits is None else int(torch.isnan(syn_logits).sum().item())
         if hf_nan_count > 0 or syn_nan_count > 0:
             print(f"NaN logits detected | hf={hf_nan_count} syn={syn_nan_count}")
 
@@ -5036,7 +5947,8 @@ def _run_axon_test_single(
         masked_mean_rel_diff: float | None = None
         masked_max_rel_diff: float | None = None
         masked_top1_eq: bool | None = None
-        if not skip_hf:
+        vllm_top_logprobs_metrics: dict[str, Any] | None = None
+        if not skip_hf and syn_logits is not None:
             assert hf_logits is not None
             if syn_logits.device != hf_logits.device:
                 syn_logits = syn_logits.to(hf_logits.device)
@@ -5157,6 +6069,14 @@ def _run_axon_test_single(
                     masked_top1_eq = (
                         bool(top1_matches[valid_rows].all()) if bool(valid_rows.any()) else None
                     )
+        if not skip_hf and syn_logits is None and vllm_top_logprobs is not None:
+            vllm_top_logprobs_metrics = _compare_vllm_top_logprobs_with_hf_prefill(
+                hf_logits=hf_logits,
+                vllm_top_logprobs=vllm_top_logprobs,
+                prompt_lengths=vllm_prompt_lengths,
+                attention_mask=attention_mask,
+                top_k=vllm_logprobs_value,
+            )
 
         layer_diffs: list[dict[str, float | int]] = []
         if trace_layers and (not skip_hf) and hf_layer_outputs and syn_layer_outputs:
@@ -5306,6 +6226,18 @@ def _run_axon_test_single(
                 print()
         if skip_hf:
             print("Logits diff:    skipped (HF reference disabled)")
+        elif syn_logits is None:
+            print("Logits diff:    unavailable (Axon/vLLM generate backend does not expose full logits)")
+            if vllm_top_logprobs_metrics is not None:
+                print(
+                    "vLLM top-logprobs | k/positions/top1_eq/hf_topk_covered/mean_abs/max_abs:",
+                    vllm_top_logprobs_metrics.get("k"),
+                    vllm_top_logprobs_metrics.get("positions"),
+                    vllm_top_logprobs_metrics.get("top1_eq"),
+                    vllm_top_logprobs_metrics.get("hf_topk_covered"),
+                    vllm_top_logprobs_metrics.get("mean_abs_diff"),
+                    vllm_top_logprobs_metrics.get("max_abs_diff"),
+                )
         else:
             print(
                 "Logits diff (raw) | mean/max/last_max/top1_eq:",
@@ -5386,6 +6318,8 @@ def _run_axon_test_single(
             "masked_mean_rel_diff": masked_mean_rel_diff,
             "masked_max_rel_diff": masked_max_rel_diff,
             "masked_top1_eq": masked_top1_eq,
+            "vllm_logprobs": vllm_logprobs_value,
+            "vllm_top_logprobs_metrics": vllm_top_logprobs_metrics,
             "hf_nan_count": hf_nan_count,
             "syn_nan_count": syn_nan_count,
             "layer_diffs": layer_diffs if trace_layers else None,
@@ -5446,6 +6380,8 @@ def run_axon_test(
     optimize_graph: bool = False,
     graph_backend_intrinsics: str | None = None,
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
+    vllm_gpu_memory_utilization: float | None = None,
+    vllm_logprobs: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     profile_axon: bool = False,
@@ -5490,6 +6426,8 @@ def run_axon_test(
         optimize_graph=optimize_graph,
         graph_backend_intrinsics=graph_backend_intrinsics,
         builtins_overlays=builtins_overlays,
+        vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+        vllm_logprobs=vllm_logprobs,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
         profile_axon=profile_axon,

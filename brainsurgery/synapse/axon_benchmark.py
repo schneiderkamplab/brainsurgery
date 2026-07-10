@@ -12,7 +12,7 @@ import queue
 import signal
 import sys
 import traceback
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -92,6 +92,10 @@ _SUMMARY_FIELDNAMES = [
     "masked_top1_eq",
     "masked_max_abs_diff",
     "masked_max_rel_diff",
+    "vllm_logprobs",
+    "vllm_top_logprobs_top1_eq",
+    "vllm_top_logprobs_hf_topk_covered",
+    "vllm_top_logprobs_max_abs_diff",
 ]
 
 _MAX_BENCHMARK_WORKER_RETRIES = 1
@@ -270,6 +274,18 @@ def _resolve_tinygrad_worker_specs(*, device: str, processes: int) -> list[_Work
         return None
     return _resolve_pipeline_worker_specs(
         backend="codegen2-tinygrad",
+        device=device,
+        processes=processes,
+        pipeline_parallel_size=1,
+    )
+
+
+def _resolve_vllm_worker_specs(*, device: str, processes: int) -> list[_WorkerSpec] | None:
+    normalized = str(device).strip().lower()
+    if processes <= 1 or not (normalized == "cuda" or normalized.startswith("cuda:") or normalized == "auto"):
+        return None
+    return _resolve_pipeline_worker_specs(
+        backend="codegen2-vllm",
         device=device,
         processes=processes,
         pipeline_parallel_size=1,
@@ -612,6 +628,9 @@ def _summary_row_from_result(row: dict[str, Any]) -> dict[str, object]:
     profile_top = None
     if isinstance(profile_rows, Sequence) and profile_rows and isinstance(profile_rows[0], dict):
         profile_top = cast(dict[str, Any], profile_rows[0])
+    vllm_metrics = row.get("vllm_top_logprobs_metrics")
+    if not isinstance(vllm_metrics, Mapping):
+        vllm_metrics = {}
 
     return {
         "backend": str(row.get("axon_backend", row.get("backend", ""))),
@@ -641,6 +660,12 @@ def _summary_row_from_result(row: dict[str, Any]) -> dict[str, object]:
         "masked_top1_eq": masked_top1_eq_text,
         "masked_max_abs_diff": _format_metric_value(row.get("masked_max_diff")),
         "masked_max_rel_diff": _format_metric_value(row.get("masked_max_rel_diff")),
+        "vllm_logprobs": "" if row.get("vllm_logprobs") is None else str(row.get("vllm_logprobs")),
+        "vllm_top_logprobs_top1_eq": str(vllm_metrics.get("top1_eq", "")),
+        "vllm_top_logprobs_hf_topk_covered": str(vllm_metrics.get("hf_topk_covered", "")),
+        "vllm_top_logprobs_max_abs_diff": _format_optional_float(
+            vllm_metrics.get("max_abs_diff")
+        ),
     }
 
 
@@ -718,6 +743,8 @@ def _sanitize_benchmark_result(row: dict[str, Any]) -> dict[str, Any]:
         "masked_mean_rel_diff",
         "masked_max_rel_diff",
         "masked_top1_eq",
+        "vllm_logprobs",
+        "vllm_top_logprobs_metrics",
         "debug_max_logit_diff",
         "debug_max_rel_diff",
         "debug_top1_eq",
@@ -861,6 +888,10 @@ def _log_result_summary(result: dict[str, Any]) -> None:
     print(f"result.masked_top1_eq={result.get('masked_top1_eq')}")
     print(f"result.masked_max_abs_diff={result.get('masked_max_diff')}")
     print(f"result.masked_max_rel_diff={result.get('masked_max_rel_diff')}")
+    vllm_metrics = result.get("vllm_top_logprobs_metrics")
+    if isinstance(vllm_metrics, Mapping):
+        print(f"result.vllm_top_logprobs_top1_eq={vllm_metrics.get('top1_eq')}")
+        print(f"result.vllm_top_logprobs_max_abs_diff={vllm_metrics.get('max_abs_diff')}")
 
 
 def render_axon_benchmark_csv(*, csv_path: Path, table_format: str = "markdown") -> str:
@@ -946,6 +977,8 @@ def _run_benchmark_pair(
     optimize_graph: bool,
     graph_backend_intrinsics: str | None,
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
+    vllm_gpu_memory_utilization: float | None = None,
+    vllm_logprobs: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = False,
@@ -999,6 +1032,8 @@ def _run_benchmark_pair(
         optimize_graph=optimize_graph,
         graph_backend_intrinsics=graph_backend_intrinsics,
         builtins_overlays=builtins_overlays,
+        vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+        vllm_logprobs=vllm_logprobs,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
         oom_cpu_fallback=oom_cpu_fallback,
@@ -1564,6 +1599,8 @@ def run_axon_benchmark(
     graph_backend_intrinsics: str | None = None,
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
     backend_builtins_overlays: str | Sequence[str] | None = None,
+    vllm_gpu_memory_utilization: float | None = None,
+    vllm_logprobs: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
     oom_cpu_fallback: bool = False,
@@ -1702,6 +1739,8 @@ def run_axon_benchmark(
         "graph_backend_intrinsics": graph_backend_intrinsics,
         "builtins_overlays": builtins_overlays,
         "backend_builtins_overlays": backend_overlay_map,
+        "vllm_gpu_memory_utilization": vllm_gpu_memory_utilization,
+        "vllm_logprobs": vllm_logprobs,
         "jax_pipeline_parallel_enabled": (
             axon_backend == "codegen2-jax"
             and pipeline_parallel_size is not None
@@ -1754,6 +1793,11 @@ def run_axon_benchmark(
         if processes <= 1 and pipeline_worker_specs:
             serial_cuda_visible_devices = pipeline_worker_specs[0].cuda_visible_devices
             effective_device = pipeline_worker_specs[0].run_device
+    elif "codegen2-vllm" in backend_sequence:
+        pipeline_worker_specs = _resolve_vllm_worker_specs(
+            device=device,
+            processes=max(1, int(processes)),
+        )
 
     if processes <= 1:
         results = _run_benchmark_jobs_serial(

@@ -60,6 +60,8 @@ class VLLMLayerClassification:
     ffn_groups: list[FFNGroup] = field(default_factory=list)
     attention_node_ids: set[str] = field(default_factory=set)
     embedding_node_ids: set[str] = field(default_factory=set)
+    token_embedding_node_ids: set[str] = field(default_factory=set)
+    position_embedding_node_ids: set[str] = field(default_factory=set)
     lm_head_node_id: str | None = None
     rmsnorm_node_ids: set[str] = field(default_factory=set)
     qk_norm_node_ids: set[str] = field(default_factory=set)
@@ -98,6 +100,11 @@ _TRIVIAL_TRANSFORM_OPS = frozenset({
     "Tensor.transpose",
     "Tensor.cast",
     "Tensor.expand",
+    "_reshape",
+    "_permute",
+    "_transpose",
+    "_cast",
+    "_expand",
     "Attention.reshape_heads",
     "Attention.flatten_heads",
 })
@@ -341,6 +348,7 @@ def _classify_embeddings(
         for inp in module.inputs:
             if isinstance(inp, (GraphValueRef, GraphValue)):
                 all_module_input_names.add(inp.name)
+    main_module = modules_by_name.get(program.main_module)
     for module in program.modules:
         for node in module.nodes:
             if not _is_embedding_call(node, modules_by_name):
@@ -352,6 +360,11 @@ def _classify_embeddings(
             if x_name is not None and x_name in all_module_input_names:
                 classification.node_types[node.id] = VLLMLayerType.VOCAB_PARALLEL_EMBEDDING
                 classification.embedding_node_ids.add(node.id)
+                classification.token_embedding_node_ids.add(node.id)
+            elif main_module is not None and module.name == main_module.name:
+                classification.node_types[node.id] = VLLMLayerType.VOCAB_PARALLEL_EMBEDDING
+                classification.embedding_node_ids.add(node.id)
+                classification.position_embedding_node_ids.add(node.id)
 
 
 def _is_structural_attention_call(
@@ -830,34 +843,32 @@ def _classify_lm_head(
         if name in visited:
             return False
         visited.add(name)
-        for module in program.modules:
-            for node in module.nodes:
-                for inp in node.inputs:
-                    found = False
-                    if _value_name(inp) == name:
-                        found = True
-                    elif isinstance(inp, GraphExpr):
-                        for sub in inp.inputs:
-                            if _value_name(sub) == name:
-                                found = True
-                                break
-                    if found:
-                        out_name = _node_output_name(node)
-                        if out_name and _reaches_output(out_name, visited, depth + 1):
-                            return True
+        for node in main_module.nodes:
+            for inp in node.inputs:
+                found = False
+                if _value_name(inp) == name:
+                    found = True
+                elif isinstance(inp, GraphExpr):
+                    for sub in inp.inputs:
+                        if _value_name(sub) == name:
+                            found = True
+                            break
+                if found:
+                    out_name = _node_output_name(node)
+                    if out_name and _reaches_output(out_name, visited, depth + 1):
+                        return True
         return False
 
-    for module in program.modules:
-        for node in reversed(module.nodes):
-            if not _is_linear_call(node, modules_by_name):
-                continue
-            if node.id in classification.node_types:
-                continue
-            node_output = _node_output_name(node)
-            if node_output and _reaches_output(node_output):
-                classification.node_types[node.id] = VLLMLayerType.PARALLEL_LM_HEAD
-                classification.lm_head_node_id = node.id
-                return
+    for node in reversed(main_module.nodes):
+        if not _is_linear_call(node, modules_by_name):
+            continue
+        if node.id in classification.node_types:
+            continue
+        node_output = _node_output_name(node)
+        if node_output and _reaches_output(node_output):
+            classification.node_types[node.id] = VLLMLayerType.PARALLEL_LM_HEAD
+            classification.lm_head_node_id = node.id
+            return
 
 
 def _classify_norms(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Iterable
 
 from ..codegen2_torch.core import _DirectTorchEmitter
 from ..graph_ir.core import (
@@ -164,16 +164,16 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     if isinstance(path_inp, GraphPath) and path_inp.parts:
                         field = path_inp.parts[-1]
                         if isinstance(default, int):
-                            return f"getattr(config, '{field}', {default})"
-                        return f"getattr(config, '{field}', 0)"
+                            return self._config_expr(field, default=default)
+                        return self._config_expr(field)
                 elif node.op.name == "_config_float":
                     path_inp = node.inputs[0] if node.inputs else None
                     default = _literal_value(node.inputs[1], None) if len(node.inputs) >= 2 else None
                     if isinstance(path_inp, GraphPath) and path_inp.parts:
                         field = path_inp.parts[-1]
                         if isinstance(default, (int, float)):
-                            return f"getattr(config, '{field}', {default})"
-                        return f"getattr(config, '{field}', 0.0)"
+                            return self._config_expr(field, default=float(default))
+                        return self._config_expr(field, default=0.0)
         return None
 
     def _trace_dim_expr(
@@ -187,6 +187,8 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         if visited is None:
             visited = set()
         if isinstance(operand, GraphLiteral):
+            if operand.value is None:
+                return None
             return str(operand.value)
         if isinstance(operand, GraphValueRef):
             name = operand.name
@@ -589,7 +591,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
 
     @staticmethod
     def _activation_to_code(act_name: str) -> str:
-        if act_name.endswith("gelu_pytorch_tanh"):
+        if act_name.endswith(("gelu_pytorch_tanh", "gelu_tanh", "gelu_new")):
             return "F.gelu({x}, approximate='tanh')"
         if act_name.endswith("gelu"):
             return "F.gelu({x})"
@@ -732,13 +734,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 2, "quant_config = getattr(vllm_config, 'quant_config', None)")
         add(lines, indent * 2, "params_dtype = vllm_config.model_config.dtype")
         add(lines, indent * 2, "cache_config = getattr(vllm_config, 'cache_config', None)")
+        add(lines, indent * 2, "self._model_config = dict(_MODEL_CONFIG or {})")
+        add(lines, indent * 2, "self.config = config")
         add(lines, indent * 2, "from vllm.distributed import get_tensor_model_parallel_world_size")
         add(lines, indent * 2, "_tp_size = get_tensor_model_parallel_world_size()")
         add(lines, indent * 2, "self._tp_size = _tp_size")
-        add(lines, indent * 2, "_num_heads = config.num_attention_heads // _tp_size")
-        add(lines, indent * 2, "_num_kv_heads = max(1, getattr(config, 'num_key_value_heads', config.num_attention_heads) // _tp_size)")
-        add(lines, indent * 2, "self._model_config = dict(_MODEL_CONFIG or {})")
-        add(lines, indent * 2, "self.config = config")
+        add(lines, indent * 2, "_num_heads = (getattr(config, 'num_attention_heads', None) if getattr(config, 'num_attention_heads', None) is not None else self._model_config.get('num_attention_heads', 1)) // _tp_size")
+        add(lines, indent * 2, "_num_kv_heads = max(1, (getattr(config, 'num_key_value_heads', None) if getattr(config, 'num_key_value_heads', None) is not None else self._model_config.get('num_key_value_heads', self._model_config.get('num_attention_heads', _num_heads))) // _tp_size)")
         add(lines, indent * 2, "")
         add(lines, indent * 2, "# --- vLLM layer instantiation ---")
         add(lines, indent * 2, "from vllm.model_executor.layers.linear import (")
@@ -766,7 +768,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             has_rope = self._detect_rope(repeated_mod) is not None
         if has_rope:
             num_layers_expr = self._config_expr("num_hidden_layers")
-            head_dim_expr = self._config_expr("head_dim")
+            head_dim_expr = self._head_dim_expr()
             add(lines, indent * 2, "from vllm.model_executor.layers.rotary_embedding import get_rope")
             rope_variants = self._detect_rope_variants()
             if rope_variants:
@@ -775,7 +777,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 add(lines, indent * 2, "self.rotary_emb = nn.ModuleList([")
                 add(lines, indent * 3, "get_rope(")
                 add(lines, indent * 4, f"({full_hd} if ((i + 1) % _rope_period == 0) else {local_hd}),")
-                add(lines, indent * 4, "max_position=getattr(config, 'max_position_embeddings', 4096),")
+                add(lines, indent * 4, f"max_position={self._config_expr('max_position_embeddings', default=4096)},")
                 add(lines, indent * 4, "is_neox_style=True,")
                 add(lines, indent * 4, "rope_parameters=(")
                 add(lines, indent * 5, "dict(config.rope_parameters[config.layer_types[i]])")
@@ -787,12 +789,11 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 add(lines, indent * 3, f") for i in range({num_layers_expr})")
                 add(lines, indent * 2, "])")
             else:
-                add(lines, indent * 2, "_rope_theta = getattr(config, 'rope_theta',")
-                add(lines, indent * 3, "self._model_config.get('rope_theta', 10000.0))")
+                add(lines, indent * 2, f"_rope_theta = {self._config_expr('rope_theta', default=10000.0)}")
                 add(lines, indent * 2, "_rope_params = {'rope_type': 'default', 'rope_theta': _rope_theta}")
                 add(lines, indent * 2, "self.rotary_emb = nn.ModuleList([")
                 add(lines, indent * 3, f"get_rope({head_dim_expr},")
-                add(lines, indent * 3, "max_position=getattr(config, 'max_position_embeddings', 4096),")
+                add(lines, indent * 3, f"max_position={self._config_expr('max_position_embeddings', default=4096)},")
                 add(lines, indent * 3, "is_neox_style=True,")
                 add(lines, indent * 3, "rope_parameters=_rope_params,")
                 add(lines, indent * 3, f") for i in range({num_layers_expr})")
@@ -809,21 +810,37 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             add(lines, indent * 2, "")
 
         # --- lm_head and logits_processor ---
+        lm_head_attr = None
         if classification.lm_head_node_id:
             lm_head_node = self._find_node_by_id(classification.lm_head_node_id)
-            lm_head_attr = self._vllm_attr_access(lm_head_node) if lm_head_node else None
-            if lm_head_attr:
-                add(lines, indent * 2, f"self.lm_head = {lm_head_attr}")
-                # Handle tied word embeddings
-                add(lines, indent * 2, "if getattr(config, 'tie_word_embeddings', False):")
-                for emb_id in classification.embedding_node_ids:
-                    if emb_id == classification.pli_embed_node_id:
-                        continue
-                    emb_node = self._find_node_by_id(emb_id)
-                    if emb_node is not None:
-                        emb_attr = self._vllm_attr_access(emb_node)
-                        add(lines, indent * 3, f"self.lm_head = self.lm_head.tie_weights({emb_attr})")
-                        break
+            if lm_head_node is not None and not self._is_repeated_node(lm_head_node):
+                lm_head_attr = self._vllm_attr_access(lm_head_node)
+        if lm_head_attr:
+            add(lines, indent * 2, f"self.lm_head = {lm_head_attr}")
+        else:
+            add(lines, indent * 2, "self.lm_head = ParallelLMHead(")
+            add(lines, indent * 3, f"{self._config_expr('vocab_size')},")
+            add(lines, indent * 3, f"{self._config_expr('hidden_size')},")
+            add(lines, indent * 3, "bias=False,")
+            add(lines, indent * 3, "params_dtype=params_dtype,")
+            add(lines, indent * 3, f"org_num_embeddings={self._config_expr('vocab_size')},")
+            add(lines, indent * 3, "quant_config=quant_config,")
+            add(lines, indent * 3, "prefix='lm_head',")
+            add(lines, indent * 2, ")")
+        # Handle tied word embeddings
+        add(lines, indent * 2, "if getattr(config, 'tie_word_embeddings', False):")
+        emitted_tie_body = False
+        for emb_id in classification.token_embedding_node_ids:
+            if emb_id == classification.pli_embed_node_id:
+                continue
+            emb_node = self._find_node_by_id(emb_id)
+            if emb_node is not None and not self._is_repeated_node(emb_node):
+                emb_attr = self._vllm_attr_access(emb_node)
+                add(lines, indent * 3, f"self.lm_head = self.lm_head.tie_weights({emb_attr})")
+                emitted_tie_body = True
+                break
+        if not emitted_tie_body:
+            add(lines, indent * 3, "pass")
         add(lines, indent * 2, "from vllm.model_executor.layers.logits_processor import LogitsProcessor")
         add(lines, indent * 2, "_soft_cap = getattr(config, 'final_logit_softcapping', None)")
         add(lines, indent * 2, "self.logits_processor = LogitsProcessor(")
@@ -841,7 +858,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         # PLI scale factor buffers (matches native vLLM Gemma4Model).
         if classification.pli_gate_node_id is not None:
             hs_expr = self._config_expr("hidden_size")
-            pli_dim_expr = self._resolve_const_value("PLI") or "getattr(config, 'per_layer_input_dim', 256)"
+            pli_dim_expr = self._resolve_const_value("PLI") or self._config_expr("per_layer_input_dim", default=256)
             add(lines, indent * 2, f"self.register_buffer('_embed_scale_per_layer', torch.tensor({pli_dim_expr} ** 0.5), persistent=False)")
             add(lines, indent * 2, f"self.register_buffer('_per_layer_projection_scale', torch.tensor({hs_expr} ** -0.5), persistent=False)")
             add(lines, indent * 2, "self.register_buffer('_per_layer_input_scale', torch.tensor(2 ** -0.5), persistent=False)")
@@ -876,19 +893,32 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         if not self._use_clean_forward:
             add(lines, indent * 2, "self._eval_symbols()")
         add(lines, indent, "")
-        add(lines, indent, "def embed_input_ids(self, input_ids):")
-        for node_id in sorted(classification.embedding_node_ids):
+        add(lines, indent, "def embed_input_ids(self, input_ids, positions=None):")
+        emitted_token_embedding = False
+        for node_id in sorted(classification.token_embedding_node_ids):
             if node_id == classification.pli_embed_node_id:
                 continue
             node = self._find_node_by_id(node_id)
             if node is not None:
                 attr = self._vllm_attr_access(node)
                 if hasattr(self, '_model_config_data') and self._model_config_data.get("embedding_scale"):
-                    add(lines, indent * 2, f"return {attr}(input_ids) * self.normalizer")
+                    add(lines, indent * 2, f"hidden_states = {attr}(input_ids) * self.normalizer")
                 else:
-                    add(lines, indent * 2, f"return {attr}(input_ids)")
+                    add(lines, indent * 2, f"hidden_states = {attr}(input_ids)")
+                emitted_token_embedding = True
                 break
-        add(lines, indent * 2, "return None")
+        if not emitted_token_embedding:
+            add(lines, indent * 2, "hidden_states = None")
+        for node_id in sorted(classification.position_embedding_node_ids):
+            if node_id == classification.pli_embed_node_id:
+                continue
+            node = self._find_node_by_id(node_id)
+            if node is None:
+                continue
+            attr = self._vllm_attr_access(node)
+            add(lines, indent * 2, "if positions is not None:")
+            add(lines, indent * 3, f"hidden_states = hidden_states + {attr}(positions)")
+        add(lines, indent * 2, "return hidden_states")
         add(lines, indent, "")
 
         add(lines, indent, "def load_weights(self, weights):")
@@ -907,6 +937,45 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent * 2, "params_dict = dict(self.named_parameters())")
         add(lines, indent * 2, "params_dict.update(dict(self.named_buffers()))")
         add(lines, indent * 2, "loaded_params = set()")
+        add(lines, indent * 2, "_transpose_model_param_names = set()")
+        for module in self.program.modules:
+            for node in module.nodes:
+                if not _is_linear_call(node, self.modules_by_name):
+                    continue
+                if not _bool_arg(node, 4, False):
+                    continue
+                if node.id not in classification.node_types:
+                    continue
+                attr_name = self._vllm_layer_attr_name(node)
+                if self._is_repeated_node(node) or "{i}" in self._node_prefix(node):
+                    add(lines, indent * 2, f"for _i, _mod in enumerate(self.{attr_name}):")
+                    add(lines, indent * 3, "if hasattr(_mod, 'weight'):")
+                    add(lines, indent * 4, f"_transpose_model_param_names.add(f'{attr_name}.{{_i}}.weight')")
+                else:
+                    add(lines, indent * 2, f"if hasattr(self.{attr_name}, 'weight'):")
+                    add(lines, indent * 3, f"_transpose_model_param_names.add('{attr_name}.weight')")
+        add(lines, indent * 2, "def _maybe_transpose_for_param(param, tensor, *, force=False):")
+        add(lines, indent * 3, "pdata = getattr(param, 'data', None)")
+        add(lines, indent * 3, "if force and torch.is_tensor(tensor) and tensor.ndim == 2:")
+        add(lines, indent * 4, "return tensor.t().contiguous()")
+        add(lines, indent * 3, "if (")
+        add(lines, indent * 4, "torch.is_tensor(pdata)")
+        add(lines, indent * 4, "and torch.is_tensor(tensor)")
+        add(lines, indent * 4, "and pdata.ndim == 2")
+        add(lines, indent * 4, "and tensor.ndim == 2")
+        add(lines, indent * 4, "and tuple(pdata.shape) == tuple(tensor.t().shape)")
+        add(lines, indent * 3, "):")
+        add(lines, indent * 4, "return tensor.t().contiguous()")
+        add(lines, indent * 3, "return tensor")
+        add(lines, indent * 2, "def _compatible_direct_load(param, tensor):")
+        add(lines, indent * 3, "pdata = getattr(param, 'data', None)")
+        add(lines, indent * 3, "if not (torch.is_tensor(pdata) and torch.is_tensor(tensor)):")
+        add(lines, indent * 4, "return True")
+        add(lines, indent * 3, "if tuple(pdata.shape) == tuple(tensor.shape):")
+        add(lines, indent * 4, "return True")
+        add(lines, indent * 3, "if pdata.ndim == 2 and tensor.ndim == 2 and tuple(pdata.shape) == tuple(tensor.t().shape):")
+        add(lines, indent * 4, "return True")
+        add(lines, indent * 3, "return tensor.numel() >= pdata.numel()")
         add(lines, indent * 2, "")
         add(lines, indent * 2, "# Build checkpoint name -> model param name mapping from module prefixes")
         add(lines, indent * 2, "_ckpt_to_model = {}")
@@ -1024,12 +1093,16 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         rope_id = self._detect_rope(repeated_mod)
         act_name = self._detect_activation(repeated_mod)
 
-        # Find final norm (non-repeated RMSNorm)
+        # Find final norm (non-repeated RMSNorm/LayerNorm)
         final_norm_attr = None
-        for nid in sorted(cls.rmsnorm_node_ids):
-            mod_name = self._node_module_name(self._find_node_by_id(nid))
+        for nid, layer_type in sorted(cls.node_types.items()):
+            if layer_type not in (VLLMLayerType.RMSNORM, VLLMLayerType.LAYERNORM):
+                continue
+            node = self._find_node_by_id(nid)
+            if node is None:
+                continue
+            mod_name = self._node_module_name(node)
             if mod_name not in cls.repeated_module_names:
-                node = self._find_node_by_id(nid)
                 final_norm_attr = self._vllm_attr_access(node)
                 break
 
@@ -1037,7 +1110,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         num_layers_expr = self._config_expr("num_hidden_layers")
         num_heads_expr = self._config_expr("num_attention_heads")
         num_kv_heads_expr = self._config_expr("num_key_value_heads", alt="num_attention_heads")
-        head_dim_expr = self._config_expr("head_dim")
+        head_dim_expr = self._head_dim_expr()
 
         # --- Generate forward ---
         add(lines, 4, "def forward(")
@@ -1051,7 +1124,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, 8, "if inputs_embeds is not None:")
         add(lines, 12, "hidden_states = inputs_embeds")
         add(lines, 8, "else:")
-        add(lines, 12, "hidden_states = self.embed_input_ids(input_ids)")
+        add(lines, 12, "hidden_states = self.embed_input_ids(input_ids, positions)")
         add(lines, 8, "")
         add(lines, 8, "config = self.config")
         add(lines, 8, "_tp_size = self._tp_size")
@@ -1112,7 +1185,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 pli_embed_attr = self._vllm_attr_access(pli_embed_node)
                 pli_model_proj_attr = self._vllm_attr_access(pli_model_proj_node)
                 pli_proj_norm_attr = self._vllm_attr_access(pli_proj_norm_node)
-                pli_dim = self._resolve_const_value("PLI") or "getattr(config, 'per_layer_input_dim', 256)"
+                pli_dim = self._resolve_const_value("PLI") or self._config_expr("per_layer_input_dim", default=256)
                 add(lines, 8, f"_pli_dim = {pli_dim}")
                 add(lines, 8, f"_per_layer_inputs = {pli_embed_attr}(input_ids)")
                 add(lines, 8, f"_per_layer_inputs = _per_layer_inputs * self._embed_scale_per_layer")
@@ -1125,7 +1198,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 add(lines, 8, "")
 
         add(lines, 8, f"residual = None")
-        add(lines, 8, f"_first_kv_shared = getattr(config, 'num_hidden_layers', 0) - getattr(config, 'num_kv_shared_layers', 0)")
+        add(lines, 8, f"_first_kv_shared = {self._config_expr('num_hidden_layers')} - {self._config_expr('num_kv_shared_layers')}")
         add(lines, 8, f"for i in range(_num_layers):")
 
         indent = 12
@@ -1435,9 +1508,11 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 norm_attr = self._vllm_attr_access(node)
                 break
 
-        # Find final norm: non-repeated RMSNorm (not in any repeated module)
+        # Find final norm: non-repeated RMSNorm/LayerNorm (not in any repeated module)
         final_norm_attr = None
-        for nid in sorted(cls.rmsnorm_node_ids):
+        for nid, layer_type in sorted(cls.node_types.items()):
+            if layer_type not in (VLLMLayerType.RMSNORM, VLLMLayerType.LAYERNORM):
+                continue
             node = self._find_node_by_id(nid)
             if node is None:
                 continue
@@ -1462,7 +1537,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, 8, "if inputs_embeds is not None:")
         add(lines, 12, "hidden_states = inputs_embeds")
         add(lines, 8, "else:")
-        add(lines, 12, "hidden_states = self.embed_input_ids(input_ids)")
+        add(lines, 12, "hidden_states = self.embed_input_ids(input_ids, positions)")
         add(lines, 8, "")
         add(lines, 8, "config = self.config")
         add(lines, 8, f"_num_layers = {num_layers_expr}")
@@ -1500,7 +1575,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, 8, "if inputs_embeds is not None:")
         add(lines, 12, "hidden_states = inputs_embeds")
         add(lines, 8, "else:")
-        add(lines, 12, "hidden_states = self.embed_input_ids(input_ids)")
+        add(lines, 12, "hidden_states = self.embed_input_ids(input_ids, positions)")
         add(lines, 8, "")
         add(lines, 8, "self._attn_metadata = attn_metadata")
         add(lines, 8, "self._positions = positions")
@@ -1583,9 +1658,9 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         # num_kv_shared_layers, map to the earlier layer of the same
         # attention type whose KV cache they reuse.
         add(lines, indent, "_kv_sharing_targets = {}")
-        add(lines, indent, "_nkv = getattr(config, 'num_kv_shared_layers', 0)")
+        add(lines, indent, f"_nkv = {self._config_expr('num_kv_shared_layers')}")
         add(lines, indent, "if _nkv > 0:")
-        add(lines, indent + 1, "_nl = getattr(config, 'num_hidden_layers', 0)")
+        add(lines, indent + 1, f"_nl = {self._config_expr('num_hidden_layers')}")
         add(lines, indent + 1, "_first_shared = _nl - _nkv")
         add(lines, indent + 1, "_ltypes = getattr(config, 'layer_types', [])")
         add(lines, indent + 1, "for _i in range(_first_shared, _nl):")
@@ -1625,6 +1700,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 # checkpoint-to-model mapping.
                 if layer_type in (
                     VLLMLayerType.RMSNORM,
+                    VLLMLayerType.LAYERNORM,
                     VLLMLayerType.VOCAB_PARALLEL_EMBEDDING,
                 ):
                     prefix_expr = self._layer_prefix(node)
@@ -1648,7 +1724,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             inter_expr = self._config_expr("intermediate_size")
             tsr_expr = self._config_expr("time_step_rank")
             num_layers_expr = self._config_expr("num_hidden_layers")
-            eps_expr = "getattr(config, 'layer_norm_epsilon', getattr(config, 'rms_norm_eps', 1e-5))"
+            eps_expr = (
+                "(getattr(config, 'layer_norm_epsilon', None) "
+                "if getattr(config, 'layer_norm_epsilon', None) is not None "
+                "else (getattr(config, 'rms_norm_eps', None) "
+                "if getattr(config, 'rms_norm_eps', None) is not None "
+                "else self._model_config.get('layer_norm_epsilon', self._model_config.get('rms_norm_eps', 1e-5))))"
+            )
             mixer_prefix = self._derive_mamba_mixer_prefix_from_scope(classification)
             add(lines, indent, f"self._vllm_mamba_mixer = nn.ModuleList([")
             add(lines, indent + 1, f"MambaMixer(")
@@ -1657,11 +1739,11 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             add(lines, indent + 2, f"conv_kernel_size={conv_k_expr},")
             add(lines, indent + 2, f"intermediate_size={inter_expr},")
             add(lines, indent + 2, f"time_step_rank={tsr_expr},")
-            add(lines, indent + 2, f"use_conv_bias=getattr(config, 'use_conv_bias', True),")
-            add(lines, indent + 2, f"use_bias=getattr(config, 'use_bias', False),")
+            add(lines, indent + 2, f"use_conv_bias={self._config_expr('use_conv_bias', default=True)},")
+            add(lines, indent + 2, f"use_bias={self._config_expr('use_bias', default=False)},")
             add(lines, indent + 2, f"use_rms_norm=False,")
             add(lines, indent + 2, f"rms_norm_eps={eps_expr},")
-            add(lines, indent + 2, f"activation=getattr(config, 'hidden_act', 'silu'),")
+            add(lines, indent + 2, f"activation={self._config_expr('hidden_act', default='silu')},")
             add(lines, indent + 2, f"model_config=vllm_config.model_config,")
             add(lines, indent + 2, f"cache_config=cache_config,")
             add(lines, indent + 2, f"prefix={mixer_prefix},")
@@ -1703,7 +1785,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                                     if val is not None:
                                         shape_parts.append(val)
                                     else:
-                                        shape_parts.append(f"getattr(config, '{d}', 1)")
+                                        shape_parts.append(self._config_expr(str(d), default=1))
                             break
                     if not shape_parts:
                         continue
@@ -1741,10 +1823,18 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add = self._add
         prefix = self._layer_prefix(node)
         if layer_type == VLLMLayerType.VOCAB_PARALLEL_EMBEDDING:
-            vocab = self._config_expr("vocab_size")
+            if node.id in classification.position_embedding_node_ids:
+                vocab = (
+                    "getattr(config, 'max_position_embeddings', "
+                    "getattr(config, 'n_positions', "
+                    "self._model_config.get('max_position_embeddings', "
+                    "self._model_config.get('n_positions', 0))))"
+                )
+            else:
+                vocab = self._config_expr("vocab_size")
             if node.id == self._vllm_classification.pli_embed_node_id:
                 num_layers = self._config_expr("num_hidden_layers")
-                pli_dim = self._resolve_const_value("PLI") or f"getattr(config, 'per_layer_input_dim', 256)"
+                pli_dim = self._resolve_const_value("PLI") or self._config_expr("per_layer_input_dim", default=256)
                 dim = f"({num_layers} * {pli_dim})"
             else:
                 dim = self._config_expr("hidden_size")
@@ -1784,7 +1874,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             elif node.id in pli_linear_ids:
                 add(lines, indent, "ReplicatedLinear(")
                 add(lines, indent + 1, f"{in_dim}, {out_dim},")
-                add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+                add(lines, indent + 1, f"bias={bias}, skip_bias_add=False,")
                 add(lines, indent + 1, f"prefix={prefix},")
                 add(lines, indent + 1, "params_dtype=params_dtype,")
                 add(lines, indent, ")")
@@ -1806,7 +1896,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 else:
                     add(lines, indent, "ColumnParallelLinear(")
                     add(lines, indent + 1, f"{in_dim}, {out_dim},")
-                    add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+                    add(lines, indent + 1, f"bias={bias}, skip_bias_add=False,")
                     add(lines, indent + 1, f"prefix={prefix},")
                     add(lines, indent + 1, "quant_config=quant_config,")
                     add(lines, indent + 1, "params_dtype=params_dtype,")
@@ -1814,7 +1904,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             elif layer_type == VLLMLayerType.COLUMN_PARALLEL_LINEAR:
                 add(lines, indent, "ColumnParallelLinear(")
                 add(lines, indent + 1, f"{in_dim}, {out_dim},")
-                add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+                add(lines, indent + 1, f"bias={bias}, skip_bias_add=False,")
                 add(lines, indent + 1, f"prefix={prefix},")
                 add(lines, indent + 1, "quant_config=quant_config,")
                 add(lines, indent + 1, "params_dtype=params_dtype,")
@@ -1822,13 +1912,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             else:
                 add(lines, indent, "RowParallelLinear(")
                 add(lines, indent + 1, f"{in_dim}, {out_dim},")
-                add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+                add(lines, indent + 1, f"bias={bias}, skip_bias_add=False,")
                 add(lines, indent + 1, f"prefix={prefix},")
                 add(lines, indent + 1, "quant_config=quant_config,")
                 add(lines, indent + 1, "params_dtype=params_dtype,")
                 add(lines, indent, ")")
         elif layer_type == VLLMLayerType.ATTENTION:
-            head_size = self._config_expr("head_dim", alt="hidden_size")
+            head_size = self._head_dim_expr()
             kv_heads_arg = "_num_kv_heads"
             if self._is_repeated_node(node):
                 repeated_mod = self._get_repeated_module()
@@ -1844,7 +1934,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             if attn_scale is not None:
                 scale_expr = f"{float(attn_scale)}"
             else:
-                scale_cfg = self._config_expr("query_pre_attn_scalar", alt="head_dim")
+                scale_cfg = self._query_pre_attn_scalar_expr()
                 scale_expr = f"1.0 / (float({scale_cfg}) ** 0.5)"
             add(lines, indent, "Attention(")
             add(lines, indent + 1, "_num_heads,")
@@ -1885,7 +1975,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             add(lines, indent, ")")
         elif layer_type == VLLMLayerType.RMSNORM:
             if node.id in self._vllm_classification.qk_norm_node_ids:
-                dim = self._config_expr("head_dim")
+                dim = self._head_dim_expr()
                 if self._is_repeated_node(node):
                     repeated_mod = self._get_repeated_module()
                     if repeated_mod is not None:
@@ -1894,7 +1984,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                         if hd_expr:
                             dim = hd_expr
             elif node.id in self._vllm_classification.v_norm_node_ids:
-                dim = self._config_expr("head_dim")
+                dim = self._head_dim_expr()
                 if self._is_repeated_node(node):
                     repeated_mod = self._get_repeated_module()
                     if repeated_mod is not None:
@@ -1903,7 +1993,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                         if hd_expr:
                             dim = hd_expr
             elif node.id == self._vllm_classification.pli_proj_norm_node_id:
-                dim = self._resolve_const_value("PLI") or f"getattr(config, 'per_layer_input_dim', 256)"
+                dim = self._resolve_const_value("PLI") or self._config_expr("per_layer_input_dim", default=256)
             else:
                 dim = self._config_expr("hidden_size")
             eps = self._node_rmsnorm_eps(node)
@@ -1940,7 +2030,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             prefix = self._layer_prefix(node)
             add(lines, indent, "ColumnParallelLinear(")
             add(lines, indent + 1, f"{in_dim}, {out_dim},")
-            add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+            add(lines, indent + 1, f"bias={bias}, skip_bias_add=False,")
             add(lines, indent + 1, f"prefix={prefix},")
             add(lines, indent + 1, "quant_config=quant_config,")
             add(lines, indent + 1, "params_dtype=params_dtype,")
@@ -1948,7 +2038,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             return
 
         hidden_size = self._node_input_dim_expr(node)
-        head_size = self._config_expr("head_dim", alt="hidden_size")
+        head_size = self._head_dim_expr()
         if self._is_repeated_node(node):
             repeated_mod = self._get_repeated_module()
             if repeated_mod is not None:
@@ -1981,7 +2071,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent, "QKVParallelLinear(")
         add(lines, indent + 1, f"{hidden_size}, {head_size},")
         add(lines, indent + 1, f"{total_num_heads}, {total_num_kv_heads},")
-        add(lines, indent + 1, f"bias={bias}, skip_bias_add=True,")
+        add(lines, indent + 1, f"bias={bias}, skip_bias_add=False,")
         add(lines, indent + 1, f"prefix={qkv_prefix},")
         add(lines, indent + 1, "quant_config=quant_config,")
         add(lines, indent + 1, "params_dtype=params_dtype,")
@@ -1998,8 +2088,14 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         scope_parts = self._vllm_classification.module_scope_parts.get(mod_name)
         if scope_parts is None:
             base = _linear_base_key(q_node)
-            if base and "{i}" in base:
-                return f'f"{base.rsplit(".", 1)[0] + ".qkv_proj"}"'
+            if base and "{" in base:
+                parent = base.rsplit(".", 1)[0] + ".qkv_proj"
+                parts = self._format_template_parts(
+                    parent.split("."),
+                    loop_var=self._node_loop_index(q_node),
+                    map_unknown_templates_to_loop=True,
+                )
+                return f'f"{".".join(parts)}"'
             return f'f"{{prefix}}.layers.{{i}}.qkv_proj"'
         base = _linear_base_key(q_node)
         if base:
@@ -2014,12 +2110,11 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
             full_parts[-1] = "qkv_proj"
         else:
             full_parts = ["qkv_proj"]
-        fparts: list[str] = []
-        for p in full_parts:
-            if p == "{__scope}":
-                fparts.append("{prefix}")
-            else:
-                fparts.append(p)
+        fparts = self._format_template_parts(
+            full_parts,
+            loop_var=self._node_loop_index(q_node),
+            map_unknown_templates_to_loop=True,
+        )
         return f'f"{".".join(fparts)}"'
 
     def _emit_weight_loading_body(
@@ -2056,6 +2151,10 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent + 2, "self.state_dict_tensors[_orig_name] = loaded_weight")
         add(lines, indent + 2, "break")
         add(lines, indent + 1, "param = params_dict[name]")
+        add(lines, indent + 1, "loaded_weight = _maybe_transpose_for_param(param, loaded_weight, force=name in _transpose_model_param_names)")
+        add(lines, indent + 1, "if not _compatible_direct_load(param, loaded_weight):")
+        add(lines, indent + 2, "self.state_dict_tensors[_orig_name] = loaded_weight")
+        add(lines, indent + 2, "continue")
         add(lines, indent + 1, "weight_loader = getattr(param, 'weight_loader', None)")
         add(lines, indent + 1, "if weight_loader is not None:")
         add(lines, indent + 2, "weight_loader(param, loaded_weight, _sid)")
@@ -2070,6 +2169,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         add(lines, indent + 2, "self.state_dict_tensors[_orig_name] = loaded_weight")
         add(lines, indent + 2, "continue")
         add(lines, indent + 1, "param = params_dict[name]")
+        add(lines, indent + 1, "loaded_weight = _maybe_transpose_for_param(param, loaded_weight, force=name in _transpose_model_param_names)")
         add(lines, indent + 1, "weight_loader = getattr(param, 'weight_loader', None)")
         add(lines, indent + 1, "if weight_loader is not None:")
         add(lines, indent + 2, "weight_loader(param, loaded_weight)")
@@ -2121,8 +2221,13 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
         scope_parts = self._vllm_classification.module_scope_parts.get(mod_name)
         if scope_parts is None:
             base = self._node_prefix(node)
-            if "{i}" in base or "{prefix}" in base:
-                return f'f"{base}"'
+            if "{" in base:
+                parts = self._format_template_parts(
+                    base.split("."),
+                    loop_var=self._node_loop_index(node),
+                    map_unknown_templates_to_loop=True,
+                )
+                return f'f"{".".join(parts)}"'
             return f'f"{{prefix}}.layers.{{i}}.{_safe_ident(base)}"'
         base = _linear_base_key(node)
         if not base:
@@ -2140,12 +2245,11 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                 full_parts = sub_parts
         else:
             full_parts = list(scope_parts)
-        fparts: list[str] = []
-        for p in full_parts:
-            if p == "{__scope}":
-                fparts.append("{prefix}")
-            else:
-                fparts.append(p)
+        fparts = self._format_template_parts(
+            full_parts,
+            loop_var=self._node_loop_index(node),
+            map_unknown_templates_to_loop=True,
+        )
         return f'f"{".".join(fparts)}"'
 
     def _derive_layer_prefix_expr(
@@ -2171,26 +2275,84 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                     break
         if scope_parts is None:
             return 'f"{self._prefix}.layers.{_i}"'
-        fparts: list[str] = []
-        for p in scope_parts:
-            if p == "{__scope}":
-                fparts.append("{prefix}")
-            elif p == "{i}":
-                fparts.append("{_i}")
-            else:
-                fparts.append(p)
+        fparts = self._format_template_parts(
+            scope_parts,
+            loop_var=self._node_loop_index(node),
+            loop_target="_i",
+            map_unknown_templates_to_loop=True,
+        )
         return f'f"{".".join(fparts)}"'
 
-    def _config_expr(self, config_name: str, alt: str | None = None) -> str:
+    def _config_expr(
+        self,
+        config_name: str,
+        alt: str | None = None,
+        *,
+        default: int | float | str = 0,
+    ) -> str:
         if alt is not None:
             inner = self._config_expr(alt)
             return (
-                f"getattr(config, {config_name!r}, "
-                f"self._model_config.get({config_name!r}, {inner}))"
+                f"(getattr(config, {config_name!r}, None) "
+                f"if getattr(config, {config_name!r}, None) is not None "
+                f"else self._model_config.get({config_name!r}, {inner}))"
             )
+        default_repr = repr(default) if isinstance(default, str) else str(default)
         return (
-            f"getattr(config, {config_name!r}, "
-            f"self._model_config.get({config_name!r}, 0))"
+            f"(getattr(config, {config_name!r}, None) "
+            f"if getattr(config, {config_name!r}, None) is not None "
+            f"else self._model_config.get({config_name!r}, {default_repr}))"
+        )
+
+    def _format_template_parts(
+        self,
+        parts: Iterable[str],
+        *,
+        loop_var: str | None = None,
+        loop_target: str = "i",
+        map_unknown_templates_to_loop: bool = False,
+    ) -> list[str]:
+        formatted: list[str] = []
+        for part in parts:
+            if part == "{__scope}":
+                formatted.append("{prefix}")
+                continue
+            if part.startswith("{") and part.endswith("}"):
+                name = part[1:-1]
+                if loop_var is not None and name == loop_var:
+                    formatted.append(f"{{{loop_target}}}")
+                elif name == "i":
+                    formatted.append(f"{{{loop_target}}}")
+                elif map_unknown_templates_to_loop:
+                    formatted.append(f"{{{loop_target}}}")
+                else:
+                    formatted.append(part)
+                continue
+            formatted.append(part)
+        return formatted
+
+    def _head_dim_expr(self) -> str:
+        hidden_size = (
+            "int(getattr(config, 'hidden_size', None) "
+            "if getattr(config, 'hidden_size', None) is not None "
+            "else self._model_config.get('hidden_size', 0))"
+        )
+        num_heads = (
+            "max(1, int(getattr(config, 'num_attention_heads', None) "
+            "if getattr(config, 'num_attention_heads', None) is not None "
+            "else self._model_config.get('num_attention_heads', 1)))"
+        )
+        derived = f"({hidden_size} // {num_heads})"
+        return (
+            "(getattr(config, 'head_dim', None) "
+            "if getattr(config, 'head_dim', None) is not None "
+            f"else self._model_config.get('head_dim', {derived}))"
+        )
+
+    def _query_pre_attn_scalar_expr(self) -> str:
+        return (
+            "getattr(config, 'query_pre_attn_scalar', "
+            f"self._model_config.get('query_pre_attn_scalar', {self._head_dim_expr()}))"
         )
 
     def _node_input_dim_expr(self, node: GraphNode) -> str:
@@ -2224,7 +2386,7 @@ class _DirectVLLMEmitter(_DirectTorchEmitter):
                                 if py_expr:
                                     return py_expr
             num_heads = self._config_expr("num_attention_heads")
-            head_dim = self._config_expr("head_dim")
+            head_dim = self._head_dim_expr()
             return f"({num_heads} * {head_dim})"
         typed = self._node_input_dim_from_type(node)
         if typed is not None:

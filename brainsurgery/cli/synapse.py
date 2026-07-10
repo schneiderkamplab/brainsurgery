@@ -947,6 +947,24 @@ def axon_test(
             "backend:intrinsic[,intrinsic...] for an allow-list."
         ),
     ),
+    vllm_gpu_memory_utilization: float | None = typer.Option(
+        None,
+        "--vllm-gpu-memory-utilization",
+        min=0.0,
+        max=1.0,
+        help=(
+            "GPU memory utilization passed to vLLM LLM(...) when "
+            "--axon-backend codegen2-vllm is used."
+        ),
+    ),
+    vllm_logprobs: int | None = typer.Option(
+        None,
+        "--vllm-logprobs",
+        help=(
+            "Request top-k vLLM logprobs for prompt and generated tokens. "
+            "Use -1 for full-vocabulary logprobs if vLLM permits it."
+        ),
+    ),
     builtins_overlays: list[str] = typer.Option(
         [],
         "--builtins-overlay",
@@ -997,6 +1015,8 @@ def axon_test(
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
+            vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+            vllm_logprobs=vllm_logprobs,
             builtins_overlays=builtins_overlays,
         )
     except ValueError as exc:
@@ -1225,6 +1245,24 @@ def axon_benchmark(
             "backend:intrinsic[,intrinsic...] for an allow-list."
         ),
     ),
+    vllm_gpu_memory_utilization: float | None = typer.Option(
+        None,
+        "--vllm-gpu-memory-utilization",
+        min=0.0,
+        max=1.0,
+        help=(
+            "GPU memory utilization passed to vLLM LLM(...) when "
+            "--axon-backend codegen2-vllm is used."
+        ),
+    ),
+    vllm_logprobs: int | None = typer.Option(
+        None,
+        "--vllm-logprobs",
+        help=(
+            "Request top-k vLLM logprobs for prompt and generated tokens. "
+            "Use -1 for full-vocabulary logprobs if vLLM permits it."
+        ),
+    ),
     builtins_overlays: list[str] = typer.Option(
         [],
         "--builtins-overlay",
@@ -1354,6 +1392,8 @@ def axon_benchmark(
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
+            vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+            vllm_logprobs=vllm_logprobs,
             builtins_overlays=builtins_overlays,
             backend_builtins_overlays=backend_builtins_overlays,
             skip_hf=skip_hf,
