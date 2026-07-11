@@ -1,0 +1,98 @@
+inputs:
+- models/test/qwen3-1.7b-base
+output:
+  path: models/test/qwen3_1_7b_base_validation
+  shard: 100MB
+transforms:
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- copy:
+    from: model.norm.weight::[:8]
+- copy:
+    from: model.norm.weight::[:8]
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- reshape:
+    from: demo.cast16
+- null
+- null
+- null
+- null
+- copy:
+    from: model.norm.weight::[:8]
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- copy:
+    from: demo.matmul
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- null
+- load:
+    path: models/test/qwen3-1.7b-base
+- null
+- null
+- execute:
+    transforms:
+    - copy:
+        from: model::model.norm.weight::[:8]

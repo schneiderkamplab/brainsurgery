@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-
-from test_inference import _choose_device, _load_tokenizer, load_gpt2_brainsurgery
+from test_inference import (
+	DEFAULT_PROMPT_FILE,
+	MODEL_PRESETS,
+	_choose_device,
+	_effective_dtype_name,
+	_encode_prompt,
+	_list_model_presets,
+	_load_tokenizer,
+	_read_prompts,
+	_resolve_validation_config,
+	load_model,
+)
 
 
 def _perplexity(model: torch.nn.Module, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> float:
@@ -27,76 +38,29 @@ def _last_token_logits(
 	return logits[0, last_index, :].detach().float().cpu()
 
 
-def _read_prompts(prompt_args: list[str], prompt_file: Path | None) -> list[str]:
-	if prompt_args:
-		return prompt_args
-	if prompt_file is not None:
-		lines = [line.strip() for line in prompt_file.read_text(encoding="utf-8").splitlines()]
-		prompts = [line for line in lines if line]
-		if not prompts:
-			raise RuntimeError(f"prompt file has no non-empty lines: {prompt_file}")
-		return prompts
-	return [
-        "The history of machine learning is",
-        "In a distant future, humans and AI",
-        "Write a short Python function to compute Fibonacci numbers:",
-        "A recipe for a perfect breakfast includes",
-        "Translate the following sentence into French:",
-        "Summarize the main idea of a story about a brave knight:",
-        "The sound of rain on a window feels like",
-        "List three ways to improve memory retention:",
-        "Describe a color to someone who has never seen:",
-        "The economic impact of inflation can be explained as",
-        "Write a haiku about autumn leaves:",
-        "Debug the following code snippet:",
-        "A conversation between a cat and a dog might go like",
-        "Explain the rules of chess in simple terms:",
-        "The strangest dream I ever had involved",
-        "Provide step-by-step instructions for tying a tie:",
-        "The philosophy of existentialism suggests that",
-        "Generate a creative name for a startup that",
-        "Describe the taste of coffee to a robot:",
-        "What would happen if humans could breathe underwater?",
-        "Write a motivational quote about persistence:",
-        "The main ingredients in a classic pizza are",
-        "Explain how GPS navigation works:",
-        "Create a fictional planet where",
-        "The difference between RAM and ROM is",
-        "Write a short email requesting a meeting:",
-        "The cultural significance of music in society is",
-        "Describe a sunset using only metaphors:",
-        "List the steps to solve a quadratic equation:",
-        "Imagine a world without electricity and describe",
-        "The role of humor in communication is",
-        "Write a tweet about a new technological breakthrough:",
-        "Explain the concept of supply and demand:",
-        "A mysterious package arrives containing",
-        "The benefits and drawbacks of remote work include",
-        "Describe how to train a dog to sit:",
-        "The importance of sleep for health is",
-        "Write a short sci-fi story starting with a glitch:",
-        "Explain how photosynthesis differs from respiration:",
-        "The most challenging puzzle I encountered was",
-        "Create a dialogue between a teacher and a student about math:",
-        "List five tips for effective public speaking:",
-        "Describe the feeling of standing on a mountain peak:",
-        "The history of the internet began when",
-        "Write a product description for a smart watch:",
-        "Explain the concept of gravity to a child:",
-        "A detective investigates a crime scene where",
-        "The role of emotions in decision-making is",
-        "Write a short bedtime story for children:",
-        "Predict the future of transportation in 100 years:"
-    ]
-
-
 def main() -> None:
 	parser = argparse.ArgumentParser(description="Quantitative regression check before vs after brainsurgery")
-	parser.add_argument("--base-model-dir", type=Path, default=Path("models/test/gpt2"))
-	parser.add_argument("--test-model-dir", type=Path, default=Path("models/test/validation"))
+	parser.add_argument("--model-preset", choices=sorted(MODEL_PRESETS), default="gpt2-validation")
+	parser.add_argument("--list-model-presets", action="store_true", default=False)
+	parser.add_argument("--base-model-dir", dest="base_model", type=str, default=None)
+	parser.add_argument("--base-model", dest="base_model", type=str, default=None)
+	parser.add_argument("--test-model-dir", dest="model", type=str, default=None)
+	parser.add_argument("--model-dir", dest="model", type=str, default=None)
+	parser.add_argument("--model", dest="model", type=str, default=None)
+	parser.add_argument(
+		"--model-loader",
+		choices=("gpt2-brainsurgery", "hf-causal-lm", "hf-mistral3-conditional-generation"),
+		default=None,
+	)
+	parser.add_argument("--tokenizer-source", type=str, default=None)
+	parser.add_argument("--tokenizer-loader", choices=("auto",), default=None)
+	parser.add_argument("--dtype", choices=("auto", "float32", "float16", "bfloat16"), default="auto")
+	parser.add_argument("--local-files-only", action="store_true", default=False)
+	parser.add_argument("--trust-remote-code", action=argparse.BooleanOptionalAction, default=True)
+	parser.add_argument("--print-config", action="store_true", default=False)
 	parser.add_argument("--device", type=str, default=None)
 	parser.add_argument("--prompt", action="append", default=[])
-	parser.add_argument("--prompt-file", type=Path, default=None)
+	parser.add_argument("--prompt-file", type=Path, default=DEFAULT_PROMPT_FILE)
 	parser.add_argument(
 		"--min-cosine",
 		type=float,
@@ -110,25 +74,61 @@ def main() -> None:
 		help="Fail if mean(max(ppl_a,ppl_b)/min(ppl_a,ppl_b)) is above this",
 	)
 	args = parser.parse_args()
+	if args.list_model_presets:
+		_list_model_presets()
+		return
+	resolved_config = _resolve_validation_config(args)
+	if args.print_config:
+		print(json.dumps(resolved_config, indent=2))
+		return
 
 	device = _choose_device(args.device)
+	effective_dtype_name = _effective_dtype_name(args.dtype, device)
+	if effective_dtype_name != args.dtype:
+		print(
+			"Using dtype=float32 because Apple MPS does not support bfloat16 "
+			f"for this validation path (requested dtype={args.dtype})."
+		)
 	prompts = _read_prompts(args.prompt, args.prompt_file)
 
-	tokenizer = _load_tokenizer(args.base_model_dir)
-	base_model = load_gpt2_brainsurgery(args.base_model_dir, device)
-	test_model = load_gpt2_brainsurgery(args.test_model_dir, device)
+	fallback_to_gpt2 = resolved_config["model_loader"] == "gpt2-brainsurgery"
+	tokenizer = _load_tokenizer(
+		resolved_config["tokenizer_source"],
+		local_files_only=args.local_files_only if not fallback_to_gpt2 else True,
+		trust_remote_code=args.trust_remote_code,
+		fallback_to_gpt2=fallback_to_gpt2,
+	)
+	base_model = load_model(
+		resolved_config["base_model"],
+		device,
+		model_loader=resolved_config["model_loader"],
+		dtype_name=effective_dtype_name,
+		config_source=resolved_config.get("config_source"),
+		trust_remote_code=args.trust_remote_code,
+		local_files_only=args.local_files_only,
+	)
+	test_model = load_model(
+		resolved_config["test_model"],
+		device,
+		model_loader=resolved_config["model_loader"],
+		dtype_name=effective_dtype_name,
+		config_source=resolved_config.get("config_source"),
+		trust_remote_code=args.trust_remote_code,
+		local_files_only=args.local_files_only,
+	)
 
 	cosines: list[float] = []
 	ppl_ratios: list[float] = []
 	top1_matches = 0
 
 	print(f"Device: {device}")
-	print(f"Base model: {args.base_model_dir}")
-	print(f"Test model: {args.test_model_dir}")
+	print(f"Model preset: {args.model_preset}")
+	print(f"Model loader: {resolved_config['model_loader']}")
+	print(f"Base model: {resolved_config['base_model']}")
+	print(f"Test model: {resolved_config['test_model']}")
 
 	for idx, prompt in enumerate(prompts, start=1):
-		encoded = tokenizer(prompt, return_tensors="pt")
-		encoded = {k: v.to(device) for k, v in encoded.items()}
+		encoded = _encode_prompt(tokenizer, prompt, device)
 
 		base_ppl = _perplexity(base_model, encoded["input_ids"], encoded["attention_mask"])
 		test_ppl = _perplexity(test_model, encoded["input_ids"], encoded["attention_mask"])
