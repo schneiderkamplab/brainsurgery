@@ -2,6 +2,7 @@
 __pycache__
 /models
 /log/
+/validation/model_outputs.json
 .brainsurgery
 
 # Python cache/build artifacts
