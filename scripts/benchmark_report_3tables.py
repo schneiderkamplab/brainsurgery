@@ -60,6 +60,9 @@ def _load_result_json_rows(log_root: Path) -> list[dict[str, str]]:
         checkpoint = data.get("checkpoint_id") or data.get("checkpoint")
         if not axon or not checkpoint:
             return None
+        vllm_metrics = data.get("vllm_top_logprobs_metrics")
+        if not isinstance(vllm_metrics, dict):
+            vllm_metrics = {}
         return {
             "backend": value(data, "axon_backend", "backend"),
             "axon": str(axon),
@@ -73,6 +76,10 @@ def _load_result_json_rows(log_root: Path) -> list[dict[str, str]]:
             "hf_time": value(data, "hf_time", "hf_time_s"),
             "axon_time": value(data, "axon_time", "axon_time_s"),
             "speed_ratio_axon_over_hf": value(data, "speed_ratio_axon_over_hf"),
+            "vllm_logprobs": value(data, "vllm_logprobs"),
+            "vllm_top_logprobs_top1_eq": value(vllm_metrics, "top1_eq"),
+            "vllm_top_logprobs_hf_topk_covered": value(vllm_metrics, "hf_topk_covered"),
+            "vllm_top_logprobs_max_abs_diff": value(vllm_metrics, "max_abs_diff"),
             "_result_json_path": str(path),
         }
 
@@ -166,6 +173,12 @@ def _drop_dry_run_rows_if_real_rows_exist(rows: list[dict[str, str]]) -> list[di
 
 
 def _is_issue_row(row: dict[str, str], abs_threshold: float) -> bool:
+    if _is_skip_row(row):
+        return False
+    vllm_issue = _vllm_issue_if_available(row, abs_threshold)
+    if vllm_issue is not None:
+        return vllm_issue
+
     top1 = _get(row, "masked_top1_eq", "masked top-1 eq")
     abs_diff_raw = _get(row, "masked_max_abs_diff", "masked max abs diff")
     err = _get(row, "error", "exception", "traceback")
@@ -180,6 +193,85 @@ def _is_issue_row(row: dict[str, str], abs_threshold: float) -> bool:
         except ValueError:
             return True
     return False
+
+
+def _is_skip_row(row: dict[str, str]) -> bool:
+    fallback = _get(row, "fallback")
+    top1 = _get(row, "masked_top1_eq", "masked top-1 eq")
+    return fallback.startswith("skip") or top1.upper() == "SKIP"
+
+
+def _is_true_text(raw: str) -> bool:
+    return raw.strip().lower() == "true"
+
+
+def _is_false_or_error_text(raw: str) -> bool:
+    return raw.strip().lower() in {"false", "error"}
+
+
+def _has_vllm_quality(row: dict[str, str]) -> bool:
+    return any(
+        _get(row, name)
+        for name in (
+            "vllm_top_logprobs_top1_eq",
+            "vllm_top_logprobs_hf_topk_covered",
+            "vllm_top_logprobs_max_abs_diff",
+        )
+    )
+
+
+def _vllm_issue_if_available(row: dict[str, str], abs_threshold: float) -> bool | None:
+    """Return issue status for rows with vLLM top-logprob metrics.
+
+    vLLM rows intentionally do not expose dense logits, so masked-logit metrics
+    are usually N/A. When top-logprob metrics are present, they are the quality
+    signal for reporting.
+    """
+
+    err = _get(row, "error", "exception", "traceback")
+    top1 = _get(row, "vllm_top_logprobs_top1_eq")
+    covered = _get(row, "vllm_top_logprobs_hf_topk_covered")
+    abs_diff_raw = _get(row, "vllm_top_logprobs_max_abs_diff")
+    if err:
+        return True
+    if not _has_vllm_quality(row):
+        return None
+    if top1 and not _is_true_text(top1):
+        return True
+    if covered and not _is_true_text(covered):
+        return True
+    if abs_diff_raw:
+        try:
+            return float(abs_diff_raw) >= abs_threshold
+        except ValueError:
+            return True
+    return False
+
+
+def _row_quality_top1_bad(row: dict[str, str]) -> bool:
+    if _is_skip_row(row):
+        return False
+    if _has_vllm_quality(row):
+        top1 = _get(row, "vllm_top_logprobs_top1_eq")
+        covered = _get(row, "vllm_top_logprobs_hf_topk_covered")
+        return _is_false_or_error_text(top1) or _is_false_or_error_text(covered)
+    top1 = _get(row, "masked_top1_eq", "masked top-1 eq")
+    return bool(top1) and top1 != "True" and top1.upper() != "ERROR"
+
+
+def _row_quality_abs_bad(row: dict[str, str], abs_threshold: float) -> bool:
+    if _is_skip_row(row):
+        return False
+    if _has_vllm_quality(row):
+        abs_diff_raw = _get(row, "vllm_top_logprobs_max_abs_diff")
+    else:
+        abs_diff_raw = _get(row, "masked_max_abs_diff", "masked max abs diff")
+    if not abs_diff_raw or abs_diff_raw.upper() == "ERROR":
+        return False
+    try:
+        return float(abs_diff_raw) >= abs_threshold
+    except ValueError:
+        return True
 
 
 def _is_generic_axon(axon_path: str) -> bool:
@@ -466,10 +558,13 @@ def main() -> int:
     progress_label = args.label.strip() or log_root.name
 
     issue_rows = [row for row in rows if _is_issue_row(row, args.abs_threshold)]
+    skipped_rows = sum(1 for row in rows if _is_skip_row(row))
     error_rows = 0
     top1_bad = 0
     abs_bad = 0
     for row in rows:
+        if _is_skip_row(row):
+            continue
         top1 = _get(row, "masked_top1_eq", "masked top-1 eq")
         abs_diff_raw = _get(row, "masked_max_abs_diff", "masked max abs diff")
         err = _get(row, "error", "exception", "traceback")
@@ -477,15 +572,11 @@ def main() -> int:
         if has_error:
             error_rows += 1
             continue
-        if top1 and top1 != "True":
+        if _row_quality_top1_bad(row):
             top1_bad += 1
-        if abs_diff_raw:
-            try:
-                if float(abs_diff_raw) >= args.abs_threshold:
-                    abs_bad += 1
-            except ValueError:
-                abs_bad += 1
-    healthy = max(completed - len(issue_rows), 0)
+        if _row_quality_abs_bad(row, args.abs_threshold):
+            abs_bad += 1
+    healthy = max(completed - skipped_rows - len(issue_rows), 0)
     timed = _timed_rows(rows)
     timed_count = len(timed)
     axon_faster = sum(1 for _row, _hf, _axon, ratio in timed if ratio < 1.0)
@@ -500,6 +591,7 @@ def main() -> int:
             elapsed,
             eta,
             str(healthy),
+            str(skipped_rows),
             str(error_rows),
             str(top1_bad),
             str(abs_bad),
@@ -518,6 +610,7 @@ def main() -> int:
             "Elapsed",
             "ETA",
             "Healthy",
+            "Skipped",
             "Error rows",
             "masked_top1_eq != True",
             "masked_max_abs_diff >= 1e-3",
@@ -573,10 +666,13 @@ def main() -> int:
                 _get(row, "fallback"),
                 _get(row, "masked_top1_eq", "masked top-1 eq"),
                 _get(row, "masked_max_abs_diff", "masked max abs diff"),
+                _get(row, "vllm_top_logprobs_top1_eq"),
+                _get(row, "vllm_top_logprobs_hf_topk_covered"),
+                _get(row, "vllm_top_logprobs_max_abs_diff"),
             ]
         )
     if not issue_table_rows:
-        issue_table_rows = [["(none)", "", "", "", ""]]
+        issue_table_rows = [["(none)", "", "", "", "", "", "", "", ""]]
     _print_markdown_table(
         [
             "Axon",
@@ -585,6 +681,9 @@ def main() -> int:
             "Fallback",
             "masked_top1_eq",
             "masked_max_abs_diff",
+            "vllm_top_logprobs_top1_eq",
+            "vllm_top_logprobs_hf_topk_covered",
+            "vllm_top_logprobs_max_abs_diff",
         ],
         issue_table_rows,
     )
@@ -656,10 +755,12 @@ def main() -> int:
                 f"{ratio:.3f}",
                 _get(row, "masked_top1_eq", "masked top-1 eq"),
                 _get(row, "masked_max_abs_diff", "masked max abs diff"),
+                _get(row, "vllm_top_logprobs_top1_eq"),
+                _get(row, "vllm_top_logprobs_max_abs_diff"),
             ]
         )
     if not slower_table_rows:
-        slower_table_rows = [["(none)", "", "", "", "", "", "", ""]]
+        slower_table_rows = [["(none)", "", "", "", "", "", "", "", "", ""]]
     _print_markdown_table(
         [
             "Axon",
@@ -670,6 +771,8 @@ def main() -> int:
             "Axon/HF",
             "masked_top1_eq",
             "masked_max_abs_diff",
+            "vllm_top_logprobs_top1_eq",
+            "vllm_top_logprobs_max_abs_diff",
         ],
         slower_table_rows,
     )

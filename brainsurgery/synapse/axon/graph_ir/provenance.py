@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 from weakref import WeakValueDictionary
@@ -136,6 +137,7 @@ class GraphSdpaGqaFact:
     keep: str
     default_scale: bool = True
     scale: GraphProvenance | None = None  # None = default 1/sqrt(HD)
+    rel_bias: str | None = None
 
 
 @dataclass(frozen=True)
@@ -896,6 +898,8 @@ def _derived_facts(provenance: GraphProvenance) -> tuple[GraphDerivedProvenanceF
         facts.append(GraphDerivedProvenanceFact("additive_mask_from_keep", keep))
     if _is_nonempty_keep_rows(provenance):
         facts.append(GraphDerivedProvenanceFact("nonempty_keep_rows", provenance))
+    if _is_linear_position_bias(provenance):
+        facts.append(GraphDerivedProvenanceFact("linear_position_bias", provenance))
     sdpa = _sdpa_gqa_fact(provenance)
     if sdpa is not None:
         facts.append(GraphDerivedProvenanceFact("sdpa_gqa", sdpa))
@@ -980,6 +984,28 @@ def _contains_op(provenance: GraphProvenance, op_name: str, *, depth: int = 12) 
     return any(_contains_op(arg, op_name, depth=depth - 1) for arg in provenance.args)
 
 
+def _contains_any_op(provenance: GraphProvenance, op_names: set[str], *, depth: int = 16) -> bool:
+    if depth <= 0:
+        return False
+    if provenance.kind == "op" and provenance.op in op_names:
+        return True
+    return any(_contains_any_op(arg, op_names, depth=depth - 1) for arg in provenance.args)
+
+
+def _is_linear_position_bias(provenance: GraphProvenance) -> bool:
+    """Conservatively recognize the primitive structure of ALiBi position bias."""
+    if provenance.kind != "op" or provenance.op != "core.binary.*" or len(provenance.args) != 2:
+        return False
+    # Positions.linear_position_bias computes a product of head slopes with a
+    # cumsum-derived token-position tensor, optionally multiplied by a scalar.
+    has_position = _contains_op(provenance, "_cumsum", depth=16)
+    has_slope = _contains_any_op(provenance, {"_exp", "_pow"}, depth=16) and _contains_op(
+        provenance, "_arange", depth=16
+    )
+    has_shape_to_bias = _contains_op(provenance, "_reshape", depth=16)
+    return has_position and has_slope and has_shape_to_bias
+
+
 def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     standard = _standard_sdpa_fact(provenance)
     if standard is not None:
@@ -1005,6 +1031,7 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     softmax_in = _match_probs_slice_softmax(probs)
     if softmax_in is None:
         return None
+    softmax_in, rel_bias = _match_optional_rel_bias(softmax_in)
     scores_scaled, additive_mask_g = _match_binary_op(softmax_in, "core.binary.+")
     if scores_scaled is None or additive_mask_g is None:
         return None
@@ -1014,10 +1041,7 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     scores, scale = _match_binary_op(scores_scaled, "core.binary.*")
     if scores is None or scale is None:
         return None
-    if not _is_default_scale(scale):
-        is_default = False
-    else:
-        is_default = True
+    is_default, scale = _match_optional_default_scale(scale)
     q_name, k_name = _match_qk_scores(scores)
     if q_name is None or k_name is None:
         return None
@@ -1029,6 +1053,7 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
         keep=keep_name,
         default_scale=is_default,
         scale=None if is_default else scale,
+        rel_bias=rel_bias,
     )
 
 
@@ -1051,6 +1076,7 @@ def _standard_sdpa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     softmax_in = _match_probs_slice_softmax(probs)
     if softmax_in is None:
         return None
+    softmax_in, rel_bias = _match_optional_rel_bias(softmax_in)
     scores_scaled, additive_mask = _match_binary_op(softmax_in, "core.binary.+")
     if scores_scaled is None or additive_mask is None:
         return None
@@ -1066,7 +1092,7 @@ def _standard_sdpa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     q_name, k_name = _match_standard_qk_scores(scores)
     if q_name is None or k_name is None:
         return None
-    is_default = _is_default_scale(scale)
+    is_default, scale = _match_optional_default_scale(scale)
     return GraphSdpaGqaFact(
         q=q_name,
         k=k_name,
@@ -1075,7 +1101,60 @@ def _standard_sdpa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
         keep=keep_name,
         default_scale=is_default,
         scale=None if is_default else scale,
+        rel_bias=rel_bias,
     )
+
+
+def _match_optional_default_scale(provenance: GraphProvenance) -> tuple[bool, GraphProvenance | None]:
+    if _is_default_scale(provenance):
+        return True, None
+    if provenance.kind != "op" or provenance.op != "core.select" or len(provenance.args) != 3:
+        return False, provenance
+    cond, then_value, else_value = provenance.args
+    if cond.kind != "op" or cond.op != "core.binary.==" or len(cond.args) != 2:
+        return False, provenance
+    null = _make_provenance("literal", value=None)
+    scale_input: GraphProvenance | None = None
+    if cond.args[0].kind == "input" and cond.args[1] == null:
+        scale_input = cond.args[0]
+    elif cond.args[1].kind == "input" and cond.args[0] == null:
+        scale_input = cond.args[1]
+    if scale_input is None:
+        return False, provenance
+    if else_value == scale_input:
+        return False, scale_input
+    return False, provenance
+
+
+def _match_optional_rel_bias(provenance: GraphProvenance) -> tuple[GraphProvenance, str | None]:
+    """Strip `rel_bias == null ? base : base + rel_bias` from attention scores."""
+    left, right = _match_binary_op(provenance, "core.binary.+")
+    if left is not None and right is not None:
+        if right.kind == "input":
+            return left, right.name
+        if left.kind == "input":
+            return right, left.name
+    if provenance.kind != "op" or provenance.op != "core.select" or len(provenance.args) != 3:
+        return provenance, None
+    cond, then_value, else_value = provenance.args
+    if cond.kind != "op" or cond.op != "core.binary.==" or len(cond.args) != 2:
+        return provenance, None
+    rel_bias: GraphProvenance | None = None
+    null = _make_provenance("literal", value=None)
+    if cond.args[0].kind == "input" and cond.args[1] == null:
+        rel_bias = cond.args[0]
+    elif cond.args[1].kind == "input" and cond.args[0] == null:
+        rel_bias = cond.args[1]
+    if rel_bias is None:
+        return provenance, None
+    left, right = _match_binary_op(else_value, "core.binary.+")
+    if left is None or right is None:
+        return provenance, None
+    if right == rel_bias and left == then_value:
+        return then_value, rel_bias.name
+    if left == rel_bias and right == then_value:
+        return then_value, rel_bias.name
+    return provenance, None
 
 
 def _match_additive_mask_from_keep(provenance: GraphProvenance) -> str | None:
@@ -1108,17 +1187,25 @@ def _match_binary_op(
     provenance: GraphProvenance,
     op_name: str,
 ) -> tuple[GraphProvenance | None, GraphProvenance | None]:
+    provenance = _strip_alias(provenance)
     if provenance.kind == "op" and provenance.op == op_name and len(provenance.args) == 2:
         return provenance.args[0], provenance.args[1]
     return None, None
 
 
 def _match_probs_slice_softmax(provenance: GraphProvenance) -> GraphProvenance | None:
+    provenance = _strip_alias(provenance)
     if provenance.kind == "op" and provenance.op == "_slice" and provenance.args:
-        provenance = provenance.args[0]
+        provenance = _strip_alias(provenance.args[0])
     if provenance.kind == "op" and provenance.op == "_softmax" and provenance.args:
         return provenance.args[0]
     return None
+
+
+def _strip_alias(provenance: GraphProvenance) -> GraphProvenance:
+    while provenance.kind == "op" and provenance.op == "core.alias" and len(provenance.args) == 1:
+        provenance = provenance.args[0]
+    return provenance
 
 
 def _match_qk_scores(provenance: GraphProvenance) -> tuple[str | None, str | None]:
@@ -1170,7 +1257,9 @@ def _is_default_scale(provenance: GraphProvenance) -> bool:
     if provenance.kind != "op" or provenance.op != "core.binary./" or len(provenance.args) != 2:
         return False
     numerator, denominator = provenance.args
-    if numerator != _make_provenance("literal", value=1.0):
+    if numerator.kind != "literal" or not isinstance(numerator.value, int | float):
+        return False
+    if not math.isclose(float(numerator.value), 1.0):
         return False
     return denominator.kind == "op" and denominator.op == "_sqrt" and len(denominator.args) == 1
 

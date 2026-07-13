@@ -15,12 +15,22 @@ class TeeWriter:
 
     def write(self, data: str) -> int:
         for stream in self._streams:
-            stream.write(data)
+            try:
+                stream.write(data)
+            except ValueError:
+                if bool(getattr(stream, "closed", False)):
+                    continue
+                raise
         return len(data)
 
     def flush(self) -> None:
         for stream in self._streams:
-            stream.flush()
+            try:
+                stream.flush()
+            except ValueError:
+                if bool(getattr(stream, "closed", False)):
+                    continue
+                raise
 
     def isatty(self) -> bool:
         for stream in self._streams:
@@ -33,18 +43,37 @@ class TeeWriter:
                     continue
         return False
 
+    def fileno(self) -> int:
+        for stream in self._streams:
+            fileno = getattr(stream, "fileno", None)
+            if callable(fileno):
+                try:
+                    return int(fileno())
+                except Exception:
+                    continue
+        raise OSError("no underlying stream exposes fileno")
+
 
 class LogFileWriter:
     def __init__(self, stream: Any) -> None:
         self._stream = stream
 
     def write(self, data: str) -> int:
+        if bool(getattr(self._stream, "closed", False)):
+            return len(data)
         normalized = data.replace("\r", "\n")
         self._stream.write(normalized)
         return len(data)
 
     def flush(self) -> None:
+        if bool(getattr(self._stream, "closed", False)):
+            return
         self._stream.flush()
+
+    def fileno(self) -> int:
+        if bool(getattr(self._stream, "closed", False)):
+            raise OSError("underlying log stream is closed")
+        return int(self._stream.fileno())
 
 
 class ParentLogger:

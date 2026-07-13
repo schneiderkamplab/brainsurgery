@@ -132,6 +132,40 @@ main x = do
     assert "if self._profile_enabled" not in text
 
 
+def test_synapse_codegen_dump_can_emit_vllm_python(tmp_path: Path) -> None:
+    source = tmp_path / "main.axon"
+    source.write_text(
+        """
+{-# MAIN "main" #-}
+
+main :: Int -> Int
+main x = do
+  y <- x + 1
+  return y
+"""
+    )
+    output = tmp_path / "generated_vllm.py"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "synapse",
+            "axon-codegen-dump",
+            str(source),
+            str(output),
+            "--main-module",
+            "main",
+            "--backend",
+            "codegen2-vllm",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    text = output.read_text()
+    assert "class AxonGeneratedModel" in text
+    assert "vLLM handles generation externally" in text
+
+
 def test_synapse_test_exposes_ast_and_graph_optimizer_flags_only() -> None:
     help_text = _help("axon-test")
     assert "--optimize-ast" in help_text
@@ -165,3 +199,4 @@ def test_synapse_codegen_dump_exposes_codegen2_flags() -> None:
     assert "--builtins-overlay" in help_text
     assert "codegen2-torch" in help_text
     assert "codegen2-triton" in help_text
+    assert "codegen2-vllm" in help_text

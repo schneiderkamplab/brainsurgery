@@ -4821,6 +4821,7 @@ class _DirectTorchEmitter:
                     and not isinstance(actual_bind_type, TypeOptional)
                 ):
                     actual_bind_type = TypeOptional(actual_bind_type)
+                actual_required_dim_names = callee_required_dim_names - set(dim_subst)
                 _emit_bind_nested_shape_symbols(
                     lines,
                     add=self._add,
@@ -4828,7 +4829,7 @@ class _DirectTorchEmitter:
                     value_expr=temp_name,
                     local=inline_local,
                     protected=self.global_symbol_names,
-                    required_names=callee_required_dim_names,
+                    required_names=actual_required_dim_names,
                     indent=indent,
                     guard_nullable=_operand_may_be_none(operand) or isinstance(param.type_expr, TypeOptional),
                 )
@@ -5396,6 +5397,7 @@ class _DirectTorchEmitter:
                 and not isinstance(actual_bind_type, TypeOptional)
             ):
                 actual_bind_type = TypeOptional(actual_bind_type)
+            actual_required_dim_names = callee_required_dim_names - set(dim_subst)
             _emit_bind_nested_shape_symbols(
                 lines,
                 add=self._add,
@@ -5403,7 +5405,7 @@ class _DirectTorchEmitter:
                 value_expr=temp_name,
                 local=inline_local,
                 protected=self.global_symbol_names,
-                required_names=callee_required_dim_names,
+                required_names=actual_required_dim_names,
                 indent=indent,
                 guard_nullable=_operand_may_be_none(operand) or isinstance(param.type_expr, TypeOptional),
             )
@@ -6056,10 +6058,10 @@ class _DirectTorchEmitter:
             "pow": lambda: f"(torch.pow({args[0]}, {args[1]}) if torch.is_tensor({args[0]}) else ({args[0]} ** {args[1]}))",
             "floor": lambda: f"torch.floor({args[0]}) if torch.is_tensor({args[0]}) else int({args[0]} // 1)",
             "sqrt": lambda: f"torch.sqrt({args[0]}) if torch.is_tensor({args[0]}) else ({args[0]} ** 0.5)",
-            "sin": lambda: f"torch.sin({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').sin({float_arg(0)})",
-            "cos": lambda: f"torch.cos({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').cos({float_arg(0)})",
-            "exp": lambda: f"torch.exp({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').exp({float_arg(0)})",
-            "log": lambda: f"(torch.log({args[0]}) if torch.is_tensor({args[0]}) else __import__('math').log(float({args[0]})))",
+            "sin": lambda: f"torch.sin({args[0]}) if torch.is_tensor({args[0]}) else math.sin({float_arg(0)})",
+            "cos": lambda: f"torch.cos({args[0]}) if torch.is_tensor({args[0]}) else math.cos({float_arg(0)})",
+            "exp": lambda: f"torch.exp({args[0]}) if torch.is_tensor({args[0]}) else math.exp({float_arg(0)})",
+            "log": lambda: f"(torch.log({args[0]}) if torch.is_tensor({args[0]}) else math.log(float({args[0]})))",
             "cast": lambda: f"{args[0]}.to(dtype=getattr(torch, str({args[1]})))",
             "cast_like": lambda: f"{args[0]}.to(device={args[1]}.device, dtype={args[1]}.dtype)",
             "dtype_value": lambda: f"{{'min': torch.finfo({args[0]}.dtype).min, 'max': torch.finfo({args[0]}.dtype).max, 'eps': torch.finfo({args[0]}.dtype).eps, 'tiny': torch.finfo({args[0]}.dtype).tiny, 'inf': float('inf'), '-inf': float('-inf')}}[str({args[1]})]",
@@ -6317,6 +6319,7 @@ def emit_model_code_from_graph_ir(
         header.append("import time")
     header.extend(
         [
+            "import math",
             "import torch",
             "from torch import nn",
             "from torch.nn import functional as F",

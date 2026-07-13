@@ -6,7 +6,7 @@
 
 import Activations (gelu_new)
 
-import Attention (attention, merge_heads, split_qkv_heads)
+import Attention (attention_with_rel_bias_scaled, merge_heads, split_qkv_heads)
 
 import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 
@@ -55,7 +55,7 @@ bloom_block x keep pos_bias past_kv = do
     k, v, new_kv <- Cache.update past_kv k v
     head_dim <- size q 3
     scale <- 1.0 / sqrt head_dim
-    a <- attention q k v keep rel_bias=pos_bias scale=scale |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
+    a <- attention_with_rel_bias_scaled q k v keep pos_bias scale |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
     return a, new_kv
   x <- attn_res + a
   xn <- NN.layernorm@post_attention_layernorm x eps=EPS

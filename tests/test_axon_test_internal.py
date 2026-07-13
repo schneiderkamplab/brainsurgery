@@ -16,6 +16,43 @@ def test_extract_logits_accepts_namespace_logits() -> None:
     assert axon_test_mod._extract_logits(output) is logits
 
 
+class _GenerateCompatibilityProbe:
+    def __call__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        return None
+
+    def forward(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        return None
+
+    def _update_model_kwargs_for_generation(  # type: ignore[no-untyped-def]
+        self, outputs, *args, **kwargs
+    ):
+        del outputs, args, kwargs
+        return {}
+
+    def generate(self, input_ids=None) -> str:  # type: ignore[no-untyped-def]
+        del input_ids
+        patched = (
+            type(self).__call__ is not _GenerateCompatibilityProbe.__call__
+            or type(self).forward is not _GenerateCompatibilityProbe.forward
+            or "_update_model_kwargs_for_generation" in self.__dict__
+        )
+        return "patched" if patched else "unpatched"
+
+
+def test_call_generate_compatible_does_not_patch_successful_generate() -> None:
+    model = _GenerateCompatibilityProbe()
+
+    result = axon_test_mod._call_generate_compatible(
+        model,
+        input_ids=torch.tensor([[1, 2, 3]]),
+        unsupported_kwarg="filtered",
+    )
+
+    assert result == "unpatched"
+
+
 def test_should_trust_remote_code_for_local_custom_code_artifacts(tmp_path) -> None:  # type: ignore[no-untyped-def]
     (tmp_path / "modeling_phi3_small.py").write_text("# local custom model\n", encoding="utf-8")
 

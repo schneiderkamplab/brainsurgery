@@ -13,6 +13,7 @@ import re
 import shutil
 import sys
 import time
+import ctypes
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, suppress
 from copy import deepcopy
@@ -22,6 +23,47 @@ from types import MethodType, ModuleType
 from typing import Any, cast
 
 import safetensors
+
+
+def _bootstrap_python_nvidia_cuda_libs() -> None:
+    """Expose CUDA libraries shipped by Python NVIDIA wheels to dlopen users.
+
+    Running via a direct PATH override does not always populate LD_LIBRARY_PATH
+    like an activated environment would. PyTorch/NVRTC can then find libnvrtc
+    but fail to find its matching libnvrtc-builtins dependency during runtime
+    kernel compilation. Preloading by absolute path keeps this local to the
+    Python environment and avoids model-specific handling.
+    """
+
+    lib_dirs: list[Path] = []
+    for entry in sys.path:
+        base = Path(entry)
+        if not base.name.startswith("site-packages"):
+            continue
+        nvidia_dir = base / "nvidia"
+        if not nvidia_dir.is_dir():
+            continue
+        for lib_dir in sorted(nvidia_dir.glob("*/lib")):
+            if lib_dir.is_dir():
+                lib_dirs.append(lib_dir)
+    if not lib_dirs:
+        return
+    existing = os.environ.get("LD_LIBRARY_PATH", "")
+    existing_parts = [part for part in existing.split(":") if part]
+    prepend = [str(path) for path in lib_dirs if str(path) not in existing_parts]
+    if prepend:
+        os.environ["LD_LIBRARY_PATH"] = ":".join([*prepend, *existing_parts])
+    for pattern in ("libnvrtc-builtins.so*", "libnvrtc.so*"):
+        for lib_dir in lib_dirs:
+            for candidate in sorted(lib_dir.glob(pattern)):
+                if candidate.is_file():
+                    with suppress(OSError):
+                        ctypes.CDLL(str(candidate), mode=ctypes.RTLD_GLOBAL)
+                    break
+
+
+_bootstrap_python_nvidia_cuda_libs()
+
 import torch
 from accelerate import dispatch_model, init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
@@ -72,6 +114,7 @@ from .axon.codegen2_triton import (
     emit_model_code_from_graph_ir as emit_triton_model_code_from_graph_ir,
 )
 from .axon.codegen2_vllm import emit_model_code_from_graph_ir as emit_vllm_model_code_from_graph_ir
+from .axon.graph_ir.core import GraphLiteral, GraphProgram
 from .axon_runner_common import cleanup_cuda_after_oom as _cleanup_cuda_after_oom
 from .axon_runner_common import is_cuda_oom as _is_cuda_oom
 from .black_mamba_reference import BlackMambaReferenceModel, is_black_mamba_config_dir
@@ -97,10 +140,8 @@ def _default_graph_backend_intrinsics(
                     return item
             return None
         return graph_backend_intrinsics
-    if axon_backend == "codegen2-triton":
-        return "codegen2-triton"
-    if axon_backend == "codegen2-vllm":
-        return "codegen2-vllm"
+    if axon_backend in {"codegen2-triton", "codegen2-vllm"}:
+        return axon_backend
     return None
 
 
@@ -113,6 +154,70 @@ def _format_metric_value(value: object) -> str:
         return f"{float(cast(Any, value)):.6g}"
     except Exception:
         return str(value)
+
+
+def _merged_text_model_config(model_config: Mapping[str, Any] | None) -> dict[str, Any]:
+    merged = dict(model_config or {})
+    text_config = merged.get("text_config")
+    if isinstance(text_config, Mapping):
+        merged.update(text_config)
+    return merged
+
+
+def _config_int_value(config: Mapping[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = config.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _graph_uses_alibi_attention(graph_program: GraphProgram) -> bool:
+    for module in graph_program.modules:
+        for node in module.nodes:
+            alibi_attr = node.attrs.get("alibi_slopes")
+            if isinstance(alibi_attr, GraphLiteral) and bool(alibi_attr.value):
+                return True
+    return False
+
+
+def _vllm_attention_head_dim_from_config(
+    model_config: Mapping[str, Any] | None,
+) -> int | None:
+    config = _merged_text_model_config(model_config)
+    explicit = _config_int_value(config, "head_dim")
+    if explicit is not None:
+        return explicit
+    hidden = _config_int_value(config, "hidden_size", "n_embd", "d_model")
+    heads = _config_int_value(config, "num_attention_heads", "n_head", "num_heads")
+    if hidden is None or heads is None or heads <= 0:
+        return None
+    return hidden // heads
+
+
+def _auto_vllm_attention_backend(
+    *,
+    graph_program: GraphProgram,
+    model_config: Mapping[str, Any] | None,
+) -> str | None:
+    """Choose vLLM attention backend from capabilities, not model identity.
+
+    vLLM Triton attention can exceed shared-memory limits for large head
+    dimensions, while FlexAttention currently rejects ALiBI slopes. Use Flex
+    only when the graph proves no ALiBI attention and the config/head shape
+    indicates a high-head-dim attention kernel.
+    """
+
+    if _graph_uses_alibi_attention(graph_program):
+        return None
+    head_dim = _vllm_attention_head_dim_from_config(model_config)
+    if head_dim is not None and head_dim >= 256:
+        return "FLEX_ATTENTION"
+    return None
 
 
 def _format_checkpoint_summary_table(
@@ -1085,12 +1190,34 @@ def _infer_tensor_shape_from_checkpoint(
     return None
 
 
+def _checkpoint_key_prefixes(
+    safetensors_files: Sequence[Path],
+    *,
+    max_depth: int = 4,
+) -> list[str]:
+    prefixes: set[str] = set()
+    for path in safetensors_files:
+        st = safetensors.safe_open(str(path), framework="pt")
+        for key in st.keys():
+            parts = str(key).split(".")
+            for depth in range(1, min(max_depth, max(0, len(parts) - 1)) + 1):
+                prefixes.add(".".join(parts[:depth]))
+    return sorted(prefixes)
+
+
 def _augment_model_config_from_checkpoint(
     *,
     model_dir: Path,
     safetensors_files: Sequence[Path],
     model_config: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    if isinstance(model_config, dict) and isinstance(model_config.get("text_config"), dict):
+        enriched = dict(model_config)
+        text_config = model_config["text_config"]
+        for key, value in text_config.items():
+            enriched.setdefault(str(key), value)
+        model_config = enriched
+
     if (
         isinstance(model_config, dict)
         and str(model_config.get("model_type", "")).strip().lower() == "deepseek_v4"
@@ -3482,7 +3609,7 @@ def _prepare_vllm_model_dir(
         }
         if isinstance(value, dict):
             for key, child in list(value.items()):
-                if key.endswith("layer_types") and isinstance(child, list):
+                if isinstance(key, str) and key.endswith("layer_types") and isinstance(child, list):
                     normalized: list[Any] = []
                     changed = False
                     for item in child:
@@ -3499,11 +3626,48 @@ def _prepare_vllm_model_dir(
             for child in value:
                 _sanitize_vllm_layer_type_schema(child)
 
+    def _sanitize_vllm_auto_map_schema(value: dict[str, Any]) -> None:
+        auto_map = value.get("auto_map")
+        if not isinstance(auto_map, dict):
+            return
+        kept: dict[str, Any] = {}
+        for key, mapped in auto_map.items():
+            mapped_values = mapped if isinstance(mapped, list) else [mapped]
+            required_modules: list[str] = []
+            for item in mapped_values:
+                if not isinstance(item, str) or "." not in item:
+                    continue
+                module_name = item.split(".", 1)[0]
+                required_modules.append(module_name)
+            if required_modules and not all(
+                (source_model_dir / f"{module_name}.py").exists()
+                or (target_model_dir / f"{module_name}.py").exists()
+                for module_name in required_modules
+            ):
+                continue
+            kept[key] = mapped
+        if kept:
+            value["auto_map"] = kept
+        else:
+            value.pop("auto_map", None)
+
     config_path = source_model_dir / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    try:
+        hf_config = AutoConfig.from_pretrained(
+            source_model_dir,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+        hf_config_dict = hf_config.to_dict()
+    except Exception:
+        hf_config_dict = {}
+    for key, value in hf_config_dict.items():
+        config.setdefault(key, value)
     config["architectures"] = [architecture]
     _sanitize_vllm_rope_schema(config)
     _sanitize_vllm_layer_type_schema(config)
+    _sanitize_vllm_auto_map_schema(config)
     (target_model_dir / "config.json").write_text(
         json.dumps(config, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -3617,6 +3781,7 @@ def _compare_vllm_top_logprobs_with_hf_prefill(
     vllm_top_logprobs: dict[str, Any] | None,
     prompt_lengths: Sequence[int],
     attention_mask: torch.Tensor | None = None,
+    dummy_mask: torch.Tensor | None = None,
     top_k: int | None,
 ) -> dict[str, Any] | None:
     if hf_logits is None or vllm_top_logprobs is None or top_k is None or int(top_k) == 0:
@@ -3631,7 +3796,9 @@ def _compare_vllm_top_logprobs_with_hf_prefill(
     top1_matches = 0
     coverage_count = 0
     intersection_count = 0
+    excluded_dummy_vocab = 0
     abs_diffs: list[float] = []
+    examples: list[dict[str, Any]] = []
     for row_idx, row in enumerate(rows):
         if row_idx >= int(hf_logits.shape[0]) or row_idx >= len(prompt_lengths):
             continue
@@ -3653,7 +3820,9 @@ def _compare_vllm_top_logprobs_with_hf_prefill(
 
         if isinstance(generated_positions, Sequence) and generated_positions:
             # First generated token is predicted from the full prompt, matching
-            # HF logits at the last prompt position.
+            # HF logits at the last prompt position. Prefer this when available
+            # because it compares the same next-token distribution used by
+            # generation.
             vllm_probs = generated_positions[0]
             hf_pos_idx = (
                 physical_positions[prompt_len - 1]
@@ -3661,7 +3830,7 @@ def _compare_vllm_top_logprobs_with_hf_prefill(
                 else prompt_len - 1
             )
             source = "generated_first"
-        else:
+        elif isinstance(prompt_positions, Sequence) and prompt_positions:
             # vLLM prompt_logprobs[i] is P(prompt[i] | prompt[:i]), so it
             # matches HF logits at i-1. The first prompt token has no context.
             pos_idx = min(prompt_len - 1, len(prompt_positions) - 1)
@@ -3672,10 +3841,24 @@ def _compare_vllm_top_logprobs_with_hf_prefill(
                 physical_positions[pos_idx - 1] if physical_positions is not None else pos_idx - 1
             )
             source = "prompt_last"
+        else:
+            continue
         if not isinstance(vllm_probs, Mapping) or not vllm_probs:
             continue
         hf_pos = hf_logits[row_idx, hf_pos_idx].detach().float().cpu()
         hf_log_probs = torch.log_softmax(hf_pos, dim=-1)
+        if dummy_mask is not None and int(dummy_mask.numel()) == int(hf_log_probs.numel()):
+            keep_vocab = ~dummy_mask.detach().to(dtype=torch.bool).cpu()
+            excluded_dummy_vocab = int(dummy_mask.detach().to(dtype=torch.bool).sum().item())
+            hf_log_probs = hf_log_probs.masked_fill(~keep_vocab, float("-inf"))
+            vllm_probs = {
+                int(token_id): float(logprob)
+                for token_id, logprob in vllm_probs.items()
+                if 0 <= int(token_id) < int(keep_vocab.numel())
+                and bool(keep_vocab[int(token_id)].item())
+            }
+            if not vllm_probs:
+                continue
         hf_top_values, hf_top_ids = torch.topk(hf_log_probs, k=min(k, int(hf_log_probs.numel())))
         hf_top_set = {int(token_id) for token_id in hf_top_ids.tolist()}
         vllm_top_set = set(int(token_id) for token_id in vllm_probs.keys())
@@ -3690,6 +3873,28 @@ def _compare_vllm_top_logprobs_with_hf_prefill(
             intersection_count += 1
             diff = abs(float(vllm_probs[token_id]) - float(hf_log_probs[token_id].item()))
             abs_diffs.append(diff)
+        if len(examples) < 2:
+            sorted_vllm = sorted(
+                ((int(token_id), float(logprob)) for token_id, logprob in vllm_probs.items()),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            examples.append(
+                {
+                    "row": row_idx,
+                    "source": source,
+                    "hf_pos": hf_pos_idx,
+                    "hf_top": [
+                        (int(token_id), float(logprob))
+                        for token_id, logprob in zip(
+                            hf_top_ids.tolist(),
+                            hf_top_values.tolist(),
+                            strict=False,
+                        )
+                    ],
+                    "vllm_top": sorted_vllm[:k if k > 0 else len(sorted_vllm)],
+                }
+            )
     if compared == 0:
         return None
     return {
@@ -3701,8 +3906,10 @@ def _compare_vllm_top_logprobs_with_hf_prefill(
         "hf_topk_covered": coverage_count == compared,
         "hf_topk_covered_positions": coverage_count,
         "intersection_count": intersection_count,
+        "excluded_dummy_vocab": excluded_dummy_vocab,
         "mean_abs_diff": (sum(abs_diffs) / len(abs_diffs)) if abs_diffs else None,
         "max_abs_diff": max(abs_diffs) if abs_diffs else None,
+        "examples": examples,
     }
 
 
@@ -3710,6 +3917,36 @@ def _call_generate_compatible(model: Any, **kwargs: Any) -> Any:
     """Call HF/reference generate with only supported keyword arguments."""
 
     generate = model.generate
+
+    def _accepted_generate_kwargs() -> dict[str, Any]:
+        try:
+            signature = inspect.signature(generate)
+        except (TypeError, ValueError):
+            return dict(kwargs)
+        if any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        ):
+            return dict(kwargs)
+        accepted = {
+            name
+            for name, param in signature.parameters.items()
+            if name != "self"
+            and param.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        return {key: value for key, value in kwargs.items() if key in accepted}
+
+    call_kwargs = _accepted_generate_kwargs()
+    try:
+        return generate(**call_kwargs)
+    except (AttributeError, TypeError):
+        # Some custom HF/reference models return plain dicts where GenerationMixin
+        # expects ModelOutput. Retry with compatibility wrappers only after the
+        # normal unpatched generate path has failed; patching standard HF models
+        # changes generation semantics for left-padded batched causal LM inputs.
+        pass
+
     model_cls = model.__class__
     original_call = getattr(model_cls, "__call__", None)
     original_forward = getattr(model_cls, "forward", None)
@@ -3763,35 +4000,7 @@ def _call_generate_compatible(model: Any, **kwargs: Any) -> Any:
             )
             restore_update_model_kwargs = True
     try:
-        signature = inspect.signature(generate)
-    except (TypeError, ValueError):
-        try:
-            return generate(**kwargs)
-        finally:
-            if restore_call:
-                with suppress(Exception):
-                    setattr(model_cls, "__call__", original_call)
-            if restore_forward:
-                with suppress(Exception):
-                    setattr(model_cls, "forward", original_forward)
-            if restore_update_model_kwargs:
-                with suppress(Exception):
-                    setattr(
-                        model, "_update_model_kwargs_for_generation", original_update_model_kwargs
-                    )
-    try:
-        if any(
-            param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
-        ):
-            return generate(**kwargs)
-        accepted = {
-            name
-            for name, param in signature.parameters.items()
-            if name != "self"
-            and param.kind
-            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-        }
-        return generate(**{key: value for key, value in kwargs.items() if key in accepted})
+        return generate(**call_kwargs)
     finally:
         if restore_call:
             with suppress(Exception):
@@ -4300,6 +4509,7 @@ def _run_axon_test_single(
     graph_backend_intrinsics: str | None = None,
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
     vllm_gpu_memory_utilization: float | None = None,
+    vllm_attention_backend: str | None = None,
     vllm_logprobs: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
@@ -4578,10 +4788,14 @@ def _run_axon_test_single(
                     profile=profile_axon,
                 )
             elif axon_backend == "codegen2-vllm":
+                vllm_model_config = dict(model_config or {})
+                vllm_model_config["__axon_checkpoint_prefixes"] = _checkpoint_key_prefixes(
+                    safetensors_files
+                )
                 code = emit_vllm_model_code_from_graph_ir(
                     graph_program,
                     class_name=class_name,
-                    model_config=model_config,
+                    model_config=vllm_model_config,
                     profile=profile_axon,
                 )
             else:
@@ -4593,6 +4807,16 @@ def _run_axon_test_single(
                     align_devices=axon_backend == "pipeline2-torch",
                 )
             generated_py_path.write_text(code, encoding="utf-8")
+            keep_codegen_dir = os.environ.get("AXON_KEEP_GENERATED_CODE_DIR")
+            if keep_codegen_dir:
+                keep_dir = Path(keep_codegen_dir)
+                keep_dir.mkdir(parents=True, exist_ok=True)
+                safe_backend = re.sub(r"[^A-Za-z0-9_.-]+", "_", axon_backend)
+                safe_axon = re.sub(r"[^A-Za-z0-9_.-]+", "_", axon_file.stem)
+                shutil.copy2(
+                    generated_py_path,
+                    keep_dir / f"{safe_axon}__{safe_backend}__generated_model.py",
+                )
             model_cls = _load_generated_class(generated_py_path, class_name)
 
         hf_config: Any | None = None
@@ -5265,7 +5489,57 @@ def _run_axon_test_single(
                     )
                 return _extract_logits(model(**hf_forward_kwargs))
 
+            def _run_hf_vllm_prefill_forward(model: Any) -> torch.Tensor:
+                """Run HF on the exact stripped prompt rows passed to vLLM."""
+                hf_forward_kwargs = _move_hf_token_inputs_to_embedding_devices(
+                    model, io["hf_forward_inputs"]
+                )
+                if resolved_model_task in {"causal_lm", "seq2seq_lm"}:
+                    hf_forward_kwargs["use_cache"] = False
+                batch_size = int(io["input_ids"].shape[0])
+                attention = io.get("attention_mask")
+                logits_parts: list[torch.Tensor] = []
+                for batch_idx in range(batch_size):
+                    sample_kwargs: dict[str, Any] = {}
+                    keep = None
+                    if torch.is_tensor(attention):
+                        keep = attention[batch_idx].to(dtype=torch.bool)
+                    for key, value in hf_forward_kwargs.items():
+                        if (
+                            torch.is_tensor(value)
+                            and value.ndim > 0
+                            and int(value.shape[0]) == batch_size
+                        ):
+                            sample_value = value[batch_idx : batch_idx + 1]
+                            if (
+                                keep is not None
+                                and key in {"input_ids", "attention_mask", "position_ids"}
+                                and sample_value.ndim >= 2
+                                and int(sample_value.shape[1]) == int(keep.shape[0])
+                            ):
+                                sample_value = sample_value[:, keep]
+                            sample_kwargs[key] = sample_value
+                        else:
+                            sample_kwargs[key] = value
+                    logits_parts.append(_extract_logits(model(**sample_kwargs)))
+                if not logits_parts:
+                    return _run_hf_forward(model)
+                max_seq = max(int(item.shape[1]) for item in logits_parts)
+                if all(int(item.shape[1]) == max_seq for item in logits_parts):
+                    return torch.cat(logits_parts, dim=0)
+                padded: list[torch.Tensor] = []
+                for item in logits_parts:
+                    pad_seq = max_seq - int(item.shape[1])
+                    if pad_seq <= 0:
+                        padded.append(item)
+                    else:
+                        padded.append(
+                            torch.nn.functional.pad(item, (0, 0, 0, pad_seq), value=0.0)
+                        )
+                return torch.cat(padded, dim=0)
+
             hf_gen: torch.Tensor | None = None
+            hf_logits_for_vllm: torch.Tensor | None = None
             hf_time = 0.0
             hf_forward_samples: list[float] = []
             hf_forward_warmup_samples: list[float] = []
@@ -5316,6 +5590,8 @@ def _run_axon_test_single(
                                     "retrying one additional full forward pass"
                                 )
                                 hf_logits = _run_hf_forward(hf)
+                        if axon_backend == "codegen2-vllm":
+                            hf_logits_for_vllm = _run_hf_vllm_prefill_forward(hf)
 
                     hf_max_new_tokens = (
                         max(1, max_len)
@@ -5392,6 +5668,9 @@ def _run_axon_test_single(
                         )
                     )
             hf_logits_cpu = hf_logits.detach().cpu()
+            hf_logits_for_vllm_cpu = (
+                None if hf_logits_for_vllm is None else hf_logits_for_vllm.detach().cpu()
+            )
             hf_gen_cpu = None if hf_gen is None else hf_gen.detach().cpu()
             dummy_mask = _build_phi3small_dummy_vocab_mask(
                 model_config=model_config,
@@ -5413,6 +5692,7 @@ def _run_axon_test_single(
             _cleanup(target_device)
             return {
                 "logits": hf_logits_cpu,
+                "vllm_prefill_logits": hf_logits_for_vllm_cpu,
                 "gen": hf_gen_cpu,
                 "time": hf_time,
                 "forward_samples": hf_forward_samples,
@@ -5429,6 +5709,7 @@ def _run_axon_test_single(
 
         hf_result: dict[str, Any] = {}
         hf_logits: torch.Tensor | None = None
+        hf_vllm_prefill_logits: torch.Tensor | None = None
         hf_gen: torch.Tensor | None = None
         hf_time: float | None = None
         hf_dummy_tokens_mask: torch.Tensor | None = None
@@ -5454,6 +5735,9 @@ def _run_axon_test_single(
                 hf_result = _run_hf_side("cpu")
 
             hf_logits = cast(torch.Tensor, hf_result["logits"])
+            hf_vllm_prefill_logits = cast(
+                torch.Tensor | None, hf_result.get("vllm_prefill_logits")
+            )
             hf_gen = cast(torch.Tensor | None, hf_result["gen"])
             hf_time = float(hf_result["time"])
             hf_forward_samples = list(cast(Sequence[float], hf_result.get("forward_samples", [])))
@@ -5489,8 +5773,12 @@ def _run_axon_test_single(
                         "axon_backend='codegen2-vllm' requires the vllm package in this environment"
                     ) from exc
 
-                arch_name = f"{class_name}VLLM"
-                generated_module_name = generated_py_path.stem
+                vllm_unique_suffix = hashlib.sha1(str(tmp_path).encode()).hexdigest()[:12]
+                arch_name = f"{class_name}VLLM_{vllm_unique_suffix}"
+                generated_module_name = f"{generated_py_path.stem}_{vllm_unique_suffix}"
+                generated_module_path = tmp_path / f"{generated_module_name}.py"
+                shutil.copy2(generated_py_path, generated_module_path)
+                sys.modules.pop(generated_module_name, None)
                 plugin_name = (
                     f"axon_vllm_plugin_{hashlib.sha1(arch_name.encode()).hexdigest()[:12]}"
                 )
@@ -5527,6 +5815,18 @@ def _run_axon_test_single(
                     target_model_dir=vllm_model_dir,
                     architecture=arch_name,
                 )
+                keep_codegen_dir = os.environ.get("AXON_KEEP_GENERATED_CODE_DIR")
+                if keep_codegen_dir:
+                    keep_dir = Path(keep_codegen_dir)
+                    keep_dir.mkdir(parents=True, exist_ok=True)
+                    safe_backend = re.sub(r"[^A-Za-z0-9_.-]+", "_", axon_backend)
+                    safe_axon = re.sub(r"[^A-Za-z0-9_.-]+", "_", axon_file.stem)
+                    config_copy = vllm_model_dir / "config.json"
+                    if config_copy.exists():
+                        shutil.copy2(
+                            config_copy,
+                            keep_dir / f"{safe_axon}__{safe_backend}__vllm_config.json",
+                        )
 
                 prompt_rows: list[list[int]] = []
                 attention_cpu = attention_mask_cpu
@@ -5539,6 +5839,7 @@ def _run_axon_test_single(
 
                 max_prompt_len = max((len(row) for row in prompt_rows), default=0)
                 max_new_tokens = max(1, int(max_len) - int(max_prompt_len))
+                vllm_max_model_len = max(1, int(max_prompt_len) + int(max_new_tokens))
                 sampling_params = SamplingParams(
                     max_tokens=max_new_tokens,
                     temperature=0.0,
@@ -5550,9 +5851,43 @@ def _run_axon_test_single(
                 llm_kwargs: dict[str, Any] = {}
                 if vllm_logprobs is not None:
                     llm_kwargs["max_logprobs"] = int(vllm_logprobs)
+                effective_vllm_attention_backend = vllm_attention_backend
+                if effective_vllm_attention_backend is None:
+                    effective_vllm_attention_backend = _auto_vllm_attention_backend(
+                        graph_program=graph_program,
+                        model_config=model_config,
+                    )
+                    if effective_vllm_attention_backend is not None:
+                        print(
+                            "AxonDerived/vLLM: auto-selected attention backend "
+                            f"{effective_vllm_attention_backend}"
+                        )
+                if effective_vllm_attention_backend is not None:
+                    from vllm.config import AttentionConfig
+                    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+                    backend_name = str(effective_vllm_attention_backend).strip()
+                    if not backend_name:
+                        raise ValueError("--vllm-attention-backend must not be empty")
+                    try:
+                        attention_backend = AttentionBackendEnum[backend_name]
+                    except KeyError as exc:
+                        valid = ", ".join(sorted(AttentionBackendEnum.__members__))
+                        raise ValueError(
+                            f"Unknown --vllm-attention-backend {backend_name!r}; valid values: {valid}"
+                        ) from exc
+                    llm_kwargs["attention_config"] = AttentionConfig(backend=attention_backend)
                 requested_vllm_dtype = str(resolved_dtype).removeprefix("torch.")
 
                 def _new_vllm_llm(dtype_name: str) -> Any:
+                    vllm_uses_mamba_cache = (
+                        "_MambaPlaceholderLayer" in code or "_vllm_mamba_mixer" in code
+                    )
+                    effective_llm_kwargs = dict(llm_kwargs)
+                    if vllm_uses_mamba_cache:
+                        effective_llm_kwargs["mamba_block_size"] = max(
+                            8, ((int(vllm_max_model_len) + 7) // 8) * 8
+                        )
                     return LLM(
                         model=str(vllm_model_dir),
                         dtype=dtype_name,
@@ -5561,11 +5896,16 @@ def _run_axon_test_single(
                             if vllm_gpu_memory_utilization is None
                             else float(vllm_gpu_memory_utilization)
                         ),
-                        max_model_len=max(1, int(max_len)),
+                        max_model_len=vllm_max_model_len,
+                        max_num_batched_tokens=vllm_max_model_len,
                         skip_tokenizer_init=True,
                         tensor_parallel_size=1,
                         trust_remote_code=True,
-                        **llm_kwargs,
+                        enforce_eager=True,
+                        enable_prefix_caching=vllm_uses_mamba_cache,
+                        enable_chunked_prefill=False,
+                        disable_hybrid_kv_cache_manager=not vllm_uses_mamba_cache,
+                        **effective_llm_kwargs,
                     )
 
                 vllm_effective_dtype = requested_vllm_dtype
@@ -5587,13 +5927,25 @@ def _run_axon_test_single(
                     else:
                         raise
                 prompts_for_vllm = [{"prompt_token_ids": prompt_ids} for prompt_ids in prompt_rows]
+                vllm_serial_prompts = "axon_vllm_legacy_forward = True" in code
 
                 def _run_vllm_generate() -> dict[str, Any]:
-                    outputs = llm.generate(
-                        prompts_for_vllm,
-                        sampling_params,
-                        use_tqdm=False,
-                    )
+                    if vllm_serial_prompts:
+                        outputs = []
+                        for prompt in prompts_for_vllm:
+                            outputs.extend(
+                                llm.generate(
+                                    [prompt],
+                                    sampling_params,
+                                    use_tqdm=False,
+                                )
+                            )
+                    else:
+                        outputs = llm.generate(
+                            prompts_for_vllm,
+                            sampling_params,
+                            use_tqdm=False,
+                        )
                     return {
                         "generated": _vllm_outputs_to_tensor(
                             outputs,
@@ -6137,13 +6489,21 @@ def _run_axon_test_single(
                         bool(top1_matches[valid_rows].all()) if bool(valid_rows.any()) else None
                     )
         if not skip_hf and syn_logits is None and vllm_top_logprobs is not None:
+            compare_vllm_hf_logits = (
+                hf_vllm_prefill_logits if hf_vllm_prefill_logits is not None else hf_logits
+            )
             vllm_top_logprobs_metrics = _compare_vllm_top_logprobs_with_hf_prefill(
-                hf_logits=hf_logits,
+                hf_logits=compare_vllm_hf_logits,
                 vllm_top_logprobs=vllm_top_logprobs,
                 prompt_lengths=vllm_prompt_lengths,
-                attention_mask=attention_mask,
+                attention_mask=None if hf_vllm_prefill_logits is not None else attention_mask,
+                dummy_mask=hf_dummy_tokens_mask,
                 top_k=vllm_logprobs_value,
             )
+            if vllm_top_logprobs_metrics is not None:
+                excluded_dummy_vocab = int(
+                    vllm_top_logprobs_metrics.get("excluded_dummy_vocab") or 0
+                )
 
         layer_diffs: list[dict[str, float | int]] = []
         if trace_layers and (not skip_hf) and hf_layer_outputs and syn_layer_outputs:
@@ -6302,6 +6662,29 @@ def _run_axon_test_single(
                     vllm_top_logprobs_metrics.get("mean_abs_diff"),
                     vllm_top_logprobs_metrics.get("max_abs_diff"),
                 )
+                for example in vllm_top_logprobs_metrics.get("examples", [])[:2]:
+                    def _format_logprob_item(item: object) -> str:
+                        token_id, logprob = item
+                        try:
+                            text = tokenizer_obj.decode([int(token_id)])
+                        except Exception:
+                            text = ""
+                        return f"{int(token_id)}:{float(logprob):.4f}:{text!r}"
+
+                    print(
+                        "vLLM top-logprobs example | row/source/hf_pos:",
+                        example.get("row"),
+                        example.get("source"),
+                        example.get("hf_pos"),
+                    )
+                    print(
+                        "  HF top:",
+                        ", ".join(_format_logprob_item(item) for item in example.get("hf_top", [])),
+                    )
+                    print(
+                        "  vLLM top:",
+                        ", ".join(_format_logprob_item(item) for item in example.get("vllm_top", [])),
+                    )
         else:
             print(
                 "Logits diff (raw) | mean/max/last_max/top1_eq:",
@@ -6445,6 +6828,7 @@ def run_axon_test(
     graph_backend_intrinsics: str | None = None,
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
     vllm_gpu_memory_utilization: float | None = None,
+    vllm_attention_backend: str | None = None,
     vllm_logprobs: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
@@ -6491,6 +6875,7 @@ def run_axon_test(
         graph_backend_intrinsics=graph_backend_intrinsics,
         builtins_overlays=builtins_overlays,
         vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+        vllm_attention_backend=vllm_attention_backend,
         vllm_logprobs=vllm_logprobs,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,

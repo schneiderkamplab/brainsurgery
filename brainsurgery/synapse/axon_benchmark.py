@@ -14,6 +14,7 @@ import sys
 import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -35,7 +36,20 @@ from .axon_test import (
     _format_metric_value,
     _repo_root,
     _resolve_benchmark_mode,
+    _resolve_model_task,
     _run_axon_test_single,
+    _task_pragma_from_axon,
+)
+from .axon import (
+    GraphOptimizeConfig,
+    elaborate_closed_axon_file,
+    flatten_closed_axon_file,
+    lower_axon_program_to_graph_ir,
+    normalize_closed_axon_file,
+    optimize_graph_program,
+    optimize_safe_flat_typed_axon_file,
+    resolve_axon_program_from_path,
+    typecheck2_flat_axon_file,
 )
 
 
@@ -110,7 +124,6 @@ _VALID_AXON_BENCHMARK_BACKENDS = {
     "runtime2-torch",
     "pipeline2-torch",
 }
-
 
 def _normalize_axon_backend_token(value: str) -> str:
     token = str(value).strip().lower()
@@ -784,6 +797,166 @@ def _error_result_for_pair(
     }
 
 
+def _skip_result_for_pair(
+    pair: _BenchmarkPair,
+    *,
+    repo_root: Path,
+    axon_backend: str,
+    reason: str,
+) -> dict[str, Any]:
+    model_dir = repo_root / "models" / pair.checkpoint_id
+    return {
+        "axon_backend": axon_backend,
+        "axon_file": pair.axon_file,
+        "checkpoint_id": pair.checkpoint_id,
+        "weights": model_dir,
+        "hf_model_dir": model_dir,
+        "fallback": "skip-unsupported",
+        "masked_top1_eq": "SKIP",
+        "masked_max_diff": "SKIP",
+        "masked_max_rel_diff": "SKIP",
+        "skip_reason": reason,
+    }
+
+
+def _scheduled_model_task(
+    pair: _BenchmarkPair,
+    *,
+    requested_model_task: str,
+) -> str | None:
+    resolved = _resolve_model_task(requested_model_task)
+    if resolved != "auto":
+        return resolved
+    return _task_pragma_from_axon(axon_file=pair.axon_file)
+
+
+def _graph_literal_value(value: Any) -> Any:
+    return getattr(value, "value", None)
+
+
+def _iter_graph_operands(value: Any) -> Iterable[Any]:
+    yield value
+    for item in getattr(value, "inputs", ()) or ():
+        yield from _iter_graph_operands(item)
+    attrs = getattr(value, "attrs", {}) or {}
+    for item in attrs.values():
+        yield from _iter_graph_operands(item)
+
+
+def _graph_operand_path_uses_template(value: Any, template_name: str) -> bool:
+    wanted = f"{{{template_name}}}"
+    for operand in _iter_graph_operands(value):
+        parts = getattr(operand, "parts", None)
+        if parts is not None and wanted in tuple(parts):
+            return True
+    return False
+
+
+def _graph_tensor_dims(value: Any) -> tuple[Any, ...] | None:
+    dims = getattr(value, "dims", None)
+    if dims is not None:
+        return tuple(dims)
+    type_expr = getattr(value, "type_expr", None)
+    while type_expr is not None and type(type_expr).__name__ == "TypeOptional":
+        type_expr = getattr(type_expr, "inner", None)
+    if type_expr is not None and type(type_expr).__name__ == "TypeTensor":
+        return tuple(getattr(type_expr, "dims", ()) or ())
+    return None
+
+
+@lru_cache(maxsize=None)
+def _vllm_graph_unsupported_reason(axon_file: str) -> str | None:
+    """Return a codegen2-vllm unsupported-graph reason, if known.
+
+    This mirrors codegen fail-fast checks, but lets benchmark sweeps classify
+    known unsupported rows as SKIP.  A pipeline failure is intentionally not
+    converted to a skip so the normal benchmark path can report the real error.
+    """
+    try:
+        axon = resolve_axon_program_from_path(Path(axon_file)).ast
+        axon = normalize_closed_axon_file(axon)
+        axon = elaborate_closed_axon_file(axon)
+        axon = flatten_closed_axon_file(axon)
+        axon = typecheck2_flat_axon_file(axon)
+        axon = optimize_safe_flat_typed_axon_file(axon)
+        graph = lower_axon_program_to_graph_ir(axon)
+        graph = optimize_graph_program(
+            graph,
+            config=GraphOptimizeConfig(backend_intrinsics="codegen2-vllm"),
+        )
+        from .axon.codegen2_vllm.core import unsupported_reason_for_vllm_graph
+    except Exception:
+        return None
+    backend_reason = unsupported_reason_for_vllm_graph(graph)
+    if backend_reason is not None:
+        return backend_reason
+    modules_by_name = {module.name: module for module in graph.modules}
+    for module in graph.modules:
+        for node in module.nodes:
+            if node.op.name != "core.repeat":
+                continue
+            var_name = _graph_literal_value(node.attrs.get("var"))
+            callee_name = _graph_literal_value(node.attrs.get("callee"))
+            if not isinstance(var_name, str) or not isinstance(callee_name, str):
+                continue
+            if var_name == "i":
+                # codegen2-vllm already lowers the conventional repeated-layer
+                # template symbol.  Other repeat-local symbols, such as expert
+                # ids, would require dynamic parameter path resolution.
+                continue
+            callee = modules_by_name.get(callee_name)
+            if callee is None:
+                continue
+            if any(
+                _graph_operand_path_uses_template(callee_node, var_name)
+                for callee_node in callee.nodes
+            ):
+                return (
+                    "codegen2-vllm does not yet support repeat-local parameter "
+                    f"path templates such as {{{var_name}}}; skipping instead "
+                    "of resolving them incorrectly"
+                )
+            carry_count = _graph_literal_value(node.attrs.get("carry_count"))
+            if not isinstance(carry_count, int) or carry_count <= 0:
+                continue
+            for carry_index, carry in enumerate(node.inputs[3 : 3 + carry_count]):
+                dims = _graph_tensor_dims(carry)
+                if dims is None:
+                    continue
+                if len(dims) != 3:
+                    return (
+                        "codegen2-vllm clean transformer forward currently supports "
+                        "rank-3 tensor layer carries [B,S,D] only; "
+                        f"repeat carry {carry_index} has rank {len(dims)}"
+                    )
+    return None
+
+
+def _backend_skip_reason(
+    pair: _BenchmarkPair,
+    *,
+    axon_backend: str,
+    model_task: str,
+    benchmark_mode: str,
+) -> str | None:
+    if axon_backend != "codegen2-vllm":
+        return None
+    scheduled_task = _scheduled_model_task(pair, requested_model_task=model_task)
+    if scheduled_task is not None and scheduled_task != "causal_lm":
+        return (
+            "codegen2-vllm currently supports only causal_lm generate rows "
+            f"(TASK is {scheduled_task!r})"
+        )
+    if benchmark_mode == "forward":
+        return "codegen2-vllm supports generate benchmarking only"
+    unsupported_reason = _vllm_graph_unsupported_reason(
+        str(pair.axon_file.resolve())
+    )
+    if unsupported_reason is not None:
+        return unsupported_reason
+    return None
+
+
 def _signal_name(exitcode: int) -> str:
     signum = abs(int(exitcode))
     try:
@@ -984,6 +1157,7 @@ def _run_benchmark_pair(
     graph_backend_intrinsics: str | None,
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
     vllm_gpu_memory_utilization: float | None = None,
+    vllm_attention_backend: str | None = None,
     vllm_logprobs: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
@@ -1039,6 +1213,7 @@ def _run_benchmark_pair(
         graph_backend_intrinsics=graph_backend_intrinsics,
         builtins_overlays=builtins_overlays,
         vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+        vllm_attention_backend=vllm_attention_backend,
         vllm_logprobs=vllm_logprobs,
         skip_hf=skip_hf,
         hf_strict_dtype=hf_strict_dtype,
@@ -1144,7 +1319,32 @@ def _run_benchmark_jobs_serial(
                             if jax_param_devices is not None:
                                 print(f"worker.AXON_JAX_PARAM_DEVICES={jax_param_devices}")
                             try:
-                                result = _run_benchmark_pair(pair, device=device, **backend_kwargs)
+                                skip_reason = _backend_skip_reason(
+                                    pair,
+                                    axon_backend=axon_backend,
+                                    model_task=str(common_kwargs["model_task"]),
+                                    benchmark_mode=str(common_kwargs["benchmark_mode"]),
+                                )
+                                if skip_reason is not None:
+                                    print(
+                                        "Benchmark pair skipped:",
+                                        f"backend={axon_backend}",
+                                        f"axon={pair.axon_file}",
+                                        f"checkpoint={pair.checkpoint_id}",
+                                        f"reason={skip_reason}",
+                                    )
+                                    result = _skip_result_for_pair(
+                                        pair,
+                                        repo_root=cast(Path, common_kwargs["repo_root"]),
+                                        axon_backend=axon_backend,
+                                        reason=skip_reason,
+                                    )
+                                else:
+                                    result = _run_benchmark_pair(
+                                        pair,
+                                        device=device,
+                                        **backend_kwargs,
+                                    )
                             except Exception as exc:
                                 print(
                                     "Benchmark pair failed:",
@@ -1242,7 +1442,32 @@ def _run_benchmark_worker_loop(
                     try:
                         if jax_param_devices is not None:
                             print(f"worker.AXON_JAX_PARAM_DEVICES={jax_param_devices}")
-                        result = _run_benchmark_pair(pair, device=worker_device, **backend_kwargs)
+                        skip_reason = _backend_skip_reason(
+                            pair,
+                            axon_backend=axon_backend,
+                            model_task=str(common_kwargs["model_task"]),
+                            benchmark_mode=str(common_kwargs["benchmark_mode"]),
+                        )
+                        if skip_reason is not None:
+                            print(
+                                "Benchmark pair skipped:",
+                                f"backend={axon_backend}",
+                                f"axon={pair.axon_file}",
+                                f"checkpoint={pair.checkpoint_id}",
+                                f"reason={skip_reason}",
+                            )
+                            result = _skip_result_for_pair(
+                                pair,
+                                repo_root=cast(Path, common_kwargs["repo_root"]),
+                                axon_backend=axon_backend,
+                                reason=skip_reason,
+                            )
+                        else:
+                            result = _run_benchmark_pair(
+                                pair,
+                                device=worker_device,
+                                **backend_kwargs,
+                            )
                     except Exception as exc:
                         print(
                             "Benchmark pair failed:",
@@ -1611,6 +1836,7 @@ def run_axon_benchmark(
     builtins_overlays: tuple[str, ...] | list[str] | None = None,
     backend_builtins_overlays: str | Sequence[str] | None = None,
     vllm_gpu_memory_utilization: float | None = None,
+    vllm_attention_backend: str | None = None,
     vllm_logprobs: int | None = None,
     skip_hf: bool = False,
     hf_strict_dtype: bool = False,
@@ -1756,6 +1982,7 @@ def run_axon_benchmark(
         "builtins_overlays": builtins_overlays,
         "backend_builtins_overlays": backend_overlay_map,
         "vllm_gpu_memory_utilization": vllm_gpu_memory_utilization,
+        "vllm_attention_backend": vllm_attention_backend,
         "vllm_logprobs": vllm_logprobs,
         "jax_pipeline_parallel_enabled": (
             axon_backend == "codegen2-jax"

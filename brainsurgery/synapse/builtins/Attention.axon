@@ -3,6 +3,7 @@ import Math sqrt
 import Tensor (concat, slice, softmax)
 export (
   attention,
+  attention_with_rel_bias_scaled,
   attention_gqa_with_additive_mask,
   attention_with_additive_mask,
   attention_scaled,
@@ -96,6 +97,21 @@ attention q k v keep ?rel_bias=null ?scale=null ?sink_logits=null ?softcap=null 
   v_work <- fp32_compute ? (Tensor.cast v dtype="float32") : v
   out <- Tensor.matmul probs v_work
   return fp32_compute ? (Tensor.cast out dtype="float32") : out
+
+
+attention_with_rel_bias_scaled :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,VD] -> Tensor[B,HM,Q,K] -> Tensor[..RB] -> Float -> Tensor[B,H,Q,VD]
+attention_with_rel_bias_scaled q k v keep rel_bias scale = do
+  scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
+  scores <- scores * scale
+  mask <- mask_to_additive scores keep
+  probs_in <- scores + mask
+  probs_in <- probs_in + rel_bias
+  probs <- softmax probs_in dim=-1
+  K <- Tensor.size v dim=-2
+  probs <- slice probs dim=-1 start=0 end=K
+  probs <- (probs :: Tensor[B,H,Q,K])
+  probs <- Tensor.where keep probs 0
+  return Tensor.matmul probs v
 
 
 attention_with_additive_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[B,H,K,VD] -> Tensor[B,H,Q,K] -> Tensor[B,HM,Q,K] -> ?Tensor[..RB] -> ?Float -> ?Tensor[B,H,Q,1] -> ?Float -> ?Bool -> ?Bool -> Tensor[B,H,Q,VD]

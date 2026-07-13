@@ -253,21 +253,34 @@ def _axon_codegen_dump_to_text(
     lower_graph_fn = getattr(axon_module, "lower_axon_program_to_graph_ir")
 
     backend = backend.strip().lower()
-    if backend not in {"codegen2-torch", "codegen2-tinygrad", "codegen2-mlx", "codegen2-jax", "codegen2-triton"}:
+    if backend not in {
+        "codegen2-torch",
+        "codegen2-tinygrad",
+        "codegen2-mlx",
+        "codegen2-jax",
+        "codegen2-triton",
+        "codegen2-vllm",
+    }:
         raise typer.BadParameter(
             "backend must be 'codegen2-torch', 'codegen2-tinygrad', 'codegen2-mlx', "
-            "'codegen2-jax', or 'codegen2-triton'"
+            "'codegen2-jax', 'codegen2-triton', or 'codegen2-vllm'"
         )
-    if profile and backend not in {"codegen2-torch", "codegen2-jax", "codegen2-triton"}:
+    if profile and backend not in {
+        "codegen2-torch",
+        "codegen2-jax",
+        "codegen2-triton",
+        "codegen2-vllm",
+    }:
         raise typer.BadParameter(
             "--profile-code is currently supported only for --backend codegen2-torch, "
-            "codegen2-jax, or codegen2-triton"
+            "codegen2-jax, codegen2-triton, or codegen2-vllm"
         )
     if backend in {"codegen2-mlx", "codegen2-jax"} and align_devices:
         raise typer.BadParameter(f"--align-devices is not supported with --backend {backend}")
 
     model_dir = weights or (_checkpoint_model_dir(checkpoint) if checkpoint is not None else None)
     model_config = None
+    safetensors_files: list[Path] = []
     if model_dir is not None:
         axon_test_module = importlib.import_module("brainsurgery.synapse.axon_test")
         resolve_safetensors = getattr(axon_test_module, "_resolve_safetensors_paths")
@@ -276,9 +289,10 @@ def _axon_codegen_dump_to_text(
         model_dir = model_dir.resolve()
         if not model_dir.exists():
             raise typer.BadParameter(f"Checkpoint/weights path not found: {model_dir}")
+        safetensors_files = list(resolve_safetensors(model_dir))
         model_config = augment_model_config(
             model_dir=model_dir if model_dir.is_dir() else model_dir.parent,
-            safetensors_files=resolve_safetensors(model_dir),
+            safetensors_files=safetensors_files,
             model_config=load_model_config(model_dir if model_dir.is_dir() else model_dir.parent),
         )
 
@@ -324,6 +338,23 @@ def _axon_codegen_dump_to_text(
             graph,
             class_name=class_name,
             model_config=model_config,
+            profile=profile,
+            align_devices=align_devices,
+        )
+    if backend == "codegen2-vllm":
+        emit_module = importlib.import_module("brainsurgery.synapse.axon.codegen2_vllm")
+        emit_fn = getattr(emit_module, "emit_model_code_from_graph_ir")
+        vllm_model_config = dict(model_config or {})
+        if safetensors_files:
+            axon_test_module = importlib.import_module("brainsurgery.synapse.axon_test")
+            checkpoint_key_prefixes = getattr(axon_test_module, "_checkpoint_key_prefixes")
+            vllm_model_config["__axon_checkpoint_prefixes"] = checkpoint_key_prefixes(
+                safetensors_files
+            )
+        return emit_fn(
+            graph,
+            class_name=class_name,
+            model_config=vllm_model_config,
             profile=profile,
             align_devices=align_devices,
         )
@@ -666,7 +697,7 @@ def axon_codegen_dump(
         "--backend",
         help=(
             "Codegen backend: codegen2-torch, codegen2-tinygrad, "
-            "codegen2-mlx, codegen2-jax, or codegen2-triton."
+            "codegen2-mlx, codegen2-jax, codegen2-triton, or codegen2-vllm."
         ),
     ),
     class_name: str = typer.Option(
@@ -957,6 +988,14 @@ def axon_test(
             "--axon-backend codegen2-vllm is used."
         ),
     ),
+    vllm_attention_backend: str | None = typer.Option(
+        None,
+        "--vllm-attention-backend",
+        help=(
+            "Optional vLLM AttentionConfig backend enum name, such as FLEX_ATTENTION. "
+            "Only used with --axon-backend codegen2-vllm."
+        ),
+    ),
     vllm_logprobs: int | None = typer.Option(
         None,
         "--vllm-logprobs",
@@ -1016,6 +1055,7 @@ def axon_test(
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
             vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+            vllm_attention_backend=vllm_attention_backend,
             vllm_logprobs=vllm_logprobs,
             builtins_overlays=builtins_overlays,
         )
@@ -1255,6 +1295,14 @@ def axon_benchmark(
             "--axon-backend codegen2-vllm is used."
         ),
     ),
+    vllm_attention_backend: str | None = typer.Option(
+        None,
+        "--vllm-attention-backend",
+        help=(
+            "Optional vLLM AttentionConfig backend enum name, such as FLEX_ATTENTION. "
+            "Only used with --axon-backend codegen2-vllm."
+        ),
+    ),
     vllm_logprobs: int | None = typer.Option(
         None,
         "--vllm-logprobs",
@@ -1393,6 +1441,7 @@ def axon_benchmark(
             optimize_graph=optimize_graph,
             graph_backend_intrinsics=graph_backend_intrinsics,
             vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+            vllm_attention_backend=vllm_attention_backend,
             vllm_logprobs=vllm_logprobs,
             builtins_overlays=builtins_overlays,
             backend_builtins_overlays=backend_builtins_overlays,

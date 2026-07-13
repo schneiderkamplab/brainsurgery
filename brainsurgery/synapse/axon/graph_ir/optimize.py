@@ -74,6 +74,7 @@ from .provenance import (
     GraphProvenance,
     GraphRopeApplyFactorsFact,
     GraphSdpaGqaFact,
+    _make_provenance,
     graph_provenance_facts,
     infer_graph_provenance,
 )
@@ -163,6 +164,11 @@ _TRITON_BACKEND_INTRINSICS = frozenset(
 _VLLM_BACKEND_INTRINSICS = frozenset(
     {
         "__vllm_paged_attention",
+        "__vllm_selected_expert_clamped_packed_swiglu_ffn",
+        "__vllm_selected_expert_packed_gegelu_ffn",
+        "__vllm_selected_expert_packed_swiglu_ffn",
+        "__vllm_selected_expert_relu2_ffn",
+        "__vllm_selected_expert_swiglu_ffn",
     }
 )
 _BACKEND_INTRINSICS_BY_TARGET = {
@@ -314,6 +320,26 @@ def _graph_value_ref_provenance(
 ) -> GraphProvenance | None:
     if isinstance(operand, GraphValueRef):
         return local_provenance.get(operand.name)
+    if isinstance(operand, GraphLiteral):
+        return _make_provenance("literal", value=operand.value)
+    if isinstance(operand, GraphPath):
+        prefix = "@@" if operand.absolute else "@"
+        return _make_provenance("path", value=prefix + ".".join(operand.parts))
+    if isinstance(operand, GraphExpr):
+        args = tuple(
+            item
+            for item in (
+                _graph_value_ref_provenance(
+                    nested,
+                    local_provenance=local_provenance,
+                )
+                for nested in (*operand.inputs, *operand.attrs.values())
+            )
+            if item is not None
+        )
+        if len(args) != len(operand.inputs) + len(operand.attrs):
+            return None
+        return _make_provenance("op", op=operand.op.name, args=args)
     return None
 
 
@@ -327,6 +353,34 @@ def _has_additive_mask_from_keep_fact(
         fact.kind == "additive_mask_from_keep" and fact.value == keep_provenance
         for fact in graph_provenance_facts(provenance)
     )
+
+
+def _has_linear_position_bias_fact(provenance: GraphProvenance | None) -> bool:
+    if provenance is None:
+        return False
+    return any(fact.kind == "linear_position_bias" for fact in graph_provenance_facts(provenance))
+
+
+def _linear_position_bias_scale(provenance: GraphProvenance | None) -> int | float:
+    if provenance is None or provenance.kind != "op" or provenance.op != "core.binary.*" or len(provenance.args) != 2:
+        return 1.0
+    left, right = provenance.args
+    if left.kind == "literal" and isinstance(left.value, int | float):
+        return left.value
+    if right.kind == "literal" and isinstance(right.value, int | float):
+        return right.value
+    return 1.0
+
+
+def _is_default_attention_scale(provenance: GraphProvenance | None) -> bool:
+    if provenance is None or provenance.kind != "op" or provenance.op != "core.binary./" or len(provenance.args) != 2:
+        return False
+    numerator, denominator = provenance.args
+    if numerator.kind != "literal" or not isinstance(numerator.value, int | float):
+        return False
+    if not math.isclose(float(numerator.value), 1.0):
+        return False
+    return denominator.kind == "op" and denominator.op == "_sqrt" and len(denominator.args) == 1
 
 
 def _maybe_rewrite_node_to_backend_sdpa(
@@ -369,6 +423,25 @@ def _maybe_rewrite_node_to_backend_sdpa(
             keep = formal_to_actual[fact.keep]
         except KeyError:
             continue
+        rel_bias_attr: dict[str, GraphOperand] = {}
+        if fact.rel_bias is not None:
+            if op_name != "__vllm_paged_attention":
+                continue
+            rel_bias = formal_to_actual.get(fact.rel_bias)
+            if rel_bias is None:
+                continue
+            rel_bias_prov = _graph_value_ref_provenance(
+                rel_bias,
+                local_provenance=local_provenance,
+            )
+            if not _has_linear_position_bias_fact(rel_bias_prov):
+                continue
+            rel_bias_attr["alibi_slopes"] = GraphLiteral(value=True, type_expr=TypeBool())
+            scale_value = _linear_position_bias_scale(rel_bias_prov)
+            rel_bias_attr["alibi_scale"] = GraphLiteral(
+                value=scale_value,
+                type_expr=TypeFloat() if isinstance(scale_value, float) else TypeInt(),
+            )
         additive_prov = _graph_value_ref_provenance(
             additive_mask,
             local_provenance=local_provenance,
@@ -379,7 +452,17 @@ def _maybe_rewrite_node_to_backend_sdpa(
         if fact.default_scale or fact.scale is None:
             scale_operand: GraphOperand = GraphLiteral(value=None, type_expr=TypeNull())
         elif fact.scale.kind == "input" and fact.scale.name in formal_to_actual:
-            scale_operand = formal_to_actual[fact.scale.name]
+            actual_scale = formal_to_actual[fact.scale.name]
+            if op_name == "__vllm_paged_attention":
+                actual_scale_prov = _graph_value_ref_provenance(
+                    actual_scale,
+                    local_provenance=local_provenance,
+                )
+                if not _is_default_attention_scale(actual_scale_prov):
+                    continue
+                scale_operand = GraphLiteral(value=None, type_expr=TypeNull())
+            else:
+                scale_operand = actual_scale
         elif fact.scale.kind == "literal":
             scale_operand = GraphLiteral(
                 value=fact.scale.value,
@@ -398,7 +481,7 @@ def _maybe_rewrite_node_to_backend_sdpa(
                 scale_operand,
                 GraphLiteral(value=True, type_expr=TypeBool()),
             ),
-            attrs={},
+            attrs=rel_bias_attr,
         )
     return None
 
@@ -4627,14 +4710,15 @@ def _torch_selected_expert_relu2_candidate(
 
 def _has_torch_selected_expert_intrinsic_candidates(graph: GraphProgram) -> bool:
     # This is only a cost prefilter; the rewrite itself is guarded by
-    # primitive-level provenance.  Selected-expert candidates may use either
-    # banked expert linear primitives or ordinary path-templated linear
-    # primitives inside an expert loop.  `_where_indices` alone is not enough and
-    # would trigger expensive no-op provenance searches in unrelated indexing
-    # code.
+    # primitive-level provenance.  Selected-expert candidates may be expressed
+    # either as sparse scatter/update loops (`_where_indices`) or as direct
+    # top-k weighted sums (`_topk` + `_sum`).  `_where_indices` alone misses
+    # direct selected-expert FFNs, while `_topk` alone would trigger expensive
+    # no-op provenance searches in unrelated routing code.
     # Do not filter on module names or higher-level helper definitions.
     names = _graph_op_names(graph)
-    return "_where_indices" in names and ("_expert_linear" in names or "_linear" in names)
+    has_selected_expert_shape = "_where_indices" in names or ("_topk" in names and "_sum" in names)
+    return has_selected_expert_shape and ("_expert_linear" in names or "_linear" in names)
 
 
 def _rewrite_torch_selected_expert_intrinsics(
@@ -15158,6 +15242,27 @@ def optimize_graph_program(
                 candidate = _alpha_rename_shadowed_type_dims(candidate)
                 candidate = _sanitize_graph_constraints(candidate)
                 _validate_optimizer_graph(candidate, phase="vllm_paged_attention_intrinsics")
+                current = candidate
+            vllm_selected_expert_intrinsics = {
+                "__vllm_selected_expert_clamped_packed_swiglu_ffn",
+                "__vllm_selected_expert_packed_gegelu_ffn",
+                "__vllm_selected_expert_packed_swiglu_ffn",
+                "__vllm_selected_expert_relu2_ffn",
+                "__vllm_selected_expert_swiglu_ffn",
+            }
+            candidate = (
+                _rewrite_torch_selected_expert_intrinsics(
+                    current,
+                    enabled_intrinsics=enabled_backend_intrinsics,
+                    op_prefix="__vllm",
+                )
+                if vllm_selected_expert_intrinsics & enabled_backend_intrinsics
+                else current
+            )
+            if candidate != current:
+                candidate = _alpha_rename_shadowed_type_dims(candidate)
+                candidate = _sanitize_graph_constraints(candidate)
+                _validate_optimizer_graph(candidate, phase="vllm_selected_expert_intrinsics")
                 current = candidate
         if debug_timings:
             elapsed = time.perf_counter() - backend_start

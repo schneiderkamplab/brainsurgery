@@ -2,7 +2,7 @@
 {-# TASK "causal_lm" #-}
 
 import Activations (gelu)
-import Attention (attention, merge_heads, split_qkv_heads)
+import Attention (attention_with_rel_bias_scaled, merge_heads, split_qkv_heads)
 import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
 import NN (embedding, layernorm, linear)
 import Positions (linear_position_bias_for_input)
@@ -37,7 +37,7 @@ falcon_block x keep pos_bias past_kv = do
     qkv_heads <- split_qkv_heads qkv heads=NUM_HEADS layout="interleaved"
     q, k, v <- (qkv_heads :: (Tensor[B,NUM_HEADS,S,MODEL_DIM / NUM_HEADS], Tensor[B,NUM_HEADS,S,MODEL_DIM / NUM_HEADS], Tensor[B,NUM_HEADS,S,MODEL_DIM / NUM_HEADS]))
     k, v, new_kv <- Cache.update past_kv k v
-    a <- attention q k v keep=keep rel_bias=pos_bias scale=0.125 |> merge_heads
+    a <- attention_with_rel_bias_scaled q k v keep pos_bias 0.125 |> merge_heads
     a <- linear@dense a dim=MODEL_DIM bias=true
     return a, new_kv
 
