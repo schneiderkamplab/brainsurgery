@@ -1482,7 +1482,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             return super()._primitive_expr(primitive, node, local=local, symbols_dict=symbols_dict)
         simple = {
             "reshape": lambda: f"{args[0]}.reshape(tuple(int(x) for x in {args[1]}))",
-            "arange": lambda: f"mx.arange(int({args[1]}), dtype=mx.int64)" if args[2] == 'None' else f"mx.arange(int({args[1]}), int({args[2]}), dtype=mx.int64)",
+            "arange": lambda: f"mx.arange(int({args[1]}), int({args[0]}.shape[-2] if len({args[0]}.shape) >= 3 else {args[0]}.shape[-1]), dtype=mx.int64)" if args[2] == 'None' else f"mx.arange(int({args[1]}), int({args[2]}), dtype=mx.int64)",
             "chunk": lambda: f"mx.split({args[0]}, indices_or_sections=int({args[2] if len(args) > 2 else attrs.get('parts', '1')}), axis=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
             "split": lambda: f"mx.split({args[0]}, indices_or_sections=[int(x) for x in {args[2] if len(args) > 2 else attrs.get('sizes', '[]')}], axis=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
             "sum": lambda: f"{args[0]}.sum(axis=int({args[1] if len(args) > 1 else '-1'}), keepdims=bool({args[2] if len(args) > 2 else 'False'}))",
