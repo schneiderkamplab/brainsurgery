@@ -304,37 +304,113 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "return ((_k_all, _v_all, (_k_all, _v_all)),)")
         add(lines, 4, "")
 
+    def _detect_codegen_arch(self) -> dict[str, Any]:
+        """Detect architecture features from graph IR at codegen time.
+
+        Only detects things that are visible in the graph structure:
+        - activation type (from activation ops in graph modules)
+        - encoder-decoder (from main module inputs)
+        - rope presence (from rope ops in graph modules)
+        """
+        activation = "gelu"
+        has_rope = False
+        for module in self.program.modules:
+            for node in module.nodes:
+                primitive = _normalize_primitive_op(node.op.name)
+                if primitive == "activations_silu":
+                    activation = "silu"
+                elif primitive in (
+                    "activations_gelu",
+                    "activations_gelu_new",
+                    "activations_gelu_pytorch_tanh",
+                ):
+                    activation = "gelu"
+                if "rope" in primitive:
+                    has_rope = True
+
+        main_mod = self.modules_by_name.get(self.program.main_module, None)
+        is_encoder_decoder = main_mod is not None and any(
+            inp.name == "decoder_input_ids" for inp in main_mod.inputs
+        )
+
+        return {
+            "activation": activation,
+            "has_rope": has_rope,
+            "is_encoder_decoder": is_encoder_decoder,
+        }
+
     def _emit_build_ff(self, lines: list[str]) -> None:
         add = self._add
+        arch = self._detect_codegen_arch()
+        activation = arch["activation"]
+        is_encoder_decoder = arch["is_encoder_decoder"]
+
+        if activation == "silu":
+            act_expr = "(mx.sigmoid(g) * g)"
+        else:
+            act_expr = "_gelu_compiled(g)"
+
         add(lines, 4, "def _build_ff(self):")
         add(lines, 8, "import math")
         add(lines, 8, "s = self._symbols")
-        add(lines, 8, "num_layers = int(s['NUM_LAYERS'])")
-        add(lines, 8, "num_heads = int(s['NUM_HEADS'])")
-        add(lines, 8, "kvh = int(s['KVH'])")
-        add(lines, 8, "model_dim = int(s['MODEL_DIM'])")
-        add(lines, 8, "model_head_dim = int(s['MODEL_HEAD_DIM'])")
+        add(lines, 8, "num_layers = int(s.get('NUM_LAYERS', 1))")
+        add(lines, 8, "num_heads = int(s.get('NUM_HEADS', 1))")
+        add(lines, 8, "kvh = int(s.get('KVH', num_heads))")
+        add(lines, 8, "model_dim = int(s.get('MODEL_DIM', 1))")
+        add(lines, 8, "model_head_dim = int(s.get('MODEL_HEAD_DIM', model_dim // num_heads if num_heads else 1))")
         add(lines, 8, "ghd = int(s['GHD']) if s.get('HAS_GLOBAL_HD') else model_head_dim")
-        add(lines, 8, "ffn_dim = int(s['FFN'])")
-        add(lines, 8, "win_local = int(s['WIN_LOCAL'])")
-        add(lines, 8, "win_full = int(s['WIN_FULL'])")
-        add(lines, 8, "rope_period = int(s['ROPE_PERIOD'])")
-        add(lines, 8, "num_kv_shared = int(s['NUM_KV_SHARED'])")
+        add(lines, 8, "ffn_dim = int(s.get('FFN', 1))")
+        add(lines, 8, "win_local = int(s.get('WIN_LOCAL', 4096))")
+        add(lines, 8, "win_full = int(s.get('WIN_FULL', 4096))")
+        add(lines, 8, "rope_period = int(s.get('ROPE_PERIOD', 1))")
+        add(lines, 8, "num_kv_shared = int(s.get('NUM_KV_SHARED', 0))")
         add(lines, 8, "use_double_wide = bool(s.get('USE_DOUBLE_WIDE_MLP', False))")
         add(lines, 8, "eps = float(s.get('EPS', 1e-6))")
         add(lines, 8, "logit_softcap = float(s.get('LOGIT_SOFTCAP', 0.0))")
         add(lines, 8, "emb_scale = float(s.get('EMB_SCALE', 1.0))")
-        add(lines, 8, "theta_local = float(s.get('THETA_LOCAL', 10000.0))")
-        add(lines, 8, "theta_full = float(s.get('THETA_FULL', 1000000.0))")
+        add(lines, 8, "theta_local = float(s.get('THETA_LOCAL', float(s.get('THETA', 10000.0))))")
+        add(lines, 8, "theta_full = float(s.get('THETA_FULL', float(s.get('THETA', 1000000.0))))")
         add(lines, 8, "rope_scale_full = float(s.get('ROPE_SCALE_FULL', 1.0))")
         add(lines, 8, "partial_full = float(s.get('ROTARY_PARTIAL_FULL', 1.0))")
-        add(lines, 8, "has_pli = int(s.get('PLI', 0)) > 0")
+        add(lines, 8, "object.__setattr__(self, '_use_kv_cache', True)")
+        add(lines, 8, "")
+        add(lines, 8, "# --- Runtime param_root detection from state dict ---")
+        add(lines, 8, "_ft = self._flat_tensors")
+        add(lines, 8, "param_root = None")
+        add(lines, 8, "for _key in _ft:")
+        add(lines, 12, "if _key.endswith('.embed_tokens.weight'):")
+        add(lines, 16, "_candidate = _key[:-len('.embed_tokens.weight')]")
+        add(lines, 16, f"if f'{{_candidate}}.layers.0.self_attn.q_proj.weight' in _ft and f'{{_candidate}}.layers.0.mlp.gate_proj.weight' in _ft:")
+        add(lines, 20, "param_root = _candidate")
+        add(lines, 20, "break")
+        add(lines, 8, "if param_root is None:")
+        add(lines, 12, "def _ff(input_ids, past_kv=None, use_cache=False, **kwargs):")
+        add(lines, 16, "result = self._forward(input_ids, past_kv=past_kv, use_cache=use_cache, **kwargs)")
+        add(lines, 16, "if isinstance(result, dict):")
+        add(lines, 20, "logits = result.get('logits', result.get('output'))")
+        add(lines, 20, "kv = result.get('new_kv', result.get('past_kv', result.get('cache')))")
+        add(lines, 16, "elif isinstance(result, (list, tuple)):")
+        add(lines, 20, "logits = result[0]")
+        add(lines, 20, "kv = result[1] if len(result) > 1 else None")
+        add(lines, 16, "else:")
+        add(lines, 20, "logits = result")
+        add(lines, 20, "kv = None")
+        add(lines, 16, "return logits, kv")
+        add(lines, 12, "return _ff")
+        add(lines, 8, "")
+        add(lines, 8, "# --- Runtime feature detection ---")
+        add(lines, 8, "has_pre_ffn = f'{param_root}.layers.0.pre_feedforward_layernorm.weight' in _ft")
+        add(lines, 8, "has_post_ffn = f'{param_root}.layers.0.post_feedforward_layernorm.weight' in _ft")
+        add(lines, 8, "has_pli = f'{param_root}.embed_tokens_per_layer.weight' in _ft")
+        add(lines, 8, "has_q_norm = f'{param_root}.layers.0.self_attn.q_norm.weight' in _ft")
+        add(lines, 8, "has_k_norm = f'{param_root}.layers.0.self_attn.k_norm.weight' in _ft")
+        add(lines, 8, "has_v_rms = f'{param_root}.layers.0.self_attn.v_norm.weight' in _ft")
+        add(lines, 8, "has_layer_scalar = f'{param_root}.layers.0.layer_scalar' in _ft")
         add(lines, 8, "pli = int(s.get('PLI', 0))")
         add(lines, 8, "pli_scale = float(s.get('PLI_SCALE', 1.0))")
         add(lines, 8, "proj_scale = float(s.get('PROJ_SCALE', 1.0))")
         add(lines, 8, "pli_combine = float(s.get('PER_LAYER_INPUT_SCALE', 1.0))")
-        add(lines, 8, "param_root = 'model.language_model'")
-        add(lines, 8, "dtype = self._flat_tensors.get(f'{param_root}.embed_tokens.weight', mx.array(0)).dtype")
+        add(lines, 8, "dtype = _ft.get(f'{param_root}.embed_tokens.weight', mx.array(0)).dtype")
         add(lines, 8, "head_dim_local = model_head_dim")
         add(lines, 8, "head_dim_full = ghd")
         add(lines, 8, "rot_full = int(head_dim_full * partial_full)")
@@ -365,9 +441,6 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 12, "path = f'{param_root}.layers.{layer}.' + '.'.join(parts) + '.weight'")
         add(lines, 12, "return p(path)")
         add(lines, 8, "embed_w = p(f'{param_root}.embed_tokens.weight')")
-        add(lines, 8, "embed_pl_w = p(f'{param_root}.embed_tokens_per_layer.weight')")
-        add(lines, 8, "proj_w = p(f'{param_root}.per_layer_model_projection.weight')")
-        add(lines, 8, "proj_norm_w = p(f'{param_root}.per_layer_projection_norm.weight')")
         add(lines, 8, "norm_w = p(f'{param_root}.norm.weight')")
         add(lines, 8, "")
         add(lines, 8, "def _rms(x, w, eps=eps):")
@@ -375,6 +448,11 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 12, "return y0 * w if w is not None else y0")
         add(lines, 8, "def _rms_noscale(x, eps=eps):")
         add(lines, 12, "return mx.fast.rms_norm(x, None, eps)")
+        add(lines, 8, "")
+        add(lines, 8, "if has_pli:")
+        add(lines, 12, "embed_pl_w = p(f'{param_root}.embed_tokens_per_layer.weight')")
+        add(lines, 12, "proj_w = p(f'{param_root}.per_layer_model_projection.weight')")
+        add(lines, 12, "proj_norm_w = p(f'{param_root}.per_layer_projection_norm.weight')")
         add(lines, 8, "")
         add(lines, 8, "kv_caches = [None] * num_layers")
         add(lines, 8, "")
@@ -423,7 +501,8 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 16, "")
         add(lines, 16, "q = xn @ _ws(i, 'self_attn', 'q_proj').swapaxes(-1, -2)")
         add(lines, 16, "q = q.reshape(B, S, num_heads, hd).transpose(0, 2, 1, 3)")
-        add(lines, 16, "q = _rms(q, _ws(i, 'self_attn', 'q_norm'))")
+        add(lines, 16, "if has_q_norm:")
+        add(lines, 20, "q = _rms(q, _ws(i, 'self_attn', 'q_norm'))")
         add(lines, 16, "")
         add(lines, 16, "if shared_layer:")
         add(lines, 20, "if full:")
@@ -435,10 +514,12 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 16, "else:")
         add(lines, 20, "k = xn @ _ws(i, 'self_attn', 'k_proj').swapaxes(-1, -2)")
         add(lines, 20, "k = k.reshape(B, S, kvh, hd).transpose(0, 2, 1, 3)")
-        add(lines, 20, "k = _rms(k, _ws(i, 'self_attn', 'k_norm'))")
+        add(lines, 20, "if has_k_norm:")
+        add(lines, 24, "k = _rms(k, _ws(i, 'self_attn', 'k_norm'))")
         add(lines, 20, "v = xn @ _ws(i, 'self_attn', 'v_proj').swapaxes(-1, -2)")
         add(lines, 20, "v = v.reshape(B, S, kvh, hd).transpose(0, 2, 1, 3)")
-        add(lines, 20, "v = mx.fast.rms_norm(v, None, eps)")
+        add(lines, 20, "if has_v_rms:")
+        add(lines, 24, "v = mx.fast.rms_norm(v, None, eps)")
         add(lines, 20, "k_step, v_step = k, v")
         add(lines, 16, "")
         add(lines, 16, "if k_step is None:")
@@ -518,25 +599,32 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 16, "xn2 = _rms(a, _ws(i, 'post_attention_layernorm'))")
         add(lines, 16, "x = x + xn2")
         add(lines, 16, "")
-        add(lines, 16, "xn3 = _rms(x, _ws(i, 'pre_feedforward_layernorm'))")
+        add(lines, 16, "if has_pre_ffn:")
+        add(lines, 20, "xn3 = _rms(x, _ws(i, 'pre_feedforward_layernorm'))")
+        add(lines, 16, "else:")
+        add(lines, 20, "xn3 = _rms(x, _ws(i, 'post_attention_layernorm'))")
         add(lines, 16, "g = xn3 @ _ws(i, 'mlp', 'gate_proj').swapaxes(-1, -2)")
         add(lines, 16, "u = xn3 @ _ws(i, 'mlp', 'up_proj').swapaxes(-1, -2)")
-        add(lines, 16, "m = _gelu_compiled(g) * u")
+        add(lines, 16, f"m = {act_expr} * u")
         add(lines, 16, "m = m @ _ws(i, 'mlp', 'down_proj').swapaxes(-1, -2)")
-        add(lines, 16, "xn4 = _rms(m, _ws(i, 'post_feedforward_layernorm'))")
+        add(lines, 16, "if has_post_ffn:")
+        add(lines, 20, "xn4 = _rms(m, _ws(i, 'post_feedforward_layernorm'))")
+        add(lines, 16, "else:")
+        add(lines, 20, "xn4 = m")
         add(lines, 16, "x = x + xn4")
         add(lines, 16, "")
         add(lines, 16, "if has_pli:")
         add(lines, 20, "pli_i = pli_inputs[:, :, i, :]")
         add(lines, 20, "gate = x @ _ws(i, 'per_layer_input_gate').swapaxes(-1, -2)")
-        add(lines, 20, "gate = _gelu_compiled(gate)")
+        add(lines, 20, f"gate = (mx.sigmoid(gate) * gate)" if activation == "silu" else "gate = _gelu_compiled(gate)")
         add(lines, 20, "p_val = gate * pli_i")
         add(lines, 20, "p_val = p_val @ _ws(i, 'per_layer_projection').swapaxes(-1, -2)")
         add(lines, 20, "p_val = _rms(p_val, _ws(i, 'post_per_layer_input_norm'))")
         add(lines, 20, "x = x + p_val")
         add(lines, 16, "")
-        add(lines, 16, "ls = _w(i, 'layer_scalar')")
-        add(lines, 16, "x = x * ls")
+        add(lines, 16, "if has_layer_scalar:")
+        add(lines, 20, "ls = _w(i, 'layer_scalar')")
+        add(lines, 20, "x = x * ls")
         add(lines, 16, "")
         add(lines, 16, "if not shared_layer:")
         add(lines, 20, "if full:")
@@ -558,7 +646,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
 
     def _emit_common(self, lines: list[str]) -> None:
         add = self._add
-        add(lines, 4, "def __init__(self, state_dict: dict[str, mx.array], config: dict | None = None):")
+        add(lines, 4, "def __init__(self, state_dict: dict[str, mx.array], config: dict | None = None, target_dtype=None):")
         add(lines, 8, "super().__init__()")
         add(lines, 8, "object.__setattr__(self, '_flat_tensors', {})")
         add(lines, 8, "object.__setattr__(self, '_path_cache', {})")
@@ -576,21 +664,29 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "object.__setattr__(self, '_profile_enabled', False)")
         add(lines, 8, "object.__setattr__(self, '_profile_records', {})")
         add(lines, 8, "object.__setattr__(self, '_symbols', {})")
-        add(lines, 8, "self.load_state_dict(state_dict)")
+        add(lines, 8, "self.load_state_dict(state_dict, dtype=target_dtype)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
-        add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None):")
-        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config)")
+        add(lines, 4, "def from_state_dict(cls, state_dict, *, graph=None, model_config=None, dtype=None):")
+        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config, target_dtype=dtype)")
         add(lines, 4, "")
         add(lines, 4, "@classmethod")
-        add(lines, 4, "def from_safetensors(cls, safetensors_files, *, model_config=None):")
+        add(lines, 4, "def from_safetensors(cls, safetensors_files, *, model_config=None, dtype=None):")
         add(lines, 8, "state_dict = {}")
+        add(lines, 8, "import torch")
+        add(lines, 8, "target = cls._dtype_from_name(dtype) if dtype else None")
         add(lines, 8, "for path in safetensors_files:")
         add(lines, 12, "with safe_open(str(path), framework='pt') as f:")
         add(lines, 16, "for key in f.keys():")
         add(lines, 20, "t = f.get_tensor(key)")
-        add(lines, 20, "state_dict[str(key)] = mx.array(t.float().numpy()).astype(mx.bfloat16) if t.dtype == __import__('torch').bfloat16 else mx.array(t.numpy())")
-        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config)")
+        add(lines, 20, "if t.dtype == torch.bfloat16:")
+        add(lines, 24, "arr = mx.array(t.float().numpy()).astype(mx.bfloat16)")
+        add(lines, 20, "else:")
+        add(lines, 24, "arr = mx.array(t.numpy())")
+        add(lines, 20, "if target is not None:")
+        add(lines, 24, "arr = arr.astype(target)")
+        add(lines, 20, "state_dict[str(key)] = arr")
+        add(lines, 8, "return cls(state_dict, config=_MODEL_CONFIG if model_config is None else model_config, target_dtype=dtype)")
         add(lines, 4, "")
         self._emit_load_state_dict(lines)
         add(lines, 4, "")
@@ -834,6 +930,9 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "if isinstance(value, mx.array):")
         add(lines, 12, "return value")
         add(lines, 8, "import numpy as np")
+        add(lines, 8, "import torch")
+        add(lines, 8, "if isinstance(value, torch.Tensor) and value.dtype == torch.bfloat16:")
+        add(lines, 12, "return mx.array(value.float().numpy()).astype(mx.bfloat16)")
         add(lines, 8, "return mx.array(np.asarray(value))")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
@@ -904,6 +1003,16 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "return x.reshape(x.shape[:dim] + (1,) + x.shape[dim:])")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _expand(x, shape):")
+        add(lines, 8, "actual = list(shape)")
+        add(lines, 8, "tshape = list(x.shape)")
+        add(lines, 8, "offset = len(actual) - len(tshape)")
+        add(lines, 8, "for i in range(len(actual)):")
+        add(lines, 12, "if actual[i] == -1:")
+        add(lines, 16, "actual[i] = int(tshape[i - offset])")
+        add(lines, 8, "return mx.broadcast_to(x, tuple(actual))")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
         add(lines, 4, "def _topk(x, k, dim=-1, largest=True, sorted_=True):")
         add(lines, 8, "return mx.topk(x, int(k), axis=int(dim))")
         add(lines, 4, "")
@@ -960,14 +1069,16 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
 
     def _emit_load_state_dict(self, lines: list[str]) -> None:
         add = self._add
-        add(lines, 4, "def load_state_dict(self, state_dict, *, quantize=False):")
+        add(lines, 4, "def load_state_dict(self, state_dict, *, quantize=False, dtype=None):")
         add(lines, 8, "state_dict = self._materialize_state_aliases(state_dict)")
+        add(lines, 8, "target = self._dtype_from_name(dtype) if dtype else None")
         add(lines, 8, "tensors = {}")
         add(lines, 8, "for k, v in state_dict.items():")
         add(lines, 12, "if isinstance(v, mx.array):")
-        add(lines, 16, "tensors[str(k)] = v")
+        add(lines, 16, "tensors[str(k)] = v.astype(target) if target is not None else v")
         add(lines, 12, "else:")
-        add(lines, 16, "tensors[str(k)] = self._from_numpy(v)")
+        add(lines, 16, "arr = self._from_numpy(v)")
+        add(lines, 16, "tensors[str(k)] = arr.astype(target) if target is not None else arr")
         add(lines, 8, "")
         for path, op_type in sorted(self._static_param_ops.items()):
             safe = _path_to_safe_attr(path)
@@ -1081,12 +1192,16 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         add(lines, 8, "return self._forward(input_ids, past_kv=_past_kv, use_cache=_use_cache, **inputs)")
         add(lines, 4, "")
         add(lines, 4, "def compile(self, max_kv_length=2048):")
-        add(lines, 8, "\"\"\"Build a fast forward using mx.fast.* primitives with _KVCache.\"\"\"")
+        add(lines, 8, "\"\"\"Build a fast forward using mx.fast.* primitives with _KVCache, or mx.compile fallback.\"\"\"")
         add(lines, 8, "if self._ff is not None:")
         add(lines, 12, "return self._ff")
         add(lines, 8, "object.__setattr__(self, '_use_kv_cache', True)")
         add(lines, 8, "ff = self._build_ff()")
-        add(lines, 8, "kv = [None] * self._symbols['NUM_LAYERS']")
+        add(lines, 8, "if self._compiled_fn is not None:")
+        add(lines, 12, "object.__setattr__(self, '_ff', ff)")
+        add(lines, 12, "return ff")
+        add(lines, 8, "num_layers = int(self._symbols.get('NUM_LAYERS', 1))")
+        add(lines, 8, "kv = [None] * num_layers")
         add(lines, 8, "for length in range(1, min(max_kv_length + 1, 65)):")
         add(lines, 12, "inp = mx.array([[0]], dtype=mx.int64)")
         add(lines, 12, "result = ff(inp, past_kv=kv, use_cache=True)")
@@ -1371,7 +1486,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             "chunk": lambda: f"mx.split({args[0]}, indices_or_sections=int({args[2] if len(args) > 2 else attrs.get('parts', '1')}), axis=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
             "split": lambda: f"mx.split({args[0]}, indices_or_sections=[int(x) for x in {args[2] if len(args) > 2 else attrs.get('sizes', '[]')}], axis=int({args[1] if len(args) > 1 else attrs.get('dim', '-1')}))",
             "sum": lambda: f"{args[0]}.sum(axis=int({args[1] if len(args) > 1 else '-1'}), keepdims=bool({args[2] if len(args) > 2 else 'False'}))",
-            "expand": lambda: f"mx.broadcast_to({args[0]}, tuple(int(x) for x in {args[1]}))",
+            "expand": lambda: f"self._expand({args[0]}, {args[1]})",
             "permute": lambda: f"mx.transpose({args[0]}, axes=tuple(int(x) for x in {args[1]}))",
             "transpose": lambda: f"mx.swapaxes({args[0]}, int({args[1]}), int({args[2]}))",
             "unsqueeze": lambda: f"self._unsqueeze({args[0]}, {args[1]})",
@@ -1401,10 +1516,10 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             "dtype_value": lambda: f"(lambda _x: self._dtype_value(_x.dtype, {args[1]}))(self._value({args[0]}))",
             "cumsum": lambda: f"{args[0]}.cumsum(axis=int({args[1] if len(args) > 1 else '-1'}))",
             "empty_like": lambda: f"(lambda _x: mx.zeros(_x.shape, dtype=_x.dtype))(self._value({args[0]}))",
-            "fill": lambda: f"(lambda _x: mx.full(_x.shape, {args[1]}, dtype=(_x.dtype if self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) is None else self._dtype_from_name({args[2] if len(args) > 2 else 'None'}))))(self._value({args[0]}))",
-            "empty": lambda: f"mx.zeros(tuple(int(x) for x in {args[1]}), dtype=((self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) if {args[2] if len(args) > 2 else 'None'} is not None else None) or {args[0]}.dtype))",
-            "zeros": lambda: f"mx.zeros(tuple(int(x) for x in {args[1]}), dtype=((self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) if {args[2] if len(args) > 2 else 'None'} is not None else None) or {args[0]}.dtype))",
-            "full": lambda: f"mx.full(tuple(int(x) for x in {args[1]}), {args[2]}, dtype=((self._dtype_from_name({args[3] if len(args) > 3 else 'None'}) if {args[3] if len(args) > 3 else 'None'} is not None else None) or {args[0]}.dtype))",
+            "fill": lambda: f"(lambda _x: mx.full(_x.shape, {args[1]}, dtype=(self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) or _x.dtype)))(self._value({args[0]}))",
+            "empty": lambda: f"mx.zeros(tuple(int(x) for x in {args[1]}), dtype=(self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) or {args[0]}.dtype))",
+            "zeros": lambda: f"mx.zeros(tuple(int(x) for x in {args[1]}), dtype=(self._dtype_from_name({args[2] if len(args) > 2 else 'None'}) or {args[0]}.dtype))",
+            "full": lambda: f"mx.full(tuple(int(x) for x in {args[1]}), {args[2]}, dtype=(self._dtype_from_name({args[3] if len(args) > 3 else 'None'}) or {args[0]}.dtype))",
             "zeros_like": lambda: f"(lambda _x: mx.zeros(_x.shape, dtype=_x.dtype))(self._value({args[0]}))",
             "activations_tanh": lambda: f"mx.tanh({args[0]})",
             "activations_silu": lambda: f"mx.sigmoid({args[0]}) * {args[0]}",

@@ -477,6 +477,8 @@ def _to_torch(value: Any) -> torch.Tensor | None:
         import mlx.core as mx
         if isinstance(value, mx.array):
             import numpy as np
+            if value.dtype == mx.bfloat16:
+                value = value.astype(mx.float32)
             return torch.from_numpy(np.asarray(value))
     except ImportError:
         pass
@@ -484,7 +486,10 @@ def _to_torch(value: Any) -> torch.Tensor | None:
         import jax
         if isinstance(value, jax.Array):
             import numpy as np
-            return torch.from_numpy(np.asarray(value))
+            arr = np.asarray(value)
+            if arr.dtype == np.dtype('bfloat16') if hasattr(np, 'bfloat16') else False:
+                arr = arr.astype(np.float32)
+            return torch.from_numpy(arr)
     except ImportError:
         pass
     return None
@@ -4719,9 +4724,10 @@ def _run_axon_test_single(
                     syn = model_cls.from_safetensors(
                         safetensors_files,
                         model_config=model_config,
+                        dtype=str(resolved_dtype).removeprefix("torch."),
                     ).eval()
                 else:
-                    syn = model_cls.from_state_dict(local_state_dict).eval()
+                    syn = model_cls.from_state_dict(local_state_dict, dtype=str(resolved_dtype).removeprefix("torch.")).eval()
             elif axon_backend == "codegen2-jax":
                 jax_param_devices_env = os.environ.get("AXON_JAX_PARAM_DEVICES")
                 jax_param_devices = (

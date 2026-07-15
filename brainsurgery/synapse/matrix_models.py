@@ -482,6 +482,12 @@ def _is_valid_pytorch_checkpoint_file(path: Path) -> bool:
 def _auth_headers() -> list[str]:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if not token:
+        try:
+            from huggingface_hub.utils import get_token
+            token = get_token()
+        except Exception:
+            pass
+    if not token:
         return []
     return [f"Authorization: Bearer {token}"]
 
