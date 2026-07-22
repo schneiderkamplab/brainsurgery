@@ -67,7 +67,7 @@ def run_generate(args: argparse.Namespace) -> None:
     def _resolve_literal(gp, ref):
         """Follow GraphValueRef chain to find a literal value."""
         if isinstance(ref, GraphLiteral):
-            return float(ref.value)
+            return float(ref.value) if ref.value is not None else None
         if isinstance(ref, GraphValueRef):
             for m in gp.modules:
                 for n in m.nodes:
