@@ -20,23 +20,23 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 512
+MODEL_DIM <- 512
 
-VOCAB_SIZE = 58101
+VOCAB_SIZE <- 58101
 
-L_ENC = 6
+L_ENC <- 6
 
-L_DEC = 6
+L_DEC <- 6
 
-H_ENC = 8
+H_ENC <- 8
 
-H_DEC = 8
+H_DEC <- 8
 
-FFN_ENC = 2048
+FFN_ENC <- 2048
 
-FFN_DEC = 2048
+FFN_DEC <- 2048
 
-EPS = 1e-05
+EPS <- 1e-05
 
 EMB_SCALE = sqrt MODEL_DIM
 

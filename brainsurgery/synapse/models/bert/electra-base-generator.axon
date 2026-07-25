@@ -16,19 +16,19 @@ import Config
 
 import NN
 
-E = 768
+E <- 768
 
-MODEL_DIM = 256
+MODEL_DIM <- 256
 
-VOCAB_SIZE = 30522
+VOCAB_SIZE <- 30522
 
-NUM_LAYERS = 12
+NUM_LAYERS <- 12
 
-NUM_HEADS = 4
+NUM_HEADS <- 4
 
-FFN = 1024
+FFN <- 1024
 
-EPS = 1e-12
+EPS <- 1e-12
 
 electra_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 electra_block x keep = do

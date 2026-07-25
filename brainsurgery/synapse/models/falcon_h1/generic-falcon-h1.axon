@@ -1,0 +1,205 @@
+{-# CHECKPOINTS ["tiiuae/Falcon-H1-0.5B-Base", "tiiuae/Falcon-H1-1.5B-Base"] #-}
+{-# TASK "causal_lm" #-}
+{-# PADDING_SIDE "right" #-}
+
+import Activations (silu)
+import Attention (attention, merge_heads, reshape_heads)
+import Cache
+import Config
+import List
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import Math (exp, log, mul)
+import NN
+import Params (param)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import SSM (causal_conv1d_full)
+import Tensor
+
+type FalconH1MambaCache[B,C,CK,H,HD,N] = (Tensor[B,C,CK], Tensor[B,H,HD,N])
+type FalconH1LayerCache[B,AH,T,C,AD,MC,CK,MH,MHD,N] = (?CacheLayer[B,AH,T,C,AD], FalconH1MambaCache[B,MC,CK,MH,MHD,N])
+type FalconH1Cache[B,AH,T,C,AD,MC,CK,MH,MHD,N] = (List[FalconH1LayerCache[B,AH,T,C,AD,MC,CK,MH,MHD,N]], Dim)
+
+MODEL_DIM <- Config.dim @@hidden_size default=1024
+FFN <- Config.dim @@intermediate_size default=2048
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=36
+NUM_HEADS <- Config.dim @@num_attention_heads default=8
+KV_HEADS <- Config.dim @@num_key_value_heads default=2
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+QD <- NUM_HEADS * HEAD_DIM
+KVD <- KV_HEADS * HEAD_DIM
+VOCAB_SIZE <- Config.dim @@vocab_size default=32784
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=16384
+EPS <- Config.float @@rms_norm_eps default=1e-5
+THETA <- Config.float @@'rope_parameters.rope_theta' default=100000000000.0
+ATTENTION_BIAS <- Config.bool @@attention_bias default=false
+MLP_BIAS <- Config.bool @@mlp_bias default=false
+EMBED_MULTIPLIER <- Config.float @@embedding_multiplier default=1.0
+LM_HEAD_MULTIPLIER <- Config.float @@lm_head_multiplier default=1.0
+KEY_MULTIPLIER <- Config.float @@key_multiplier default=1.0
+ATTENTION_IN_MULTIPLIER <- Config.float @@attention_in_multiplier default=1.0
+ATTENTION_OUT_MULTIPLIER <- Config.float @@attention_out_multiplier default=1.0
+SSM_IN_MULTIPLIER <- Config.float @@ssm_in_multiplier default=1.0
+SSM_OUT_MULTIPLIER <- Config.float @@ssm_out_multiplier default=1.0
+MLP_MULTIPLIERS <- ((Config.list @@mlp_multipliers default=[1.0, 1.0]) :: List[Float])
+SSM_MULTIPLIERS <- ((Config.list @@ssm_multipliers default=[1.0, 1.0, 1.0, 1.0, 1.0]) :: List[Float])
+
+SSM_DIM <- Config.dim @@mamba_d_ssm default=1536
+SSM_HEADS <- Config.dim @@mamba_n_heads default=24
+SSM_HEAD_DIM <- Config.dim @@mamba_d_head default=(SSM_DIM / SSM_HEADS)
+SSM_GROUPS <- Config.dim @@mamba_n_groups default=1
+SSM_STATE <- Config.dim @@mamba_d_state default=128
+SSM_GROUP_STATE <- SSM_GROUPS * SSM_STATE
+SSM_CONV_KERNEL <- Config.dim @@mamba_d_conv default=4
+SSM_CONV_DIM <- SSM_DIM + (2 * SSM_GROUP_STATE)
+SSM_PROJECTION_DIM <- SSM_DIM + SSM_CONV_DIM + SSM_HEADS
+SSM_CONV_BIAS <- Config.bool @@mamba_conv_bias default=true
+SSM_PROJ_BIAS <- Config.bool @@mamba_proj_bias default=false
+
+falcon_h1_expand_groups :: Tensor[B,G,N] -> Tensor[B,SSM_HEADS,N]
+falcon_h1_expand_groups x = do
+  x <- Tensor.unsqueeze x dim=2
+  x <- Tensor.expand x shape=[B, SSM_GROUPS, SSM_HEADS / SSM_GROUPS, N]
+  return Tensor.reshape x shape=[B, SSM_HEADS, N]
+
+falcon_h1_scan_step :: Tensor[B,SSM_HEADS,SSM_HEAD_DIM,N] -> Tensor[B,SSM_HEADS,SSM_HEAD_DIM] -> Tensor[B,SSM_HEADS] -> Tensor[B,SSM_HEADS,N] -> Tensor[B,SSM_HEADS,N] -> Tensor[SSM_HEADS] -> Tensor[SSM_HEADS] -> (Tensor[B,SSM_HEADS,SSM_HEAD_DIM,N], Tensor[B,SSM_HEADS,SSM_HEAD_DIM])
+falcon_h1_scan_step state u_t dt_t b_t c_t a d = do
+  a_full <- Tensor.unsqueeze a dim=0 |> Tensor.unsqueeze dim=-1 |> Tensor.unsqueeze dim=-1
+  d_a <- exp ((Tensor.unsqueeze dt_t dim=-1 |> Tensor.unsqueeze dim=-1) * a_full)
+  d_b <- (Tensor.unsqueeze dt_t dim=-1 |> Tensor.unsqueeze dim=-1) * (Tensor.unsqueeze b_t dim=2)
+  state <- (state * d_a) + (d_b * (Tensor.unsqueeze u_t dim=-1))
+  y_t <- Tensor.matmul state (Tensor.unsqueeze c_t dim=-1) |> Tensor.reshape shape=[B, SSM_HEADS, SSM_HEAD_DIM]
+  d_full <- Tensor.unsqueeze d dim=0 |> Tensor.unsqueeze dim=-1
+  return state, y_t + (u_t * d_full)
+
+falcon_h1_scan :: Tensor[B,S,SSM_DIM] -> Tensor[B,S,SSM_HEADS] -> Tensor[B,S,SSM_GROUP_STATE] -> Tensor[B,S,SSM_GROUP_STATE] -> ?Tensor[B,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE] -> (Tensor[B,S,SSM_DIM], Tensor[B,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+falcon_h1_scan u dt b c past_state = do
+  a_log <- ((param @A_log) :: Tensor[SSM_HEADS])
+  a <- 0.0 - (exp a_log)
+  d <- ((param @D) :: Tensor[SSM_HEADS])
+  dt_bias <- ((param @dt_bias) :: Tensor[SSM_HEADS])
+  dt_bias <- Tensor.unsqueeze dt_bias dim=0 |> Tensor.expand shape=[B, SSM_HEADS]
+  u0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B, SSM_HEADS, SSM_HEAD_DIM]
+  b0 <- Tensor.slice b dim=1 start=0 end=1 |> Tensor.reshape shape=[B, SSM_GROUPS, SSM_STATE] |> falcon_h1_expand_groups
+  zero_state <- ((Tensor.unsqueeze u0 dim=-1) * (Tensor.unsqueeze b0 dim=2)) * 0.0
+  state <- (past_state == null) ? zero_state : past_state
+  y <- Tensor.zeros_like u
+  state, y <- for t <- [0..S) carry (state, y) do
+    u_t <- Tensor.slice u dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, SSM_HEADS, SSM_HEAD_DIM]
+    dt_t <- Tensor.slice dt dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, SSM_HEADS]
+    dt_t <- exp (dt_t + dt_bias)
+    dt_t <- log (dt_t + 1.0)
+    b_t <- Tensor.slice b dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, SSM_GROUPS, SSM_STATE] |> falcon_h1_expand_groups
+    c_t <- Tensor.slice c dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, SSM_GROUPS, SSM_STATE] |> falcon_h1_expand_groups
+    state, y_t <- falcon_h1_scan_step state u_t dt_t b_t c_t a d
+    y_t <- Tensor.reshape y_t shape=[B, 1, SSM_DIM]
+    index <- Tensor.fill y_t t dtype="long"
+    y <- Tensor.scatter y index y_t dim=1
+    yield state, y
+  return y, state
+
+falcon_h1_sequence_mask :: Tensor[B,S,C] -> ?Tensor[B,S] -> Tensor[B,S,C]
+falcon_h1_sequence_mask x mask = (mask == null) ? x : (x * (Tensor.unsqueeze mask dim=-1))
+
+falcon_h1_conv_cached :: Tensor[B,S,SSM_CONV_DIM] -> ?Tensor[B,SSM_CONV_DIM,SSM_CONV_KERNEL] -> Tensor[SSM_CONV_DIM,1,SSM_CONV_KERNEL] -> Tensor[SSM_CONV_DIM] -> ?Tensor[B,S] -> (Tensor[B,S,SSM_CONV_DIM], Tensor[B,SSM_CONV_DIM,SSM_CONV_KERNEL])
+falcon_h1_conv_cached x past w b attn_mask = do
+  x <- falcon_h1_sequence_mask x attn_mask
+  x_c <- Tensor.transpose x dim1=1 dim2=2
+  zero_prefix <- Tensor.zeros x_c shape=[B,SSM_CONV_DIM,SSM_CONV_KERNEL - 1]
+  prefix <- (past == null)
+    ? zero_prefix
+    : Tensor.slice (past :: Tensor[B,SSM_CONV_DIM,SSM_CONV_KERNEL]) dim=-1 start=1 end=SSM_CONV_KERNEL
+  conv_input <- Tensor.concat prefix x_c dim=-1
+  y_all <- causal_conv1d_full (Tensor.transpose conv_input dim1=1 dim2=2) w b "silu"
+  y <- Tensor.slice y_all dim=1 start=(SSM_CONV_KERNEL - 1) end=(SSM_CONV_KERNEL - 1 + S)
+  total <- Tensor.size conv_input dim=-1
+  conv_state <- Tensor.slice conv_input dim=-1 start=(total - SSM_CONV_KERNEL) end=total
+  y <- falcon_h1_sequence_mask y attn_mask
+  return y, conv_state
+
+falcon_h1_mamba :: Tensor[B,S,D] -> ?Tensor[B,S] -> ?FalconH1MambaCache[B,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE] -> (Tensor[B,S,D], FalconH1MambaCache[B,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+falcon_h1_mamba x attn_mask past = do
+  x <- falcon_h1_sequence_mask x attn_mask
+  x <- x * SSM_IN_MULTIPLIER
+  projected <- NN.linear@in_proj x dim=SSM_PROJECTION_DIM bias=SSM_PROJ_BIAS
+  gate, hidden, b_state, c_state, dt <- Tensor.split projected sizes=[SSM_DIM, SSM_DIM, SSM_GROUP_STATE, SSM_GROUP_STATE, SSM_HEADS]
+  m0 <- List.index SSM_MULTIPLIERS 0
+  m1 <- List.index SSM_MULTIPLIERS 1
+  m2 <- List.index SSM_MULTIPLIERS 2
+  m3 <- List.index SSM_MULTIPLIERS 3
+  m4 <- List.index SSM_MULTIPLIERS 4
+  gate <- gate * m0
+  hidden <- hidden * m1
+  b_state <- b_state * m2
+  c_state <- c_state * m3
+  dt <- dt * m4
+  hidden_bc <- Tensor.concat hidden b_state dim=-1 |> Tensor.concat c_state dim=-1
+  past_conv, past_state <- (past == null) ? (null, null) : past
+  w <- ((param @conv1d.weight) :: Tensor[SSM_CONV_DIM,1,SSM_CONV_KERNEL])
+  b <- SSM_CONV_BIAS
+    ? ((param @conv1d.bias) :: Tensor[SSM_CONV_DIM])
+    : do
+      zero <- Tensor.slice w dim=-1 start=0 end=1 |> Tensor.reshape shape=[SSM_CONV_DIM]
+      return zero * 0.0
+  hidden_bc, conv_state <- falcon_h1_conv_cached hidden_bc past_conv w b attn_mask
+  hidden, b_state, c_state <- Tensor.split hidden_bc sizes=[SSM_DIM, SSM_GROUP_STATE, SSM_GROUP_STATE]
+  y, scan_state <- falcon_h1_scan hidden dt b_state c_state past_state
+  y <- y |> mul (silu gate) |> NN.linear@out_proj dim=MODEL_DIM bias=SSM_PROJ_BIAS
+  return y, ((conv_state, scan_state) :: FalconH1MambaCache[B,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+
+falcon_h1_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?Tensor[B,S] -> ?FalconH1LayerCache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE] -> (Tensor[B,S,D], FalconH1LayerCache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+falcon_h1_block x rope_sin rope_cos mask attn_mask past_kv = do
+  past_attn, past_mamba <- (past_kv == null)
+    ? (((null :: ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM]), (null :: ?FalconH1MambaCache[B,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])) :: FalconH1LayerCache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+    : (past_kv :: FalconH1LayerCache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  m, new_mamba <- scope@mamba do
+    m, new_mamba <- falcon_h1_mamba xn attn_mask past_mamba
+    return m, new_mamba
+  m <- m * SSM_OUT_MULTIPLIER
+  a, new_kv <- scope@self_attn do
+    ax <- xn * ATTENTION_IN_MULTIPLIER
+    q <- NN.linear@q_proj ax dim=QD bias=ATTENTION_BIAS |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj ax dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    v <- NN.linear@v_proj ax dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    k <- k * KEY_MULTIPLIER
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_attn k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=ATTENTION_BIAS
+    return a, new_kv
+  x <- x + m + (a * ATTENTION_OUT_MULTIPLIER)
+  xn <- NN.rmsnorm@pre_ff_layernorm x eps=EPS cast_float=true
+  m <- scope@feed_forward do
+    gate_multiplier <- List.index MLP_MULTIPLIERS 0
+    output_multiplier <- List.index MLP_MULTIPLIERS 1
+    gate <- NN.linear@gate_proj xn dim=FFN bias=MLP_BIAS
+    up <- NN.linear@up_proj xn dim=FFN bias=MLP_BIAS
+    return up |> mul (silu (gate * gate_multiplier)) |> NN.linear@down_proj dim=MODEL_DIM bias=MLP_BIAS |> mul output_multiplier
+  return x + m, ((new_kv, new_mamba) :: FalconH1LayerCache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+
+falcon_h1 :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?FalconH1Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE] -> ?Bool -> (Tensor[B,S,V], ?FalconH1Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+falcon_h1 input_ids attn_mask past_kv use_cache = do
+  past_layers, past_length <- (past_kv == null)
+    ? ((List.init :: List[FalconH1LayerCache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE]]), (0 :: Int))
+    : (past_kv :: FalconH1Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- List.init
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM |> mul EMBED_MULTIPLIER
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- (past_kv == null)
+        ? (null :: ?FalconH1LayerCache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+        : ((List.index past_layers i) :: FalconH1LayerCache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE])
+      x, new_i <- falcon_h1_block x rope_sin rope_cos mask attn_mask past_i
+      work_kv <- List.append work_kv new_i
+      yield x, work_kv
+    x <- NN.rmsnorm@final_layernorm x eps=EPS cast_float=true
+    return x, work_kv
+  logits <- NN.linear@@lm_head x dim=VOCAB_SIZE bias=false |> mul LM_HEAD_MULTIPLIER
+  new_cache <- use_cache ? ((work_kv, key_len) :: FalconH1Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM,SSM_CONV_DIM,SSM_CONV_KERNEL,SSM_HEADS,SSM_HEAD_DIM,SSM_STATE]) : null
+  return logits, new_cache

@@ -20,69 +20,69 @@ import NN
 
 import Tensor
 
-D_ENC = 2048
+D_ENC <- 2048
 
-D_DEC = 2048
+D_DEC <- 2048
 
-VOCAB_SIZE = 256000
+VOCAB_SIZE <- 256000
 
-L_ENC = 24
+L_ENC <- 24
 
-L_DEC = 24
+L_DEC <- 24
 
-H_ENC = 32
+H_ENC <- 32
 
-KVH_ENC = 32
+KVH_ENC <- 32
 
-HD_ENC = 64
+HD_ENC <- 64
+
+H_DEC <- 32
+
+KVH_DEC <- 32
+
+HD_DEC <- 64
+
+FFN_ENC <- 5120
+
+FFN_DEC <- 5120
+
+EPS_ENC <- 1e-06
+
+EPS_DEC <- 1e-06
+
+THETA_ENC <- 10000.0
+
+THETA_DEC <- 10000.0
+
+WIN_SLIDE_ENC <- 4096
+
+WIN_SLIDE_DEC <- 4096
+
+WIN_FULL_ENC <- 8192
+
+WIN_FULL_DEC <- 8192
+
+ROPE_PERIOD_ENC <- 2
+
+ROPE_PERIOD_DEC <- 2
+
+ATTN_SCALE_ENC <- 1.0 / sqrt (64.0)
+
+ATTN_SCALE_DEC <- 1.0 / sqrt (64.0)
+
+LOGIT_SOFTCAP <- 30.0
 
 QD_ENC = H_ENC * HD_ENC
 
 KVD_ENC = KVH_ENC * HD_ENC
 
-H_DEC = 32
-
-KVH_DEC = 32
-
-HD_DEC = 64
-
 QD_DEC = H_DEC * HD_DEC
 
 KVD_DEC = KVH_DEC * HD_DEC
 
-FFN_ENC = 5120
-
-FFN_DEC = 5120
-
-EPS_ENC = 1e-06
-
-EPS_DEC = 1e-06
-
-THETA_ENC = 10000.0
-
-THETA_DEC = 10000.0
-
-WIN_SLIDE_ENC = 4096
-
-WIN_SLIDE_DEC = 4096
-
-WIN_FULL_ENC = 8192
-
-WIN_FULL_DEC = 8192
-
-ROPE_PERIOD_ENC = 2
-
-ROPE_PERIOD_DEC = 2
-
-ATTN_SCALE_ENC = 1.0 / sqrt (64.0)
-
-ATTN_SCALE_DEC = 1.0 / sqrt (64.0)
-
 EMB_SCALE_ENC = sqrt D_ENC
 
 EMB_SCALE_DEC = sqrt D_DEC
-
-LOGIT_SOFTCAP = 30.0
 
 t5gemma_encoder_block :: Tensor[B,S,D_ENC] -> Int -> Tensor[B,1,S,S] -> Tensor[B,1,S,S] -> Tensor[B,H_ENC,S,S] -> Tensor[B,H_ENC,S,S] -> Tensor[B,1,S,HD_ENC] -> Tensor[B,1,S,HD_ENC] -> Tensor[B,S,D_ENC]
 t5gemma_encoder_block x i mask_slide mask_full additive_mask_slide additive_mask_full rope_sin rope_cos = do

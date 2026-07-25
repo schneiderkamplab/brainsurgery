@@ -1,0 +1,142 @@
+{-# CHECKPOINTS "test/Dots1-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "rednote_model" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import List
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul)
+
+import MoE (grouped_sigmoid_router, grouped_swiglu_ffn_separate)
+
+import NN
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Tensor
+
+MODEL_DIM <- (128 :: Dim)
+
+FFN <- (256 :: Dim)
+
+MOE_FFN <- (64 :: Dim)
+
+NUM_LAYERS <- (4 :: Dim)
+
+NUM_DENSE <- (1 :: Dim)
+
+NUM_HEADS <- (4 :: Dim)
+
+KV_HEADS <- (2 :: Dim)
+
+HEAD_DIM <- MODEL_DIM / NUM_HEADS
+
+QD <- NUM_HEADS * HEAD_DIM
+
+KVD <- KV_HEADS * HEAD_DIM
+
+VOCAB_SIZE <- (65536 :: Dim)
+
+MAX_POSITIONS <- (1024 :: Dim)
+
+SLIDING_WINDOW <- (64 :: Dim)
+
+EPS <- 1e-05
+
+THETA <- 10000000.0
+
+ATTENTION_BIAS <- false
+
+NUM_EXPERTS <- (4 :: Dim)
+
+TOP_K <- (2 :: Dim)
+
+NUM_SHARED <- (1 :: Dim)
+
+N_GROUP <- (1 :: Dim)
+
+TOPK_GROUP <- (1 :: Dim)
+
+NORM_TOPK <- true
+
+ROUTE_SCALE <- 2.5
+
+TIE <- false
+
+LAYER_TYPES <- ((["full_attention", "full_attention", "full_attention", "full_attention"]) :: List[String])
+
+rednote_dense :: Path -> Tensor[B,S,D] -> Dim -> Tensor[B,S,D]
+rednote_dense@path x ffn = do
+  gate <- NN.linear@gate_proj x dim=ffn bias=false |> silu
+  up <- NN.linear@up_proj x dim=ffn bias=false
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+rednote_sparse :: Tensor[B,S,D] -> Tensor[B,S,D]
+rednote_sparse x = do
+  scores, indices <- grouped_sigmoid_router@gate x NUM_EXPERTS TOP_K n_group=N_GROUP topk_group=TOPK_GROUP norm_topk_prob=NORM_TOPK routed_scaling_factor=ROUTE_SCALE e_score_correction_bias=@gate.e_score_correction_bias
+  routed <- grouped_swiglu_ffn_separate x scores indices NUM_EXPERTS MOE_FFN gate_weight=@experts.gate_proj.weight up_weight=@experts.up_proj.weight out_weight=@experts.down_proj.weight
+  shared <- rednote_dense@shared_experts x ffn=(MOE_FFN * NUM_SHARED)
+  return routed + shared
+
+rednote_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+rednote_block x layer rope_sin rope_cos sliding_mask full_mask past_kv = do
+  layer_type <- List.index LAYER_TYPES layer
+  sparse <- layer >= NUM_DENSE
+  mask <- (layer_type == "sliding_attention") ? sliding_mask : full_mask
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=ATTENTION_BIAS |> reshape_heads heads=NUM_HEADS |> NN.rmsnorm@q_norm eps=EPS dim=HEAD_DIM cast_float=true
+    k <- NN.linear@k_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS |> NN.rmsnorm@k_norm eps=EPS dim=HEAD_DIM cast_float=true
+    v <- NN.linear@v_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=ATTENTION_BIAS
+    return a, new_kv
+  x <- x + a
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true
+  m <- scope@mlp do
+    return sparse
+            ? (rednote_sparse xn)
+            : do
+                gate <- NN.linear@gate_proj xn dim=FFN bias=false |> silu
+                up <- NN.linear@up_proj xn dim=FFN bias=false
+                return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+  return x + m, new_kv
+
+rednote_model :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+rednote_model input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  sliding_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=SLIDING_WINDOW
+  full_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- rednote_block x i rope_sin rope_cos sliding_mask full_mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- NN.rmsnorm@norm x eps=EPS cast_float=true
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- TIE ? (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false) : (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false)
+  return logits, new_kv

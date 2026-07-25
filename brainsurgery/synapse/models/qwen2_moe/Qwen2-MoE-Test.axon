@@ -1,0 +1,148 @@
+{-# CHECKPOINTS "test/Qwen2-MoE-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "qwen2_moe" #-}
+
+import Activations (sigmoid, silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import List
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul)
+
+import MoE (grouped_swiglu_ffn_separate)
+
+import NN
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Tensor
+
+MODEL_DIM <- (128 :: Dim)
+
+FFN <- (256 :: Dim)
+
+MOE_FFN <- (64 :: Dim)
+
+SHARED_FFN <- (5632 :: Dim)
+
+NUM_LAYERS <- (4 :: Dim)
+
+NUM_HEADS <- (4 :: Dim)
+
+KV_HEADS <- (2 :: Dim)
+
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+
+QD <- NUM_HEADS * HEAD_DIM
+
+KVD <- KV_HEADS * HEAD_DIM
+
+VOCAB_SIZE <- (1024 :: Dim)
+
+MAX_POSITIONS <- (1024 :: Dim)
+
+SLIDING_WINDOW <- (64 :: Dim)
+
+EPS <- 1e-06
+
+THETA <- 1000000.0
+
+NUM_EXPERTS <- (4 :: Dim)
+
+TOP_K <- (2 :: Dim)
+
+SPARSE_STEP <- (1 :: Dim)
+
+NORM_TOPK <- false
+
+TIE <- false
+
+LAYER_TYPES <- ((["full_attention", "full_attention", "full_attention", "full_attention"]) :: List[String])
+
+MLP_ONLY_LAYERS <- (([]) :: List[Int])
+
+qwen2_moe_dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+qwen2_moe_dense_ffn x = do
+  gate <- NN.linear@gate_proj x dim=FFN bias=false |> silu
+  up <- NN.linear@up_proj x dim=FFN bias=false
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+qwen2_moe_sparse_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+qwen2_moe_sparse_ffn x = do
+  x32 <- Tensor.cast x dtype="float32"
+  logits <- NN.linear@gate x32 dim=NUM_EXPERTS bias=false weight_path=@gate.weight
+  probs <- Tensor.softmax logits dim=-1 dtype="float32"
+  scores, indices <- Tensor.topk probs k=TOP_K dim=-1 largest=true sorted=false
+  scores <- NORM_TOPK ? (scores / (Tensor.sum scores dim=-1 keepdim=true)) : scores
+  scores <- Tensor.cast_like scores x
+  routed <- grouped_swiglu_ffn_separate x scores indices NUM_EXPERTS MOE_FFN gate_weight=@experts.gate_proj.weight up_weight=@experts.up_proj.weight out_weight=@experts.down_proj.weight
+  shared <- scope@shared_expert do
+    gate <- NN.linear@gate_proj x dim=SHARED_FFN bias=false |> silu
+    up <- NN.linear@up_proj x dim=SHARED_FFN bias=false
+    return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+  shared_gate <- NN.linear@shared_expert_gate x dim=1 bias=false |> sigmoid
+  return routed + (shared_gate * shared)
+
+qwen2_moe_is_sparse :: Int -> Bool
+qwen2_moe_is_sparse layer = do
+  mlp_only <- false
+  mlp_only <- for j <- [0..List.length MLP_ONLY_LAYERS) carry (mlp_only) do
+    candidate <- List.index MLP_ONLY_LAYERS j
+    yield mlp_only or (candidate == layer)
+  return mlp_only ? false : (((layer + 1) % SPARSE_STEP) == 0)
+
+qwen2_moe_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+qwen2_moe_block x layer rope_sin rope_cos sliding_mask full_mask past_kv = do
+  layer_type <- List.index LAYER_TYPES layer
+  mask <- (layer_type == "sliding_attention") ? sliding_mask : full_mask
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KV_HEADS
+    v <- NN.linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KV_HEADS
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+    return a, new_kv
+  x <- x + a
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true
+  sparse <- qwen2_moe_is_sparse layer
+  m <- scope@mlp do
+    return sparse ? (qwen2_moe_sparse_ffn xn) : (qwen2_moe_dense_ffn xn)
+  return x + m, new_kv
+
+qwen2_moe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+qwen2_moe input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  sliding_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=SLIDING_WINDOW
+  full_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- qwen2_moe_block x i rope_sin rope_cos sliding_mask full_mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- NN.rmsnorm@norm x eps=EPS cast_float=true
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- TIE ? (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false) : (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false)
+  return logits, new_kv

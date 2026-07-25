@@ -1,0 +1,72 @@
+{-# CHECKPOINTS "Salesforce/ctrl" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "ctrl" #-}
+
+import Activations (relu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (sqrt)
+
+import NN
+
+import Positions (position_ids, sinusoidal_positions)
+
+MODEL_DIM <- (1280 :: Dim)
+
+VOCAB_SIZE <- (246534 :: Dim)
+
+NUM_LAYERS <- (48 :: Dim)
+
+NUM_HEADS <- (16 :: Dim)
+
+FFN <- (8192 :: Dim)
+
+MAX_POSITIONS <- (50000 :: Dim)
+
+EPS <- 1e-06
+
+ctrl_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+ctrl_block x mask past_kv = do
+  xn <- NN.layernorm@layernorm1 x eps=EPS
+  q <- NN.linear@multi_head_attention.Wq xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@multi_head_attention.Wk xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  v <- NN.linear@multi_head_attention.Wv xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  k, v, new_kv <- Cache.update past_kv k v
+  a <- attention q k v mask |> merge_heads |> NN.linear@multi_head_attention.dense dim=MODEL_DIM bias=true
+  x <- x + a
+  xn <- NN.layernorm@layernorm2 x eps=EPS
+  m <- NN.linear@ffn.0 xn dim=FFN bias=true |> relu |> NN.linear@ffn.2 dim=MODEL_DIM bias=true
+  return x + m, new_kv
+
+ctrl :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+ctrl input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  tok <- NN.embedding@transformer.w input_ids dim=MODEL_DIM
+  tok <- tok * sqrt MODEL_DIM
+  pos <- sinusoidal_positions tok pos_ids theta=10000.0 offset=0 mode="rope"
+  x <- tok + pos
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- for@transformer.h i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
+    x, new_i <- ctrl_block x mask past_i
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  x <- NN.layernorm@transformer.layernorm x eps=EPS
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@@transformer.w x dim=VOCAB_SIZE bias=true weight_path=@@transformer.w.weight bias_path=@@lm_head.bias
+  return logits, new_kv

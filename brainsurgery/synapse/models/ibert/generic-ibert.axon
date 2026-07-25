@@ -1,0 +1,48 @@
+{-# CHECKPOINTS ["kssteven/ibert-roberta-base"] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (gelu)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+import Positions (position_ids)
+import Config
+import NN
+
+
+MODEL_DIM <- Config.int @@hidden_size default=768
+VOCAB_SIZE <- Config.int @@vocab_size default=50265
+NUM_LAYERS <- Config.int @@num_hidden_layers default=12
+NUM_HEADS <- Config.int @@num_attention_heads default=12
+FFN <- Config.int @@intermediate_size default=3072
+EPS <- Config.float @@layer_norm_eps default=1e-5
+PAD <- Config.int @@pad_token_id default=1
+
+ibert_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+ibert_block x keep = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- NN.layernorm@attention.output.LayerNorm (x + a) eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return NN.layernorm@output.LayerNorm (x + m) eps=EPS
+
+ibert :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+ibert input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  pos_base <- position_ids input_ids attn_mask=attn_mask pad_fill=-1
+  pos_ids <- pos_base + PAD + 1
+  token_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@ibert.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@ibert.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@ibert.embeddings.token_type_embeddings token_type_ids dim=MODEL_DIM
+  x <- NN.layernorm@ibert.embeddings.LayerNorm (tok + pos + typ) eps=EPS
+  x <- for@ibert.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- ibert_block x keep
+    yield x
+  x <- NN.linear@lm_head.dense x dim=MODEL_DIM bias=true |> gelu
+  x <- NN.layernorm@lm_head.layer_norm x eps=EPS
+  return NN.linear@lm_head.decoder x dim=VOCAB_SIZE bias=true weight_path=@@ibert.embeddings.word_embeddings.weight bias_path=@@lm_head.bias

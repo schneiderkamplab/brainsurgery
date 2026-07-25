@@ -1,0 +1,226 @@
+{-# CHECKPOINTS ["ibm-granite/granite-4.0-1b-base", "ibm-granite/granite-4.0-1b"] #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "granitemoehybrid" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Config
+
+import List
+
+import Masking (causal_mask_for_input, mask_for_input)
+
+import Math (clamp, exp, log, mul)
+
+import MoE (grouped_swiglu_ffn_basic)
+
+import NN
+
+import Params (param)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import SSM (causal_conv1d_full)
+
+import Tensor
+
+MODEL_DIM <- (2048 :: Dim)
+
+VOCAB_SIZE <- (100352 :: Dim)
+
+NUM_LAYERS <- (40 :: Dim)
+
+FFN <- (4096 :: Dim)
+
+SHARED_FFN <- (4096 :: Dim)
+
+NUM_HEADS <- (16 :: Dim)
+
+KV_HEADS <- Config.dim @@num_key_value_heads default=NUM_HEADS
+
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+
+MAX_POSITIONS <- (131072 :: Dim)
+
+THETA <- 10000000.0
+
+EPS <- 1e-05
+
+ATTN_BIAS <- false
+
+ATTENTION_SCALE <- 0.0078125
+
+EMBED_SCALE <- 12.0
+
+LOGITS_SCALE <- 8.0
+
+TIE <- true
+
+RESIDUAL_SCALE <- 0.22
+
+POSITION_TYPE <- "rope"
+
+LAYER_TYPES <- ((["attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention", "attention"]) :: List[String])
+
+NUM_EXPERTS <- (0 :: Dim)
+
+TOP_K <- (0 :: Dim)
+
+MAMBA_HEADS <- (128 :: Dim)
+
+MAMBA_HEAD_DIM <- Config.dim @@mamba_d_head default=(MODEL_DIM * 2 / MAMBA_HEADS)
+
+MAMBA_GROUPS <- (1 :: Dim)
+
+STATE_DIM <- (256 :: Dim)
+
+CONV_KERNEL <- (4 :: Dim)
+
+EXPAND <- (2 :: Dim)
+
+INNER <- EXPAND * MODEL_DIM
+
+CONV_DIM <- INNER + (2 * MAMBA_GROUPS * STATE_DIM)
+
+PROJECTION_DIM <- INNER + CONV_DIM + MAMBA_HEADS
+
+CONV_BIAS <- true
+
+PROJ_BIAS <- false
+
+granitemoehybrid_sequence_mask :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+granitemoehybrid_sequence_mask x mask = (mask == null) ? x : (x * (Tensor.unsqueeze mask dim=-1))
+
+granitemoehybrid_expand_groups :: Tensor[B,G,N] -> Dim -> Dim -> Tensor[B,H,N]
+granitemoehybrid_expand_groups x heads groups = do
+  per_group <- heads / groups
+  x <- Tensor.unsqueeze x dim=2
+  x <- Tensor.expand x shape=[B, G, per_group, N]
+  return Tensor.reshape x shape=[B, heads, N]
+
+granitemoehybrid_scan_step :: Tensor[B,H,HD,N] -> Tensor[B,H,HD] -> Tensor[B,H] -> Tensor[B,H,N] -> Tensor[B,H,N] -> Tensor[H] -> Tensor[H] -> (Tensor[B,H,HD,N], Tensor[B,H,HD])
+granitemoehybrid_scan_step state u dt b c a d = do
+  a_full <- Tensor.unsqueeze a dim=0 |> Tensor.unsqueeze dim=-1 |> Tensor.unsqueeze dim=-1 |> Tensor.expand shape=[B, H, 1, 1]
+  d_a <- exp ((Tensor.unsqueeze dt dim=-1 |> Tensor.unsqueeze dim=-1) * a_full)
+  d_b <- (Tensor.unsqueeze dt dim=-1 |> Tensor.unsqueeze dim=-1) * (Tensor.unsqueeze b dim=2)
+  state <- (state * d_a) + (d_b * (Tensor.unsqueeze u dim=-1))
+  y <- Tensor.matmul state (Tensor.unsqueeze c dim=-1) |> Tensor.reshape shape=[B, H, HD]
+  d_full <- Tensor.unsqueeze d dim=0 |> Tensor.unsqueeze dim=-1 |> Tensor.expand shape=[B, H, 1]
+  return state, y + (u * d_full)
+
+granitemoehybrid_scan :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S,H] -> Tensor[B,S,GN] -> Tensor[B,S,GN] -> Path -> Path -> Path -> Path -> Dim -> Dim -> Tensor[B,S,D]
+granitemoehybrid_scan u gate dt b c a_path d_path dt_bias_path norm_weight_path groups head_dim = do
+  norm_w <- param norm_weight_path
+  seq <- Tensor.size u dim=1
+  heads <- D / head_dim
+  a_log <- ((param a_path) :: Tensor[heads])
+  a <- 0.0 - (exp a_log)
+  d <- ((param d_path) :: Tensor[heads])
+  dt_bias <- ((param dt_bias_path) :: Tensor[heads])
+  state_dim <- (Tensor.size b dim=-1) / groups
+  u0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B, heads, head_dim]
+  b0 <- Tensor.slice b dim=1 start=0 end=1 |> Tensor.reshape shape=[B, groups, state_dim] |> granitemoehybrid_expand_groups heads groups
+  state <- ((Tensor.unsqueeze u0 dim=-1) * (Tensor.unsqueeze b0 dim=2)) * 0.0
+  dt_bias_full <- Tensor.unsqueeze dt_bias dim=0 |> Tensor.expand shape=[B, heads]
+  dt0 <- Tensor.slice dt dim=1 start=0 end=1 |> Tensor.reshape shape=[B, heads]
+  dt0 <- exp (dt0 + dt_bias_full)
+  dt0 <- log (dt0 + 1.0) |> clamp min=0.0 max=1e30
+  c0 <- Tensor.slice c dim=1 start=0 end=1 |> Tensor.reshape shape=[B, groups, state_dim] |> granitemoehybrid_expand_groups heads groups
+  state, y0 <- granitemoehybrid_scan_step state u0 dt0 b0 c0 a d
+  y_all <- Tensor.zeros_like u
+  y_step <- Tensor.reshape y0 shape=[B, 1, D]
+  index <- Tensor.fill y_step 0 dtype="long"
+  y_all <- Tensor.scatter y_all index y_step dim=1
+  state, y_all <- for t <- [1..seq) carry (state, y_all) do
+    u_t <- Tensor.slice u dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, heads, head_dim]
+    dt_t <- Tensor.slice dt dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, heads]
+    dt_t <- exp (dt_t + dt_bias_full)
+    dt_t <- log (dt_t + 1.0) |> clamp min=0.0 max=1e30
+    b_t <- Tensor.slice b dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, groups, state_dim] |> granitemoehybrid_expand_groups heads groups
+    c_t <- Tensor.slice c dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, groups, state_dim] |> granitemoehybrid_expand_groups heads groups
+    state, y_t <- granitemoehybrid_scan_step state u_t dt_t b_t c_t a d
+    y_step <- Tensor.reshape y_t shape=[B, 1, D]
+    index <- Tensor.fill y_step t dtype="long"
+    y_all <- Tensor.scatter y_all index y_step dim=1
+    yield state, y_all
+  gated <- y_all * (silu gate)
+  group_dim <- D / groups
+  gated <- Tensor.reshape gated shape=[B, S, groups, group_dim]
+  gated <- NN.rmsnorm_noscale gated eps=EPS dim=group_dim cast_float=true
+  return Tensor.reshape gated shape=[B, S, D] |> mul norm_w
+
+granitemoehybrid_mamba :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+granitemoehybrid_mamba x attn_mask = do
+  x <- granitemoehybrid_sequence_mask x attn_mask
+  projected <- NN.linear@in_proj x dim=PROJECTION_DIM bias=PROJ_BIAS
+  gate, hidden_bc, dt <- Tensor.split projected sizes=[INNER, CONV_DIM, MAMBA_HEADS]
+  w <- ((param @conv1d.weight) :: Tensor[CONV_DIM,1,CONV_KERNEL])
+  bias <- CONV_BIAS ? ((param @conv1d.bias) :: Tensor[CONV_DIM]) : ((Tensor.zeros hidden_bc shape=[CONV_DIM]) :: Tensor[CONV_DIM])
+  hidden_bc <- causal_conv1d_full hidden_bc w bias "silu"
+  hidden_bc <- granitemoehybrid_sequence_mask hidden_bc attn_mask
+  hidden, b_state, c_state <- Tensor.split hidden_bc sizes=[INNER, MAMBA_GROUPS * STATE_DIM, MAMBA_GROUPS * STATE_DIM]
+  y <- granitemoehybrid_scan hidden gate dt b_state c_state @A_log @D @dt_bias @norm.weight MAMBA_GROUPS MAMBA_HEAD_DIM
+  return NN.linear@out_proj y dim=MODEL_DIM bias=PROJ_BIAS
+
+granitemoehybrid_attention :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+granitemoehybrid_attention x rope_sin rope_cos mask = do
+  q <- NN.linear@q_proj x dim=(NUM_HEADS * HEAD_DIM) bias=ATTN_BIAS |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@k_proj x dim=(KV_HEADS * HEAD_DIM) bias=ATTN_BIAS |> reshape_heads heads=KV_HEADS
+  v <- NN.linear@v_proj x dim=(KV_HEADS * HEAD_DIM) bias=ATTN_BIAS |> reshape_heads heads=KV_HEADS
+  q, k <- (POSITION_TYPE == "rope") ? rope_pair_base_factors q k rope_sin rope_cos : (q, k)
+  k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+  v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+  return attention q k v mask scale=ATTENTION_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=ATTN_BIAS
+
+granitemoehybrid_shared_mlp :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+granitemoehybrid_shared_mlp@path x = do
+  gate_up <- NN.linear@input_linear x dim=(2 * SHARED_FFN) bias=false
+  gate, up <- Tensor.chunk gate_up parts=2
+  return gate |> silu |> mul up |> NN.linear@output_linear dim=MODEL_DIM bias=false
+
+granitemoehybrid_moe :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+granitemoehybrid_moe@path x = do
+  x32 <- Tensor.cast x dtype="float32"
+  logits <- NN.linear@router.layer x32 dim=NUM_EXPERTS bias=false
+  topk_logits, indices <- Tensor.topk logits k=TOP_K dim=-1 largest=true sorted=true
+  scores <- Tensor.softmax topk_logits dim=-1 dtype="float32" |> Tensor.cast_like x
+  return grouped_swiglu_ffn_basic x scores indices NUM_EXPERTS gate_up_weight=@input_linear.weight out_weight=@output_linear.weight
+
+granitemoehybrid_layer :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> ?Tensor[B,S] -> Tensor[B,S,D]
+granitemoehybrid_layer x layer rope_sin rope_cos mask attn_mask = do
+  residual <- x
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  layer_type <- List.index LAYER_TYPES layer
+  y <- (layer_type == "mamba")
+        ? do
+            y <- scope@mamba do
+              return granitemoehybrid_mamba xn attn_mask
+            return y
+        : do
+            y <- scope@self_attn do
+              return granitemoehybrid_attention xn rope_sin rope_cos mask
+            return y
+  x <- residual + (y * RESIDUAL_SCALE)
+  residual <- x
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true
+  shared <- granitemoehybrid_shared_mlp@shared_mlp xn
+  routed <- (NUM_EXPERTS == 0) ? (Tensor.zeros_like shared) : granitemoehybrid_moe@block_sparse_moe xn
+  return residual + ((shared + routed) * RESIDUAL_SCALE)
+
+granitemoehybrid :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,V], ?Any)
+granitemoehybrid input_ids attn_mask past_kv use_cache = do
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=0
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  mask <- causal_mask_for_input input_ids S padding_mask=attn_mask window=MAX_POSITIONS
+  x <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- x * EMBED_SCALE
+    x <- for@layers i <- [0..NUM_LAYERS) carry (x) granitemoehybrid_layer x i rope_sin rope_cos mask attn_mask
+    return NN.rmsnorm@norm x eps=EPS cast_float=true
+  logits <- TIE ? (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false) : (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false)
+  return logits / LOGITS_SCALE, null

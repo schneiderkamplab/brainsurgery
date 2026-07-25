@@ -1,0 +1,75 @@
+{-# CHECKPOINTS "test/BertGeneration-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "bert_generation" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import NN
+
+import Positions (position_ids)
+
+import Tensor
+
+MODEL_DIM <- (64 :: Dim)
+
+VOCAB_SIZE <- (50257 :: Dim)
+
+NUM_LAYERS <- (3 :: Dim)
+
+NUM_HEADS <- (4 :: Dim)
+
+FFN <- (128 :: Dim)
+
+MAX_POSITIONS <- (128 :: Dim)
+
+EPS <- 1e-12
+
+HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+bert_generation_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+bert_generation_block x keep past_kv = do
+  a, new_kv <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k, v, new_kv <- Cache.update past_kv k v
+    a <- attention q k v keep |> merge_heads
+    a <- NN.linear@output.dense a dim=MODEL_DIM bias=true
+    return a, new_kv
+  x <- NN.layernorm@attention.output.LayerNorm (x + a) eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return NN.layernorm@output.LayerNorm (x + m) eps=EPS, new_kv
+
+bert_generation :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+bert_generation input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  key_length <- mask_length_for_input input_ids attn_mask past_length
+  keep <- causal_mask_for_input input_ids key_length padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@bert do
+    tok <- NN.embedding@embeddings.word_embeddings input_ids dim=MODEL_DIM
+    pos <- NN.embedding@embeddings.position_embeddings pos_ids dim=MODEL_DIM
+    x <- NN.layernorm@embeddings.LayerNorm (tok + pos) eps=EPS
+    x, work_kv <- for@encoder.layer i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- bert_generation_block x keep past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    return x, work_kv
+  logits <- NN.linear@lm_head.decoder x dim=VOCAB_SIZE bias=true transpose=false weight_path=@@bert.embeddings.word_embeddings.weight bias_path=@@lm_head.bias
+  new_kv <- Cache.finish work_kv key_length
+  return logits, (use_cache ? new_kv : null)

@@ -13,7 +13,13 @@ import torch
 from safetensors.torch import save_file
 import transformers
 import transformers.utils.import_utils as transformers_import_utils
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForMaskedLM,
+    AutoModelForSeq2SeqLM,
+    AutoTokenizer,
+)
 
 from create_deepseek_v4_random import create_deepseek_v4_test_checkpoint
 
@@ -25,6 +31,8 @@ if not hasattr(transformers_import_utils, "is_torch_fx_available"):
 class TestSpec:
     name: str
     source: str
+    task: str = "causal_lm"
+    tokenizer: str | None = None
 
 
 TEST_SPECS: tuple[TestSpec, ...] = (
@@ -36,6 +44,12 @@ TEST_SPECS: tuple[TestSpec, ...] = (
     TestSpec("DeepSeek-V3-Test", "deepseek-ai/DeepSeek-V3-Base"),
     TestSpec("DeepSeek-V4-Test", "deepseek-ai/DeepSeek-V4-Flash"),
     TestSpec("FlexOlmo-Test", "allenai/Flex-math-2x7B-1T"),
+    TestSpec(
+        "Funnel-Test",
+        "windowsartes/funnel",
+        task="masked_lm",
+        tokenizer="google-bert/bert-base-uncased",
+    ),
     TestSpec("Gemma4-Dense-Test", "google/gemma-4-31B"),
     TestSpec("Gemma4-E-Test", "google/gemma-4-E2B"),
     TestSpec("Gemma4-MoE-Test", "google/gemma-4-26B-A4B"),
@@ -59,6 +73,67 @@ TEST_SPECS: tuple[TestSpec, ...] = (
     TestSpec("OCRonos-Test", "PleIAs/OCRonos"),
     TestSpec("Qwen3-Test", "Qwen/Qwen3-14B"),
     TestSpec("Qwen3-MoE-Test", "Qwen/Qwen3-30B-A3B"),
+    TestSpec("AFMoE-Test", "arcee-ai/Trinity-Nano-Base"),
+    TestSpec("AriaText-Test", "rhymes-ai/Aria"),
+    TestSpec("Bamba-Test", "ibm-ai-platform/Bamba-9B-v1"),
+    TestSpec("Cohere2-Test", "trl-internal-testing/tiny-Cohere2ForCausalLM"),
+    TestSpec("Cohere2-MoE-Test", "CohereLabs/North-Mini-Code-1.0"),
+    TestSpec("CPMAnt-Test", "openbmb/cpm-ant-10b"),
+    TestSpec("Cwm-Test", "facebook/cwm"),
+    TestSpec("DBRX-Test", "LnL-AI/dbrx-base-converted-v2"),
+    TestSpec("Dots1-Test", "dots-studio/dots.llm1.base"),
+    TestSpec(
+        "EncoderDecoder-Bert2Bert-Test",
+        "patrickvonplaten/bert2bert-cnn_dailymail-fp16",
+        task="seq2seq_lm",
+    ),
+    TestSpec("Ernie-Test", "nghuyong/ernie-1.0-base-zh", task="masked_lm"),
+    TestSpec("Ernie4.5-MoE-Test", "baidu/ERNIE-4.5-21B-A3B-PT"),
+    TestSpec("EXAONE-MoE-Test", "LGAI-EXAONE/K-EXAONE-236B-A23B"),
+    TestSpec("Gemma3n-Text-Test", "google/gemma-3n-E2B"),
+    TestSpec("GLM-MoE-DSA-Test", "zai-org/GLM-5"),
+    TestSpec("GraniteMoeHybrid-Test", "ibm-granite/granite-4.0-350m-base"),
+    TestSpec(
+        "GraniteMoeShared-Test",
+        "ibm-research/moe-7b-1b-active-shared-experts",
+    ),
+    TestSpec("HunYuan-Dense-V1-Test", "tencent/Hunyuan-0.5B-Pretrain"),
+    TestSpec("HunYuan-MoE-V1-Test", "tencent/Hunyuan-A13B-Instruct"),
+    TestSpec("HY-V3-Test", "tencent/Hy-MT2-30B-A3B"),
+    TestSpec("HyperCLOVAX-Test", "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B"),
+    TestSpec("Jais2-Test", "inceptionai/Jais-2-8B-Chat"),
+    TestSpec("JetMoE-Test", "jetmoe/jetmoe-8b"),
+    TestSpec("Laguna-Test", "poolside/Laguna-XS.2"),
+    TestSpec("LFM2-MoE-Test", "LiquidAI/LFM2-8B-A1B"),
+    TestSpec("LongCat-Flash-Test", "meituan-longcat/LongCat-Flash-Chat"),
+    TestSpec(
+        "LongT5-Local-Test",
+        "saekomdalkom/long-t5-local-base-finetuned-xsum",
+        task="seq2seq_lm",
+    ),
+    TestSpec("MiniMax-Test", "MiniMaxAI/MiniMax-Text-01-hf"),
+    TestSpec("MiniMax-M2-Test", "MiniMaxAI/MiniMax-M2"),
+    TestSpec("MPT-Test", "vinai/PhoGPT-4B-Chat"),
+    TestSpec("OLMoHybrid-Test", "allenai/Olmo-Hybrid-7B"),
+    TestSpec("Pegasus-X-Test", "google/pegasus-x-base", task="seq2seq_lm"),
+    TestSpec("Persimmon-Test", "adept/persimmon-8b-base"),
+    TestSpec(
+        "ProphetNet-Test",
+        "microsoft/prophetnet-large-uncased",
+        task="seq2seq_lm",
+    ),
+    TestSpec("Qwen2-MoE-Test", "Qwen/Qwen1.5-MoE-A2.7B"),
+    TestSpec("Qwen3.5-Test", "Qwen/Qwen3.5-0.8B"),
+    TestSpec("Qwen3.5-MoE-Test", "Qwen/Qwen3.5-0.8B"),
+    TestSpec("Qwen3-Next-Test", "Qwen/Qwen3-Coder-Next"),
+    TestSpec("RecurrentGemma-Test", "google/recurrentgemma-2b"),
+    TestSpec("Seed-OSS-Test", "ByteDance-Seed/Seed-OSS-36B-Instruct"),
+    TestSpec("SolarOpen-Test", "upstage/Solar-Open-100B"),
+    TestSpec("VaultGemma-Test", "google/vaultgemma-1b"),
+    TestSpec("xLSTM-Test", "NX-AI/xLSTM-7b"),
+    TestSpec("Youtu-Test", "tencent/Youtu-LLM-2B-Base"),
+    TestSpec("Zamba-Test", "Zyphra/Zamba-7B-v1"),
+    TestSpec("Zamba2-Test", "Zyphra/Zamba2-1.2B"),
 )
 
 
@@ -66,7 +141,7 @@ def _set_if_present(config: Any, name: str, value: Any) -> None:
     if hasattr(config, name):
         try:
             setattr(config, name, value)
-        except AttributeError:
+        except (AttributeError, NotImplementedError):
             pass
 
 
@@ -192,6 +267,10 @@ def _apply_family_adjustments(config: Any, spec_name: str) -> None:
     if spec_name == "GPT-J-Test":
         set_all("rotary_dim", 32)
         set_all("n_positions", 2048)
+
+    if spec_name == "Funnel-Test":
+        set_all("block_sizes", [1, 1, 2])
+        set_all("block_repeats", [1, 1, 1])
 
     if spec_name.startswith("Gemma4-"):
         set_all("global_head_dim", 32)
@@ -346,10 +425,24 @@ def _replace_packed_experts_with_real_checkpoint_keys(
 
 
 def _rewrite_test_checkpoint_keys(state_dict: dict[str, torch.Tensor], *, spec_name: str) -> None:
-    if spec_name not in {"GPT-OSS-Test", "Magistral-Test", "Mistral3-Test", "Mistral4-Test"}:
+    if spec_name not in {
+        "Ernie-Test",
+        "GPT-OSS-Test",
+        "Magistral-Test",
+        "Mistral3-Test",
+        "Mistral4-Test",
+    }:
         return
     additions: dict[str, torch.Tensor] = {}
     removals: set[str] = set()
+    if spec_name == "Ernie-Test":
+        for key, value in list(state_dict.items()):
+            if ".LayerNorm.weight" in key:
+                additions[key.replace(".LayerNorm.weight", ".LayerNorm.gamma")] = value
+                removals.add(key)
+            elif ".LayerNorm.bias" in key:
+                additions[key.replace(".LayerNorm.bias", ".LayerNorm.beta")] = value
+                removals.add(key)
     if spec_name == "GPT-OSS-Test":
         suffix_map = {
             ".mlp.experts.gate_up_proj": ".mlp.experts.gate_up_proj.weight",
@@ -470,14 +563,14 @@ def _patch_saved_config(output: Path, *, spec_name: str) -> None:
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _local_source(root: Path, source: str) -> Path:
+def _local_source(root: Path, source: str) -> Path | str:
     path = root / source
     if path.exists():
         return path
-    raise FileNotFoundError(f"missing local source checkpoint: {path}")
+    return source
 
 
-def _tokenizer_size(source: Path) -> int:
+def _tokenizer_size(source: Path | str) -> int:
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             source,
@@ -529,7 +622,12 @@ def create_test_checkpoint(
                 local_files_only=False,
                 trust_remote_code=True,
             )
-    vocab_size = _tokenizer_size(source)
+    tokenizer_source = (
+        _local_source(repo_root / "models", spec.tokenizer)
+        if spec.tokenizer is not None
+        else source
+    )
+    vocab_size = _tokenizer_size(tokenizer_source)
     _mutate_config(config, vocab_size=vocab_size)
     _apply_family_adjustments(config, spec.name)
     _apply_storage_dtype(config, dtype)
@@ -544,17 +642,22 @@ def create_test_checkpoint(
     ):
         model_cls = getattr(transformers, str(architectures[0]), None)
     trust_model_remote_code = not type(config).__module__.startswith("transformers.models.")
+    auto_model_cls = {
+        "causal_lm": AutoModelForCausalLM,
+        "masked_lm": AutoModelForMaskedLM,
+        "seq2seq_lm": AutoModelForSeq2SeqLM,
+    }[spec.task]
     model = (
         model_cls(config)
         if model_cls is not None
-        else AutoModelForCausalLM.from_config(config, trust_remote_code=trust_model_remote_code)
+        else auto_model_cls.from_config(config, trust_remote_code=trust_model_remote_code)
     )
     model = model.to(dtype=dtype)
     model.eval()
     output.mkdir(parents=True, exist_ok=True)
     config.save_pretrained(output)
     _patch_saved_config(output, spec_name=spec.name)
-    if spec.name != "DeepSeek-V2-Test":
+    if spec.name != "DeepSeek-V2-Test" and isinstance(source, Path):
         _copy_remote_code_files(source, output)
     else:
         for stale_remote_code in output.glob("*.py"):
@@ -574,7 +677,7 @@ def create_test_checkpoint(
     save_file(state_dict, output / "model.safetensors", metadata={"format": "pt"})
     try:
         AutoTokenizer.from_pretrained(
-            source,
+            tokenizer_source,
             local_files_only=True,
             trust_remote_code=True,
         ).save_pretrained(output)

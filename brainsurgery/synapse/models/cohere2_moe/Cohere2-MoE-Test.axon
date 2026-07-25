@@ -1,0 +1,159 @@
+{-# CHECKPOINTS "test/Cohere2-MoE-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "cohere2_moe" #-}
+
+import Activations (sigmoid, silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import List
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul)
+
+import MoE (grouped_swiglu_ffn_separate)
+
+import NN
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Tensor
+
+MODEL_DIM <- (128 :: Dim)
+
+FFN <- (256 :: Dim)
+
+PREFIX_FFN <- Config.dim @@prefix_dense_intermediate_size default=FFN
+
+NUM_LAYERS <- (4 :: Dim)
+
+NUM_HEADS <- (4 :: Dim)
+
+KV_HEADS <- Config.dim @@num_key_value_heads default=NUM_HEADS
+
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+
+QD <- NUM_HEADS * HEAD_DIM
+
+KVD <- KV_HEADS * HEAD_DIM
+
+VOCAB_SIZE <- (65536 :: Dim)
+
+MAX_POSITIONS <- (1024 :: Dim)
+
+SLIDING_WINDOW <- (64 :: Dim)
+
+LAYER_EPS <- 1e-05
+
+RMS_EPS <- 1e-06
+
+HAS_RMS <- true
+
+THETA <- 50000.0
+
+LOGIT_SCALE <- 1.0
+
+ATTENTION_BIAS <- false
+
+NUM_EXPERTS <- (4 :: Dim)
+
+TOP_K <- (2 :: Dim)
+
+NUM_SHARED <- (1 :: Dim)
+
+NORM_TOPK <- false
+
+SELECTION_FN <- "sigmoid"
+
+SHARED_STRATEGY <- "average"
+
+PREFIX_ROPE_PATTERN <- (1 :: Dim)
+
+LAYER_TYPES <- ((["full_attention", "sliding_attention", "sliding_attention", "sliding_attention"]) :: List[String])
+
+MLP_TYPES <- ((["dense", "sparse", "sparse", "sparse"]) :: List[String])
+
+cohere2_moe_force_rope :: Bool -> Bool
+cohere2_moe_force_rope use_dense_mlp = use_dense_mlp and (PREFIX_ROPE_PATTERN == 1)
+
+cohere2_moe_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+cohere2_moe_norm@path x = HAS_RMS ? (NN.rmsnorm@path x eps=RMS_EPS cast_float=true) : (NN.layernorm@path x eps=LAYER_EPS bias=false)
+
+cohere2_moe_dense :: Tensor[B,S,D] -> Tensor[B,S,D]
+cohere2_moe_dense x = do
+  gate <- NN.linear@gate_proj x dim=PREFIX_FFN bias=false |> silu
+  up <- NN.linear@up_proj x dim=PREFIX_FFN bias=false
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+cohere2_moe_shared :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+cohere2_moe_shared@path x = do
+  gate <- NN.linear@gate_proj x dim=(FFN * NUM_SHARED) bias=false |> silu
+  up <- NN.linear@up_proj x dim=(FFN * NUM_SHARED) bias=false
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+cohere2_moe_sparse :: Tensor[B,S,D] -> Tensor[B,S,D]
+cohere2_moe_sparse x = do
+  logits <- NN.linear@gate x dim=NUM_EXPERTS bias=false weight_path=@gate.weight
+  selected, indices <- Tensor.topk logits k=TOP_K dim=-1 largest=true sorted=true
+  scores <- (SELECTION_FN == "softmax") ? (Tensor.softmax selected dim=-1 dtype="float32") : (selected |> sigmoid)
+  sigmoid_router <- SELECTION_FN == "sigmoid"
+  normalize <- sigmoid_router ? NORM_TOPK : false
+  scores <- normalize ? (scores / (Tensor.sum scores dim=-1 keepdim=true)) : scores
+  scores <- Tensor.cast_like scores x
+  routed <- grouped_swiglu_ffn_separate x scores indices NUM_EXPERTS FFN gate_weight=@experts.gate_proj.weight up_weight=@experts.up_proj.weight out_weight=@experts.down_proj.weight
+  shared <- (NUM_SHARED == 0) ? (Tensor.zeros_like x) : (cohere2_moe_shared@shared_experts x)
+  return (NUM_SHARED == 0) ? routed : ((SHARED_STRATEGY == "average") ? ((routed + shared) / 2.0) : (routed + shared))
+
+cohere2_moe_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+cohere2_moe_block x layer rope_sin rope_cos sliding_mask full_mask past_kv = do
+  layer_type <- List.index LAYER_TYPES layer
+  mlp_type <- List.index MLP_TYPES layer
+  sliding <- layer_type == "sliding_attention"
+  use_dense_mlp <- mlp_type == "dense"
+  mask <- sliding ? sliding_mask : full_mask
+  xn <- cohere2_moe_norm@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=ATTENTION_BIAS |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    v <- NN.linear@v_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    q, k <- (sliding or (cohere2_moe_force_rope use_dense_mlp)) ? (rope_pair_base_factors q k rope_sin rope_cos interleaved=true) : (q, k)
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=ATTENTION_BIAS
+    return a, new_kv
+  m <- scope@mlp do
+    return use_dense_mlp ? (cohere2_moe_dense xn) : (cohere2_moe_sparse xn)
+  return x + a + m, new_kv
+
+cohere2_moe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+cohere2_moe input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA interleaved=true
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  sliding_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=SLIDING_WINDOW
+  full_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- cohere2_moe_block x i rope_sin rope_cos sliding_mask full_mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- cohere2_moe_norm@norm x
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false
+  return logits * LOGIT_SCALE, new_kv

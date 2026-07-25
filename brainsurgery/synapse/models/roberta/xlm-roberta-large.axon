@@ -16,19 +16,19 @@ import Config
 
 import NN
 
-MODEL_DIM = 1024
+MODEL_DIM <- 1024
 
-VOCAB_SIZE = 250002
+VOCAB_SIZE <- 250002
 
-NUM_LAYERS = 24
+NUM_LAYERS <- 24
 
-NUM_HEADS = 16
+NUM_HEADS <- 16
 
-FFN = 4096
+FFN <- 4096
 
-EPS = 1e-05
+EPS <- 1e-05
 
-PAD = 1
+PAD <- 1
 
 roberta_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 roberta_block x keep = do

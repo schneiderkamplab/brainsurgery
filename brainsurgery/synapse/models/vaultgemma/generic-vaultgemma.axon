@@ -1,0 +1,87 @@
+{-# CHECKPOINTS ["test/VaultGemma-Test", "google/vaultgemma-1b"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (gelu_pytorch_tanh, tanh)
+import Attention (attention, merge_heads, reshape_heads)
+import Cache
+import Config
+import List
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import Math (mul, sqrt)
+import NN
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Tensor
+
+MODEL_DIM <- Config.dim @@hidden_size default=128
+MODEL_DIM_FLOAT <- Config.float @@hidden_size default=128.0
+EMBED_SCALE <- sqrt MODEL_DIM_FLOAT
+FFN <- Config.dim @@intermediate_size default=(4 * MODEL_DIM)
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=2
+NUM_HEADS <- Config.dim @@num_attention_heads default=4
+KV_HEADS <- Config.dim @@num_key_value_heads default=2
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+QD <- NUM_HEADS * HEAD_DIM
+KVD <- KV_HEADS * HEAD_DIM
+VOCAB_SIZE <- Config.dim @@vocab_size default=50258
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=128
+SLIDING_WINDOW <- Config.dim @@sliding_window default=64
+EPS <- Config.float @@rms_norm_eps default=1e-6
+THETA <- Config.float @@'rope_parameters.rope_theta' default=10000.0
+QUERY_SCALE <- 1.0 / (sqrt (Config.float @@query_pre_attn_scalar default=32.0))
+ATTENTION_SOFTCAP <- Config.float @@attn_logit_softcapping default=50.0
+FINAL_SOFTCAP <- Config.float @@final_logit_softcapping default=30.0
+ATTENTION_BIAS <- Config.bool @@attention_bias default=false
+LAYER_TYPES <- ((Config.list @@layer_types default=["sliding_attention", "full_attention"]) :: List[String])
+
+vaultgemma_norm :: Path -> Tensor[..S,D] -> Tensor[..S,D]
+vaultgemma_norm@path x = NN.rmsnorm@path x eps=EPS unit_offset=true cast_float=true
+
+vaultgemma_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+vaultgemma_block x i mask_sliding mask_full rope_sin rope_cos past_kv = do
+  layer_type <- List.index LAYER_TYPES i
+  mask <- (layer_type == "sliding_attention") ? mask_sliding : mask_full
+  xn <- vaultgemma_norm@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=ATTENTION_BIAS |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    v <- NN.linear@v_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask scale=QUERY_SCALE softcap=ATTENTION_SOFTCAP
+    return merge_heads a |> NN.linear@o_proj dim=MODEL_DIM bias=ATTENTION_BIAS, new_kv
+  x <- x + a
+  xn <- vaultgemma_norm@pre_feedforward_layernorm x
+  m <- scope@mlp do
+    gate <- NN.linear@gate_proj xn dim=FFN bias=false |> gelu_pytorch_tanh
+    up <- NN.linear@up_proj xn dim=FFN bias=false
+    return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+  return x + m, new_kv
+
+vaultgemma :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+vaultgemma input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask_sliding <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=SLIDING_WINDOW
+  mask_full <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=EMBED_SCALE
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- vaultgemma_block x i mask_sliding mask_full rope_sin rope_cos past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- vaultgemma_norm@norm x
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- scope@model do
+    return NN.linear@embed_tokens x dim=VOCAB_SIZE bias=false
+  logits <- (tanh (logits / FINAL_SOFTCAP)) * FINAL_SOFTCAP
+  return logits, new_kv

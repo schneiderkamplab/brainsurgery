@@ -18,29 +18,29 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 1024
+MODEL_DIM <- 1024
 
-VOCAB_SIZE = 250054
+VOCAB_SIZE <- 250054
 
-L_ENC = 12
+L_ENC <- 12
 
-L_DEC = 12
+L_DEC <- 12
 
-H_ENC = 16
+H_ENC <- 16
 
-H_DEC = 16
+H_DEC <- 16
 
-FFN_ENC = 4096
+FFN_ENC <- 4096
 
-FFN_DEC = 4096
+FFN_DEC <- 4096
 
-EPS = 1e-05
+EPS <- 1e-05
 
-POS_OFFSET = 2
+POS_OFFSET <- 2
+
+EMB_SCALE <- Config.float@embed_scale default=EMB_SCALE_DERIVED
 
 EMB_SCALE_DERIVED = sqrt MODEL_DIM
-
-EMB_SCALE = 32.0
 
 mbart_encoder_layer :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 mbart_encoder_layer x keep = do

@@ -1,0 +1,110 @@
+{-# CHECKPOINTS "test/CPMAnt-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "cpmant" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Config
+
+import Math (floor, log, sqrt)
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- (128 :: Dim)
+
+VOCAB_SIZE <- (65536 :: Dim)
+
+NUM_LAYERS <- (4 :: Dim)
+
+NUM_HEADS <- (4 :: Dim)
+
+HEAD_DIM <- (128 :: Dim)
+
+FFN_DIM <- (10240 :: Dim)
+
+EPS <- 1e-06
+
+PROMPT_TYPES <- (32 :: Dim)
+
+PROMPT_LENGTH <- (32 :: Dim)
+
+SEGMENT_TYPES <- (32 :: Dim)
+
+NUM_BUCKETS <- (512 :: Dim)
+
+MAX_DISTANCE <- (2048 :: Dim)
+
+ATTN_DIM = NUM_HEADS * HEAD_DIM
+
+EMBED_VOCAB = VOCAB_SIZE + (PROMPT_TYPES * PROMPT_LENGTH)
+
+cpmant_block :: Tensor[B,T,D] -> Tensor[B,1,T,T] -> Tensor[B,NUM_HEADS,T,T] -> Tensor[B,T,D]
+cpmant_block x keep position_bias = do
+  xn <- NN.rmsnorm@self_att.layernorm_before_attention x eps=EPS
+  q <- NN.linear@self_att.self_attention.project_q xn dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@self_att.self_attention.project_k xn dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+  v <- NN.linear@self_att.self_attention.project_v xn dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+  a <- attention q k v keep rel_bias=position_bias scale=(1.0 / sqrt HEAD_DIM)
+  a <- merge_heads a |> NN.linear@self_att.self_attention.attention_out dim=MODEL_DIM bias=false
+  x_attn <- x + a
+  xn <- NN.rmsnorm@ffn.layernorm_before_ffn x_attn eps=EPS
+  gate <- NN.linear@ffn.ffn.w_in.w_0 xn dim=FFN_DIM bias=false |> gelu
+  up <- NN.linear@ffn.ffn.w_in.w_1 xn dim=FFN_DIM bias=false
+  m <- NN.linear@ffn.ffn.w_out (gate * up) dim=MODEL_DIM bias=false
+  return x_attn + m
+
+cpmant :: TokenIds[B,S] -> Tensor[B,S,EMBED_VOCAB]
+cpmant input_ids = do
+  prompt_ids <- Tensor.arange input_ids (VOCAB_SIZE + (2 * PROMPT_LENGTH)) (VOCAB_SIZE + (3 * PROMPT_LENGTH))
+  prompt_ids <- Tensor.reshape prompt_ids shape=[1, PROMPT_LENGTH] |> Tensor.expand shape=[B, PROMPT_LENGTH]
+  all_ids <- Tensor.concat prompt_ids input_ids dim=1
+  prompt_segment <- Tensor.full input_ids [B, PROMPT_LENGTH] 0 dtype="long"
+  token_segment <- Tensor.where (Tensor.eq input_ids 0) 0 2 |> Tensor.cast dtype="long"
+  segment <- Tensor.concat prompt_segment token_segment dim=1
+  prompt_valid <- Tensor.full input_ids [B, PROMPT_LENGTH] true dtype="bool"
+  token_valid <- Tensor.eq input_ids 0
+  token_valid <- Tensor.where token_valid false true
+  valid <- Tensor.concat prompt_valid token_valid dim=1
+  qvalid <- Tensor.reshape valid shape=[B, PROMPT_LENGTH + S, 1] |> Tensor.expand shape=[B, PROMPT_LENGTH + S, PROMPT_LENGTH + S]
+  kvalid <- Tensor.reshape valid shape=[B, 1, PROMPT_LENGTH + S] |> Tensor.expand shape=[B, PROMPT_LENGTH + S, PROMPT_LENGTH + S]
+  keep <- qvalid and kvalid
+  keep <- Tensor.reshape keep shape=[B, 1, PROMPT_LENGTH + S, PROMPT_LENGTH + S]
+  qseg <- Tensor.reshape segment shape=[B, PROMPT_LENGTH + S, 1]
+  kseg <- Tensor.reshape segment shape=[B, 1, PROMPT_LENGTH + S]
+  segment_bucket <- (qseg * SEGMENT_TYPES) + kseg + NUM_BUCKETS
+  qpos <- Tensor.arange segment 0 (PROMPT_LENGTH + S) |> Tensor.reshape shape=[PROMPT_LENGTH + S, 1]
+  kpos <- Tensor.arange segment 0 (PROMPT_LENGTH + S) |> Tensor.reshape shape=[1, PROMPT_LENGTH + S]
+  relative_position <- kpos - qpos
+  half <- NUM_BUCKETS / 2
+  rel_base <- Tensor.where (Tensor.le relative_position 0) 0 half
+  distance <- Tensor.where (Tensor.le relative_position 0) (0 - relative_position) relative_position
+  max_exact <- half / 2
+  small <- Tensor.le distance (max_exact - 1)
+  large_input <- Tensor.where (Tensor.le distance max_exact) max_exact distance
+  log_scale <- log (MAX_DISTANCE / max_exact)
+  large_ratio <- large_input / max_exact
+  large_log <- log large_ratio
+  large <- max_exact + floor ((large_log / log_scale) * (half - max_exact))
+  large <- Tensor.where (Tensor.le large (half - 1)) large (half - 1)
+  position_bucket <- Tensor.where small distance large
+  position_bucket <- Tensor.cast (position_bucket + rel_base) dtype="long"
+  position_bucket <- Tensor.reshape position_bucket shape=[1, PROMPT_LENGTH + S, PROMPT_LENGTH + S] |> Tensor.expand shape=[B, PROMPT_LENGTH + S, PROMPT_LENGTH + S]
+  bucket <- Tensor.where (Tensor.eq qseg kseg) position_bucket segment_bucket
+  position_bias <- NN.embedding@@cpmant.position_bias.relative_attention_bias bucket dim=NUM_HEADS
+  position_bias <- Tensor.permute position_bias dims=[0, 3, 1, 2]
+  tok <- NN.embedding@cpmant.input_embedding all_ids dim=MODEL_DIM
+  seg <- NN.embedding@cpmant.segment_embedding segment dim=MODEL_DIM
+  x <- ((tok + seg) :: Tensor[B,PROMPT_LENGTH + S,MODEL_DIM])
+  position_bias <- (position_bias :: Tensor[B,NUM_HEADS,PROMPT_LENGTH + S,PROMPT_LENGTH + S])
+  x <- for@cpmant.encoder.layers i <- [0..NUM_LAYERS) carry (x) do
+    x <- cpmant_block x keep position_bias
+    yield x
+  x <- NN.rmsnorm@cpmant.encoder.output_layernorm x eps=EPS
+  x <- Tensor.slice x dim=1 start=PROMPT_LENGTH end=(PROMPT_LENGTH + S)
+  return NN.linear@@cpmant.input_embedding x dim=EMBED_VOCAB bias=false weight_path=@@cpmant.input_embedding.weight

@@ -1,0 +1,72 @@
+{-# CHECKPOINTS "FacebookAI/xlm-mlm-en-2048" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "xlm" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Params (has_root)
+
+import Positions (position_ids)
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- 2048
+
+VOCAB_SIZE <- 30145
+
+NUM_LAYERS <- 12
+
+NUM_HEADS <- 16
+
+FFN <- 4 * MODEL_DIM
+
+EPS <- 1e-12
+
+xlm_attention :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+xlm_attention@path x keep = do
+  q <- NN.linear@q_lin x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@k_lin x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  v <- NN.linear@v_lin x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  return attention q k v keep |> merge_heads |> NN.linear@out_lin dim=MODEL_DIM bias=true
+
+xlm_ffn :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+xlm_ffn@path x = NN.linear@lin1 x dim=FFN bias=true |> gelu |> NN.linear@lin2 dim=MODEL_DIM bias=true
+
+xlm_block :: Int -> Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+xlm_block i x keep = do
+  a <- xlm_attention @@'transformer.attentions.{i}' x keep
+  x <- x + a
+  x <- NN.layernorm @@'transformer.layer_norm1.{i}' x eps=EPS
+  m <- xlm_ffn @@'transformer.ffns.{i}' x
+  y <- x + m
+  y <- NN.layernorm @@'transformer.layer_norm2.{i}' y eps=EPS
+  return y
+
+xlm :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
+xlm input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok <- NN.embedding@transformer.embeddings input_ids dim=MODEL_DIM weight_path=@@transformer.embeddings.weight
+  pos <- NN.embedding@transformer.position_embeddings pos_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- NN.layernorm@transformer.layer_norm_emb x eps=EPS
+  active <- Tensor.unsqueeze attn_mask dim=-1 |> Tensor.cast_like x
+  x <- x * active
+  x <- for i <- [0..NUM_LAYERS) carry (x) do
+    x <- xlm_block i x keep
+    x <- x * active
+    yield x
+  has_output_weight <- has_root "pred_layer.proj.weight"
+  logits <- has_output_weight ? NN.linear@pred_layer.proj x dim=VOCAB_SIZE bias=true weight_path=@@pred_layer.proj.weight bias_path=@@pred_layer.proj.bias : NN.linear@pred_layer.proj x dim=VOCAB_SIZE bias=true weight_path=@@transformer.embeddings.weight bias_path=@@pred_layer.proj.bias
+  return logits

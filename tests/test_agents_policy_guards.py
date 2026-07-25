@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
+
+from brainsurgery.synapse.axon_test import _declared_checkpoints_from_axon
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = REPO_ROOT / "brainsurgery" / "synapse" / "models"
@@ -78,4 +80,24 @@ def test_each_builtin_primitive_reference_is_single_source() -> None:
     assert not repeated, (
         "Primitive _xyz references must have a single canonical builtin definition:\n"
         + "\n".join(f"{name}: {', '.join(locs)}" for name, locs in sorted(repeated.items()))
+    )
+
+
+def test_generic_axon_checkpoints_have_single_owners() -> None:
+    owners: dict[str, list[Path]] = defaultdict(list)
+    for file_path in sorted(MODELS_DIR.rglob("generic-*.axon")):
+        for checkpoint in _declared_checkpoints_from_axon(axon_file=file_path):
+            owners[checkpoint].append(file_path.relative_to(REPO_ROOT))
+
+    repeated = {
+        checkpoint: paths
+        for checkpoint, paths in owners.items()
+        if len(paths) > 1
+    }
+    assert not repeated, (
+        "Checkpoint IDs must have a single generic Axon owner:\n"
+        + "\n".join(
+            f"{checkpoint}: {', '.join(map(str, paths))}"
+            for checkpoint, paths in sorted(repeated.items())
+        )
     )

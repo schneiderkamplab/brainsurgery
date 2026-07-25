@@ -1,0 +1,103 @@
+{-# CHECKPOINTS "Guilherme34/nanochat-d32-retrained-hf" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# PADDING_SIDE "right" #-}
+
+{-# MAIN "nanochat" #-}
+
+import Activations (relu2, tanh)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import NN
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Tensor
+
+MODEL_DIM <- (2048 :: Dim)
+
+FFN <- (8192 :: Dim)
+
+NUM_LAYERS <- (32 :: Dim)
+
+NUM_HEADS <- (16 :: Dim)
+
+KV_HEADS <- Config.dim @@num_key_value_heads default=NUM_HEADS
+
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+
+QD <- NUM_HEADS * HEAD_DIM
+
+KVD <- KV_HEADS * HEAD_DIM
+
+VOCAB_SIZE <- (65536 :: Dim)
+
+MAX_POSITIONS <- (2048 :: Dim)
+
+EPS <- 1e-06
+
+THETA <- 10000.0
+
+ATTENTION_BIAS <- false
+
+SOFTCAP <- 15.0
+
+TIE <- false
+
+nanochat_norm :: Tensor[..S,D] -> Tensor[..S,D]
+nanochat_norm x = NN.rmsnorm_noscale x eps=EPS dim=D cast_float=true
+
+nanochat_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,DH])
+nanochat_block x rope_sin rope_cos mask past_kv = do
+  residual <- x
+  xn <- nanochat_norm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=ATTENTION_BIAS |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    v <- NN.linear@v_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    q, k <- rope_pair_base_factors q k (0.0 - rope_sin) rope_cos
+    q <- nanochat_norm q
+    k <- nanochat_norm k
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask
+    return merge_heads a |> NN.linear@o_proj dim=MODEL_DIM bias=ATTENTION_BIAS, new_kv
+  x <- residual + a
+  residual <- x
+  xn <- nanochat_norm x
+  m <- NN.linear@mlp.fc1 xn dim=FFN bias=false |> relu2 |> NN.linear@mlp.fc2 dim=MODEL_DIM bias=false
+  return residual + m, new_kv
+
+nanochat :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,DH])
+nanochat input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- nanochat_norm x
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- nanochat_block x rope_sin rope_cos mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    return nanochat_norm x
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- TIE ? (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false) : (NN.linear@lm_head x dim=VOCAB_SIZE bias=false)
+  logits <- (SOFTCAP == 0.0) ? logits : ((tanh (logits / SOFTCAP)) * SOFTCAP)
+  return logits, new_kv

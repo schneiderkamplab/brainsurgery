@@ -1,0 +1,87 @@
+{-# CHECKPOINTS "bigcode/tiny_starcoder_py" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "gpt_bigcode" #-}
+
+import Activations (gelu_new)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import NN
+
+import Positions (position_ids)
+
+import Tensor
+
+MODEL_DIM <- (768 :: Dim)
+
+VOCAB_SIZE <- (49152 :: Dim)
+
+NUM_LAYERS <- (20 :: Dim)
+
+NUM_HEADS <- (12 :: Dim)
+
+MULTI_QUERY <- true
+
+FFN <- Config.dim @@n_inner default=(4 * MODEL_DIM)
+
+MAX_POSITIONS <- (8192 :: Dim)
+
+EPS <- 1e-05
+
+FP32_SOFTMAX <- true
+
+KV_HEADS = MULTI_QUERY ? 1 : NUM_HEADS
+
+HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+KV_DIM = KV_HEADS * HEAD_DIM
+
+gpt_bigcode_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,DH])
+gpt_bigcode_block x mask past_kv = do
+  residual <- x
+  xn <- NN.layernorm@ln_1 x eps=EPS
+  qkv <- NN.linear@attn.c_attn xn dim=(MODEL_DIM + (2 * KV_DIM)) bias=true
+  q, k, v <- Tensor.split qkv sizes=[MODEL_DIM, KV_DIM, KV_DIM]
+  q <- reshape_heads q heads=NUM_HEADS
+  k <- reshape_heads k heads=KV_HEADS
+  v <- reshape_heads v heads=KV_HEADS
+  k, v, new_kv <- Cache.update past_kv k v
+  k_full <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+  v_full <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+  a <- attention q k_full v_full mask fp32_compute=FP32_SOFTMAX |> merge_heads |> NN.linear@attn.c_proj dim=MODEL_DIM bias=true
+  x <- residual + a
+  residual <- x
+  x <- NN.layernorm@ln_2 x eps=EPS
+  x <- NN.linear@mlp.c_fc x dim=FFN bias=true |> gelu_new |> NN.linear@mlp.c_proj dim=MODEL_DIM bias=true
+  return residual + x, new_kv
+
+gpt_bigcode :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,DH])
+gpt_bigcode input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  tok <- NN.embedding@transformer.wte input_ids dim=MODEL_DIM
+  pos <- NN.embedding@transformer.wpe pos_ids dim=MODEL_DIM
+  x <- tok + pos
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- for@transformer.h i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
+    x, new_i <- gpt_bigcode_block x mask past_i
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  x <- NN.layernorm@transformer.ln_f x eps=EPS
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@transformer.wte x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

@@ -1,0 +1,102 @@
+{-# CHECKPOINTS "saekomdalkom/long-t5-local-base-finetuned-xsum" #-}
+
+{-# TOKENIZER ["saekomdalkom/long-t5-local-base-finetuned-xsum", "google/long-t5-local-base"] #-}
+
+{-# TASK "seq2seq_lm" #-}
+
+{-# MAIN "longt5_local" #-}
+
+import Activations (gelu_new)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, causal_mask_for_input, mask_for_input)
+
+import Math (mul, sqrt)
+
+import Positions (relative_position_bias)
+
+import Config
+
+import NN
+
+MODEL_DIM <- 768
+
+VOCAB_SIZE <- 32128
+
+L_ENC <- 12
+
+L_DEC <- 12
+
+NUM_HEADS <- 12
+
+HEAD_DIM <- 64
+
+FFN <- 2048
+
+EPS <- 1e-06
+
+NUM_BUCKETS <- 32
+
+MAX_DISTANCE <- 128
+
+LOCAL_RADIUS <- 127
+
+TIE_EMBEDDINGS <- false
+
+ATTN_DIM = NUM_HEADS * HEAD_DIM
+
+LM_SCALE = 1.0 / sqrt MODEL_DIM
+
+longt5_local :: TokenIds[B,SENC] -> ?Mask[B,SENC,SENC] -> TokenIds[B,SDEC] -> ?Mask[B,SDEC,SDEC] -> Tensor[B,SDEC,V]
+longt5_local input_ids attention_mask decoder_input_ids decoder_attention_mask = do
+  attention_mask <- mask_for_input input_ids attention_mask SENC
+  decoder_attention_mask <- mask_for_input decoder_input_ids decoder_attention_mask SDEC
+  encoder_keep <- bidirectional_mask_for_input input_ids SENC padding_mask=attention_mask window=LOCAL_RADIUS
+  decoder_keep <- causal_mask_for_input decoder_input_ids SDEC padding_mask=decoder_attention_mask window=1048576
+  cross_keep <- bidirectional_mask_for_input decoder_input_ids SENC padding_mask=attention_mask
+  enc_hidden <- TIE_EMBEDDINGS ? NN.embedding@shared input_ids dim=MODEL_DIM : NN.embedding@encoder.embed_tokens input_ids dim=MODEL_DIM
+  enc_hidden <- for@encoder.block i <- [0..L_ENC) carry (enc_hidden) do
+    self_attn <- scope@layer.0 do
+      x_norm <- NN.rmsnorm@layer_norm enc_hidden eps=EPS
+      q <- NN.linear@LocalSelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      k <- NN.linear@LocalSelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      v <- NN.linear@LocalSelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      rel_bias <- relative_position_bias@@encoder.block.0.layer.0.LocalSelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=true
+      return attention q k v encoder_keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@LocalSelfAttention.o dim=MODEL_DIM bias=false
+    enc_hidden <- enc_hidden + self_attn
+    ffn <- scope@layer.1 do
+      x_norm <- NN.rmsnorm@layer_norm enc_hidden eps=EPS
+      gate <- NN.linear@DenseReluDense.wi_0 x_norm dim=FFN bias=false |> gelu_new
+      up <- NN.linear@DenseReluDense.wi_1 x_norm dim=FFN bias=false
+      return gate |> mul up |> NN.linear@DenseReluDense.wo dim=MODEL_DIM bias=false
+    enc_hidden <- enc_hidden + ffn
+    yield enc_hidden
+  enc_hidden <- NN.rmsnorm@encoder.final_layer_norm enc_hidden eps=EPS
+  dec_hidden <- TIE_EMBEDDINGS ? NN.embedding@shared decoder_input_ids dim=MODEL_DIM : NN.embedding@decoder.embed_tokens decoder_input_ids dim=MODEL_DIM
+  dec_hidden <- for@decoder.block i <- [0..L_DEC) carry (dec_hidden) do
+    self_attn <- scope@layer.0 do
+      x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS
+      q <- NN.linear@SelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      k <- NN.linear@SelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      v <- NN.linear@SelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      rel_bias <- relative_position_bias@@decoder.block.0.layer.0.SelfAttention.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=MAX_DISTANCE bidirectional=false
+      return attention q k v decoder_keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=MODEL_DIM bias=false
+    dec_hidden <- dec_hidden + self_attn
+    cross_attn <- scope@layer.1 do
+      x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS
+      q <- NN.linear@EncDecAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      k <- NN.linear@EncDecAttention.k enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      v <- NN.linear@EncDecAttention.v enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
+      return attention q k v cross_keep scale=1.0 |> merge_heads |> NN.linear@EncDecAttention.o dim=MODEL_DIM bias=false
+    dec_hidden <- dec_hidden + cross_attn
+    ffn <- scope@layer.2 do
+      x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS
+      gate <- NN.linear@DenseReluDense.wi_0 x_norm dim=FFN bias=false |> gelu_new
+      up <- NN.linear@DenseReluDense.wi_1 x_norm dim=FFN bias=false
+      return gate |> mul up |> NN.linear@DenseReluDense.wo dim=MODEL_DIM bias=false
+    dec_hidden <- dec_hidden + ffn
+    yield dec_hidden
+  dec_hidden <- NN.rmsnorm@decoder.final_layer_norm dec_hidden eps=EPS
+  dec_hidden <- TIE_EMBEDDINGS ? (dec_hidden * LM_SCALE) : dec_hidden
+  return TIE_EMBEDDINGS ? NN.linear@shared dec_hidden dim=VOCAB_SIZE bias=false : NN.linear@lm_head dec_hidden dim=VOCAB_SIZE bias=false

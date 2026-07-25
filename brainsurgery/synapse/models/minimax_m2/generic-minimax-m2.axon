@@ -1,0 +1,84 @@
+{-# CHECKPOINTS ["test/MiniMax-M2-Test", "MiniMaxAI/MiniMax-M2", "MiniMaxAI/MiniMax-M2.5", "MiniMaxAI/MiniMax-M2.7"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (sigmoid)
+import Attention (attention, merge_heads, reshape_heads)
+import Cache
+import Config
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import MoE (grouped_swiglu_ffn_separate)
+import NN
+import Params (param)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Tensor
+
+MODEL_DIM <- Config.dim @@hidden_size default=32
+FFN <- Config.dim @@intermediate_size default=16
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=2
+NUM_HEADS <- Config.dim @@num_attention_heads default=4
+KV_HEADS <- Config.dim @@num_key_value_heads default=2
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+QD <- NUM_HEADS * HEAD_DIM
+KVD <- KV_HEADS * HEAD_DIM
+VOCAB_SIZE <- Config.dim @@vocab_size default=50264
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=128
+EPS <- Config.float @@rms_norm_eps default=1e-6
+THETA <- Config.float @@'rope_parameters.rope_theta' default=5000000.0
+NUM_EXPERTS <- Config.dim @@num_local_experts default=4
+TOP_K <- Config.dim @@num_experts_per_tok default=2
+TIE <- Config.bool @@tie_word_embeddings default=false
+
+minimax_m2_sparse :: Tensor[B,S,D] -> Tensor[B,S,D]
+minimax_m2_sparse x = do
+  logits <- NN.linear@gate x dim=NUM_EXPERTS bias=false
+  scores <- Tensor.cast (sigmoid (Tensor.cast logits dtype="float32")) dtype="float32"
+  choice <- scores + (param @e_score_correction_bias)
+  _, indices <- Tensor.topk choice k=TOP_K dim=-1 largest=true sorted=false
+  scores <- Tensor.gather scores indices dim=-1
+  scores <- Tensor.cast_like (scores / (Tensor.sum scores dim=-1 keepdim=true)) x
+  return grouped_swiglu_ffn_separate x scores indices NUM_EXPERTS FFN gate_weight=@experts.w1.weight up_weight=@experts.w3.weight out_weight=@experts.w2.weight
+
+minimax_m2_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+minimax_m2_block x rope_sin rope_cos mask past_kv = do
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=false |> NN.rmsnorm@q_norm eps=EPS dim=QD cast_float=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=false |> NN.rmsnorm@k_norm eps=EPS dim=KVD cast_float=true |> reshape_heads heads=KV_HEADS
+    v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KV_HEADS
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+    return a, new_kv
+  x <- x + a
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true
+  m <- scope@block_sparse_moe do
+    return minimax_m2_sparse xn
+  return x + m, new_kv
+
+minimax_m2 :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+minimax_m2 input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- minimax_m2_block x rope_sin rope_cos mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- NN.rmsnorm@norm x eps=EPS cast_float=true
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- TIE
+    ? (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false)
+    : (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false)
+  return logits, new_kv

@@ -949,6 +949,11 @@ def axon_test(
         "--compile-dynamic/--no-compile-dynamic",
         help="Set torch.compile(dynamic=True).",
     ),
+    trust_remote_code: bool = typer.Option(
+        False,
+        "--trust-remote-code/--no-trust-remote-code",
+        help="Explicitly allow Hugging Face custom repository code for the reference model.",
+    ),
     hf_strict_dtype: bool = typer.Option(
         False,
         "--hf-strict-dtype/--no-hf-strict-dtype",
@@ -1050,6 +1055,7 @@ def axon_test(
             compile_mode=compile_mode,
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
+            trust_remote_code=trust_remote_code,
             hf_strict_dtype=hf_strict_dtype,
             optimize_ast=optimize_ast,
             optimize_graph=optimize_graph,
@@ -1235,6 +1241,11 @@ def axon_benchmark(
         False,
         "--compile-dynamic/--no-compile-dynamic",
         help="Set torch.compile(dynamic=True).",
+    ),
+    trust_remote_code: bool = typer.Option(
+        False,
+        "--trust-remote-code/--no-trust-remote-code",
+        help="Explicitly allow Hugging Face custom repository code for the reference model.",
     ),
     axon_backend: str = typer.Option(
         "codegen2-torch",
@@ -1433,6 +1444,7 @@ def axon_benchmark(
             compile_mode=compile_mode,
             compile_fullgraph=compile_fullgraph,
             compile_dynamic=compile_dynamic,
+            trust_remote_code=trust_remote_code,
             axon_backend=axon_backend,
             axon_backends=axon_backends,
             axon_typechecker=axon_typechecker,

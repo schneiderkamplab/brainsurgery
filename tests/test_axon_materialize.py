@@ -207,6 +207,55 @@ def test_materialize_groups_identical_instruct_variant_by_body(tmp_path: Path) -
     assert not (axon_dir / "toy-Instruct.axon").exists()
 
 
+def test_materialize_filters_checkpoint_tokenizer_mapping(tmp_path: Path) -> None:
+    axon_dir = tmp_path / "modelsrc"
+    axon_dir.mkdir(parents=True)
+    axon_path = axon_dir / "generic-toy.axon"
+    axon_path.write_text(
+        "\n".join(
+            [
+                '{-# CHECKPOINTS ["org/toy-a", "org/toy-b"] #-}',
+                '{-# TOKENIZER [["org/toy-a", "org/tokenizer-a"], ["org/toy-b", "org/tokenizer-b"]] #-}',
+                "",
+                "import Config",
+                "",
+                "D <- Config.dim @@hidden_size default=16",
+                "",
+                "toy :: Tensor[B,S,D] -> Tensor[B,S,D]",
+                "toy x = x",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    model_root = tmp_path / "weights" / "org"
+    for name, hidden_size in (("toy-a", 16), ("toy-b", 32)):
+        checkpoint_dir = model_root / name
+        checkpoint_dir.mkdir(parents=True)
+        (checkpoint_dir / "config.json").write_text(
+            json.dumps({"hidden_size": hidden_size}),
+            encoding="utf-8",
+        )
+        import torch
+        from safetensors.torch import save_file
+
+        save_file({"weight": torch.zeros([1])}, str(checkpoint_dir / "model.safetensors"))
+
+    written = run_axon_materialize_workflow(
+        axon_path=axon_path,
+        models_root=tmp_path / "weights",
+    )
+
+    assert written == [axon_dir / "toy-a.axon", axon_dir / "toy-b.axon"]
+    rendered_a = (axon_dir / "toy-a.axon").read_text(encoding="utf-8")
+    rendered_b = (axon_dir / "toy-b.axon").read_text(encoding="utf-8")
+    assert '{-# TOKENIZER ["org/toy-a", "org/tokenizer-a"] #-}' in rendered_a
+    assert '{-# TOKENIZER ["org/toy-b", "org/tokenizer-b"] #-}' in rendered_b
+    assert "tokenizer-b" not in rendered_a
+    assert "tokenizer-a" not in rendered_b
+
+
 def test_materialize_resolves_config_calls_inside_module_body_using_constant_env(
     tmp_path: Path,
 ) -> None:

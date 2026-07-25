@@ -1,0 +1,105 @@
+{-# CHECKPOINTS ["test/EXAONE-MoE-Test", "LGAI-EXAONE/K-EXAONE-236B-A23B"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (silu)
+import Attention (attention, merge_heads, reshape_heads)
+import Cache
+import Config
+import List
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import Math (mul)
+import MoE (grouped_sigmoid_router, grouped_swiglu_ffn_separate)
+import NN
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Tensor
+
+MODEL_DIM <- Config.dim @@hidden_size default=32
+FFN <- Config.dim @@intermediate_size default=64
+MOE_FFN <- Config.dim @@moe_intermediate_size default=16
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=2
+NUM_HEADS <- Config.dim @@num_attention_heads default=4
+KV_HEADS <- Config.dim @@num_key_value_heads default=2
+HEAD_DIM <- MODEL_DIM / NUM_HEADS
+QD <- NUM_HEADS * HEAD_DIM
+KVD <- KV_HEADS * HEAD_DIM
+VOCAB_SIZE <- Config.dim @@vocab_size default=50264
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=128
+SLIDING_WINDOW <- Config.dim @@sliding_window default=32
+EPS <- Config.float @@rms_norm_eps default=1e-5
+THETA <- Config.float @@'rope_parameters.rope_theta' default=10000.0
+NUM_EXPERTS <- Config.dim @@num_experts default=4
+TOP_K <- Config.dim @@num_experts_per_tok default=2
+NUM_SHARED <- Config.dim @@num_shared_experts default=1
+N_GROUP <- Config.dim @@n_group default=1
+TOPK_GROUP <- Config.dim @@topk_group default=1
+NORM_TOPK <- Config.bool @@norm_topk_prob default=true
+ROUTED_SCALE <- Config.float @@routed_scaling_factor default=1.0
+LAYER_TYPES <- ((Config.list @@layer_types default=["sliding_attention", "full_attention"]) :: List[String])
+MLP_TYPES <- ((Config.list @@mlp_layer_types default=["dense", "sparse"]) :: List[String])
+
+exaone_moe_dense :: Path -> Tensor[B,S,D] -> Dim -> Tensor[B,S,D]
+exaone_moe_dense@path x ffn = do
+  gate <- NN.linear@gate_proj x dim=ffn bias=false |> silu
+  up <- NN.linear@up_proj x dim=ffn bias=false
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+exaone_moe_sparse :: Tensor[B,S,D] -> Tensor[B,S,D]
+exaone_moe_sparse x = do
+  scores, indices <- grouped_sigmoid_router@gate x NUM_EXPERTS TOP_K n_group=N_GROUP topk_group=TOPK_GROUP norm_topk_prob=NORM_TOPK routed_scaling_factor=ROUTED_SCALE e_score_correction_bias=@e_score_correction_bias
+  routed <- grouped_swiglu_ffn_separate x scores indices NUM_EXPERTS MOE_FFN gate_weight=@experts.gate_proj.weight up_weight=@experts.up_proj.weight out_weight=@experts.down_proj.weight
+  shared <- exaone_moe_dense@shared_experts x ffn=(MOE_FFN * NUM_SHARED)
+  return routed + shared
+
+exaone_moe_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+exaone_moe_block x layer rope_sin rope_cos sliding_mask full_mask past_kv = do
+  layer_type <- List.index LAYER_TYPES layer
+  mlp_type <- List.index MLP_TYPES layer
+  sliding <- layer_type == "sliding_attention"
+  sparse <- mlp_type == "sparse"
+  mask <- sliding ? sliding_mask : full_mask
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KV_HEADS
+    v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KV_HEADS
+    q <- NN.rmsnorm@q_norm q eps=EPS dim=HEAD_DIM cast_float=true
+    k <- NN.rmsnorm@k_norm k eps=EPS dim=HEAD_DIM cast_float=true
+    q, k <- sliding ? (rope_pair_base_factors q k rope_sin rope_cos) : (q, k)
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+    return a, new_kv
+  x <- x + a
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true
+  m <- scope@mlp do
+    return sparse ? (exaone_moe_sparse xn) : do
+      gate <- NN.linear@gate_proj xn dim=FFN bias=false |> silu
+      up <- NN.linear@up_proj xn dim=FFN bias=false
+      return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+  return x + m, new_kv
+
+exaone_moe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+exaone_moe input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  sliding_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=SLIDING_WINDOW
+  full_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- exaone_moe_block x i rope_sin rope_cos sliding_mask full_mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- NN.rmsnorm@norm x eps=EPS cast_float=true
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

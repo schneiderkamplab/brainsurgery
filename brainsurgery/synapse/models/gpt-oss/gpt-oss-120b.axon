@@ -24,51 +24,51 @@ import NN
 
 import Tensor
 
-MODEL_DIM = (2880 :: Dim)
+MODEL_DIM <- (2880 :: Dim)
 
-VOCAB_SIZE = (201088 :: Dim)
+VOCAB_SIZE <- (201088 :: Dim)
 
-NUM_LAYERS = (36 :: Dim)
+NUM_LAYERS <- (36 :: Dim)
 
-NUM_HEADS = (64 :: Dim)
+NUM_HEADS <- (64 :: Dim)
 
-KVH = (8 :: Dim)
+KVH <- (8 :: Dim)
 
-MODEL_HEAD_DIM = (64 :: Dim)
+MODEL_HEAD_DIM <- (64 :: Dim)
+
+E <- (128 :: Dim)
+
+EPT <- 4
+
+FFN <- (2880 :: Dim)
+
+MAX_POSITIONS <- (131072 :: Dim)
+
+SW <- (128 :: Dim)
+
+EPS <- 1e-05
+
+THETA <- 150000.0
+
+ROPE_SCALE <- 32.0
+
+ROPE_LOW_FREQ <- 1.0
+
+ROPE_HIGH_FREQ <- 32.0
+
+ROPE_CONTEXT <- 4096
+
+ROPE_ATTN_FACTOR <- 1.3465735902799727
+
+SWIGLU_LIMIT <- 7.0
+
+SWIGLU_ALPHA <- 1.702
 
 QD = NUM_HEADS * MODEL_HEAD_DIM
 
 KVD = KVH * MODEL_HEAD_DIM
 
-E = (128 :: Dim)
-
-EPT = 4
-
-FFN = (2880 :: Dim)
-
-MAX_POSITIONS = (131072 :: Dim)
-
-SW = (128 :: Dim)
-
-EPS = 1e-05
-
-THETA = 150000.0
-
-ROPE_SCALE = 32.0
-
-ROPE_LOW_FREQ = 1.0
-
-ROPE_HIGH_FREQ = 32.0
-
-ROPE_CONTEXT = 4096
-
-ROPE_ATTN_FACTOR = 1.3465735902799727
-
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
-
-SWIGLU_LIMIT = 7.0
-
-SWIGLU_ALPHA = 1.702
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true

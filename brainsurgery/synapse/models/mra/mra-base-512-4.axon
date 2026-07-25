@@ -1,0 +1,192 @@
+{-# CHECKPOINTS "uw-madison/mra-base-512-4" #-}
+
+{-# TOKENIZER "FacebookAI/roberta-base" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "mra" #-}
+
+import Activations (gelu)
+
+import Config
+
+import Math (exp, sqrt)
+
+import Masking (Mask, mask_for_input)
+
+import NN
+
+import Positions (position_ids)
+
+import Tensor
+
+MODEL_DIM <- (768 :: Dim)
+
+VOCAB_SIZE <- (50265 :: Dim)
+
+NUM_LAYERS <- (12 :: Dim)
+
+NUM_HEADS <- (12 :: Dim)
+
+HEAD_DIM <- MODEL_DIM / NUM_HEADS
+
+FFN <- (3072 :: Dim)
+
+MAX_POS <- (512 :: Dim)
+
+BLOCKS_PER_ROW <- (4 :: Dim)
+
+APPROX_MODE <- "full"
+
+FIRST_PRIOR <- (0 :: Dim)
+
+DIAGONAL_PRIOR <- (0 :: Dim)
+
+EPS <- 1e-05
+
+BLOCK_SIZE <- 32
+
+CONFIG_BLOCKS <- (MAX_POS / BLOCK_SIZE) * BLOCKS_PER_ROW
+
+mra_block_mask_to_tokens :: Tensor[BH,NB,NB] -> Tensor[BH,S,S]
+mra_block_mask_to_tokens block_mask = do
+  expanded <- Tensor.reshape block_mask shape=[BH, NB, 1, NB, 1]
+  expanded <- Tensor.expand expanded shape=[BH, NB, BLOCK_SIZE, NB, BLOCK_SIZE]
+  return Tensor.reshape expanded shape=[BH, S, S]
+
+mra_repeat_blocks :: Tensor[BH,NB,D] -> Tensor[BH,S,D]
+mra_repeat_blocks x = do
+  x <- Tensor.reshape x shape=[BH, NB, 1, D]
+  x <- Tensor.expand x shape=[BH, NB, BLOCK_SIZE, D]
+  return Tensor.reshape x shape=[BH, S, D]
+
+mra_repeat_block_scalars :: Tensor[BH,NB] -> Tensor[BH,S]
+mra_repeat_block_scalars x = do
+  x <- Tensor.reshape x shape=[BH, NB, 1]
+  x <- Tensor.expand x shape=[BH, NB, BLOCK_SIZE]
+  return Tensor.reshape x shape=[BH, S]
+
+mra_attention :: Tensor[B,H,S,HD] -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD] -> Tensor[B,S] -> Tensor[B,H,S,HD]
+mra_attention q k v padding_mask = do
+  BH <- B * H
+  NB <- S / BLOCK_SIZE
+  block_pairs <- NB * NB
+  budget <- (CONFIG_BLOCKS < block_pairs) ? CONFIG_BLOCKS : block_pairs
+  scale <- 1.0 / sqrt HD
+  mask <- Tensor.reshape padding_mask shape=[B, 1, S]
+  mask <- Tensor.expand mask shape=[B, H, S]
+  mask <- Tensor.reshape mask shape=[BH, S]
+  mask_f <- Tensor.cast mask dtype="float32"
+  mask_values <- Tensor.reshape mask_f shape=[BH, S, 1]
+  q <- Tensor.reshape q shape=[BH, S, HD]
+  q <- q * mask_values
+  k <- Tensor.reshape k shape=[BH, S, HD]
+  k <- k * mask_values
+  v <- Tensor.reshape v shape=[BH, S, HD]
+  v <- v * mask_values
+  token_count <- Tensor.reshape mask_f shape=[BH, NB, BLOCK_SIZE] |> Tensor.sum dim=-1
+  denominator <- Tensor.reshape (token_count + 1e-6) shape=[BH, NB, 1]
+  q_hat <- Tensor.reshape q shape=[BH, NB, BLOCK_SIZE, HD] |> Tensor.sum dim=2
+  q_hat <- q_hat / denominator
+  k_hat <- Tensor.reshape k shape=[BH, NB, BLOCK_SIZE, HD] |> Tensor.sum dim=2
+  k_hat <- k_hat / denominator
+  v_hat <- Tensor.reshape v shape=[BH, NB, BLOCK_SIZE, HD] |> Tensor.sum dim=2
+  v_hat <- v_hat / denominator
+  low <- Tensor.matmul q_hat ((Tensor.transpose k_hat -2 -1) * scale)
+  low_row_max, _ <- Tensor.topk low 1 dim=-1 largest=true sorted=false
+  query_block_count <- Tensor.reshape token_count shape=[BH, NB, 1]
+  key_block_count <- Tensor.reshape token_count shape=[BH, 1, NB]
+  valid_block_counts <- query_block_count * key_block_count
+  valid_blocks <- Tensor.le 0.5 valid_block_counts
+  low <- Tensor.where valid_blocks low (low - 10000.0)
+  block_ids <- Tensor.arange low start=0 end=NB
+  block_rows <- Tensor.reshape block_ids shape=[NB, 1]
+  block_cols <- Tensor.reshape block_ids shape=[1, NB]
+  diagonal_offset <- DIAGONAL_PRIOR / 2
+  diagonal_left <- Tensor.le (block_rows - diagonal_offset) block_cols
+  diagonal_right <- Tensor.le block_cols (block_rows + diagonal_offset)
+  diagonal <- Tensor.and diagonal_left diagonal_right
+  first_row <- Tensor.le (block_rows + 1) FIRST_PRIOR
+  first_col <- Tensor.le (block_cols + 1) FIRST_PRIOR
+  first <- Tensor.where first_row true first_col
+  diagonal_enabled <- (DIAGONAL_PRIOR > 0) ? diagonal : Tensor.where diagonal false false
+  first_enabled <- (FIRST_PRIOR > 0) ? first : Tensor.where first false false
+  prior <- Tensor.where diagonal_enabled true first_enabled
+  prior_f <- Tensor.cast prior dtype="float32"
+  low_normalized <- low - low_row_max
+  low_for_selection <- low_normalized + (prior_f * 5000.0)
+  flat_low <- Tensor.reshape low_for_selection shape=[BH, block_pairs]
+  selected_values, selected_indices <- Tensor.topk flat_low budget dim=-1 largest=true sorted=false
+  neg_threshold, _ <- Tensor.topk (0.0 - selected_values) 1 dim=-1 largest=true sorted=false
+  threshold <- Tensor.reshape (0.0 - neg_threshold) shape=[BH, 1, 1]
+  high_resolution_blocks <- Tensor.le threshold low_for_selection
+  selected_flat <- Tensor.zeros_like flat_low
+  selected_flat <- Tensor.scatter selected_flat selected_indices 1.0 dim=-1
+  selected_blocks <- Tensor.reshape selected_flat shape=[BH, NB, NB]
+  selected_blocks <- Tensor.le 0.5 selected_blocks
+  selected_tokens <- mra_block_mask_to_tokens selected_blocks
+  high_scores <- Tensor.matmul q ((Tensor.transpose k -2 -1) * scale)
+  selected_scores <- Tensor.where selected_tokens high_scores -1e9
+  high_max, _ <- Tensor.topk selected_scores 1 dim=-1 largest=true sorted=false
+  key_valid <- Tensor.reshape mask shape=[BH, 1, S]
+  high_valid <- Tensor.and selected_tokens key_valid
+  high_attn <- exp (selected_scores - high_max)
+  high_attn <- Tensor.where high_valid high_attn 0.0
+  high_out <- Tensor.matmul high_attn v
+  high_normalizer <- Tensor.sum high_attn dim=-1
+  high_resolution_blocks_f <- Tensor.cast high_resolution_blocks dtype="float32"
+  low_attn <- exp (low - low_row_max - (high_resolution_blocks_f * 10000.0))
+  low_attn <- low_attn * Tensor.reshape token_count shape=[BH, 1, NB]
+  low_out <- Tensor.matmul low_attn v_hat |> mra_repeat_blocks
+  low_normalizer <- Tensor.sum low_attn dim=-1 |> mra_repeat_block_scalars
+  low_row_max_tokens <- Tensor.reshape low_row_max shape=[BH, NB] |> mra_repeat_block_scalars
+  log_correction <- low_row_max_tokens - Tensor.reshape high_max shape=[BH, S]
+  log_correction <- log_correction * mask_f
+  low_side <- Tensor.le log_correction 0.0
+  high_side <- Tensor.le 0.0 log_correction
+  low_correction <- exp (log_correction * Tensor.cast low_side dtype="float32")
+  high_correction <- exp ((0.0 - log_correction) * Tensor.cast high_side dtype="float32")
+  low_out <- low_out * Tensor.reshape low_correction shape=[BH, S, 1]
+  low_normalizer <- low_normalizer * low_correction
+  high_out <- high_out * Tensor.reshape high_correction shape=[BH, S, 1]
+  high_normalizer <- high_normalizer * high_correction
+  full_context <- (high_out + low_out) / Tensor.reshape (high_normalizer + low_normalizer + 1e-6) shape=[BH, S, 1]
+  sparse_context <- high_out / Tensor.reshape (high_normalizer + 1e-6) shape=[BH, S, 1]
+  context <- (APPROX_MODE == "sparse") ? sparse_context : full_context
+  context <- context * Tensor.reshape mask_f shape=[BH, S, 1]
+  return Tensor.reshape context shape=[B, H, S, HD]
+
+mra_layer :: Tensor[B,S,D] -> Tensor[B,S] -> Tensor[B,S,D]
+mra_layer x padding_mask = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true
+    q <- Tensor.reshape q shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true
+    k <- Tensor.reshape k shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true
+    v <- Tensor.reshape v shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    a <- mra_attention q k v padding_mask
+    a <- Tensor.permute a dims=[0, 2, 1, 3] |> Tensor.reshape shape=[B, S, MODEL_DIM]
+    return NN.linear@output.dense a dim=MODEL_DIM bias=true
+  x <- NN.layernorm@attention.output.LayerNorm (x + a) eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return NN.layernorm@output.LayerNorm (x + m) eps=EPS
+
+mra :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+mra input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  padding_mask <- (attn_mask == null) ? (input_ids - input_ids + 1) : attn_mask
+  pos_ids <- position_ids input_ids
+  pos_ids <- pos_ids + 2
+  token_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@mra.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@mra.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@mra.embeddings.token_type_embeddings token_type_ids dim=MODEL_DIM
+  x <- NN.layernorm@mra.embeddings.LayerNorm (tok + typ + pos) eps=EPS
+  x <- for@mra.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- mra_layer x padding_mask
+    yield x
+  x <- NN.linear@cls.predictions.transform.dense x dim=MODEL_DIM bias=true |> gelu
+  x <- NN.layernorm@cls.predictions.transform.LayerNorm x eps=EPS
+  return NN.linear@cls.predictions.decoder x dim=VOCAB_SIZE bias=true weight_path=@@mra.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias

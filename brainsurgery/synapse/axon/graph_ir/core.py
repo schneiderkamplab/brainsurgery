@@ -1227,6 +1227,17 @@ def _bind_dim_substitution_from_types(
     subst: dict[str, DimToken],
     row_subst: dict[str, tuple[DimToken, ...]] | None = None,
 ) -> None:
+    if isinstance(formal, TypeOptional):
+        _bind_dim_substitution_from_types(
+            formal.inner,
+            actual.inner if isinstance(actual, TypeOptional) else actual,
+            subst,
+            row_subst,
+        )
+        return
+    if isinstance(actual, TypeOptional):
+        _bind_dim_substitution_from_types(formal, actual.inner, subst, row_subst)
+        return
     if isinstance(formal, TypeTensor) and isinstance(actual, TypeTensor) and formal.base == actual.base:
         _bind_dim_substitution_from_sequences(formal.dims, actual.dims, subst, row_subst)
         return
@@ -1235,9 +1246,6 @@ def _bind_dim_substitution_from_types(
         return
     if isinstance(formal, TypeList) and isinstance(actual, TypeList):
         _bind_dim_substitution_from_types(formal.item, actual.item, subst, row_subst)
-        return
-    if isinstance(formal, TypeOptional) and isinstance(actual, TypeOptional):
-        _bind_dim_substitution_from_types(formal.inner, actual.inner, subst, row_subst)
         return
     if isinstance(formal, TypeTuple) and isinstance(actual, TypeTuple) and len(formal.items) == len(actual.items):
         for formal_item, actual_item in zip(formal.items, actual.items, strict=True):
@@ -1457,6 +1465,21 @@ def _instantiated_module_output_types(
         _substitute_type_expr_with_rows(type_expr, subst, row_subst)
         for type_expr in raw_declared_types
     )
+    if len(callee.nodes) == 1:
+        instantiated = _infer_module_output_types_from_body(
+            callee,
+            actuals,
+            output_count,
+            dim_values,
+            modules_by_name=modules_by_name,
+            _seen=_seen,
+        )
+        if (
+            instantiated is not None
+            and len(instantiated) == output_count
+            and not any(_type_contains_inference_var(type_expr) for type_expr in instantiated)
+        ):
+            return instantiated
     bound_dim_names = _call_bound_dim_names_from_actuals(actuals, dim_values=dim_values)
     if all(
         not _type_contains_inference_var(type_expr)

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeList, TypeOptional
-from ..codegen2_common import normalize_primitive_op
+from ..codegen2_common import normalize_primitive_op, render_python_literal
 from ..codegen2_torch.core import _DirectTorchEmitter, _is_static_mask_type, graph_main_output_names
 from ..graph_ir import GraphProgram, validate_graph_program
 
@@ -57,6 +57,7 @@ SUPPORTED_TINYGRAD_PRIMITIVES: frozenset[str] = frozenset({
     "where_indices",
     "gather",
     "scatter",
+    "scatter_reduce",
     "index_add",
     "clamp",
     "le",
@@ -67,8 +68,10 @@ SUPPORTED_TINYGRAD_PRIMITIVES: frozenset[str] = frozenset({
     "div",
     "pow",
     "floor",
+    "round",
     "sqrt",
     "sin",
+    "acos",
     "cos",
     "exp",
     "log",
@@ -98,9 +101,12 @@ SUPPORTED_TINYGRAD_PRIMITIVES: frozenset[str] = frozenset({
     "_tinygrad_sdpa",
 })
 
-# Kept as a diagnostic table for genuinely missing tinygrad coverage. It should
-# stay empty for models we claim to support.
-NON_OBVIOUS_TINYGRAD_OPS: dict[str, str] = {}
+# Diagnostic reasons for primitives whose Axon contract TinyGrad cannot satisfy.
+NON_OBVIOUS_TINYGRAD_OPS: dict[str, str] = {
+    "argsort": "TinyGrad does not expose Axon's required stable-sort contract",
+    "random_normal": "Axon requires an explicit stateless key; TinyGrad RNG uses mutable global seeding",
+    "random_uniform": "Axon requires an explicit stateless key; TinyGrad RNG uses mutable global seeding",
+}
 
 
 @dataclass(frozen=True)
@@ -1244,6 +1250,7 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             "list_length": lambda: f"len({args[0]})",
             "gather": lambda: f"{args[0]}.gather(int({args[2] if len(args) > 2 else '-1'}), {args[1]})",
             "scatter": lambda: f"{args[0]}.scatter(int({args[3] if len(args) > 3 else '-1'}), {args[1]}, {args[2]})",
+            "scatter_reduce": lambda: f"{args[0]}.scatter_reduce(int({args[3]}), {args[1]}, {args[2]}, reduce=({{'max': 'amax', 'min': 'amin'}}.get(str({args[4]}), str({args[4]}))), include_self=bool({args[5]}))",
             "index_add": lambda: f"self._index_add({args[0]}, {args[1]}, {args[2]}, {args[3] if len(args) > 3 else '0'})",
             "le": lambda: f"({args[0]} <= {args[1]})",
             "eq": lambda: f"self._eq({args[0]}, {args[1]})",
@@ -1253,8 +1260,10 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
             "div": lambda: f"({args[0]} / {args[1]})",
             "pow": lambda: f"({args[0]} ** {args[1]})",
             "floor": lambda: f"{args[0]}.floor() if isinstance({args[0]}, Tensor) else int({args[0]} // 1)",
+            "round": lambda: f"{args[0]}.round() if isinstance({args[0]}, Tensor) else round({args[0]})",
             "sqrt": lambda: f"{args[0]}.sqrt() if isinstance({args[0]}, Tensor) else ({args[0]} ** 0.5)",
             "sin": lambda: f"{args[0]}.sin() if isinstance({args[0]}, Tensor) else __import__('math').sin(float({args[0]}))",
+            "acos": lambda: f"{args[0]}.acos()",
             "cos": lambda: f"{args[0]}.cos() if isinstance({args[0]}, Tensor) else __import__('math').cos(float({args[0]}))",
             "exp": lambda: f"{args[0]}.exp() if isinstance({args[0]}, Tensor) else __import__('math').exp(float({args[0]}))",
             "log": lambda: f"{args[0]}.log() if isinstance({args[0]}, Tensor) else __import__('math').log(float({args[0]}))",
@@ -1487,7 +1496,7 @@ def emit_model_code_from_graph_ir(
             "    require_value as _common_require_value,",
             ")",
             "",
-            f"_MODEL_CONFIG = {model_config!r}",
+            f"_MODEL_CONFIG = {render_python_literal(model_config)}",
             "",
             body,
         ]

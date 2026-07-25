@@ -6,6 +6,7 @@ export (
   and,
   arange,
   arange_step,
+  argsort,
   assign_slice,
   cast,
   cast_like,
@@ -28,6 +29,7 @@ export (
   reshape,
   shape,
   scatter,
+  scatter_reduce,
   size,
   slice,
   softmax,
@@ -163,6 +165,9 @@ sum x ?dim=-1 ?keepdim=false = _sum x dim keepdim
 topk :: Tensor[..S] -> Dim -> ?Int -> ?Bool -> ?Bool -> (Tensor[..R], IdxTensor[..I])
 topk x k ?dim=-1 ?largest=true ?sorted=true = _topk x k dim largest sorted
 
+argsort :: Tensor[..S] -> ?Int -> ?Bool -> ?Bool -> IdxTensor[..S]
+argsort x ?dim=-1 ?descending=false ?stable=true = _argsort x dim descending stable
+
 dtype_value :: Tensor[..S] -> String -> Float
 dtype_value x kind = _dtype_value x kind
 
@@ -177,6 +182,9 @@ gather x index ?dim=-1 = _gather x index dim
 
 scatter :: Tensor[..S] -> IdxTensor[..I] -> Any -> ?Int -> Tensor[..S]
 scatter x index src ?dim=-1 = _scatter x index src dim
+
+scatter_reduce :: Tensor[..S] -> IdxTensor[..I] -> Tensor[..I] -> ?Int -> ?String -> ?Bool -> Tensor[..S]
+scatter_reduce x index src ?dim=-1 ?reduce="sum" ?include_self=true = _scatter_reduce x index src dim reduce include_self
 
 index_add :: Tensor[..S] -> IdxTensor[..I] -> Tensor[..T] -> ?Int -> Tensor[..S]
 index_add x index src ?dim=0 = _index_add x index src dim

@@ -1,0 +1,263 @@
+{-# CHECKPOINTS "test/Reformer-Test" #-}
+
+{-# TOKENIZER ["test/Reformer-Test", "google-bert/bert-base-uncased"] #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "reformer" #-}
+
+import Activations (gelu, relu)
+
+import Config
+
+import List
+
+import Masking (Mask, mask_for_input)
+
+import Math (exp, floor, log, pow, sqrt)
+
+import NN
+
+import Params (param)
+
+import Random
+
+import Tensor
+
+MODEL_DIM <- (32 :: Dim)
+
+VOCAB_SIZE <- (30522 :: Dim)
+
+NUM_LAYERS <- (2 :: Dim)
+
+NUM_HEADS <- (2 :: Dim)
+
+HEAD_DIM <- (16 :: Dim)
+
+FFN <- (64 :: Dim)
+
+EPS <- 1e-12
+
+PAD_ID <- 0
+
+ATTN_LAYERS <- ["local", "lsh"]
+
+LOCAL_CHUNK <- (4 :: Dim)
+
+LOCAL_BEFORE <- (1 :: Dim)
+
+LOCAL_AFTER <- (0 :: Dim)
+
+LSH_CHUNK <- (4 :: Dim)
+
+LSH_BEFORE <- (1 :: Dim)
+
+LSH_AFTER <- (0 :: Dim)
+
+NUM_HASHES <- (2 :: Dim)
+
+NUM_BUCKET_FACTORS <- (([4]) :: List[Dim])
+
+ROTATION_SIZE <- do
+  total <- 0
+  total <- for i <- [0..List.length NUM_BUCKET_FACTORS) carry (total) total + (List.index NUM_BUCKET_FACTORS i)
+  return total
+
+NUM_BUCKETS <- do
+  product <- 1
+  product <- for i <- [0..List.length NUM_BUCKET_FACTORS) carry (product) product * (List.index NUM_BUCKET_FACTORS i)
+  return product
+
+HASH_SEED <- 0
+
+AXIAL_POSITIONS <- true
+
+AXIAL_SHAPE <- [2, 4]
+
+AXIAL_DIMS <- [16, 16]
+
+AXIS_0 <- List.index AXIAL_SHAPE 0
+
+AXIS_1 <- List.index AXIAL_SHAPE 1
+
+AXIAL_DIM_0 <- List.index AXIAL_DIMS 0
+
+AXIAL_DIM_1 <- List.index AXIAL_DIMS 1
+
+HIDDEN_ACT <- "gelu"
+
+PAD_CHUNK <- (LOCAL_CHUNK > LSH_CHUNK) ? LOCAL_CHUNK : LSH_CHUNK
+
+reformer_activation :: Tensor[..S] -> Tensor[..S]
+reformer_activation x = (HIDDEN_ACT == "relu") ? (relu x) : (gelu x)
+
+reformer_logsumexp :: Tensor[..S] -> Int -> Tensor[..R]
+reformer_logsumexp x dim = do
+  maximum, _ <- Tensor.topk x 1 dim=dim largest=true sorted=false
+  shifted <- x - maximum
+  total <- Tensor.sum (exp shifted) dim=dim keepdim=true
+  return (log total) + maximum
+
+reformer_axial_positions :: TokenIds[B,S] -> Tensor[B,S,MODEL_DIM]
+reformer_axial_positions position_ids = do
+  axis0 <- param @@reformer.embeddings.position_embeddings.weights.0
+  axis1 <- param @@reformer.embeddings.position_embeddings.weights.1
+  axis0 <- Tensor.expand axis0 shape=[B, AXIS_0, AXIS_1, AXIAL_DIM_0]
+  axis1 <- Tensor.expand axis1 shape=[B, AXIS_0, AXIS_1, AXIAL_DIM_1]
+  table <- Tensor.concat axis0 axis1 dim=-1
+  table <- Tensor.reshape table shape=[B, AXIS_0 * AXIS_1, MODEL_DIM]
+  indices <- Tensor.unsqueeze position_ids -1
+  indices <- Tensor.expand indices shape=[B, S, MODEL_DIM]
+  return Tensor.gather table indices dim=1
+
+reformer_positions :: TokenIds[B,S] -> Tensor[B,S,MODEL_DIM]
+reformer_positions position_ids = AXIAL_POSITIONS ? (reformer_axial_positions position_ids) : (NN.embedding@@reformer.embeddings.position_embeddings.embedding position_ids dim=MODEL_DIM)
+
+reformer_chunk_relation :: Tensor[..R,S] -> Dim -> Dim -> Dim -> Tensor[1,1,S,S]
+reformer_chunk_relation position_ids chunk before after = do
+  positions <- Tensor.arange position_ids 0 S
+  chunks <- Tensor.cast (floor (positions / chunk)) "long"
+  num_chunks <- floor ((S + chunk - 1) / chunk)
+  query_chunks <- Tensor.reshape chunks shape=[S, 1]
+  key_chunks <- Tensor.reshape chunks shape=[1, S]
+  keep <- Tensor.eq query_chunks key_chunks
+  keep <- for offset <- [1..before + 1) carry (keep) do
+    target <- query_chunks - offset
+    target <- Tensor.where (Tensor.le target -1) (target + num_chunks) target
+    keep <- keep or (Tensor.eq target key_chunks)
+    yield keep
+  keep <- for offset <- [1..after + 1) carry (keep) do
+    target <- query_chunks + offset
+    target <- Tensor.where (Tensor.le num_chunks target) (target - num_chunks) target
+    keep <- keep or (Tensor.eq target key_chunks)
+    yield keep
+  return Tensor.reshape keep shape=[1, 1, S, S]
+
+reformer_local_attention :: Path -> Tensor[B,S,D] -> Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+reformer_local_attention@path x padding_mask = do
+  q <- NN.linear@query x dim=(NUM_HEADS * HEAD_DIM) bias=false |> Tensor.reshape shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  k <- NN.linear@key x dim=(NUM_HEADS * HEAD_DIM) bias=false |> Tensor.reshape shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  v <- NN.linear@value x dim=(NUM_HEADS * HEAD_DIM) bias=false |> Tensor.reshape shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  full <- Tensor.reshape padding_mask shape=[B, 1, 1, S] |> Tensor.expand shape=[B, 1, S, S]
+  chunked <- reformer_chunk_relation x LOCAL_CHUNK LOCAL_BEFORE LOCAL_AFTER
+  keep <- (S <= LOCAL_CHUNK) ? full : (full and chunked)
+  scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
+  scores <- scores / sqrt HEAD_DIM
+  scores <- Tensor.where keep scores -1e9
+  probs <- Tensor.softmax scores dim=-1
+  return Tensor.matmul probs v |> Tensor.permute dims=[0, 2, 1, 3] |> Tensor.reshape shape=[B, S, NUM_HEADS * HEAD_DIM]
+
+reformer_lsh_attention :: Path -> Tensor[B,S,D] -> Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+reformer_lsh_attention@path x padding_mask = do
+  qk <- NN.linear@query_key x dim=(NUM_HEADS * HEAD_DIM) bias=false |> Tensor.reshape shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  v <- NN.linear@value x dim=(NUM_HEADS * HEAD_DIM) bias=false |> Tensor.reshape shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  variance <- Tensor.sum (qk * qk) dim=-1 keepdim=true
+  variance <- variance / HEAD_DIM
+  k <- qk * pow (variance + 1e-6) -0.5
+  k <- k / sqrt HEAD_DIM
+  scores <- Tensor.matmul qk (Tensor.transpose k dim1=2 dim2=3)
+  key_keep <- Tensor.reshape padding_mask shape=[B, 1, 1, S] |> Tensor.expand shape=[B, NUM_HEADS, S, S]
+  positions <- Tensor.arange x 0 S
+  query_positions <- Tensor.reshape positions shape=[S, 1]
+  key_positions <- Tensor.reshape positions shape=[1, S]
+  self_positions <- Tensor.eq query_positions key_positions
+  full_scores <- Tensor.where key_keep scores -1e9
+  full_scores <- Tensor.where self_positions -1e5 full_scores
+  full_logits <- reformer_logsumexp full_scores -1
+  full_probs <- exp (full_scores - full_logits)
+  full_out <- Tensor.matmul full_probs v
+  key <- Random.key HASH_SEED
+  rotations, _ <- Random.normal key x [NUM_HEADS, HEAD_DIM, NUM_HASHES, ROTATION_SIZE / 2]
+  rotations <- Tensor.reshape rotations shape=[NUM_HEADS, HEAD_DIM, NUM_HASHES * (ROTATION_SIZE / 2)]
+  rotated <- Tensor.matmul qk rotations
+  rotated <- Tensor.reshape rotated shape=[B, NUM_HEADS, S, NUM_HASHES, ROTATION_SIZE / 2]
+  rotated <- Tensor.permute rotated dims=[0, 1, 3, 2, 4]
+  buckets <- Tensor.zeros rotated shape=[B, NUM_HEADS, NUM_HASHES, S] dtype="long"
+  factor_offset <- 0
+  factor_product <- 1
+  factor_offset, factor_product, buckets <- for factor_i <- [0..List.length NUM_BUCKET_FACTORS) carry (factor_offset, factor_product, buckets) do
+    factor <- List.index NUM_BUCKET_FACTORS factor_i
+    factor_half <- factor / 2
+    factor_rotated <- Tensor.slice rotated dim=-1 start=factor_offset end=(factor_offset + factor_half)
+    factor_rotated <- Tensor.concat factor_rotated (0 - factor_rotated) dim=-1
+    _, factor_buckets <- Tensor.topk factor_rotated 1 dim=-1 largest=true sorted=false
+    factor_buckets <- Tensor.reshape factor_buckets shape=[B, NUM_HEADS, NUM_HASHES, S]
+    yield factor_offset + factor_half, factor_product * factor, buckets + (factor_product * factor_buckets)
+  hash_padding <- Tensor.reshape padding_mask shape=[B, 1, 1, S]
+  buckets <- Tensor.where hash_padding buckets NUM_BUCKETS
+  sorted_indices <- Tensor.argsort buckets dim=-1 descending=false stable=true
+  sorted_ranks <- Tensor.argsort sorted_indices dim=-1 descending=false stable=true
+  query_ranks <- Tensor.unsqueeze sorted_ranks -1
+  key_ranks <- Tensor.unsqueeze sorted_ranks -2
+  query_chunks <- Tensor.cast (floor (query_ranks / LSH_CHUNK)) "long"
+  key_chunks <- Tensor.cast (floor (key_ranks / LSH_CHUNK)) "long"
+  num_chunks <- floor ((S + LSH_CHUNK - 1) / LSH_CHUNK)
+  current_keep <- Tensor.eq query_chunks key_chunks
+  previous_target <- query_chunks - 1
+  previous_target <- Tensor.where (Tensor.le previous_target -1) (previous_target + num_chunks) previous_target
+  last_hash_chunks <- Tensor.slice key_chunks dim=2 start=(NUM_HASHES - 1) end=NUM_HASHES
+  earlier_hash_chunks <- Tensor.slice key_chunks dim=2 start=0 end=(NUM_HASHES - 1)
+  previous_hash_chunks <- Tensor.concat last_hash_chunks earlier_hash_chunks dim=2
+  previous_key_chunks <- Tensor.where (Tensor.eq query_chunks 0) previous_hash_chunks key_chunks
+  previous_keep <- (LSH_BEFORE > 0) ? (Tensor.eq previous_target previous_key_chunks) : (Tensor.eq query_chunks -1)
+  hash_padding <- Tensor.reshape padding_mask shape=[B, 1, 1, 1, S]
+  current_keep <- current_keep and hash_padding
+  previous_keep <- previous_keep and hash_padding
+  hash_keep <- Tensor.concat current_keep previous_keep dim=-1
+  hash_scores <- Tensor.unsqueeze scores 2
+  hash_scores <- Tensor.expand hash_scores shape=[B, NUM_HEADS, NUM_HASHES, S, S]
+  hash_scores <- Tensor.concat hash_scores hash_scores dim=-1
+  hash_scores <- Tensor.where hash_keep hash_scores -1e9
+  hash_self <- Tensor.reshape self_positions shape=[1, 1, 1, S, S]
+  hash_self <- Tensor.concat hash_self hash_self dim=-1
+  hash_scores <- Tensor.where hash_self -1e5 hash_scores
+  hash_logits <- reformer_logsumexp hash_scores -1
+  hash_probs <- exp (hash_scores - hash_logits)
+  hash_values <- Tensor.unsqueeze v 2 |> Tensor.expand shape=[B, NUM_HEADS, NUM_HASHES, S, HEAD_DIM]
+  hash_values <- Tensor.concat hash_values hash_values dim=3
+  hash_out <- Tensor.matmul hash_probs hash_values
+  hash_norm <- reformer_logsumexp hash_logits 2
+  hash_weights <- exp (hash_logits - hash_norm)
+  hash_out <- Tensor.sum (hash_out * hash_weights) dim=2 keepdim=false
+  out <- (S <= LSH_CHUNK) ? full_out : hash_out
+  return Tensor.permute out dims=[0, 2, 1, 3] |> Tensor.reshape shape=[B, S, NUM_HEADS * HEAD_DIM]
+
+reformer_layer :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S] -> String -> (Tensor[B,S,D], Tensor[B,S,D])
+reformer_layer x1 x2 padding_mask attention_kind = do
+  f <- scope@attention do
+    normalized <- NN.layernorm@layer_norm x2 eps=EPS
+    attended <- (attention_kind == "lsh") ? (reformer_lsh_attention@self_attention normalized padding_mask) : (reformer_local_attention@self_attention normalized padding_mask)
+    return NN.linear@output.dense attended dim=MODEL_DIM bias=false
+  y1 <- x1 + f
+  g <- scope@feed_forward do
+    normalized <- NN.layernorm@layer_norm y1 eps=EPS
+    hidden <- NN.linear@dense.dense normalized dim=FFN bias=true |> reformer_activation
+    return NN.linear@output.dense hidden dim=MODEL_DIM bias=true
+  return y1, (x2 + g)
+
+reformer :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+reformer input_ids attn_mask = do
+  original_length <- S
+  attn_mask <- mask_for_input input_ids attn_mask S
+  padded_length <- (floor ((S + PAD_CHUNK - 1) / PAD_CHUNK)) * PAD_CHUNK
+  padding_length <- padded_length - S
+  padding_ids <- Tensor.full input_ids shape=[B, padding_length] value=PAD_ID dtype="long"
+  padding_mask <- Tensor.zeros input_ids shape=[B, padding_length] dtype="long"
+  input_ids <- Tensor.concat input_ids padding_ids dim=1
+  attn_mask <- Tensor.concat attn_mask padding_mask dim=1
+  attn_mask <- Tensor.cast attn_mask "bool"
+  position_ids <- Tensor.arange input_ids 0 padded_length
+  position_ids <- Tensor.reshape position_ids shape=[1, padded_length]
+  position_ids <- Tensor.expand position_ids shape=[B, padded_length]
+  tok <- NN.embedding@reformer.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- reformer_positions position_ids
+  x1 <- tok + pos
+  x2 <- x1 + Tensor.zeros_like x1
+  x1, x2 <- for@reformer.encoder.layers i <- [0..NUM_LAYERS) carry (x1, x2) do
+    attention_kind <- List.index ATTN_LAYERS i
+    x1, x2 <- reformer_layer x1 x2 attn_mask attention_kind
+    yield x1, x2
+  hidden <- Tensor.concat x1 x2 dim=-1
+  hidden <- NN.layernorm@reformer.encoder.layer_norm hidden eps=EPS
+  logits <- NN.linear@lm_head.decoder hidden dim=VOCAB_SIZE bias=false
+  return Tensor.slice logits dim=1 start=0 end=original_length

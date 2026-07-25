@@ -39,6 +39,7 @@ from ..codegen2_common import (
     lookup_config,
     normalize_primitive_op,
     path_parts,
+    render_python_literal,
 )
 from ..graph_ir import (
     GraphLiteral,
@@ -1311,12 +1312,23 @@ def _emit_bind_nested_shape_symbols_inner(
             local.update(nested_local)
         return
     if isinstance(type_expr, TypeTensor):
+        variadic_indices = [
+            index
+            for index, dim in enumerate(type_expr.dims)
+            if isinstance(dim, str) and dim.startswith("..")
+        ]
+        variadic_index = variadic_indices[0] if len(variadic_indices) == 1 else None
         for idx, dim in enumerate(type_expr.dims):
+            if isinstance(dim, str) and dim.startswith(".."):
+                continue
+            axis = idx
+            if variadic_index is not None and idx > variadic_index:
+                axis = idx - len(type_expr.dims)
             _emit_bind_dim_expr(
                 lines,
                 add=add,
                 dim=dim,
-                actual_expr=f"{value_expr}.shape[{idx}]",
+                actual_expr=f"{value_expr}.shape[{axis}]",
                 local=local,
                 protected=protected,
                 required_names=required_names,
@@ -2524,6 +2536,16 @@ class Codegen2GraphModel(nn.Module):
             keepdim = bool(args[2]) if len(args) > 2 and not self._is_null(args[2]) else False
             out(torch.sum(x, dim=dim, keepdim=keepdim))
             return True
+        if primitive == "argsort":
+            out(
+                torch.argsort(
+                    args[0],
+                    dim=int(args[1]),
+                    descending=bool(args[2]),
+                    stable=bool(args[3]),
+                )
+            )
+            return True
         if primitive == "activations_gegelu":
             x = args[0]
             limit = args[1] if len(args) > 1 and not self._is_null(args[1]) else None
@@ -2543,6 +2565,19 @@ class Codegen2GraphModel(nn.Module):
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else -1
             out(self._scatter(args[0], args[1], args[2], dim))
             return True
+        if primitive == "scatter_reduce":
+            reduce = {"max": "amax", "min": "amin"}.get(str(args[4]), str(args[4]))
+            out(
+                torch.scatter_reduce(
+                    args[0],
+                    dim=int(args[3]),
+                    index=args[1],
+                    src=args[2],
+                    reduce=reduce,
+                    include_self=bool(args[5]),
+                )
+            )
+            return True
         if primitive == "assign_slice":
             if len(args) < 5:
                 raise ValueError("_assign_slice expects x, src, dim, start, end")
@@ -2551,6 +2586,13 @@ class Codegen2GraphModel(nn.Module):
         if primitive == "index_add":
             dim = int(args[3]) if len(args) > 3 and not self._is_null(args[3]) else 0
             out(torch.index_add(args[0], dim=dim, index=args[1], source=args[2]))
+            return True
+        if primitive in {"random_normal", "random_uniform"}:
+            ref, shape, seed = args[:3]
+            dtype = ref.dtype if ref.is_floating_point() else torch.float32
+            generator = torch.Generator(device=ref.device).manual_seed(int(seed))
+            factory = torch.randn if primitive == "random_normal" else torch.rand
+            out(factory(tuple(int(x) for x in shape), device=ref.device, dtype=dtype, generator=generator))
             return True
         if primitive == "clamp":
             x = args[0]
@@ -2595,12 +2637,18 @@ class Codegen2GraphModel(nn.Module):
         if primitive == "floor":
             out(torch.floor(args[0]) if torch.is_tensor(args[0]) else int(args[0] // 1))
             return True
+        if primitive == "round":
+            out(torch.round(args[0]) if torch.is_tensor(args[0]) else round(args[0]))
+            return True
         if primitive == "sqrt":
             value = args[0]
             out(torch.sqrt(value) if torch.is_tensor(value) else math.sqrt(float(value)))
             return True
         if primitive == "sin":
             out(torch.sin(args[0]) if torch.is_tensor(args[0]) else math.sin(float(args[0])))
+            return True
+        if primitive == "acos":
+            out(torch.acos(args[0]) if torch.is_tensor(args[0]) else math.acos(float(args[0])))
             return True
         if primitive == "cos":
             out(torch.cos(args[0]) if torch.is_tensor(args[0]) else math.cos(float(args[0])))
@@ -4536,6 +4584,8 @@ class _DirectTorchEmitter:
             return False
         cond = self._operand_expr(cond_operand, local=local, symbols_dict=symbols_dict)
         cond_expr = cond if self._operand_is_bool(cond_operand) else f"bool({cond})"
+        then_local = set(local)
+        else_local = set(local)
         self._add(lines, indent, f"if {cond_expr}:")
         self._emit_select_branch(
             lines,
@@ -4544,7 +4594,7 @@ class _DirectTorchEmitter:
             target_outputs=node.outputs,
             module_name=module_name,
             indent=indent + 4,
-            local=local,
+            local=then_local,
             symbols_dict=symbols_dict,
             inline_prefix=f"__select_inline_{node.id.replace(':', '_')}_then",
         )
@@ -4556,10 +4606,11 @@ class _DirectTorchEmitter:
             target_outputs=node.outputs,
             module_name=module_name,
             indent=indent + 4,
-            local=local,
+            local=else_local,
             symbols_dict=symbols_dict,
             inline_prefix=f"__select_inline_{node.id.replace(':', '_')}_else",
         )
+        local.update(then_local & else_local)
         return True
 
     def _branch_benefits_from_control_inline(self, operand: GraphOperand, *, module_name: str) -> bool:
@@ -6008,6 +6059,8 @@ class _DirectTorchEmitter:
             return f"torch.where({args[0]})"
         if primitive == "topk":
             return f"torch.topk({args[0]}, {int_arg(1)}, dim={int_arg(2)}, largest={bool_arg(3)}, sorted={bool_arg(4)})"
+        if primitive == "argsort":
+            return f"torch.argsort({args[0]}, dim={int_arg(1)}, descending={bool_arg(2)}, stable={bool_arg(3)})"
         if primitive == "concat":
             if "dim" in attrs:
                 if self.align_devices:
@@ -6048,8 +6101,26 @@ class _DirectTorchEmitter:
             "require": lambda: f"self._require_value({args[0]})",
             "gather": lambda: f"torch.gather({args[0]}, dim={int_arg(2, '-1')}, index=self._move_to({args[1]}, {args[0]}.device))",
             "scatter": lambda: f"self._scatter({args[0]}, {args[1]}, {args[2]}, {int_arg(3, '-1')})",
+            "scatter_reduce": lambda: (
+                f"torch.scatter_reduce({args[0]}, dim={int_arg(3, '-1')}, "
+                f"index={args[1]}, src={args[2]}, "
+                f"reduce={{'max': 'amax', 'min': 'amin'}}.get(str({args[4]}), str({args[4]})), "
+                f"include_self={bool_arg(5, 'True')})"
+            ),
             "assign_slice": lambda: f"self._assign_slice({args[0]}, {args[1]}, {args[2]}, {args[3]}, {args[4]})",
             "index_add": lambda: f"torch.index_add({args[0]}, dim={int_arg(3, '0')}, index=self._move_to({args[1]}, {args[0]}.device), source=self._move_to({args[2]}, {args[0]}.device))",
+            "random_normal": lambda: (
+                f"(lambda _ref, _shape, _seed: torch.randn(tuple(int(x) for x in _shape), "
+                f"device=_ref.device, dtype=(_ref.dtype if _ref.is_floating_point() else torch.float32), "
+                f"generator=torch.Generator(device=_ref.device).manual_seed(int(_seed))))"
+                f"({args[0]}, {args[1]}, {args[2]})"
+            ),
+            "random_uniform": lambda: (
+                f"(lambda _ref, _shape, _seed: torch.rand(tuple(int(x) for x in _shape), "
+                f"device=_ref.device, dtype=(_ref.dtype if _ref.is_floating_point() else torch.float32), "
+                f"generator=torch.Generator(device=_ref.device).manual_seed(int(_seed))))"
+                f"({args[0]}, {args[1]}, {args[2]})"
+            ),
             "and": lambda: (
                 f"(lambda _a, _b: torch.logical_and(_a, _b))(*self._align_pair({args[0]}, {args[1]}, prefer='right'))"
                 if self.align_devices
@@ -6057,8 +6128,10 @@ class _DirectTorchEmitter:
             ),
             "pow": lambda: f"(torch.pow({args[0]}, {args[1]}) if torch.is_tensor({args[0]}) else ({args[0]} ** {args[1]}))",
             "floor": lambda: f"torch.floor({args[0]}) if torch.is_tensor({args[0]}) else int({args[0]} // 1)",
+            "round": lambda: f"torch.round({args[0]}) if torch.is_tensor({args[0]}) else round({args[0]})",
             "sqrt": lambda: f"torch.sqrt({args[0]}) if torch.is_tensor({args[0]}) else ({args[0]} ** 0.5)",
             "sin": lambda: f"torch.sin({args[0]}) if torch.is_tensor({args[0]}) else math.sin({float_arg(0)})",
+            "acos": lambda: f"torch.acos({args[0]}) if torch.is_tensor({args[0]}) else math.acos({float_arg(0)})",
             "cos": lambda: f"torch.cos({args[0]}) if torch.is_tensor({args[0]}) else math.cos({float_arg(0)})",
             "exp": lambda: f"torch.exp({args[0]}) if torch.is_tensor({args[0]}) else math.exp({float_arg(0)})",
             "log": lambda: f"(torch.log({args[0]}) if torch.is_tensor({args[0]}) else math.log(float({args[0]})))",
@@ -6334,7 +6407,7 @@ def emit_model_code_from_graph_ir(
             "    require_value as _common_require_value,",
             ")",
             "",
-            f"_MODEL_CONFIG = {model_config!r}",
+            f"_MODEL_CONFIG = {render_python_literal(model_config)}",
             "",
             body,
         ]

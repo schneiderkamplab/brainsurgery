@@ -1,0 +1,73 @@
+{-# CHECKPOINTS "nghuyong/ernie-1.0-base-zh" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "ernie" #-}
+
+import Activations (gelu, relu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Positions (position_ids)
+
+import Config
+
+import NN
+
+MODEL_DIM <- 768
+
+VOCAB_SIZE <- 18000
+
+NUM_LAYERS <- 12
+
+NUM_HEADS <- 12
+
+FFN <- 3072
+
+EPS <- 1e-05
+
+HIDDEN_ACT <- "relu"
+
+USE_TASK_ID <- false
+
+ernie_activation :: Tensor[..S] -> Tensor[..S]
+ernie_activation x = (HIDDEN_ACT == "relu") ? (relu x) : (gelu x)
+
+ernie_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+ernie_block x keep = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- x + a
+  x <- NN.layernorm@attention.output.LayerNorm x eps=EPS weight_path=@attention.output.LayerNorm.gamma bias_path=@attention.output.LayerNorm.beta
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> ernie_activation
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  y <- x + m
+  y <- NN.layernorm@output.LayerNorm y eps=EPS weight_path=@output.LayerNorm.gamma bias_path=@output.LayerNorm.beta
+  return y
+
+ernie :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
+ernie input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@ernie.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@ernie.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@ernie.embeddings.token_type_embeddings tok_type_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- x + typ
+  x <- USE_TASK_ID ? (x + NN.embedding@ernie.embeddings.task_type_embeddings tok_type_ids dim=MODEL_DIM) : x
+  x <- NN.layernorm@ernie.embeddings.LayerNorm x eps=EPS weight_path=@@ernie.embeddings.LayerNorm.gamma bias_path=@@ernie.embeddings.LayerNorm.beta
+  x <- for@ernie.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- ernie_block x keep
+    yield x
+  logits <- scope@cls.predictions do
+    x <- NN.linear@transform.dense x dim=MODEL_DIM bias=true |> ernie_activation
+    x <- NN.layernorm@transform.LayerNorm x eps=EPS weight_path=@@cls.predictions.transform.LayerNorm.gamma bias_path=@@cls.predictions.transform.LayerNorm.beta
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@ernie.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
+  return logits

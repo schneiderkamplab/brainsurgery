@@ -30,27 +30,27 @@ type MambaLayerCache[B, C, CK, D, N] = (Tensor[B,C,CK], Tensor[B,D,N])
 
 type BlackMambaCache[B, C, CK, D, N] = List[?MambaLayerCache[B,C,CK,D,N]]
 
-MODEL_DIM = 1472
+MODEL_DIM <- 1472
 
-VOCAB_SIZE = 50304
+VOCAB_SIZE <- 50304
 
-NUM_LAYERS = 36
+NUM_LAYERS <- 36
 
-I = MODEL_DIM * (2)
+I <- MODEL_DIM * (2)
 
-N = 16
+N <- 16
 
-R = 92
+R <- 92
 
-E = 8
+E <- 8
 
-TOP_K = 2
+TOP_K <- 2
 
-CONV_KERNEL = 4
+CONV_KERNEL <- 4
 
-FF = 3872
+FF <- 3872
 
-EPS = 1e-05
+EPS <- 1e-05
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true

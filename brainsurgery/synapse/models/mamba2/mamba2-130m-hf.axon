@@ -1,0 +1,94 @@
+{-# CHECKPOINTS "AntonV/mamba2-130m-hf" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# PADDING_SIDE "right" #-}
+
+{-# MAIN "mamba2" #-}
+
+import Config
+
+import NN
+
+import Params (has_root, param)
+
+import SSM (causal_conv1d_full, mamba2_scan)
+
+import Tensor
+
+MODEL_DIM <- (768 :: Dim)
+
+EXPAND <- (2 :: Dim)
+
+INNER_DIM <- EXPAND * MODEL_DIM
+
+STATE_DIM <- (128 :: Dim)
+
+NUM_GROUPS <- (1 :: Dim)
+
+NUM_HEADS <- (24 :: Dim)
+
+HEAD_DIM <- (64 :: Dim)
+
+CONV_KERNEL <- (4 :: Dim)
+
+CONV_DIM <- INNER_DIM + (2 * NUM_GROUPS * STATE_DIM)
+
+PROJECTION_DIM <- INNER_DIM + CONV_DIM + NUM_HEADS
+
+NUM_LAYERS <- (24 :: Dim)
+
+VOCAB_SIZE <- (50288 :: Dim)
+
+EPS <- 1e-05
+
+USE_BIAS <- false
+
+USE_CONV_BIAS <- true
+
+TIME_STEP_MIN <- 0.0
+
+TIME_STEP_MAX <- 1e30
+
+HAS_LM_HEAD <- has_root "lm_head"
+
+sequence_mask :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+sequence_mask x mask = (mask == null) ? x : (x * (Tensor.unsqueeze mask dim=-1))
+
+mamba2_mixer :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+mamba2_mixer x attn_mask = do
+  x <- sequence_mask x attn_mask
+  projected <- NN.linear@in_proj x dim=PROJECTION_DIM bias=USE_BIAS
+  gate, hidden_bc, dt <- Tensor.split projected sizes=[INNER_DIM, CONV_DIM, NUM_HEADS]
+  w <- ((param @conv1d.weight) :: Tensor[CONV_DIM,1,CONV_KERNEL])
+  b <- USE_CONV_BIAS
+        ? ((param @conv1d.bias) :: Tensor[CONV_DIM])
+        : do
+            zero <- Tensor.slice w dim=-1 start=0 end=1
+            zero <- Tensor.reshape zero shape=[CONV_DIM]
+            return zero * 0.0
+  hidden_bc <- causal_conv1d_full hidden_bc w b "silu"
+  hidden_bc <- sequence_mask hidden_bc attn_mask
+  hidden, b_state, c_state <- Tensor.split hidden_bc sizes=[INNER_DIM, NUM_GROUPS * STATE_DIM, NUM_GROUPS * STATE_DIM]
+  y <- mamba2_scan hidden gate dt b_state c_state @A_log @D @dt_bias @norm.weight NUM_GROUPS HEAD_DIM time_step_min=TIME_STEP_MIN time_step_max=TIME_STEP_MAX
+  return NN.linear@out_proj y dim=MODEL_DIM bias=USE_BIAS
+
+mamba2_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+mamba2_block x attn_mask = do
+  residual <- x
+  x <- NN.rmsnorm@norm x eps=EPS cast_float=true
+  y <- scope@mixer do
+    return mamba2_mixer x attn_mask
+  return residual + y
+
+mamba2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,V], ?Any)
+mamba2 input_ids attn_mask past_kv use_cache = do
+  logits <- scope@backbone do
+    x <- NN.embedding@embeddings input_ids dim=MODEL_DIM
+    layer <- 0
+    x, layer <- for@layers i <- [0..NUM_LAYERS) carry (x, layer) do
+      x <- mamba2_block x attn_mask
+      yield x, i
+    x <- NN.rmsnorm@norm_f x eps=EPS cast_float=true
+    return HAS_LM_HEAD ? (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false) : (NN.linear@embeddings x dim=VOCAB_SIZE bias=false)
+  return logits, null

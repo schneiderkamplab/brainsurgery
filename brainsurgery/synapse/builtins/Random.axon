@@ -1,0 +1,22 @@
+type Key = Int
+
+export (Key, key, split, normal, uniform)
+
+-- Keys make random operations pure and reproducible within one backend.
+-- Native backend generators are not required to produce identical sequences.
+key :: Int -> Key
+key seed = seed
+
+split :: Key -> (Key, Key)
+split key = do
+  return (2 * key) + 1, (2 * key) + 2
+
+normal :: Key -> Tensor[..REF] -> List[Dim] -> (Tensor[..S], Key)
+normal key ref shape = do
+  values <- _random_normal ref shape key
+  return values, key + 1
+
+uniform :: Key -> Tensor[..REF] -> List[Dim] -> (Tensor[..S], Key)
+uniform key ref shape = do
+  values <- _random_uniform ref shape key
+  return values, key + 1

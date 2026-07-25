@@ -1,0 +1,128 @@
+{-# CHECKPOINTS "NX-AI/xLSTM-7b" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "xlstm" #-}
+
+import Activations (sigmoid, silu, softplus, tanh)
+
+import Config
+
+import Math (exp, floor, pow, sqrt)
+
+import NN
+
+import Params (param)
+
+import Tensor
+
+MODEL_DIM <- (4096 :: Dim)
+
+VOCAB_SIZE <- (50304 :: Dim)
+
+NUM_BLOCKS <- (32 :: Dim)
+
+NUM_HEADS <- (8 :: Dim)
+
+QK_FACTOR <- 0.5
+
+V_FACTOR <- 1.0
+
+FFN_FACTOR <- 2.667
+
+FFN_MULTIPLE <- (64 :: Dim)
+
+EPS <- 1e-06
+
+GATE_CAP <- 15.0
+
+LOGIT_CAP <- 30.0
+
+QK_DIM = floor (MODEL_DIM * QK_FACTOR)
+
+V_DIM = floor (MODEL_DIM * V_FACTOR)
+
+QK_HEAD_DIM = QK_DIM / NUM_HEADS
+
+V_HEAD_DIM = V_DIM / NUM_HEADS
+
+FFN_RAW = floor (MODEL_DIM * FFN_FACTOR)
+
+FFN_DIM = ((FFN_RAW + FFN_MULTIPLE - 1) / FFN_MULTIPLE) * FFN_MULTIPLE
+
+xlstm_soft_cap :: Tensor[..S] -> Float -> Tensor[..S]
+xlstm_soft_cap x cap = cap * tanh (x / cap)
+
+xlstm_mlstm :: Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM]
+xlstm_mlstm x = do
+  q <- NN.linear@q x dim=QK_DIM bias=false |> Tensor.reshape shape=[B, S, NUM_HEADS, QK_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  k <- NN.linear@k x dim=QK_DIM bias=false |> Tensor.reshape shape=[B, S, NUM_HEADS, QK_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  v <- NN.linear@v x dim=V_DIM bias=false |> Tensor.reshape shape=[B, S, NUM_HEADS, V_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  ogate <- NN.linear@ogate_preact x dim=V_DIM bias=false |> sigmoid
+  igate <- NN.linear@igate_preact x dim=NUM_HEADS bias=true |> xlstm_soft_cap GATE_CAP |> Tensor.permute dims=[0, 2, 1]
+  fgate <- NN.linear@fgate_preact x dim=NUM_HEADS bias=true |> xlstm_soft_cap GATE_CAP |> Tensor.permute dims=[0, 2, 1]
+  c <- Tensor.zeros x shape=[B, NUM_HEADS, QK_HEAD_DIM, V_HEAD_DIM] dtype="float32"
+  n <- Tensor.zeros x shape=[B, NUM_HEADS, QK_HEAD_DIM] dtype="float32"
+  m <- Tensor.zeros x shape=[B, NUM_HEADS, 1] dtype="float32"
+  out <- Tensor.zeros x shape=[B, NUM_HEADS, S, V_HEAD_DIM]
+  c, n, m, out <- for t <- [0..S) carry (c, n, m, out) do
+    qt <- Tensor.slice q dim=2 start=t end=(t + 1) |> Tensor.reshape shape=[B, NUM_HEADS, QK_HEAD_DIM]
+    kt <- Tensor.slice k dim=2 start=t end=(t + 1) |> Tensor.reshape shape=[B, NUM_HEADS, QK_HEAD_DIM]
+    vt <- Tensor.slice v dim=2 start=t end=(t + 1) |> Tensor.reshape shape=[B, NUM_HEADS, V_HEAD_DIM]
+    it <- Tensor.slice igate dim=2 start=t end=(t + 1)
+    ft <- Tensor.slice fgate dim=2 start=t end=(t + 1)
+    flog <- 0.0 - softplus (0.0 - ft)
+    fm <- flog + m
+    m_new <- Tensor.where (Tensor.le fm it) it fm
+    fa <- exp (fm - m_new)
+    ia <- exp (it - m_new)
+    c_new <- (Tensor.unsqueeze fa dim=-1) * c
+    c_new <- c_new + ((Tensor.unsqueeze ia dim=-1) * (Tensor.unsqueeze kt dim=-1) * (Tensor.unsqueeze vt dim=-2))
+    n_new <- (fa * n) + (ia * kt)
+    q_scaled <- qt * (1.0 / sqrt QK_HEAD_DIM)
+    h_num <- Tensor.sum ((Tensor.unsqueeze q_scaled dim=-1) * c_new) dim=-2 keepdim=false
+    qn <- Tensor.sum (q_scaled * n_new) dim=-1 keepdim=true
+    qn_abs <- Tensor.where (Tensor.le qn 0.0) (0.0 - qn) qn
+    min_denom <- exp (0.0 - m_new)
+    denom <- Tensor.where (Tensor.le qn_abs min_denom) min_denom qn_abs
+    ht <- h_num / (denom + EPS)
+    ht_out <- Tensor.unsqueeze ht dim=2
+    idx <- Tensor.fill ht_out t dtype="long"
+    out <- Tensor.scatter out idx ht_out dim=2
+    yield c_new, n_new, m_new, out
+  h <- Tensor.permute out dims=[0, 2, 1, 3]
+  h_ref <- h
+  h <- Tensor.cast h dtype="float32"
+  h_mean <- Tensor.sum h dim=-1 keepdim=true
+  h_mean <- h_mean / V_HEAD_DIM
+  h <- h - h_mean
+  h_var <- Tensor.sum (h * h) dim=-1 keepdim=true
+  h_var <- h_var / V_HEAD_DIM
+  h <- h / pow (h_var + EPS) 0.5
+  h <- Tensor.cast_like h h_ref
+  h <- Tensor.reshape h shape=[B, S, V_DIM]
+  nw <- ((param @multihead_norm.weight) :: Tensor[V_DIM])
+  h <- h * nw
+  return NN.linear@out_proj ((ogate * h)) dim=MODEL_DIM bias=false
+
+xlstm_block :: Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM]
+xlstm_block x = do
+  xn <- NN.rmsnorm@norm_mlstm x eps=EPS cast_float=true
+  a <- scope@mlstm_layer do
+    return xlstm_mlstm xn
+  x_attn <- x + a
+  xn <- NN.rmsnorm@norm_ffn x_attn eps=EPS cast_float=true
+  gate <- NN.linear@ffn.proj_up_gate xn dim=FFN_DIM bias=false |> silu
+  up <- NN.linear@ffn.proj_up xn dim=FFN_DIM bias=false
+  ffn <- NN.linear@ffn.proj_down (gate * up) dim=MODEL_DIM bias=false
+  return x_attn + ffn
+
+xlstm :: TokenIds[B,S] -> Tensor[B,S,VOCAB_SIZE]
+xlstm input_ids = do
+  x <- NN.embedding@backbone.embeddings input_ids dim=MODEL_DIM
+  x <- for@backbone.blocks i <- [0..NUM_BLOCKS) carry (x) do
+    x <- xlstm_block x
+    yield x
+  x <- NN.rmsnorm@backbone.out_norm x eps=EPS cast_float=true
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return xlstm_soft_cap logits LOGIT_CAP

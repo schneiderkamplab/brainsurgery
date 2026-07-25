@@ -18,6 +18,7 @@ def test_synapse_benchmark_exposes_ast_and_graph_optimizer_flags_only() -> None:
     assert "--optimize-ast" in help_text
     assert "--optimize-graph" in help_text
     assert "--builtins-overlay" in help_text
+    assert "--trust-remote-code" in help_text
     assert "--canonicalize" not in help_text
     assert "--backend-required" not in help_text
     assert "--optimize-safe" not in help_text

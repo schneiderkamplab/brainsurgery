@@ -1,0 +1,88 @@
+{-# CHECKPOINTS ["deepmind/language-perceiver"] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (gelu)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, mask_for_input)
+import Params (param)
+import Positions (position_ids)
+import Config
+import NN
+import Tensor
+
+
+INPUT_DIM <- Config.int @@d_model default=768
+LATENT_DIM <- Config.int @@d_latents default=1280
+QK_DIM <- Config.int @@qk_channels default=256
+VALUE_DIM <- Config.int @@v_channels default=1280
+NUM_LATENTS <- Config.int @@num_latents default=256
+SELF_LAYERS <- Config.int @@num_self_attends_per_block default=26
+SELF_HEADS <- Config.int @@num_self_attention_heads default=8
+CROSS_HEADS <- Config.int @@num_cross_attention_heads default=8
+MAX_POSITIONS <- Config.int @@max_position_embeddings default=2048
+VOCAB_SIZE <- Config.int @@vocab_size default=262
+EPS <- Config.float @@layer_norm_eps default=1e-12
+
+cross_attention :: Path -> Tensor[B,Q,QD] -> Tensor[B,K,KVD] -> ?Tensor[B,1,Q,K] -> Dim -> Dim -> Dim -> Tensor[B,Q,QD]
+cross_attention@path query inputs keep heads qk_dim value_dim = do
+  qn <- NN.layernorm@attention.self.layernorm1 query eps=EPS
+  kvn <- NN.layernorm@attention.self.layernorm2 inputs eps=EPS
+  q <- NN.linear@attention.self.query qn dim=qk_dim bias=true |> reshape_heads heads=heads
+  k <- NN.linear@attention.self.key kvn dim=qk_dim bias=true |> reshape_heads heads=heads
+  v <- NN.linear@attention.self.value kvn dim=value_dim bias=true |> reshape_heads heads=heads
+  all_scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
+  all_keep <- Tensor.eq all_scores all_scores
+  keep <- (keep == null) ? all_keep : keep
+  a <- attention q k v keep |> merge_heads
+  return NN.linear@attention.output.dense a dim=QD bias=true
+
+perceiver_mlp :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+perceiver_mlp@path x = do
+  m <- NN.layernorm@layernorm x eps=EPS
+  m <- NN.linear@mlp.dense1 m dim=D bias=true |> gelu
+  m <- NN.linear@mlp.dense2 m dim=D bias=true
+  return x + m
+
+self_attention_layer :: Tensor[B,S,LATENT_DIM] -> Tensor[B,S,LATENT_DIM]
+self_attention_layer x = do
+  a <- scope@attention do
+    xn <- NN.layernorm@self.layernorm1 x eps=EPS
+    q <- NN.linear@self.query xn dim=QK_DIM bias=true |> reshape_heads heads=SELF_HEADS
+    k <- NN.linear@self.key xn dim=QK_DIM bias=true |> reshape_heads heads=SELF_HEADS
+    v <- NN.linear@self.value xn dim=VALUE_DIM bias=true |> reshape_heads heads=SELF_HEADS
+    scores <- Tensor.matmul q (Tensor.transpose k dim1=2 dim2=3)
+    keep <- Tensor.eq scores scores
+    return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=LATENT_DIM bias=true
+  x <- x + a
+  m <- NN.layernorm@layernorm x eps=EPS
+  m <- NN.linear@mlp.dense1 m dim=LATENT_DIM bias=true |> gelu
+  m <- NN.linear@mlp.dense2 m dim=LATENT_DIM bias=true
+  return x + m
+
+perceiver :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,MAX_POSITIONS,VOCAB_SIZE]
+perceiver input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  tok <- NN.embedding@perceiver.input_preprocessor.embeddings input_ids dim=INPUT_DIM
+  pos <- NN.embedding@perceiver.input_preprocessor.position_embeddings pos_ids dim=INPUT_DIM
+  inputs <- tok + pos
+
+  latents <- ((param @@perceiver.embeddings.latents) :: Tensor[NUM_LATENTS,LATENT_DIM])
+  latents <- Tensor.unsqueeze latents dim=0 |> Tensor.expand shape=[B, NUM_LATENTS, LATENT_DIM]
+  attn_mask <- Tensor.cast attn_mask dtype="bool"
+  keep <- Tensor.reshape attn_mask shape=[B, 1, 1, S]
+  keep <- Tensor.expand keep shape=[B, 1, NUM_LATENTS, S]
+  a <- cross_attention@perceiver.encoder.cross_attention latents inputs keep CROSS_HEADS QK_DIM VALUE_DIM
+  latents <- perceiver_mlp@perceiver.encoder.cross_attention (latents + a)
+  latents <- for@perceiver.encoder.self_attends i <- [0..SELF_LAYERS) carry (latents) do
+    latents <- self_attention_layer latents
+    yield latents
+
+  queries <- ((param @@perceiver.decoder.output_position_encodings.position_embeddings) :: Tensor[MAX_POSITIONS,INPUT_DIM])
+  queries <- Tensor.unsqueeze queries dim=0 |> Tensor.expand shape=[B, MAX_POSITIONS, INPUT_DIM]
+  decoded <- cross_attention@perceiver.decoder.decoding_cross_attention queries latents null 8 256 INPUT_DIM
+  decoded <- perceiver_mlp@perceiver.decoder.decoding_cross_attention decoded
+  embedding_weight <- ((param @@perceiver.input_preprocessor.embeddings.weight) :: Tensor[VOCAB_SIZE,INPUT_DIM])
+  logits <- Tensor.matmul decoded (Tensor.transpose embedding_weight 0 1)
+  bias <- ((param @@embedding_decoder.bias) :: Tensor[VOCAB_SIZE])
+  return logits + bias

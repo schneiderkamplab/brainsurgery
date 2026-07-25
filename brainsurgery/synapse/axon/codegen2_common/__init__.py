@@ -1,6 +1,6 @@
 from .core import (
-    config_value,
     compose_path,
+    config_value,
     execute_common_primitive,
     has_config_value,
     is_null,
@@ -10,8 +10,9 @@ from .core import (
     path_parts,
     read_config_value,
     render_path,
-    required_state_value,
+    render_python_literal,
     require_value,
+    required_state_value,
 )
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "optional_state_value",
     "path_parts",
     "read_config_value",
+    "render_python_literal",
     "render_path",
     "required_state_value",
     "require_value",

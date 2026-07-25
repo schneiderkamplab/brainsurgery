@@ -1,0 +1,163 @@
+{-# CHECKPOINTS "allenai/Olmo-Hybrid-7B" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "olmo_hybrid" #-}
+
+import Activations (sigmoid, silu, softplus)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Config
+
+import List
+
+import Masking (causal_mask_for_input, mask_for_input)
+
+import Math (exp, mul, pow, sqrt)
+
+import NN
+
+import Params (param)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import SSM (causal_conv1d_full)
+
+import Tensor
+
+MODEL_DIM <- (3840 :: Dim)
+
+VOCAB_SIZE <- (100352 :: Dim)
+
+NUM_LAYERS <- (32 :: Dim)
+
+NUM_HEADS <- (30 :: Dim)
+
+NUM_KV_HEADS <- (30 :: Dim)
+
+LINEAR_KEY_HEADS <- (30 :: Dim)
+
+LINEAR_VALUE_HEADS <- (30 :: Dim)
+
+LINEAR_KEY_DIM <- (96 :: Dim)
+
+LINEAR_VALUE_DIM <- (192 :: Dim)
+
+CONV_KERNEL <- (4 :: Dim)
+
+ALLOW_NEG <- true
+
+FFN_DIM <- (11008 :: Dim)
+
+EPS <- 1e-06
+
+MAX_POSITIONS <- (65536 :: Dim)
+
+THETA <- Config.float @@rope_parameters.rope_theta default=10000.0
+
+HAS_ROPE <- false
+
+TYPES <- ((["linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention"]) :: List[String])
+
+HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+LINEAR_KEY_TOTAL = LINEAR_KEY_HEADS * LINEAR_KEY_DIM
+
+LINEAR_VALUE_TOTAL = LINEAR_VALUE_HEADS * LINEAR_VALUE_DIM
+
+olmo_hybrid_delta :: Tensor[B,S,VH,KD] -> Tensor[B,S,VH,KD] -> Tensor[B,S,VH,VD] -> Tensor[B,S,VH] -> Tensor[B,S,VH] -> Tensor[B,S,VH,VD]
+olmo_hybrid_delta q k v g beta = do
+  v_ref <- v
+  q <- q / (pow ((Tensor.sum (q * q) dim=-1 keepdim=true) + 1e-6) 0.5)
+  k <- k / (pow ((Tensor.sum (k * k) dim=-1 keepdim=true) + 1e-6) 0.5)
+  q <- (Tensor.cast q dtype="float32") * (1.0 / sqrt KD)
+  k <- Tensor.cast k dtype="float32"
+  v <- Tensor.cast v dtype="float32"
+  state <- Tensor.zeros v shape=[B, VH, KD, VD] dtype="float32"
+  out <- Tensor.zeros_like v
+  state, out <- for t <- [0..S) carry (state, out) do
+    qt <- Tensor.slice q dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, VH, KD]
+    kt <- Tensor.slice k dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, VH, KD]
+    vt <- Tensor.slice v dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, VH, VD]
+    gt <- Tensor.slice g dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, VH] |> exp |> Tensor.unsqueeze dim=-1 |> Tensor.unsqueeze dim=-1
+    bt <- Tensor.slice beta dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, VH] |> Tensor.unsqueeze dim=-1
+    state <- state * gt
+    memory <- Tensor.sum (state * (Tensor.unsqueeze kt dim=-1)) dim=-2 keepdim=false
+    delta <- (vt - memory) * bt
+    state <- state + ((Tensor.unsqueeze kt dim=-1) * (Tensor.unsqueeze delta dim=-2))
+    yt <- Tensor.sum (state * (Tensor.unsqueeze qt dim=-1)) dim=-2 keepdim=false |> Tensor.reshape shape=[B, 1, VH, VD]
+    idx <- Tensor.fill yt t dtype="long"
+    out <- Tensor.scatter out idx yt dim=1
+    yield state, out
+  return Tensor.cast_like out v_ref
+
+olmo_hybrid_conv :: Path -> Tensor[B,S,C] -> Tensor[B,S,C]
+olmo_hybrid_conv@__scope x = do
+  w <- ((param @weight) :: Tensor[C,1,CONV_KERNEL])
+  zero <- ((Tensor.zeros x shape=[C]) :: Tensor[C])
+  return causal_conv1d_full x w zero "silu"
+
+olmo_hybrid_linear :: Path -> Tensor[B,S,MODEL_DIM] -> ?Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+olmo_hybrid_linear@__scope x attn_mask = do
+  x <- (attn_mask == null) ? x : (x * (Tensor.unsqueeze attn_mask dim=-1))
+  q <- NN.linear@q_proj x dim=LINEAR_KEY_TOTAL bias=false |> olmo_hybrid_conv@q_conv1d
+  k <- NN.linear@k_proj x dim=LINEAR_KEY_TOTAL bias=false |> olmo_hybrid_conv@k_conv1d
+  v <- NN.linear@v_proj x dim=LINEAR_VALUE_TOTAL bias=false |> olmo_hybrid_conv@v_conv1d
+  q <- Tensor.reshape q shape=[B, S, LINEAR_KEY_HEADS, LINEAR_KEY_DIM] |> Tensor.permute dims=[0, 2, 1, 3] |> Tensor.repeat repeats=(LINEAR_VALUE_HEADS / LINEAR_KEY_HEADS) |> Tensor.permute dims=[0, 2, 1, 3]
+  k <- Tensor.reshape k shape=[B, S, LINEAR_KEY_HEADS, LINEAR_KEY_DIM] |> Tensor.permute dims=[0, 2, 1, 3] |> Tensor.repeat repeats=(LINEAR_VALUE_HEADS / LINEAR_KEY_HEADS) |> Tensor.permute dims=[0, 2, 1, 3]
+  v <- Tensor.reshape v shape=[B, S, LINEAR_VALUE_HEADS, LINEAR_VALUE_DIM]
+  beta <- NN.linear@b_proj x dim=LINEAR_VALUE_HEADS bias=false |> sigmoid
+  beta <- ALLOW_NEG ? (beta * 2.0) : beta
+  a <- NN.linear@a_proj x dim=LINEAR_VALUE_HEADS bias=false
+  alog <- ((param @A_log) :: Tensor[LINEAR_VALUE_HEADS])
+  dt <- ((param @dt_bias) :: Tensor[LINEAR_VALUE_HEADS])
+  g <- (0.0 - (exp alog)) * (softplus (a + dt))
+  y <- olmo_hybrid_delta q k v g beta
+  gate <- NN.linear@g_proj x dim=LINEAR_VALUE_TOTAL bias=false |> Tensor.reshape shape=[B, S, LINEAR_VALUE_HEADS, LINEAR_VALUE_DIM]
+  y <- NN.rmsnorm_noscale y eps=1e-5 dim=LINEAR_VALUE_DIM cast_float=true
+  nw <- ((param @o_norm.weight) :: Tensor[LINEAR_VALUE_DIM])
+  return ((y * nw) * (silu gate)) |> Tensor.reshape shape=[B, S, LINEAR_VALUE_TOTAL] |> NN.linear@o_proj dim=MODEL_DIM bias=false
+
+olmo_hybrid_attn :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,S] -> Tensor[B,S,MODEL_DIM]
+olmo_hybrid_attn@__scope x rs rc mask = do
+  q <- NN.linear@q_proj x dim=(NUM_HEADS * HEAD_DIM) bias=false |> NN.rmsnorm@q_norm eps=EPS dim=(NUM_HEADS * HEAD_DIM) cast_float=true |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@k_proj x dim=(NUM_KV_HEADS * HEAD_DIM) bias=false |> NN.rmsnorm@k_norm eps=EPS dim=(NUM_KV_HEADS * HEAD_DIM) cast_float=true |> reshape_heads heads=NUM_KV_HEADS
+  v <- NN.linear@v_proj x dim=(NUM_KV_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=NUM_KV_HEADS
+  q, k <- HAS_ROPE ? (rope_pair_base_factors q k rs rc) : (q, k)
+  k <- Tensor.repeat k repeats=(NUM_HEADS / NUM_KV_HEADS)
+  v <- Tensor.repeat v repeats=(NUM_HEADS / NUM_KV_HEADS)
+  return attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+
+olmo_hybrid_mlp :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM]
+olmo_hybrid_mlp@__scope x = do
+  gate <- NN.linear@gate_proj x dim=FFN_DIM bias=false |> silu
+  up <- NN.linear@up_proj x dim=FFN_DIM bias=false
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+olmo_hybrid_layer :: Tensor[B,S,MODEL_DIM] -> Int -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,S] -> ?Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+olmo_hybrid_layer x i rs rc mask attn_mask = do
+  kind <- List.index TYPES i
+  return (kind == "linear_attention")
+        ? do
+            xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+            x_attn <- x + (olmo_hybrid_linear@linear_attn xn attn_mask)
+            xn <- NN.rmsnorm@post_attention_layernorm x_attn eps=EPS cast_float=true
+            return x_attn + (olmo_hybrid_mlp@mlp xn)
+        : do
+            a <- olmo_hybrid_attn@self_attn x rs rc mask |> NN.rmsnorm@post_attention_layernorm eps=EPS cast_float=true
+            x_attn <- x + a
+            m <- olmo_hybrid_mlp@mlp x_attn |> NN.rmsnorm@post_feedforward_layernorm eps=EPS cast_float=true
+            return x_attn + m
+
+olmo_hybrid :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?Any)
+olmo_hybrid input_ids attn_mask past_kv use_cache = do
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos <- position_ids input_ids attn_mask=attn_mask past_length=0
+  rs, rc <- rope_base_factors pos HEAD_DIM THETA
+  mask <- causal_mask_for_input input_ids S padding_mask=attn_mask window=MAX_POSITIONS
+  x <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- for@layers i <- [0..NUM_LAYERS) carry (x) olmo_hybrid_layer x i rs rc mask attn_mask
+    return NN.rmsnorm@norm x eps=EPS cast_float=true
+  return NN.linear@@lm_head x dim=VOCAB_SIZE bias=false, null

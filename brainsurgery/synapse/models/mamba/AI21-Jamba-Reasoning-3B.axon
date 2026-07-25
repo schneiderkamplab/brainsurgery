@@ -34,33 +34,33 @@ type JambaLayerCache[B, H, T, DH, C, K, D, N] = (?AttnLayerCache[B,H,T,DH], ?Mam
 
 type JambaCache[B, H, T, DH, C, K, D, N] = List[JambaLayerCache[B,H,T,DH,C,K,D,N]]
 
-MODEL_DIM = 2560
+MODEL_DIM <- 2560
 
-VOCAB_SIZE = 65536
+VOCAB_SIZE <- 65536
 
-NUM_LAYERS = 28
+NUM_LAYERS <- 28
 
-NUM_HEADS = 20
+NUM_HEADS <- 20
 
-KVH = 1
+KVH <- 1
 
-MODEL_HEAD_DIM = 128
+MODEL_HEAD_DIM <- 128
+
+FF <- 8192
+
+I <- MODEL_DIM * (2)
+
+N <- 16
+
+R <- 160
+
+ATTN_PERIOD <- 14
+
+ATTN_OFFSET <- 7
+
+EPS <- 1e-06
 
 SCALE = 1.0 / sqrt MODEL_HEAD_DIM
-
-FF = 8192
-
-I = MODEL_DIM * (2)
-
-N = 16
-
-R = 160
-
-ATTN_PERIOD = 14
-
-ATTN_OFFSET = 7
-
-EPS = 1e-06
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true

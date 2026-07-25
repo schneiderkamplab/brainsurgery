@@ -26,19 +26,21 @@ type MambaLayerCache[B, C, K, D, N] = (Tensor[B,C,K], Tensor[B,D,N])
 
 type MambaCache[B, C, K, D, N] = List[MambaLayerCache[B,C,K,D,N]]
 
-MODEL_DIM = 2560
+MODEL_DIM <- 2560
 
-I = 5120
+I <- 5120
 
-N = 16
+N <- 16
 
-R = 160
+R <- 160
 
-NUM_LAYERS = 64
+K <- 4
 
-VOCAB_SIZE = 50280
+NUM_LAYERS <- 64
 
-EPS = 1e-05
+VOCAB_SIZE <- 50280
+
+EPS <- 1e-05
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true

@@ -1,0 +1,55 @@
+{-# CHECKPOINTS ["microsoft/mpnet-base"] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (gelu)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+import Positions (position_ids, relative_position_bias)
+import Config
+import NN
+
+
+
+MODEL_DIM <- Config.int @@hidden_size default=768
+VOCAB_SIZE <- Config.int @@vocab_size default=30527
+NUM_LAYERS <- Config.int @@num_hidden_layers default=12
+NUM_HEADS <- Config.int @@num_attention_heads default=12
+FFN <- Config.int @@intermediate_size default=3072
+EPS <- Config.float @@layer_norm_eps default=1e-05
+PAD <- Config.int @@pad_token_id default=1
+NUM_BUCKETS <- Config.int @@relative_attention_num_buckets default=32
+
+mpnet_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+mpnet_block x keep = do
+  a <- scope@attention.attn do
+    q <- NN.linear@q x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@v x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    rel <- relative_position_bias @@mpnet.encoder.relative_attention_bias q k num_buckets=NUM_BUCKETS max_distance=128 bidirectional=true
+    return attention q k v keep rel_bias=rel |> merge_heads |> NN.linear@o dim=MODEL_DIM bias=true
+  x <- x + a
+  x <- NN.layernorm@attention.LayerNorm x eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  y <- x + m
+  y <- NN.layernorm@output.LayerNorm y eps=EPS
+  return y
+
+mpnet :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
+mpnet input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_base <- position_ids input_ids attn_mask=attn_mask pad_fill=-1
+  pos_ids <- pos_base + PAD + 1
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok <- NN.embedding@mpnet.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@mpnet.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- NN.layernorm@mpnet.embeddings.LayerNorm x eps=EPS
+  x <- for@mpnet.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- mpnet_block x keep
+    yield x
+  logits <- scope@lm_head do
+    x <- NN.linear@dense x dim=MODEL_DIM bias=true |> gelu
+    x <- NN.layernorm@layer_norm x eps=EPS
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@mpnet.embeddings.word_embeddings.weight bias_path=@@lm_head.decoder.bias
+  return logits

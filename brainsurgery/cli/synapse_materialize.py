@@ -51,7 +51,22 @@ def _tokenizer_pragma_for_checkpoints(
     selected: list[list[str]] = []
     globals_: list[str] = []
     checkpoint_set = set(checkpoints)
+    occurrences: list[object] = []
     for occurrence in _pragma_occurrences(raw):
+        if (
+            isinstance(occurrence, list | tuple)
+            and occurrence
+            and all(
+                isinstance(item, list | tuple)
+                and len(item) == 2
+                and all(isinstance(value, str) and value for value in item)
+                for item in occurrence
+            )
+        ):
+            occurrences.extend(occurrence)
+        else:
+            occurrences.append(occurrence)
+    for occurrence in occurrences:
         if isinstance(occurrence, str) and occurrence:
             globals_.append(occurrence)
             continue

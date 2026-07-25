@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
+from ..codegen2_common import render_python_literal
 from ..codegen2_torch.core import (
     _DirectTorchEmitter,
     _dim_ident,
@@ -7532,7 +7533,7 @@ def emit_model_code_from_graph_ir(
             "    required_state_value as _common_required_state_value,",
             ")",
             "",
-            f"_MODEL_CONFIG = {model_config!r}",
+            f"_MODEL_CONFIG = {render_python_literal(model_config)}",
             "",
         ]
     )

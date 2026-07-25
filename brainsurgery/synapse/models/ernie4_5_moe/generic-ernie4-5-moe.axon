@@ -1,0 +1,107 @@
+{-# CHECKPOINTS ["test/Ernie4.5-MoE-Test", "baidu/ERNIE-4.5-21B-A3B-PT", "baidu/ERNIE-4.5-21B-A3B-Thinking"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (silu)
+import Attention (attention, merge_heads, reshape_heads)
+import Cache
+import Config
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import Math (mul)
+import MoE (grouped_swiglu_ffn_separate)
+import NN
+import Params (param)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Tensor
+
+MODEL_DIM <- Config.dim @@hidden_size default=32
+FFN <- Config.dim @@intermediate_size default=64
+MOE_FFN <- Config.dim @@moe_intermediate_size default=16
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=2
+NUM_HEADS <- Config.dim @@num_attention_heads default=4
+KV_HEADS <- Config.dim @@num_key_value_heads default=2
+HEAD_DIM <- MODEL_DIM / NUM_HEADS
+QD <- NUM_HEADS * HEAD_DIM
+KVD <- KV_HEADS * HEAD_DIM
+VOCAB_SIZE <- Config.dim @@vocab_size default=50264
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=128
+EPS <- Config.float @@rms_norm_eps default=1e-5
+THETA <- Config.float @@'rope_parameters.rope_theta' default=500000.0
+USE_BIAS <- Config.bool @@use_bias default=false
+NUM_EXPERTS <- Config.dim @@moe_num_experts default=4
+TOP_K <- Config.dim @@moe_k default=2
+NUM_SHARED <- Config.dim @@moe_num_shared_experts default=1
+MOE_START <- Config.dim @@moe_layer_start_index default=1
+MOE_END <- Config.dim @@moe_layer_end_index default=(NUM_LAYERS - 1)
+MOE_INTERVAL <- Config.dim @@moe_layer_interval default=1
+NORM_MIN <- Config.float @@moe_norm_min default=1e-12
+TIE <- Config.bool @@tie_word_embeddings default=true
+
+ernie_moe_dense :: Path -> Tensor[B,S,D] -> Dim -> Tensor[B,S,D]
+ernie_moe_dense@path x ffn = do
+  gate <- NN.linear@gate_proj x dim=ffn bias=USE_BIAS |> silu
+  up <- NN.linear@up_proj x dim=ffn bias=USE_BIAS
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=USE_BIAS
+
+ernie_moe_sparse :: Tensor[B,S,D] -> Tensor[B,S,D]
+ernie_moe_sparse x = do
+  x32 <- Tensor.cast x dtype="float32"
+  logits <- NN.linear@gate x32 dim=NUM_EXPERTS bias=false
+  probs <- Tensor.softmax logits dim=-1 dtype="float32"
+  choice <- probs + (Tensor.reshape (param @moe_statics.e_score_correction_bias) shape=[NUM_EXPERTS])
+  _, indices <- Tensor.topk choice k=TOP_K dim=-1 largest=true sorted=true
+  scores <- Tensor.gather probs indices dim=-1
+  denom <- Tensor.sum scores dim=-1 keepdim=true
+  denom <- Tensor.where (denom < NORM_MIN) NORM_MIN denom
+  scores <- Tensor.cast_like (scores / denom) x
+  routed <- grouped_swiglu_ffn_separate x scores indices NUM_EXPERTS MOE_FFN gate_weight=@experts.gate_proj.weight up_weight=@experts.up_proj.weight out_weight=@experts.down_proj.weight
+  shared <- ernie_moe_dense@shared_experts x ffn=(MOE_FFN * NUM_SHARED)
+  return routed + shared
+
+ernie_moe_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+ernie_moe_block x layer rope_sin rope_cos mask past_kv = do
+  sparse <- (((layer + 1) % MOE_INTERVAL) == 0) and (layer >= MOE_START) and (layer <= MOE_END)
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=USE_BIAS |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=USE_BIAS |> reshape_heads heads=KV_HEADS
+    v <- NN.linear@v_proj xn dim=KVD bias=USE_BIAS |> reshape_heads heads=KV_HEADS
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=USE_BIAS
+    return a, new_kv
+  x <- x + a
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true
+  m <- scope@mlp do
+    return sparse ? (ernie_moe_sparse xn) : do
+      gate <- NN.linear@gate_proj xn dim=FFN bias=USE_BIAS |> silu
+      up <- NN.linear@up_proj xn dim=FFN bias=USE_BIAS
+      return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=USE_BIAS
+  return x + m, new_kv
+
+ernie_moe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+ernie_moe input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- ernie_moe_block x i rope_sin rope_cos mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- NN.rmsnorm@norm x eps=EPS cast_float=true
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- TIE
+    ? (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false)
+    : (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false)
+  return logits, new_kv

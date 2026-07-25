@@ -764,7 +764,13 @@ class _ProgramTransformer(Transformer[Token, object]):
 
     def type_dim_paren(self, children: list[object]) -> DimToken:
         inner = next(
-            (child for child in children if isinstance(child, int | str | DimExprBinary)), None
+            (
+                child
+                for child in children
+                if not isinstance(child, Token)
+                and isinstance(child, int | str | DimExprBinary)
+            ),
+            None,
         )
         if inner is None:
             raise ValueError("invalid parenthesized tensor dimension expression")

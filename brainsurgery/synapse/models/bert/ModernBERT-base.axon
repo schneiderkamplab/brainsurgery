@@ -20,27 +20,27 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 768
+MODEL_DIM <- 768
 
-VOCAB_SIZE = 50368
+VOCAB_SIZE <- 50368
 
-NUM_LAYERS = 22
+NUM_LAYERS <- 22
 
-NUM_HEADS = 12
+NUM_HEADS <- 12
 
-FFN = 1152
+FFN <- 1152
 
-EPS = 1e-05
+EPS <- 1e-05
 
-FULL_EVERY = 3
+FULL_EVERY <- 3
 
-LOCAL_ATTN = 128
+LOCAL_ATTN <- 128
 
-LOCAL_WIN = 64
+LOCAL_WIN <- 64
 
-THETA_FULL = 160000.0
+THETA_FULL <- 160000.0
 
-THETA_LOCAL = 10000.0
+THETA_LOCAL <- 10000.0
 
 modernbert_layer :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 modernbert_layer x i rope_sin_full rope_cos_full rope_sin_local rope_cos_local mask_full mask_local = do

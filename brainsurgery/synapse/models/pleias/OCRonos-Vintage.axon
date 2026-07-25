@@ -20,15 +20,15 @@ import NN
 
 import Tensor
 
-CONTEXT_SIZE <- (1024 :: Dim)
+CONTEXT_SIZE <- (Config.dim @@n_positions default=((1024 :: Dim)))
 
-MODEL_DIM <- (768 :: Dim)
+MODEL_DIM <- (Config.dim @@n_embd default=((768 :: Dim)))
 
-NUM_LAYERS <- (12 :: Dim)
+NUM_LAYERS <- (Config.dim @@n_layer default=((12 :: Dim)))
 
-NUM_HEADS <- (12 :: Dim)
+NUM_HEADS <- (Config.dim @@n_head default=((12 :: Dim)))
 
-VOCAB_SIZE <- (50257 :: Dim)
+VOCAB_SIZE <- (Config.dim @@vocab_size default=((50257 :: Dim)))
 
 gpt2_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,H,P,CONTEXT_SIZE,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,CONTEXT_SIZE,DH])
 gpt2_block x mask past_kv = do

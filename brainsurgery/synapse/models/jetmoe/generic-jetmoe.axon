@@ -1,0 +1,100 @@
+{-# CHECKPOINTS ["test/JetMoE-Test", "jetmoe/jetmoe-8b", "jetmoe/jetmoe-8b-chat"] #-}
+{-# TASK "causal_lm" #-}
+
+import Attention (attention)
+import Cache
+import Config
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import MoE (grouped_swiglu_ffn_basic)
+import NN
+import Params (param)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Tensor
+
+MODEL_DIM <- Config.dim @@hidden_size default=2048
+VOCAB_SIZE <- Config.dim @@vocab_size default=32000
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=12
+KV_HEADS <- Config.dim @@num_key_value_heads default=16
+HEAD_DIM <- Config.dim @@kv_channels default=128
+NUM_EXPERTS <- Config.dim @@num_local_experts default=8
+TOP_K <- Config.dim @@num_experts_per_tok default=2
+NUM_HEADS = KV_HEADS * TOP_K
+KVD = KV_HEADS * HEAD_DIM
+FFN <- Config.dim @@intermediate_size default=5632
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=4096
+THETA <- Config.float @@'rope_parameters.rope_theta' default=10000.0
+EPS <- Config.float @@rms_norm_eps default=1e-6
+TIE <- Config.bool @@tie_word_embeddings default=true
+
+jetmoe_router :: Path -> Tensor[B,S,D] -> (Tensor[B,S,TOP_K], IdxTensor[B,S,TOP_K])
+jetmoe_router@path x = do
+  logits <- NN.linear@path x dim=NUM_EXPERTS bias=false |> Tensor.cast dtype="float32"
+  selected_logits, indices <- Tensor.topk logits k=TOP_K dim=-1 largest=true sorted=true
+  scores <- Tensor.softmax selected_logits dim=-1 |> Tensor.cast_like x
+  return scores, indices
+
+jetmoe_repeat_head_block :: Tensor[B,H,T,DH] -> Dim -> Tensor[B,repeats * H,T,DH]
+jetmoe_repeat_head_block x repeats = do
+  return Tensor.unsqueeze x 1 |> Tensor.expand shape=[B,repeats,H,T,DH] |> Tensor.reshape shape=[B,repeats * H,T,DH]
+
+jetmoe_attention :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+jetmoe_attention x rope_sin rope_cos mask past_kv = do
+  scores, indices <- jetmoe_router@experts.router.layer x
+  selected_x <- Tensor.unsqueeze x 2 |> Tensor.expand shape=[B,S,TOP_K,MODEL_DIM]
+  q <- NN.expert_linear@experts.input_linear selected_x indices dim=KVD bias=false weight_path=@experts.input_linear.weight
+  q <- Tensor.reshape q shape=[B,S,NUM_HEADS,HEAD_DIM] |> Tensor.permute dims=[0,2,1,3]
+  k, v <- NN.linear@kv_proj x dim=(2 * KVD) bias=false |> Tensor.chunk parts=2 dim=-1
+  k <- Tensor.reshape k shape=[B,S,KV_HEADS,HEAD_DIM] |> Tensor.permute dims=[0,2,1,3]
+  v <- Tensor.reshape v shape=[B,S,KV_HEADS,HEAD_DIM] |> Tensor.permute dims=[0,2,1,3]
+  q, k <- rope_pair_base_factors q k rope_sin rope_cos
+  k, v, new_kv <- Cache.update past_kv k v
+  k <- jetmoe_repeat_head_block k TOP_K
+  v <- jetmoe_repeat_head_block v TOP_K
+  a <- attention q k v mask
+  a <- Tensor.permute a dims=[0,2,1,3] |> Tensor.reshape shape=[B,S,TOP_K,KVD]
+  a <- NN.expert_linear@experts.output_linear a indices dim=MODEL_DIM bias=false weight_path=@experts.output_linear.weight
+  a <- Tensor.sum (a * (Tensor.unsqueeze scores dim=-1)) dim=2 keepdim=false
+  return a + (param @experts.bias), new_kv
+
+jetmoe_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+jetmoe_ffn x = do
+  scores, indices <- jetmoe_router@router.layer x
+  y <- grouped_swiglu_ffn_basic x scores indices NUM_EXPERTS gate_up_weight=@input_linear.weight out_weight=@output_linear.weight
+  return y + (param @bias)
+
+jetmoe_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+jetmoe_block x rope_sin rope_cos mask past_kv = do
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  a, new_kv <- scope@self_attention do
+    a, new_kv <- jetmoe_attention xn rope_sin rope_cos mask past_kv
+    return a, new_kv
+  x <- x + a
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true
+  m <- scope@mlp do
+    return jetmoe_ffn xn
+  return x + m, new_kv
+
+jetmoe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+jetmoe input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- jetmoe_block x rope_sin rope_cos mask past_i
+      yield x, Cache.append work_kv new_i
+    x <- NN.rmsnorm@norm x eps=EPS cast_float=true
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- TIE
+    ? NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false
+    : NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

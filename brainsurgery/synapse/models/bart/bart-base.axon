@@ -16,27 +16,27 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 768
+MODEL_DIM <- 768
 
-VOCAB_SIZE = 50265
+VOCAB_SIZE <- 50265
 
-L_ENC = 6
+L_ENC <- 6
 
-L_DEC = 6
+L_DEC <- 6
 
-H_ENC = 12
+H_ENC <- 12
 
-H_DEC = 12
+H_DEC <- 12
 
-FFN_ENC = 3072
+FFN_ENC <- 3072
 
-FFN_DEC = 3072
+FFN_DEC <- 3072
 
-EPS = 1e-05
+EPS <- 1e-05
 
-POS_OFFSET = 2
+POS_OFFSET <- 2
 
-EMB_SCALE = 1.0
+EMB_SCALE <- 1.0
 
 bart_encoder_layer :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 bart_encoder_layer x keep = do

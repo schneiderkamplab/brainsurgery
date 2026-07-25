@@ -1,0 +1,104 @@
+{-# CHECKPOINTS ["google/bert2bert_L-24_wmt_de_en", "google/bert2bert_L-24_wmt_en_de"] #-}
+
+{-# TASK "seq2seq_lm" #-}
+
+{-# MAIN "bert2bert" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, causal_mask_for_input, mask_for_input)
+
+import Positions (position_ids)
+
+import Config
+
+import NN
+
+MODEL_DIM <- 1024
+
+VOCAB_SIZE <- 31950
+
+L_ENC <- 24
+
+L_DEC <- 24
+
+H_ENC <- 16
+
+H_DEC <- 16
+
+FFN_ENC <- 4096
+
+FFN_DEC <- 4096
+
+EPS_ENC <- 1e-12
+
+EPS_DEC <- 1e-12
+
+HAS_TOKEN_TYPES <- false
+
+bert2bert_embeddings :: Path -> TokenIds[B,S] -> Float -> Tensor[B,S,D]
+bert2bert_embeddings@path input_ids eps = do
+  pos_ids <- position_ids input_ids
+  token_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@position_embeddings pos_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- HAS_TOKEN_TYPES ? (x + NN.embedding@token_type_embeddings token_type_ids dim=MODEL_DIM) : x
+  return NN.layernorm@LayerNorm x eps=eps
+
+bert2bert_encoder_layer :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+bert2bert_encoder_layer x keep = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=H_ENC
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=H_ENC
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=H_ENC
+    return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- NN.layernorm@attention.output.LayerNorm (x + a) eps=EPS_ENC
+  m <- NN.linear@intermediate.dense x dim=FFN_ENC bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return NN.layernorm@output.LayerNorm (x + m) eps=EPS_ENC
+
+bert2bert_decoder_layer :: Tensor[B,SDEC,D] -> Tensor[B,SENC,D] -> Tensor[B,1,SDEC,SDEC] -> Tensor[B,1,SDEC,SENC] -> Tensor[B,SDEC,D]
+bert2bert_decoder_layer x enc_hidden decoder_keep cross_keep = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    return attention q k v decoder_keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- NN.layernorm@attention.output.LayerNorm (x + a) eps=EPS_DEC
+  a <- scope@crossattention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    k <- NN.linear@self.key enc_hidden dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    v <- NN.linear@self.value enc_hidden dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+    return attention q k v cross_keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- NN.layernorm@crossattention.output.LayerNorm (x + a) eps=EPS_DEC
+  m <- NN.linear@intermediate.dense x dim=FFN_DEC bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return NN.layernorm@output.LayerNorm (x + m) eps=EPS_DEC
+
+bert2bert :: TokenIds[B,SENC] -> ?Mask[B,SENC,SENC] -> TokenIds[B,SDEC] -> ?Mask[B,SDEC,SDEC] -> Tensor[B,SDEC,V]
+bert2bert input_ids attention_mask decoder_input_ids decoder_attention_mask = do
+  attention_mask <- mask_for_input input_ids attention_mask SENC
+  decoder_attention_mask <- mask_for_input decoder_input_ids decoder_attention_mask SDEC
+  encoder_keep <- bidirectional_mask_for_input input_ids SENC padding_mask=attention_mask
+  decoder_keep <- causal_mask_for_input decoder_input_ids SDEC padding_mask=decoder_attention_mask window=128
+  cross_keep <- bidirectional_mask_for_input decoder_input_ids SENC padding_mask=attention_mask
+  enc_hidden <- bert2bert_embeddings@encoder.embeddings input_ids EPS_ENC
+  enc_hidden <- for@encoder.encoder.layer i <- [0..L_ENC) carry (enc_hidden) do
+    enc_hidden <- bert2bert_encoder_layer enc_hidden encoder_keep
+    yield enc_hidden
+  dec_hidden <- bert2bert_embeddings@decoder.bert.embeddings decoder_input_ids EPS_DEC
+  dec_hidden <- for@decoder.bert.encoder.layer i <- [0..L_DEC) carry (dec_hidden) do
+    dec_hidden <- bert2bert_decoder_layer dec_hidden enc_hidden decoder_keep cross_keep
+    yield dec_hidden
+  logits <- HAS_TOKEN_TYPES
+        ? do
+            logits <- scope@decoder.cls.predictions do
+              head_hidden <- NN.linear@transform.dense dec_hidden dim=MODEL_DIM bias=true |> gelu
+              head_hidden <- NN.layernorm@transform.LayerNorm head_hidden eps=EPS_DEC
+              return NN.linear@decoder head_hidden dim=VOCAB_SIZE bias=true weight_path=@@decoder.bert.embeddings.word_embeddings.weight bias_path=@@decoder.cls.predictions.bias
+            return logits
+        : NN.linear@decoder.lm_head.decoder dec_hidden dim=VOCAB_SIZE bias=true
+  return logits

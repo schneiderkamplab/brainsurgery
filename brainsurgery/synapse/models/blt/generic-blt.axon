@@ -1,0 +1,242 @@
+{-# CHECKPOINTS ["test/BLT-Test", "itazap/blt-1b-hf", "facebook/blt-1b"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (silu)
+import Attention (attention, merge_heads, reshape_heads)
+import Config
+import List
+import Masking (Mask, causal_mask_for_input, mask_for_input)
+import Math (floor, log, mul)
+import NN
+import Positions (rope_base_factors, rope_pair_base_factors)
+import Tensor
+
+VOCAB_SIZE <- Config.dim @@vocab_size default=50257
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=128
+CROSS_K <- Config.dim @@cross_attn_k default=2
+PATCH_THRESHOLD <- Config.float @@patching_threshold default=10.0
+HAS_MAX_PATCH_LENGTH <- Config.has_value @@max_patch_length
+MAX_PATCH_LENGTH <- Config.dim @@max_patch_length default=3
+HASH_VOCAB <- Config.dim @@encoder_hash_byte_group_vocab default=50257
+HASH_FUNCTIONS <- Config.dim @@encoder_hash_byte_group_nb_functions default=1
+HASH_GROUP_SIZES <- ((Config.list @@encoder_hash_byte_group_size default=[1]) :: List[Dim])
+HASH_PRIMES <- ([1000000007, 1000000009, 1000000033, 1000000087, 1000000093, 1000000097, 1000000103, 1000000123, 1000000181, 1000000207] :: List[Int])
+
+LOCAL_DIM <- Config.dim @@'encoder_config.hidden_size' default=32
+LOCAL_LAYERS <- Config.dim @@'encoder_config.num_hidden_layers' default=2
+LOCAL_HEADS <- Config.dim @@'encoder_config.num_attention_heads' default=4
+LOCAL_KV_HEADS <- Config.dim @@'encoder_config.num_key_value_heads' default=LOCAL_HEADS
+LOCAL_FFN <- Config.dim @@'encoder_config.intermediate_size' default=64
+LOCAL_EPS <- Config.float @@'encoder_config.rms_norm_eps' default=(Config.float @@'encoder_config.norm_eps' default=1e-5)
+LOCAL_THETA <- Config.float @@'encoder_config.rope_parameters.rope_theta' default=(Config.float @@'encoder_config.rope_theta' default=10000.0)
+LOCAL_HD = LOCAL_DIM / LOCAL_HEADS
+
+GLOBAL_DIM <- Config.dim @@'global_config.hidden_size' default=64
+GLOBAL_LAYERS <- Config.dim @@'global_config.num_hidden_layers' default=2
+GLOBAL_HEADS <- Config.dim @@'global_config.num_attention_heads' default=4
+GLOBAL_KV_HEADS <- Config.dim @@'global_config.num_key_value_heads' default=GLOBAL_HEADS
+GLOBAL_FFN <- Config.dim @@'global_config.intermediate_size' default=64
+GLOBAL_EPS <- Config.float @@'global_config.rms_norm_eps' default=(Config.float @@'global_config.norm_eps' default=1e-5)
+GLOBAL_THETA <- Config.float @@'global_config.rope_parameters.rope_theta' default=(Config.float @@'global_config.rope_theta' default=10000.0)
+GLOBAL_HD = GLOBAL_DIM / GLOBAL_HEADS
+
+DECODER_DIM <- Config.dim @@'decoder_config.hidden_size' default=32
+DECODER_LAYERS <- Config.dim @@'decoder_config.num_hidden_layers' default=2
+DECODER_HEADS <- Config.dim @@'decoder_config.num_attention_heads' default=4
+DECODER_KV_HEADS <- Config.dim @@'decoder_config.num_key_value_heads' default=DECODER_HEADS
+DECODER_FFN <- Config.dim @@'decoder_config.intermediate_size' default=64
+DECODER_EPS <- Config.float @@'decoder_config.rms_norm_eps' default=(Config.float @@'decoder_config.norm_eps' default=1e-5)
+DECODER_THETA <- Config.float @@'decoder_config.rope_parameters.rope_theta' default=(Config.float @@'decoder_config.rope_theta' default=10000.0)
+DECODER_HD = DECODER_DIM / DECODER_HEADS
+
+PATCHER_DIM <- Config.dim @@'patcher_config.hidden_size' default=32
+PATCHER_LAYERS <- Config.dim @@'patcher_config.num_hidden_layers' default=2
+PATCHER_HEADS <- Config.dim @@'patcher_config.num_attention_heads' default=4
+PATCHER_KV_HEADS <- Config.dim @@'patcher_config.num_key_value_heads' default=PATCHER_HEADS
+PATCHER_FFN <- Config.dim @@'patcher_config.intermediate_size' default=64
+PATCHER_EPS <- Config.float @@'patcher_config.rms_norm_eps' default=(Config.float @@'patcher_config.norm_eps' default=1e-5)
+PATCHER_THETA <- Config.float @@'patcher_config.rope_parameters.rope_theta' default=(Config.float @@'patcher_config.rope_theta' default=10000.0)
+PATCHER_HD = PATCHER_DIM / PATCHER_HEADS
+
+blt_hash_group :: TokenIds[B,S] -> Dim -> Int -> Int -> Tensor[B,S,LOCAL_DIM]
+blt_hash_group input_ids group_size prime bank = do
+  hash_ids <- Tensor.zeros_like input_ids
+  factor <- (Tensor.zeros_like input_ids) + 1
+  hash_ids, factor <- for offset <- [0..group_size) carry (hash_ids, factor) do
+    shift <- group_size - 1 - offset
+    padding <- Tensor.zeros input_ids shape=[B,shift] dtype="long"
+    prefix <- Tensor.slice input_ids dim=1 start=0 end=(S - shift)
+    shifted <- Tensor.concat padding prefix dim=1
+    hash_ids <- hash_ids + (shifted * factor)
+    factor <- factor * prime
+    yield hash_ids, factor
+  hash_ids <- ((hash_ids % HASH_VOCAB) :: Tensor[B,S]) + (bank * HASH_VOCAB)
+  return NN.embedding@@model.encoder_hash_tok_embedding hash_ids dim=LOCAL_DIM
+
+blt_hash_embeddings :: TokenIds[B,S] -> Tensor[B,S,LOCAL_DIM]
+blt_hash_embeddings input_ids = do
+  groups <- List.length HASH_GROUP_SIZES
+  banks <- HASH_FUNCTIONS * groups
+  embeddings <- Tensor.zeros input_ids shape=[B,S,LOCAL_DIM] dtype="float32"
+  embeddings <- for bank <- [0..banks) carry (embeddings) do
+    hash_index <- floor (bank / groups)
+    group_index <- ((bank % groups) :: Int)
+    prime <- List.index HASH_PRIMES hash_index
+    group_size <- List.index HASH_GROUP_SIZES group_index
+    hashed <- blt_hash_group input_ids group_size prime bank
+    yield embeddings + hashed
+  return embeddings
+
+blt_mlp :: Tensor[B,S,D] -> Dim -> Tensor[B,S,D]
+blt_mlp x ffn = do
+  gate <- NN.linear@gate_proj x dim=ffn bias=false |> silu
+  up <- NN.linear@up_proj x dim=ffn bias=false
+  return NN.linear@down_proj (mul gate up) dim=D bias=false
+
+blt_self_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Dim -> Dim -> Dim -> Float -> Tensor[B,S,D]
+blt_self_block x rope_sin rope_cos keep heads kv_heads ffn eps = do
+  residual <- x
+  xn <- NN.rmsnorm@input_layernorm x eps=eps cast_float=true
+  q <- NN.linear@self_attn.q_proj xn dim=D bias=false |> reshape_heads heads=heads
+  k <- NN.linear@self_attn.k_proj xn dim=(kv_heads * (D / heads)) bias=false |> reshape_heads heads=kv_heads
+  v <- NN.linear@self_attn.v_proj xn dim=(kv_heads * (D / heads)) bias=false |> reshape_heads heads=kv_heads
+  q, k <- rope_pair_base_factors q k rope_sin rope_cos interleaved=true
+  k <- Tensor.repeat k repeats=(heads / kv_heads)
+  v <- Tensor.repeat v repeats=(heads / kv_heads)
+  a <- attention q k v keep fp32_compute=true |> merge_heads
+  x <- residual + (NN.linear@self_attn.o_proj a dim=D bias=false)
+  residual <- x
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=eps cast_float=true
+  m <- scope@mlp do
+    return blt_mlp xn ffn
+  return residual + m
+
+blt_cross_attention :: Tensor[B,Q,D] -> Tensor[B,K,D] -> Tensor[B,1,Q,K] -> Dim -> Dim -> Float -> Tensor[B,Q,D]
+blt_cross_attention hidden cross keep heads kv_heads eps = do
+  qn <- NN.rmsnorm@q_norm hidden eps=eps cast_float=true
+  kn <- NN.rmsnorm@k_norm cross eps=eps cast_float=true
+  q <- NN.linear@q_proj qn dim=D bias=false |> reshape_heads heads=heads
+  k <- NN.linear@k_proj kn dim=(kv_heads * (D / heads)) bias=false |> reshape_heads heads=kv_heads
+  v <- NN.linear@v_proj kn dim=(kv_heads * (D / heads)) bias=false |> reshape_heads heads=kv_heads
+  k <- Tensor.repeat k repeats=(heads / kv_heads)
+  v <- Tensor.repeat v repeats=(heads / kv_heads)
+  a <- attention q k v keep zero_masked_after_softmax=false fp32_compute=true |> merge_heads
+  return hidden + (NN.linear@o_proj a dim=D bias=false)
+
+blt_entropy :: Tensor[B,S,V] -> Tensor[B,S]
+blt_entropy logits = do
+  probs <- Tensor.softmax logits dim=-1 dtype="float32"
+  terms <- probs * (log probs)
+  return 0.0 - (Tensor.sum terms dim=-1)
+
+blt_patch_ids :: TokenIds[B,S] -> Tensor[B,S] -> IdxTensor[B,S]
+blt_patch_ids input_ids entropies = do
+  ids <- input_ids - input_ids
+  current <- Tensor.slice ids dim=1 start=0 end=1
+  length <- Tensor.zeros_like current
+  current, length, ids <- for t <- [0..S) carry (current, length, ids) do
+    previous <- (t == 0) ? 0 : (t - 1)
+    entropy <- Tensor.slice entropies dim=1 start=previous end=(previous + 1)
+    second_boundary <- Tensor.eq current current
+    entropy_boundary <- entropy > PATCH_THRESHOLD
+    length_boundary <- HAS_MAX_PATCH_LENGTH and (length >= MAX_PATCH_LENGTH)
+    later_boundary <- Tensor.where entropy_boundary second_boundary length_boundary
+    boundary <- (t == 0)
+      ? (Tensor.eq current (current + 1))
+      : ((t == 1) ? second_boundary : later_boundary)
+    current <- current + (Tensor.cast boundary dtype="long")
+    length <- Tensor.where boundary ((Tensor.zeros_like length) + 1) (length + 1)
+    index <- Tensor.fill current t dtype="long"
+    ids <- Tensor.scatter ids index current dim=1
+    yield current, length, ids
+  return Tensor.cast ids dtype="long"
+
+blt_decoder_patch_ids :: IdxTensor[B,S] -> IdxTensor[B,S]
+blt_decoder_patch_ids patch_ids = do
+  shifted <- Tensor.slice patch_ids dim=1 start=1 end=S
+  last <- Tensor.slice patch_ids dim=1 start=(S - 1) end=S
+  return Tensor.concat (shifted - 1) (last - 1) dim=1
+
+blt_patch_reduce :: Tensor[B,S,D] -> IdxTensor[B,S] -> Tensor[B,S,D]
+blt_patch_reduce hidden patch_ids = do
+  base <- Tensor.zeros hidden shape=[B,S,D]
+  index <- Tensor.unsqueeze patch_ids dim=-1 |> Tensor.expand shape=[B,S,D]
+  return Tensor.scatter_reduce base index hidden dim=1 reduce="max" include_self=false
+
+blt_patch_cross_mask_encoder :: IdxTensor[B,S] -> Tensor[B,1,CROSS_K * S,S]
+blt_patch_cross_mask_encoder patch_ids = do
+  patch_slots <- Tensor.arange patch_ids 0 S |> Tensor.reshape shape=[1,S,1]
+  patch_slots <- Tensor.expand patch_slots shape=[B,S,CROSS_K] |> Tensor.reshape shape=[B,CROSS_K * S,1]
+  token_patches <- Tensor.reshape patch_ids shape=[B,1,S]
+  return Tensor.eq patch_slots token_patches |> Tensor.reshape shape=[B,1,CROSS_K * S,S]
+
+blt_patch_cross_mask_decoder :: IdxTensor[B,S] -> Tensor[B,1,S,CROSS_K * S]
+blt_patch_cross_mask_decoder patch_ids = do
+  token_patches <- Tensor.reshape patch_ids shape=[B,S,1]
+  patch_slots <- Tensor.arange patch_ids 0 S |> Tensor.reshape shape=[1,S,1]
+  patch_slots <- Tensor.expand patch_slots shape=[B,S,CROSS_K] |> Tensor.reshape shape=[B,1,CROSS_K * S]
+  return Tensor.eq token_patches patch_slots |> Tensor.reshape shape=[B,1,S,CROSS_K * S]
+
+blt_patcher :: TokenIds[B,S] -> Tensor[B,1,S,S] -> Tensor[B,S] -> Tensor[B,S]
+blt_patcher input_ids causal_keep pos_ids = do
+  logits <- scope@model.patcher do
+    x <- NN.embedding@embed_tokens input_ids dim=PATCHER_DIM
+    rope_sin, rope_cos <- rope_base_factors pos_ids PATCHER_HD PATCHER_THETA interleaved=true
+    x <- for@layers i <- [0..PATCHER_LAYERS) carry (x) do
+      x <- blt_self_block x rope_sin rope_cos causal_keep PATCHER_HEADS PATCHER_KV_HEADS PATCHER_FFN PATCHER_EPS
+      yield x
+    x <- NN.rmsnorm@norm x eps=PATCHER_EPS cast_float=true
+    logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+    return logits
+  return blt_entropy logits
+
+blt :: TokenIds[B,S] -> ?Mask[B,S,MAX_POSITIONS] -> Tensor[B,S,VOCAB_SIZE]
+blt input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- Tensor.arange input_ids 0 S |> Tensor.reshape shape=[1,S] |> Tensor.expand shape=[B,S]
+  causal_keep <- causal_mask_for_input input_ids S padding_mask=attn_mask window=MAX_POSITIONS
+  entropies <- blt_patcher input_ids causal_keep pos_ids
+  patch_ids <- blt_patch_ids input_ids entropies
+  decoder_patch_ids <- blt_decoder_patch_ids patch_ids
+  encoder_cross_keep <- blt_patch_cross_mask_encoder patch_ids
+  decoder_cross_keep <- blt_patch_cross_mask_decoder decoder_patch_ids
+
+  local_rope_sin, local_rope_cos <- rope_base_factors pos_ids LOCAL_HD LOCAL_THETA interleaved=true
+  encoder_hidden, patch_embeds <- scope@model.local_encoder do
+    tok <- NN.embedding@embed_tokens input_ids dim=LOCAL_DIM
+    hashed <- blt_hash_embeddings input_ids
+    x <- tok + hashed
+    x <- for@layers i <- [0..LOCAL_LAYERS) carry (x) do
+      x <- blt_self_block x local_rope_sin local_rope_cos causal_keep LOCAL_HEADS LOCAL_KV_HEADS LOCAL_FFN LOCAL_EPS
+      yield x
+    patch_embeds <- blt_patch_reduce x patch_ids
+    patch_embeds <- NN.linear@patch_embedding_projection patch_embeds dim=(LOCAL_DIM * CROSS_K) bias=false
+    patch_embeds <- Tensor.reshape patch_embeds shape=[B,CROSS_K * S,LOCAL_DIM]
+    cross <- scope@cross_attn_layers.0 do
+      return blt_cross_attention patch_embeds x encoder_cross_keep LOCAL_HEADS LOCAL_KV_HEADS LOCAL_EPS
+    return x, patch_embeds + cross
+
+  global_pos <- Tensor.arange input_ids 0 S |> Tensor.reshape shape=[1,S] |> Tensor.expand shape=[B,S]
+  global_keep <- causal_mask_for_input input_ids S window=S
+  global_rope_sin, global_rope_cos <- rope_base_factors global_pos GLOBAL_HD GLOBAL_THETA interleaved=true
+  global_hidden <- scope@model.global_transformer do
+    x <- Tensor.reshape patch_embeds shape=[B,S,LOCAL_DIM * CROSS_K]
+    x <- for@layers i <- [0..GLOBAL_LAYERS) carry (x) do
+      x <- blt_self_block x global_rope_sin global_rope_cos global_keep GLOBAL_HEADS GLOBAL_KV_HEADS GLOBAL_FFN GLOBAL_EPS
+      yield x
+    return x
+
+  decoder_rope_sin, decoder_rope_cos <- rope_base_factors pos_ids DECODER_HD DECODER_THETA interleaved=true
+  decoded <- scope@model.local_decoder do
+    patches <- NN.linear@patch_embedding_projection global_hidden dim=(DECODER_DIM * CROSS_K) bias=false
+    patches <- Tensor.reshape patches shape=[B,CROSS_K * S,DECODER_DIM]
+    x <- encoder_hidden
+    x <- for i <- [0..DECODER_LAYERS) carry (x) do
+      cross <- scope@'cross_attn_layers.{i}' do
+        return blt_cross_attention x patches decoder_cross_keep DECODER_HEADS DECODER_KV_HEADS DECODER_EPS
+      x <- x + cross
+      x <- scope@'layers.{i}' do
+        return blt_self_block x decoder_rope_sin decoder_rope_cos causal_keep DECODER_HEADS DECODER_KV_HEADS DECODER_FFN DECODER_EPS
+      yield x
+    return NN.rmsnorm@norm x eps=DECODER_EPS cast_float=true
+  return NN.linear@@lm_head decoded dim=VOCAB_SIZE bias=false

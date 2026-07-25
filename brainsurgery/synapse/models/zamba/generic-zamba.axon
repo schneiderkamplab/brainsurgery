@@ -1,0 +1,135 @@
+{-# CHECKPOINTS ["test/Zamba-Test", "Zyphra/Zamba-7B-v1"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (gelu, silu, softplus)
+import Attention (attention, merge_heads, reshape_heads)
+import Config
+import List
+import Masking (causal_mask_for_input, mask_for_input)
+import Math (exp, mul, sqrt)
+import NN
+import Params (param)
+import SSM (causal_conv1d)
+import Tensor
+
+MODEL_DIM <- Config.dim @@hidden_size default=3712
+ATTN_DIM <- Config.dim @@attention_hidden_size default=7424
+VOCAB_SIZE <- Config.dim @@vocab_size default=32000
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=76
+NUM_HEADS <- Config.dim @@num_attention_heads default=16
+HEAD_DIM <- Config.dim @@attention_head_dim default=464
+ATTN_SCALE = 1.0 / sqrt (HEAD_DIM / 2)
+FFN_DIM <- Config.dim @@intermediate_size default=14848
+HIDDEN_ACT <- Config.str @@hidden_act default="gelu"
+EPS <- Config.float @@rms_norm_eps default=1e-5
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=4096
+MAMBA_HEADS <- Config.dim @@n_mamba_heads default=2
+STATE_DIM <- Config.dim @@mamba_d_state default=16
+EXPAND <- Config.dim @@mamba_expand default=2
+DT_RANK <- Config.dim @@mamba_dt_rank default=232
+INNER = EXPAND * MODEL_DIM
+MAMBA_HEAD_DIM = INNER / MAMBA_HEADS
+PROJ_BIAS <- Config.bool @@mamba_proj_bias default=false
+LAYER_TYPES <- ((Config.list @@layers_block_type default=[]) :: List[String])
+
+zamba_mamba_scan :: Tensor[B,S,H,HD] -> Tensor[B,S,H,HD] -> Tensor[H,B,S,R] -> Tensor[H,B,S,N] -> Tensor[H,B,S,N] -> Tensor[H,HD,N] -> Tensor[H,HD] -> Tensor[B,S,H,HD]
+zamba_mamba_scan u gate dt b c a d = do
+  u0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B,H,HD]
+  b0 <- Tensor.slice b dim=2 start=0 end=1 |> Tensor.reshape shape=[H,B,N] |> Tensor.permute dims=[1,0,2]
+  state <- ((Tensor.unsqueeze u0 dim=-1) * (Tensor.unsqueeze b0 dim=2)) * 0.0
+  out <- Tensor.zeros_like u
+  state, out <- for t <- [0..S) carry (state, out) do
+    ut <- Tensor.slice u dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,H,HD]
+    gt <- Tensor.slice gate dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,H,HD]
+    dtt <- Tensor.slice dt dim=2 start=t end=(t + 1) |> Tensor.reshape shape=[H,B,HD] |> Tensor.permute dims=[1,0,2]
+    bt <- Tensor.slice b dim=2 start=t end=(t + 1) |> Tensor.reshape shape=[H,B,N] |> Tensor.permute dims=[1,0,2]
+    ct <- Tensor.slice c dim=2 start=t end=(t + 1) |> Tensor.reshape shape=[H,B,N] |> Tensor.permute dims=[1,0,2]
+    da <- exp ((Tensor.unsqueeze dtt dim=-1) * (Tensor.unsqueeze a dim=0))
+    dbu <- (Tensor.unsqueeze dtt dim=-1) * (Tensor.unsqueeze bt dim=2) * (Tensor.unsqueeze ut dim=-1)
+    state <- (state * da) + dbu
+    yt <- Tensor.sum (state * (Tensor.unsqueeze ct dim=2)) dim=-1 keepdim=false
+    yt <- (yt + (ut * (Tensor.unsqueeze d dim=0))) * (silu gt)
+    yt <- Tensor.reshape yt shape=[B,1,H,HD]
+    idx <- Tensor.fill yt t dtype="long"
+    out <- Tensor.scatter out idx yt dim=1
+    yield state, out
+  return out
+
+zamba_mamba :: Path -> Tensor[B,S,MODEL_DIM] -> ?Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+zamba_mamba@__scope x attn_mask = do
+  projected <- NN.linear@in_proj x dim=(2 * INNER) bias=PROJ_BIAS
+  projected <- Tensor.reshape projected shape=[B,S,INNER,2]
+  hidden, gate <- Tensor.chunk projected dim=-1 parts=2
+  hidden <- Tensor.reshape hidden shape=[B,S,INNER]
+  gate <- Tensor.reshape gate shape=[B,S,INNER] |> Tensor.reshape shape=[B,S,MAMBA_HEADS,MAMBA_HEAD_DIM]
+  hidden <- causal_conv1d@conv1d hidden attention_mask=attn_mask
+  hidden <- Tensor.reshape hidden shape=[B,S,MAMBA_HEADS,MAMBA_HEAD_DIM]
+  hidden_h <- Tensor.permute hidden dims=[2,0,1,3]
+  xw <- ((param @x_proj_weight) :: Tensor[MAMBA_HEADS,DT_RANK + 2 * STATE_DIM,MAMBA_HEAD_DIM])
+  xw <- Tensor.unsqueeze xw dim=1
+  hidden_h_t <- Tensor.permute hidden_h dims=[0,1,3,2]
+  params <- Tensor.matmul xw hidden_h_t |> Tensor.permute dims=[0,1,3,2]
+  dt, b, c <- Tensor.split params sizes=[DT_RANK,STATE_DIM,STATE_DIM]
+  dtw <- ((param @dt_proj_weight) :: Tensor[MAMBA_HEADS,MAMBA_HEAD_DIM,DT_RANK])
+  dtw <- Tensor.unsqueeze dtw dim=1
+  dt <- Tensor.permute dt dims=[0,1,3,2]
+  dt <- Tensor.matmul dtw dt |> Tensor.permute dims=[0,1,3,2]
+  dt_bias <- ((param @dt_proj_bias) :: Tensor[MAMBA_HEADS,MAMBA_HEAD_DIM])
+  dt <- softplus (dt + (Tensor.reshape dt_bias shape=[MAMBA_HEADS,1,1,MAMBA_HEAD_DIM]))
+  alog <- ((param @A_log) :: Tensor[MAMBA_HEADS,MAMBA_HEAD_DIM,STATE_DIM])
+  a <- 0.0 - (exp alog)
+  d <- ((param @D) :: Tensor[MAMBA_HEADS,MAMBA_HEAD_DIM])
+  y <- zamba_mamba_scan hidden gate dt b c a d
+  return Tensor.reshape y shape=[B,S,INNER] |> NN.linear@out_proj dim=MODEL_DIM bias=PROJ_BIAS
+
+zamba_attention :: Path -> Tensor[B,S,ATTN_DIM] -> Tensor[B,1,S,S] -> Tensor[B,S,MODEL_DIM]
+zamba_attention@__scope x mask = do
+  q <- NN.linear@q_proj x dim=(NUM_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@k_proj x dim=(NUM_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=NUM_HEADS
+  v <- NN.linear@v_proj x dim=(NUM_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=NUM_HEADS
+  return attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+
+zamba_mlp :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM]
+zamba_mlp@__scope x = do
+  gate <- NN.linear@gate_proj x dim=FFN_DIM bias=false
+  gate <- (HIDDEN_ACT == "silu") ? (silu gate) : (gelu gate)
+  up <- NN.linear@up_proj x dim=FFN_DIM bias=false
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+zamba_transformer :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM] -> Tensor[B,1,S,S] -> Tensor[B,S,MODEL_DIM]
+zamba_transformer@__scope x original mask = do
+  joined <- Tensor.concat x original dim=-1
+  joined <- NN.rmsnorm@input_layernorm joined eps=EPS cast_float=true
+  a <- zamba_attention@self_attn joined mask
+  a <- NN.rmsnorm@pre_ff_layernorm a eps=EPS cast_float=true
+  return zamba_mlp@feed_forward a
+
+zamba_layer :: Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM] -> Int -> Tensor[B,1,S,S] -> ?Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+zamba_layer x original i mask attn_mask = do
+  kind <- List.index LAYER_TYPES i
+  injected <- (kind == "hybrid")
+    ? do
+      transformed <- zamba_transformer@@model.layers.2.shared_transf x original mask
+      return NN.linear@linear transformed dim=MODEL_DIM bias=false
+    : ((Tensor.zeros_like x) :: Tensor[B,S,MODEL_DIM])
+  mixed <- x + injected
+  y <- (kind == "hybrid")
+    ? do
+      xn <- NN.rmsnorm@mamba_decoder.input_layernorm mixed eps=EPS cast_float=true
+      return zamba_mamba@mamba_decoder.mamba xn attn_mask
+    : do
+      xn <- NN.rmsnorm@input_layernorm mixed eps=EPS cast_float=true
+      return zamba_mamba@mamba xn attn_mask
+  return x + y
+
+zamba :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?Any)
+zamba input_ids attn_mask past_kv use_cache = do
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  mask <- causal_mask_for_input input_ids S padding_mask=attn_mask window=MAX_POSITIONS
+  x <- scope@model do
+    original <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- original
+    x <- for@layers i <- [0..NUM_LAYERS) carry (x) do
+      yield zamba_layer x original i mask attn_mask
+    return NN.rmsnorm@final_layernorm x eps=EPS cast_float=true
+  return NN.linear@@model.embed_tokens x dim=VOCAB_SIZE bias=false, null

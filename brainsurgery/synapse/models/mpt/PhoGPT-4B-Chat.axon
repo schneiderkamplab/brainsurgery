@@ -1,0 +1,91 @@
+{-# CHECKPOINTS "vinai/PhoGPT-4B-Chat" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "mpt" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (clamp, exp, log, sqrt)
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- (128 :: Dim)
+
+NUM_LAYERS <- (32 :: Dim)
+
+NUM_HEADS <- (24 :: Dim)
+
+HEAD_DIM <- MODEL_DIM / NUM_HEADS
+
+VOCAB_SIZE <- (20480 :: Dim)
+
+MAX_POSITIONS <- (8192 :: Dim)
+
+EPS <- 1e-05
+
+ALIBI_BIAS_MAX <- 8.0
+
+SOFTMAX_SCALE <- Config.float @@attn_config.softmax_scale default=(1.0 / (sqrt HEAD_DIM))
+
+HAS_CLIP_QKV <- false
+
+CLIP_QKV <- Config.float @@attn_config.clip_qkv default=0.0
+
+mpt_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[NUM_HEADS,1,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+mpt_block x mask alibi past_kv = do
+  xn <- NN.layernorm@norm_1 x eps=EPS bias=false
+  a, new_kv <- scope@attn do
+    qkv <- NN.linear@Wqkv xn dim=(3 * MODEL_DIM) bias=false
+    qkv <- HAS_CLIP_QKV ? (clamp qkv min=(0.0 - CLIP_QKV) max=CLIP_QKV) : qkv
+    q_lin, k_lin, v_lin <- Tensor.chunk qkv parts=3 dim=-1
+    q <- reshape_heads q_lin heads=NUM_HEADS
+    k <- reshape_heads k_lin heads=NUM_HEADS
+    v <- reshape_heads v_lin heads=NUM_HEADS
+    k, v, new_kv <- Cache.update past_kv k v
+    a <- attention q k v mask rel_bias=alibi scale=SOFTMAX_SCALE fp32_compute=true
+    return merge_heads a |> NN.linear@out_proj dim=MODEL_DIM bias=false, new_kv
+  x <- x + a
+  xn <- NN.layernorm@norm_2 x eps=EPS bias=false
+  m <- NN.linear@ffn.up_proj xn dim=(4 * MODEL_DIM) bias=false |> gelu |> NN.linear@ffn.down_proj dim=MODEL_DIM bias=false
+  return x + m, new_kv
+
+mpt :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+mpt input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  positions <- Tensor.arange input_ids start=(1 - key_len) end=1 |> Tensor.cast dtype="float32"
+  positions <- Tensor.reshape positions shape=[1, 1, key_len]
+  head_ids <- Tensor.arange input_ids start=1 end=(NUM_HEADS + 1) |> Tensor.cast dtype="float32"
+  base <- head_ids * (ALIBI_BIAS_MAX / NUM_HEADS)
+  slopes <- 1.0 / (exp ((log 2.0) * base))
+  slopes <- Tensor.reshape slopes shape=[NUM_HEADS, 1, 1]
+  alibi <- slopes * positions
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@transformer do
+    x <- NN.embedding@wte input_ids dim=MODEL_DIM
+    x, work_kv <- for@blocks i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- mpt_block x mask alibi past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- NN.layernorm@norm_f x eps=EPS bias=false
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- scope@transformer do
+    return NN.linear@wte x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

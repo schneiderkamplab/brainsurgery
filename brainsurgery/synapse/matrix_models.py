@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from urllib.parse import unquote, urlparse
 
 import torch
 
@@ -26,6 +27,7 @@ _ESSENTIAL_TEXT_FILES = {
     "tokenizer.model",
     "spm.model",
     "special_tokens_map.json",
+    "vocab.txt",
     "vocab.json",
     "merges.txt",
 }
@@ -35,6 +37,15 @@ _DEFAULT_BACKOFF_INITIAL_S = 2.0
 _DEFAULT_BACKOFF_MAX_S = 60.0
 _HF_SIBLINGS_CACHE: dict[str, list["HFSibling"]] = {}
 _HF_CONTENT_LENGTH_CACHE: dict[tuple[str, str], int | None] = {}
+
+
+def _is_tokenizer_asset_name(name: str) -> bool:
+    basename = Path(name).name
+    return (
+        basename in _ESSENTIAL_TEXT_FILES
+        or basename.endswith((".model", ".spm", ".tiktoken", ".tokenizer"))
+        or basename.startswith("tokenization_") and basename.endswith(".py")
+    )
 
 
 @dataclass(frozen=True)
@@ -335,6 +346,37 @@ def _run_curl(
         raise RuntimeError(f"curl failed for {url}\nstdout:\n{run.stdout}\nstderr:\n{run.stderr}")
 
 
+def _run_hf_hub_download(*, url: str, out_path: Path) -> bool:
+    parsed = urlparse(url)
+    if parsed.netloc != "huggingface.co" or "/resolve/" not in parsed.path:
+        return False
+    repo_path, resolved_path = parsed.path.lstrip("/").split("/resolve/", 1)
+    if "/" not in repo_path or "/" not in resolved_path:
+        return False
+    revision, filename = resolved_path.split("/", 1)
+    filename = unquote(filename)
+    local_dir = out_path
+    for _ in Path(filename).parts:
+        local_dir = local_dir.parent
+    try:
+        from huggingface_hub import hf_hub_download
+
+        downloaded = Path(
+            hf_hub_download(
+                repo_id=repo_path,
+                filename=filename,
+                revision=revision,
+                local_dir=local_dir,
+            )
+        )
+    except Exception:
+        return False
+    if downloaded.resolve() != out_path.resolve():
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(downloaded, out_path)
+    return True
+
+
 def _head_content_length(*, url: str, headers: list[str] | None = None, cwd: Path) -> int | None:
     cmd = ["curl", "-fsIL"]
     if headers:
@@ -344,20 +386,30 @@ def _head_content_length(*, url: str, headers: list[str] | None = None, cwd: Pat
     run = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
     if run.returncode != 0:
         return None
-    content_length: int | None = None
+    linked_sizes: list[int] = []
+    final_content_length: int | None = None
     for raw_line in run.stdout.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        if line.lower().startswith("content-length:"):
-            value = line.split(":", 1)[1].strip()
-            try:
-                parsed = int(value)
-            except ValueError:
-                continue
-            if parsed >= 0:
-                content_length = parsed
-    return content_length
+        lower = line.lower()
+        if not lower.startswith(("content-length:", "x-linked-size:")):
+            continue
+        value = line.split(":", 1)[1].strip()
+        try:
+            parsed = int(value)
+        except ValueError:
+            continue
+        if parsed < 0:
+            continue
+        if lower.startswith("x-linked-size:"):
+            linked_sizes.append(parsed)
+        else:
+            # curl -L emits one header block per response. The last
+            # Content-Length therefore describes the resolved response rather
+            # than an earlier redirect body.
+            final_content_length = parsed
+    return max(linked_sizes) if linked_sizes else final_content_length
 
 
 def _download_with_retry(
@@ -395,6 +447,9 @@ def _download_with_retry(
     while True:
         attempt += 1
         try:
+            if _run_hf_hub_download(url=url, out_path=out_path) and _is_valid_target(out_path):
+                partial_path.unlink(missing_ok=True)
+                return
             _run_curl(
                 url=url,
                 out_path=partial_path,
@@ -479,6 +534,13 @@ def _is_valid_pytorch_checkpoint_file(path: Path) -> bool:
         return False
 
 
+def _is_pytorch_weight_filename(name: str) -> bool:
+    basename = Path(name).name
+    return basename == "model.bin" or (
+        basename.startswith("pytorch_model") and basename.endswith(".bin")
+    )
+
+
 def _auth_headers() -> list[str]:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if not token:
@@ -540,7 +602,7 @@ def estimate_remote_param_count_lower_bound(
         shard_entries = [
             entry
             for entry in sibling_entries
-            if "/" not in entry.rfilename and entry.rfilename.endswith(".bin")
+            if "/" not in entry.rfilename and _is_pytorch_weight_filename(entry.rfilename)
         ]
         if not shard_entries:
             return None
@@ -613,10 +675,13 @@ def _is_complete_model_dir(model_dir: Path, *, require_tokenizer: bool) -> bool:
         return False
     if require_tokenizer:
         has_tokenizer = (
-            (model_dir / "tokenizer_config.json").exists()
-            or (model_dir / "tokenizer.json").exists()
+            (model_dir / "tokenizer.json").exists()
             or (model_dir / "tokenizer.model").exists()
             or (model_dir / "spm.model").exists()
+            or (model_dir / "vocab.txt").exists()
+            or any(model_dir.glob("*.model"))
+            or any(model_dir.glob("*.spm"))
+            or any(model_dir.glob("*.tokenizer"))
             or ((model_dir / "vocab.json").exists() and (model_dir / "merges.txt").exists())
             or any(model_dir.glob("*.tiktoken"))
             or any(model_dir.glob("tokenization*.py"))
@@ -683,7 +748,7 @@ def _normalize_local_weight_format(model_dir: Path) -> None:
     pt_files = (
         sorted(model_dir.glob("*.pt"))
         + sorted(model_dir.glob("*.pth"))
-        + sorted(model_dir.glob("*.bin"))
+        + sorted(path for path in model_dir.glob("*.bin") if _is_pytorch_weight_filename(path.name))
     )
     if safetensor_files and pt_files:
         for stale in pt_files:
@@ -775,7 +840,9 @@ def ensure_model_downloaded(
                 name for name in siblings if "/" not in name and name.endswith(".safetensors")
             )
             pytorch_bin_files = sorted(
-                name for name in siblings if "/" not in name and name.endswith(".bin")
+                name
+                for name in siblings
+                if "/" not in name and _is_pytorch_weight_filename(name)
             )
             index_files = [name for name in siblings if name == "model.safetensors.index.json"]
             pytorch_index_files = [
@@ -801,8 +868,7 @@ def ensure_model_downloaded(
                 name
                 for name in siblings
                 if (
-                    Path(name).name in _ESSENTIAL_TEXT_FILES
-                    or Path(name).name.endswith(".tiktoken")
+                    _is_tokenizer_asset_name(name)
                     or (
                         Path(name).name.endswith(".py")
                         and Path(name).name.startswith(
@@ -836,8 +902,8 @@ def ensure_model_downloaded(
                 _status(status_cb, f"{spec.local_dir}: download complete")
                 return model_dir
 
-            text_files = [name for name in pending_files if name in _ESSENTIAL_TEXT_FILES]
-            weight_files = [name for name in pending_files if name not in _ESSENTIAL_TEXT_FILES]
+            text_files = [name for name in pending_files if _is_tokenizer_asset_name(name)]
+            weight_files = [name for name in pending_files if not _is_tokenizer_asset_name(name)]
 
             max_retries = int(os.environ.get("MODEL_DOWNLOAD_MAX_RETRIES", _DEFAULT_MAX_RETRIES))
             backoff_initial_s = float(

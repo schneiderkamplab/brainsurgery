@@ -1,0 +1,158 @@
+{-# CHECKPOINTS ["test/Qwen3.5-Test", "test/Qwen3.5-MoE-Test", "Qwen/Qwen3.5-0.8B", "Qwen/Qwen3.5-2B", "Qwen/Qwen3.5-4B", "Qwen/Qwen3.5-9B", "Qwen/Qwen3.5-27B", "Qwen/Qwen3.5-35B-A3B", "Qwen/Qwen3.5-122B-A10B", "Qwen/Qwen3.6-27B", "Qwen/Qwen3.6-35B-A3B"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (sigmoid, silu, softplus)
+import Attention (attention, merge_heads, reshape_heads)
+import Config
+import List
+import Masking (causal_mask_for_input, mask_for_input)
+import Math (exp, mul, pow, sqrt)
+import MoE (grouped_swiglu_ffn_separate)
+import NN
+import Params (has_root, param)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import SSM (causal_conv1d_full)
+import Tensor
+
+CFG <- (Config.has_key @@text_config) ? "text_config." : ""
+HAS_LANGUAGE_MODEL <- has_root "model.language_model"
+
+MODEL_DIM <- Config.dim @@'{CFG}hidden_size' default=4096
+VOCAB_SIZE <- Config.dim @@'{CFG}vocab_size' default=248320
+NUM_LAYERS <- Config.dim @@'{CFG}num_hidden_layers' default=32
+NUM_HEADS <- Config.dim @@'{CFG}num_attention_heads' default=16
+NUM_KV_HEADS <- Config.dim @@'{CFG}num_key_value_heads' default=4
+HEAD_DIM <- Config.dim @@'{CFG}head_dim' default=256
+LINEAR_KEY_HEADS <- Config.dim @@'{CFG}linear_num_key_heads' default=16
+LINEAR_VALUE_HEADS <- Config.dim @@'{CFG}linear_num_value_heads' default=32
+LINEAR_KEY_DIM <- Config.dim @@'{CFG}linear_key_head_dim' default=128
+LINEAR_VALUE_DIM <- Config.dim @@'{CFG}linear_value_head_dim' default=128
+CONV_DIM = (2 * LINEAR_KEY_HEADS * LINEAR_KEY_DIM) + (LINEAR_VALUE_HEADS * LINEAR_VALUE_DIM)
+LINEAR_OUTPUT_DIM = LINEAR_VALUE_HEADS * LINEAR_VALUE_DIM
+CONV_KERNEL <- Config.dim @@'{CFG}linear_conv_kernel_dim' default=4
+FFN_DIM <- Config.dim @@'{CFG}intermediate_size' default=12288
+NUM_EXPERTS <- Config.dim @@'{CFG}num_experts' default=0
+TOPK <- Config.dim @@'{CFG}num_experts_per_tok' default=1
+EXPERT_DIM <- Config.dim @@'{CFG}moe_intermediate_size' default=512
+SHARED_EXPERT_DIM <- Config.dim @@'{CFG}shared_expert_intermediate_size' default=512
+EPS <- Config.float @@'{CFG}rms_norm_eps' default=1e-6
+MAX_POSITIONS <- Config.dim @@'{CFG}max_position_embeddings' default=32768
+THETA <- Config.float @@'{CFG}rope_parameters.rope_theta' default=10000.0
+TIE <- Config.bool @@'{CFG}tie_word_embeddings' default=false
+ROTARY = HEAD_DIM / 4
+TYPES <- ((Config.list @@'{CFG}layer_types' default=["linear_attention", "full_attention"]) :: List[String])
+
+qwen35_delta :: Tensor[B,S,VH,KD] -> Tensor[B,S,VH,KD] -> Tensor[B,S,VH,VD] -> Tensor[B,S,VH] -> Tensor[B,S,VH] -> Tensor[B,S,VH,VD]
+qwen35_delta q k v g beta = do
+  v_ref <- v
+  q <- q / (pow ((Tensor.sum (q * q) dim=-1 keepdim=true) + 1e-6) 0.5)
+  k <- k / (pow ((Tensor.sum (k * k) dim=-1 keepdim=true) + 1e-6) 0.5)
+  q <- (Tensor.cast q dtype="float32") * (1.0 / sqrt KD)
+  k <- Tensor.cast k dtype="float32"
+  v <- Tensor.cast v dtype="float32"
+  state <- Tensor.zeros v shape=[B,VH,KD,VD] dtype="float32"
+  out <- Tensor.zeros_like v
+  state, out <- for t <- [0..S) carry (state, out) do
+    qt <- Tensor.slice q dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,VH,KD]
+    kt <- Tensor.slice k dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,VH,KD]
+    vt <- Tensor.slice v dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,VH,VD]
+    gt <- Tensor.slice g dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,VH] |> exp |> Tensor.unsqueeze dim=-1 |> Tensor.unsqueeze dim=-1
+    bt <- Tensor.slice beta dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,VH] |> Tensor.unsqueeze dim=-1
+    state <- state * gt
+    memory <- Tensor.sum (state * (Tensor.unsqueeze kt dim=-1)) dim=-2 keepdim=false
+    delta <- (vt - memory) * bt
+    state <- state + ((Tensor.unsqueeze kt dim=-1) * (Tensor.unsqueeze delta dim=-2))
+    yt <- Tensor.sum (state * (Tensor.unsqueeze qt dim=-1)) dim=-2 keepdim=false |> Tensor.reshape shape=[B,1,VH,VD]
+    idx <- Tensor.fill yt t dtype="long"
+    out <- Tensor.scatter out idx yt dim=1
+    yield state, out
+  return Tensor.cast_like out v_ref
+
+qwen35_linear :: Path -> Tensor[B,S,MODEL_DIM] -> ?Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+qwen35_linear@__scope x attn_mask = do
+  x <- (attn_mask == null) ? x : (x * (Tensor.unsqueeze attn_mask dim=-1))
+  qkv <- NN.linear@in_proj_qkv x dim=CONV_DIM bias=false
+  w <- ((param @conv1d.weight) :: Tensor[CONV_DIM,1,CONV_KERNEL])
+  zero <- ((Tensor.zeros qkv shape=[CONV_DIM]) :: Tensor[CONV_DIM])
+  qkv <- causal_conv1d_full qkv w zero "silu"
+  qf, kf, vf <- Tensor.split qkv sizes=[LINEAR_KEY_HEADS * LINEAR_KEY_DIM,LINEAR_KEY_HEADS * LINEAR_KEY_DIM,LINEAR_VALUE_HEADS * LINEAR_VALUE_DIM]
+  q <- Tensor.reshape qf shape=[B,S,LINEAR_KEY_HEADS,LINEAR_KEY_DIM] |> Tensor.permute dims=[0,2,1,3] |> Tensor.repeat repeats=(LINEAR_VALUE_HEADS / LINEAR_KEY_HEADS) |> Tensor.permute dims=[0,2,1,3]
+  k <- Tensor.reshape kf shape=[B,S,LINEAR_KEY_HEADS,LINEAR_KEY_DIM] |> Tensor.permute dims=[0,2,1,3] |> Tensor.repeat repeats=(LINEAR_VALUE_HEADS / LINEAR_KEY_HEADS) |> Tensor.permute dims=[0,2,1,3]
+  v <- Tensor.reshape vf shape=[B,S,LINEAR_VALUE_HEADS,LINEAR_VALUE_DIM]
+  z <- NN.linear@in_proj_z x dim=LINEAR_OUTPUT_DIM bias=false |> Tensor.reshape shape=[B,S,LINEAR_VALUE_HEADS,LINEAR_VALUE_DIM]
+  beta <- NN.linear@in_proj_b x dim=LINEAR_VALUE_HEADS bias=false |> sigmoid
+  a <- NN.linear@in_proj_a x dim=LINEAR_VALUE_HEADS bias=false
+  alog <- ((param @A_log) :: Tensor[LINEAR_VALUE_HEADS])
+  dt <- ((param @dt_bias) :: Tensor[LINEAR_VALUE_HEADS])
+  g <- (0.0 - (exp alog)) * (softplus (a + dt))
+  y <- qwen35_delta q k v g beta
+  y <- NN.rmsnorm_noscale y eps=EPS dim=LINEAR_VALUE_DIM cast_float=true
+  nw <- ((param @norm.weight) :: Tensor[LINEAR_VALUE_DIM])
+  return ((y * nw) * (silu z)) |> Tensor.reshape shape=[B,S,LINEAR_OUTPUT_DIM] |> NN.linear@out_proj dim=MODEL_DIM bias=false
+
+qwen35_attn :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,1,S,ROTARY] -> Tensor[B,1,S,ROTARY] -> Tensor[B,1,S,S] -> Tensor[B,S,MODEL_DIM]
+qwen35_attn@__scope x rs rc mask = do
+  qg <- NN.linear@q_proj x dim=(2 * NUM_HEADS * HEAD_DIM) bias=false |> Tensor.reshape shape=[B,S,NUM_HEADS,2 * HEAD_DIM]
+  q, gate <- Tensor.chunk qg parts=2
+  q <- NN.rmsnorm@q_norm q eps=EPS dim=HEAD_DIM cast_float=true unit_offset=true |> Tensor.permute dims=[0,2,1,3]
+  k <- NN.linear@k_proj x dim=(NUM_KV_HEADS * HEAD_DIM) bias=false |> Tensor.reshape shape=[B,S,NUM_KV_HEADS,HEAD_DIM] |> NN.rmsnorm@k_norm eps=EPS dim=HEAD_DIM cast_float=true unit_offset=true |> Tensor.permute dims=[0,2,1,3]
+  v <- NN.linear@v_proj x dim=(NUM_KV_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=NUM_KV_HEADS
+  qr, qp <- Tensor.split q sizes=[ROTARY,HEAD_DIM - ROTARY]
+  kr, kp <- Tensor.split k sizes=[ROTARY,HEAD_DIM - ROTARY]
+  qr, kr <- rope_pair_base_factors qr kr rs rc
+  q <- Tensor.concat qr qp dim=-1
+  k <- Tensor.concat kr kp dim=-1 |> Tensor.repeat repeats=(NUM_HEADS / NUM_KV_HEADS)
+  v <- Tensor.repeat v repeats=(NUM_HEADS / NUM_KV_HEADS)
+  y <- attention q k v mask |> merge_heads
+  return (y * (Tensor.reshape gate shape=[B,S,NUM_HEADS * HEAD_DIM] |> sigmoid)) |> NN.linear@o_proj dim=MODEL_DIM bias=false
+
+qwen35_mlp :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM]
+qwen35_mlp@__scope x = do
+  gate <- NN.linear@gate_proj x dim=FFN_DIM bias=false |> silu
+  up <- NN.linear@up_proj x dim=FFN_DIM bias=false
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+qwen35_moe :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM]
+qwen35_moe@__scope x = do
+  logits <- NN.linear@gate x dim=NUM_EXPERTS bias=false
+  probs <- Tensor.softmax logits dim=-1 dtype="float32"
+  scores, indices <- Tensor.topk probs k=TOPK dim=-1 largest=true sorted=false
+  scores <- scores / ((Tensor.sum scores dim=-1 keepdim=true) + 1e-20) |> Tensor.cast_like x
+  routed <- grouped_swiglu_ffn_separate x scores indices NUM_EXPERTS EXPERT_DIM gate_weight=@experts.gate_proj.weight up_weight=@experts.up_proj.weight out_weight=@experts.down_proj.weight
+  sg <- NN.linear@shared_expert.gate_proj x dim=SHARED_EXPERT_DIM bias=false |> silu
+  su <- NN.linear@shared_expert.up_proj x dim=SHARED_EXPERT_DIM bias=false
+  shared <- sg |> mul su |> NN.linear@shared_expert.down_proj dim=MODEL_DIM bias=false
+  return routed + (shared * (NN.linear@shared_expert_gate x dim=1 bias=false |> sigmoid))
+
+qwen35_layer :: Tensor[B,S,MODEL_DIM] -> Int -> Tensor[B,1,S,ROTARY] -> Tensor[B,1,S,ROTARY] -> Tensor[B,1,S,S] -> ?Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+qwen35_layer x i rs rc mask attn_mask = do
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true unit_offset=true
+  kind <- List.index TYPES i
+  a <- (kind == "linear_attention") ? qwen35_linear@linear_attn xn attn_mask : qwen35_attn@self_attn xn rs rc mask
+  x <- x + a
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true unit_offset=true
+  m <- (NUM_EXPERTS == 0) ? qwen35_mlp@mlp xn : qwen35_moe@mlp xn
+  return x + m
+
+qwen35_model :: Path -> TokenIds[B,S] -> Tensor[B,S] -> Tensor[B,1,S,ROTARY] -> Tensor[B,1,S,ROTARY] -> Tensor[B,1,S,S] -> Tensor[B,S,MODEL_DIM]
+qwen35_model@root input_ids attn_mask rs rc mask = do
+  x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+  x <- for@layers i <- [0..NUM_LAYERS) carry (x) do
+    yield qwen35_layer x i rs rc mask attn_mask
+  return NN.rmsnorm@norm x eps=EPS cast_float=true unit_offset=true
+
+qwen3_5 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?Any)
+qwen3_5 input_ids attn_mask past_kv use_cache = do
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos <- position_ids input_ids attn_mask=attn_mask past_length=0
+  rs, rc <- rope_base_factors pos ROTARY THETA
+  mask <- causal_mask_for_input input_ids S padding_mask=attn_mask window=MAX_POSITIONS
+  x <- HAS_LANGUAGE_MODEL
+    ? (qwen35_model@model.language_model input_ids attn_mask rs rc mask)
+    : (qwen35_model@model input_ids attn_mask rs rc mask)
+  logits <- TIE
+    ? (HAS_LANGUAGE_MODEL
+      ? (NN.linear@model.language_model.embed_tokens x dim=VOCAB_SIZE bias=false)
+      : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false))
+    : (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false)
+  return logits, null

@@ -20,17 +20,13 @@ import Config
 
 import NN
 
-MODEL_DIM <- do
-  return (4096)
+MODEL_DIM <- (4096 :: Dim)
 
-VOCAB_SIZE <- do
-  return (50400)
+VOCAB_SIZE <- (50400 :: Dim)
 
-NUM_LAYERS <- do
-  return (28)
+NUM_LAYERS <- (28 :: Dim)
 
-NUM_HEADS <- do
-  return (16)
+NUM_HEADS <- (16 :: Dim)
 
 MODEL_HEAD_DIM <- do
   return MODEL_DIM / NUM_HEADS
@@ -38,17 +34,13 @@ MODEL_HEAD_DIM <- do
 FFN <- do
   return 4 * MODEL_DIM
 
-EPS <- do
-  return (1e-05)
+EPS <- (1e-05)
 
-MAX_POSITIONS <- do
-  return (2048)
+MAX_POSITIONS <- (2048 :: Dim)
 
-ROTARY_DIM <- do
-  return (64)
+ROTARY_DIM <- (64 :: Dim)
 
-THETA <- do
-  return (10000.0)
+THETA <- (10000.0)
 
 HAS_LM_HEAD <- do
   return has_root "lm_head"

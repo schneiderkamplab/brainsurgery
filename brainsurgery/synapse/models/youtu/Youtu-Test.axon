@@ -1,0 +1,104 @@
+{-# CHECKPOINTS "test/Youtu-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "youtu" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Config
+
+import Masking (causal_mask_for_input, mask_for_input)
+
+import Math (mul, sqrt)
+
+import NN
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Tensor
+
+MODEL_DIM <- (128 :: Dim)
+
+VOCAB_SIZE <- (128256 :: Dim)
+
+NUM_LAYERS <- (4 :: Dim)
+
+NUM_HEADS <- (4 :: Dim)
+
+FFN <- (256 :: Dim)
+
+Q_RANK <- (32 :: Dim)
+
+KV_RANK <- (32 :: Dim)
+
+QK_ROPE <- (8 :: Dim)
+
+QK_NOPE <- (24 :: Dim)
+
+V_HEAD <- (32 :: Dim)
+
+MAX_POSITIONS <- (1024 :: Dim)
+
+EPS <- 1e-06
+
+THETA <- 1600000.0
+
+ROPE_INTERLEAVED <- true
+
+ATTN_BIAS <- false
+
+TIE <- true
+
+QK_HEAD = QK_NOPE + QK_ROPE
+
+ATTN_SCALE = 1.0 / sqrt QK_HEAD
+
+youtu_attention :: Tensor[B,S,D] -> Tensor[B,1,S,QK_ROPE] -> Tensor[B,1,S,QK_ROPE] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+youtu_attention x rope_sin rope_cos mask = do
+  q_latent <- NN.linear@q_a_proj x dim=Q_RANK bias=ATTN_BIAS
+  q_latent <- NN.rmsnorm@q_a_layernorm q_latent eps=EPS cast_float=true
+  q <- NN.linear@q_b_proj q_latent dim=(NUM_HEADS * QK_HEAD) bias=false |> reshape_heads heads=NUM_HEADS
+  q_nope, q_rope <- Tensor.split q sizes=[QK_NOPE, QK_ROPE]
+  compressed <- NN.linear@kv_a_proj_with_mqa x dim=(KV_RANK + QK_ROPE) bias=ATTN_BIAS
+  kv_latent, k_rope_base <- Tensor.split compressed sizes=[KV_RANK, QK_ROPE]
+  kv_latent <- NN.rmsnorm@kv_a_layernorm kv_latent eps=EPS cast_float=true
+  kv <- NN.linear@kv_b_proj kv_latent dim=(NUM_HEADS * (QK_NOPE + V_HEAD)) bias=false |> reshape_heads heads=NUM_HEADS
+  k_nope, v <- Tensor.split kv sizes=[QK_NOPE, V_HEAD]
+  k_rope <- reshape_heads k_rope_base heads=1 |> Tensor.repeat repeats=NUM_HEADS
+  q_rope, k_rope <- rope_pair_base_factors q_rope k_rope rope_sin rope_cos interleaved=ROPE_INTERLEAVED
+  q <- Tensor.concat q_nope q_rope dim=-1
+  k <- Tensor.concat k_nope k_rope dim=-1
+  return attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=ATTN_BIAS
+
+youtu_mlp :: Tensor[B,S,D] -> Tensor[B,S,D]
+youtu_mlp x = do
+  gate <- NN.linear@gate_proj x dim=FFN bias=false |> silu
+  up <- NN.linear@up_proj x dim=FFN bias=false
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+
+youtu_block :: Tensor[B,S,D] -> Tensor[B,1,S,QK_ROPE] -> Tensor[B,1,S,QK_ROPE] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+youtu_block x rope_sin rope_cos mask = do
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  a <- scope@self_attn do
+    return youtu_attention xn rope_sin rope_cos mask
+  x <- x + a
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true
+  m <- scope@mlp do
+    return youtu_mlp xn
+  return x + m
+
+youtu :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,V], ?Any)
+youtu input_ids attn_mask past_kv use_cache = do
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=0
+  rope_sin, rope_cos <- rope_base_factors pos_ids QK_ROPE THETA interleaved=ROPE_INTERLEAVED
+  mask <- causal_mask_for_input input_ids S padding_mask=attn_mask window=MAX_POSITIONS
+  x <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- for@layers i <- [0..NUM_LAYERS) carry (x) youtu_block x rope_sin rope_cos mask
+    return NN.rmsnorm@norm x eps=EPS cast_float=true
+  logits <- TIE ? (NN.linear@@model.embed_tokens x dim=VOCAB_SIZE bias=false) : (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false)
+  return logits, null

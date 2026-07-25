@@ -22,38 +22,28 @@ import NN
 
 import Tensor
 
-MODEL_DIM <- do
-  return ((4096 :: Dim) :: Dim)
+MODEL_DIM <- ((4096 :: Dim) :: Dim)
 
-VOCAB_SIZE <- do
-  return ((32000 :: Dim) :: Dim)
+VOCAB_SIZE <- ((32000 :: Dim) :: Dim)
 
-NUM_LAYERS <- do
-  return ((32 :: Dim) :: Dim)
+NUM_LAYERS <- ((32 :: Dim) :: Dim)
 
-NUM_HEADS <- do
-  return ((32 :: Dim) :: Dim)
+NUM_HEADS <- ((32 :: Dim) :: Dim)
 
-KVH <- do
-  return ((32 :: Dim) :: Dim)
+KVH <- ((32 :: Dim) :: Dim)
 
-MODEL_HEAD_DIM <- do
-  return (false ? (128 :: Dim) : ((MODEL_DIM / NUM_HEADS) :: Dim))
+MODEL_HEAD_DIM <- (false ? (128 :: Dim) : ((MODEL_DIM / NUM_HEADS) :: Dim))
 
 KVD <- do
   return ((KVH * MODEL_HEAD_DIM) :: Dim)
 
-FFN <- do
-  return ((11008 :: Dim) :: Dim)
+FFN <- ((11008 :: Dim) :: Dim)
 
-EPS <- do
-  return (1e-05)
+EPS <- (1e-05)
 
-THETA <- do
-  return (10000.0)
+THETA <- (10000.0)
 
-MAX_POSITIONS <- do
-  return ((4096 :: Dim) :: Dim)
+MAX_POSITIONS <- ((4096 :: Dim) :: Dim)
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS

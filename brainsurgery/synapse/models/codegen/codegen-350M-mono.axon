@@ -1,0 +1,87 @@
+{-# CHECKPOINTS "Salesforce/codegen-350M-mono" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "codegen" #-}
+
+import Activations (gelu_new)
+
+import Attention (attention, merge_heads)
+
+import Cache
+
+import Config
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import NN
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_prefix_factors)
+
+import Tensor
+
+MODEL_DIM <- (1024 :: Dim)
+
+VOCAB_SIZE <- (51200 :: Dim)
+
+NUM_LAYERS <- (20 :: Dim)
+
+NUM_HEADS <- (16 :: Dim)
+
+FFN <- Config.dim @@n_inner default=(4 * MODEL_DIM)
+
+EPS <- 1e-05
+
+MAX_POSITIONS <- (2048 :: Dim)
+
+ROTARY_DIM <- (32 :: Dim)
+
+THETA <- 10000.0
+
+HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+MP_GROUPS = 4
+
+codegen_heads :: Tensor[B,S,MP_GROUPS,3 * MODEL_DIM / MP_GROUPS / 3] -> Tensor[B,NUM_HEADS,S,MODEL_DIM / NUM_HEADS]
+codegen_heads x = do
+  x <- Tensor.reshape x shape=[B, S, NUM_HEADS, HEAD_DIM]
+  return Tensor.permute x dims=[0, 2, 1, 3]
+
+codegen_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+codegen_block x rope_sin rope_cos mask past_kv = do
+  xn <- NN.layernorm@ln_1 x eps=EPS
+  a, new_kv <- scope@attn do
+    qkv <- NN.linear@qkv_proj xn dim=(3 * MODEL_DIM) bias=false
+    qkv <- Tensor.reshape qkv shape=[B, S, MP_GROUPS, (3 * MODEL_DIM) / MP_GROUPS]
+    q_raw, v_raw, k_raw <- Tensor.chunk qkv dim=-1 parts=3
+    q <- codegen_heads q_raw
+    k <- codegen_heads k_raw
+    v <- codegen_heads v_raw
+    q, k <- rope_pair_base_prefix_factors q k rope_sin rope_cos ROTARY_DIM interleaved=true
+    k, v, new_kv <- Cache.update past_kv k v
+    a <- attention q k v mask |> merge_heads |> NN.linear@out_proj dim=MODEL_DIM bias=false
+    return a, new_kv
+  m <- NN.linear@mlp.fc_in xn dim=FFN bias=true |> gelu_new |> NN.linear@mlp.fc_out dim=MODEL_DIM bias=true
+  return x + a + m, new_kv
+
+codegen :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+codegen input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids ROTARY_DIM THETA interleaved=true
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x <- NN.embedding@transformer.wte input_ids dim=MODEL_DIM
+  x, work_kv <- for@transformer.h i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
+    x, new_i <- ((codegen_block x rope_sin rope_cos mask past_i) :: (Tensor[B,S,MODEL_DIM], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,MODEL_DIM / NUM_HEADS]))
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  x <- NN.layernorm@transformer.ln_f x eps=EPS
+  new_kv <- Cache.finish work_kv (past_length + S)
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=true
+  return logits, new_kv

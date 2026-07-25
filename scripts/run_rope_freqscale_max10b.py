@@ -23,7 +23,6 @@ def main() -> None:
         Path("brainsurgery/synapse/models/llama3/Meta-Llama-3-70B-Instruct.axon"),
         Path("brainsurgery/synapse/models/llama3/Meta-Llama-3-70B.axon"),
         Path("brainsurgery/synapse/models/llama3/Meta-Llama-3-8B.axon"),
-        Path("brainsurgery/synapse/models/llama3/generic-llama3-basic.axon"),
         Path("brainsurgery/synapse/models/llama3/generic-llama3.axon"),
     ]
 

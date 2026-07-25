@@ -28,51 +28,51 @@ import Params
 
 import Tensor
 
-MODEL_D = 2688
+MODEL_D <- 2688
 
-VOCAB_SIZE = 131072
+VOCAB_SIZE <- 131072
 
-NUM_LAYERS = 52
+NUM_LAYERS <- 52
 
-NUM_HEADS = 32
+NUM_HEADS <- 32
 
-KVH = 2
+KVH <- 2
 
-MODEL_HEAD_DIM = 128
+MODEL_HEAD_DIM <- 128
+
+MAX_POSITIONS <- 262144
+
+EPS <- 1e-05
+
+M_H <- 64
+
+M_HD <- 64
+
+M_G <- 8
+
+M_N <- 128
+
+E <- 128
+
+EPT <- 6
+
+N_GROUP <- 1
+
+TOPK_GROUP <- 1
+
+FFN <- 1856
+
+SFFN <- 3712
+
+ROUTE_SCALE <- 2.5
 
 ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
-
-MAX_POSITIONS = 262144
-
-EPS = 1e-05
-
-M_H = 64
-
-M_HD = 64
-
-M_G = 8
-
-M_N = 128
 
 M_I = M_H * M_HD
 
 M_CONV = M_I + 2 * M_G * M_N
 
-E = 128
-
-EPT = 6
-
-N_GROUP = 1
-
-TOPK_GROUP = 1
-
 NORM_TOPK_PROB = 1
-
-FFN = 1856
-
-SFFN = 3712
-
-ROUTE_SCALE = 2.5
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true

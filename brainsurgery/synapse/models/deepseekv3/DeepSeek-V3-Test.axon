@@ -24,67 +24,67 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 128
+MODEL_DIM <- 128
 
-VOCAB_SIZE = 128815
+VOCAB_SIZE <- 128815
 
-NUM_LAYERS = 4
+NUM_LAYERS <- 4
 
-NUM_HEADS = 4
+NUM_HEADS <- 4
 
-QKNOPE = 24
+QKNOPE <- 24
 
-QKROPE = 8
+QKROPE <- 8
 
-VHD = 32
+VHD <- 32
+
+QLR <- 32
+
+KVR <- 32
+
+FFN <- 256
+
+E <- 4
+
+EPT <- 2
+
+EM <- 64
+
+SE <- 1
+
+NG <- 2
+
+TKG <- 1
+
+NTP <- true
+
+RSC <- 2.5
+
+EPS <- 1e-06
+
+THETA <- 10000.0
+
+MAX_POSITIONS <- 512
+
+FIRST_DENSE <- 2
+
+HAS_ROPE_SCALING <- (false) or (true)
+
+ROPE_SCALE <- 40.0
+
+ROPE_BETA_FAST <- 32.0
+
+ROPE_BETA_SLOW <- 1.0
+
+ROPE_MSCALE <- 1.0
+
+ROPE_MSCALE_ALL_DIM <- 1.0
+
+ROPE_CONTEXT <- 256
 
 QHD = QKNOPE + QKROPE
 
-QLR = 32
-
-KVR = 32
-
 KVPROJ = NUM_HEADS * (QKNOPE + VHD)
-
-FFN = 256
-
-E = 4
-
-EPT = 2
-
-EM = 64
-
-SE = 1
-
-NG = 2
-
-TKG = 1
-
-NTP = true
-
-RSC = 2.5
-
-EPS = 1e-06
-
-THETA = 10000.0
-
-MAX_POSITIONS = 512
-
-FIRST_DENSE = 2
-
-HAS_ROPE_SCALING = (false) or (true)
-
-ROPE_SCALE = 40.0
-
-ROPE_BETA_FAST = 32.0
-
-ROPE_BETA_SLOW = 1.0
-
-ROPE_MSCALE = 1.0
-
-ROPE_MSCALE_ALL_DIM = 1.0
-
-ROPE_CONTEXT = 256
 
 ROPE_SOFTMAX_MSCALE = (HAS_ROPE_SCALING and (ROPE_MSCALE_ALL_DIM != 0.0)) ? ((0.1 * ROPE_MSCALE_ALL_DIM * log ROPE_SCALE) + 1.0) : 1.0
 

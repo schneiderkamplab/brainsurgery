@@ -1,0 +1,78 @@
+{-# CHECKPOINTS "abeja/gpt-neox-japanese-2.7b" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "gpt_neox_japanese" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, split_qkv_heads)
+
+import Cache
+
+import Config
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import NN
+
+import Params (param)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+MODEL_DIM <- (2560 :: Dim)
+
+VOCAB_SIZE <- (32000 :: Dim)
+
+NUM_LAYERS <- (32 :: Dim)
+
+NUM_HEADS <- (32 :: Dim)
+
+FFN_MULTIPLE <- (4 :: Dim)
+
+EPS <- 1e-05
+
+THETA <- 10000.0
+
+MAX_POSITIONS <- (2048 :: Dim)
+
+HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+FFN = MODEL_DIM * FFN_MULTIPLE
+
+gpt_neox_japanese_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+gpt_neox_japanese_block x i rope_sin rope_cos mask past_kv = do
+  xn <- NN.layernorm@input_layernorm x eps=EPS
+  a, new_kv <- scope@attention do
+    qkv <- NN.linear@query_key_value xn dim=(3 * MODEL_DIM) bias=false
+    q, k, v <- split_qkv_heads qkv heads=NUM_HEADS layout="interleaved"
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    a <- attention q k v mask |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=false
+    a <- (i == (NUM_LAYERS - 1)) ? (a + ((param @dense_bias) :: Tensor[MODEL_DIM])) : a
+    return a, new_kv
+  x <- x + a
+  xn <- NN.layernorm@post_attention_layernorm x eps=EPS
+  m <- NN.linear@mlp.dense_h_to_4h xn dim=FFN bias=false |> gelu |> NN.linear@mlp.dense_4h_to_h dim=MODEL_DIM bias=false
+  return x + m, new_kv
+
+gpt_neox_japanese :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+gpt_neox_japanese input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x <- NN.embedding@@gpt_neox_japanese.embed_in input_ids dim=MODEL_DIM
+  x, work_kv <- for@gpt_neox_japanese.layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
+    x, new_i <- gpt_neox_japanese_block x i rope_sin rope_cos mask past_i
+    yield x, Cache.append work_kv new_i
+  x <- NN.layernorm@@gpt_neox_japanese.final_layer_norm x eps=EPS
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@@embed_out x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

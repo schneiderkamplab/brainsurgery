@@ -66,6 +66,7 @@ from ..typecheck_shared import (
     _bind_dim_name,
     _broadcast_tensor_branch_types,
     _collect_module_constraints,
+    _collect_external_component_callsites,
     _destructure_type,
     _expr_to_dim_token,
     _expand_alias,
@@ -81,6 +82,8 @@ from ..typecheck_shared import (
     _reject_bare_tensor_types,
     _scoped_typevars,
     _simplify_dim_expr,
+    _strip_inferred_program,
+    _specialize_module_from_callsite,
     _substitute_expr_dim_names,
     _substitute_statement_dim_names,
     _thread_interprocedural_call_guards,
@@ -302,7 +305,12 @@ def _unify_call_arg_type(
                 try:
                     out_dims.append(_unify_dim_token(actual_dim, formal_dim, ctx))
                 except ValueError:
-                    solved = _bind_single_fresh_dim_equation(actual_dim, formal_dim, state)
+                    solved = _bind_single_fresh_dim_equation(
+                        actual_dim,
+                        formal_dim,
+                        state,
+                        local_fresh_dims=local_fresh_dims,
+                    )
                     if solved is not None:
                         out_dims.append(solved)
                         continue
@@ -442,6 +450,8 @@ def _bind_single_fresh_dim_equation(
     actual_dim: DimToken,
     formal_dim: DimToken,
     state: _Tc2,
+    *,
+    local_fresh_dims: set[str] | None = None,
 ) -> DimToken | None:
     difference = _dim_affine(
         DimExprBinary(op="-", left=formal_dim, right=actual_dim),
@@ -450,15 +460,53 @@ def _bind_single_fresh_dim_equation(
     if difference is None:
         return None
     coeffs, const = difference
-    if len(coeffs) != 1:
+    candidates = [
+        name
+        for name in coeffs
+        if name not in state.constant_expr_defs
+        and not name.startswith("..")
+        and (local_fresh_dims is None or name in local_fresh_dims)
+    ]
+    if len(candidates) != 1:
         return None
-    name, coeff = next(iter(coeffs.items()))
-    if name in state.constant_expr_defs or name.startswith("..") or coeff == 0:
+    name = candidates[0]
+    coeff = coeffs.pop(name)
+    if coeff == 0:
         return None
-    solved = -const / coeff
-    if solved.denominator != 1:
+
+    solved_coeffs = {other: -value / coeff for other, value in coeffs.items()}
+    solved_const = -const / coeff
+    if solved_const.denominator != 1 or any(
+        value.denominator != 1 for value in solved_coeffs.values()
+    ):
         return None
-    _bind_dim_name(name, int(solved), state.ctx)
+
+    solved: DimToken | None = int(solved_const) if solved_const else None
+    for other, value in sorted(solved_coeffs.items()):
+        integer = int(value)
+        if integer == 0:
+            continue
+        magnitude: DimToken = (
+            other
+            if abs(integer) == 1
+            else DimExprBinary(op="*", left=abs(integer), right=other)
+        )
+        if solved is None:
+            solved = (
+                magnitude
+                if integer > 0
+                else DimExprBinary(op="-", left=0, right=magnitude)
+            )
+        else:
+            solved = DimExprBinary(
+                op="+" if integer > 0 else "-",
+                left=solved,
+                right=magnitude,
+            )
+    if solved is None:
+        solved = 0
+    solved = _simplify_dim_expr(solved) if isinstance(solved, DimExprBinary) else solved
+    _bind_dim_name(name, solved, state.ctx)
     return _normalize_dim_token(formal_dim, state.ctx)
 
 
@@ -756,6 +804,8 @@ def _instantiate_call_signature(
     type_subst: dict[str, TypeVar] = {}
 
     def fresh_dim(name: str) -> str:
+        if name in state.constant_expr_defs:
+            return name
         existing = dim_subst.get(name)
         if isinstance(existing, str):
             return existing
@@ -2992,7 +3042,7 @@ def _tc_user_call(
                 )
             except ValueError as exc:
                 raise ValueError(
-                    f"Axon typecheck2 failed while checking call to {module.name!r}"
+                    f"Axon typecheck2 failed while checking call to {module.name!r}: {exc}"
                 ) from exc
             if binding.return_types is not None:
                 resolved_returns = tuple(
@@ -3491,6 +3541,7 @@ def _tc_definition(
 
 
 def _typecheck2_flat_axon_file_once(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
+    program = _strip_inferred_program(program)
     main_module = resolve_main_module(program, main_module=main_module)
     _reachable(program, main_module)
     program = prune_unreachable_definitions(program, entrypoint=main_module)
@@ -3588,7 +3639,66 @@ def _typecheck2_flat_axon_file_once(program: AxonFile, *, main_module: str | Non
     return typed_program
 
 
+def _apply_consistent_callsite_refinements(
+    program: AxonFile,
+    *,
+    inferred_interface_modules: frozenset[str],
+) -> tuple[AxonFile, bool]:
+    def tensor_variadics(tp: TypeExpr | None) -> set[str]:
+        if isinstance(tp, TypeOptional):
+            return tensor_variadics(tp.inner)
+        if isinstance(tp, TypeList):
+            return tensor_variadics(tp.item)
+        if isinstance(tp, TypeTuple):
+            variadics: set[str] = set()
+            for item in tp.items:
+                variadics.update(tensor_variadics(item))
+            return variadics
+        if isinstance(tp, TypeTensor):
+            return {
+                dim for dim in tp.dims if isinstance(dim, str) and dim.startswith("..")
+            }
+        return set()
+
+    def has_prefixed_shared_variadic(module: AxonDefinition) -> bool:
+        result = module.return_type_expr
+        if not isinstance(result, TypeTensor) or len(result.dims) < 2:
+            return False
+        result_variadics = tensor_variadics(result)
+        return bool(result_variadics) and any(
+            result_variadics & tensor_variadics(param.type_expr)
+            for param in module.params
+        )
+
+    changed = False
+    refined_modules: list[AxonDefinition] = []
+    for module in program.modules:
+        if (
+            module.name not in inferred_interface_modules
+            or not has_prefixed_shared_variadic(module)
+        ):
+            refined_modules.append(module)
+            continue
+        callsites = _collect_external_component_callsites(
+            program,
+            frozenset({module.name}),
+            external_only=False,
+        )
+        if not callsites or any(callsite != callsites[0] for callsite in callsites[1:]):
+            refined_modules.append(module)
+            continue
+        refined = _specialize_module_from_callsite(module, callsites[0])
+        changed = changed or refined != module
+        refined_modules.append(refined)
+    if not changed:
+        return program, False
+    return replace(program, modules=tuple(refined_modules)), True
+
+
 def typecheck2_flat_axon_file(program: AxonFile, *, main_module: str | None = None) -> AxonFile:
+    inferred_interface_modules = frozenset(
+        module.name for module in program.modules if module.return_type_expr is None
+    )
     previous: AxonFile | None = None
     current = program
     seen: dict[str, AxonFile] = {}
@@ -3600,6 +3710,14 @@ def typecheck2_flat_axon_file(program: AxonFile, *, main_module: str | None = No
                 validate_typed_axon_file(previous, main_module=main_module)
                 return previous
             raise
+        typed, refined = _apply_consistent_callsite_refinements(
+            typed,
+            inferred_interface_modules=inferred_interface_modules,
+        )
+        if refined:
+            previous = typed
+            current = typed
+            continue
         key = repr(typed)
         if previous is not None and typed == previous:
             return typed

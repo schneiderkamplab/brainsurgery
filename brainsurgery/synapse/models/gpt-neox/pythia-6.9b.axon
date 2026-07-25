@@ -20,43 +20,32 @@ import Config
 
 import NN
 
-MODEL_DIM <- do
-  return (4096)
+MODEL_DIM <- (4096 :: Dim)
 
-VOCAB_SIZE <- do
-  return (50432)
+VOCAB_SIZE <- (50432 :: Dim)
 
-NUM_LAYERS <- do
-  return (32)
+NUM_LAYERS <- (32 :: Dim)
 
-NUM_HEADS <- do
-  return (32)
+NUM_HEADS <- (32 :: Dim)
 
 MODEL_HEAD_DIM <- do
   return MODEL_DIM / NUM_HEADS
 
-FFN <- do
-  return (16384)
+FFN <- (16384 :: Dim)
 
-EPS <- do
-  return (1e-05)
+EPS <- (1e-05)
 
-THETA <- do
-  return (10000.0)
+THETA <- (10000.0)
 
-ROTARY_PCT <- do
-  return (0.25)
+ROTARY_PCT <- (0.25)
 
 ROTARY_DIM <- floor (MODEL_HEAD_DIM * ROTARY_PCT)
 
-MAX_POSITIONS <- do
-  return (2048)
+MAX_POSITIONS <- (2048 :: Dim)
 
-PAR <- do
-  return (true)
+PAR <- (true)
 
-ACT <- do
-  return ("gelu")
+ACT <- ("gelu")
 
 neox_ln :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 neox_ln@path x = NN.layernorm@path x eps=EPS

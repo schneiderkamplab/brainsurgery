@@ -17,10 +17,11 @@ import ctypes
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager, suppress
 from copy import deepcopy
+from dataclasses import MISSING, fields, is_dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MethodType, ModuleType
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import safetensors
 
@@ -77,9 +78,11 @@ from transformers import (
     AutoModelForSeq2SeqLM,
 )
 from transformers.generation import GenerationConfig, GenerationMixin
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING, CONFIG_MAPPING_NAMES
 from transformers.utils import ModelOutput
 from transformers.utils import import_utils as transformers_import_utils
 from transformers.utils.quantization_config import FineGrainedFP8Config, Mxfp4Config
+from huggingface_hub.errors import StrictDataclassFieldValidationError
 
 from .axon import (
     candidate_tokenizer_dirs,
@@ -674,7 +677,7 @@ def _run_phi3small_chunked_logits(
     return logits
 
 
-class _DebertaV2ModernMaskedLMReference(torch.nn.Module):
+class _DebertaModernMaskedLMReference(torch.nn.Module):
     def __init__(
         self,
         *,
@@ -725,17 +728,43 @@ class _DebertaV2ModernMaskedLMReference(torch.nn.Module):
 
 
 def _ensure_transformers_import_compat() -> None:
-    if hasattr(transformers_import_utils, "is_torch_fx_available"):
+    if not hasattr(transformers_import_utils, "is_torch_fx_available"):
+
+        def _is_torch_fx_available() -> bool:
+            try:
+                import torch.fx  # noqa: F401
+            except Exception:
+                return False
+            return True
+
+        setattr(transformers_import_utils, "is_torch_fx_available", _is_torch_fx_available)
+
+    # Transformers 5 removed the legacy "default" registry entry while some
+    # otherwise-compatible Hub modules still import and request it.
+    try:
+        from transformers import modeling_rope_utils
+    except Exception:
+        return
+    if "default" in modeling_rope_utils.ROPE_INIT_FUNCTIONS:
         return
 
-    def _is_torch_fx_available() -> bool:
-        try:
-            import torch.fx  # noqa: F401
-        except Exception:
-            return False
-        return True
+    def _compute_default_rope_parameters(
+        config: Any,
+        device: torch.device | None = None,
+        seq_len: int | None = None,
+        layer_type: str | None = None,
+    ) -> tuple[torch.Tensor, float]:
+        del seq_len
+        config.standardize_rope_params()
+        params = config.rope_parameters[layer_type] if layer_type is not None else config.rope_parameters
+        base = params["rope_theta"]
+        partial_rotary_factor = params.get("partial_rotary_factor", 1.0)
+        head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        dim = int(head_dim * partial_rotary_factor)
+        indices = torch.arange(0, dim, 2, dtype=torch.int64, device=device).float()
+        return 1.0 / (base ** (indices / dim)), 1.0
 
-    setattr(transformers_import_utils, "is_torch_fx_available", _is_torch_fx_available)
+    modeling_rope_utils.ROPE_INIT_FUNCTIONS["default"] = _compute_default_rope_parameters
 
 
 def _patch_cache_api_compat() -> None:
@@ -852,7 +881,65 @@ def _load_checkpoint_tensor(
     raise KeyError(key)
 
 
-def _is_deberta_v2_modern_mlm_checkpoint(
+def _hf_reference_matches_checkpoint_sample(
+    model: Any,
+    safetensors_files: Sequence[Path],
+) -> bool:
+    model_state = model.state_dict()
+    candidate: tuple[int, Path, str, tuple[int, ...]] | None = None
+    for path in safetensors_files:
+        st = safetensors.safe_open(str(path), framework="pt")
+        for key in st.keys():
+            model_tensor = model_state.get(key)
+            if not torch.is_tensor(model_tensor) or model_tensor.ndim < 2:
+                continue
+            shape = tuple(int(dim) for dim in st.get_slice(key).get_shape())
+            numel = math.prod(shape)
+            if shape != tuple(model_tensor.shape):
+                continue
+            if candidate is None or numel > candidate[0]:
+                candidate = (numel, path, key, shape)
+    if candidate is None:
+        return True
+    _, path, key, shape = candidate
+    st = safetensors.safe_open(str(path), framework="pt")
+    selectors = tuple(
+        slice(0, min(dim, 16)) if axis == len(shape) - 1 else slice(0, 1)
+        for axis, dim in enumerate(shape)
+    )
+    expected = st.get_slice(key)[selectors]
+    actual = model_state[key].detach()[selectors]
+    expected = expected.to(
+        device=actual.device,
+        dtype=actual.dtype if expected.is_floating_point() else expected.dtype,
+    )
+    return torch.equal(actual, expected)
+
+
+def _restore_hf_reference_weights_if_needed(
+    model: Any,
+    *,
+    safetensors_files: Sequence[Path],
+    dtype: torch.dtype,
+) -> bool:
+    if _hf_reference_matches_checkpoint_sample(model, safetensors_files):
+        return False
+    checkpoint_state = _load_state_dict(
+        list(safetensors_files),
+        device=torch.device("cpu"),
+        dtype=dtype,
+        model_config=None,
+    )
+    model.load_state_dict(checkpoint_state, strict=True)
+    checkpoint_state.clear()
+    if not _hf_reference_matches_checkpoint_sample(model, safetensors_files):
+        raise RuntimeError(
+            "HF reference parameters still differ from the checkpoint after explicit loading"
+        )
+    return True
+
+
+def _is_deberta_modern_mlm_checkpoint(
     *,
     model_dir: Path,
     model_config: dict[str, Any] | None,
@@ -860,7 +947,10 @@ def _is_deberta_v2_modern_mlm_checkpoint(
 ) -> bool:
     if not isinstance(model_config, dict):
         return False
-    if str(model_config.get("model_type", "")).strip().lower() != "deberta-v2":
+    if str(model_config.get("model_type", "")).strip().lower() not in {
+        "deberta",
+        "deberta-v2",
+    }:
         return False
     has_modern = _checkpoint_contains_any_key(
         safetensors_files,
@@ -884,7 +974,7 @@ def _load_hf_masked_lm_reference(
     model_config: dict[str, Any] | None,
 ) -> Any:
     _ensure_transformers_import_compat()
-    if _is_deberta_v2_modern_mlm_checkpoint(
+    if _is_deberta_modern_mlm_checkpoint(
         model_dir=model_dir,
         model_config=model_config,
         safetensors_files=safetensors_files,
@@ -896,7 +986,7 @@ def _load_hf_masked_lm_reference(
             config=hf_config,
             trust_remote_code=trust_remote_code,
         )
-        model = _DebertaV2ModernMaskedLMReference(
+        model = _DebertaModernMaskedLMReference(
             backbone=backbone,
             dense_weight=_load_checkpoint_tensor(
                 safetensors_files,
@@ -939,6 +1029,12 @@ def _load_hf_masked_lm_reference(
         config=hf_config,
         trust_remote_code=trust_remote_code,
     )
+    if _restore_hf_reference_weights_if_needed(
+        model,
+        safetensors_files=safetensors_files,
+        dtype=resolved_dtype,
+    ):
+        print("HF: restored checkpoint tensors after incompatible from_pretrained load")
     return model.to(device=resolved_device, dtype=resolved_dtype).eval()
 
 
@@ -1532,8 +1628,29 @@ def _rebuild_hf_phi3small_longrope_buffers(model: Any) -> int:
     return rebuilt
 
 
-def _checkpoint_has_explicit_output_head_weight(model_dir: Path) -> bool:
-    output_head_suffixes = ("lm_head.weight", "embed_out.weight", "head.weight")
+def _checkpoint_has_explicit_output_head_weight(model_dir: Path, model: Any | None = None) -> bool:
+    exact_keys: set[str] = set()
+    if model is not None and hasattr(model, "get_output_embeddings"):
+        output_embeddings = model.get_output_embeddings()
+        if output_embeddings is not None:
+            exact_keys = {
+                f"{name}.weight"
+                for name, module in model.named_modules()
+                if name and module is output_embeddings
+            }
+
+    output_head_suffixes = (
+        "lm_head.weight",
+        "lm_head.decoder.weight",
+        "embed_out.weight",
+        "head.weight",
+    )
+
+    def _is_output_weight(key: object) -> bool:
+        rendered = str(key)
+        if exact_keys:
+            return rendered in exact_keys
+        return any(rendered.endswith(suffix) for suffix in output_head_suffixes)
 
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
@@ -1543,15 +1660,12 @@ def _checkpoint_has_explicit_output_head_weight(model_dir: Path) -> bool:
             return False
         weight_map = payload.get("weight_map")
         if isinstance(weight_map, dict):
-            return any(
-                any(str(key).endswith(suffix) for suffix in output_head_suffixes)
-                for key in weight_map
-            )
+            return any(_is_output_weight(key) for key in weight_map)
         return False
     for shard_path in _resolve_safetensors_paths(model_dir):
         st = safetensors.safe_open(str(shard_path), framework="pt")
         for key in st.keys():
-            if any(str(key).endswith(suffix) for suffix in output_head_suffixes):
+            if _is_output_weight(key):
                 return True
     return False
 
@@ -2422,35 +2536,105 @@ def _patch_rope_payload_for_compat(
     return changed
 
 
+def _ensure_legacy_hf_config_attributes(
+    config: Any,
+    serialized: Mapping[str, Any] | None = None,
+) -> Any:
+    for name, value in (
+        ("is_decoder", False),
+        ("add_cross_attention", False),
+    ):
+        if not hasattr(config, name):
+            setattr(config, name, value)
+    if serialized is not None:
+        tie_word_embeddings = serialized.get("tie_word_embeddings")
+        if isinstance(tie_word_embeddings, bool):
+            config.tie_word_embeddings = tie_word_embeddings
+    if hasattr(config, "hash_seed") and config.hash_seed is None:
+        config.hash_seed = 0
+    return config
+
+
+def _infer_model_type_from_architectures(payload: Mapping[str, Any]) -> str | None:
+    architectures = payload.get("architectures")
+    if not isinstance(architectures, list) or len(architectures) != 1:
+        return None
+    architecture = architectures[0]
+    if not isinstance(architecture, str) or not architecture:
+        return None
+    matches: list[tuple[int, str]] = []
+    for model_type, config_class_name in CONFIG_MAPPING_NAMES.items():
+        stem = str(config_class_name).removesuffix("Config")
+        if architecture == stem or architecture.startswith(f"{stem}For"):
+            matches.append((len(stem), str(model_type)))
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    if len(matches) > 1 and matches[0][0] == matches[1][0]:
+        return None
+    return matches[0][1]
+
+
+def _patch_unsupported_kernel_payload_for_compat(payload: dict[str, Any]) -> bool:
+    model_type = payload.get("model_type")
+    if not isinstance(model_type, str) or model_type not in CONFIG_MAPPING:
+        return False
+    config_class = CONFIG_MAPPING[model_type]
+    if not is_dataclass(config_class):
+        return False
+    changed = False
+    for field in fields(config_class):
+        if not field.name.endswith("_kernel") or field.name not in payload:
+            continue
+        allowed = get_args(field.type)
+        if not allowed or payload[field.name] in allowed or field.default is MISSING:
+            continue
+        payload[field.name] = field.default
+        changed = True
+    return changed
+
+
 def _load_auto_config_with_compat_fallback(model_dir: Path, *, trust_remote_code: bool) -> Any:
     _ensure_transformers_import_compat()
+    config_path = model_dir / "config.json"
+    serialized: dict[str, Any] | None = None
+    if config_path.exists():
+        candidate = json.loads(config_path.read_text(encoding="utf-8"))
+        if isinstance(candidate, dict):
+            serialized = candidate
     compat_exc: Exception | None = None
     try:
-        return AutoConfig.from_pretrained(
-            str(model_dir),
-            local_files_only=True,
-            trust_remote_code=trust_remote_code,
+        return _ensure_legacy_hf_config_attributes(
+            AutoConfig.from_pretrained(
+                str(model_dir),
+                local_files_only=True,
+                trust_remote_code=trust_remote_code,
+            ),
+            serialized,
         )
-    except (KeyError, ValueError) as exc:
-        error_text = str(exc)
-        if (
-            "original_max_position_embeddings" not in error_text
-            and "must be a dictionary with three fields" not in error_text
-        ):
-            raise
+    except (KeyError, ValueError, StrictDataclassFieldValidationError) as exc:
         compat_exc = exc
 
-    config_path = model_dir / "config.json"
     if not config_path.exists():
         raise compat_exc or RuntimeError("Unable to load model config")
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload = serialized
     if not isinstance(payload, dict):
         raise compat_exc or ValueError(
             f"Expected mapping in {config_path}, got {type(payload).__name__}"
         )
-    changed = _patch_rope_payload_for_compat(payload, error_text=str(compat_exc))
+    changed = False
+    if not payload.get("model_type"):
+        inferred_model_type = _infer_model_type_from_architectures(payload)
+        if inferred_model_type is not None:
+            payload["model_type"] = inferred_model_type
+            changed = True
+    changed = _patch_rope_payload_for_compat(
+        payload,
+        error_text=str(compat_exc),
+    ) or changed
+    changed = _patch_unsupported_kernel_payload_for_compat(payload) or changed
     if not changed:
-        raise compat_exc or RuntimeError("No compatible rope settings to patch")
+        raise compat_exc or RuntimeError("No compatible config settings to patch")
 
     with TemporaryDirectory(prefix="axon_hf_config_patch_") as tmp_dir:
         tmp_dir_path = Path(tmp_dir)
@@ -2459,10 +2643,13 @@ def _load_auto_config_with_compat_fallback(model_dir: Path, *, trust_remote_code
         if trust_remote_code:
             for py_file in model_dir.glob("*.py"):
                 shutil.copy2(py_file, tmp_dir_path / py_file.name)
-        return AutoConfig.from_pretrained(
-            str(tmp_config.parent),
-            local_files_only=True,
-            trust_remote_code=trust_remote_code,
+        return _ensure_legacy_hf_config_attributes(
+            AutoConfig.from_pretrained(
+                str(tmp_config.parent),
+                local_files_only=True,
+                trust_remote_code=trust_remote_code,
+            ),
+            payload,
         )
 
 
@@ -2509,6 +2696,13 @@ def _patch_deepseek_v4_reference_runtime_config(config: Any) -> Any:
         return config
     setattr(config, "_attn_implementation", "eager")
     setattr(config, "_experts_implementation", "eager")
+    return config
+
+
+def _disable_unavailable_hf_cpu_kernels(config: Any, device: torch.device) -> Any:
+    """Select a config's portable implementation when accelerator kernels cannot run."""
+    if device.type == "cpu" and hasattr(config, "use_mamba_kernels"):
+        setattr(config, "use_mamba_kernels", False)
     return config
 
 
@@ -3111,8 +3305,58 @@ def _load_hf_causal_lm_from_dequantized_deepseek_v4_fp8_state(
 def _refresh_hf_rotary_caches_if_needed(model: Any, *, dtype: torch.dtype) -> int:
     refreshed = 0
     for module in model.modules():
+        inv_freq_refreshed = False
+        rope_init_fn = getattr(module, "rope_init_fn", None)
+        rope_config = getattr(module, "config", None)
+        if callable(rope_init_fn) and rope_config is not None:
+            current_inv_freq = getattr(module, "inv_freq", None)
+            target_device = _hf_module_runtime_device(module)
+            if target_device is None:
+                target_device = (
+                    current_inv_freq.device
+                    if torch.is_tensor(current_inv_freq)
+                    and current_inv_freq.device.type != "meta"
+                    else torch.device("cpu")
+                )
+            try:
+                expected_inv_freq, attention_scaling = rope_init_fn(
+                    rope_config,
+                    device=target_device,
+                )
+            except Exception:
+                expected_inv_freq = None
+                attention_scaling = None
+            if torch.is_tensor(expected_inv_freq):
+                should_replace = (
+                    not torch.is_tensor(current_inv_freq)
+                    or current_inv_freq.device.type == "meta"
+                    or current_inv_freq.shape != expected_inv_freq.shape
+                    or not torch.isfinite(current_inv_freq).all()
+                )
+                if not should_replace:
+                    delta = (
+                        current_inv_freq.detach().to(
+                            device=expected_inv_freq.device,
+                            dtype=torch.float32,
+                        )
+                        - expected_inv_freq.detach().to(dtype=torch.float32)
+                    ).abs()
+                    should_replace = bool(delta.numel() and float(delta.max()) > 1e-6)
+                if should_replace:
+                    module.register_buffer(
+                        "inv_freq",
+                        expected_inv_freq,
+                        persistent=False,
+                    )
+                    if hasattr(module, "original_inv_freq"):
+                        module.original_inv_freq = expected_inv_freq
+                    if attention_scaling is not None:
+                        module.attention_scaling = attention_scaling
+                    inv_freq_refreshed = True
+
         set_cache = getattr(module, "_set_cos_sin_cache", None)
         if not callable(set_cache):
+            refreshed += int(inv_freq_refreshed)
             continue
         module_name = module.__class__.__name__.lower()
         is_deepseek_rotary = "deepseek" in module_name
@@ -3123,7 +3367,7 @@ def _refresh_hf_rotary_caches_if_needed(model: Any, *, dtype: torch.dtype) -> in
             continue
         cos_cached = getattr(module, "cos_cached", None)
         sin_cached = getattr(module, "sin_cached", None)
-        needs_refresh = False
+        needs_refresh = inv_freq_refreshed
         if not torch.is_tensor(cos_cached) or not torch.is_tensor(sin_cached):
             needs_refresh = True
         elif cos_cached.device.type == "meta" or sin_cached.device.type == "meta":
@@ -3184,6 +3428,7 @@ def _refresh_hf_rotary_caches_if_needed(model: Any, *, dtype: torch.dtype) -> in
             set_cache(seq_len=int(max_seq_len), device=target_device, dtype=dtype)
             refreshed += 1
         except Exception:
+            refreshed += int(inv_freq_refreshed)
             continue
     return refreshed
 
@@ -3484,12 +3729,6 @@ def _time_generate_repeated(
             torch.cuda.synchronize()
         elif torch.backends.mps.is_available():
             torch.mps.synchronize()
-        try:
-            import mlx.core as mx
-
-            mx.synchronize()
-        except (ImportError, AttributeError):
-            pass
 
     with timing(message=label):
         warmup_samples: list[float] = []
@@ -3525,12 +3764,6 @@ def _time_forward_repeated(
             torch.cuda.synchronize()
         elif torch.backends.mps.is_available():
             torch.mps.synchronize()
-        try:
-            import mlx.core as mx
-
-            mx.synchronize()
-        except (ImportError, AttributeError):
-            pass
 
     with timing(message=label):
         warmup_samples: list[float] = []
@@ -4090,6 +4323,12 @@ def _call_generate_or_forward_greedy(
     return generated
 
 
+def _hf_reference_generate_uses_cache(model_type: str) -> bool:
+    """Avoid known-broken upstream cache implementations in reference-only integration."""
+
+    return str(model_type).strip().lower() not in {"blt", "cpmant", "xlstm"}
+
+
 def _module_parameter_device(module: Any) -> torch.device | None:
     if module is None:
         return None
@@ -4104,7 +4343,11 @@ def _module_parameter_device(module: Any) -> torch.device | None:
 def _hf_input_embedding_device(model: Any) -> torch.device | None:
     get_embeddings = getattr(model, "get_input_embeddings", None)
     if callable(get_embeddings):
-        device = _module_parameter_device(get_embeddings())
+        try:
+            embeddings = get_embeddings()
+        except (AttributeError, NotImplementedError):
+            embeddings = None
+        device = _module_parameter_device(embeddings)
         if device is not None:
             return device
     for path in (
@@ -4116,6 +4359,21 @@ def _hf_input_embedding_device(model: Any) -> torch.device | None:
         device = _module_parameter_device(_get_nested_attr(model, path))
         if device is not None:
             return device
+    try:
+        named_modules = model.named_modules()
+    except Exception:
+        named_modules = ()
+    preferred_suffixes = ("word_embeddings", "embed_tokens", "wte")
+    fallback_embedding = None
+    for name, module in named_modules:
+        if not isinstance(module, torch.nn.Embedding):
+            continue
+        if fallback_embedding is None:
+            fallback_embedding = module
+        if str(name).endswith(preferred_suffixes):
+            return _module_parameter_device(module)
+    if fallback_embedding is not None:
+        return _module_parameter_device(fallback_embedding)
     return None
 
 
@@ -4130,13 +4388,7 @@ def _hf_decoder_embedding_device(model: Any) -> torch.device | None:
     if decoder is None:
         decoder = getattr(model, "decoder", None)
     if decoder is not None:
-        get_embeddings = getattr(decoder, "get_input_embeddings", None)
-        if callable(get_embeddings):
-            device = _module_parameter_device(get_embeddings())
-            if device is not None:
-                return device
-        embed_tokens = getattr(decoder, "embed_tokens", None)
-        device = _module_parameter_device(embed_tokens)
+        device = _hf_input_embedding_device(decoder)
         if device is not None:
             return device
     for path in (
@@ -4371,8 +4623,148 @@ def _checkpoint_requires_local_tokenizer(checkpoint_id: str) -> bool:
     return checkpoint_id not in {
         "mistralai/Devstral-Small-2507",
         "mistralai/Magistral-Small-2509",
+        "robingeibel/reformer-finetuned",
+        "uw-madison/mra-base-512-4",
+        "windowsartes/funnel",
         "Zyphra/BlackMamba-2.8B",
     }
+
+
+def _portable_mra_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    mask: torch.Tensor | None,
+    num_blocks: int,
+    approx_mode: str,
+    block_size: int = 32,
+    initial_prior_first_n_blocks: int = 0,
+    initial_prior_diagonal_n_blocks: int = 0,
+) -> torch.Tensor:
+    batch_size, num_heads, seq_len, head_dim = query.shape
+    if seq_len % block_size != 0:
+        raise ValueError("MRA sequence length must be divisible by block_size")
+    meta_batch = batch_size * num_heads
+    blocks_per_row = seq_len // block_size
+    block_pairs = blocks_per_row * blocks_per_row
+    selected_count = min(int(num_blocks), block_pairs)
+
+    query = query.reshape(meta_batch, seq_len, head_dim)
+    key = key.reshape(meta_batch, seq_len, head_dim)
+    value = value.reshape(meta_batch, seq_len, head_dim)
+    if mask is None:
+        mask = torch.ones(
+            (meta_batch, seq_len),
+            dtype=query.dtype,
+            device=query.device,
+        )
+    else:
+        mask = mask.to(device=query.device, dtype=query.dtype)
+        query = query * mask[:, :, None]
+        key = key * mask[:, :, None]
+        value = value * mask[:, :, None]
+
+    token_count = mask.reshape(meta_batch, blocks_per_row, block_size).sum(dim=-1)
+    denominator = token_count[:, :, None] + 1e-6
+    query_hat = (
+        query.reshape(meta_batch, blocks_per_row, block_size, head_dim).sum(dim=2)
+        / denominator
+    )
+    key_hat = (
+        key.reshape(meta_batch, blocks_per_row, block_size, head_dim).sum(dim=2)
+        / denominator
+    )
+    value_hat = (
+        value.reshape(meta_batch, blocks_per_row, block_size, head_dim).sum(dim=2)
+        / denominator
+    )
+
+    low_logits = torch.matmul(query_hat, key_hat.transpose(-1, -2)) / math.sqrt(head_dim)
+    low_row_max = low_logits.max(dim=-1, keepdim=True).values
+    valid_blocks = token_count[:, :, None] * token_count[:, None, :] >= 0.5
+    low_logits = low_logits - 1e4 * (~valid_blocks).to(low_logits.dtype)
+    selection_logits = low_logits - low_row_max
+
+    if initial_prior_diagonal_n_blocks > 0:
+        offset = initial_prior_diagonal_n_blocks // 2
+        diagonal = torch.ones(
+            (blocks_per_row, blocks_per_row),
+            dtype=selection_logits.dtype,
+            device=selection_logits.device,
+        )
+        diagonal = torch.tril(torch.triu(diagonal, diagonal=-offset), diagonal=offset)
+        selection_logits = selection_logits + diagonal[None, :, :] * 5e3
+    if initial_prior_first_n_blocks > 0:
+        selection_logits = selection_logits.clone()
+        selection_logits[:, :initial_prior_first_n_blocks, :] += 5e3
+        selection_logits[:, :, :initial_prior_first_n_blocks] += 5e3
+
+    selected = torch.topk(
+        selection_logits.reshape(meta_batch, -1),
+        selected_count,
+        dim=-1,
+        largest=True,
+        sorted=False,
+    )
+    selected_flat = torch.zeros(
+        (meta_batch, block_pairs),
+        dtype=torch.bool,
+        device=query.device,
+    )
+    selected_flat.scatter_(1, selected.indices, True)
+    selected_blocks = selected_flat.reshape(meta_batch, blocks_per_row, blocks_per_row)
+    selected_tokens = selected_blocks.repeat_interleave(block_size, dim=1).repeat_interleave(
+        block_size, dim=2
+    )
+
+    high_logits = torch.matmul(query, key.transpose(-1, -2)) / math.sqrt(head_dim)
+    selected_logits = high_logits.masked_fill(~selected_tokens, -torch.inf)
+    high_max = selected_logits.max(dim=-1).values
+    high_valid = selected_tokens & mask[:, None, :].bool()
+    high_attention = torch.exp(selected_logits - high_max[:, :, None])
+    high_attention = torch.where(high_valid, high_attention, torch.zeros_like(high_attention))
+    high_output = torch.matmul(high_attention, value)
+    high_normalizer = high_attention.sum(dim=-1)
+
+    if approx_mode == "full":
+        threshold = selected.values.min(dim=-1).values
+        high_resolution_blocks = selection_logits >= threshold[:, None, None]
+        low_attention = torch.exp(
+            low_logits - low_row_max - 1e4 * high_resolution_blocks.to(low_logits.dtype)
+        )
+        low_attention = low_attention * token_count[:, None, :]
+        low_output = torch.matmul(low_attention, value_hat)
+        low_output = low_output.repeat_interleave(block_size, dim=1)
+        low_normalizer = low_attention.sum(dim=-1).repeat_interleave(block_size, dim=1)
+        low_max_tokens = low_row_max.squeeze(-1).repeat_interleave(block_size, dim=1)
+        log_correction = (low_max_tokens - high_max) * mask
+        low_correction = torch.exp(log_correction * (log_correction <= 0).to(log_correction.dtype))
+        high_correction = torch.exp(-log_correction * (log_correction > 0).to(log_correction.dtype))
+        low_output = low_output * low_correction[:, :, None]
+        low_normalizer = low_normalizer * low_correction
+        high_output = high_output * high_correction[:, :, None]
+        high_normalizer = high_normalizer * high_correction
+        context = (high_output + low_output) / (
+            high_normalizer[:, :, None] + low_normalizer[:, :, None] + 1e-6
+        )
+    elif approx_mode == "sparse":
+        context = high_output / (high_normalizer[:, :, None] + 1e-6)
+    else:
+        raise ValueError(f"Unsupported MRA approximation mode: {approx_mode!r}")
+
+    context = context * mask[:, :, None]
+    return context.reshape(batch_size, num_heads, seq_len, head_dim)
+
+
+def _install_hf_mra_portable_attention_reference(model: Any) -> bool:
+    config = getattr(model, "config", None)
+    if str(getattr(config, "model_type", "")).strip().lower() != "mra":
+        return False
+    module = importlib.import_module("transformers.models.mra.modeling_mra")
+    if getattr(module, "mra_cuda_kernel", None) is not None:
+        return False
+    setattr(module, "mra2_attention", _portable_mra_attention)
+    return True
 
 
 def _build_seq2seq_decoder_inputs(
@@ -4458,7 +4850,12 @@ def _declared_checkpoints_from_axon(
     return checkpoints
 
 
-def _ensure_checkpoint_model_dir(*, repo_root: Path, checkpoint_id: str) -> Path:
+def _ensure_checkpoint_model_dir(
+    *,
+    repo_root: Path,
+    checkpoint_id: str,
+    require_tokenizer: bool | None = None,
+) -> Path:
     def _status(message: str) -> None:
         print(f"[model-download] {message}")
 
@@ -4467,7 +4864,11 @@ def _ensure_checkpoint_model_dir(*, repo_root: Path, checkpoint_id: str) -> Path
         spec=ModelDownloadSpec(
             local_dir=checkpoint_id,
             repo_id=checkpoint_id,
-            require_tokenizer=_checkpoint_requires_local_tokenizer(checkpoint_id),
+            require_tokenizer=(
+                _checkpoint_requires_local_tokenizer(checkpoint_id)
+                if require_tokenizer is None
+                else require_tokenizer
+            ),
         ),
         status_cb=_status,
     )
@@ -4900,6 +5301,21 @@ def _run_axon_test_single(
                 )
             _apply_hf_experts_implementation(hf_config, resolved_hf_experts_implementation)
         exec_device_str = str(resolved_device)
+        if (
+            resolved_device.type == "cpu"
+            and hf_config is None
+            and isinstance(model_config, Mapping)
+            and (
+                "use_mamba_kernels" in model_config
+                or any(str(key).endswith("_kernel") for key in model_config)
+            )
+        ):
+            hf_config = _load_auto_config_with_compat_fallback(
+                resolved_hf_model_dir,
+                trust_remote_code=effective_trust_remote_code,
+            )
+        if hf_config is not None:
+            hf_config = _disable_unavailable_hf_cpu_kernels(hf_config, resolved_device)
         tokenizer_obj, input_ids_cpu, attention_mask_cpu = tokenize_prompts(
             prompts=prompts,
             tokenizer_source=tokenizer_source,
@@ -5354,8 +5770,12 @@ def _run_axon_test_single(
                     else:
                         raise
             if (
-                resolved_model_task == "causal_lm"
-                and not _checkpoint_has_explicit_output_head_weight(resolved_hf_model_dir)
+                resolved_model_task in {"causal_lm", "masked_lm"}
+                and bool(getattr(model_config, "tie_word_embeddings", True))
+                and not _checkpoint_has_explicit_output_head_weight(
+                    resolved_hf_model_dir,
+                    hf,
+                )
                 and hasattr(hf, "get_output_embeddings")
                 and hasattr(hf, "get_input_embeddings")
             ):
@@ -5416,6 +5836,8 @@ def _run_axon_test_single(
             refreshed_rotary = _refresh_hf_rotary_caches_if_needed(hf, dtype=resolved_dtype)
             if refreshed_rotary > 0:
                 print(f"HF: refreshed rotary caches ({refreshed_rotary} modules)")
+            if _install_hf_mra_portable_attention_reference(hf):
+                print("HF: installed portable MRA attention reference")
             hf = _maybe_compile_model(
                 hf,
                 enabled=compile_hf,
@@ -5656,7 +6078,9 @@ def _run_axon_test_single(
                                 max_new_tokens=hf_max_new_tokens,
                                 eos_token_id=tokenizer_obj.eos_token_id,
                                 pad_token_id=tokenizer_obj.eos_token_id,
-                                use_cache=True,
+                                use_cache=_hf_reference_generate_uses_cache(
+                                    resolved_model_type
+                                ),
                             )
 
                     hf_gen, hf_time, hf_generate_samples, hf_generate_warmup_samples = (

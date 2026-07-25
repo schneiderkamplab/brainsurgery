@@ -1,0 +1,126 @@
+{-# CHECKPOINTS "ibm-research/moe-7b-1b-active-shared-experts" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "granitemoe_shared" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul)
+
+import MoE (grouped_swiglu_ffn_basic)
+
+import NN
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Tensor
+
+MODEL_DIM <- (1536 :: Dim)
+
+FFN <- (512 :: Dim)
+
+SHARED_FFN <- (1024 :: Dim)
+
+NUM_LAYERS <- (40 :: Dim)
+
+NUM_HEADS <- (12 :: Dim)
+
+KV_HEADS <- Config.dim @@num_key_value_heads default=NUM_HEADS
+
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+
+QD <- NUM_HEADS * HEAD_DIM
+
+KVD <- KV_HEADS * HEAD_DIM
+
+VOCAB_SIZE <- (50257 :: Dim)
+
+MAX_POSITIONS <- (4096 :: Dim)
+
+EPS <- 1e-05
+
+THETA <- 10000.0
+
+NUM_EXPERTS <- (62 :: Dim)
+
+TOP_K <- (6 :: Dim)
+
+EMBED_SCALE <- 12.0
+
+LOGITS_SCALE <- 6.0
+
+RESIDUAL_SCALE <- 0.22
+
+ATTENTION_SCALE <- 0.0078125
+
+ATTENTION_BIAS <- false
+
+TIE <- true
+
+granitemoe_shared_ffn :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+granitemoe_shared_ffn@path x = do
+  gate_up <- NN.linear@input_linear x dim=(2 * SHARED_FFN) bias=false
+  gate, up <- Tensor.chunk gate_up parts=2
+  return gate |> silu |> mul up |> NN.linear@output_linear dim=MODEL_DIM bias=false
+
+granitemoe_shared_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
+granitemoe_shared_moe x = do
+  logits <- NN.linear@router.layer x dim=NUM_EXPERTS bias=false
+  topk_logits, indices <- Tensor.topk logits k=TOP_K dim=-1 largest=true sorted=false
+  scores <- Tensor.softmax topk_logits dim=-1 dtype="float32" |> Tensor.cast_like x
+  return grouped_swiglu_ffn_basic x scores indices NUM_EXPERTS gate_up_weight=@input_linear.weight out_weight=@output_linear.weight
+
+granitemoe_shared_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+granitemoe_shared_block x rope_sin rope_cos mask past_kv = do
+  xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=ATTENTION_BIAS |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    v <- NN.linear@v_proj xn dim=KVD bias=ATTENTION_BIAS |> reshape_heads heads=KV_HEADS
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask scale=ATTENTION_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=ATTENTION_BIAS
+    return a, new_kv
+  x <- x + (a * RESIDUAL_SCALE)
+  xn <- NN.rmsnorm@post_attention_layernorm x eps=EPS cast_float=true
+  routed <- scope@block_sparse_moe do
+    return granitemoe_shared_moe xn
+  shared <- (SHARED_FFN == 0) ? (Tensor.zeros_like xn) : (granitemoe_shared_ffn@shared_mlp xn)
+  m <- routed + shared
+  return x + (m * RESIDUAL_SCALE), new_kv
+
+granitemoe_shared :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+granitemoe_shared input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=1
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- x * EMBED_SCALE
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- granitemoe_shared_block x rope_sin rope_cos mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- NN.rmsnorm@norm x eps=EPS cast_float=true
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- TIE ? (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false) : (NN.linear@@lm_head x dim=VOCAB_SIZE bias=false)
+  return logits / LOGITS_SCALE, new_kv

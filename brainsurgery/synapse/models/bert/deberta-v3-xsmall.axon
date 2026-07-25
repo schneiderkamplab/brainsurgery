@@ -20,27 +20,27 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 384
+MODEL_DIM <- 384
 
-E = (false) ? (1536) : MODEL_DIM
+E <- (false) ? (1536) : MODEL_DIM
 
-VOCAB_SIZE = 128100
+VOCAB_SIZE <- 128100
 
-NUM_LAYERS = 12
+NUM_LAYERS <- 12
 
-NUM_HEADS = 6
+NUM_HEADS <- 6
 
-FFN = 1536
+FFN <- 1536
 
-EPS = 1e-07
+EPS <- 1e-07
 
-POS_BUCKETS = 256
+POS_BUCKETS <- 256
 
-MAX_REL = 512
+MAX_REL <- 512
 
-REL_Q_SCALE = 0.5773502691896257
+REL_Q_SCALE <- 0.5773502691896257
 
-ATTN_SCALE = 0.125
+ATTN_SCALE <- 0.125
 
 deberta_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 deberta_block x keep = do
@@ -59,7 +59,7 @@ deberta_block x keep = do
   y <- NN.layernorm@output.LayerNorm y eps=EPS
   return y
 
-deberta_legacy_head :: Tensor[B,S,D] -> Tensor[B,S,V]
+deberta_legacy_head :: Tensor[B,S,D] -> Tensor[B,S,VOCAB_SIZE]
 deberta_legacy_head x = do
   logits <- scope@cls.predictions do
     x <- NN.linear@transform.dense x dim=E bias=true |> gelu
@@ -67,7 +67,7 @@ deberta_legacy_head x = do
     return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
   return logits
 
-deberta_modern_head :: Tensor[B,S,D] -> Tensor[B,S,V]
+deberta_modern_head :: Tensor[B,S,D] -> Tensor[B,S,VOCAB_SIZE]
 deberta_modern_head x = do
   logits <- scope@lm_predictions.lm_head do
     x <- NN.linear@dense x dim=MODEL_DIM bias=true |> gelu
@@ -75,7 +75,7 @@ deberta_modern_head x = do
     return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@lm_predictions.lm_head.bias
   return logits
 
-deberta_v2 :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
+deberta_v2 :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
 deberta_v2 input_ids attn_mask = do
   attn_mask <- mask_for_input input_ids attn_mask S
   pos_ids <- position_ids input_ids

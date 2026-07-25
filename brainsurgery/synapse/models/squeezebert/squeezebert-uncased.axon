@@ -1,0 +1,95 @@
+{-# CHECKPOINTS "squeezebert/squeezebert-uncased" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "squeezebert" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Params (param)
+
+import Positions (position_ids)
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- 768
+
+VOCAB_SIZE <- 30528
+
+NUM_LAYERS <- 12
+
+NUM_HEADS <- 12
+
+FFN <- 3072
+
+EPS <- 1e-12
+
+Q_GROUPS <- 4
+
+K_GROUPS <- 4
+
+V_GROUPS <- 4
+
+POST_GROUPS <- 1
+
+FFN_GROUPS <- 4
+
+OUT_GROUPS <- 4
+
+grouped_conv1x1 :: Path -> Tensor[B,C,S] -> Dim -> Dim -> ?Path -> ?Path -> Tensor[B,O,S]
+grouped_conv1x1@path x out_dim groups ?weight_path=@weight ?bias_path=@bias = do
+  in_group <- C / groups
+  out_group <- out_dim / groups
+  w <- param weight_path |> Tensor.reshape shape=[groups, out_group, in_group] |> Tensor.unsqueeze dim=0
+  xg <- Tensor.reshape x shape=[B, groups, in_group, S]
+  y <- Tensor.matmul w xg |> Tensor.reshape shape=[B, out_dim, S]
+  b <- param bias_path |> Tensor.reshape shape=[1, out_dim, 1]
+  return y + b
+
+squeezebert_block :: Tensor[B,C,S] -> Tensor[B,1,S,S] -> Tensor[B,C,S]
+squeezebert_block x keep = do
+  q0 <- grouped_conv1x1@attention.query x MODEL_DIM Q_GROUPS
+  k0 <- grouped_conv1x1@attention.key x MODEL_DIM K_GROUPS
+  v0 <- grouped_conv1x1@attention.value x MODEL_DIM V_GROUPS
+  q <- Tensor.permute q0 dims=[0, 2, 1] |> reshape_heads heads=NUM_HEADS
+  k <- Tensor.permute k0 dims=[0, 2, 1] |> reshape_heads heads=NUM_HEADS
+  v <- Tensor.permute v0 dims=[0, 2, 1] |> reshape_heads heads=NUM_HEADS
+  a <- attention q k v keep |> merge_heads |> Tensor.permute dims=[0, 2, 1]
+  a <- grouped_conv1x1@post_attention.conv1d a MODEL_DIM POST_GROUPS
+  x <- x + a
+  x <- Tensor.permute x dims=[0, 2, 1] |> NN.layernorm@post_attention.layernorm eps=EPS |> Tensor.permute dims=[0, 2, 1]
+  m <- grouped_conv1x1@intermediate.conv1d x FFN FFN_GROUPS |> gelu
+  m <- grouped_conv1x1@output.conv1d m MODEL_DIM OUT_GROUPS
+  y <- x + m
+  return Tensor.permute y dims=[0, 2, 1] |> NN.layernorm@output.layernorm eps=EPS |> Tensor.permute dims=[0, 2, 1]
+
+squeezebert :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+squeezebert input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@transformer.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@transformer.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@transformer.embeddings.token_type_embeddings tok_type_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- x + typ
+  x <- NN.layernorm@transformer.embeddings.LayerNorm x eps=EPS
+  x <- Tensor.permute x dims=[0, 2, 1]
+  x <- for@transformer.encoder.layers i <- [0..NUM_LAYERS) carry (x) do
+    x <- squeezebert_block x keep
+    yield x
+  x <- Tensor.permute x dims=[0, 2, 1]
+  logits <- scope@cls.predictions do
+    x <- NN.linear@transform.dense x dim=MODEL_DIM bias=true |> gelu
+    x <- NN.layernorm@transform.LayerNorm x eps=EPS
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@transformer.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
+  return logits

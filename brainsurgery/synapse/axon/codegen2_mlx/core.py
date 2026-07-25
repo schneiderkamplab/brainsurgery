@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..ast import TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional
-from ..codegen2_common import normalize_primitive_op
+from ..codegen2_common import normalize_primitive_op, render_python_literal
 from ..codegen2_torch.core import _DirectTorchEmitter, graph_main_output_names
 from ..graph_ir import GraphProgram, validate_graph_program
 
@@ -40,6 +40,7 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "l2norm",
     "reshape",
     "arange",
+    "argsort",
     "slice",
     "chunk",
     "split",
@@ -66,8 +67,10 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "div",
     "pow",
     "floor",
+    "round",
     "sqrt",
     "sin",
+    "acos",
     "cos",
     "exp",
     "log",
@@ -82,6 +85,8 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "zeros_like",
     "tensor_like",
     "topk",
+    "random_normal",
+    "random_uniform",
     "activations_tanh",
     "activations_silu",
     "activations_sigmoid",
@@ -99,7 +104,9 @@ SUPPORTED_MLX_PRIMITIVES: frozenset[str] = frozenset({
     "_mlx_rmsnorm_scaled",
 })
 
-NON_OBVIOUS_MLX_OPS: dict[str, str] = {}
+NON_OBVIOUS_MLX_OPS: dict[str, str] = {
+    "scatter_reduce": "MLX exposes no native repeated-index scatter reduction",
+}
 
 
 @dataclass(frozen=True)
@@ -1349,6 +1356,11 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             return f"mx.softmax({args[0]}.astype(self._dtype_from_name({dtype})) if {dtype} != None else {args[0]}, axis=int({dim}))"
         if primitive == "topk":
             return f"self._topk({args[0]}, {args[1]}, dim={args[2]}, largest={args[3]}, sorted_={args[4]})"
+        if primitive == "argsort":
+            values = f"(-{args[0]})" if args[2] == "True" else args[0]
+            if args[2] not in {"True", "False"}:
+                values = f"mx.where(bool({args[2]}), -{args[0]}, {args[0]})"
+            return f"mx.argsort({values}, axis=int({args[1]}))"
         if primitive == "concat":
             if "dim" in attrs:
                 return f"self._concat({', '.join(args)}, dim={attrs['dim']})"
@@ -1383,6 +1395,8 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             "gather": lambda: f"mx.take({args[0]}, {args[1]}.astype(mx.int64), axis=int({args[2] if len(args) > 2 else '-1'}))",
             "scatter": lambda: f"mx.scatter({args[0]}, {args[1]}, {args[2]}, axis=int({args[3] if len(args) > 3 else '-1'}))",
             "index_add": lambda: f"self._index_add({args[0]}, {args[1]}, {args[2]}, {args[3] if len(args) > 3 else '0'})",
+            "random_normal": lambda: f"mx.random.normal(shape=tuple(int(x) for x in {args[1]}), dtype=({args[0]}.dtype if mx.issubdtype({args[0]}.dtype, mx.floating) else mx.float32), key=mx.random.key(int({args[2]})))",
+            "random_uniform": lambda: f"mx.random.uniform(shape=tuple(int(x) for x in {args[1]}), dtype=({args[0]}.dtype if mx.issubdtype({args[0]}.dtype, mx.floating) else mx.float32), key=mx.random.key(int({args[2]})))",
             "le": lambda: f"({args[0]} <= {args[1]})",
             "eq": lambda: f"self._eq({args[0]}, {args[1]})",
             "and": lambda: f"({args[0]} & {args[1]})",
@@ -1391,8 +1405,10 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
             "div": lambda: f"({args[0]} / {args[1]})",
             "pow": lambda: f"mx.power({args[0]}, {args[1]})",
             "floor": lambda: f"mx.floor({args[0]}) if isinstance({args[0]}, mx.array) else int({args[0]} // 1)",
+            "round": lambda: f"mx.round({args[0]}) if isinstance({args[0]}, mx.array) else round({args[0]})",
             "sqrt": lambda: f"mx.sqrt({args[0]}) if isinstance({args[0]}, mx.array) else ({args[0]} ** 0.5)",
             "sin": lambda: f"mx.sin({args[0]}) if isinstance({args[0]}, mx.array) else __import__('math').sin(float({args[0]}))",
+            "acos": lambda: f"mx.arccos({args[0]})",
             "cos": lambda: f"mx.cos({args[0]}) if isinstance({args[0]}, mx.array) else __import__('math').cos(float({args[0]}))",
             "exp": lambda: f"mx.exp({args[0]}) if isinstance({args[0]}, mx.array) else __import__('math').exp(float({args[0]}))",
             "log": lambda: f"mx.log({args[0]}) if isinstance({args[0]}, mx.array) else __import__('math').log(float({args[0]}))",
@@ -1566,7 +1582,7 @@ def emit_model_code_from_graph_ir(
             "    require_value as _common_require_value,",
             ")",
             "",
-            f"_MODEL_CONFIG = {model_config!r}",
+            f"_MODEL_CONFIG = {render_python_literal(model_config)}",
             "",
             "class _KVCache:",
             '    """Pre-allocated KV cache buffer — O(n) vs O(n²) for concatenate."""',

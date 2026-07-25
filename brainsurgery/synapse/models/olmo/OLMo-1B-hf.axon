@@ -1,0 +1,113 @@
+{-# CHECKPOINTS "allenai/OLMo-1B-hf" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "olmo" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Cache
+
+import Config
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (clamp, mul, pow)
+
+import NN
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Tensor
+
+MODEL_DIM <- (2048 :: Dim)
+
+VOCAB_SIZE <- (50304 :: Dim)
+
+NUM_LAYERS <- (16 :: Dim)
+
+NUM_HEADS <- (16 :: Dim)
+
+KV_HEADS <- Config.dim @@num_key_value_heads default=NUM_HEADS
+
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+
+FFN <- (8192 :: Dim)
+
+MAX_POSITIONS <- (2048 :: Dim)
+
+THETA <- 10000.0
+
+ATTENTION_BIAS <- false
+
+HAS_CLIP_QKV <- false
+
+CLIP_QKV <- Config.float @@clip_qkv default=0.0
+
+TIE_EMBEDDINGS <- true
+
+QD = NUM_HEADS * HEAD_DIM
+
+KVD = KV_HEADS * HEAD_DIM
+
+olmo_norm :: Tensor[..S,D] -> Tensor[..S,D]
+olmo_norm x = do
+  xf <- Tensor.cast x dtype="float32"
+  width <- Tensor.size xf dim=-1
+  mean <- Tensor.sum xf dim=-1 keepdim=true
+  mean <- mean / width
+  centered <- xf - mean
+  variance <- Tensor.sum (centered * centered) dim=-1 keepdim=true
+  variance <- variance / width
+  normalized <- centered / pow (variance + 1e-05) 0.5
+  return Tensor.cast_like normalized x
+
+olmo_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,DH])
+olmo_block x rope_sin rope_cos mask past_kv = do
+  residual <- x
+  xn <- olmo_norm x
+  q <- NN.linear@self_attn.q_proj xn dim=QD bias=ATTENTION_BIAS
+  k <- NN.linear@self_attn.k_proj xn dim=KVD bias=ATTENTION_BIAS
+  v <- NN.linear@self_attn.v_proj xn dim=KVD bias=ATTENTION_BIAS
+  q <- HAS_CLIP_QKV ? (clamp q min=(0.0 - CLIP_QKV) max=CLIP_QKV) : q
+  k <- HAS_CLIP_QKV ? (clamp k min=(0.0 - CLIP_QKV) max=CLIP_QKV) : k
+  v <- HAS_CLIP_QKV ? (clamp v min=(0.0 - CLIP_QKV) max=CLIP_QKV) : v
+  q <- reshape_heads q heads=NUM_HEADS
+  k <- reshape_heads k heads=KV_HEADS
+  v <- reshape_heads v heads=KV_HEADS
+  q, k <- rope_pair_base_factors q k rope_sin rope_cos
+  k, v, new_kv <- Cache.update past_kv k v
+  k_full <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+  v_full <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+  a <- attention q k_full v_full mask |> merge_heads |> NN.linear@self_attn.o_proj dim=MODEL_DIM bias=ATTENTION_BIAS
+  x <- residual + a
+  residual <- x
+  x <- olmo_norm x
+  gate <- NN.linear@mlp.gate_proj x dim=FFN bias=false |> silu
+  up <- NN.linear@mlp.up_proj x dim=FFN bias=false
+  x <- gate |> mul up |> NN.linear@mlp.down_proj dim=MODEL_DIM bias=false
+  return residual + x, new_kv
+
+olmo :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,DH])
+olmo input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x <- NN.embedding@model.embed_tokens input_ids dim=MODEL_DIM
+  x, work_kv <- for@model.layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
+    x, new_i <- olmo_block x rope_sin rope_cos mask past_i
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  x <- olmo_norm x
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- TIE_EMBEDDINGS ? (NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false) : (NN.linear@lm_head x dim=VOCAB_SIZE bias=false)
+  return logits, new_kv

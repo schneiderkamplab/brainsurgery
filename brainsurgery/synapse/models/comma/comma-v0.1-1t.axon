@@ -22,27 +22,27 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 4096
+MODEL_DIM <- (4096 :: Dim)
 
-VOCAB_SIZE = 64256
+VOCAB_SIZE <- (64256 :: Dim)
 
-NUM_LAYERS = 32
+NUM_LAYERS <- (32 :: Dim)
 
-NUM_HEADS = 32
+NUM_HEADS <- (32 :: Dim)
 
-KVH = 32
+KVH <- (32 :: Dim)
 
-MODEL_HEAD_DIM = 128
+MODEL_HEAD_DIM <- (128 :: Dim)
+
+FFN <- (11008 :: Dim)
+
+EPS <- 1e-05
+
+THETA <- 100000.0
+
+MAX_POSITIONS <- (16384 :: Dim)
 
 KVD = KVH * MODEL_HEAD_DIM
-
-FFN = 11008
-
-EPS = 1e-05
-
-THETA = 100000.0
-
-MAX_POSITIONS = 16384
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true

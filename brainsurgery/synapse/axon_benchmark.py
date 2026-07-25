@@ -39,6 +39,7 @@ from .axon_test import (
     _resolve_model_task,
     _run_axon_test_single,
     _task_pragma_from_axon,
+    _tokenizer_pragma_for_checkpoint,
 )
 from .axon import (
     GraphOptimizeConfig,
@@ -1170,7 +1171,20 @@ def _run_benchmark_pair(
     generate_warmup: int = 0,
     generate_repeat: int = 1,
 ) -> dict[str, Any]:
-    model_dir = _ensure_checkpoint_model_dir(repo_root=repo_root, checkpoint_id=pair.checkpoint_id)
+    declared_tokenizer = _tokenizer_pragma_for_checkpoint(
+        axon_file=pair.axon_file,
+        checkpoint_id=pair.checkpoint_id,
+    )
+    effective_tokenizer = tokenizer or declared_tokenizer
+    require_local_tokenizer = effective_tokenizer in {None, pair.checkpoint_id}
+    ensure_kwargs: dict[str, Any] = {}
+    if not require_local_tokenizer:
+        ensure_kwargs["require_tokenizer"] = False
+    model_dir = _ensure_checkpoint_model_dir(
+        repo_root=repo_root,
+        checkpoint_id=pair.checkpoint_id,
+        **ensure_kwargs,
+    )
     print()
     print("=" * 80)
     print(f"Axon file:      {pair.axon_file}")

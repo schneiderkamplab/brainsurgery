@@ -1,7 +1,32 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from typing import Any
+
+
+def render_python_literal(value: Any) -> str:
+    """Render JSON-like data as an import-safe Python expression."""
+    if isinstance(value, float):
+        if math.isnan(value):
+            return 'float("nan")'
+        if math.isinf(value):
+            return 'float("-inf")' if value < 0 else 'float("inf")'
+        return repr(value)
+    if isinstance(value, dict):
+        items = (
+            f"{render_python_literal(key)}: {render_python_literal(item)}"
+            for key, item in value.items()
+        )
+        return "{" + ", ".join(items) + "}"
+    if isinstance(value, list):
+        return "[" + ", ".join(render_python_literal(item) for item in value) + "]"
+    if isinstance(value, tuple):
+        items = ", ".join(render_python_literal(item) for item in value)
+        if len(value) == 1:
+            items += ","
+        return f"({items})"
+    return repr(value)
 
 
 def normalize_primitive_op(name: str) -> str:

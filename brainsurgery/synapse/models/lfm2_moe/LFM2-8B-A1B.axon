@@ -1,0 +1,183 @@
+{-# CHECKPOINTS "LiquidAI/LFM2-8B-A1B" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "lfm2_moe" #-}
+
+import Activations (sigmoid, silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Config
+
+import List
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul)
+
+import MoE (grouped_swiglu_ffn_separate)
+
+import NN
+
+import Params (param)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Tensor
+
+type AttnState[B, H, T, DH] = (Tensor[B,H,T,DH], Tensor[B,H,T,DH])
+
+type ConvState[B, D, CK] = Tensor[B,D,CK]
+
+type LayerState[B, H, T, DH, D, CK] = (?AttnState[B,H,T,DH], ?ConvState[B,D,CK])
+
+type Lfm2MoeCache[B, H, L, T, DH, D, CK] = (List[LayerState[B,H,T,DH,D,CK]], Dim)
+
+MODEL_DIM <- (2048 :: Dim)
+
+VOCAB_SIZE <- (65536 :: Dim)
+
+NUM_LAYERS <- (24 :: Dim)
+
+NUM_HEADS <- (32 :: Dim)
+
+KV_HEADS <- (8 :: Dim)
+
+DENSE_FFN <- (7168 :: Dim)
+
+MOE_FFN <- (1792 :: Dim)
+
+NUM_DENSE_LAYERS <- (2 :: Dim)
+
+NUM_EXPERTS <- (32 :: Dim)
+
+TOP_K <- (4 :: Dim)
+
+USE_EXPERT_BIAS <- true
+
+NORM_TOPK <- true
+
+ROUTE_SCALE <- 1.0
+
+MAX_POSITIONS <- (128000 :: Dim)
+
+THETA <- 1000000.0
+
+EPS <- 1e-05
+
+CONV_KERNEL <- (3 :: Dim)
+
+CONV_BIAS <- false
+
+LAYER_TYPES <- ((["conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "full_attention", "conv", "conv"]) :: List[String])
+
+TIE_EMBEDDINGS <- true
+
+HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+rms :: Path -> Tensor[..S] -> Tensor[..S]
+rms@path x = do
+  width <- Tensor.size x dim=-1
+  return NN.rmsnorm@path x eps=EPS dim=width cast_float=true
+
+attn_update :: ?AttnState[B,KV_HEADS,P,HEAD_DIM] -> Tensor[B,KV_HEADS,S,HEAD_DIM] -> Tensor[B,KV_HEADS,S,HEAD_DIM] -> (Tensor[B,KV_HEADS,K,HEAD_DIM], Tensor[B,KV_HEADS,K,HEAD_DIM], AttnState[B,KV_HEADS,K,HEAD_DIM])
+attn_update past k v = (past == null)
+    ? (k, v, (k, v))
+    : do
+        pk, pv <- (past :: AttnState[B,KV_HEADS,P,HEAD_DIM])
+        ka <- Tensor.concat pk k dim=-2
+        va <- Tensor.concat pv v dim=-2
+        return ka, va, (ka, va)
+
+lfm2_moe_attention :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?AttnState[B,KV_HEADS,P,HEAD_DIM] -> (Tensor[B,S,D], AttnState[B,KV_HEADS,K,HEAD_DIM])
+lfm2_moe_attention x rope_sin rope_cos mask past = do
+  q <- NN.linear@self_attn.q_proj x dim=(NUM_HEADS * HEAD_DIM) |> Tensor.reshape shape=[B, S, NUM_HEADS, HEAD_DIM] |> rms@self_attn.q_layernorm |> Tensor.permute dims=[0, 2, 1, 3]
+  k <- NN.linear@self_attn.k_proj x dim=(KV_HEADS * HEAD_DIM) |> Tensor.reshape shape=[B, S, KV_HEADS, HEAD_DIM] |> rms@self_attn.k_layernorm |> Tensor.permute dims=[0, 2, 1, 3]
+  v <- NN.linear@self_attn.v_proj x dim=(KV_HEADS * HEAD_DIM) |> reshape_heads heads=KV_HEADS
+  q, k <- rope_pair_base_factors q k rope_sin rope_cos
+  k, v, new_state <- attn_update past k v
+  k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+  v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+  y <- attention q k v mask |> merge_heads |> NN.linear@self_attn.out_proj dim=MODEL_DIM
+  return y, new_state
+
+lfm2_moe_convolution :: Tensor[B,S,D] -> ?Tensor[B,D,CONV_KERNEL] -> ?Tensor[B,S] -> (Tensor[B,S,D], Tensor[B,D,CONV_KERNEL])
+lfm2_moe_convolution x past attn_mask = do
+  seq <- Tensor.size x dim=1
+  apply_mask <- ((Tensor.size x dim=0) > 1) and (seq > 1) and (attn_mask != null)
+  x <- apply_mask ? (x * (Tensor.unsqueeze attn_mask dim=-1)) : x
+  bcx <- NN.linear@conv.in_proj x dim=(3 * MODEL_DIM) bias=CONV_BIAS
+  b, c, u <- Tensor.chunk bcx dim=-1 parts=3
+  bx <- Tensor.transpose (b * u) dim1=1 dim2=2
+  zero_prefix <- Tensor.zeros bx shape=[B, MODEL_DIM, CONV_KERNEL - 1]
+  prefix <- (past == null) ? zero_prefix : Tensor.slice (past :: Tensor[B,MODEL_DIM,CONV_KERNEL]) dim=-1 start=1 end=CONV_KERNEL
+  conv_input <- Tensor.concat prefix bx dim=-1
+  w <- ((param @conv.conv.weight) :: Tensor[MODEL_DIM,1,CONV_KERNEL])
+  bias <- CONV_BIAS ? ((param @conv.conv.bias) :: Tensor[MODEL_DIM]) : ((Tensor.zeros bx shape=[MODEL_DIM]) :: Tensor[MODEL_DIM])
+  y <- Tensor.reshape bias shape=[1, MODEL_DIM, 1] |> Tensor.expand shape=[B, MODEL_DIM, seq]
+  y <- for j <- [0..CONV_KERNEL) carry (y) do
+    x_j <- Tensor.slice conv_input dim=-1 start=j end=(j + seq)
+    w_j <- Tensor.slice w dim=-1 start=j end=(j + 1) |> Tensor.reshape shape=[1, MODEL_DIM, 1]
+    yield y + (x_j * w_j)
+  total <- Tensor.size conv_input dim=-1
+  new_state <- Tensor.slice conv_input dim=-1 start=(total - CONV_KERNEL) end=total
+  y <- Tensor.transpose y dim1=1 dim2=2
+  y <- c |> mul y |> NN.linear@conv.out_proj dim=MODEL_DIM bias=CONV_BIAS
+  return y, new_state
+
+lfm2_moe_dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+lfm2_moe_dense_ffn x = do
+  gate <- NN.linear@w1 x dim=DENSE_FFN bias=false |> silu
+  up <- NN.linear@w3 x dim=DENSE_FFN bias=false
+  return gate |> mul up |> NN.linear@w2 dim=MODEL_DIM bias=false
+
+lfm2_moe_sparse_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+lfm2_moe_sparse_ffn x = do
+  x32 <- Tensor.cast x dtype="float32"
+  logits <- NN.linear@gate x32 dim=NUM_EXPERTS bias=false
+  probs <- sigmoid logits
+  choice <- USE_EXPERT_BIAS ? (probs + (param @expert_bias)) : probs
+  _, indices <- Tensor.topk choice k=TOP_K dim=-1 largest=true sorted=false
+  scores <- Tensor.gather probs indices dim=-1
+  scores <- NORM_TOPK ? (scores / ((Tensor.sum scores dim=-1 keepdim=true) + 1e-6)) : scores
+  scores <- Tensor.cast_like (scores * ROUTE_SCALE) x
+  return grouped_swiglu_ffn_separate x scores indices NUM_EXPERTS MOE_FFN gate_weight=@experts.w1.weight up_weight=@experts.w3.weight out_weight=@experts.w2.weight
+
+lfm2_moe_layer :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?Tensor[B,S] -> ?LayerState[B,KV_HEADS,P,HEAD_DIM,MODEL_DIM,CONV_KERNEL] -> (Tensor[B,S,D], LayerState[B,KV_HEADS,K,HEAD_DIM,MODEL_DIM,CONV_KERNEL])
+lfm2_moe_layer x i rope_sin rope_cos mask attn_mask past = do
+  past_attn, past_conv <- (past == null) ? (((null :: ?AttnState[B,KV_HEADS,P,HEAD_DIM]), (null :: ?ConvState[B,MODEL_DIM,CONV_KERNEL])) :: LayerState[B,KV_HEADS,P,HEAD_DIM,MODEL_DIM,CONV_KERNEL]) : (past :: LayerState[B,KV_HEADS,P,HEAD_DIM,MODEL_DIM,CONV_KERNEL])
+  xn <- rms@operator_norm x
+  layer_type <- List.index LAYER_TYPES i
+  y, state <- (layer_type == "full_attention")
+        ? do
+            y, state <- lfm2_moe_attention xn rope_sin rope_cos mask past_attn
+            return y, ((state, (null :: ?ConvState[B,MODEL_DIM,CONV_KERNEL])) :: LayerState[B,KV_HEADS,K,HEAD_DIM,MODEL_DIM,CONV_KERNEL])
+        : do
+            y, state <- lfm2_moe_convolution xn past_conv attn_mask
+            return y, (((null :: ?AttnState[B,KV_HEADS,K,HEAD_DIM]), state) :: LayerState[B,KV_HEADS,K,HEAD_DIM,MODEL_DIM,CONV_KERNEL])
+  x <- x + y
+  xn <- rms@ffn_norm x
+  m <- scope@feed_forward do
+    return (i < NUM_DENSE_LAYERS) ? (lfm2_moe_dense_ffn xn) : (lfm2_moe_sparse_ffn xn)
+  return x + m, state
+
+lfm2_moe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Lfm2MoeCache[B,KV_HEADS,NUM_LAYERS,P,HEAD_DIM,MODEL_DIM,CONV_KERNEL] -> ?Bool -> (Tensor[B,S,V], ?Lfm2MoeCache[B,KV_HEADS,NUM_LAYERS,K,HEAD_DIM,MODEL_DIM,CONV_KERNEL])
+lfm2_moe input_ids attn_mask past_kv use_cache = do
+  past_layers, past_length <- (past_kv == null) ? ((List.init :: List[LayerState[B,KV_HEADS,P,HEAD_DIM,MODEL_DIM,CONV_KERNEL]]), (0 :: Int)) : (past_kv :: Lfm2MoeCache[B,KV_HEADS,NUM_LAYERS,P,HEAD_DIM,MODEL_DIM,CONV_KERNEL])
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  x <- NN.embedding@model.embed_tokens input_ids dim=MODEL_DIM
+  new_layers <- (List.init :: List[LayerState[B,KV_HEADS,K,HEAD_DIM,MODEL_DIM,CONV_KERNEL]])
+  x, new_layers <- for@model.layers i <- [0..NUM_LAYERS) carry (x, new_layers) do
+    past_i <- (past_kv == null) ? null : List.index past_layers i
+    x, state <- lfm2_moe_layer x i rope_sin rope_cos mask attn_mask past_i
+    yield x, List.append new_layers state
+  x <- NN.rmsnorm@model.embedding_norm x eps=EPS cast_float=true
+  new_cache <- ((new_layers, key_len) :: Lfm2MoeCache[B,KV_HEADS,NUM_LAYERS,K,HEAD_DIM,MODEL_DIM,CONV_KERNEL])
+  new_cache <- use_cache ? new_cache : null
+  logits <- TIE_EMBEDDINGS ? NN.linear@model.embed_tokens x dim=VOCAB_SIZE bias=false : NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, new_cache

@@ -1,5 +1,6 @@
 export (
   PI,
+  acos,
   add,
   clamp,
   cos,
@@ -9,11 +10,15 @@ export (
   log,
   mul,
   pow,
+  round,
   sin,
   sqrt,
 )
 
 PI = 3.141592653589793
+
+acos :: Tensor[..S] -> Tensor[..S]
+acos x = _acos x
 
 add :: Any -> Any -> Any
 add x y = _add x y
@@ -35,6 +40,9 @@ log x = _log x
 
 floor :: Any -> Any
 floor x = _floor x
+
+round :: Any -> Any
+round x = _round x
 
 sin :: Tensor[..S] -> Tensor[..S]
 sin x = _sin x

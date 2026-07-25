@@ -20,49 +20,49 @@ import NN
 
 import Tensor
 
-MODEL_DIM = 768
+MODEL_DIM <- 768
 
-VOCAB_SIZE = 256000
+VOCAB_SIZE <- 256000
 
-L_ENC = 12
+L_ENC <- 12
 
-L_DEC = 12
+L_DEC <- 12
 
-NUM_HEADS = 12
+NUM_HEADS <- 12
 
-KVH = 12
+KVH <- 12
 
-MODEL_HEAD_DIM = 64
+MODEL_HEAD_DIM <- 64
+
+FFN_ENC <- 2048
+
+FFN_DEC <- 2048
+
+EPS <- 1e-06
+
+THETA <- 10000.0
+
+WIN_SLIDE_ENC <- 4096
+
+WIN_SLIDE_DEC <- 4096
+
+WIN_FULL_ENC <- 8192
+
+WIN_FULL_DEC <- 8192
+
+ROPE_PERIOD_ENC <- 2
+
+ROPE_PERIOD_DEC <- 2
+
+ATTN_SCALE <- 1.0 / sqrt (64.0)
+
+LOGIT_SOFTCAP <- 30.0
 
 QD = NUM_HEADS * MODEL_HEAD_DIM
 
 KVD = KVH * MODEL_HEAD_DIM
 
-FFN_ENC = 2048
-
-FFN_DEC = 2048
-
-EPS = 1e-06
-
-THETA = 10000.0
-
-WIN_SLIDE_ENC = 4096
-
-WIN_SLIDE_DEC = 4096
-
-WIN_FULL_ENC = 8192
-
-WIN_FULL_DEC = 8192
-
-ROPE_PERIOD_ENC = 2
-
-ROPE_PERIOD_DEC = 2
-
-ATTN_SCALE = 1.0 / sqrt (64.0)
-
 EMB_SCALE = sqrt MODEL_DIM
-
-LOGIT_SOFTCAP = 30.0
 
 t5gemma_encoder_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,S] -> Tensor[B,1,S,S] -> Tensor[B,NUM_HEADS,S,S] -> Tensor[B,NUM_HEADS,S,S] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,S,D]
 t5gemma_encoder_block x i mask_slide mask_full additive_mask_slide additive_mask_full rope_sin rope_cos = do

@@ -1,0 +1,68 @@
+{-# CHECKPOINTS "facebook/data2vec-text-base" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "data2vec_text" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Positions (position_ids)
+
+import Config
+
+import NN
+
+MODEL_DIM <- 768
+
+VOCAB_SIZE <- 50265
+
+NUM_LAYERS <- 12
+
+NUM_HEADS <- 12
+
+FFN <- 3072
+
+EPS <- 1e-05
+
+PAD <- 1
+
+data2vec_text_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+data2vec_text_block x keep = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- x + a
+  x <- NN.layernorm@attention.output.LayerNorm x eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  y <- x + m
+  y <- NN.layernorm@output.LayerNorm y eps=EPS
+  return y
+
+data2vec_text :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
+data2vec_text input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_base <- position_ids input_ids attn_mask=attn_mask pad_fill=-1
+  pos_ids <- pos_base + PAD + 1
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@data2vec_text.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@data2vec_text.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@data2vec_text.embeddings.token_type_embeddings tok_type_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- x + typ
+  x <- NN.layernorm@data2vec_text.embeddings.LayerNorm x eps=EPS
+  x <- for@data2vec_text.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- data2vec_text_block x keep
+    yield x
+  logits <- scope@lm_head do
+    x <- NN.linear@dense x dim=MODEL_DIM bias=true |> gelu
+    x <- NN.layernorm@layer_norm x eps=EPS
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@data2vec_text.embeddings.word_embeddings.weight bias_path=@@lm_head.bias
+  return logits

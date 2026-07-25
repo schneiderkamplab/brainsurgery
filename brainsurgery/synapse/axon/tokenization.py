@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerFast
 
 
 def _is_marian_autotokenizer_error(exc: Exception) -> bool:
@@ -84,6 +84,14 @@ def load_tokenizer(
                 return _from_pretrained(source, **kwargs)
             except Exception as exc:
                 last_error = exc
+        if (candidate / "tokenizer.json").exists():
+            try:
+                return PreTrainedTokenizerFast.from_pretrained(
+                    source,
+                    local_files_only=True,
+                )
+            except Exception:
+                pass
         if (
             isinstance(fallback_repo_id, str)
             and _looks_like_hf_repo_id(fallback_repo_id)
@@ -213,7 +221,10 @@ def _ensure_special_tokens_from_config(
     *,
     trust_remote_code: bool,
 ) -> None:
-    if tokenizer_obj.eos_token_id is not None or tokenizer_obj.bos_token_id is not None:
+    if (
+        getattr(tokenizer_obj, "eos_token_id", None) is not None
+        and getattr(tokenizer_obj, "bos_token_id", None) is not None
+    ):
         return
     eos_id, bos_id = _special_token_ids_from_config(
         tokenizer_source,
@@ -224,7 +235,7 @@ def _ensure_special_tokens_from_config(
         eos_token = tokenizer_obj.convert_ids_to_tokens(eos_id)
         if isinstance(eos_token, str):
             tokenizer_obj.eos_token = eos_token
-    if tokenizer_obj.bos_token_id is None and bos_id is not None:
+    if getattr(tokenizer_obj, "bos_token_id", None) is None and bos_id is not None:
         bos_token = tokenizer_obj.convert_ids_to_tokens(bos_id)
         if isinstance(bos_token, str):
             tokenizer_obj.bos_token = bos_token

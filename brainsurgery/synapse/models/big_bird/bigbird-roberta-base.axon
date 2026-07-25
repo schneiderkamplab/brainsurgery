@@ -1,0 +1,97 @@
+{-# CHECKPOINTS "google/bigbird-roberta-base" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "big_bird" #-}
+
+import Activations (gelu_new)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Config
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Math (log, sqrt)
+
+import NN
+
+import Positions (position_ids)
+
+import Tensor
+
+MODEL_DIM <- (768 :: Dim)
+
+VOCAB_SIZE <- (50358 :: Dim)
+
+NUM_LAYERS <- (12 :: Dim)
+
+NUM_HEADS <- (12 :: Dim)
+
+FFN <- (3072 :: Dim)
+
+EPS <- 1e-12
+
+BLOCK_SIZE <- (64 :: Dim)
+
+NUM_RANDOM_BLOCKS <- (3 :: Dim)
+
+RESCALE_EMBEDDINGS <- false
+
+big_bird_eval_attention_inputs :: TokenIds[B,S] -> Tensor[B,S] -> (Tensor[B,1,S,S], Tensor[1,1,S,S])
+big_bird_eval_attention_inputs input_ids padding_mask = do
+  full_keep <- bidirectional_mask_for_input input_ids S padding_mask=padding_mask
+  positions <- Tensor.arange input_ids 0 S
+  blocks <- Tensor.cast (positions / BLOCK_SIZE) "long"
+  query_blocks <- Tensor.reshape blocks shape=[S, 1]
+  key_blocks <- Tensor.reshape blocks shape=[1, S]
+  block_delta <- query_blocks - key_blocks
+  block_distance <- Tensor.where (Tensor.le block_delta 0) (0 - block_delta) block_delta
+  local <- Tensor.le block_distance 1
+  last_block <- (S - 1) / BLOCK_SIZE
+  global_query <- (Tensor.eq query_blocks 0) or (Tensor.eq query_blocks last_block)
+  global_key <- (Tensor.eq key_blocks 0) or (Tensor.eq key_blocks last_block)
+  sparse_keep <- local or global_query
+  sparse_keep <- sparse_keep or global_key
+  sparse_keep <- Tensor.reshape sparse_keep shape=[1, 1, S, S]
+  sparse_keep <- Tensor.expand sparse_keep shape=[B, 1, S, S]
+  sparse_keep <- sparse_keep and full_keep
+  full_threshold <- (5 + (2 * NUM_RANDOM_BLOCKS)) * BLOCK_SIZE
+  use_full <- S <= full_threshold
+  keep <- use_full ? full_keep : sparse_keep
+  duplicate_first_block <- (Tensor.eq global_query false) and (Tensor.eq key_blocks 0)
+  sparse_bias <- Tensor.cast duplicate_first_block "float32"
+  sparse_bias <- sparse_bias * log (1.0 + NUM_RANDOM_BLOCKS)
+  sparse_bias <- Tensor.reshape sparse_bias shape=[1, 1, S, S]
+  zero_bias <- Tensor.zeros input_ids shape=[1, 1, S, S] dtype="float32"
+  return keep, (use_full ? zero_bias : sparse_bias)
+
+big_bird_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[1,1,S,S] -> Tensor[B,S,D]
+big_bird_block x keep rel_bias = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    return attention q k v keep rel_bias=rel_bias |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- NN.layernorm@attention.output.LayerNorm (x + a) eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu_new
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return NN.layernorm@output.LayerNorm (x + m) eps=EPS
+
+big_bird :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+big_bird input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  token_type_ids <- input_ids - input_ids
+  keep, rel_bias <- big_bird_eval_attention_inputs input_ids attn_mask
+  tok <- NN.embedding@bert.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  tok <- RESCALE_EMBEDDINGS ? (tok * sqrt MODEL_DIM) : tok
+  pos <- NN.embedding@bert.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@bert.embeddings.token_type_embeddings token_type_ids dim=MODEL_DIM
+  x <- NN.layernorm@bert.embeddings.LayerNorm (tok + pos + typ) eps=EPS
+  x <- for@bert.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- big_bird_block x keep rel_bias
+    yield x
+  x <- NN.linear@cls.predictions.transform.dense x dim=MODEL_DIM bias=true |> gelu_new
+  x <- NN.layernorm@cls.predictions.transform.LayerNorm x eps=EPS
+  return NN.linear@cls.predictions.decoder x dim=VOCAB_SIZE bias=true weight_path=@@bert.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias

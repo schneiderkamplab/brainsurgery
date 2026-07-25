@@ -24,71 +24,81 @@ import NN
 
 import Tensor
 
-CFG = "text_config"
+CFG <- "text_config"
 
-PARAM_ROOT = (has_root "model.language_model") ? "model" : ""
+PARAM_ROOT <- (has_root "model.language_model") ? "model" : ""
 
-MODEL_DIM = 128
+MODEL_DIM <- 128
 
-VOCAB_SIZE = 262144
+MODEL_DIM_FLOAT <- 128.0
 
-NUM_LAYERS = 4
+VOCAB_SIZE <- 262144
 
-NUM_HEADS = 4
+NUM_LAYERS <- 4
 
-KVH = 2
+NUM_HEADS <- 4
 
-HAS_GLOBAL_KVH = true
+KVH <- 2
 
-GKVH = HAS_GLOBAL_KVH ? (2) : KVH
+HAS_GLOBAL_KVH <- true
 
-MODEL_HEAD_DIM = 32
+GKVH <- HAS_GLOBAL_KVH ? (2) : KVH
 
-HAS_GLOBAL_HD = true
+MODEL_HEAD_DIM <- 32
 
-GHD = HAS_GLOBAL_HD ? (32) : MODEL_HEAD_DIM
+HAS_GLOBAL_HD <- true
 
-FFN = 256
+GHD <- HAS_GLOBAL_HD ? (32) : MODEL_HEAD_DIM
 
-MOE_FFN = 64
+FFN <- 256
 
-PLI = 256
+MOE_FFN <- 64
 
-WIN_LOCAL = 64
+PLI <- 256
 
-WIN_FULL = 1024
+PLI_FLOAT <- 256.0
 
-EPS = 1e-06
+WIN_LOCAL <- 64
 
-THETA_LOCAL = 10000.0
+WIN_FULL <- 512
 
-THETA_FULL = 1000000.0
+EPS <- 1e-06
 
-ROPE_SCALE_FULL = 1.0
+THETA_LOCAL <- 10000.0
 
-ROTARY_PARTIAL_FULL = 0.25
+THETA_FULL <- 1000000.0
+
+ROPE_SCALE_FULL <- 1.0
+
+ROTARY_PARTIAL_FULL <- 0.25
 
 ROPE_PERIOD <- Config.int @@text_config.sliding_window_pattern default=(USE_DOUBLE_WIDE_MLP ? 5 : 6)
 
-ATTN_K_EQ_V = false
+ATTN_K_EQ_V <- false
 
-LOGIT_SOFTCAP = 30.0
+LOGIT_SOFTCAP <- 30.0
 
-HAS_PLI = PLI > 0
+HAS_PLI <- PLI > 0
 
-PER_LAYER_INPUT_SCALE = 0.7071067811865476
+PER_LAYER_INPUT_SCALE <- 0.7071067811865476
 
-NUM_KV_SHARED = 0
+NUM_KV_SHARED <- 0
 
-USE_DOUBLE_WIDE_MLP = true
+USE_DOUBLE_WIDE_MLP <- true
 
-HAS_TOPK_EXPERTS = true
+HAS_TOPK_EXPERTS <- true
 
-TOPK_EXPERTS = HAS_TOPK_EXPERTS ? (2) : 8
+TOPK_EXPERTS <- HAS_TOPK_EXPERTS ? (2) : 8
 
-HAS_NUM_EXPERTS = true
+HAS_NUM_EXPERTS <- true
 
-NUM_EXPERTS = HAS_NUM_EXPERTS ? (4) : 128
+NUM_EXPERTS <- HAS_NUM_EXPERTS ? (4) : 128
+
+EMB_SCALE <- sqrt MODEL_DIM_FLOAT
+
+PLI_SCALE <- sqrt PLI_FLOAT
+
+PROJ_SCALE <- 1.0 / EMB_SCALE
 
 rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
 rms@path x = NN.rmsnorm@path x cast_float=true
@@ -185,11 +195,8 @@ gemma4_e input_ids attn_mask past_kv use_cache = do
   work_kv <- Cache.prepare past_kv use_cache WIN_FULL
   read_kv <- Cache.read past_kv work_kv
   logits, new_kv <- scope@model.language_model do
-    emb_scale <- sqrt (128.0)
-    pli_scale <- sqrt (256.0)
-    proj_scale <- 1.0 / emb_scale
-    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=emb_scale
-    per_layer_inputs <- gemma4_per_layer_inputs input_ids x num_layers=NUM_LAYERS per_layer_dim=PLI embed_scale=pli_scale projection_scale=proj_scale combine_scale=PER_LAYER_INPUT_SCALE rms_eps=EPS
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM scale=EMB_SCALE
+    per_layer_inputs <- gemma4_per_layer_inputs input_ids x num_layers=NUM_LAYERS per_layer_dim=PLI embed_scale=PLI_SCALE projection_scale=PROJ_SCALE combine_scale=PER_LAYER_INPUT_SCALE rms_eps=EPS
     shared_full_k <- (null :: ?Tensor[B,KVH,S,DHF])
     shared_full_v <- (null :: ?Tensor[B,KVH,S,DHF])
     shared_sliding_k <- (null :: ?Tensor[B,KVH,S,DHS])

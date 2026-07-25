@@ -24,59 +24,59 @@ import NN
 
 import Tensor
 
-CFG = (false) ? "text_config" : ""
+CFG <- (false) ? "text_config" : ""
+
+MODEL_DIM <- 4096
+
+VOCAB_SIZE <- 131072
+
+NUM_LAYERS <- 36
+
+NUM_HEADS <- 32
+
+QKNOPE <- 64
+
+QKROPE <- 64
+
+VHD <- 128
+
+QLR <- 1024
+
+KVR <- 256
+
+EM <- 2048
+
+E <- 128
+
+EPT <- 4
+
+SE <- 1
+
+EPS <- 1e-06
+
+THETA <- Config.float @@'{ROPE_CFG}.rope_theta' default=10000.0
+
+ROPE_FACTOR <- Config.float @@'{ROPE_CFG}.factor' default=128.0
+
+ROPE_CONTEXT <- Config.int @@'{ROPE_CFG}.original_max_position_embeddings' default=8192
+
+MAX_POSITIONS <- Config.int @@'{CFG}.max_position_embeddings' default=ROPE_CONTEXT
+
+ROPE_BETA_FAST <- Config.float @@'{ROPE_CFG}.beta_fast' default=32.0
+
+ROPE_BETA_SLOW <- Config.float @@'{ROPE_CFG}.beta_slow' default=1.0
+
+ROPE_MSCALE <- Config.float @@'{ROPE_CFG}.mscale' default=1.0
+
+ROPE_MSCALE_ALL_DIM <- Config.float @@'{ROPE_CFG}.mscale_all_dim' default=1.0
+
+Q_SCALE_BETA <- Config.float @@'{ROPE_CFG}.llama_4_scaling_beta' default=0.1
+
+ROUTE_SCALE <- 1.0
 
 ROPE_CFG = (CFG == "") ? "rope_parameters" : "text_config.rope_parameters"
 
-MODEL_DIM = 4096
-
-VOCAB_SIZE = 131072
-
-NUM_LAYERS = 36
-
-NUM_HEADS = 32
-
-QKNOPE = 64
-
-QKROPE = 64
-
 QKHD = QKNOPE + QKROPE
-
-VHD = 128
-
-QLR = 1024
-
-KVR = 256
-
-EM = 2048
-
-E = 128
-
-EPT = 4
-
-SE = 1
-
-EPS = 1e-06
-
-THETA = 10000.0
-
-ROPE_FACTOR = 128.0
-
-ROPE_CONTEXT = 8192
-
-MAX_POSITIONS = 8192
-
-ROPE_BETA_FAST = 32.0
-
-ROPE_BETA_SLOW = 1.0
-
-ROPE_MSCALE = 1.0
-
-ROPE_MSCALE_ALL_DIM = 1.0
-
-Q_SCALE_BETA = 0.1
-
-ROUTE_SCALE = 1.0
 
 ATTN_SCALE = 1.0 / sqrt QKHD
 

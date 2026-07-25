@@ -1,0 +1,68 @@
+{-# CHECKPOINTS ["uw-madison/nystromformer-512"] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (gelu_new)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+import Params (param)
+import Positions (position_ids)
+import Config
+import NN
+import Tensor
+
+
+MODEL_DIM <- Config.int @@hidden_size default=768
+VOCAB_SIZE <- Config.int @@vocab_size default=30000
+NUM_LAYERS <- Config.int @@num_hidden_layers default=12
+NUM_HEADS <- Config.int @@num_attention_heads default=12
+HEAD_DIM <- MODEL_DIM / NUM_HEADS
+FFN <- Config.int @@intermediate_size default=3072
+KERNEL <- Config.int @@conv_kernel_size default=65
+PAD <- (KERNEL - 1) / 2
+EPS <- Config.float @@layer_norm_eps default=1e-5
+
+local_value_conv :: Tensor[B,NUM_HEADS,S,HEAD_DIM] -> Tensor[NUM_HEADS,1,KERNEL,1] -> Tensor[B,NUM_HEADS,S,HEAD_DIM]
+local_value_conv x weight = do
+  zero <- Tensor.slice x dim=2 start=0 end=1 |> Tensor.zeros_like
+  zeros <- Tensor.expand zero shape=[B, NUM_HEADS, PAD, HEAD_DIM]
+  padded <- Tensor.concat zeros x dim=2 |> Tensor.concat zeros dim=2
+  out <- Tensor.zeros_like x
+  out <- for t <- [0..KERNEL) carry (out) do
+    shifted <- Tensor.slice padded dim=2 start=t end=(t + S)
+    scale <- Tensor.slice weight dim=2 start=t end=(t + 1)
+    scale <- Tensor.reshape scale shape=[1, NUM_HEADS, 1, 1]
+    yield out + (shifted * scale)
+  return out
+
+nystromformer_block :: Tensor[B,S,MODEL_DIM] -> Tensor[B,1,S,S] -> Tensor[B,S,MODEL_DIM]
+nystromformer_block x keep = do
+  a <- scope@attention do
+    q <- NN.linear@self.query x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    local_weight <- ((param @self.conv.weight) :: Tensor[NUM_HEADS,1,KERNEL,1])
+    local <- local_value_conv v local_weight
+    a <- attention q k v keep
+    return merge_heads (a + local) |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- NN.layernorm@attention.output.LayerNorm (x + a) eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu_new
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return NN.layernorm@output.LayerNorm (x + m) eps=EPS
+
+nystromformer :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+nystromformer input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  pos_ids <- position_ids input_ids
+  pos_ids <- pos_ids + 2
+  token_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@nystromformer.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@nystromformer.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@nystromformer.embeddings.token_type_embeddings token_type_ids dim=MODEL_DIM
+  x <- NN.layernorm@nystromformer.embeddings.LayerNorm (tok + pos + typ) eps=EPS
+  x <- for@nystromformer.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- nystromformer_block x keep
+    yield x
+  x <- NN.linear@cls.predictions.transform.dense x dim=MODEL_DIM bias=true |> gelu_new
+  x <- NN.layernorm@cls.predictions.transform.LayerNorm x eps=EPS
+  return NN.linear@cls.predictions.decoder x dim=VOCAB_SIZE bias=true weight_path=@@nystromformer.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias

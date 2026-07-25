@@ -4717,8 +4717,20 @@ def _has_torch_selected_expert_intrinsic_candidates(graph: GraphProgram) -> bool
     # no-op provenance searches in unrelated routing code.
     # Do not filter on module names or higher-level helper definitions.
     names = _graph_op_names(graph)
-    has_selected_expert_shape = "_where_indices" in names or ("_topk" in names and "_sum" in names)
-    return has_selected_expert_shape and ("_expert_linear" in names or "_linear" in names)
+    has_selected_expert_shape = (
+        "_where_indices" in names
+        or ("_topk" in names and "_sum" in names)
+        or any(name.startswith("__") and name.endswith("_weighted_topk_sum") for name in names)
+    )
+    has_expert_compute = (
+        "_expert_linear" in names
+        or "_linear" in names
+        or any(
+            name.startswith("__") and name.endswith("_expert_packed_swiglu_ffn")
+            for name in names
+        )
+    )
+    return has_selected_expert_shape and has_expert_compute
 
 
 def _rewrite_torch_selected_expert_intrinsics(
@@ -6525,9 +6537,38 @@ def _result_types(type_expr: TypeExpr, output_count: int) -> tuple[TypeExpr, ...
 def _destructured_list_output_types(
     primitive_type: TypeList,
     output_count: int,
+    *,
+    op_name: str | None = None,
+    inputs: tuple[GraphOperand, ...] = (),
 ) -> tuple[TypeExpr, ...] | None:
     if output_count <= 1 or isinstance(primitive_type.item, TypeAny):
         return None
+    if op_name == "_split" and len(inputs) >= 3:
+        input_type = graph_operand_type(inputs[0])
+        dim_token = _graph_operand_dim_token_for_type_rule(inputs[1], None)
+        size_tokens = _reshape_shape_tokens(inputs[2])
+        if (
+            isinstance(input_type, TypeTensor)
+            and type(dim_token) is int
+            and size_tokens is not None
+            and len(size_tokens) == output_count
+            and input_type.dims
+        ):
+            axis = dim_token
+            if axis < 0:
+                axis += len(input_type.dims)
+            if 0 <= axis < len(input_type.dims):
+                return tuple(
+                    TypeTensor(
+                        base=input_type.base,
+                        dims=(
+                            *input_type.dims[:axis],
+                            size,
+                            *input_type.dims[axis + 1 :],
+                        ),
+                    )
+                    for size in size_tokens
+                )
     return tuple(primitive_type.item for _ in range(output_count))
 
 
@@ -6537,7 +6578,10 @@ def _type_contains_inference_var(type_expr: TypeExpr) -> bool:
     if _is_graph_type_variable_like(type_expr):
         return True
     if isinstance(type_expr, TypeTensor):
-        return any(isinstance(dim, str) and dim.startswith("..") for dim in type_expr.dims)
+        return any(
+            dim == -1 or (isinstance(dim, str) and dim.startswith(".."))
+            for dim in type_expr.dims
+        )
     if isinstance(type_expr, TypeOptional):
         return _type_contains_inference_var(type_expr.inner)
     if isinstance(type_expr, TypeList):
@@ -6652,6 +6696,8 @@ def _type_has_non_dim_local_dim_ref(
 
 def _refined_compatible_type(current: TypeExpr, desired: TypeExpr) -> TypeExpr:
     if not (graph_type_compatible(current, desired) or graph_type_compatible(desired, current)):
+        return current
+    if _type_contains_inference_var(desired) and not _type_contains_inference_var(current):
         return current
     if (
         isinstance(current, TypeTensor)
@@ -6906,14 +6952,19 @@ def _unify_dim_binding(
     actual_dim: DimToken,
     dim_map: dict[str, DimToken],
 ) -> None:
+    if formal_name not in dim_map:
+        # Formal and actual dimensions live in different lexical scopes. A
+        # call may therefore instantiate callee S with caller 3 * S. Graph
+        # dimension substitution is parallel, so the S inside the replacement
+        # is a caller symbol rather than a recursive reference to the formal.
+        if actual_dim != formal_name:
+            dim_map[formal_name] = actual_dim
+        return
     actual = substitute_dim_token(actual_dim, dim_map)
     if actual == -1:
         return
     existing = dim_map.get(formal_name)
-    if existing is None:
-        if actual != formal_name:
-            _set_dim_binding_if_acyclic(dim_map, formal_name, actual)
-        return
+    assert existing is not None
     existing = substitute_dim_token(existing, dim_map)
     if existing == -1:
         _set_dim_binding_if_acyclic(dim_map, formal_name, actual)
@@ -7397,18 +7448,7 @@ def _instantiate_call_output_types(
         )
         for type_expr in raw_declared_outputs
     )
-    bound_dim_names = _call_bound_dim_names_from_actuals(actuals, dim_values=dim_values)
-    if all(
-        not _type_contains_inference_var(type_expr)
-        and not _type_contains_unbound_dim(type_expr, bound_dim_names)
-        for type_expr in declared_outputs
-    ):
-        return declared_outputs
-    if (
-        len(callee.nodes) == 1
-        and output_count == len(callee.nodes[0].outputs)
-        and not callee.is_global_binding
-    ):
+    if len(callee.nodes) == 1 and not callee.is_global_binding:
         synthetic = GraphNode(
             id=f"{callee.name}:call",
             op=GraphOp(callee.name),
@@ -7445,6 +7485,13 @@ def _instantiate_call_output_types(
             and not any(_type_contains_inference_var(type_expr) for type_expr in forwarded_types)
         ):
             return forwarded_types
+    bound_dim_names = _call_bound_dim_names_from_actuals(actuals, dim_values=dim_values)
+    if all(
+        not _type_contains_inference_var(type_expr)
+        and not _type_contains_unbound_dim(type_expr, bound_dim_names)
+        for type_expr in declared_outputs
+    ):
+        return declared_outputs
     if (
         callee.return_type_expr is not None
         and _module_return_type_needs_body_inference(callee)
@@ -7541,28 +7588,36 @@ def _infer_primitive_graph_type(
     type_rule = get_op_type_rule(op_name[1:] if op_name.startswith("_") else op_name)
     if type_rule is None:
         return None
-    inferred = type_rule(
-        arg_types=tuple(graph_operand_type(item) for item in inputs),
-        kwarg_types={key: graph_operand_type(value) for key, value in attrs.items()},
-        args=inputs,
-        kwargs=dict(attrs),
-        helpers=_PrimitiveTypeHelpers(
-            type_dims=_type_dims,
-            expr_to_dim_token=lambda value: _graph_operand_dim_token_for_type_rule(value, dim_values)
-            if isinstance(value, GraphValueRef | GraphLiteral | GraphPath | GraphExpr)
-            else None,
-            type_tensor=lambda *, dims: TypeTensor(base="Tensor", dims=tuple(dims)),
-            resolve_name_expr=lambda name: GraphValueRef(
-                name=name,
-                type_expr=TypeDim(),
-            )
-            if dim_values is not None and name in dim_values
-            else None,
-            broadcast_tensor_dims=lambda left, right: _broadcast_graph_dims(left, right),
-            dim_equivalent=lambda left, right: substitute_dim_token(left, {}) == substitute_dim_token(right, {}),
-            unify_dim=_unify_graph_dim_for_type_rule,
-        ),
-    )
+    arg_types = tuple(graph_operand_type(item) for item in inputs)
+    kwarg_types = {key: graph_operand_type(value) for key, value in attrs.items()}
+    try:
+        inferred = type_rule(
+            arg_types=arg_types,
+            kwarg_types=kwarg_types,
+            args=inputs,
+            kwargs=dict(attrs),
+            helpers=_PrimitiveTypeHelpers(
+                type_dims=_type_dims,
+                expr_to_dim_token=lambda value: _graph_operand_dim_token_for_type_rule(value, dim_values)
+                if isinstance(value, GraphValueRef | GraphLiteral | GraphPath | GraphExpr)
+                else None,
+                type_tensor=lambda *, dims: TypeTensor(base="Tensor", dims=tuple(dims)),
+                resolve_name_expr=lambda name: GraphValueRef(
+                    name=name,
+                    type_expr=TypeDim(),
+                )
+                if dim_values is not None and name in dim_values
+                else None,
+                broadcast_tensor_dims=lambda left, right: _broadcast_graph_dims(left, right),
+                dim_equivalent=lambda left, right: substitute_dim_token(left, {}) == substitute_dim_token(right, {}),
+                unify_dim=_unify_graph_dim_for_type_rule,
+            ),
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"graph primitive type inference failed for {op_name!r} "
+            f"with args={arg_types!r} kwargs={kwarg_types!r}: {exc}"
+        ) from exc
     return inferred if isinstance(inferred, TypeExpr) else None
 
 
@@ -7751,6 +7806,14 @@ def _more_specific_compatible_type(
     prefer_refreshed_dim_names: set[str] | None = None,
 ) -> TypeExpr:
     prefer_refreshed_dim_names = prefer_refreshed_dim_names or set()
+    if (
+        isinstance(existing, TypeTensor)
+        and isinstance(refreshed, TypeTensor)
+        and len(existing.dims) == len(refreshed.dims)
+        and graph_type_compatible(existing, refreshed)
+        and any(old == -1 and new != -1 for old, new in zip(existing.dims, refreshed.dims, strict=True))
+    ):
+        return refreshed
     if (
         prefer_refreshed_dim_names
         and graph_type_compatible(existing, refreshed)
@@ -7987,7 +8050,7 @@ def _module_input_dim_symbols(module: GraphModule) -> set[str]:
 
 def _dim_has_unbound_names(dim: DimToken, bound_names: set[str]) -> bool:
     return any(
-        isinstance(name, str) and not name.startswith("..") and name not in bound_names
+        isinstance(name, str) and (name.startswith("..") or name not in bound_names)
         for name in dim_token_names(dim)
     )
 
@@ -8333,6 +8396,7 @@ def _refresh_graph_module_types(
         if not changed_desired_types:
             break
     nodes: list[GraphNode] = []
+    authoritative_output_names: set[str] = set()
     conditions: dict[str, GraphExpr] = {}
     for node in module.nodes:
         refreshed_dim_names = _dim_value_symbol_names(dim_values)
@@ -8463,15 +8527,38 @@ def _refresh_graph_module_types(
         else:
             if node.op.name == "_reshape":
                 inputs = _reshape_split_last_dim_inputs(inputs)
-            primitive_type = _infer_primitive_graph_type(
-                node.op.name,
-                inputs,
-                attrs,
-                dim_values=dim_values,
-            )
+            try:
+                primitive_type = _infer_primitive_graph_type(
+                    node.op.name,
+                    inputs,
+                    attrs,
+                    dim_values=dim_values,
+                )
+            except ValueError as exc:
+                referenced_producers = {
+                    item.name: next(
+                        (
+                            producer
+                            for producer in module.nodes
+                            if any(output.name == item.name for output in producer.outputs)
+                        ),
+                        env.get(item.name),
+                    )
+                    for item in inputs
+                    if isinstance(item, GraphValueRef)
+                }
+                raise ValueError(
+                    f"graph type refresh failed in module {module.name!r} "
+                    f"at node {node.id!r}; referenced values={referenced_producers!r}: {exc}"
+                ) from exc
             if primitive_type is not None:
                 destructured_types = (
-                    _destructured_list_output_types(primitive_type, len(node.outputs))
+                    _destructured_list_output_types(
+                        primitive_type,
+                        len(node.outputs),
+                        op_name=node.op.name,
+                        inputs=inputs,
+                    )
                     if isinstance(primitive_type, TypeList)
                     else None
                 )
@@ -8506,6 +8593,8 @@ def _refresh_graph_module_types(
             output_types = value_dependent_output_types
             type_expr = output_types[0] if len(output_types) == 1 else TypeTuple(output_types)
             authoritative_output_types = True
+        if authoritative_output_types:
+            authoritative_output_names.update(output.name for output in node.outputs)
         outputs = tuple(
             replace(
                 output,
@@ -8615,6 +8704,9 @@ def _refresh_graph_module_types(
         refined_outputs: list[GraphValue] = []
         changed_outputs = False
         for output in node.outputs:
+            if output.name in authoritative_output_names:
+                refined_outputs.append(output)
+                continue
             used_type = use_types.get(output.name)
             if used_type is None:
                 refined_outputs.append(output)
@@ -8668,7 +8760,13 @@ def _refresh_graph_module_types(
         for output in module.outputs
     )
     inferred_return_type = _return_type_expr_from_outputs(outputs)
+    has_authoritative_return_output = any(
+        isinstance(output, GraphValueRef) and output.name in authoritative_output_names
+        for output in module.outputs
+    )
     if module.return_type_expr is None:
+        return_type_expr = inferred_return_type
+    elif has_authoritative_return_output:
         return_type_expr = inferred_return_type
     elif not _module_return_type_needs_body_inference(module):
         return_type_expr = module.return_type_expr
@@ -13793,7 +13891,12 @@ def _forwarded_node_output_types(
     if primitive_type is None or isinstance(primitive_type, TypeAny):
         return None
     output_types = (
-        _destructured_list_output_types(primitive_type, output_count)
+        _destructured_list_output_types(
+            primitive_type,
+            output_count,
+            op_name=forwarded.op.name,
+            inputs=forwarded.inputs,
+        )
         if isinstance(primitive_type, TypeList)
         else None
     )

@@ -1,0 +1,185 @@
+{-# CHECKPOINTS ["microsoft/prophetnet-large-uncased", "test/ProphetNet-Test"] #-}
+{-# TASK "seq2seq_lm" #-}
+
+import Activations (gelu)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, bidirectional_mask, bidirectional_mask_for_input, causal_mask, mask_for_input)
+import Math (floor, log, sqrt)
+import Config
+import NN
+import Tensor
+
+MODEL_DIM <- Config.int @@hidden_size default=64
+VOCAB_SIZE <- Config.int @@vocab_size default=30522
+L_ENC <- Config.int @@num_encoder_layers default=2
+L_DEC <- Config.int @@num_decoder_layers default=2
+H_ENC <- Config.int @@num_encoder_attention_heads default=4
+H_DEC <- Config.int @@num_decoder_attention_heads default=4
+FFN_ENC <- Config.int @@encoder_ffn_dim default=128
+FFN_DEC <- Config.int @@decoder_ffn_dim default=128
+NUM_BUCKETS <- Config.int @@num_buckets default=16
+MAX_DISTANCE <- Config.int @@relative_max_distance default=32
+EPS <- Config.float @@layer_norm_eps default=0.00001
+
+prophetnet_buckets :: Tensor[Q,K] -> Tensor[Q,K]
+prophetnet_buckets relative_position = do
+  rel_pos <- Tensor.where (Tensor.le relative_position 0) (0 - relative_position) 0
+  max_exact <- NUM_BUCKETS / 2
+  small <- Tensor.le rel_pos (max_exact - 1)
+  large_input <- Tensor.where (Tensor.le rel_pos max_exact) max_exact rel_pos
+  log_position <- log (large_input / max_exact)
+  log_scale <- log (MAX_DISTANCE / max_exact)
+  large <- max_exact + floor ((log_position / log_scale) * (NUM_BUCKETS - max_exact))
+  large <- Tensor.where (Tensor.le large (NUM_BUCKETS - 1)) large (NUM_BUCKETS - 1)
+  return Tensor.where small rel_pos large |> Tensor.cast dtype="long"
+
+prophetnet_relative_bias :: Path -> Tensor[B,S,D] -> Tensor[S,K] -> Tensor[B,H,S,K]
+prophetnet_relative_bias@path hidden buckets = do
+  logits <- NN.linear@path hidden dim=(NUM_BUCKETS * H_DEC) bias=true
+  logits <- Tensor.reshape logits shape=[B, S, NUM_BUCKETS, H_DEC] |> Tensor.permute dims=[0, 3, 1, 2]
+  buckets <- Tensor.reshape buckets shape=[1, 1, S, K] |> Tensor.expand shape=[B, H_DEC, S, K]
+  return Tensor.gather logits buckets dim=-1
+
+prophetnet_predict_relative_bias :: Path -> Tensor[B,2 * S,D] -> Tensor[S,K] -> Tensor[B,2,H_DEC,S,K]
+prophetnet_predict_relative_bias@path hidden buckets = do
+  hidden <- Tensor.reshape hidden shape=[B, 2, S, D]
+  logits <- NN.linear@path hidden dim=(NUM_BUCKETS * H_DEC) bias=true
+  logits <- Tensor.reshape logits shape=[B, 2, S, NUM_BUCKETS, H_DEC]
+  logits <- Tensor.permute logits dims=[0, 2, 1, 4, 3]
+  logits <- Tensor.reshape logits shape=[B, 2, H_DEC, S, NUM_BUCKETS]
+  buckets <- Tensor.reshape buckets shape=[1, 1, 1, S, K]
+  buckets <- Tensor.expand buckets shape=[2, B, H_DEC, S, K]
+  buckets <- Tensor.reshape buckets shape=[B, 2, H_DEC, S, K]
+  return Tensor.gather logits buckets dim=-1
+
+prophetnet_encoder_layer :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+prophetnet_encoder_layer x keep = do
+  a <- scope@self_attn do
+    q <- NN.linear@query_proj x dim=MODEL_DIM bias=true |> reshape_heads heads=H_ENC
+    k <- NN.linear@key_proj x dim=MODEL_DIM bias=true |> reshape_heads heads=H_ENC
+    v <- NN.linear@value_proj x dim=MODEL_DIM bias=true |> reshape_heads heads=H_ENC
+    return attention q k v keep |> merge_heads |> NN.linear@out_proj dim=MODEL_DIM bias=true
+  x <- NN.layernorm@self_attn_layer_norm (x + a) eps=EPS
+  m <- NN.linear@feed_forward.intermediate x dim=FFN_ENC bias=true |> gelu
+  m <- NN.linear@feed_forward.output m dim=MODEL_DIM bias=true
+  return NN.layernorm@feed_forward_layer_norm (x + m) eps=EPS
+
+prophetnet_predict_keep :: Tensor[B,S] -> Dim -> Int -> Tensor[B,1,S,2 * S]
+prophetnet_predict_keep padding_mask length stream = do
+  pos <- Tensor.arange padding_mask 0 length
+  q <- Tensor.reshape pos shape=[length, 1]
+  k <- Tensor.reshape pos shape=[1, length]
+  previous <- Tensor.le k (q - 1)
+  first <- Tensor.eq k 0
+  predicting <- Tensor.where previous true first
+  left <- (stream == 0) ? Tensor.le k q : predicting
+  left <- Tensor.reshape left shape=[1, 1, length, length] |> Tensor.expand shape=[B, 1, length, length]
+  pad <- Tensor.reshape padding_mask shape=[B, 1, 1, length] |> Tensor.expand shape=[B, 1, length, length] |> Tensor.cast dtype="bool"
+  left <- Tensor.and left pad
+  left <- Tensor.reshape left shape=[B, 1, length, length]
+  right <- Tensor.eq q k |> Tensor.reshape shape=[1, 1, length, length] |> Tensor.expand shape=[B, 1, length, length]
+  right <- Tensor.reshape right shape=[B, 1, length, length]
+  return Tensor.concat left right dim=-1
+
+prophetnet_decoder_layer :: Tensor[B,3 * S,MODEL_DIM] -> Tensor[B,SENC,MODEL_DIM] -> Tensor[B,S] -> Tensor[B,1,3 * S,SENC] -> Tensor[B,3 * S,MODEL_DIM]
+prophetnet_decoder_layer hidden enc_hidden decoder_padding cross_keep = do
+  sequence_length <- Tensor.size decoder_padding -1
+  main <- Tensor.slice hidden dim=1 start=0 end=S
+  pred1 <- Tensor.slice hidden dim=1 start=S end=(2 * S)
+  pred2 <- Tensor.slice hidden dim=1 start=(2 * S) end=(3 * S)
+  main_q <- NN.linear@self_attn.query_proj main dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  main_k <- NN.linear@self_attn.key_proj main dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  main_v <- NN.linear@self_attn.value_proj main dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  pred1_q <- NN.linear@self_attn.query_proj pred1 dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  pred1_k <- NN.linear@self_attn.key_proj pred1 dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  pred1_v <- NN.linear@self_attn.value_proj pred1 dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  pred2_q <- NN.linear@self_attn.query_proj pred2 dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  pred2_k <- NN.linear@self_attn.key_proj pred2 dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  pred2_v <- NN.linear@self_attn.value_proj pred2 dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+
+  pos <- Tensor.arange main 0 S
+  row <- Tensor.reshape pos shape=[S, 1]
+  col <- Tensor.reshape pos shape=[1, S]
+  main_buckets <- prophetnet_buckets (col - row)
+  pred_left <- col - (row + 1)
+  pred_right <- col - (row - 1)
+  pred_buckets <- prophetnet_buckets (Tensor.concat pred_left pred_right dim=-1)
+  main_bias <- prophetnet_relative_bias@self_attn.relative_pos_embeddings main main_buckets
+  pred_bias <- prophetnet_predict_relative_bias@self_attn.relative_pos_embeddings (Tensor.concat pred1 pred2 dim=1) pred_buckets
+  pred1_bias <- Tensor.slice pred_bias dim=1 start=0 end=1 |> Tensor.reshape shape=[B, H_DEC, S, 2 * S]
+  pred2_bias <- Tensor.slice pred_bias dim=1 start=1 end=2 |> Tensor.reshape shape=[B, H_DEC, S, 2 * S]
+
+  main_positions <- Tensor.arange main 0 sequence_length
+  main_rows <- Tensor.reshape main_positions shape=[sequence_length, 1]
+  main_cols <- Tensor.reshape main_positions shape=[1, sequence_length]
+  main_keep <- Tensor.le main_cols main_rows
+  main_keep <- Tensor.reshape main_keep shape=[1, 1, sequence_length, sequence_length] |> Tensor.expand shape=[B, 1, sequence_length, sequence_length]
+  main_padding <- Tensor.reshape decoder_padding shape=[B, 1, 1, sequence_length] |> Tensor.expand shape=[B, 1, sequence_length, sequence_length] |> Tensor.cast dtype="bool"
+  main_keep <- ((Tensor.and main_keep main_padding) :: Tensor[B,1,S,S])
+  main_scores <- Tensor.matmul main_q (Tensor.transpose main_k dim1=2 dim2=3)
+  main_scores <- main_scores / sqrt (MODEL_DIM / H_DEC)
+  main_zero <- Tensor.zeros_like main_scores
+  main_masked <- Tensor.where main_keep main_zero (Tensor.min_like main_scores)
+  main_probs <- Tensor.softmax (main_scores + main_masked + main_bias) dim=-1
+  main_a <- Tensor.matmul main_probs main_v |> merge_heads |> NN.linear@self_attn.out_proj dim=MODEL_DIM bias=true
+  pred1_k_all <- Tensor.concat main_k pred1_k dim=-2
+  pred1_v_all <- Tensor.concat main_v pred1_v dim=-2
+  pred1_keep <- prophetnet_predict_keep decoder_padding sequence_length 0
+  pred1_scores <- Tensor.matmul pred1_q (Tensor.transpose pred1_k_all dim1=2 dim2=3)
+  pred1_scores <- pred1_scores / sqrt (MODEL_DIM / H_DEC)
+  pred1_zero <- Tensor.zeros_like pred1_scores
+  pred1_masked <- Tensor.where pred1_keep pred1_zero (Tensor.min_like pred1_scores)
+  pred1_probs <- Tensor.softmax (pred1_scores + pred1_masked + pred1_bias) dim=-1
+  pred1_a <- Tensor.matmul pred1_probs pred1_v_all |> merge_heads |> NN.linear@self_attn.out_proj dim=MODEL_DIM bias=true
+  pred2_k_all <- Tensor.concat main_k pred2_k dim=-2
+  pred2_v_all <- Tensor.concat main_v pred2_v dim=-2
+  pred2_keep <- prophetnet_predict_keep decoder_padding sequence_length 1
+  pred2_scores <- Tensor.matmul pred2_q (Tensor.transpose pred2_k_all dim1=2 dim2=3)
+  pred2_scores <- pred2_scores / sqrt (MODEL_DIM / H_DEC)
+  pred2_zero <- Tensor.zeros_like pred2_scores
+  pred2_masked <- Tensor.where pred2_keep pred2_zero (Tensor.min_like pred2_scores)
+  pred2_probs <- Tensor.softmax (pred2_scores + pred2_masked + pred2_bias) dim=-1
+  pred2_a <- Tensor.matmul pred2_probs pred2_v_all |> merge_heads |> NN.linear@self_attn.out_proj dim=MODEL_DIM bias=true
+  a <- Tensor.concat main_a pred1_a dim=1 |> Tensor.concat pred2_a dim=1
+  hidden <- NN.layernorm@self_attn_layer_norm (hidden + a) eps=EPS
+
+  q <- NN.linear@cross_attn.query_proj hidden dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  k <- NN.linear@cross_attn.key_proj enc_hidden dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  v <- NN.linear@cross_attn.value_proj enc_hidden dim=MODEL_DIM bias=true |> reshape_heads heads=H_DEC
+  a <- attention q k v cross_keep |> merge_heads |> NN.linear@cross_attn.out_proj dim=MODEL_DIM bias=true
+  hidden <- NN.layernorm@cross_attn_layer_norm (hidden + a) eps=EPS
+  m <- NN.linear@feed_forward.intermediate hidden dim=FFN_DEC bias=true |> gelu
+  m <- NN.linear@feed_forward.output m dim=MODEL_DIM bias=true
+  return NN.layernorm@feed_forward_layer_norm (hidden + m) eps=EPS
+
+prophetnet :: TokenIds[B,SENC] -> ?Mask[B,SENC,SENC] -> TokenIds[B,SDEC] -> ?Mask[B,SDEC,SDEC] -> Tensor[B,SDEC,V]
+prophetnet input_ids attention_mask decoder_input_ids decoder_attention_mask = do
+  attention_mask <- mask_for_input input_ids attention_mask SENC
+  decoder_attention_mask <- mask_for_input decoder_input_ids decoder_attention_mask SDEC
+  encoder_keep <- bidirectional_mask_for_input input_ids SENC padding_mask=attention_mask
+
+  enc_pos_ids <- Tensor.arange input_ids 1 (SENC + 1) |> Tensor.reshape shape=[1, SENC] |> Tensor.expand shape=[B, SENC]
+  enc_hidden <- NN.embedding@prophetnet.word_embeddings input_ids dim=MODEL_DIM
+  enc_hidden <- enc_hidden + NN.embedding@prophetnet.encoder.position_embeddings enc_pos_ids dim=MODEL_DIM
+  enc_hidden <- NN.layernorm@prophetnet.encoder.embeddings_layer_norm enc_hidden eps=EPS
+  enc_hidden <- for@prophetnet.encoder.layers i <- [0..L_ENC) carry (enc_hidden) do
+    enc_hidden <- prophetnet_encoder_layer enc_hidden encoder_keep
+    yield enc_hidden
+
+  dec_pos_ids <- Tensor.arange decoder_input_ids 1 (SDEC + 1) |> Tensor.reshape shape=[1, SDEC] |> Tensor.expand shape=[B, SDEC]
+  dec_tok <- NN.embedding@prophetnet.word_embeddings decoder_input_ids dim=MODEL_DIM
+  main <- dec_tok + NN.embedding@prophetnet.decoder.position_embeddings dec_pos_ids dim=MODEL_DIM
+  pred_pos <- NN.embedding@prophetnet.decoder.position_embeddings (dec_pos_ids + 1) dim=MODEL_DIM
+  stream0_ids <- decoder_input_ids - decoder_input_ids
+  stream1_ids <- stream0_ids + 1
+  pred1 <- NN.embedding@prophetnet.decoder.ngram_embeddings stream1_ids dim=MODEL_DIM
+  pred2 <- NN.embedding@prophetnet.decoder.ngram_embeddings stream0_ids dim=MODEL_DIM
+  hidden <- Tensor.concat main (pred1 + pred_pos) dim=1 |> Tensor.concat (pred2 + pred_pos) dim=1
+  hidden <- NN.layernorm@prophetnet.decoder.embeddings_layer_norm hidden eps=EPS
+  cross_padding <- Tensor.reshape attention_mask shape=[B, 1, 1, SENC] |> Tensor.expand shape=[B, 1, 3 * SDEC, SENC]
+  cross_keep <- Tensor.cast cross_padding "bool"
+  hidden <- for@prophetnet.decoder.layers i <- [0..L_DEC) carry (hidden) do
+    hidden <- ((prophetnet_decoder_layer hidden enc_hidden decoder_attention_mask cross_keep) :: Tensor[B,3 * SDEC,MODEL_DIM])
+    yield hidden
+  pred1 <- Tensor.slice hidden dim=1 start=SDEC end=(2 * SDEC)
+  return NN.linear@prophetnet.word_embeddings pred1 dim=VOCAB_SIZE bias=false

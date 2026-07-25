@@ -1,0 +1,60 @@
+{-# CHECKPOINTS ["microsoft/biogpt", "microsoft/BioGPT-Large"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (gelu)
+import Attention (attention, merge_heads, reshape_heads)
+import Cache
+import Config
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import Math (sqrt)
+import NN
+import Positions (position_ids)
+
+MODEL_DIM <- Config.dim @@hidden_size default=1024
+VOCAB_SIZE <- Config.dim @@vocab_size default=42384
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=24
+NUM_HEADS <- Config.dim @@num_attention_heads default=16
+FFN <- Config.dim @@intermediate_size default=4096
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=1024
+EPS <- Config.float @@layer_norm_eps default=1e-12
+SCALE_EMBEDDING <- Config.bool @@scale_embedding default=true
+
+biogpt_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+biogpt_block x mask past_kv = do
+  residual <- x
+  xn <- NN.layernorm@self_attn_layer_norm x eps=EPS
+  q <- NN.linear@self_attn.q_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@self_attn.k_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  v <- NN.linear@self_attn.v_proj xn dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  k, v, new_kv <- Cache.update past_kv k v
+  a <- attention q k v mask |> merge_heads |> NN.linear@self_attn.out_proj dim=MODEL_DIM bias=true
+  x <- residual + a
+  residual <- x
+  x <- NN.layernorm@final_layer_norm x eps=EPS
+  x <- NN.linear@fc1 x dim=FFN bias=true |> gelu |> NN.linear@fc2 dim=MODEL_DIM bias=true
+  return residual + x, new_kv
+
+biogpt :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+biogpt input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length pad_fill=-1
+  pos_ids <- pos_ids + 2
+  tok <- NN.embedding@biogpt.embed_tokens input_ids dim=MODEL_DIM
+  tok <- SCALE_EMBEDDING ? (tok * sqrt MODEL_DIM) : tok
+  pos <- NN.embedding@biogpt.embed_positions pos_ids dim=MODEL_DIM
+  x <- tok + pos
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- for@biogpt.layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
+    x, new_i <- biogpt_block x mask past_i
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  x <- NN.layernorm@biogpt.layer_norm x eps=EPS
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@biogpt.embed_tokens x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

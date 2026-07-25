@@ -18,29 +18,29 @@ import Config
 
 import NN
 
-MODEL_DIM = 4096
+MODEL_DIM <- 4096
 
-VOCAB_SIZE = 250112
+VOCAB_SIZE <- 250112
 
-L_ENC = 24
+L_ENC <- 24
 
-L_DEC_OVERRIDE = 24
+L_DEC_OVERRIDE <- 24
+
+NUM_HEADS <- 64
+
+HEAD_DIM <- 64
+
+FFN <- 10240
+
+EPS <- 1e-06
+
+NUM_BUCKETS <- 32
+
+MAX_DISTANCE <- 128
 
 L_DEC = (L_DEC_OVERRIDE > 0) ? L_DEC_OVERRIDE : L_ENC
 
-NUM_HEADS = 64
-
-HEAD_DIM = 64
-
 ATTN_DIM = NUM_HEADS * HEAD_DIM
-
-FFN = 10240
-
-EPS = 1e-06
-
-NUM_BUCKETS = 32
-
-MAX_DISTANCE = 128
 
 mt5_encoder_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 mt5_encoder_block x keep = do

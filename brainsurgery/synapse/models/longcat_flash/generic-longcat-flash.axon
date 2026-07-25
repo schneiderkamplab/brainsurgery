@@ -1,0 +1,132 @@
+{-# CHECKPOINTS ["test/LongCat-Flash-Test", "meituan-longcat/LongCat-Flash-Chat"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (silu)
+import Attention (attention, merge_heads, reshape_heads)
+import Config
+import Masking (Mask, causal_mask_for_input, mask_for_input)
+import Math (mul, sqrt)
+import MoE (grouped_swiglu_ffn_separate)
+import NN
+import Params (param)
+import Positions (position_ids, rope_base_factors, rope_pair_base_split_interleaved_factors)
+import Tensor
+
+MODEL_DIM <- Config.dim @@hidden_size default=6144
+VOCAB_SIZE <- Config.dim @@vocab_size default=131072
+NUM_LAYERS <- Config.dim @@num_layers default=28
+NUM_HEADS <- Config.dim @@num_attention_heads default=64
+Q_LORA <- Config.dim @@q_lora_rank default=1536
+KV_LORA <- Config.dim @@kv_lora_rank default=512
+QK_NOPE <- Config.dim @@qk_nope_head_dim default=128
+QK_ROPE <- Config.dim @@qk_rope_head_dim default=64
+V_HEAD <- Config.dim @@v_head_dim default=128
+QK_HEAD = QK_NOPE + QK_ROPE
+FFN <- Config.dim @@ffn_hidden_size default=12288
+EXPERT_FFN <- Config.dim @@expert_ffn_hidden_size default=2048
+EXPERTS <- Config.dim @@n_routed_experts default=512
+ZERO_EXPERTS <- Config.dim @@zero_expert_num default=256
+TOTAL_EXPERTS = EXPERTS + ZERO_EXPERTS
+TOP_K <- Config.dim @@moe_topk default=12
+ROUTED_SCALE <- Config.float @@routed_scaling_factor default=6.0
+EPS <- Config.float @@rms_norm_eps default=1e-5
+THETA <- Config.float @@'rope_parameters.rope_theta' default=10000000.0
+MAX_POSITIONS <- Config.dim @@max_position_embeddings default=131072
+ATTN_BIAS <- Config.bool @@attention_bias default=false
+ATTN_SCALE = 1.0 / sqrt QK_HEAD
+Q_SCALE = sqrt (MODEL_DIM / Q_LORA)
+KV_SCALE = sqrt (MODEL_DIM / KV_LORA)
+
+longcat_rms :: Path -> Tensor[..S] -> Tensor[..S]
+longcat_rms path x = NN.rmsnorm path x eps=EPS cast_float=true scale_path=@@'{path}.weight'
+
+longcat_dense_mlp :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+longcat_dense_mlp path x = do
+  gate <- NN.linear path x dim=FFN bias=false weight_path=@@'{path}.gate_proj.weight'
+  up <- NN.linear path x dim=FFN bias=false weight_path=@@'{path}.up_proj.weight'
+  hidden <- gate |> silu |> mul up
+  return NN.linear path hidden dim=MODEL_DIM bias=false weight_path=@@'{path}.down_proj.weight'
+
+longcat_router :: Path -> Tensor[B,S,D] -> (Tensor[B,S,TOP_K], IdxTensor[B,S,TOP_K])
+longcat_router path x = do
+  x32 <- Tensor.cast x dtype="float32"
+  logits <- NN.linear path x32 dim=TOTAL_EXPERTS bias=false weight_path=@@'{path}.classifier.weight'
+  probs <- Tensor.softmax logits dim=-1 dtype="float32"
+  correction <- param path=@@'{path}.e_score_correction_bias'
+  correction <- Tensor.reshape correction shape=[1,1,TOTAL_EXPERTS]
+  choice <- probs + correction
+  _, indices <- Tensor.topk choice k=TOP_K dim=-1 largest=true sorted=false
+  weights <- Tensor.gather probs indices dim=-1
+  weights <- weights * ROUTED_SCALE |> Tensor.cast_like x
+  return weights, indices
+
+longcat_experts :: Path -> Tensor[B,S,D] -> Tensor[B,S,TOP_K] -> IdxTensor[B,S,TOP_K] -> Tensor[B,S,D]
+longcat_experts path hidden weights indices = do
+  learned <- indices < EXPERTS
+  learned_indices <- Tensor.where learned indices 0
+  learned_weights <- Tensor.where learned weights 0.0
+  routed <- grouped_swiglu_ffn_separate hidden learned_weights learned_indices EXPERTS EXPERT_FFN gate_weight=@@'{path}.experts.gate_proj.weight' up_weight=@@'{path}.experts.up_proj.weight' out_weight=@@'{path}.experts.down_proj.weight'
+  identity_weights <- Tensor.where learned 0.0 weights |> Tensor.unsqueeze dim=-1
+  identity <- Tensor.unsqueeze hidden dim=2 |> Tensor.expand shape=[B,S,TOP_K,D] |> mul identity_weights |> Tensor.sum dim=2
+  return routed + identity
+
+longcat_shortcut_moe :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+longcat_shortcut_moe path x = do
+  weights, indices <- longcat_router @@'{path}.router' x
+  return longcat_experts path x weights indices
+
+longcat_mla :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,QK_ROPE] -> Tensor[B,1,S,QK_ROPE] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+longcat_mla path x rope_sin rope_cos mask = do
+  q <- NN.linear path x dim=Q_LORA bias=ATTN_BIAS weight_path=@@'{path}.q_a_proj.weight' bias_path=@@'{path}.q_a_proj.bias'
+  q <- longcat_rms @@'{path}.q_a_layernorm' q
+  q <- NN.linear path q dim=(NUM_HEADS * QK_HEAD) bias=false weight_path=@@'{path}.q_b_proj.weight'
+  q <- reshape_heads q heads=NUM_HEADS
+  q_nope, q_rope <- Tensor.split q sizes=[QK_NOPE,QK_ROPE]
+  q_nope <- q_nope * Q_SCALE
+  q_rope <- q_rope * Q_SCALE
+
+  compressed <- NN.linear path x dim=(KV_LORA + QK_ROPE) bias=ATTN_BIAS weight_path=@@'{path}.kv_a_proj_with_mqa.weight' bias_path=@@'{path}.kv_a_proj_with_mqa.bias'
+  kv_latent, k_rope <- Tensor.split compressed sizes=[KV_LORA,QK_ROPE]
+  kv_latent <- longcat_rms @@'{path}.kv_a_layernorm' kv_latent
+  kv_latent <- kv_latent * KV_SCALE
+  kv <- NN.linear path kv_latent dim=(NUM_HEADS * (QK_NOPE + V_HEAD)) bias=false weight_path=@@'{path}.kv_b_proj.weight'
+  kv <- Tensor.reshape kv shape=[B,S,NUM_HEADS,QK_NOPE + V_HEAD]
+  kv <- Tensor.permute kv dims=[0,2,1,3]
+  k_nope, v <- Tensor.split kv sizes=[QK_NOPE,V_HEAD]
+  k_rope <- reshape_heads k_rope heads=1
+  q_rope, k_rope <- rope_pair_base_split_interleaved_factors q_rope k_rope rope_sin rope_cos
+  k_rope <- Tensor.repeat k_rope repeats=NUM_HEADS
+  q <- Tensor.concat q_nope q_rope dim=-1
+  k <- Tensor.concat k_nope k_rope dim=-1
+  out <- attention q k v mask scale=ATTN_SCALE |> merge_heads
+  return NN.linear path out dim=MODEL_DIM bias=ATTN_BIAS weight_path=@@'{path}.o_proj.weight' bias_path=@@'{path}.o_proj.bias'
+
+longcat_block :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,QK_ROPE] -> Tensor[B,1,S,QK_ROPE] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+longcat_block path x rope_sin rope_cos mask = do
+  shortcut <- Tensor.zeros_like x
+  x, shortcut, path <- for sub <- [0..2) carry (x, shortcut, path) do
+    residual <- x
+    xn <- longcat_rms @@'{path}.input_layernorm.{sub}' x
+    a <- longcat_mla @@'{path}.self_attn.{sub}' xn rope_sin rope_cos mask
+    x <- residual + a
+    residual <- x
+    xn <- longcat_rms @@'{path}.post_attention_layernorm.{sub}' x
+    shortcut <- (sub == 0) ? (longcat_shortcut_moe @@'{path}.mlp' xn) : shortcut
+    m <- longcat_dense_mlp @@'{path}.mlps.{sub}' xn
+    x <- (sub == 0) ? (residual + m) : (residual + m + shortcut)
+    yield x, shortcut, path
+  return x
+
+longcat_flash :: TokenIds[B,S] -> ?Mask[B,S,MAX_POSITIONS] -> ?Any -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?Any)
+longcat_flash input_ids attn_mask past_kv use_cache = do
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=0
+  mask <- causal_mask_for_input input_ids S padding_mask=attn_mask window=MAX_POSITIONS
+  rope_sin, rope_cos <- rope_base_factors pos_ids QK_ROPE theta=THETA interleaved=false
+  x <- NN.embedding@@model.embed_tokens input_ids dim=MODEL_DIM
+  x <- for i <- [0..NUM_LAYERS) carry (x) do
+    x <- longcat_block @@'model.layers.{i}' x rope_sin rope_cos mask
+    yield x
+  x <- longcat_rms @@model.norm x
+  logits <- NN.linear@@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, null

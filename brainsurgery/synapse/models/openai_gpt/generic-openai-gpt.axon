@@ -1,0 +1,52 @@
+{-# CHECKPOINTS ["openai-community/openai-gpt"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (gelu_new)
+import Attention (attention, merge_heads, reshape_heads)
+import Cache
+import Config
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import NN
+import Positions (position_ids)
+import Tensor
+
+MODEL_DIM <- Config.dim @@n_embd default=768
+VOCAB_SIZE <- Config.dim @@vocab_size default=40478
+NUM_LAYERS <- Config.dim @@n_layer default=12
+NUM_HEADS <- Config.dim @@n_head default=12
+MAX_POSITIONS <- Config.dim @@n_positions default=512
+EPS <- Config.float @@layer_norm_epsilon default=1e-05
+
+openai_gpt_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+openai_gpt_block x mask past_kv = do
+  q_lin, k_lin, v_lin <- Tensor.chunk (NN.linear@attn.c_attn x dim=(3 * MODEL_DIM) bias=true transpose=true) dim=-1 parts=3
+  q <- reshape_heads q_lin heads=NUM_HEADS
+  k <- reshape_heads k_lin heads=NUM_HEADS
+  v <- reshape_heads v_lin heads=NUM_HEADS
+  k, v, new_kv <- Cache.update past_kv k v
+  a <- attention q k v mask |> merge_heads |> NN.linear@attn.c_proj dim=MODEL_DIM bias=true transpose=true
+  n <- NN.layernorm@ln_1 (x + a) eps=EPS
+  m <- NN.linear@mlp.c_fc n dim=(4 * MODEL_DIM) bias=true transpose=true |> gelu_new |> NN.linear@mlp.c_proj dim=MODEL_DIM bias=true transpose=true
+  return NN.layernorm@ln_2 (n + m) eps=EPS, new_kv
+
+openai_gpt :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+openai_gpt input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  tok <- NN.embedding@@tokens_embed input_ids dim=MODEL_DIM
+  pos <- NN.embedding@@positions_embed pos_ids dim=MODEL_DIM
+  x <- tok + pos
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- for@h i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
+    x, new_i <- openai_gpt_block x mask past_i
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@@tokens_embed x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

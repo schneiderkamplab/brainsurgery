@@ -1,0 +1,103 @@
+{-# CHECKPOINTS ["Finnish-NLP/convbert-base-generator-finnish", "test/ConvBERT-Test"] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (gelu)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+import Params (param)
+import Positions (position_ids)
+import Config
+import NN
+import Tensor
+
+
+MODEL_DIM <- Config.int @@hidden_size default=768
+EMBED_DIM <- Config.int @@embedding_size default=768
+VOCAB_SIZE <- Config.int @@vocab_size default=30522
+NUM_LAYERS <- Config.int @@num_hidden_layers default=12
+CONFIG_HEADS <- Config.int @@num_attention_heads default=12
+HEAD_RATIO <- Config.int @@head_ratio default=2
+NUM_HEADS <- CONFIG_HEADS / HEAD_RATIO
+ATTN_DIM <- MODEL_DIM / 2
+HEAD_DIM <- ATTN_DIM / NUM_HEADS
+FFN <- Config.int @@intermediate_size default=3072
+KERNEL <- Config.int @@conv_kernel_size default=9
+PAD <- (KERNEL - 1) / 2
+EPS <- Config.float @@layer_norm_eps default=1e-12
+
+sliding_windows :: Tensor[B,S,C] -> Tensor[B,S,C,KERNEL]
+sliding_windows x = do
+  zero <- Tensor.slice x dim=1 start=0 end=1 |> Tensor.zeros_like
+  zeros <- Tensor.expand zero shape=[B, PAD, C]
+  padded <- Tensor.concat zeros x dim=1 |> Tensor.concat zeros dim=1
+  window <- Tensor.slice padded dim=1 start=0 end=S |> Tensor.unsqueeze dim=-1
+  windows <- Tensor.zeros window shape=[B, S, C, KERNEL]
+  windows <- for t <- [0..KERNEL) carry (windows) do
+    shifted <- Tensor.slice padded dim=1 start=t end=(t + S) |> Tensor.unsqueeze dim=-1
+    yield Tensor.assign_slice windows shifted dim=-1 start=t end=(t + 1)
+  return windows
+
+depthwise_conv :: Tensor[B,S,C] -> Tensor[C,1,KERNEL] -> Tensor[B,S,C]
+depthwise_conv x weight = do
+  windows <- sliding_windows x
+  weight <- Tensor.reshape weight shape=[1, 1, C, KERNEL]
+  return Tensor.sum (windows * weight) dim=-1
+
+pointwise_conv :: Tensor[B,S,I] -> Tensor[O,I,1] -> Tensor[O,1] -> Tensor[B,S,O]
+pointwise_conv x weight bias = do
+  weight <- Tensor.reshape weight shape=[O, I] |> Tensor.transpose 0 1
+  bias <- Tensor.reshape bias shape=[O]
+  out <- Tensor.matmul x weight
+  return out + bias
+
+convbert_attention :: Path -> Tensor[B,S,MODEL_DIM] -> Tensor[B,1,S,S] -> Tensor[B,S,MODEL_DIM]
+convbert_attention@path x keep = do
+  q_lin <- NN.linear@query x dim=ATTN_DIM bias=true
+  q <- reshape_heads q_lin heads=NUM_HEADS
+  k <- NN.linear@key x dim=ATTN_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  v <- NN.linear@value x dim=ATTN_DIM bias=true |> reshape_heads heads=NUM_HEADS
+  context <- attention q k v keep |> merge_heads
+
+  key_depthwise <- ((param @key_conv_attn_layer.depthwise.weight) :: Tensor[MODEL_DIM,1,KERNEL])
+  key_pointwise <- ((param @key_conv_attn_layer.pointwise.weight) :: Tensor[ATTN_DIM,MODEL_DIM,1])
+  key_bias <- ((param @key_conv_attn_layer.bias) :: Tensor[ATTN_DIM,1])
+  conv_key <- depthwise_conv x key_depthwise
+  conv_key <- pointwise_conv conv_key key_pointwise key_bias
+  kernel <- NN.linear@conv_kernel_layer (conv_key * q_lin) dim=(NUM_HEADS * KERNEL) bias=true
+  kernel <- Tensor.reshape kernel shape=[B, S, NUM_HEADS, KERNEL] |> Tensor.softmax dim=-1
+
+  conv_values <- NN.linear@conv_out_layer x dim=ATTN_DIM bias=true
+  conv_values <- sliding_windows conv_values
+  conv_values <- Tensor.reshape conv_values shape=[B, S, NUM_HEADS, HEAD_DIM, KERNEL]
+  kernel <- Tensor.unsqueeze kernel dim=3
+  conv_context <- Tensor.sum (conv_values * kernel) dim=-1
+  conv_context <- Tensor.reshape conv_context shape=[B, S, ATTN_DIM]
+  return Tensor.concat context conv_context dim=-1
+
+convbert_block :: Tensor[B,S,MODEL_DIM] -> Tensor[B,1,S,S] -> Tensor[B,S,MODEL_DIM]
+convbert_block x keep = do
+  a <- scope@attention do
+    a <- convbert_attention@self x keep
+    return NN.linear@output.dense a dim=MODEL_DIM bias=true
+  x <- NN.layernorm@attention.output.LayerNorm (x + a) eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return NN.layernorm@output.LayerNorm (x + m) eps=EPS
+
+convbert :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+convbert input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  pos_ids <- position_ids input_ids
+  token_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@convbert.embeddings.word_embeddings input_ids dim=EMBED_DIM
+  pos <- NN.embedding@convbert.embeddings.position_embeddings pos_ids dim=EMBED_DIM
+  typ <- NN.embedding@convbert.embeddings.token_type_embeddings token_type_ids dim=EMBED_DIM
+  x <- NN.layernorm@convbert.embeddings.LayerNorm (tok + pos + typ) eps=EPS
+  x <- (EMBED_DIM == MODEL_DIM) ? x : (NN.linear@convbert.embeddings_project x dim=MODEL_DIM bias=true)
+  x <- for@convbert.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- convbert_block x keep
+    yield x
+  x <- NN.linear@generator_predictions.dense x dim=EMBED_DIM bias=true |> gelu
+  x <- NN.layernorm@generator_predictions.LayerNorm x eps=EPS
+  return NN.linear@generator_lm_head x dim=VOCAB_SIZE bias=true weight_path=@@convbert.embeddings.word_embeddings.weight bias_path=@@generator_lm_head.bias

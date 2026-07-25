@@ -194,6 +194,17 @@ lin x = x
     assert parsed.pragmas["tokenizer"] == "EleutherAI/gpt-neox-20b"
 
 
+def test_parse_program_source_preserves_parenthesized_tensor_dimension() -> None:
+    source = """
+pool :: Tensor[B,S,D] -> Tensor[B,(S + 1) / 2,D]
+pool x = x
+"""
+    parsed = parse_axon_program(source)
+    rendered = render_axon_file(parsed)
+    assert "Tensor[B,(S + 1) / 2,D]" in rendered
+    assert ast_equal(parse_axon_program(rendered), parsed)
+
+
 def test_parse_program_source_multiple_tokenizer_pragmas_preserve_occurrences() -> None:
     source = """
 {-# TOKENIZER "mistralai/Mistral-7B-v0.1" #-}

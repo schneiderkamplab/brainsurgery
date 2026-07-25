@@ -1,0 +1,64 @@
+{-# CHECKPOINTS "IDEA-CCNL/Erlangshen-MegatronBert-1.3B" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "megatron_bert" #-}
+
+import Activations (gelu_new)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Positions (position_ids)
+
+import Config
+
+import NN
+
+MODEL_DIM <- 2048
+
+VOCAB_SIZE <- 21248
+
+NUM_LAYERS <- 24
+
+NUM_HEADS <- 8
+
+FFN <- 8192
+
+EPS <- 1e-12
+
+megatron_bert_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+megatron_bert_block x keep = do
+  h <- NN.layernorm@attention.ln x eps=EPS
+  a <- scope@attention do
+    q <- NN.linear@self.query h dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key h dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value h dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- x + a
+  h <- NN.layernorm@ln x eps=EPS
+  m <- NN.linear@intermediate.dense h dim=FFN bias=true |> gelu_new
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return x + m
+
+megatron_bert :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+megatron_bert input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@bert.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@bert.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@bert.embeddings.token_type_embeddings tok_type_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- x + typ
+  x <- for@bert.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- megatron_bert_block x keep
+    yield x
+  x <- NN.layernorm@bert.encoder.ln x eps=EPS
+  logits <- scope@cls.predictions do
+    x <- NN.linear@transform.dense x dim=MODEL_DIM bias=true |> gelu_new
+    x <- NN.layernorm@transform.LayerNorm x eps=EPS
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@bert.embeddings.word_embeddings.weight bias_path=@@cls.predictions.decoder.bias
+  return logits

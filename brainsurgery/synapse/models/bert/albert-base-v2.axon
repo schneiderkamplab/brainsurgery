@@ -16,19 +16,19 @@ import Config
 
 import NN
 
-E = 128
+E <- 128
 
-MODEL_DIM = 768
+MODEL_DIM <- 768
 
-VOCAB_SIZE = 30000
+VOCAB_SIZE <- 30000
 
-NUM_LAYERS = 12
+NUM_LAYERS <- 12
 
-NUM_HEADS = 12
+NUM_HEADS <- 12
 
-FFN = 3072
+FFN <- 3072
 
-EPS = 1e-12
+EPS <- 1e-12
 
 albert_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
 albert_block x keep = do

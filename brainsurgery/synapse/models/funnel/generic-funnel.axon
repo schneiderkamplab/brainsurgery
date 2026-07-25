@@ -1,0 +1,163 @@
+{-# CHECKPOINTS ["windowsartes/funnel", "test/Funnel-Test"] #-}
+{-# TOKENIZER [["windowsartes/funnel", "google/byt5-small"], ["test/Funnel-Test", "google-bert/bert-base-uncased"]] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (gelu_new)
+import Config
+import List (index)
+import Masking (Mask, mask_for_input)
+import Math (cos, exp, sin, sqrt)
+import NN
+import Params (param)
+import Tensor
+
+MODEL_DIM <- Config.dim @@d_model default=32
+VOCAB_SIZE <- Config.dim @@vocab_size default=1126
+NUM_HEADS <- Config.dim @@n_head default=4
+HEAD_DIM <- Config.dim @@d_head default=8
+FFN <- Config.dim @@d_inner default=37
+EPS <- Config.float @@layer_norm_eps default=1e-9
+BLOCK_SIZES <- ((Config.list @@block_sizes default=[1, 1, 2]) :: List[Int])
+BLOCK0 <- ((index BLOCK_SIZES 0) :: Int)
+BLOCK1 <- ((index BLOCK_SIZES 1) :: Int)
+BLOCK2 <- ((index BLOCK_SIZES 2) :: Int)
+DECODER_LAYERS <- Config.dim @@num_decoder_layers default=1
+
+pool_hidden :: Tensor[B,S,D] -> Tensor[B,(S + 1) / 2,D]
+pool_hidden x = do
+  cls <- Tensor.slice x 1 0 1
+  prefix <- Tensor.slice x 1 0 (S - 1)
+  prepared <- Tensor.concat cls prefix dim=1
+  last <- Tensor.slice prepared 1 (S - 1) S
+  prepared <- ((S % 2) == 0) ? prepared : Tensor.concat prepared last dim=1
+  paired <- Tensor.reshape prepared shape=[B, (S + 1) / 2, 2, D]
+  return (Tensor.sum paired dim=2 keepdim=false) / 2.0
+
+pool_mask :: Tensor[B,S] -> Tensor[B,(S + 1) / 2]
+pool_mask mask = do
+  cls <- Tensor.slice mask 1 0 1
+  prefix <- Tensor.slice mask 1 0 (S - 1)
+  prepared <- Tensor.concat cls prefix dim=1
+  last <- Tensor.slice prepared 1 (S - 1) S
+  prepared <- ((S % 2) == 0) ? prepared : Tensor.concat prepared last dim=1
+  paired <- Tensor.reshape prepared shape=[B, (S + 1) / 2, 2]
+  left <- Tensor.slice paired 2 0 1 |> Tensor.reshape shape=[B, (S + 1) / 2]
+  right <- Tensor.slice paired 2 1 2 |> Tensor.reshape shape=[B, (S + 1) / 2]
+  return Tensor.where (Tensor.le left right) left right
+
+upsample4 :: Tensor[B,S4,D] -> Tensor[B,S,D]
+upsample4 x = do
+  cls <- Tensor.slice x 1 0 1
+  suffix <- Tensor.slice x 1 1 S4
+  repeated <- Tensor.unsqueeze suffix 2 |> Tensor.expand shape=[B, S4 - 1, 4, D] |> Tensor.reshape shape=[B, (S4 - 1) * 4, D]
+  padding <- Tensor.zeros x shape=[B, 3, D]
+  suffix <- Tensor.concat repeated padding dim=1 |> Tensor.slice dim=1 start=0 end=(S - 1)
+  return Tensor.concat cls suffix dim=1
+
+relative_embed :: Tensor[B,Q,D] -> Tensor[B,K,D] -> Int -> Int -> Tensor[2 * K,D]
+relative_embed ref context stride shift = do
+  extent <- K * stride
+  offset <- (shift - 1) * stride
+  start <- extent - offset
+  end <- 0 - extent - offset
+  ids <- Tensor.arange_step ref start=start end=end stride=(0 - stride) |> Tensor.cast dtype="float32"
+  freq <- Tensor.arange ref start=0 end=(D / 2) |> Tensor.cast dtype="float32"
+  inv_freq <- exp ((0.0 - 9.210340371976184) * (freq / (D / 2)))
+  sinusoid <- (Tensor.reshape ids shape=[2 * K, 1]) * (Tensor.reshape inv_freq shape=[1, D / 2])
+  out <- Tensor.zeros ref shape=[2 * K, D]
+  out <- Tensor.assign_slice out (sin sinusoid) dim=-1 start=0 end=(D / 2)
+  return Tensor.assign_slice out (cos sinusoid) dim=-1 start=(D / 2) end=D
+
+relative_shift :: Tensor[B,H,Q,R] -> Tensor[B,K,D] -> Int -> Tensor[B,H,Q,K]
+relative_shift scores context shift = do
+  shifted <- Tensor.reshape scores shape=[B, H, R, Q]
+  shifted <- Tensor.slice shifted dim=2 start=shift end=R
+  shifted <- Tensor.reshape shifted shape=[B, H, Q, R - shift]
+  return Tensor.slice shifted dim=-1 start=0 end=K
+
+cls_pair_mask :: Tensor[B,Q,D] -> Tensor[B,K,D] -> Tensor[1,1,Q,K]
+cls_pair_mask ref context = do
+  q_ids <- Tensor.arange ref start=0 end=Q
+  k_ids <- Tensor.arange ref start=0 end=K
+  q_keep <- Tensor.le 1 q_ids |> Tensor.reshape shape=[1, 1, Q, 1]
+  k_keep <- Tensor.le 1 k_ids |> Tensor.reshape shape=[1, 1, 1, K]
+  return Tensor.and q_keep k_keep
+
+funnel_attention :: Path -> Tensor[B,Q,D] -> Tensor[B,K,D] -> Tensor[B,K] -> Tensor[R,D] -> Int -> Tensor[B,Q,D]
+funnel_attention@path query key attention_mask relative shift = do
+  q <- NN.linear@q_head query dim=(NUM_HEADS * HEAD_DIM) bias=false |> Tensor.reshape shape=[B, Q, NUM_HEADS, HEAD_DIM]
+  k <- NN.linear@k_head key dim=(NUM_HEADS * HEAD_DIM) bias=true |> Tensor.reshape shape=[B, K, NUM_HEADS, HEAD_DIM]
+  v <- NN.linear@v_head key dim=(NUM_HEADS * HEAD_DIM) bias=true |> Tensor.reshape shape=[B, K, NUM_HEADS, HEAD_DIM]
+  q <- Tensor.permute q dims=[0, 2, 1, 3]
+  k <- Tensor.permute k dims=[0, 2, 1, 3]
+  v <- Tensor.permute v dims=[0, 2, 1, 3]
+  scale <- 1.0 / sqrt HEAD_DIM
+  rw <- ((param @r_w_bias) :: Tensor[NUM_HEADS,HEAD_DIM]) |> Tensor.reshape shape=[1, NUM_HEADS, 1, HEAD_DIM]
+  rw <- rw * scale
+  rr <- ((param @r_r_bias) :: Tensor[NUM_HEADS,HEAD_DIM]) |> Tensor.reshape shape=[1, NUM_HEADS, 1, HEAD_DIM]
+  rr <- rr * scale
+  rs <- ((param @r_s_bias) :: Tensor[NUM_HEADS,HEAD_DIM]) |> Tensor.reshape shape=[1, NUM_HEADS, 1, HEAD_DIM]
+  rs <- rs * scale
+  q <- q * scale
+  content <- Tensor.matmul (q + rw) (Tensor.transpose k 2 3)
+  kernel <- ((param @r_kernel) :: Tensor[D,NUM_HEADS,HEAD_DIM])
+  r_head <- Tensor.matmul relative (Tensor.reshape kernel shape=[D, NUM_HEADS * HEAD_DIM])
+  r_head <- Tensor.reshape r_head shape=[R, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[1, 2, 0]
+  positional <- Tensor.matmul (q + rr) r_head |> relative_shift key shift
+  cls_keep <- cls_pair_mask query key
+  positional <- positional * cls_keep
+  same_segment <- ((param @seg_embed) :: Tensor[2,NUM_HEADS,HEAD_DIM]) |> Tensor.slice dim=0 start=1 end=2 |> Tensor.reshape shape=[1, NUM_HEADS, HEAD_DIM, 1]
+  segment <- Tensor.matmul (q + rs) same_segment |> Tensor.expand shape=[B, NUM_HEADS, Q, K]
+  segment <- segment * cls_keep
+  scores <- content + positional + segment
+  mask <- Tensor.cast attention_mask dtype="bool" |> Tensor.reshape shape=[B, 1, 1, K] |> Tensor.expand shape=[B, NUM_HEADS, Q, K]
+  scores <- Tensor.where mask scores (Tensor.min_like scores)
+  probs <- Tensor.softmax scores dim=-1 dtype="float32"
+  out <- Tensor.matmul probs v |> Tensor.permute dims=[0, 2, 1, 3] |> Tensor.reshape shape=[B, Q, NUM_HEADS * HEAD_DIM]
+  out <- NN.linear@post_proj out dim=MODEL_DIM bias=true
+  return NN.layernorm@layer_norm (query + out) eps=EPS
+
+funnel_layer :: Tensor[B,Q,D] -> Tensor[B,K,D] -> Tensor[B,K] -> Tensor[R,D] -> Int -> Tensor[B,Q,D]
+funnel_layer query key attention_mask relative shift = do
+  x <- funnel_attention@attention query key attention_mask relative shift
+  ff <- NN.linear@ffn.linear_1 x dim=FFN bias=true |> gelu_new |> NN.linear@ffn.linear_2 dim=MODEL_DIM bias=true
+  return NN.layernorm@ffn.layer_norm (x + ff) eps=EPS
+
+funnel :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,V]
+funnel input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  x <- NN.embedding@funnel.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  x <- NN.layernorm@funnel.embeddings.layer_norm x eps=EPS
+
+  rel0 <- relative_embed x x 1 1
+  x <- for@funnel.encoder.blocks.0 i <- [0..BLOCK0) carry (x) do
+    x <- funnel_layer x x attn_mask rel0 1
+    yield x
+  first_block <- x
+
+  x1_pool <- pool_hidden x
+  mask1 <- pool_mask attn_mask
+  rel1_pool <- relative_embed x1_pool x 1 2
+  x1 <- scope@funnel.encoder.blocks.1.0 do
+    return funnel_layer x1_pool x attn_mask rel1_pool 2
+  rel1 <- relative_embed x1 x1 2 1
+  x1 <- for@funnel.encoder.blocks.1 i <- [1..BLOCK1) carry (x1) do
+    x1 <- funnel_layer x1 x1 mask1 rel1 1
+    yield x1
+
+  x2_pool <- pool_hidden x1
+  mask2 <- pool_mask mask1
+  rel2_pool <- relative_embed x2_pool x1 2 2
+  x2 <- scope@funnel.encoder.blocks.2.0 do
+    return funnel_layer x2_pool x1 mask1 rel2_pool 2
+  rel2 <- relative_embed x2 x2 4 1
+  x2 <- for@funnel.encoder.blocks.2 i <- [1..BLOCK2) carry (x2) do
+    x2 <- funnel_layer x2 x2 mask2 rel2 1
+    yield x2
+
+  upsampled <- upsample4 x2
+  decoded <- upsampled + first_block
+  decoded <- for@funnel.decoder.layers i <- [0..DECODER_LAYERS) carry (decoded) do
+    decoded <- funnel_layer decoded decoded attn_mask rel0 1
+    yield decoded
+  return NN.linear@lm_head decoded dim=VOCAB_SIZE bias=true weight_path=@@funnel.embeddings.word_embeddings.weight bias_path=@@lm_head.bias

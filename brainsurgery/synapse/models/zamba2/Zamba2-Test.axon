@@ -1,0 +1,196 @@
+{-# CHECKPOINTS "test/Zamba2-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "zamba2" #-}
+
+import Activations (gelu, silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Config
+
+import List
+
+import Masking (causal_mask_for_input, mask_for_input)
+
+import Math (mul, sqrt)
+
+import NN
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import SSM (causal_conv1d, mamba2_scan)
+
+import Tensor
+
+MODEL_DIM <- (128 :: Dim)
+
+ATTN_DIM <- (4096 :: Dim)
+
+VOCAB_SIZE <- (32000 :: Dim)
+
+NUM_LAYERS <- (4 :: Dim)
+
+NUM_HEADS <- (4 :: Dim)
+
+NUM_KV_HEADS <- (2 :: Dim)
+
+HEAD_DIM <- (32 :: Dim)
+
+FFN_DIM <- (256 :: Dim)
+
+EPS <- 1e-05
+
+MAX_POSITIONS <- (1024 :: Dim)
+
+THETA <- 10000.0
+
+USE_ROPE <- true
+
+USE_ADAPTER <- true
+
+HIDDEN_ACT <- "gelu"
+
+ADAPTER_RANK <- (128 :: Dim)
+
+MEM_BLOCKS <- (1 :: Dim)
+
+MAMBA_HEADS <- (64 :: Dim)
+
+MAMBA_GROUPS <- (1 :: Dim)
+
+STATE_DIM <- (128 :: Dim)
+
+EXPAND <- (2 :: Dim)
+
+LINEAR_BIAS <- false
+
+TIME_STEP_MIN <- 0.001
+
+TIME_STEP_MAX <- 1e30
+
+LAYER_TYPES <- ((["mamba", "mamba", "mamba", "mamba"]) :: List[String])
+
+INNER = EXPAND * MODEL_DIM
+
+MAMBA_HEAD_DIM = INNER / MAMBA_HEADS
+
+CONV_DIM = INNER + (2 * MAMBA_GROUPS * STATE_DIM)
+
+PROJECTION_DIM = INNER + CONV_DIM + MAMBA_HEADS
+
+zamba2_hybrid_info :: Int -> (Int, Int)
+zamba2_hybrid_info layer = do
+  source <- 0
+  adapter <- 0
+  seen <- 0
+  found <- false
+  source, adapter, seen, found <- for j <- [0..NUM_LAYERS) carry (source, adapter, seen, found) do
+    kind <- List.index LAYER_TYPES j
+    hybrid <- kind == "hybrid"
+    same_block <- (j % MEM_BLOCKS) == (layer % MEM_BLOCKS)
+    source <- (hybrid and same_block and (found == false)) ? j : source
+    found <- found or (hybrid and same_block)
+    adapter <- (hybrid and (j < layer)) ? (adapter + 1) : adapter
+    seen <- hybrid ? (seen + 1) : seen
+    yield source, adapter, seen, found
+  return source, adapter
+
+zamba2_mamba :: Path -> Tensor[B,S,MODEL_DIM] -> ?Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+zamba2_mamba@__scope x attn_mask = do
+  x <- (attn_mask == null) ? x : (x * (Tensor.unsqueeze attn_mask dim=-1))
+  projected <- NN.linear@in_proj x dim=PROJECTION_DIM bias=LINEAR_BIAS
+  gate, hidden_bc, dt <- Tensor.split projected sizes=[INNER, CONV_DIM, MAMBA_HEADS]
+  hidden_bc <- causal_conv1d@conv1d hidden_bc attention_mask=attn_mask
+  hidden, b_state, c_state <- Tensor.split hidden_bc sizes=[INNER, MAMBA_GROUPS * STATE_DIM, MAMBA_GROUPS * STATE_DIM]
+  y <- mamba2_scan hidden gate dt b_state c_state @A_log @D @dt_bias @norm.weight MAMBA_GROUPS MAMBA_HEAD_DIM time_step_min=TIME_STEP_MIN time_step_max=TIME_STEP_MAX
+  return NN.linear@out_proj y dim=MODEL_DIM bias=LINEAR_BIAS
+
+zamba2_q_adapter_add :: Tensor[B,S,NUM_HEADS * HEAD_DIM] -> Tensor[B,S,D] -> Path -> Path -> Tensor[B,S,NUM_HEADS * HEAD_DIM]
+zamba2_q_adapter_add base x path0 path1 = do
+  adapted <- NN.linear path0 x dim=ADAPTER_RANK bias=false
+  adapted <- NN.linear path1 adapted dim=(NUM_HEADS * HEAD_DIM) bias=false
+  return base + adapted
+
+zamba2_kv_adapter_add :: Tensor[B,S,NUM_KV_HEADS * HEAD_DIM] -> Tensor[B,S,D] -> Path -> Path -> Tensor[B,S,NUM_KV_HEADS * HEAD_DIM]
+zamba2_kv_adapter_add base x path0 path1 = do
+  adapted <- NN.linear path0 x dim=ADAPTER_RANK bias=false
+  adapted <- NN.linear path1 adapted dim=(NUM_KV_HEADS * HEAD_DIM) bias=false
+  return base + adapted
+
+zamba2_attention :: Tensor[B,S,ATTN_DIM] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,S] -> Int -> Int -> Tensor[B,S,MODEL_DIM]
+zamba2_attention x rope_sin rope_cos mask source adapter = do
+  q <- NN.linear @@'model.layers.{source}.shared_transformer.self_attn.q_proj' x dim=(NUM_HEADS * HEAD_DIM) bias=false
+  k <- NN.linear @@'model.layers.{source}.shared_transformer.self_attn.k_proj' x dim=(NUM_KV_HEADS * HEAD_DIM) bias=false
+  v <- NN.linear @@'model.layers.{source}.shared_transformer.self_attn.v_proj' x dim=(NUM_KV_HEADS * HEAD_DIM) bias=false
+  qp0 <- @@'model.layers.{source}.shared_transformer.self_attn.linear_q_adapter_list.{adapter}.0'
+  qp1 <- @@'model.layers.{source}.shared_transformer.self_attn.linear_q_adapter_list.{adapter}.1'
+  kp0 <- @@'model.layers.{source}.shared_transformer.self_attn.linear_k_adapter_list.{adapter}.0'
+  kp1 <- @@'model.layers.{source}.shared_transformer.self_attn.linear_k_adapter_list.{adapter}.1'
+  vp0 <- @@'model.layers.{source}.shared_transformer.self_attn.linear_v_adapter_list.{adapter}.0'
+  vp1 <- @@'model.layers.{source}.shared_transformer.self_attn.linear_v_adapter_list.{adapter}.1'
+  q <- USE_ADAPTER ? zamba2_q_adapter_add q x qp0 qp1 : q
+  k <- USE_ADAPTER ? zamba2_kv_adapter_add k x kp0 kp1 : k
+  v <- USE_ADAPTER ? zamba2_kv_adapter_add v x vp0 vp1 : v
+  q <- reshape_heads q heads=NUM_HEADS
+  k <- reshape_heads k heads=NUM_KV_HEADS
+  v <- reshape_heads v heads=NUM_KV_HEADS
+  q, k <- USE_ROPE ? (rope_pair_base_factors q k rope_sin rope_cos) : (q, k)
+  k <- Tensor.repeat k repeats=(NUM_HEADS / NUM_KV_HEADS)
+  v <- Tensor.repeat v repeats=(NUM_HEADS / NUM_KV_HEADS)
+  scale <- 1.0 / sqrt (HEAD_DIM / 2)
+  y <- attention q k v mask scale=scale
+  y <- merge_heads y
+  return NN.linear @@'model.layers.{source}.shared_transformer.self_attn.o_proj' y dim=MODEL_DIM bias=false
+
+zamba2_mlp :: Tensor[B,S,MODEL_DIM] -> Int -> Int -> Tensor[B,S,MODEL_DIM]
+zamba2_mlp x source adapter = do
+  gate_up <- NN.linear @@'model.layers.{source}.shared_transformer.feed_forward.gate_up_proj' x dim=(2 * FFN_DIM) bias=LINEAR_BIAS
+  adapted <- NN.linear @@'model.layers.{source}.shared_transformer.feed_forward.gate_up_proj_adapter_list.{adapter}.0' x dim=ADAPTER_RANK bias=false
+  adapted <- NN.linear @@'model.layers.{source}.shared_transformer.feed_forward.gate_up_proj_adapter_list.{adapter}.1' adapted dim=(2 * FFN_DIM) bias=false
+  gate_up <- gate_up + adapted
+  gate, up <- Tensor.chunk gate_up dim=-1 parts=2
+  gate <- (HIDDEN_ACT == "gelu") ? (gelu gate) : (silu gate)
+  hidden <- gate |> mul up
+  return NN.linear @@'model.layers.{source}.shared_transformer.feed_forward.down_proj' hidden dim=MODEL_DIM bias=LINEAR_BIAS
+
+zamba2_transformer :: Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,S] -> Int -> Tensor[B,S,MODEL_DIM]
+zamba2_transformer x original rope_sin rope_cos mask layer = do
+  source, adapter <- zamba2_hybrid_info layer
+  joined <- Tensor.concat x original dim=-1
+  joined <- NN.rmsnorm @@'model.layers.{source}.shared_transformer.input_layernorm' joined eps=EPS cast_float=true
+  a <- zamba2_attention joined rope_sin rope_cos mask source adapter
+  a <- NN.rmsnorm @@'model.layers.{source}.shared_transformer.pre_ff_layernorm' a eps=EPS cast_float=true
+  return zamba2_mlp a source adapter
+
+zamba2_layer :: Tensor[B,S,MODEL_DIM] -> Tensor[B,S,MODEL_DIM] -> Int -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,S] -> ?Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+zamba2_layer x original i rope_sin rope_cos mask attn_mask = do
+  kind <- List.index LAYER_TYPES i
+  injected <- (kind == "hybrid")
+        ? do
+            transformed <- zamba2_transformer x original rope_sin rope_cos mask i
+            return NN.linear@linear transformed dim=MODEL_DIM bias=false
+        : ((Tensor.zeros_like x) :: Tensor[B,S,MODEL_DIM])
+  mixed <- x + injected
+  y <- (kind == "hybrid")
+        ? do
+            xn <- NN.rmsnorm@mamba_decoder.input_layernorm mixed eps=EPS cast_float=true
+            return zamba2_mamba@mamba_decoder.mamba xn attn_mask
+        : do
+            xn <- NN.rmsnorm@input_layernorm mixed eps=EPS cast_float=true
+            return zamba2_mamba@mamba xn attn_mask
+  return x + y
+
+zamba2 :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?Any)
+zamba2 input_ids attn_mask past_kv use_cache = do
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=0
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  mask <- causal_mask_for_input input_ids S padding_mask=attn_mask window=MAX_POSITIONS
+  x <- scope@model do
+    original <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- original
+    x <- for@layers i <- [0..NUM_LAYERS) carry (x) zamba2_layer x original i rope_sin rope_cos mask attn_mask
+    return NN.rmsnorm@final_layernorm x eps=EPS cast_float=true
+  return NN.linear@@model.embed_tokens x dim=VOCAB_SIZE bias=false, null

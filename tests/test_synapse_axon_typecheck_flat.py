@@ -15,6 +15,7 @@ from brainsurgery.synapse.axon.ast import (
     AxonRepeat,
     AxonReturn,
     Constraint,
+    DimExprBinary,
     TypeAliasDef,
     TypeDim,
     TypeFloat,
@@ -80,6 +81,59 @@ main x = do
     helper = next(module for module in typed.modules if module.name.startswith("main__loop_h_step_"))
     assert isinstance(helper.params[0].type_expr, TypeInt)
     assert not any(module.name.startswith("main__loop_h_recur_") for module in typed.modules)
+
+
+def test_typecheck_flat_solves_loop_helper_affine_stream_dimension(tmp_path: Path) -> None:
+    source = """
+import Tensor (concat)
+
+step :: Tensor[B,3 * S,D] -> Tensor[B,3 * S,D]
+step x = x
+
+main :: Tensor[B,S,D] -> Tensor[B,3 * S,D]
+main x = do
+  streams <- concat x x dim=1
+  streams <- concat streams x dim=1
+  streams <- for@layers i <- [0..2) carry (streams) do
+    streams <- step streams
+    yield streams
+  return streams
+"""
+    path = tmp_path / "affine_stream_carry.axon"
+    path.write_text(source)
+    resolved = resolve_axon_program_from_path(path).ast
+    flat = _flat(resolved, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+
+    main = next(module for module in typed.modules if module.name == "main")
+    assert main.return_type_expr == TypeTensor(
+        base="Tensor",
+        dims=("B", DimExprBinary(op="*", left=3, right="S"), "D"),
+    )
+
+
+def test_typecheck_flat_preserves_dependent_dim_parameter_in_wrapper_body(
+    tmp_path: Path,
+) -> None:
+    source = """
+import NN (linear)
+
+project :: Path -> Tensor[B,S,D] -> Dim -> Tensor[B,S,width]
+project@path x width = linear@path x dim=width
+
+main :: Tensor[B,S,D] -> Tensor[B,S,12]
+main x = project@@weight x 12
+"""
+    path = tmp_path / "dependent_dim_parameter.axon"
+    path.write_text(source)
+    resolved = resolve_axon_program_from_path(path).ast
+    flat = _flat(resolved, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+
+    main = next(module for module in typed.modules if module.name == "main")
+    assert main.return_type_expr == TypeTensor(base="Tensor", dims=("B", "S", 12))
 
 
 def test_typecheck_flat_populates_expr_annotations() -> None:
@@ -434,6 +488,26 @@ main q k v keep rel_bias = attention q k v keep rel_bias=rel_bias
     assert "Tensor[B,H,Q,K]" in probs_line
 
 
+def test_typecheck_where_scalar_branch_preserves_tensor_shape_across_fixpoint(
+    tmp_path: Path,
+) -> None:
+    source = """
+import Positions (relative_position_bias)
+
+main :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> Tensor[1,H,Q,K]
+main q k = relative_position_bias @@bias q k num_buckets=32 max_distance=128 bidirectional=true
+"""
+    path = tmp_path / "where_scalar_branch.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    text = render_axon_file(typed, show_types=True)
+    assert "Tensor[Q,Q,K]" not in text
+    assert "Tensor[Q,K]" in text
+    lower_axon_program_to_graph_ir(typed, main_module="main")
+
+
 def test_typecheck_transpose_matmul_infers_attention_score_shape(tmp_path: Path) -> None:
     source = """
 import Tensor (matmul, transpose)
@@ -610,6 +684,38 @@ main x = floor x
     validate_typed_axon_file(typed, main_module="main")
     module = next(module for module in typed.modules if module.name == "main")
     assert module.return_type_expr == TypeTensor(base="Tensor", dims=("B", "S"))
+
+
+def test_round_preserves_tensor_shape(tmp_path: Path) -> None:
+    source = """
+import Math (round)
+
+main :: Tensor[B,S] -> Tensor[B,S]
+main x = round x
+"""
+    path = tmp_path / "round_tensor.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    module = next(module for module in typed.modules if module.name == "main")
+    assert module.return_type_expr == TypeTensor(base="Tensor", dims=("B", "S"))
+
+
+def test_round_returns_int_for_scalar(tmp_path: Path) -> None:
+    source = """
+import Math (round)
+
+main :: Float -> Int
+main x = round x
+"""
+    path = tmp_path / "round_scalar.axon"
+    path.write_text(source)
+    flat = _flat(resolve_axon_program_from_path(path).ast, main_module="main")
+    typed = typecheck2_flat_axon_file(flat, main_module="main")
+    validate_typed_axon_file(typed, main_module="main")
+    module = next(module for module in typed.modules if module.name == "main")
+    assert module.return_type_expr == TypeInt()
 
 
 def test_typecheck2_lowers_generic_mamba_without_shape_growth() -> None:

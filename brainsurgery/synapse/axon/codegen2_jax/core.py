@@ -7,7 +7,7 @@ from typing import Any
 
 from ..ast import DimExprBinary, TypeBool, TypeDim, TypeFloat, TypeInt, TypeOptional
 from ..ast import TypeTensor
-from ..codegen2_common import normalize_primitive_op
+from ..codegen2_common import normalize_primitive_op, render_python_literal
 from ..codegen2_torch.core import (
     _DirectTorchEmitter,
     _dim_ident,
@@ -50,6 +50,7 @@ SUPPORTED_JAX_PRIMITIVES: frozenset[str] = frozenset({
     "l2norm",
     "reshape",
     "arange",
+    "argsort",
     "slice",
     "assign_slice",
     "chunk",
@@ -67,6 +68,7 @@ SUPPORTED_JAX_PRIMITIVES: frozenset[str] = frozenset({
     "where_indices",
     "gather",
     "scatter",
+    "scatter_reduce",
     "index_add",
     "clamp",
     "le",
@@ -77,8 +79,10 @@ SUPPORTED_JAX_PRIMITIVES: frozenset[str] = frozenset({
     "div",
     "pow",
     "floor",
+    "round",
     "sqrt",
     "sin",
+    "acos",
     "cos",
     "exp",
     "log",
@@ -94,6 +98,8 @@ SUPPORTED_JAX_PRIMITIVES: frozenset[str] = frozenset({
     "zeros_like",
     "tensor_like",
     "topk",
+    "random_normal",
+    "random_uniform",
     "activations_tanh",
     "activations_silu",
     "activations_sigmoid",
@@ -969,6 +975,40 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
         add(lines, 8, "return jnp.put_along_axis(x, index, values, axis=dim, inplace=False)")
         add(lines, 4, "")
         add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _scatter_reduce(x, index, src, dim=-1, reduce='sum', include_self=True):")
+        add(lines, 8, "dim = int(dim)")
+        add(lines, 8, "if dim < 0:")
+        add(lines, 12, "dim += len(x.shape)")
+        add(lines, 8, "index = index.astype(jnp.int32)")
+        add(lines, 8, "values = jnp.broadcast_to(src, index.shape).astype(x.dtype)")
+        add(lines, 8, "coordinates = [axis.reshape((1,) * axis_id + (-1,) + (1,) * (index.ndim - axis_id - 1)) for axis_id, axis in enumerate([jnp.arange(size, dtype=jnp.int32) for size in index.shape])]")
+        add(lines, 8, "coordinates = [jnp.broadcast_to(axis, index.shape) for axis in coordinates]")
+        add(lines, 8, "coordinates[dim] = index")
+        add(lines, 8, "coordinates = tuple(coordinates)")
+        add(lines, 8, "reduce = str(reduce)")
+        add(lines, 8, "if reduce == 'sum':")
+        add(lines, 12, "base = x if include_self else x.at[coordinates].set(jnp.array(0, dtype=x.dtype))")
+        add(lines, 12, "return base.at[coordinates].add(values)")
+        add(lines, 8, "if reduce == 'prod':")
+        add(lines, 12, "base = x if include_self else x.at[coordinates].set(jnp.array(1, dtype=x.dtype))")
+        add(lines, 12, "return base.at[coordinates].multiply(values)")
+        add(lines, 8, "if reduce == 'mean':")
+        add(lines, 12, "if include_self:")
+        add(lines, 16, "total = x.at[coordinates].add(values)")
+        add(lines, 16, "count = jnp.ones(x.shape, dtype=jnp.int32).at[coordinates].add(jnp.ones(index.shape, dtype=jnp.int32))")
+        add(lines, 12, "else:")
+        add(lines, 16, "total = x.at[coordinates].set(jnp.array(0, dtype=x.dtype)).at[coordinates].add(values)")
+        add(lines, 16, "count = jnp.zeros(x.shape, dtype=jnp.int32).at[coordinates].add(jnp.ones(index.shape, dtype=jnp.int32))")
+        add(lines, 12, "return jnp.where(count > 0, total / count.astype(x.dtype), x)")
+        add(lines, 8, "if reduce in {'max', 'amax'}:")
+        add(lines, 12, "base = x if include_self else x.at[coordinates].set(jnp.array(-jnp.inf, dtype=x.dtype))")
+        add(lines, 12, "return base.at[coordinates].max(values)")
+        add(lines, 8, "if reduce in {'min', 'amin'}:")
+        add(lines, 12, "base = x if include_self else x.at[coordinates].set(jnp.array(jnp.inf, dtype=x.dtype))")
+        add(lines, 12, "return base.at[coordinates].min(values)")
+        add(lines, 8, "raise ValueError(f'unsupported scatter reduction: {reduce!r}')")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
         add(lines, 4, "def _linear(base, x, bias=False, transpose=False, expert=None, weight_leaf='weight', bias_leaf='bias'):")
         add(lines, 8, "raise RuntimeError('internal JAX _linear helper should not be called directly')")
         add(lines, 4, "")
@@ -1769,6 +1809,8 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             return f"nn.softmax({args[0]}.astype(self._dtype_from_name({dtype})) if {dtype} != None else {args[0]}, axis=int({dim}))"
         if primitive == "topk":
             return f"self._topk({args[0]}, {args[1]}, dim={args[2]}, largest={args[3]}, sorted_={args[4]})"
+        if primitive == "argsort":
+            return f"jnp.argsort({args[0]}, axis=int({args[1]}), stable=bool({args[3]}), descending=bool({args[2]}))"
         if primitive == "concat":
             if "dim" in attrs:
                 return f"self._concat({', '.join(args)}, dim={attrs['dim']})"
@@ -1830,7 +1872,10 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             "require": lambda: f"self._require_value({args[0]})",
             "gather": lambda: f"self._gather({args[0]}, {args[1]}, dim={args[2] if len(args) > 2 else '-1'})",
             "scatter": lambda: f"self._scatter({args[0]}, {args[1]}, {args[2]}, dim={args[3] if len(args) > 3 else '-1'})",
+            "scatter_reduce": lambda: f"self._scatter_reduce({args[0]}, {args[1]}, {args[2]}, dim={args[3]}, reduce={args[4]}, include_self={args[5]})",
             "index_add": lambda: f"self._index_add({args[0]}, {args[1]}, {args[2]}, {args[3] if len(args) > 3 else '0'})",
+            "random_normal": lambda: f"jax.random.normal(jax.random.PRNGKey(int({args[2]})), tuple(int(x) for x in {args[1]}), dtype=({args[0]}.dtype if jnp.issubdtype({args[0]}.dtype, jnp.floating) else jnp.float32))",
+            "random_uniform": lambda: f"jax.random.uniform(jax.random.PRNGKey(int({args[2]})), tuple(int(x) for x in {args[1]}), dtype=({args[0]}.dtype if jnp.issubdtype({args[0]}.dtype, jnp.floating) else jnp.float32))",
             "le": lambda: f"({args[0]} <= {args[1]})",
             "eq": lambda: f"self._eq({args[0]}, {args[1]})",
             "and": lambda: f"({args[0]} & {args[1]})",
@@ -1839,8 +1884,10 @@ class _DirectJaxEmitter(_DirectTorchEmitter):
             "div": lambda: f"({args[0]} / {args[1]})",
             "pow": lambda: f"jnp.power({args[0]}, {args[1]})",
             "floor": lambda: f"jnp.floor({args[0]}) if isinstance({args[0]}, jax.Array) else int({args[0]} // 1)",
+            "round": lambda: f"jnp.round({args[0]}) if isinstance({args[0]}, jax.Array) else round({args[0]})",
             "sqrt": lambda: f"jnp.sqrt({args[0]}) if isinstance({args[0]}, jax.Array) else ({args[0]} ** 0.5)",
             "sin": lambda: f"jnp.sin({args[0]}) if isinstance({args[0]}, jax.Array) else __import__('math').sin(float({args[0]}))",
+            "acos": lambda: f"jnp.arccos({args[0]}) if isinstance({args[0]}, jax.Array) else __import__('math').acos(float({args[0]}))",
             "cos": lambda: f"jnp.cos({args[0]}) if isinstance({args[0]}, jax.Array) else __import__('math').cos(float({args[0]}))",
             "exp": lambda: f"jnp.exp({args[0]}) if isinstance({args[0]}, jax.Array) else __import__('math').exp(float({args[0]}))",
             "log": lambda: f"jnp.log({args[0]}) if isinstance({args[0]}, jax.Array) else __import__('math').log(float({args[0]}))",
@@ -2041,7 +2088,7 @@ def emit_model_code_from_graph_ir(
             "",
             "jax.config.update('jax_default_matmul_precision', 'highest')",
             "",
-            f"_MODEL_CONFIG = {model_config!r}",
+            f"_MODEL_CONFIG = {render_python_literal(model_config)}",
             "",
             body,
         ]

@@ -1,13 +1,13 @@
 ---
 status: active
-last-confirmed: 2026-05-20
+last-confirmed: 2026-07-23
 owners: agents
 confidence: high
 ---
 
 # Wiki Index
 
-Validated-by: repo inspection of `wiki/` on 2026-05-20.
+Validated-by: repo inspection of `wiki/` on 2026-07-23.
 
 ## Core Pages
 
@@ -17,6 +17,7 @@ Validated-by: repo inspection of `wiki/` on 2026-05-20.
 - [scripts.md](scripts.md): Current inventory and operating notes for `../scripts/`.
 - [roundtrips.md](roundtrips.md): Axon stage roundtrip definitions, weak/strong contracts, and pytest integration.
 - [benchmarks.md](benchmarks.md): Benchmark execution/reporting conventions and canonical log layout.
+- [model-family-gap-plan.md](model-family-gap-plan.md): Exhaustive implementation/evidence ledger for text and specialized-generation model-family mappings.
 - [log.md](log.md): Append-only chronology of durable wiki updates and operational events.
 
 ## Policy Entry Points

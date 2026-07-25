@@ -1,0 +1,69 @@
+{-# CHECKPOINTS ["tiiuae/falcon-mamba-tiny-dev", "tiiuae/falcon-mamba-7b", "tiiuae/falcon-mamba-7b-instruct"] #-}
+{-# TASK "causal_lm" #-}
+{-# PADDING_SIDE "right" #-}
+
+import Activations (silu)
+import Config
+import NN
+import Params (param)
+import SSM (causal_conv1d_full, mamba_scan)
+import Tensor
+
+MODEL_DIM <- Config.dim @@hidden_size default=128
+INNER_DIM <- Config.dim @@intermediate_size default=(2 * MODEL_DIM)
+STATE_DIM <- Config.dim @@state_size default=8
+TIME_RANK <- Config.dim @@time_step_rank default=8
+CONV_KERNEL <- Config.dim @@conv_kernel default=4
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=4
+VOCAB_SIZE <- Config.dim @@vocab_size default=65024
+EPS <- Config.float @@layer_norm_epsilon default=1e-5
+MIXER_EPS <- Config.float @@mixer_rms_eps default=1e-6
+USE_BIAS <- Config.bool @@use_bias default=false
+USE_CONV_BIAS <- Config.bool @@use_conv_bias default=true
+
+sequence_mask :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+sequence_mask x mask = (mask == null) ? x : (x * (Tensor.unsqueeze mask dim=-1))
+
+falcon_mamba_mixer :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+falcon_mamba_mixer x attn_mask = do
+  projected <- NN.linear@in_proj x dim=(2 * INNER_DIM) bias=USE_BIAS
+  hidden, gate <- Tensor.split projected sizes=[INNER_DIM, INNER_DIM]
+  hidden <- sequence_mask hidden attn_mask
+  w <- ((param @conv1d.weight) :: Tensor[INNER_DIM,1,CONV_KERNEL])
+  b <- USE_CONV_BIAS
+    ? ((param @conv1d.bias) :: Tensor[INNER_DIM])
+    : do
+      zero <- Tensor.slice w dim=-1 start=0 end=1
+      zero <- Tensor.reshape zero shape=[INNER_DIM]
+      return zero * 0.0
+  hidden <- causal_conv1d_full hidden w b "silu"
+  hidden <- sequence_mask hidden attn_mask
+  params <- NN.linear@x_proj hidden dim=(TIME_RANK + (2 * STATE_DIM)) bias=false
+  dt, b_state, c_state <- Tensor.split params sizes=[TIME_RANK, STATE_DIM, STATE_DIM]
+  dt <- NN.rmsnorm_noscale dt eps=MIXER_EPS dim=TIME_RANK cast_float=true
+  b_state <- NN.rmsnorm_noscale b_state eps=MIXER_EPS dim=STATE_DIM cast_float=true
+  c_state <- NN.rmsnorm_noscale c_state eps=MIXER_EPS dim=STATE_DIM cast_float=true
+  dt <- NN.linear@dt_proj dt dim=INNER_DIM bias=true
+  y <- mamba_scan hidden dt b_state c_state A=@A_log D=@D a_is_log=true
+  y <- y * (silu gate)
+  return NN.linear@out_proj y dim=MODEL_DIM bias=USE_BIAS
+
+falcon_mamba_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
+falcon_mamba_block x attn_mask = do
+  residual <- x
+  x <- NN.rmsnorm@norm x eps=EPS cast_float=true
+  y <- scope@mixer do
+    return falcon_mamba_mixer x attn_mask
+  return residual + y
+
+falcon_mamba :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,V], ?Any)
+falcon_mamba input_ids attn_mask past_kv use_cache = do
+  logits <- scope@backbone do
+    x <- NN.embedding@embeddings input_ids dim=MODEL_DIM
+    layer <- 0
+    x, layer <- for@layers i <- [0..NUM_LAYERS) carry (x, layer) do
+      x <- falcon_mamba_block x attn_mask
+      yield x, i
+    x <- NN.rmsnorm@norm_f x eps=EPS cast_float=true
+    return NN.linear@embeddings x dim=VOCAB_SIZE bias=false
+  return logits, null

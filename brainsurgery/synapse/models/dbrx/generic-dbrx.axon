@@ -1,0 +1,96 @@
+{-# CHECKPOINTS ["test/DBRX-Test", "LnL-AI/dbrx-base-converted-v2", "alpindale/dbrx-instruct"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (silu)
+import Attention (attention, merge_heads, reshape_heads)
+import Cache
+import Config
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import Math (clamp)
+import NN
+import Params (param)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Tensor
+
+MODEL_DIM <- Config.dim @@d_model default=2048
+VOCAB_SIZE <- Config.dim @@vocab_size default=32000
+NUM_LAYERS <- Config.dim @@n_layers default=24
+NUM_HEADS <- Config.dim @@n_heads default=16
+KV_HEADS <- Config.dim @@'attn_config.kv_n_heads' default=1
+HEAD_DIM = MODEL_DIM / NUM_HEADS
+QKV_DIM = MODEL_DIM + (2 * KV_HEADS * HEAD_DIM)
+MAX_POSITIONS <- Config.dim @@max_seq_len default=2048
+THETA <- Config.float @@'attn_config.rope_theta' default=10000.0
+HAS_CLIP <- Config.has_value @@'attn_config.clip_qkv'
+CLIP <- Config.float @@'attn_config.clip_qkv' default=0.0
+NUM_EXPERTS <- Config.dim @@'ffn_config.moe_num_experts' default=4
+TOP_K <- Config.dim @@'ffn_config.moe_top_k' default=1
+FFN <- Config.dim @@'ffn_config.hidden_size' default=6144
+HAS_NORM <- Config.has_value @@'ffn_config.moe_normalize_expert_weights'
+
+dbrx_experts :: Tensor[B,S,D] -> Tensor[B,S,TOP_K] -> IdxTensor[B,S,TOP_K] -> Tensor[B,S,D]
+dbrx_experts x scores indices = do
+  w1_all <- ((param @experts.mlp.w1) :: Tensor[NUM_EXPERTS * MODEL_DIM,FFN]) |> Tensor.reshape shape=[NUM_EXPERTS,MODEL_DIM,FFN]
+  v1_all <- ((param @experts.mlp.v1) :: Tensor[NUM_EXPERTS * MODEL_DIM,FFN]) |> Tensor.reshape shape=[NUM_EXPERTS,MODEL_DIM,FFN]
+  w2_all <- ((param @experts.mlp.w2) :: Tensor[NUM_EXPERTS * MODEL_DIM,FFN]) |> Tensor.reshape shape=[NUM_EXPERTS,MODEL_DIM,FFN]
+  x_all <- Tensor.unsqueeze x 2 |> Tensor.expand shape=[B,S,NUM_EXPERTS,MODEL_DIM] |> Tensor.unsqueeze dim=-2
+  gate <- Tensor.matmul x_all w1_all |> Tensor.reshape shape=[B,S,NUM_EXPERTS,FFN] |> silu
+  up <- Tensor.matmul x_all v1_all |> Tensor.reshape shape=[B,S,NUM_EXPERTS,FFN]
+  update <- Tensor.matmul (Tensor.unsqueeze (gate * up) dim=-2) (Tensor.transpose w2_all 1 2) |> Tensor.reshape shape=[B,S,NUM_EXPERTS,MODEL_DIM]
+  routing <- Tensor.zeros x shape=[B,S,NUM_EXPERTS] |> Tensor.scatter indices scores dim=-1
+  return Tensor.sum (update * (Tensor.unsqueeze routing dim=-1)) dim=2 keepdim=false
+
+dbrx_moe :: Tensor[B,S,D] -> Tensor[B,S,D]
+dbrx_moe x = do
+  logits <- NN.linear@router.layer x dim=NUM_EXPERTS bias=false
+  probs <- Tensor.softmax logits dim=-1
+  scores, indices <- Tensor.topk probs k=TOP_K dim=-1 largest=true sorted=true
+  norm <- Tensor.sum scores dim=-1 keepdim=true
+  scores <- HAS_NORM ? (scores / norm) : scores
+  return dbrx_experts x scores indices
+
+dbrx_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> (Tensor[B,S,D], ?CacheLayer[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+dbrx_block x rope_sin rope_cos mask past_kv = do
+  residual <- x
+  xn <- NN.layernorm@norm_attn_norm.norm_1 x eps=1e-5 bias=false
+  a, new_kv <- scope@norm_attn_norm.attn do
+    qkv <- NN.linear@Wqkv xn dim=QKV_DIM bias=false
+    qkv <- HAS_CLIP ? clamp qkv min=(0.0 - CLIP) max=CLIP : qkv
+    q, k, v <- Tensor.split qkv dim=-1 sizes=[MODEL_DIM, KV_HEADS * HEAD_DIM, KV_HEADS * HEAD_DIM]
+    q <- reshape_heads q heads=NUM_HEADS
+    k <- reshape_heads k heads=KV_HEADS
+    v <- reshape_heads v heads=KV_HEADS
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+    a <- attention q k v mask |> merge_heads |> NN.linear@out_proj dim=MODEL_DIM bias=false
+    return a, new_kv
+  x <- residual + a
+  xn <- NN.layernorm@norm_attn_norm.norm_2 x eps=1e-5 bias=false
+  m <- scope@ffn do
+    return dbrx_moe xn
+  return x + m, new_kv
+
+dbrx :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KV_HEADS,P,MAX_POSITIONS,HEAD_DIM] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KV_HEADS,K,MAX_POSITIONS,HEAD_DIM])
+dbrx input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@transformer do
+    x <- NN.embedding@wte input_ids dim=MODEL_DIM
+    x, work_kv <- for@blocks i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- dbrx_block x rope_sin rope_cos mask past_i
+      yield x, Cache.append work_kv new_i
+    x <- NN.layernorm@norm_f x eps=1e-5 bias=false
+    return x, work_kv
+  new_kv <- Cache.finish work_kv key_len
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

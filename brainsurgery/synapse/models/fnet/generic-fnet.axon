@@ -1,0 +1,70 @@
+{-# CHECKPOINTS ["google/fnet-base"] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (gelu_new)
+import Math (PI, cos, sin)
+import Positions (position_ids)
+import Config
+import NN
+import Tensor
+
+
+
+MODEL_DIM <- Config.int @@hidden_size default=768
+VOCAB_SIZE <- Config.int @@vocab_size default=32000
+NUM_LAYERS <- Config.int @@num_hidden_layers default=12
+FFN <- Config.int @@intermediate_size default=3072
+EPS <- Config.float @@layer_norm_eps default=1e-12
+
+dft_matrix :: Tensor[..R] -> Dim -> (Tensor[N,N], Tensor[N,N])
+dft_matrix ref n = do
+  idx <- Tensor.arange ref start=0 end=n |> Tensor.cast dtype="float32"
+  row <- Tensor.reshape idx shape=[n, 1]
+  col <- Tensor.reshape idx shape=[1, n]
+  angles <- (row * col) * (-2.0 * PI / n)
+  real <- cos angles
+  imag <- sin angles
+  return real, imag
+
+fnet_fourier :: Tensor[B,S,D] -> Tensor[B,S,D]
+fnet_fourier x = do
+  hidden_real, hidden_imag <- dft_matrix x D
+  real_h <- Tensor.matmul x hidden_real
+  imag_h <- Tensor.matmul x hidden_imag
+  seq_real, seq_imag <- dft_matrix x S
+  real_h_t <- Tensor.transpose real_h dim1=1 dim2=2
+  imag_h_t <- Tensor.transpose imag_h dim1=1 dim2=2
+  real_s <- Tensor.matmul real_h_t seq_real |> Tensor.transpose dim1=1 dim2=2
+  imag_s <- Tensor.matmul imag_h_t seq_imag |> Tensor.transpose dim1=1 dim2=2
+  return real_s - imag_s
+
+fnet_block :: Tensor[B,S,D] -> Tensor[B,S,D]
+fnet_block x = do
+  mixed <- fnet_fourier x
+  x <- x + mixed
+  x <- NN.layernorm@fourier.output.LayerNorm x eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu_new
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  y <- x + m
+  y <- NN.layernorm@output.LayerNorm y eps=EPS
+  return y
+
+fnet :: TokenIds[B,S] -> Tensor[B,S,V]
+fnet input_ids = do
+  pos_ids <- position_ids input_ids
+  tok_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@fnet.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@fnet.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@fnet.embeddings.token_type_embeddings tok_type_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- x + typ
+  x <- NN.layernorm@fnet.embeddings.LayerNorm x eps=EPS
+  x <- NN.linear@fnet.embeddings.projection x dim=MODEL_DIM bias=true
+  x <- for@fnet.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- fnet_block x
+    yield x
+  logits <- scope@cls.predictions do
+    x <- NN.linear@transform.dense x dim=MODEL_DIM bias=true |> gelu_new
+    x <- NN.layernorm@transform.LayerNorm x eps=EPS
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@fnet.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
+  return logits

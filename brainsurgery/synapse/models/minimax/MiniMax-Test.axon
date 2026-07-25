@@ -1,0 +1,135 @@
+{-# CHECKPOINTS "test/MiniMax-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "minimax" #-}
+
+import Activations (sigmoid, silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Config
+
+import List
+
+import Masking (causal_mask_for_input, mask_for_input)
+
+import Math (exp)
+
+import MoE (grouped_swiglu_ffn_separate)
+
+import NN
+
+import Params (param)
+
+import Positions (rope_base_factors, rope_pair_base_factors)
+
+import Tensor
+
+MODEL_DIM <- (128 :: Dim)
+
+VOCAB_SIZE <- (65536 :: Dim)
+
+NUM_LAYERS <- (4 :: Dim)
+
+NUM_HEADS <- (4 :: Dim)
+
+KV_HEADS <- (2 :: Dim)
+
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+
+FFN_DIM <- (256 :: Dim)
+
+NUM_EXPERTS <- (4 :: Dim)
+
+TOP_K <- (2 :: Dim)
+
+MAX_POSITIONS <- (1024 :: Dim)
+
+EPS <- 1e-05
+
+THETA <- 10000000.0
+
+LAYER_TYPES <- ((["linear_attention", "linear_attention", "linear_attention", "linear_attention"]) :: List[String])
+
+FULL_ALPHA <- 3.5565588200778455
+
+FULL_BETA <- 1.0
+
+LINEAR_ALPHA <- 3.5565588200778455
+
+LINEAR_BETA <- 1.0
+
+MLP_ALPHA <- 3.5565588200778455
+
+MLP_BETA <- 1.0
+
+minimax_sparse :: Tensor[B,S,D] -> Tensor[B,S,D]
+minimax_sparse x = do
+  logits <- NN.linear@gate x dim=NUM_EXPERTS bias=false
+  probs <- Tensor.softmax (Tensor.cast logits dtype="float32") dim=-1
+  scores, indices <- Tensor.topk probs k=TOP_K dim=-1 largest=true sorted=true
+  scores <- scores / (Tensor.sum scores dim=-1 keepdim=true)
+  scores <- Tensor.cast_like scores x
+  return grouped_swiglu_ffn_separate x scores indices NUM_EXPERTS FFN_DIM gate_weight=@experts.w1.weight up_weight=@experts.w3.weight out_weight=@experts.w2.weight
+
+minimax_linear_attention :: Tensor[B,S,MODEL_DIM] -> Tensor[B,S] -> Tensor[B,S,MODEL_DIM]
+minimax_linear_attention x padding_mask = do
+  qkv <- NN.linear@qkv_proj x dim=(3 * MODEL_DIM) bias=false |> silu
+  q, k, v <- Tensor.chunk qkv dim=-1 parts=3
+  q <- Tensor.reshape q shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  k <- Tensor.reshape k shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  v <- Tensor.reshape v shape=[B, S, NUM_HEADS, HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+  v <- v * (Tensor.reshape padding_mask shape=[B, 1, S, 1])
+  slope <- ((param @slope_rate) :: Tensor[NUM_HEADS,1,1])
+  ratio <- exp (0.0 - slope)
+  state <- Tensor.zeros x shape=[B, NUM_HEADS, HEAD_DIM, HEAD_DIM]
+  out <- Tensor.zeros x shape=[B, NUM_HEADS, S, HEAD_DIM]
+  state, out <- for t <- [0..S) carry (state, out) do
+    qt <- Tensor.slice q dim=2 start=t end=(t + 1) |> Tensor.reshape shape=[B, NUM_HEADS, HEAD_DIM]
+    kt <- Tensor.slice k dim=2 start=t end=(t + 1) |> Tensor.reshape shape=[B, NUM_HEADS, HEAD_DIM]
+    vt <- Tensor.slice v dim=2 start=t end=(t + 1) |> Tensor.reshape shape=[B, NUM_HEADS, HEAD_DIM]
+    state <- (ratio * state) + ((Tensor.unsqueeze kt dim=-1) * (Tensor.unsqueeze vt dim=-2))
+    yt <- Tensor.sum ((Tensor.unsqueeze qt dim=-1) * state) dim=-2 keepdim=false
+    yt <- Tensor.unsqueeze yt dim=2
+    idx <- Tensor.fill yt t dtype="long"
+    out <- Tensor.scatter out idx yt dim=2
+    yield state, out
+  out <- Tensor.permute out dims=[0, 2, 1, 3] |> Tensor.reshape shape=[B, S, MODEL_DIM]
+  out <- NN.rmsnorm@norm out eps=EPS cast_float=true
+  gate <- NN.linear@output_gate x dim=MODEL_DIM bias=false |> sigmoid
+  return NN.linear@out_proj (gate * out) dim=MODEL_DIM bias=false
+
+minimax_full_attention :: Tensor[B,S,MODEL_DIM] -> Tensor[B,1,S,S] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,1,S,HEAD_DIM] -> Tensor[B,S,MODEL_DIM]
+minimax_full_attention x keep rope_sin rope_cos = do
+  q <- NN.linear@q_proj x dim=(NUM_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@k_proj x dim=(KV_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=KV_HEADS
+  v <- NN.linear@v_proj x dim=(KV_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=KV_HEADS
+  q, k <- rope_pair_base_factors q k rope_sin rope_cos
+  k <- Tensor.repeat k repeats=(NUM_HEADS / KV_HEADS)
+  v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+  return attention q k v keep |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+
+minimax :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,VOCAB_SIZE], ?Any)
+minimax input_ids attn_mask past_kv use_cache = do
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- Tensor.arange input_ids 0 S |> Tensor.reshape shape=[1, S] |> Tensor.expand shape=[B, S]
+  rope_sin, rope_cos <- rope_base_factors pos_ids HEAD_DIM THETA
+  keep <- causal_mask_for_input input_ids S padding_mask=attn_mask window=MAX_POSITIONS
+  x <- NN.embedding@model.embed_tokens input_ids dim=MODEL_DIM
+  x <- for@model.layers i <- [0..NUM_LAYERS) carry (x) do
+    xn <- NN.rmsnorm@input_layernorm x eps=EPS cast_float=true
+    kind <- List.index LAYER_TYPES i
+    a <- scope@self_attn do
+      return (kind == "linear_attention") ? (minimax_linear_attention xn attn_mask) : (minimax_full_attention xn keep rope_sin rope_cos)
+    alpha <- (kind == "linear_attention") ? LINEAR_ALPHA : FULL_ALPHA
+    beta <- (kind == "linear_attention") ? LINEAR_BETA : FULL_BETA
+    x_attn <- (xn * alpha) + (a * beta)
+    xn <- NN.rmsnorm@post_attention_layernorm x_attn eps=EPS cast_float=true
+    m <- scope@block_sparse_moe do
+      return minimax_sparse xn
+    x <- (xn * MLP_ALPHA) + (m * MLP_BETA)
+    yield x
+  x <- NN.rmsnorm@model.norm x eps=EPS cast_float=true
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, null

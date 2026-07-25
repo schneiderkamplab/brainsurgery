@@ -1,0 +1,217 @@
+{-# CHECKPOINTS ["test/XLNet-Test", "xlnet/xlnet-base-cased"] #-}
+{-# TOKENIZER ["test/XLNet-Test", "xlnet/xlnet-base-cased"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (gelu, relu)
+import Config
+import List
+import Masking (Mask, mask_for_input)
+import Math (cos, pow, sin, sqrt)
+import NN
+import Params
+import Tensor
+
+MODEL_DIM <- Config.dim @@d_model default=32
+VOCAB_SIZE <- Config.dim @@vocab_size default=99
+NUM_LAYERS <- Config.dim @@n_layer default=5
+NUM_HEADS <- Config.dim @@n_head default=4
+HEAD_DIM <- Config.dim @@d_head default=8
+FFN_DIM <- Config.dim @@d_inner default=128
+EPS <- Config.float @@layer_norm_eps default=1e-12
+FF_ACTIVATION <- Config.str @@ff_activation default="gelu"
+MEMORY_LENGTH <- Config.dim @@mem_len default=512
+
+type XLNetCache[B,P,D] = (List[Tensor[B,P,D]], TokenIds[B,1])
+
+xlnet_activation :: Tensor[..S] -> Tensor[..S]
+xlnet_activation x = (FF_ACTIVATION == "relu") ? (relu x) : (gelu x)
+
+xlnet_project :: Tensor[B,S,D] -> Tensor[D,H,DH] -> Tensor[B,H,S,DH]
+xlnet_project x weight = do
+  weight <- Tensor.reshape weight shape=[D, H * DH]
+  projected <- Tensor.matmul x weight
+  return Tensor.reshape projected shape=[B, S, H, DH] |> Tensor.permute dims=[0, 2, 1, 3]
+
+xlnet_relative_shift :: Tensor[B,H,Q,R] -> Dim -> Tensor[B,H,Q,K]
+xlnet_relative_shift x key_length = do
+  shifted <- Tensor.reshape x shape=[B, H, R, Q]
+  shifted <- Tensor.slice shifted dim=2 start=1 end=R
+  shifted <- Tensor.reshape shifted shape=[B, H, Q, R - 1]
+  return Tensor.slice shifted dim=3 start=0 end=key_length
+
+xlnet_position_encoding :: Tensor[B,S,D] -> Dim -> Dim -> Tensor[B,Q + K,D]
+xlnet_position_encoding x query_length key_length = do
+  frequency_ids <- Tensor.arange_step x start=0 end=MODEL_DIM stride=2
+  frequency_ids <- Tensor.cast_like frequency_ids x
+  frequency_base <- Tensor.full x shape=[MODEL_DIM / 2] value=10000.0
+  inverse_frequency <- pow frequency_base (0 - (frequency_ids / MODEL_DIM))
+  positions <- Tensor.arange_step x start=key_length end=(0 - query_length) stride=-1
+  positions <- Tensor.cast_like positions x
+  positions <- Tensor.reshape positions shape=[query_length + key_length, 1]
+  inverse_frequency <- Tensor.reshape inverse_frequency shape=[1, MODEL_DIM / 2]
+  sinusoid <- Tensor.matmul positions inverse_frequency
+  position <- Tensor.concat (sin sinusoid) (cos sinusoid) dim=-1
+  position <- Tensor.reshape position shape=[1, query_length + key_length, MODEL_DIM]
+  return Tensor.expand position shape=[B, query_length + key_length, MODEL_DIM]
+
+xlnet_attend :: Tensor[B,H,Q,DH] -> Tensor[B,H,K,DH] -> Tensor[B,H,K,DH] -> Tensor[B,H,R,DH] -> Tensor[H,DH] -> Tensor[H,DH] -> Tensor[B,1,Q,K] -> Tensor[B,H,Q,DH]
+xlnet_attend q k v r content_bias position_bias keep = do
+  content_bias <- Tensor.reshape content_bias shape=[1, H, 1, DH]
+  position_bias <- Tensor.reshape position_bias shape=[1, H, 1, DH]
+  content_scores <- Tensor.matmul (q + content_bias) (Tensor.transpose k dim1=2 dim2=3)
+  position_scores <- Tensor.matmul (q + position_bias) (Tensor.transpose r dim1=2 dim2=3)
+  position_scores <- xlnet_relative_shift position_scores K
+  scores <- (content_scores + position_scores) / sqrt DH
+  scores <- Tensor.where keep scores -1e30
+  probs <- Tensor.softmax scores dim=-1
+  return Tensor.matmul probs v
+
+xlnet_post_attention :: Path -> Tensor[B,S,D] -> Tensor[B,H,S,DH] -> Tensor[B,S,D]
+xlnet_post_attention@path residual attended = do
+  output_weight <- Params.param@o
+  attended <- Tensor.permute attended dims=[0, 2, 1, 3]
+  attended <- Tensor.reshape attended shape=[B, S, H * DH]
+  output_weight <- Tensor.reshape output_weight shape=[D, H * DH]
+  output <- Tensor.matmul attended (Tensor.transpose output_weight dim1=0 dim2=1)
+  return NN.layernorm@layer_norm (residual + output) eps=EPS
+
+xlnet_attention :: Path -> Tensor[B,S,D] -> Tensor[B,R,D] -> Tensor[B,S] -> Tensor[B,S,D]
+xlnet_attention@path x position key_keep = do
+  q_weight <- Params.param@q
+  k_weight <- Params.param@k
+  v_weight <- Params.param@v
+  r_weight <- Params.param@r
+  content_bias <- Params.param@r_w_bias
+  position_bias <- Params.param@r_r_bias
+
+  q <- xlnet_project x q_weight
+  k <- xlnet_project x k_weight
+  v <- xlnet_project x v_weight
+  r <- xlnet_project position r_weight
+
+  key_keep <- Tensor.reshape key_keep shape=[B, 1, 1, S]
+  key_keep <- Tensor.expand key_keep shape=[B, 1, S, S]
+  indices <- Tensor.arange x 0 S
+  query_indices <- Tensor.reshape indices shape=[S, 1]
+  key_indices <- Tensor.reshape indices shape=[1, S]
+  diagonal <- Tensor.eq query_indices key_indices
+  keep <- key_keep or diagonal
+  attended <- xlnet_attend q k v r content_bias position_bias keep
+  return xlnet_post_attention@path x attended
+
+xlnet_attention_two :: Path -> Tensor[B,Q,D] -> Tensor[B,1,D] -> Tensor[B,R,D] -> Tensor[B,1,Q,K] -> Tensor[B,1,Q,K] -> ?Tensor[B,M,D] -> (Tensor[B,Q,D], Tensor[B,1,D])
+xlnet_attention_two@path h g position h_keep g_keep memory = do
+  q_weight <- Params.param@q
+  k_weight <- Params.param@k
+  v_weight <- Params.param@v
+  r_weight <- Params.param@r
+  content_bias <- Params.param@r_w_bias
+  position_bias <- Params.param@r_r_bias
+
+  cat <- (memory == null) ? h : (Tensor.concat memory h dim=1)
+  q_h <- xlnet_project h q_weight
+  q_g <- xlnet_project g q_weight
+  q_g_full <- Tensor.zeros_like q_h
+  q_g_full <- Tensor.assign_slice q_g_full q_g dim=2 start=(Q - 1) end=Q
+  k <- xlnet_project cat k_weight
+  v <- xlnet_project cat v_weight
+  r <- xlnet_project position r_weight
+  attended_h <- xlnet_attend q_h k v r content_bias position_bias h_keep
+  attended_g <- xlnet_attend q_g_full k v r content_bias position_bias g_keep
+  attended_g <- Tensor.slice attended_g dim=2 start=(Q - 1) end=Q
+  h <- xlnet_post_attention@path h attended_h
+  g <- xlnet_post_attention@path g attended_g
+  return h, g
+
+xlnet_feed_forward :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+xlnet_feed_forward@path x = do
+  hidden <- NN.linear@layer_1 x dim=FFN_DIM bias=true
+  hidden <- xlnet_activation hidden
+  hidden <- NN.linear@layer_2 hidden dim=MODEL_DIM bias=true
+  return NN.layernorm@layer_norm (x + hidden) eps=EPS
+
+xlnet_layer :: Tensor[B,S,D] -> Tensor[B,R,D] -> Tensor[B,S] -> Tensor[B,S,D]
+xlnet_layer x position key_keep = do
+  x <- xlnet_attention@rel_attn x position key_keep
+  return xlnet_feed_forward@ff x
+
+xlnet_layer_two :: Tensor[B,Q,D] -> Tensor[B,1,D] -> Tensor[B,R,D] -> Tensor[B,1,Q,K] -> Tensor[B,1,Q,K] -> ?Tensor[B,M,D] -> (Tensor[B,Q,D], Tensor[B,1,D])
+xlnet_layer_two h g position h_keep g_keep memory = do
+  h, g <- xlnet_attention_two@rel_attn h g position h_keep g_keep memory
+  h <- xlnet_feed_forward@ff h
+  g <- xlnet_feed_forward@ff g
+  return h, g
+
+xlnet_generation :: TokenIds[B,S] -> ?XLNetCache[B,P,MODEL_DIM] -> (Tensor[B,1,VOCAB_SIZE], XLNetCache[B,K,MODEL_DIM])
+xlnet_generation input_ids past_kv = do
+  past_memories, previous_token <- (past_kv == null)
+    ? ((List.init :: List[Tensor[B,P,MODEL_DIM]]), (Tensor.slice input_ids dim=1 start=(S - 1) end=S))
+    : past_kv
+  content_ids <- (past_kv == null)
+    ? input_ids
+    : (Tensor.concat previous_token input_ids dim=1)
+  content_length <- Tensor.size content_ids 1
+  current_token <- Tensor.slice content_ids dim=1 start=(content_length - 1) end=content_length
+  dummy <- Tensor.zeros input_ids shape=[B, 1] dtype="long"
+  content_ids <- Tensor.concat content_ids dummy dim=1
+  query_length <- Tensor.size content_ids 1
+
+  first_memory <- (past_kv == null)
+    ? (Tensor.zeros input_ids shape=[B, 0, MODEL_DIM])
+    : (List.index past_memories 0)
+  stored_length <- Tensor.size first_memory 1
+  memory_length <- (past_kv == null) ? 0 : ((stored_length > 2) ? (stored_length - 2) : 0)
+  key_length <- memory_length + query_length
+
+  query_indices <- Tensor.arange content_ids 0 query_length |> Tensor.reshape shape=[query_length, 1]
+  key_indices <- Tensor.arange content_ids 0 key_length |> Tensor.reshape shape=[1, key_length]
+  ordinary_key <- Tensor.le key_indices (key_length - 2)
+  dummy_query <- Tensor.eq query_indices (query_length - 1)
+  dummy_key <- Tensor.eq key_indices (key_length - 1)
+  dummy_diagonal <- dummy_query and dummy_key
+  h_keep <- ordinary_key or dummy_diagonal
+  h_keep <- Tensor.reshape h_keep shape=[1, 1, query_length, key_length]
+  h_keep <- Tensor.expand h_keep shape=[B, 1, query_length, key_length]
+  g_keep <- Tensor.reshape ordinary_key shape=[1, 1, 1, key_length]
+  g_keep <- Tensor.expand g_keep shape=[B, 1, query_length, key_length]
+
+  h <- NN.embedding@transformer.word_embedding content_ids dim=MODEL_DIM
+  g <- Params.param @@transformer.mask_emb
+  g <- Tensor.expand g shape=[B, 1, MODEL_DIM]
+  position <- xlnet_position_encoding h query_length key_length
+  new_memories <- (List.init :: List[Tensor[B,K,MODEL_DIM]])
+  h, g, new_memories <- for@transformer.layer i <- [0..NUM_LAYERS) carry (h, g, new_memories) do
+    memory <- (past_kv == null)
+      ? (null :: ?Tensor[B,P,MODEL_DIM])
+      : (List.index past_memories i)
+    memory <- (memory == null)
+      ? memory
+      : (Tensor.slice memory dim=1 start=0 end=memory_length)
+    combined <- (memory == null) ? h : (Tensor.concat memory h dim=1)
+    combined_length <- Tensor.size combined 1
+    memory_start <- (combined_length > MEMORY_LENGTH) ? (combined_length - MEMORY_LENGTH) : 0
+    new_memory <- Tensor.slice combined dim=1 start=memory_start end=combined_length
+    new_memories <- List.append new_memories new_memory
+    h, g <- xlnet_layer_two h g position h_keep g_keep memory
+    yield h, g, new_memories
+  logits <- NN.linear@lm_loss g dim=VOCAB_SIZE bias=true weight_path=@@transformer.word_embedding.weight bias_path=@@lm_loss.bias
+  return logits, (new_memories, current_token)
+
+xlnet_forward :: TokenIds[B,S] -> ?Mask[B,S,S] -> (Tensor[B,S,VOCAB_SIZE], ?XLNetCache[B,K,MODEL_DIM])
+xlnet_forward input_ids attn_mask = do
+  key_keep <- mask_for_input input_ids attn_mask S
+  key_keep <- Tensor.cast key_keep "bool"
+  x <- NN.embedding@transformer.word_embedding input_ids dim=MODEL_DIM
+  position <- xlnet_position_encoding x S S
+  x <- for@transformer.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- xlnet_layer x position key_keep
+    yield x
+  logits <- NN.linear@lm_loss x dim=VOCAB_SIZE bias=true weight_path=@@transformer.word_embedding.weight bias_path=@@lm_loss.bias
+  return logits, (null :: ?XLNetCache[B,K,MODEL_DIM])
+
+xlnet :: TokenIds[B,S] -> ?Mask[B,S,S] -> ?XLNetCache[B,P,MODEL_DIM] -> ?Bool -> (Tensor[B,Q,VOCAB_SIZE], ?XLNetCache[B,K,MODEL_DIM])
+xlnet input_ids attn_mask past_kv use_cache = do
+  logits, new_kv <- use_cache
+    ? (xlnet_generation input_ids past_kv)
+    : (xlnet_forward input_ids attn_mask)
+  return logits, new_kv

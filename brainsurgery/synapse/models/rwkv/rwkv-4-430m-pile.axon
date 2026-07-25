@@ -1,0 +1,117 @@
+{-# CHECKPOINTS "RWKV/rwkv-4-430m-pile" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "rwkv" #-}
+
+import Activations (relu2, sigmoid)
+
+import Config
+
+import Math (exp, pow)
+
+import NN
+
+import Params (param)
+
+import Tensor
+
+MODEL_DIM <- (1024 :: Dim)
+
+ATTN_DIM <- Config.dim @@attention_hidden_size default=MODEL_DIM
+
+FFN <- Config.dim @@intermediate_size default=(4 * MODEL_DIM)
+
+VOCAB_SIZE <- (50277 :: Dim)
+
+NUM_LAYERS <- (24 :: Dim)
+
+EPS <- 1e-05
+
+RESCALE_EVERY <- (6 :: Dim)
+
+time_shift :: Tensor[B,S,D] -> Tensor[B,S,D]
+time_shift x = do
+  zero <- Tensor.slice x dim=1 start=0 end=1
+  zero <- zero * 0.0
+  prefix <- Tensor.slice x dim=1 start=0 end=(S - 1)
+  return Tensor.concat zero prefix dim=1
+
+rwkv_time_mix :: Tensor[B,S,D] -> Tensor[B,S,D] -> Path -> Tensor[B,S,D]
+rwkv_time_mix x shifted mix_path = do
+  mix <- ((param mix_path) :: Tensor[1,1,D])
+  return (x * mix) + (shifted * (1.0 - mix))
+
+rwkv_attention_scan :: Tensor[B,S,A] -> Tensor[B,S,A] -> Tensor[A] -> Tensor[A] -> Tensor[B,S,A]
+rwkv_attention_scan key value time_decay_raw time_first = do
+  decay <- 0.0 - (exp time_decay_raw)
+  first_key <- Tensor.slice key dim=1 start=0 end=1 |> Tensor.reshape shape=[B, A]
+  num <- first_key * 0.0 |> Tensor.cast dtype="float32"
+  den <- first_key * 0.0 |> Tensor.cast dtype="float32"
+  max_state <- num - 1e38
+  output <- Tensor.zeros_like key
+  num, den, max_state, output <- for t <- [0..S) carry (num, den, max_state, output) do
+    kt <- Tensor.slice key dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, A] |> Tensor.cast dtype="float32"
+    vt <- Tensor.slice value dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, A] |> Tensor.cast dtype="float32"
+    output_key <- kt + time_first
+    max_output <- Tensor.where (max_state > output_key) max_state output_key
+    e1 <- exp (max_state - max_output)
+    e2 <- exp (output_key - max_output)
+    yt <- ((e1 * num) + (e2 * vt)) / ((e1 * den) + e2)
+    state_key <- max_state + decay
+    max_next <- Tensor.where (state_key > kt) state_key kt
+    se1 <- exp (state_key - max_next)
+    se2 <- exp (kt - max_next)
+    num <- (se1 * num) + (se2 * vt)
+    den <- (se1 * den) + se2
+    step <- Tensor.reshape yt shape=[B, 1, A] |> Tensor.cast_like output
+    index <- Tensor.fill step t dtype="long"
+    output <- Tensor.scatter output index step dim=1
+    yield num, den, max_next, output
+  return output
+
+rwkv_attention :: Tensor[B,S,D] -> Int -> Tensor[B,S,D]
+rwkv_attention x i = do
+  shifted <- time_shift x
+  kx <- rwkv_time_mix x shifted @attention.time_mix_key
+  vx <- rwkv_time_mix x shifted @attention.time_mix_value
+  rx <- rwkv_time_mix x shifted @attention.time_mix_receptance
+  key <- NN.linear@attention.key kx dim=ATTN_DIM bias=false
+  value <- NN.linear@attention.value vx dim=ATTN_DIM bias=false
+  receptance <- NN.linear@attention.receptance rx dim=ATTN_DIM bias=false |> sigmoid
+  decay <- ((param @attention.time_decay) :: Tensor[ATTN_DIM])
+  first <- ((param @attention.time_first) :: Tensor[ATTN_DIM])
+  wkv <- rwkv_attention_scan key value decay first
+  out <- NN.linear@attention.output (receptance * wkv) dim=MODEL_DIM bias=false
+  scale_power <- (RESCALE_EVERY > 0) ? (i / RESCALE_EVERY) : 0
+  return out / (pow 2.0 scale_power)
+
+rwkv_feed_forward :: Tensor[B,S,D] -> Int -> Tensor[B,S,D]
+rwkv_feed_forward x i = do
+  shifted <- time_shift x
+  kx <- rwkv_time_mix x shifted @feed_forward.time_mix_key
+  rx <- rwkv_time_mix x shifted @feed_forward.time_mix_receptance
+  key <- NN.linear@feed_forward.key kx dim=FFN bias=false |> relu2
+  value <- NN.linear@feed_forward.value key dim=MODEL_DIM bias=false
+  receptance <- NN.linear@feed_forward.receptance rx dim=MODEL_DIM bias=false |> sigmoid
+  scale_power <- (RESCALE_EVERY > 0) ? (i / RESCALE_EVERY) : 0
+  return (receptance * value) / (pow 2.0 scale_power)
+
+rwkv_block :: Tensor[B,S,D] -> Int -> Tensor[B,S,D]
+rwkv_block x i = do
+  x <- (i == 0) ? (NN.layernorm@pre_ln x eps=EPS) : x
+  a <- NN.layernorm@ln1 x eps=EPS |> rwkv_attention i
+  x <- x + a
+  m <- NN.layernorm@ln2 x eps=EPS |> rwkv_feed_forward i
+  return x + m
+
+rwkv :: TokenIds[B,S] -> ?Tensor[B,K] -> ?Any -> ?Bool -> (Tensor[B,S,V], ?Any)
+rwkv input_ids attn_mask past_kv use_cache = do
+  x <- NN.embedding@@rwkv.embeddings input_ids dim=MODEL_DIM
+  x <- for@rwkv.blocks i <- [0..NUM_LAYERS) carry (x) do
+    x <- rwkv_block x i
+    rescale <- (RESCALE_EVERY > 0) and (((i + 1) % RESCALE_EVERY) == 0)
+    yield rescale ? (x / 2.0) : x
+  x <- NN.layernorm@@rwkv.ln_out x eps=EPS
+  logits <- NN.linear@@head x dim=VOCAB_SIZE bias=false
+  return logits, null

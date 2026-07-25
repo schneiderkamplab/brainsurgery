@@ -1,0 +1,67 @@
+{-# CHECKPOINTS "facebook/xlm-roberta-xl" #-}
+
+{-# TASK "masked_lm" #-}
+
+{-# MAIN "xlm_roberta_xl" #-}
+
+import Activations (gelu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+
+import Positions (position_ids)
+
+import Config
+
+import NN
+
+MODEL_DIM <- 2560
+
+VOCAB_SIZE <- 250880
+
+NUM_LAYERS <- 36
+
+NUM_HEADS <- 32
+
+FFN <- 10240
+
+EPS <- 1e-05
+
+PAD <- 1
+
+xlm_roberta_xl_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+xlm_roberta_xl_block x keep = do
+  h <- NN.layernorm@attention.self_attn_layer_norm x eps=EPS
+  a <- scope@attention do
+    q <- NN.linear@self.query h dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key h dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value h dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    return attention q k v keep |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- x + a
+  h <- NN.layernorm@LayerNorm x eps=EPS
+  m <- NN.linear@intermediate.dense h dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  return x + m
+
+xlm_roberta_xl :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+xlm_roberta_xl input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_base <- position_ids input_ids attn_mask=attn_mask pad_fill=-1
+  pos_ids <- pos_base + PAD + 1
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@roberta.embeddings.word_embeddings input_ids dim=MODEL_DIM
+  pos <- NN.embedding@roberta.embeddings.position_embeddings pos_ids dim=MODEL_DIM
+  typ <- NN.embedding@roberta.embeddings.token_type_embeddings tok_type_ids dim=MODEL_DIM
+  x <- tok + pos
+  x <- x + typ
+  x <- for@roberta.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- xlm_roberta_xl_block x keep
+    yield x
+  x <- NN.layernorm@roberta.encoder.LayerNorm x eps=EPS
+  logits <- scope@lm_head do
+    x <- NN.linear@dense x dim=MODEL_DIM bias=true |> gelu
+    x <- NN.layernorm@layer_norm x eps=EPS
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@roberta.embeddings.word_embeddings.weight bias_path=@@lm_head.bias
+  return logits

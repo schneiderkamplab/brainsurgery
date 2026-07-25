@@ -1,0 +1,131 @@
+{-# CHECKPOINTS ["test/RecurrentGemma-Test", "google/recurrentgemma-2b", "google/recurrentgemma-2b-it", "google/recurrentgemma-9b", "google/recurrentgemma-9b-it"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (gelu_pytorch_tanh, sigmoid, softplus, tanh)
+import Attention (attention, merge_heads, reshape_heads)
+import Config
+import List
+import Masking (causal_mask_for_input, mask_for_input)
+import Math (exp, mul, pow)
+import NN
+import Params (param)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Tensor
+
+MODEL_DIM <- Config.dim @@hidden_size default=2560
+VOCAB_SIZE <- Config.dim @@vocab_size default=256000
+NUM_LAYERS <- Config.dim @@num_hidden_layers default=26
+NUM_HEADS <- Config.dim @@num_attention_heads default=10
+KV_HEADS <- Config.dim @@num_key_value_heads default=NUM_HEADS
+HEAD_DIM <- Config.dim @@head_dim default=(MODEL_DIM / NUM_HEADS)
+LRU_WIDTH <- Config.dim @@lru_width default=MODEL_DIM
+LRU_BLOCK = LRU_WIDTH / NUM_HEADS
+FFN_HALF <- Config.dim @@intermediate_size default=7680
+FFN = FFN_HALF / 2
+WINDOW <- Config.dim @@attention_window_size default=2048
+CONV_WIDTH <- Config.dim @@conv1d_width default=4
+EPS <- Config.float @@rms_norm_eps default=1e-6
+SOFTCAP <- Config.float @@logits_soft_cap default=30.0
+THETA <- Config.float @@'rope_parameters.rope_theta' default=10000.0
+LAYER_TYPES <- ((Config.list @@block_types default=["recurrent", "recurrent", "attention"]) :: List[String])
+
+recurrent_gemma_gates :: Tensor[B,S,LRU_WIDTH] -> Path -> Path -> Tensor[B,S,LRU_WIDTH]
+recurrent_gemma_gates x weight_path bias_path = do
+  bs <- B * S
+  xh <- Tensor.reshape x shape=[bs,NUM_HEADS,LRU_BLOCK] |> Tensor.permute dims=[1,0,2]
+  w <- ((param weight_path) :: Tensor[NUM_HEADS,LRU_BLOCK,LRU_BLOCK])
+  b <- ((param bias_path) :: Tensor[NUM_HEADS,LRU_BLOCK])
+  y <- Tensor.matmul xh w
+  y <- y + (Tensor.unsqueeze b dim=1)
+  return Tensor.permute y dims=[1,0,2] |> Tensor.reshape shape=[B,S,LRU_WIDTH] |> sigmoid
+
+recurrent_gemma_rglru :: Tensor[B,S,LRU_WIDTH] -> Tensor[B,S] -> Tensor[B,S,LRU_WIDTH]
+recurrent_gemma_rglru x pos_ids = do
+  input_gate <- recurrent_gemma_gates x @input_gate_weight @input_gate_bias
+  recurrent_gate <- recurrent_gemma_gates x @recurrent_gate_weight @recurrent_gate_bias
+  recurrent_param <- ((param @recurrent_param) :: Tensor[LRU_WIDTH])
+  log_gate <- (recurrent_gate * -8.0) * (softplus recurrent_param)
+  a <- exp log_gate
+  a_square <- exp (log_gate * 2.0)
+  reset <- Tensor.eq pos_ids 0 |> Tensor.unsqueeze dim=-1
+  multiplier <- pow (1.0 - a_square) 0.5
+  multiplier <- Tensor.where reset 1.0 multiplier
+  normalized <- (x * input_gate) * multiplier
+  state <- Tensor.zeros normalized shape=[B,LRU_WIDTH] dtype="float32"
+  output <- Tensor.zeros_like normalized
+  state, output <- for t <- [0..S) carry (state, output) do
+    x_t <- Tensor.slice normalized dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,LRU_WIDTH] |> Tensor.cast dtype="float32"
+    a_t <- Tensor.slice a dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,LRU_WIDTH] |> Tensor.cast dtype="float32"
+    reset_t <- Tensor.slice reset dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B,1]
+    a_t <- Tensor.where reset_t 0.0 a_t
+    state <- (a_t * state) + x_t
+    y_t <- Tensor.cast_like state normalized |> Tensor.reshape shape=[B,1,LRU_WIDTH]
+    index <- Tensor.fill y_t t dtype="long"
+    output <- Tensor.scatter output index y_t dim=1
+    yield state, output
+  return output
+
+recurrent_gemma_recurrent :: Path -> Tensor[B,S,D] -> Tensor[B,S] -> Tensor[B,S,D]
+recurrent_gemma_recurrent@path x pos_ids = do
+  y <- NN.linear@linear_y x dim=LRU_WIDTH bias=true |> gelu_pytorch_tanh
+  z <- NN.linear@linear_x x dim=LRU_WIDTH bias=true
+  w <- ((param @conv_1d.weight) :: Tensor[LRU_WIDTH,1,CONV_WIDTH])
+  b <- ((param @conv_1d.bias) :: Tensor[LRU_WIDTH])
+  zt <- Tensor.transpose z dim1=1 dim2=2
+  prefix <- Tensor.zeros zt shape=[B,LRU_WIDTH,CONV_WIDTH - 1]
+  conv_input <- Tensor.concat prefix zt dim=-1
+  zt <- Tensor.reshape b shape=[1,LRU_WIDTH,1] |> Tensor.expand shape=[B,LRU_WIDTH,S]
+  zt <- for j <- [0..CONV_WIDTH) carry (zt) do
+    z_j <- Tensor.slice conv_input dim=-1 start=j end=(j + S)
+    w_j <- Tensor.slice w dim=-1 start=j end=(j + 1) |> Tensor.reshape shape=[1,LRU_WIDTH,1]
+    yield zt + (z_j * w_j)
+  z <- Tensor.transpose zt dim1=1 dim2=2
+  z <- scope@rg_lru do
+    return recurrent_gemma_rglru z pos_ids
+  return z |> mul y |> NN.linear@linear_out dim=MODEL_DIM bias=true
+
+recurrent_gemma_attention :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+recurrent_gemma_attention@path x rope_sin rope_cos mask = do
+  q <- NN.linear@q_proj x dim=(NUM_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=NUM_HEADS
+  k <- NN.linear@k_proj x dim=(KV_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=KV_HEADS
+  v <- NN.linear@v_proj x dim=(KV_HEADS * HEAD_DIM) bias=false |> reshape_heads heads=KV_HEADS
+  q_rot, q_pass <- Tensor.chunk q parts=2
+  k_rot, k_pass <- Tensor.chunk k parts=2
+  q_rot, k_rot <- rope_pair_base_factors q_rot k_rot rope_sin rope_cos
+  q <- Tensor.concat q_rot q_pass dim=-1
+  k <- Tensor.concat k_rot k_pass dim=-1 |> Tensor.repeat repeats=(NUM_HEADS / KV_HEADS)
+  v <- Tensor.repeat v repeats=(NUM_HEADS / KV_HEADS)
+  return attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=true
+
+recurrent_gemma_mlp :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+recurrent_gemma_mlp@path x = do
+  gate <- NN.linear@gate_proj x dim=FFN bias=true |> gelu_pytorch_tanh
+  up <- NN.linear@up_proj x dim=FFN bias=true
+  return gate |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=true
+
+recurrent_gemma_block :: Tensor[B,S,D] -> Int -> Tensor[B,S] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+recurrent_gemma_block x layer pos_ids rope_sin rope_cos mask = do
+  xn <- NN.rmsnorm@temporal_pre_norm x eps=EPS unit_offset=true cast_float=true
+  kind <- List.index LAYER_TYPES layer
+  temporal <- (kind == "attention")
+    ? recurrent_gemma_attention@temporal_block xn rope_sin rope_cos mask
+    : recurrent_gemma_recurrent@temporal_block xn pos_ids
+  x <- x + temporal
+  xn <- NN.rmsnorm@channel_pre_norm x eps=EPS unit_offset=true cast_float=true
+  return x + (recurrent_gemma_mlp@mlp_block xn)
+
+recurrent_gemma :: TokenIds[B,S] -> ?Tensor[B,S] -> ?Any -> ?Bool -> (Tensor[B,S,V], ?Any)
+recurrent_gemma input_ids attn_mask past_kv use_cache = do
+  attn_mask <- mask_for_input input_ids attn_mask WINDOW
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=0
+  rope_sin, rope_cos <- rope_base_factors pos_ids (HEAD_DIM / 2) THETA
+  mask <- causal_mask_for_input input_ids S padding_mask=attn_mask window=WINDOW
+  x <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- x * (pow MODEL_DIM 0.5)
+    x <- for@layers i <- [0..NUM_LAYERS) carry (x) do
+      yield recurrent_gemma_block x i pos_ids rope_sin rope_cos mask
+    return NN.rmsnorm@final_norm x eps=EPS unit_offset=true cast_float=true
+  logits <- NN.linear@@lm_head x dim=VOCAB_SIZE bias=false
+  logits <- (SOFTCAP == 0.0) ? logits : ((tanh (logits / SOFTCAP)) * SOFTCAP)
+  return logits, null
