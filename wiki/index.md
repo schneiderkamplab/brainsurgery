@@ -17,6 +17,8 @@ Validated-by: repo inspection of `wiki/` on 2026-05-20.
 - [scripts.md](scripts.md): Current inventory and operating notes for `../scripts/`.
 - [roundtrips.md](roundtrips.md): Axon stage roundtrip definitions, weak/strong contracts, and pytest integration.
 - [benchmarks.md](benchmarks.md): Benchmark execution/reporting conventions and canonical log layout.
+- [sanity-check.md](sanity-check.md): Per-backend benchmark sanity check — speed parity vs HF and correctness status across torch/triton/jax/vllm.
+- [vllm-backend-debug.md](vllm-backend-debug.md): vLLM backend debug status, fix workstreams A-M, and remaining issues.
 - [log.md](log.md): Append-only chronology of durable wiki updates and operational events.
 
 ## Policy Entry Points

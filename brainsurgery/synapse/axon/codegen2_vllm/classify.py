@@ -62,7 +62,10 @@ class VLLMLayerClassification:
     embedding_node_ids: set[str] = field(default_factory=set)
     lm_head_node_id: str | None = None
     rmsnorm_node_ids: set[str] = field(default_factory=set)
+    layernorm_node_ids: set[str] = field(default_factory=set)
     qk_norm_node_ids: set[str] = field(default_factory=set)
+    qk_norm_pre_reshape_node_ids: set[str] = field(default_factory=set)
+    qk_norm_k_node_ids: set[str] = field(default_factory=set)
     repeated_module_names: set[str] = field(default_factory=set)
     loop_index_param: dict[str, str] = field(default_factory=dict)
     module_scope_parts: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -79,6 +82,7 @@ class VLLMLayerClassification:
     pli_model_proj_node_id: str | None = None
     pli_proj_norm_node_id: str | None = None
     mamba_mixer_module_names: set[str] = field(default_factory=set)
+    transposed_linear_node_ids: set[str] = field(default_factory=set)
 
     def layer_type(self, node: GraphNode) -> VLLMLayerType:
         return self.node_types.get(node.id, VLLMLayerType.DEFAULT)
@@ -100,6 +104,14 @@ _TRIVIAL_TRANSFORM_OPS = frozenset({
     "Tensor.expand",
     "Attention.reshape_heads",
     "Attention.flatten_heads",
+    "Attention.merge_heads",
+    "_reshape",
+    "_permute",
+    "_transpose",
+    "_cast",
+    "_expand",
+    "_narrow",
+    "_slice",
 })
 
 
@@ -236,9 +248,14 @@ def _is_layernorm_call(
     node: GraphNode,
     modules_by_name: dict[str, GraphModule],
 ) -> bool:
+    if node.op.name in ("_layernorm", "NN.layernorm"):
+        return True
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
+    for n in mod.nodes:
+        if n.op.name in ("_layernorm", "NN.layernorm"):
+            return True
     return _module_contains_primitive(
         mod, "_layernorm", modules_by_name,
         recursive="." in node.op.name,
@@ -249,9 +266,14 @@ def _is_rmsnorm_call(
     node: GraphNode,
     modules_by_name: dict[str, GraphModule],
 ) -> bool:
+    if node.op.name in ("_rmsnorm", "NN.rmsnorm", "NN.rmsnorm_noscale"):
+        return True
     mod = _called_module(node, modules_by_name)
     if mod is None:
         return False
+    for n in mod.nodes:
+        if n.op.name in ("_rmsnorm", "NN.rmsnorm", "NN.rmsnorm_noscale"):
+            return True
     return _module_contains_primitive(
         mod, "_rmsnorm", modules_by_name,
         recursive="." in node.op.name,
@@ -267,9 +289,21 @@ def _is_activation_call(
     if mod is None:
         return False
     if activation_primitives is None:
-        return any(
+        if any(
             n.op.name.startswith("_activations_") for n in mod.nodes
-        )
+        ):
+            return True
+        for n in mod.nodes:
+            if n.op.name == "core.select":
+                for inp in n.inputs:
+                    if hasattr(inp, "op") and hasattr(inp.op, "name"):
+                        inner_mod = modules_by_name.get(inp.op.name)
+                        if inner_mod is not None and any(
+                            inner_n.op.name.startswith("_activations_")
+                            for inner_n in inner_mod.nodes
+                        ):
+                            return True
+        return False
     return any(n.op.name in activation_primitives for n in mod.nodes)
 
 
@@ -336,11 +370,13 @@ def _classify_embeddings(
     modules_by_name: dict[str, GraphModule],
     classification: VLLMLayerClassification,
 ) -> None:
-    all_module_input_names: set[str] = set()
-    for module in program.modules:
-        for inp in module.inputs:
-            if isinstance(inp, (GraphValueRef, GraphValue)):
-                all_module_input_names.add(inp.name)
+    main_module = modules_by_name.get(program.main_module)
+    if main_module is None:
+        return
+    main_input_names: set[str] = {
+        inp.name for inp in main_module.inputs
+        if isinstance(inp, (GraphValueRef, GraphValue))
+    }
     for module in program.modules:
         for node in module.nodes:
             if not _is_embedding_call(node, modules_by_name):
@@ -349,7 +385,7 @@ def _classify_embeddings(
                 continue
             x_input = node.inputs[0] if len(node.inputs) < 2 else node.inputs[1]
             x_name = _value_name(x_input)
-            if x_name is not None and x_name in all_module_input_names:
+            if x_name is not None and x_name in main_input_names:
                 classification.node_types[node.id] = VLLMLayerType.VOCAB_PARALLEL_EMBEDDING
                 classification.embedding_node_ids.add(node.id)
 
@@ -370,6 +406,12 @@ def _is_structural_attention_call(
             has_matmul = True
         if inner.op.name in ("_softmax", "Tensor.softmax"):
             has_softmax = True
+        if inner.op.name == "core.select":
+            for inp in inner.inputs:
+                if isinstance(inp, GraphExpr) and inp.op.name in ("_softmax", "Tensor.softmax"):
+                    has_softmax = True
+                if isinstance(inp, GraphExpr) and inp.op.name in ("_matmul", "Tensor.matmul"):
+                    has_matmul = True
     return has_matmul and has_softmax
 
 
@@ -389,6 +431,15 @@ def _classify_qkv_producers_structural(
     if q_linear and k_linear and v_linear:
         ids = {q_linear.id, k_linear.id, v_linear.id}
         if len(ids) < 2:
+            group = QKVGroup(
+                q_node_id=q_linear.id,
+                k_node_id=q_linear.id,
+                v_node_id=q_linear.id,
+                attention_node_id=node.id,
+            )
+            classification.qkv_groups.append(group)
+            if q_linear.id not in classification.node_types:
+                classification.node_types[q_linear.id] = VLLMLayerType.QKV_PARALLEL_LINEAR
             return
         group = QKVGroup(
             q_node_id=q_linear.id,
@@ -489,9 +540,9 @@ def _classify_qkv_producers(
     v_actual = formal_to_actual.get(sdpa_fact.v)
     if q_actual is None or k_actual is None or v_actual is None:
         return
-    q_linear = _find_linear_call_for_value(module, q_actual, modules_by_name)
-    k_linear = _find_linear_call_for_value(module, k_actual, modules_by_name)
-    v_linear = _find_linear_call_for_value(module, v_actual, modules_by_name)
+    q_linear = _find_linear_call_for_value_deep(module, q_actual, modules_by_name)
+    k_linear = _find_linear_call_for_value_deep(module, k_actual, modules_by_name)
+    v_linear = _find_linear_call_for_value_deep(module, v_actual, modules_by_name)
     if q_linear and k_linear and v_linear:
         group = QKVGroup(
             q_node_id=q_linear.id,
@@ -517,9 +568,9 @@ def _classify_qkv_producers_from_intrinsic(
     q_actual = node.inputs[0]
     k_actual = node.inputs[1]
     v_actual = node.inputs[2]
-    q_linear = _find_linear_call_for_value(module, q_actual, modules_by_name)
-    k_linear = _find_linear_call_for_value(module, k_actual, modules_by_name)
-    v_linear = _find_linear_call_for_value(module, v_actual, modules_by_name)
+    q_linear = _find_linear_call_for_value_deep(module, q_actual, modules_by_name)
+    k_linear = _find_linear_call_for_value_deep(module, k_actual, modules_by_name)
+    v_linear = _find_linear_call_for_value_deep(module, v_actual, modules_by_name)
     if q_linear and k_linear and v_linear:
         group = QKVGroup(
             q_node_id=q_linear.id,
@@ -580,6 +631,106 @@ def _find_linear_call_for_value(
     return None
 
 
+def _map_module_outputs_to_inputs(
+    called_module: GraphModule,
+    modules_by_name: dict[str, GraphModule],
+) -> dict[int, int] | None:
+    """For a module that returns a tuple, trace internal structure to find
+    which input index feeds each output index.
+
+    Returns a dict mapping output_index -> input_index, or None if the
+    mapping cannot be determined.
+    """
+    # Build map of value_name -> input_index for the called module
+    input_name_to_idx: dict[str, int] = {}
+    for i, inp in enumerate(called_module.inputs):
+        nm = _value_name(inp)
+        if nm:
+            input_name_to_idx[nm] = i
+
+    # Find tuple-producing structures inside the module.  The module may
+    # have a core.select whose branches are GraphExpr(core.tuple) or
+    # GraphExpr(sub_module) where the sub-module contains a core.tuple.
+    tuple_inputs: list[GraphOperand] | None = None
+
+    for node in called_module.nodes:
+        if node.op.name == "core.tuple" and node.outputs:
+            tuple_inputs = list(node.inputs)
+            break
+        if node.op.name == "core.select":
+            for branch in node.inputs[1:]:
+                if isinstance(branch, GraphExpr):
+                    if branch.op.name == "core.tuple":
+                        tuple_inputs = list(branch.inputs)
+                        break
+                    if branch.op.name in modules_by_name:
+                        sub = modules_by_name[branch.op.name]
+                        for sub_node in sub.nodes:
+                            if sub_node.op.name == "core.tuple":
+                                tuple_inputs = list(sub_node.inputs)
+                                # Also register sub-module input names
+                                for si, sinp in enumerate(sub.inputs):
+                                    snm = _value_name(sinp)
+                                    if snm and snm not in input_name_to_idx:
+                                        input_name_to_idx[snm] = si
+                                break
+                if tuple_inputs is not None:
+                    break
+
+    if tuple_inputs is None:
+        return None
+
+    # Build a value-name → producer map across called module and its
+    # immediate sub-modules so we can trace tuple elements back to inputs.
+    value_to_input_name: dict[str, str] = {}
+    for node in called_module.nodes:
+        for out in node.outputs:
+            nm = _value_name(out)
+            if nm:
+                for inp in node.inputs:
+                    inp_nm = _value_name(inp)
+                    if inp_nm:
+                        value_to_input_name[nm] = inp_nm
+    for sub_mod_node in called_module.nodes:
+        if sub_mod_node.op.name in modules_by_name:
+            sub = modules_by_name[sub_mod_node.op.name]
+            for node in sub.nodes:
+                for out in node.outputs:
+                    nm = _value_name(out)
+                    if nm:
+                        for inp in node.inputs:
+                            inp_nm = _value_name(inp)
+                            if inp_nm:
+                                value_to_input_name[nm] = inp_nm
+
+    mapping: dict[int, int] = {}
+    for out_i, tup_inp in enumerate(tuple_inputs):
+        nm = _value_name(tup_inp)
+        if nm and nm in input_name_to_idx:
+            mapping[out_i] = input_name_to_idx[nm]
+            continue
+        # Trace through intermediate values
+        if nm:
+            traced = value_to_input_name.get(nm)
+            if traced and traced in input_name_to_idx:
+                mapping[out_i] = input_name_to_idx[traced]
+                continue
+            # Follow chain of intermediate values
+            seen = {nm}
+            cur = nm
+            for _ in range(8):
+                nxt = value_to_input_name.get(cur)
+                if nxt is None or nxt in seen:
+                    break
+                seen.add(nxt)
+                if nxt in input_name_to_idx:
+                    mapping[out_i] = input_name_to_idx[nxt]
+                    break
+                cur = nxt
+
+    return mapping if mapping else None
+
+
 def _find_linear_call_for_value_deep(
     module: GraphModule,
     operand: GraphOperand,
@@ -638,19 +789,51 @@ def _find_linear_call_for_value_deep(
                         if result is not None:
                             return result
             return None
+    if node.op.name == "core.alias" and len(node.outputs) > 1 and len(node.inputs) >= 1:
+        # core.alias destructures a tuple into individual outputs.
+        # When the producer is a rope-pair function (rope_pair_base_factors,
+        # rope_pair_base_prefix_factors, etc.), output index maps directly to
+        # input index (output 0 = q_rope → input 0 = q, output 1 = k_rope → input 1 = k).
+        # Without this, the generic search below would find q_proj for both q and k.
+        out_idx: int | None = None
+        for i, out in enumerate(node.outputs):
+            if _value_name(out) == name:
+                out_idx = i
+                break
+        if out_idx is not None:
+            producer = _resolve_value_to_node(module, node.inputs[0])
+            if (
+                producer is not None
+                and "rope_pair" in producer.op.name
+                and out_idx < len(producer.inputs)
+            ):
+                return _find_linear_call_for_value_deep(
+                    module, producer.inputs[out_idx],
+                    modules_by_name, depth + 1, visited,
+                )
     if node.op.name in modules_by_name and len(node.outputs) > 1:
         out_idx: int | None = None
         for i, out in enumerate(node.outputs):
             if _value_name(out) == name:
                 out_idx = i
                 break
-        if out_idx is not None and out_idx < len(node.inputs):
-            result = _find_linear_call_for_value_deep(
-                module, node.inputs[out_idx],
-                modules_by_name, depth + 1, visited,
-            )
-            if result is not None:
-                return result
+        if out_idx is not None:
+            called_mod = modules_by_name[node.op.name]
+            # Try to find the correct input index via module-internal tracing.
+            # This handles modules like Cache.update where output[i] does not
+            # map to input[i] (e.g. outputs are (k, v, new_kv) but inputs are
+            # (past_kv, k, v)).
+            input_idx = out_idx
+            out_to_in = _map_module_outputs_to_inputs(called_mod, modules_by_name)
+            if out_to_in and out_idx in out_to_in:
+                input_idx = out_to_in[out_idx]
+            if input_idx < len(node.inputs):
+                result = _find_linear_call_for_value_deep(
+                    module, node.inputs[input_idx],
+                    modules_by_name, depth + 1, visited,
+                )
+                if result is not None:
+                    return result
     for inp in node.inputs:
         result = _find_linear_call_for_value_deep(
             module, inp, modules_by_name, depth + 1, visited
@@ -691,8 +874,8 @@ def _classify_gated_ffn(
                     up_input = mul_node.inputs[1]
                 else:
                     up_input = mul_node.inputs[0]
-            gate_linear = _find_linear_call_for_value(module, gate_input, modules_by_name) if gate_input else None
-            up_linear = _find_linear_call_for_value(module, up_input, modules_by_name) if up_input else None
+            gate_linear = _find_linear_call_for_value_deep(module, gate_input, modules_by_name) if gate_input else None
+            up_linear = _find_linear_call_for_value_deep(module, up_input, modules_by_name) if up_input else None
             down_linear = None
             for j in range(i + 1, len(nodes)):
                 if _is_linear_call(nodes[j], modules_by_name) and len(nodes[j].inputs) >= 2:
@@ -736,7 +919,7 @@ def _find_activation_followed_by_mul(
     if act_output is None:
         return None
     for j in range(index + 1, len(nodes)):
-        if nodes[j].op.name in {"_mul", "core.binary.*"} and len(nodes[j].inputs) >= 2:
+        if nodes[j].op.name in {"_mul", "core.binary.*", "Math.mul"} and len(nodes[j].inputs) >= 2:
             in0_name = _value_name(nodes[j].inputs[0])
             in1_name = _value_name(nodes[j].inputs[1])
             if in0_name == act_output or in1_name == act_output:
@@ -755,7 +938,7 @@ def _classify_simple_ffn(
     for module in program.modules:
         nodes = list(module.nodes)
         for i, node in enumerate(nodes):
-            if not _is_activation_call(node, modules_by_name):
+            if not (node.op.name.startswith("_activations_") or _is_activation_call(node, modules_by_name)):
                 continue
             up_linear = None
             if node.inputs:
@@ -847,9 +1030,28 @@ def _classify_lm_head(
                             return True
         return False
 
+    repeated_names = classification.repeated_module_names
+    skip_modules = set(repeated_names)
+    changed = True
+    while changed:
+        changed = False
+        for module in program.modules:
+            if module.name not in skip_modules:
+                continue
+            for node in module.nodes:
+                called = node.op.name
+                if called in modules_by_name and called not in skip_modules:
+                    skip_modules.add(called)
+                    changed = True
     for module in program.modules:
+        if module.name in skip_modules:
+            continue
         for node in reversed(module.nodes):
             if not _is_linear_call(node, modules_by_name):
+                continue
+            # Skip nodes that call repeated modules (e.g. transformer blocks
+            # inside __loop modules) — those are not the LM head.
+            if node.op.name in repeated_names:
                 continue
             if node.id in classification.node_types:
                 continue
@@ -859,6 +1061,39 @@ def _classify_lm_head(
                 classification.lm_head_node_id = node.id
                 return
 
+    # Fallback: detect core.select nodes whose branches contain linear calls
+    # that reach the module output (e.g. tied-embedding LM head:
+    #   HAS_LM_HEAD ? NN.linear(@@lm_head, x, VOCAB_SIZE)
+    #               : NN.linear(@@word_embeddings, x, VOCAB_SIZE)  )
+    for module in program.modules:
+        if module.name in repeated_names:
+            continue
+        for node in reversed(module.nodes):
+            if node.op.name != "core.select":
+                continue
+            if node.id in classification.node_types:
+                continue
+            node_output = _node_output_name(node)
+            if not node_output or not _reaches_output(node_output):
+                continue
+            for inp in node.inputs:
+                if not isinstance(inp, GraphExpr):
+                    continue
+                if inp.op.name in ("_linear", "NN.linear"):
+                    classification.node_types[node.id] = VLLMLayerType.PARALLEL_LM_HEAD
+                    classification.lm_head_node_id = node.id
+                    return
+                mod = modules_by_name.get(inp.op.name)
+                if mod is not None and (
+                    any(n.op.name in ("_linear", "NN.linear") for n in mod.nodes)
+                    or _module_contains_primitive(
+                        mod, "_linear", modules_by_name, recursive=False,
+                    )
+                ):
+                    classification.node_types[node.id] = VLLMLayerType.PARALLEL_LM_HEAD
+                    classification.lm_head_node_id = node.id
+                    return
+
 
 def _classify_norms(
     program: GraphProgram,
@@ -866,10 +1101,12 @@ def _classify_norms(
     classification: VLLMLayerClassification,
 ) -> None:
     qkv_node_ids: set[str] = set()
+    k_node_ids: set[str] = set()
     for g in classification.qkv_groups:
         qkv_node_ids.add(g.q_node_id)
         qkv_node_ids.add(g.k_node_id)
         qkv_node_ids.add(g.v_node_id)
+        k_node_ids.add(g.k_node_id)
     for module in program.modules:
         if "." in module.name and "__loop" not in module.name:
             continue
@@ -878,6 +1115,7 @@ def _classify_norms(
                 continue
             if _is_layernorm_call(node, modules_by_name):
                 classification.node_types[node.id] = VLLMLayerType.LAYERNORM
+                classification.layernorm_node_ids.add(node.id)
             elif _is_rmsnorm_call(node, modules_by_name):
                 classification.node_types[node.id] = VLLMLayerType.RMSNORM
                 classification.rmsnorm_node_ids.add(node.id)
@@ -888,6 +1126,11 @@ def _classify_norms(
                     src = _trace_back(module, data_inp, qkv_node_ids)
                     if src is not None:
                         classification.qk_norm_node_ids.add(node.id)
+                        if src in k_node_ids:
+                            classification.qk_norm_k_node_ids.add(node.id)
+                        producer = _resolve_value_to_node(module, data_inp)
+                        if producer is not None and producer.op.name not in _TRIVIAL_TRANSFORM_OPS:
+                            classification.qk_norm_pre_reshape_node_ids.add(node.id)
 
 
 def _classify_repeated_modules(
@@ -902,6 +1145,11 @@ def _classify_repeated_modules(
         for inp in module.inputs:
             name = _value_name(inp)
             if name is None or name == "__scope":
+                continue
+            # Skip Path-typed inputs (e.g. 'path') — they are scope paths,
+            # not loop variables.  The loop variable has TypeInt.
+            te = getattr(inp, "type_expr", None)
+            if te is not None and type(te).__name__ == "TypePath":
                 continue
             loop_var_name = name
             break
@@ -920,6 +1168,13 @@ def _classify_repeated_modules(
             scope_parts: tuple[str, ...] | None = None
             if isinstance(scope_inp, GraphPath):
                 scope_parts = tuple(scope_inp.parts)
+                # Deduplicate: if the GraphPath contains a repeated prefix
+                # (e.g. from inlined/merged paths), keep only the last
+                # occurrence so we get the correct sub-path.
+                _lt = "{" + loop_var_name + "}"
+                _lt_positions = [i for i, p in enumerate(scope_parts) if _lt in p]
+                if len(_lt_positions) > 1:
+                    scope_parts = scope_parts[_lt_positions[-1] - _lt_positions[0]:]
             for j, inp in enumerate(node.inputs):
                 inp_name = _value_name(inp)
                 if inp_name != loop_var_name:
@@ -930,7 +1185,9 @@ def _classify_repeated_modules(
                         classification.repeated_module_names.add(node.op.name)
                         classification.loop_index_param[node.op.name] = body_param_name
                         if scope_parts is not None:
-                            classification.module_scope_parts[node.op.name] = scope_parts
+                            existing = classification.module_scope_parts.get(node.op.name)
+                            if existing is None or len(scope_parts) > len(existing):
+                                classification.module_scope_parts[node.op.name] = scope_parts
                 break
             else:
                 # Loop variable not passed as a direct value input; check if
@@ -939,13 +1196,38 @@ def _classify_repeated_modules(
                     loop_token = "{" + loop_var_name + "}"
                     if any(loop_token in p for p in scope_parts):
                         classification.repeated_module_names.add(node.op.name)
-                        classification.module_scope_parts[node.op.name] = scope_parts
+                        existing = classification.module_scope_parts.get(node.op.name)
+                        if existing is None or len(scope_parts) > len(existing):
+                            classification.module_scope_parts[node.op.name] = scope_parts
             found_called = True
         # If the block was inlined into the loop body (no called module found),
         # treat the loop body module itself as the repeated module.
         if not found_called:
             classification.repeated_module_names.add(module.name)
             classification.loop_index_param[module.name] = loop_var_name
+            # Extract scope_parts from inlined nodes' GraphPath inputs.
+            # This is needed for nested loops (e.g. expert loops) where
+            # the loop variable appears in the scope path.
+            loop_token = "{" + loop_var_name + "}"
+            for node in module.nodes:
+                for inp in node.inputs:
+                    if isinstance(inp, GraphPath) and inp.parts:
+                        parts = tuple(inp.parts)
+                        if any(loop_token in p for p in parts):
+                            # Skip GraphPaths that end with parameter names
+                            # (e.g. 'weight', 'bias') — these are parameter
+                            # paths, not scope paths.
+                            if parts[-1] in ('weight', 'bias'):
+                                break
+                            # Deduplicate: if the GraphPath contains a
+                            # repeated prefix, keep only the last occurrence.
+                            _lt_positions = [i for i, p in enumerate(parts) if loop_token in p]
+                            if len(_lt_positions) > 1:
+                                parts = parts[_lt_positions[-1] - _lt_positions[0]:]
+                            existing = classification.module_scope_parts.get(module.name)
+                            if existing is None or len(parts) > len(existing):
+                                classification.module_scope_parts[module.name] = parts
+                        break
 
 
 def _classify_per_layer_called_modules(
@@ -1001,7 +1283,9 @@ def _linear_path_leaf(node: GraphNode) -> str | None:
         if isinstance(inp, GraphPath) and inp.parts:
             for part in inp.parts:
                 if part in ("q_proj", "k_proj", "v_proj", "o_proj",
-                            "gate_proj", "up_proj", "down_proj"):
+                            "gate_proj", "up_proj", "down_proj",
+                            "q", "k", "v", "o",
+                            "query_key_value", "out_proj"):
                     return part
     return None
 
@@ -1030,13 +1314,13 @@ def _classify_qkv_by_path(
         for node in module.nodes:
             if _is_linear_call(node, modules_by_name):
                 leaf = _linear_path_leaf(node)
-                if leaf == "q_proj" and q_node is None:
+                if leaf in ("q_proj", "q") and q_node is None:
                     q_node = node
-                elif leaf == "k_proj" and k_node is None:
+                elif leaf in ("k_proj", "k") and k_node is None:
                     k_node = node
-                elif leaf == "v_proj" and v_node is None:
+                elif leaf in ("v_proj", "v") and v_node is None:
                     v_node = node
-                elif leaf == "o_proj" and o_node is None:
+                elif leaf in ("o_proj", "o", "out_proj") and o_node is None:
                     o_node = node
             elif (
                 _is_structural_attention_call(node, modules_by_name)
@@ -1211,7 +1495,8 @@ def _classify_remaining_linears(
     (e.g. 'down_proj', 'per_layer_projection', 'o_proj'), classify as
     RowParallelLinear; otherwise ColumnParallelLinear.
     """
-    row_hints = ("down_proj", "o_proj", "per_layer_projection")
+    row_hints = ("down_proj", "o_proj", "per_layer_projection", "out_proj")
+    row_exact = {"o"}
     for module in program.modules:
         for node in module.nodes:
             if node.id in classification.node_types:
@@ -1219,7 +1504,7 @@ def _classify_remaining_linears(
             if not _is_linear_call(node, modules_by_name):
                 continue
             leaf = _linear_path_leaf(node)
-            if leaf and any(leaf.endswith(h) for h in row_hints):
+            if leaf and (any(leaf.endswith(h) for h in row_hints) or leaf in row_exact):
                 classification.node_types[node.id] = VLLMLayerType.ROW_PARALLEL_LINEAR
             else:
                 classification.node_types[node.id] = VLLMLayerType.COLUMN_PARALLEL_LINEAR
@@ -1320,6 +1605,21 @@ def _classify_ssm_mixers(
             classification.mamba_mixer_module_names.add(mod_name)
 
 
+def _classify_transposed_linears(
+    program: GraphProgram,
+    modules_by_name: dict[str, GraphModule],
+    classification: VLLMLayerClassification,
+) -> None:
+    for module in program.modules:
+        for node in module.nodes:
+            if not _is_linear_call(node, modules_by_name):
+                continue
+            if len(node.inputs) > 4:
+                val = _literal_value(node.inputs[4], False)
+                if val is True:
+                    classification.transposed_linear_node_ids.add(node.id)
+
+
 def classify_graph_for_vllm(program: GraphProgram) -> VLLMLayerClassification:
     modules_by_name = {module.name: module for module in program.modules}
     provenance = infer_graph_provenance(program)
@@ -1339,6 +1639,7 @@ def classify_graph_for_vllm(program: GraphProgram) -> VLLMLayerClassification:
     _classify_per_layer_features(program, modules_by_name, classification)
     _classify_v_norms(program, modules_by_name, classification)
     _classify_ssm_mixers(program, modules_by_name, classification)
+    _classify_transposed_linears(program, modules_by_name, classification)
     return classification
 
 

@@ -115,7 +115,7 @@ mt5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       return NN.linear@DenseReluDense.wo x_ffn dim=MODEL_DIM bias=false
     enc_hidden <- enc_hidden + ffn
     yield enc_hidden
-  enc_hidden <- NN.rmsnorm@encoder.final_layer_norm enc_hidden eps=EPS
+  enc_hidden <- NN.rmsnorm@encoder.final_layer_norm enc_hidden eps=EPS cast_float=true
   dec_hidden <- NN.embedding@shared decoder_input_ids dim=MODEL_DIM
   dec_hidden <- for@decoder.block i <- [0..L_DEC) carry (dec_hidden) do
     self_attn <- scope@layer.0 do
@@ -143,6 +143,6 @@ mt5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       return NN.linear@DenseReluDense.wo x_ffn dim=MODEL_DIM bias=false
     dec_hidden <- dec_hidden + ffn
     yield dec_hidden
-  dec_hidden <- NN.rmsnorm@decoder.final_layer_norm dec_hidden eps=EPS
+  dec_hidden <- NN.rmsnorm@decoder.final_layer_norm dec_hidden eps=EPS cast_float=true
   logits <- NN.linear@lm_head dec_hidden dim=VOCAB_SIZE bias=false
   return logits

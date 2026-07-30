@@ -51,7 +51,7 @@ LM_SCALE = (LM_SCALE_OVERRIDE > 0.0) ? LM_SCALE_OVERRIDE : LM_SCALE_DERIVED
 t5_encoder_block :: Tensor[B,S,D] -> ?Tensor[B,S] -> Tensor[B,S,D]
 t5_encoder_block x attention_mask = do
   self_attn <- scope@layer.0 do
-    x_norm <- NN.rmsnorm@layer_norm x eps=EPS
+    x_norm <- NN.rmsnorm@layer_norm x eps=EPS cast_float=true
     q <- NN.linear@SelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@SelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
     v <- NN.linear@SelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
@@ -60,7 +60,7 @@ t5_encoder_block x attention_mask = do
     return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=MODEL_DIM bias=false
   x <- x + self_attn
   ffn <- scope@layer.1 do
-    x_norm <- NN.rmsnorm@layer_norm x eps=EPS
+    x_norm <- NN.rmsnorm@layer_norm x eps=EPS cast_float=true
     x_ffn <- NN.linear@DenseReluDense.wi x_norm dim=FFN bias=false |> relu
     return NN.linear@DenseReluDense.wo x_ffn dim=MODEL_DIM bias=false
   y <- x + ffn
@@ -69,7 +69,7 @@ t5_encoder_block x attention_mask = do
 t5_decoder_block :: Tensor[B,SDEC,D] -> Tensor[B,SENC,D] -> ?Tensor[B,SENC] -> ?Tensor[B,SDEC] -> Tensor[B,SDEC,D]
 t5_decoder_block x enc_hidden encoder_attention_mask decoder_attention_mask = do
   self_attn <- scope@layer.0 do
-    x_norm <- NN.rmsnorm@layer_norm x eps=EPS
+    x_norm <- NN.rmsnorm@layer_norm x eps=EPS cast_float=true
     q <- NN.linear@SelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@SelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
     v <- NN.linear@SelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
@@ -78,7 +78,7 @@ t5_decoder_block x enc_hidden encoder_attention_mask decoder_attention_mask = do
     return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=MODEL_DIM bias=false
   x <- x + self_attn
   cross_attn <- scope@layer.1 do
-    x_norm <- NN.rmsnorm@layer_norm x eps=EPS
+    x_norm <- NN.rmsnorm@layer_norm x eps=EPS cast_float=true
     q <- NN.linear@EncDecAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
     k <- NN.linear@EncDecAttention.k enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
     v <- NN.linear@EncDecAttention.v enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
@@ -86,7 +86,7 @@ t5_decoder_block x enc_hidden encoder_attention_mask decoder_attention_mask = do
     return attention q k v keep scale=1.0 |> merge_heads |> NN.linear@EncDecAttention.o dim=MODEL_DIM bias=false
   x <- x + cross_attn
   ffn <- scope@layer.2 do
-    x_norm <- NN.rmsnorm@layer_norm x eps=EPS
+    x_norm <- NN.rmsnorm@layer_norm x eps=EPS cast_float=true
     x_ffn <- NN.linear@DenseReluDense.wi x_norm dim=FFN bias=false |> relu
     return NN.linear@DenseReluDense.wo x_ffn dim=MODEL_DIM bias=false
   y <- x + ffn
@@ -102,7 +102,7 @@ t5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
   enc_hidden <- NN.embedding@shared input_ids dim=MODEL_DIM
   enc_hidden <- for@encoder.block i <- [0..L_ENC) carry (enc_hidden) do
     self_attn <- scope@layer.0 do
-      x_norm <- NN.rmsnorm@layer_norm enc_hidden eps=EPS
+      x_norm <- NN.rmsnorm@layer_norm enc_hidden eps=EPS cast_float=true
       q <- NN.linear@SelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
       k <- NN.linear@SelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
       v <- NN.linear@SelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
@@ -111,16 +111,16 @@ t5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=MODEL_DIM bias=false
     enc_hidden <- enc_hidden + self_attn
     ffn <- scope@layer.1 do
-      x_norm <- NN.rmsnorm@layer_norm enc_hidden eps=EPS
+      x_norm <- NN.rmsnorm@layer_norm enc_hidden eps=EPS cast_float=true
       x_ffn <- NN.linear@DenseReluDense.wi x_norm dim=FFN bias=false |> relu
       return NN.linear@DenseReluDense.wo x_ffn dim=MODEL_DIM bias=false
     enc_hidden <- enc_hidden + ffn
     yield enc_hidden
-  enc_hidden <- NN.rmsnorm@encoder.final_layer_norm enc_hidden eps=EPS
+  enc_hidden <- NN.rmsnorm@encoder.final_layer_norm enc_hidden eps=EPS cast_float=true
   dec_hidden <- NN.embedding@shared decoder_input_ids dim=MODEL_DIM
   dec_hidden <- for@decoder.block i <- [0..L_DEC) carry (dec_hidden) do
     self_attn <- scope@layer.0 do
-      x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS
+      x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS cast_float=true
       q <- NN.linear@SelfAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
       k <- NN.linear@SelfAttention.k x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
       v <- NN.linear@SelfAttention.v x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
@@ -129,7 +129,7 @@ t5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       return attention q k v keep rel_bias=rel_bias scale=1.0 |> merge_heads |> NN.linear@SelfAttention.o dim=MODEL_DIM bias=false
     dec_hidden <- dec_hidden + self_attn
     cross_attn <- scope@layer.1 do
-      x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS
+      x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS cast_float=true
       q <- NN.linear@EncDecAttention.q x_norm dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
       k <- NN.linear@EncDecAttention.k enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
       v <- NN.linear@EncDecAttention.v enc_hidden dim=ATTN_DIM bias=false |> reshape_heads heads=NUM_HEADS
@@ -137,12 +137,12 @@ t5 input_ids attention_mask decoder_input_ids decoder_attention_mask = do
       return attention q k v keep scale=1.0 |> merge_heads |> NN.linear@EncDecAttention.o dim=MODEL_DIM bias=false
     dec_hidden <- dec_hidden + cross_attn
     ffn <- scope@layer.2 do
-      x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS
+      x_norm <- NN.rmsnorm@layer_norm dec_hidden eps=EPS cast_float=true
       x_ffn <- NN.linear@DenseReluDense.wi x_norm dim=FFN bias=false |> relu
       return NN.linear@DenseReluDense.wo x_ffn dim=MODEL_DIM bias=false
     dec_hidden <- dec_hidden + ffn
     yield dec_hidden
-  dec_hidden <- NN.rmsnorm@decoder.final_layer_norm dec_hidden eps=EPS
+  dec_hidden <- NN.rmsnorm@decoder.final_layer_norm dec_hidden eps=EPS cast_float=true
   dec_hidden <- dec_hidden * LM_SCALE
   logits <- NN.linear@shared dec_hidden dim=VOCAB_SIZE bias=false
   return logits

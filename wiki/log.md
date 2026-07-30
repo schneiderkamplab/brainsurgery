@@ -1,6 +1,6 @@
 ---
 status: active
-last-confirmed: 2026-07-06
+last-confirmed: 2026-07-23
 owners: agents
 confidence: high
 ---
@@ -242,4 +242,116 @@ confidence: high
   - Gemma-4-E2B-it MLX+compile: outputs match HF. `masked_top1_eq=True`. ~749 tok/s (no perf regression).
   - `tests/test_axon_graph_ir.py` (185 passed), `tests/ -k mlx` (8 passed).
   - 2 pre-existing test failures unrelated to this change (transform spec validation, completion candidates).
-- Artifacts: `log/mlx-genloop-fix-{270m,e2b}-{mlx,mlx-compile}/`.
+  - Artifacts: `log/mlx-genloop-fix-{270m,e2b}-{mlx,mlx-compile}/`.
+
+## [2026-07-23] codegen2-vllm | 4 new bug fixes (workstreams J-M), GPU/bf16 verified
+
+### Workstream J: LM head misclassification
+- **Root cause:** `_classify_lm_head` in `classify.py` searched ALL non-repeated modules for a linear reaching model output. GLM-edge's FFN down_proj (in `glm_edge_ffn`, called from repeated `glm_edge_block`) was misclassified as `PARALLEL_LM_HEAD` → created with `vocab_size` dimensions instead of `hidden_size`.
+- **Fix:** Build `skip_modules` set from `repeated_module_names` + transitively reachable modules. Only search non-skipped modules.
+- **Impact:** GLM-edge diff 2.58→6.5e-07, Longformer masked_diff 29.29→3.4e-05. Qwen (has `output_tied` in non-repeated module) still correctly classified.
+- **File:** `brainsurgery/synapse/axon/codegen2_vllm/classify.py`
+
+### Workstream K: RMSNorm eps resolution
+- **Root cause:** Three bugs: (1) `_resolve_value_ref` didn't check global binding modules (0 nodes, `GraphLiteral` outputs) — `EPS=1e-05` for GLM-edge never found. (2) `_node_rmsnorm_eps` only scanned `input[2:]`, not `input[1]` where `EPS` ValueRef lives, and didn't resolve ValueRefs. (3) Python `bool` is `int` subclass → `float(True)=1.0` returned as eps for HRM-Text where `cast_float=True` at `input[3]`.
+- **Fix:** Added global binding check in `_resolve_value_ref`, ValueRef resolution + `not isinstance(eps, bool)` guard in all eps methods, module-call eps parameter tracing in `_find_rmsnorm_eps_in_module`.
+- **Impact:** GLM-edge all RMSNorm eps 1e-6→1e-05, HRM-Text all RMSNorm eps 1.0→1e-06.
+- **File:** `brainsurgery/synapse/axon/codegen2_vllm/core.py`
+
+### Workstream L: Derived constant resolution
+- **Root cause:** `_resolve_const_literal` only checked `GraphLiteral` outputs. `MODEL_DIM <- ((1536 :: Dim) :: Dim)` lowers to `GraphExpr(core.ascribe, GraphLiteral(1536))` — not recognized. Derived constants `GQKV_DIM=4*QD`, `GATE_UP_DIM=2*FFN` all returned None → fell back to `hidden_size`.
+- **Fix:** Added `_unwrap_expr_value` to recursively unwrap `GraphExpr` (`core.ascribe`, `core.binary.*`/`+`/`/`). Updated `_resolve_const_literal` and `_resolve_const_operand`.
+- **Impact:** HRM-Text: GQKV_DIM=6144, GATE_UP_DIM=8192, QD=1536 all resolve (were all `hidden_size`=1536).
+- **File:** `brainsurgery/synapse/axon/codegen2_vllm/core.py`
+
+### Workstream M: Embedding scale
+- **Root cause:** `VOCAB_PARALLEL_EMBEDDING` layer call emitted `self._vllm_xxx(input_ids)` without applying embedding scale from `NN.embedding` module's `scale` parameter (input[3]). HRM-Text uses `EMBED_SCALE=39.19`.
+- **Fix:** In `_emit_vllm_layer_call`, check `node.inputs[3]` for non-None scale; if present, wrap as `(call * scale_expr)`.
+- **Impact:** HRM-Text diff 2.46→0.0.
+- **File:** `brainsurgery/synapse/axon/codegen2_vllm/core.py`
+
+### GPU/bf16 validation (B200, 8 models)
+All 8 spot-checked models pass on GPU/bf16 with `masked_top1_eq=True`:
+- GLM-edge: 0.25 (was 18.84), HRM-Text: 0.125 (was 18.00), Longformer: 0.36 (was 29.29), xlm-roberta: 2.25 (was 65.38)
+- Regressions confirmed: SmolLM 1.97, Qwen 3.52, BERT 0.5, RoBERTa 0.41
+- Ready for full-scale benchmark via `bash log/4b-bench/run_all_4b_vllm.sh`
+
+## [2026-07-23] SDPA graph optimization | enabling `__torch_sdpa`/`__triton_sdpa` for T5, DeBERTa, and all models
+
+### Problem
+- `log/4b-bench/run_all_4b.sh` did NOT pass `--optimize-graph`, so graph IR optimization (including SDPA rewrite) was never applied during benchmarks.
+- `_default_graph_backend_intrinsics` in `axon_test.py` did not enable `__torch_sdpa` by default for the torch backend (only jax and triton had intrinsics).
+- 62 of 139 torch/triton benchmarks were slower than HF; worst: T5/MT5 (3–6x), DeBERTa-v3 (3.6–3.9x), Phi-3-mini (1.6–1.9x), encoder-only models (1.2–4.5x).
+
+### Root Causes
+1. **Benchmark script** `log/4b-bench/run_all_4b.sh` missing `--optimize-graph` flag.
+2. **SDPA provenance matching** in `_standard_sdpa_fact` (`provenance.py`) could not handle the nested-add pattern `(scores * scale + keep_mask) + extra_bias` used by T5/DeBERTa (rel_bias).
+3. **`core.select` null-checks** for optional `rel_bias` parameter persisted in provenance as `core.select(x == null, a, b)`, blocking SDPA pattern matching.
+4. **DeBERTa `Positions.axon`** had wasteful `matmul q_flat (transpose k_flat 1 2) * 0.0` operation.
+5. **`_sdpa` codegen** had dtype mismatch: `torch.where(attn_mask, 0.0, float('-inf'))` created float32 tensor while model runs in bf16.
+6. **6-arg SDPA codegen** used inline lambda bypassing `_sdpa` method, missing dtype unification (q/k float32 from RoPE vs v bf16).
+
+### Changes
+- **`provenance.py`**: Added `extra_additive_bias` field to `GraphSdpaGqaFact`. Added `_null_select_candidates()` to unwrap `core.select(x == null, ...)` by trying both branches. Added `_try_sdpa_on_softmax_in()` to handle nested-add form `(scores * scale + keep_mask) + extra_bias`. Applied to both `_standard_sdpa_fact` and `_sdpa_gqa_fact`.
+- **`optimize.py`**: `_maybe_rewrite_node_to_backend_sdpa` passes `extra_bias` as 7th input to SDPA intrinsic. Added `__triton_sdpa` to `_TRITON_BACKEND_INTRINSICS`. Added `_rewrite_backend_sdpa_intrinsics(op_name="__triton_sdpa")` call in triton backend section.
+- **`codegen2_torch/core.py`**: Added `_sdpa` classmethod with dtype unification (q/k cast to v.dtype), bool mask conversion with `.to(dtype=target_dtype)`, extra_bias support. Updated interpreter for `__torch_sdpa`/`__triton_sdpa` with 7th input. Fixed 6-arg SDPA codegen to use `self._sdpa` instead of inline lambda. Fixed scale `SyntaxWarning` for literal values.
+- **`codegen2_triton/core.py`**: `_triton_sdpa` delegates to `_torch_sdpa` in `_primitive_expr`.
+- **`codegen2_jax/core.py`**: `_sdpa` helper accepts `extra_bias`; `_jax_sdpa` emission handles 7th input.
+- **`codegen2_tinygrad/core.py`**, **`codegen2_mlx/core.py`**: Guard raising ValueError for unsupported `extra_bias`.
+- **`Positions.axon`**: Removed wasteful `matmul * 0.0` in `relative_bias_disentangled`.
+- **`axon_test.py`**: `_default_graph_backend_intrinsics` returns `"codegen2-torch:__torch_sdpa"` for torch backend.
+- **`run_all_4b.sh`**: Added `--optimize-graph` flag.
+
+### Results (bf16, compiled, max_len=128, forward, 5 repeats)
+| Model | Before (Axon/HF) | After (Axon/HF) | Correct? |
+|---|---|---|---|
+| bert-base-uncased (torch) | 3.99x | 1.01x | Yes |
+| deberta-v3-xsmall (torch) | 3.99x | 2.42x | Yes |
+| t5-small (torch) | 4.62x | 2.29x | Yes |
+| t5-small (triton) | 3.67x | 2.86x | Yes |
+| SmolLM-135M (torch) | 0.91x | works (was crashing) | Yes |
+
+- BERT now at parity with HF. T5 and DeBERTa improved ~2x but remain 2-3x slower (remaining gap likely decoder loop overhead, not attention).
+- SDPA provenance matching verified: T5 (3 SDPA nodes, 3 with extra_bias), DeBERTa (1 SDPA node, 1 with extra_bias), BERT/SmolLM/GPT2 (1 SDPA node each, 0 extra_bias).
+- Pre-existing failures unchanged: GPT-2 top1_eq=False (same diff=1.25 before and after), SmolLM triton swiglu bf16 kernel error (pre-existing, not SDPA-related).
+
+### Relevant Files
+- `brainsurgery/synapse/axon/graph_ir/provenance.py` — `GraphSdpaGqaFact`, `_null_select_candidates`, `_try_sdpa_on_softmax_in`, `_standard_sdpa_fact`, `_sdpa_gqa_fact`
+- `brainsurgery/synapse/axon/graph_ir/optimize.py` — `_maybe_rewrite_node_to_backend_sdpa`, `_TRITON_BACKEND_INTRINSICS`, triton SDPA rewrite
+- `brainsurgery/synapse/axon/codegen2_torch/core.py` — `_sdpa` classmethod, interpreter `__torch_sdpa`/`__triton_sdpa`, `_primitive_expr` for `_torch_sdpa`, `_emit_common` emitted `_sdpa`
+- `brainsurgery/synapse/axon/codegen2_triton/core.py` — `_triton_sdpa` delegation
+- `brainsurgery/synapse/axon/codegen2_jax/core.py` — `_sdpa` helper, `_jax_sdpa` emission
+- `brainsurgery/synapse/builtins/Positions.axon` — `relative_bias_disentangled`
+- `brainsurgery/synapse/axon_test.py` — `_default_graph_backend_intrinsics`
+- `log/4b-bench/run_all_4b.sh` — benchmark script
+
+## [2026-07-27] vLLM | B200 attention backend investigation for head_dim >= 256
+
+### Gemma4 E2B/E4B vLLM blocked by B200 hardware limits
+
+- Gemma4 uses heterogeneous head dims (256 sliding, 512 full attention).
+- No vLLM attention backend on B200 supports these sizes:
+  - FA4: TMEM capacity limit for head_size >= 256
+  - FA2: max head_dim 256 (512 unsupported)
+  - TRITON_ATTN: needs 311KB shared memory, B200 has 232KB
+  - FLASHINFER: JIT fails (missing `cublasLt.h`, `nvrtc.h`, `-lcuda`)
+  - FLEX_ATTENTION: no KV sharing support
+- `Gemma4Config.verify_and_update_config` forces FA4, which falls back to
+  TRITON_ATTN, which hits the shared memory limit.
+- **Gemma4 axon files verified correct on torch backend** (f32: top1=True,
+  max_diff < 0.00005 for both E2B and E4B).
+
+### Fixes committed (`102ebb5`)
+
+- `axon_test.py`: head_dim detection from nested `text_config` for multi-modal
+  models (Gemma3/4)
+- `axon_test.py`: slot_mapping int32 -> int64 (FLASH_ATTN requires int64)
+- `axon_test.py`: `set_default_torch_dtype` + Attention.forward dtype cast
+  (dormant, gated by `_need_fa_dtype`)
+- `axon_test.py`: `set_current_vllm_config` wrapping forward pass (needed for
+  FLASHINFER)
+
+### Regression suite results
+
+- 27 PASS, 2 pre-existing FAIL (SmolLM2-135M, granite-3.1-2b), 0 ERROR, 0 regressions
+- Updated `wiki/vllm-backend-debug.md` with full B200 backend status table

@@ -1192,6 +1192,8 @@ class _DirectTinygradEmitter(_DirectTorchEmitter):
         if primitive == "_tinygrad_sdpa":
             if len(args) < 6:
                 raise ValueError("__tinygrad_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
+            if len(args) >= 7:
+                raise ValueError("__tinygrad_sdpa does not yet support extra additive bias")
             if not self._literal_null_arg(node.inputs[4]):
                 raise ValueError("__tinygrad_sdpa lowering currently requires default scale")
             return (

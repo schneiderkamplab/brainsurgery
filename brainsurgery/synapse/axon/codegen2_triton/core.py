@@ -280,6 +280,8 @@ class _DirectTritonEmitter(_DirectTorchEmitter):
         add(lines, 8, "return torch.sum(values * weights, dim=2, keepdim=False)")
 
     def _primitive_expr(self, primitive: str, node: Any, *, local: set[str], symbols_dict: str) -> str:
+        if primitive == "_triton_sdpa":
+            return super()._primitive_expr("_torch_sdpa", node, local=local, symbols_dict=symbols_dict)
         if primitive == "_triton_rmsnorm_noscale":
             args = [self._operand_expr(x, local=local, symbols_dict=symbols_dict) for x in node.inputs]
             if len(args) < 4:
@@ -444,7 +446,7 @@ def emit_model_code_from_graph_ir(
             "    def _axon_triton_swiglu_kernel(gate_ptr, up_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):",
             "        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)",
             "        mask = offsets < n_elements",
-            "        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0)",
+            "        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0).to(tl.float32)",
             "        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)",
             "        tl.store(out_ptr + offsets, gate * tl.sigmoid(gate) * up, mask=mask)",
             "    @triton.jit",

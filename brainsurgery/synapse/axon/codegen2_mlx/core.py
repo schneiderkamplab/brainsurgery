@@ -1399,7 +1399,7 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
                     b_expr = f"self._optional_param(self._compose_path({args[0]}, {bias_leaf}))"
                 else:
                     b_expr = f"self._optional_param({bias_leaf})"
-                return f"mx.addmm({b_expr}, {args[1]}, {w_expr})"
+                return f"(lambda _b: (mx.addmm(_b, {args[1]}, {w_expr}) if _b is not None else ({args[1]} @ {w_expr})))({b_expr})"
             return (
                 f"(lambda _w, _b: "
                 f"(mx.addmm(_b, {args[1]}, _w.swapaxes(-1, -2)) if _b is not None else ({args[1]} @ _w.swapaxes(-1, -2)))"
@@ -1417,6 +1417,8 @@ class _DirectMlxEmitter(_DirectTorchEmitter):
         if primitive == "_mlx_sdpa":
             if len(args) < 6:
                 raise ValueError("__mlx_sdpa expects q, k, v, additive_mask, scale, enable_gqa")
+            if len(args) >= 7:
+                raise ValueError("__mlx_sdpa does not yet support extra additive bias")
             scale = f"float({args[4]})" if args[4] != "None" else "None"
             if scale == "None":
                 return (

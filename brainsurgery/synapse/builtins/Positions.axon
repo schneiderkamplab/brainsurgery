@@ -902,10 +902,9 @@ relative_bias_disentangled@path q k ?position_buckets=256 ?max_relative_position
     : cast rel_pos dtype="int64"
   rel_pos <- unsqueeze rel_pos 0
   scale <- sqrt (HD * 3)
-  score <- matmul q_flat (transpose k_flat 1 2) * 0.0
   c2p_idx <- clamp (rel_pos + att_span) 0 ((att_span * 2) - 1) |> expand shape=[bh, T, T]
   c2p_att <- matmul q_flat (transpose pos_key 1 2) |> gather c2p_idx -1
-  score <- score + (c2p_att / scale)
+  score <- (c2p_att / scale)
   r_pos <- rel_pos
   p2c_idx <- clamp ((0 - r_pos) + att_span) 0 ((att_span * 2) - 1) |> expand shape=[bh, T, T]
   p2c_att <- matmul k_flat (transpose pos_query 1 2) |> gather p2c_idx -1 |> transpose 1 2

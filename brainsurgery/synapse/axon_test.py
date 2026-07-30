@@ -89,10 +89,14 @@ def _default_graph_backend_intrinsics(
                     return item
             return None
         return graph_backend_intrinsics
+    if axon_backend == "codegen2-torch":
+        return "codegen2-torch:__torch_sdpa"
     if axon_backend == "codegen2-triton":
         return "codegen2-triton"
     if axon_backend == "codegen2-vllm":
         return "codegen2-vllm"
+    if axon_backend == "codegen2-jax":
+        return "codegen2-jax:__jax_sdpa,__jax_rope"
     return None
 
 
@@ -487,7 +491,7 @@ def _to_torch(value: Any) -> torch.Tensor | None:
         if isinstance(value, jax.Array):
             import numpy as np
             arr = np.asarray(value)
-            if arr.dtype == np.dtype('bfloat16') if hasattr(np, 'bfloat16') else False:
+            if 'bfloat16' in str(arr.dtype):
                 arr = arr.astype(np.float32)
             return torch.from_numpy(arr)
     except ImportError:
@@ -520,6 +524,223 @@ def _extract_logits(output: Any) -> torch.Tensor:
     raise ValueError(
         f"Unsupported model output type for logits extraction: {type(output).__name__}"
     )
+
+
+def _allocate_vllm_kv_cache(
+    model: Any,
+    vllm_config: Any,
+    device: torch.device,
+) -> list[torch.Tensor]:
+    """Allocate and bind KV cache tensors to all Attention layers in the model."""
+    from vllm.model_executor.layers.attention import Attention
+
+    config = vllm_config.model_config.hf_config
+    if hasattr(config, "text_config"):
+        config = config.text_config
+
+    cache_config = vllm_config.cache_config
+    block_size = cache_config.block_size
+    num_layers = getattr(config, "num_hidden_layers", 0)
+    num_kv_heads = max(1, getattr(config, "num_key_value_heads",
+                                  getattr(config, "num_attention_heads", 1)))
+    head_dim = getattr(config, "head_dim",
+                       getattr(config, "hidden_size", 0) // max(1, getattr(config, "num_attention_heads", 1)))
+    dtype = vllm_config.model_config.dtype
+    if isinstance(dtype, str):
+        dtype = getattr(torch, dtype, torch.float16)
+
+    # Allocate enough blocks for a reasonable forward pass (max_len tokens).
+    max_tokens = 4096
+    num_blocks = max(1, (max_tokens + block_size - 1) // block_size)
+
+    kv_caches: list[torch.Tensor] = []
+    static_ctx = vllm_config.compilation_config.static_forward_context
+    for layer_name, attn_layer in static_ctx.items():
+        if not isinstance(attn_layer, Attention):
+            continue
+        kv_cache = torch.zeros(
+            num_blocks, 2, block_size, num_kv_heads, head_dim,
+            dtype=dtype, device=device,
+        )
+        attn_layer.kv_cache = kv_cache
+        kv_caches.append(kv_cache)
+
+    return kv_caches
+
+
+def _build_vllm_attn_metadata(
+    vllm_config: Any,
+    input_ids: torch.Tensor,
+    device: torch.device,
+) -> tuple[Any, dict[str, torch.Tensor]]:
+    """Build attention metadata and slot_mapping for a simple forward (prefill) pass.
+
+    Uses the Attention layer's own ``attn_backend`` to construct the correct
+    metadata type (FlashAttention, Triton, etc.) via the backend's builder.
+    """
+    import math
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import AttentionSpec
+
+    cache_config = vllm_config.cache_config
+    block_size = cache_config.block_size
+
+    batch_size = input_ids.shape[0]
+    seq_len = input_ids.shape[-1]
+    num_actual_tokens = batch_size * seq_len
+    max_query_len = seq_len
+    max_seq_len = seq_len
+
+    # query_start_loc: cumulative lengths [0, seq_len, 2*seq_len, ...]
+    query_start_loc = torch.arange(0, num_actual_tokens + 1, seq_len,
+                                   device=device, dtype=torch.int32)
+
+    # seq_lens: each request's full sequence length
+    seq_lens = torch.full((batch_size,), seq_len, device=device, dtype=torch.int32)
+
+    # slot_mapping: block_idx * block_size + offset for each token
+    blocks_per_seq = math.ceil(seq_len / block_size)
+    slot_mapping_vals = torch.zeros(num_actual_tokens, device=device, dtype=torch.int64)
+    for b in range(batch_size):
+        block_start = b * blocks_per_seq
+        for t in range(seq_len):
+            block_idx = block_start + t // block_size
+            offset = t % block_size
+            slot_mapping_vals[b * seq_len + t] = block_idx * block_size + offset
+
+    # block_table: which blocks belong to each sequence
+    block_table = torch.zeros(batch_size, blocks_per_seq,
+                              device=device, dtype=torch.int32)
+    for b in range(batch_size):
+        for i in range(blocks_per_seq):
+            block_table[b, i] = b * blocks_per_seq + i
+
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=seq_lens,
+        num_reqs=batch_size,
+        num_actual_tokens=num_actual_tokens,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
+        block_table_tensor=block_table,
+        slot_mapping=slot_mapping_vals,
+        causal=True,
+    )
+
+    static_ctx = vllm_config.compilation_config.static_forward_context
+
+    # Find the first Attention layer to determine the backend.
+    first_attn: Attention | None = None
+    for layer in static_ctx.values():
+        if isinstance(layer, Attention):
+            first_attn = layer
+            break
+    if first_attn is None:
+        return None, None
+
+    # Build metadata via the backend's builder.
+    builder_cls = first_attn.attn_backend.get_builder_cls()
+    layer_names = [n for n, l in static_ctx.items() if isinstance(l, Attention)]
+
+    config = vllm_config.model_config.hf_config
+    if hasattr(config, "text_config"):
+        config = config.text_config
+    num_kv_heads = max(1, getattr(config, "num_key_value_heads",
+                                  getattr(config, "num_attention_heads", 1)))
+    head_dim = getattr(config, "head_dim",
+                       getattr(config, "hidden_size", 0) // max(1, getattr(config, "num_attention_heads", 1)))
+    dtype = vllm_config.model_config.dtype
+    if isinstance(dtype, str):
+        dtype = getattr(torch, dtype, torch.float16)
+
+    spec = AttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_dim,
+        dtype=dtype,
+    )
+    builder = builder_cls(spec, layer_names, vllm_config, device)
+    attn_metadata = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        fast_build=True,
+    )
+
+    # The builder may return a single metadata object or a dict.
+    if isinstance(attn_metadata, dict):
+        attn_metadata_dict = attn_metadata
+    else:
+        attn_metadata_dict = {name: attn_metadata for name in layer_names}
+
+    slot_mapping_dict = {name: slot_mapping_vals for name in layer_names}
+    return attn_metadata_dict, slot_mapping_dict
+
+
+def _vllm_manual_generate(
+    model: Any,
+    io: dict[str, Any],
+    device: torch.device,
+    max_len: int,
+    eos_token_id: int | None,
+) -> torch.Tensor:
+    """Manual autoregressive generate for vLLM models.
+
+    Calls model.forward() in a loop, appending the argmax token each step.
+    Rebuilds attention metadata each step for the growing sequence (O(n^2) prefill).
+    """
+    from vllm.forward_context import set_forward_context as _sfc
+    from vllm.config import set_current_vllm_config as _scvc
+
+    _vllm_cfg = getattr(model, 'vllm_config', None) or getattr(model, '_vllm_config', None)
+    if _vllm_cfg is None:
+        raise RuntimeError("vLLM model missing vllm_config")
+
+    input_ids = io["input_ids"].clone()
+    batch_size = input_ids.shape[0]
+    prompt_len = input_ids.shape[-1]
+    num_to_generate = max_len - prompt_len
+    if num_to_generate <= 0:
+        return input_ids
+
+    syn_in = io.get("syn_inputs", {})
+    mask_key = None
+    for k in ("attn_mask", "attention_mask"):
+        if k in syn_in:
+            mask_key = k
+            break
+
+    with torch.no_grad():
+        with _scvc(_vllm_cfg):
+            for step in range(num_to_generate):
+                cur_len = input_ids.shape[-1]
+                attn_md, slot_map = _build_vllm_attn_metadata(
+                    _vllm_cfg, input_ids, device,
+                )
+                positions = torch.arange(cur_len, device=device, dtype=torch.long)
+                positions = positions.unsqueeze(0).expand(batch_size, -1).reshape(-1)
+
+                fwd_kwargs = {"input_ids": input_ids, "positions": positions}
+                if mask_key is not None:
+                    fwd_kwargs[mask_key] = torch.ones(
+                        batch_size, cur_len, device=device, dtype=torch.long,
+                    )
+
+                with _sfc(attn_md, _vllm_cfg, slot_mapping=slot_map, skip_compiled=True):
+                    logits = model(**fwd_kwargs)
+
+                if logits.dim() == 2:
+                    last_logits = logits[-1:]
+                else:
+                    last_logits = logits[:, -1, :]
+                next_token = last_logits.argmax(dim=-1)
+                input_ids = torch.cat([input_ids, next_token.view(batch_size, 1)], dim=-1)
+
+                if eos_token_id is not None and (next_token == eos_token_id).any():
+                    break
+
+    return input_ids
 
 
 def _run_phi3small_chunked_logits(
@@ -1054,6 +1275,38 @@ def _load_model_config(model_dir: Path) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         raise ValueError(f"Expected mapping in {config_path}, got {type(payload).__name__}")
     return {str(key): value for key, value in payload.items()}
+
+
+_CONFIG_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "hidden_size": ("d_model", "n_embed", "n_embd", "dim", "hidden_dim"),
+    "num_hidden_layers": ("num_layers", "n_layer", "encoder_layers", "decoder_layers"),
+    "num_attention_heads": (
+        "num_heads", "n_head", "encoder_attention_heads",
+        "decoder_attention_heads", "n_heads", "attention_heads",
+    ),
+    "num_key_value_heads": ("num_kv_heads", "n_kv_heads"),
+    "head_dim": ("d_kv", "head_size"),
+    "intermediate_size": ("d_ff", "n_inner", "ffn_hidden_size", "ffn_dim"),
+    "vocab_size": ("vocab", "n_vocab", "src_vocab_size"),
+}
+
+
+def _normalize_config_keys(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(config, dict):
+        return config
+    result = dict(config)
+    for canonical, aliases in _CONFIG_KEY_ALIASES.items():
+        if canonical not in result:
+            for alias in aliases:
+                if alias in result and result[alias] is not None:
+                    result[canonical] = result[alias]
+                    break
+    if "head_dim" not in result:
+        hs = result.get("hidden_size")
+        nah = result.get("num_attention_heads")
+        if isinstance(hs, int) and isinstance(nah, int) and nah > 0:
+            result["head_dim"] = hs // nah
+    return result
 
 
 def _infer_tensor_shape_from_checkpoint(
@@ -2745,6 +2998,7 @@ def _load_generated_class(py_path: Path, class_name: str) -> type[Any]:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to import generated module: {py_path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     model_cls = getattr(module, class_name, None)
     if model_cls is None:
@@ -3037,7 +3291,7 @@ def _time_generate_repeated(
         try:
             import mlx.core as mx
             mx.synchronize()
-        except (ImportError, AttributeError):
+        except (ImportError, AttributeError, IndexError, RuntimeError):
             pass
 
     with timing(message=label):
@@ -3077,7 +3331,7 @@ def _time_forward_repeated(
         try:
             import mlx.core as mx
             mx.synchronize()
-        except (ImportError, AttributeError):
+        except (ImportError, AttributeError, IndexError, RuntimeError):
             pass
 
     with timing(message=label):
@@ -3630,6 +3884,7 @@ def _run_axon_test_single(
         safetensors_files=safetensors_files,
         model_config=_load_model_config(resolved_hf_model_dir),
     )
+    model_config = _normalize_config_keys(model_config)
     resolved_model_type = (
         str(model_config.get("model_type", "")).strip().lower()
         if isinstance(model_config, dict)
@@ -3729,6 +3984,20 @@ def _run_axon_test_single(
         if optimize_ast:
             typed_axon = optimize_safe_flat_typed_axon_file(typed_axon)
         graph_program = lower_axon_program_to_graph_ir(typed_axon)
+        # Extract embedding scale from the unoptimized graph — the optimizer
+        # drops the scale input from NN.embedding nodes, but the codegen needs
+        # it to apply the embedding normalization (e.g. Gemma's sqrt(hidden_size)).
+        if isinstance(model_config, dict) and "embedding_scale" not in model_config:
+            for _mod in graph_program.modules:
+                for _node in _mod.nodes:
+                    if _node.op.name == "NN.embedding" and len(_node.inputs) >= 4:
+                        _scale_inp = _node.inputs[3]
+                        _is_null = hasattr(_scale_inp, "value") and _scale_inp.value is None
+                        if not _is_null:
+                            _hs = model_config.get("hidden_size")
+                            if isinstance(_hs, (int, float)) and _hs > 0:
+                                model_config["embedding_scale"] = _hs ** 0.5
+                        break
         if optimize_graph:
             from .axon import GraphOptimizeConfig
 
@@ -3868,7 +4137,7 @@ def _run_axon_test_single(
             hf_config is None
             and hf_attn_implementation is None
             and resolved_hf_experts_implementation is None
-            and axon_backend == "pipeline2-torch"
+            and (axon_backend == "pipeline2-torch" or axon_backend == "codegen2-vllm")
             and resolved_model_task in {"causal_lm", "seq2seq_lm"}
             and not skip_hf
         ):
@@ -3953,6 +4222,15 @@ def _run_axon_test_single(
             syn_inputs: dict[str, Any] = {syn_input_ids_key: input_ids}
             if use_mask_for_syn and attention_mask is not None and syn_mask_key is not None:
                 syn_inputs[syn_mask_key] = attention_mask
+            if axon_backend == "codegen2-vllm":
+                if attention_mask is not None:
+                    _pos_ids = attention_mask.to(torch.long).cumsum(dim=-1) - 1
+                    _pos_ids = _pos_ids.masked_fill(attention_mask == 0, 1)
+                else:
+                    _seq_len = input_ids.shape[-1]
+                    _pos_ids = torch.arange(_seq_len, device=input_ids.device, dtype=torch.long)
+                    _pos_ids = _pos_ids.unsqueeze(0).expand(input_ids.shape[0], -1)
+                syn_inputs["positions"] = _pos_ids.reshape(-1)
             if resolved_model_task == "seq2seq_lm":
                 if decoder_input_ids is None:
                     raise ValueError("seq2seq_lm missing decoder_input_ids for Synapse forward")
@@ -4770,7 +5048,136 @@ def _run_axon_test_single(
                     )
                     for key, value in local_state_dict.items()
                 }
-            if axon_backend in {"pipeline2-torch", "codegen2-torch", "codegen2-triton"}:
+            if axon_backend == "codegen2-vllm":
+                from vllm.config import VllmConfig, ModelConfig, CacheConfig, CompilationConfig, CompilationMode, set_current_vllm_config
+                from vllm.distributed import parallel_state as _vllm_ps
+                try:
+                    _vllm_model_config = ModelConfig(
+                        model=str(resolved_hf_model_dir),
+                        dtype=str(resolved_dtype).removeprefix("torch."),
+                    )
+                except Exception:
+                    import tempfile as _vllm_tmpf, json as _vllm_json, shutil as _vllm_shutil
+                    _vllm_tmp_dir = _vllm_tmpf.mkdtemp()
+                    _vllm_cfg = hf_config.to_dict() if hf_config is not None and hasattr(hf_config, 'to_dict') else (dict(hf_config) if hf_config is not None else {})
+                    _vllm_cfg["architectures"] = ["LlamaForCausalLM"]
+                    _vllm_cfg["model_type"] = "llama"
+                    if "hidden_size" not in _vllm_cfg:
+                        _vllm_cfg["hidden_size"] = _vllm_cfg.get("d_model", _vllm_cfg.get("n_embed", _vllm_cfg.get("n_embd", _vllm_cfg.get("dim", 0))))
+                    if "num_hidden_layers" not in _vllm_cfg:
+                        _vllm_cfg["num_hidden_layers"] = _vllm_cfg.get("num_layers", _vllm_cfg.get("n_layer", _vllm_cfg.get("encoder_layers", 0)))
+                    if "num_attention_heads" not in _vllm_cfg:
+                        _vllm_cfg["num_attention_heads"] = _vllm_cfg.get("num_heads", _vllm_cfg.get("n_head", _vllm_cfg.get("encoder_attention_heads", 1)))
+                    if "head_dim" not in _vllm_cfg:
+                        hs = _vllm_cfg.get("hidden_size", 0)
+                        nah = _vllm_cfg.get("num_attention_heads", 0)
+                        if hs and nah:
+                            _vllm_cfg["head_dim"] = hs // nah
+                    with open(os.path.join(_vllm_tmp_dir, "config.json"), "w") as _f:
+                        _vllm_json.dump(_vllm_cfg, _f)
+                    _vllm_model_config = ModelConfig(
+                        model=_vllm_tmp_dir,
+                        dtype=str(resolved_dtype).removeprefix("torch."),
+                    )
+                    _vllm_shutil.rmtree(_vllm_tmp_dir)
+                _vllm_hf_config = hf_config
+                if _vllm_hf_config is not None:
+                    _vllm_model_config.hf_config = _vllm_hf_config
+                _vllm_cache_config = CacheConfig(
+                    block_size=16,
+                    gpu_memory_utilization=0.90,
+                    cache_dtype="auto",
+                )
+                from vllm.config.attention import AttentionConfig, AttentionBackendEnum
+                _vllm_attention_config = AttentionConfig()
+                _vllm_head_dim = getattr(hf_config, 'head_dim', None)
+                if _vllm_head_dim is None:
+                    _text_cfg = getattr(hf_config, 'text_config', None)
+                    if _text_cfg is not None:
+                        _vllm_head_dim = getattr(_text_cfg, 'head_dim', None)
+                    if _vllm_head_dim is None:
+                        _hs = getattr(hf_config, 'hidden_size', 0)
+                        _nah = getattr(hf_config, 'num_attention_heads', 0)
+                        if _hs and _nah:
+                            _vllm_head_dim = _hs // _nah
+                if _vllm_head_dim is not None and _vllm_head_dim >= 256:
+                    pass  # B200: no backend supports head_dim>=256 (FA4 TMEM limit, TRITON shared mem)
+                _vllm_compile_config = CompilationConfig()
+                _vllm_compile_config.mode = CompilationMode.NONE
+                _vllm_config = VllmConfig(
+                    model_config=_vllm_model_config,
+                    cache_config=_vllm_cache_config,
+                    attention_config=_vllm_attention_config,
+                    compilation_config=_vllm_compile_config,
+                )
+                with set_current_vllm_config(_vllm_config):
+                    if not _vllm_ps.model_parallel_is_initialized():
+                        if not torch.distributed.is_initialized():
+                            import socket as _sock
+                            _s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+                            _s.bind(("", 0))
+                            _free_port = _s.getsockname()[1]
+                            _s.close()
+                            os.environ["MASTER_ADDR"] = "127.0.0.1"
+                            os.environ["MASTER_PORT"] = str(_free_port)
+                            _orig_stdout = sys.stdout
+                            sys.stdout = open(os.devnull, "w")
+                            try:
+                                torch.distributed.init_process_group(
+                                    backend="gloo", world_size=1, rank=0,
+                                )
+                            finally:
+                                sys.stdout.close()
+                                sys.stdout = _orig_stdout
+                        _orig_stdout = sys.stdout
+                        sys.stdout = open(os.devnull, "w")
+                        try:
+                            _vllm_ps.init_distributed_environment(
+                                world_size=1, rank=0, backend="gloo",
+                            )
+                            _vllm_ps.initialize_model_parallel(
+                                tensor_model_parallel_size=1,
+                                pipeline_model_parallel_size=1,
+                                backend="gloo",
+                            )
+                        finally:
+                            sys.stdout.close()
+                            sys.stdout = _orig_stdout
+                    _need_fa_dtype = (
+                        _vllm_attention_config.backend is not None
+                        and resolved_dtype != torch.float32
+                    )
+                    if _need_fa_dtype:
+                        from vllm.utils.torch_utils import set_default_torch_dtype
+                        with set_default_torch_dtype(resolved_dtype):
+                            syn = model_cls(vllm_config=_vllm_config, prefix="model")
+                    else:
+                        syn = model_cls(vllm_config=_vllm_config, prefix="model")
+                syn.load_weights(local_state_dict.items())
+                if _need_fa_dtype:
+                    syn = syn.to(target_device, dtype=resolved_dtype).eval()
+                else:
+                    syn = syn.to(target_device).eval()
+                if not compile_axon:
+                    import torch._dynamo as _dynamo
+                    syn.forward = _dynamo.disable(syn.forward)
+                if _need_fa_dtype:
+                    from vllm.model_executor.layers.attention import Attention as _VllmAttention
+                    _orig_attn_fwd = _VllmAttention.forward
+                    _target_dt = resolved_dtype
+                    def _cast_attn_fwd(self, query, key, value, *args, **kwargs):
+                        if query.dtype != _target_dt:
+                            query = query.to(_target_dt)
+                            key = key.to(_target_dt)
+                            value = value.to(_target_dt)
+                        return _orig_attn_fwd(self, query, key, value, *args, **kwargs)
+                    _VllmAttention.forward = _cast_attn_fwd
+                # Allocate and bind KV cache so FlashAttention can compute
+                # real attention output instead of returning zeros.
+                _vllm_kv_caches = _allocate_vllm_kv_cache(
+                    syn, _vllm_config, target_device,
+                )
+            elif axon_backend in {"pipeline2-torch", "codegen2-torch", "codegen2-triton"}:
                 syn = model_cls.from_state_dict(
                     local_state_dict,
                     param_devices=param_devices,
@@ -4858,7 +5265,32 @@ def _run_axon_test_single(
 
                 setattr(syn, original_block_name, _syn_block_wrapper)
 
+            _vllm_cached_attn_md = None
+            _vllm_cached_slot_map = None
+            _vllm_cached_cfg = None
+
             def _run_syn_forward(model: Any = syn) -> torch.Tensor:
+                nonlocal _vllm_cached_attn_md, _vllm_cached_slot_map, _vllm_cached_cfg
+                if axon_backend == "codegen2-vllm":
+                    from vllm.forward_context import set_forward_context as _sfc
+                    from vllm.config import set_current_vllm_config as _scvc
+                    _vllm_cfg = getattr(model, 'vllm_config', None) or getattr(model, '_vllm_config', None)
+                    if _vllm_cfg is not None:
+                        _syn_in = io["syn_inputs"]
+                        _input_ids = _syn_in.get("input_ids")
+                        with _scvc(_vllm_cfg):
+                            if _input_ids is not None:
+                                if _vllm_cached_attn_md is None or _vllm_cached_cfg is not _vllm_cfg:
+                                    _vllm_cached_attn_md, _vllm_cached_slot_map = _build_vllm_attn_metadata(
+                                        _vllm_cfg, _input_ids, target_device,
+                                    )
+                                    _vllm_cached_cfg = _vllm_cfg
+                                _attn_md = _vllm_cached_attn_md
+                                _slot_map = _vllm_cached_slot_map
+                            else:
+                                _attn_md, _slot_map = None, None
+                            with _sfc(_attn_md, _vllm_cfg, slot_mapping=_slot_map, skip_compiled=not compile_axon):
+                                return _extract_logits(model(**_syn_in))
                 if _is_deepseek_family_model_type(resolved_model_type):
                     syn_inputs = io["syn_inputs"]
                     sample_batch_size: int | None = None
@@ -4914,6 +5346,11 @@ def _run_axon_test_single(
                     syn_logits = _run_syn_forward()
 
                 def _run_syn_generate(model: Any = syn) -> torch.Tensor:
+                    if axon_backend == "codegen2-vllm":
+                        return _vllm_manual_generate(
+                            model, io, target_device, max_len,
+                            tokenizer_obj.eos_token_id,
+                        )
                     generate_kwargs: dict[str, Any] = {
                         "eos_token_id": tokenizer_obj.eos_token_id,
                         "max_len": max_len,
@@ -5049,6 +5486,11 @@ def _run_axon_test_single(
             assert hf_logits is not None
             if syn_logits.device != hf_logits.device:
                 syn_logits = syn_logits.to(hf_logits.device)
+            if syn_logits.ndim != hf_logits.ndim and syn_logits.numel() == hf_logits.numel():
+                if syn_logits.ndim == 2 and hf_logits.ndim == 3:
+                    syn_logits = syn_logits.reshape(hf_logits.shape)
+                elif syn_logits.ndim == 3 and hf_logits.ndim == 2:
+                    hf_logits = hf_logits.reshape(syn_logits.shape)
             compare_hf_logits = hf_logits
             compare_syn_logits = syn_logits
             if hf_dummy_tokens_mask is not None and int(hf_dummy_tokens_mask.numel()) == int(

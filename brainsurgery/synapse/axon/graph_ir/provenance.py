@@ -136,6 +136,7 @@ class GraphSdpaGqaFact:
     keep: str
     default_scale: bool = True
     scale: GraphProvenance | None = None  # None = default 1/sqrt(HD)
+    extra_additive_bias: str | None = None  # input name of extra additive bias (e.g. rel_bias)
 
 
 @dataclass(frozen=True)
@@ -1005,31 +1006,108 @@ def _sdpa_gqa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     softmax_in = _match_probs_slice_softmax(probs)
     if softmax_in is None:
         return None
-    scores_scaled, additive_mask_g = _match_binary_op(softmax_in, "core.binary.+")
-    if scores_scaled is None or additive_mask_g is None:
+    for candidate in _null_select_candidates(softmax_in):
+        scores_scaled, additive_mask_g = _match_binary_op(candidate, "core.binary.+")
+        if scores_scaled is None or additive_mask_g is None:
+            continue
+        additive_mask_name = _match_reshape_input(additive_mask_g)
+        if additive_mask_name is None:
+            continue
+        scores, scale = _match_binary_op(scores_scaled, "core.binary.*")
+        if scores is None or scale is None:
+            continue
+        if not _is_default_scale(scale):
+            is_default = False
+        else:
+            is_default = True
+        q_name, k_name = _match_qk_scores(scores)
+        if q_name is None or k_name is None:
+            continue
+        return GraphSdpaGqaFact(
+            q=q_name,
+            k=k_name,
+            v=v_name,
+            additive_mask=additive_mask_name,
+            keep=keep_name,
+            default_scale=is_default,
+            scale=None if is_default else scale,
+        )
+    return None
+
+
+def _null_select_candidates(provenance: GraphProvenance) -> tuple[GraphProvenance, ...]:
+    """Return candidate provenances for SDPA matching, unwrapping null-check selects.
+
+    After specialization, optional-input null checks may persist as
+    ``core.select(x == null, a, b)`` in hoisted GraphExpr provenance.  We try
+    both branches plus the original to cover the null and non-null cases.
+    """
+    if provenance.kind != "op" or provenance.op != "core.select" or len(provenance.args) != 3:
+        return (provenance,)
+    cond, true_branch, false_branch = provenance.args
+    if cond.kind == "op" and cond.op == "core.binary.==" and len(cond.args) == 2:
+        left, right = cond.args
+        if (right.kind == "literal" and right.value is None) or (
+            left.kind == "literal" and left.value is None
+        ):
+            return (false_branch, true_branch, provenance)
+    return (provenance,)
+
+
+def _try_sdpa_on_softmax_in(
+    softmax_in: GraphProvenance,
+    keep_name: str,
+    v_name: str,
+) -> GraphSdpaGqaFact | None:
+    scores_scaled, additive_mask = _match_binary_op(softmax_in, "core.binary.+")
+    if scores_scaled is None or additive_mask is None:
         return None
-    additive_mask_name = _match_reshape_input(additive_mask_g)
-    if additive_mask_name is None:
-        return None
-    scores, scale = _match_binary_op(scores_scaled, "core.binary.*")
-    if scores is None or scale is None:
-        return None
-    if not _is_default_scale(scale):
-        is_default = False
-    else:
-        is_default = True
-    q_name, k_name = _match_qk_scores(scores)
-    if q_name is None or k_name is None:
-        return None
-    return GraphSdpaGqaFact(
-        q=q_name,
-        k=k_name,
-        v=v_name,
-        additive_mask=additive_mask_name,
-        keep=keep_name,
-        default_scale=is_default,
-        scale=None if is_default else scale,
-    )
+    # The direct keep-mask form computes the additive mask inside the callee.
+    # The backend intrinsic receives the bool keep mask directly; SDPA backends
+    # convert it to additive form internally.
+    additive_keep = _match_additive_mask_from_keep(additive_mask)
+    if additive_keep is not None and additive_keep == keep_name:
+        scores, scale = _match_binary_op(scores_scaled, "core.binary.*")
+        if scores is None or scale is None:
+            return None
+        q_name, k_name = _match_standard_qk_scores(scores)
+        if q_name is None or k_name is None:
+            return None
+        is_default = _is_default_scale(scale)
+        return GraphSdpaGqaFact(
+            q=q_name,
+            k=k_name,
+            v=v_name,
+            additive_mask=keep_name,
+            keep=keep_name,
+            default_scale=is_default,
+            scale=None if is_default else scale,
+        )
+    # Try nested-add form: (scores * scale + keep_mask) + extra_bias
+    # This arises when attention has a rel_bias parameter (e.g. T5, DeBERTa).
+    # The extra_bias is an arbitrary additive tensor added on top of the keep mask.
+    inner_scores, inner_additive = _match_binary_op(scores_scaled, "core.binary.+")
+    if inner_scores is not None and inner_additive is not None:
+        inner_keep = _match_additive_mask_from_keep(inner_additive)
+        if inner_keep is not None and inner_keep == keep_name:
+            extra_bias_name = _input_name(additive_mask)
+            if extra_bias_name is not None:
+                scores, scale = _match_binary_op(inner_scores, "core.binary.*")
+                if scores is not None and scale is not None:
+                    q_name, k_name = _match_standard_qk_scores(scores)
+                    if q_name is not None and k_name is not None:
+                        is_default = _is_default_scale(scale)
+                        return GraphSdpaGqaFact(
+                            q=q_name,
+                            k=k_name,
+                            v=v_name,
+                            additive_mask=keep_name,
+                            keep=keep_name,
+                            default_scale=is_default,
+                            scale=None if is_default else scale,
+                            extra_additive_bias=extra_bias_name,
+                        )
+    return None
 
 
 def _standard_sdpa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
@@ -1051,31 +1129,11 @@ def _standard_sdpa_fact(provenance: GraphProvenance) -> GraphSdpaGqaFact | None:
     softmax_in = _match_probs_slice_softmax(probs)
     if softmax_in is None:
         return None
-    scores_scaled, additive_mask = _match_binary_op(softmax_in, "core.binary.+")
-    if scores_scaled is None or additive_mask is None:
-        return None
-    # The direct keep-mask form computes the additive mask inside the callee.
-    # The backend intrinsic receives the bool keep mask directly; SDPA backends
-    # convert it to additive form internally.
-    additive_keep = _match_additive_mask_from_keep(additive_mask)
-    if additive_keep is None or additive_keep != keep_name:
-        return None
-    scores, scale = _match_binary_op(scores_scaled, "core.binary.*")
-    if scores is None or scale is None:
-        return None
-    q_name, k_name = _match_standard_qk_scores(scores)
-    if q_name is None or k_name is None:
-        return None
-    is_default = _is_default_scale(scale)
-    return GraphSdpaGqaFact(
-        q=q_name,
-        k=k_name,
-        v=v_name,
-        additive_mask=keep_name,
-        keep=keep_name,
-        default_scale=is_default,
-        scale=None if is_default else scale,
-    )
+    for candidate in _null_select_candidates(softmax_in):
+        result = _try_sdpa_on_softmax_in(candidate, keep_name, v_name)
+        if result is not None:
+            return result
+    return None
 
 
 def _match_additive_mask_from_keep(provenance: GraphProvenance) -> str | None:
@@ -1119,6 +1177,7 @@ def _match_probs_slice_softmax(provenance: GraphProvenance) -> GraphProvenance |
     if provenance.kind == "op" and provenance.op == "_softmax" and provenance.args:
         return provenance.args[0]
     return None
+
 
 
 def _match_qk_scores(provenance: GraphProvenance) -> tuple[str | None, str | None]:
