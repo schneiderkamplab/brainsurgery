@@ -11,6 +11,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from ...int8 import materialize_int8_aliases
 from ...mxfp4 import materialize_mxfp4_aliases
 from ...ops import get_op_semantics
 from ..ast import (
@@ -1381,6 +1382,7 @@ class Codegen2GraphModel(nn.Module):
     def load_state_dict_tensors(self, state_dict: dict[str, torch.Tensor]) -> None:
         loaded = dict(state_dict)
         materialize_mxfp4_aliases(loaded, drop_packed=True)
+        materialize_int8_aliases(loaded, drop_packed=True)
         _materialize_packed_parameters(
             loaded,
             tuple(_packed_parameter_spec_payload(item) for item in self.graph.packed_parameters),
@@ -3481,11 +3483,33 @@ class _DirectTorchEmitter:
         add(lines, 8, "del strict")
         add(lines, 8, "state_dict = self._filter_state_dict(state_dict)")
         add(lines, 8, "state = dict(state_dict)")
+        add(lines, 8, "self._materialize_int8_aliases(state)")
         add(lines, 8, "_materialize_packed_parameters(state, self._PACKED_PARAMETER_SPECS)")
         add(lines, 8, "self.state_dict_tensors = self._place_state_dict(state, self.param_devices)")
         add(lines, 8, "self.setup()")
         add(lines, 8, "self._symbols = self._eval_symbols()")
         add(lines, 8, "return self")
+        add(lines, 4, "")
+        add(lines, 4, "@staticmethod")
+        add(lines, 4, "def _materialize_int8_aliases(state_dict):")
+        add(lines, 8, "# W8A16 export layout ('<base>.int8' int8 + '<base>.scale' fp32, symmetric")
+        add(lines, 8, "# per-output-channel absmax over dim 1): dequantize to bf16 on load,")
+        add(lines, 8, "# bit-identical to the published '-dequant' bf16 checkpoints.")
+        add(lines, 8, "for key in list(state_dict.keys()):")
+        add(lines, 12, "k = str(key)")
+        add(lines, 12, "if not k.endswith('.int8'):")
+        add(lines, 16, "continue")
+        add(lines, 12, "base = k[: -len('.int8')]")
+        add(lines, 12, "scale_key = f'{base}.scale'")
+        add(lines, 12, "if scale_key not in state_dict or torch.is_tensor(state_dict.get(base)):")
+        add(lines, 16, "continue")
+        add(lines, 12, "q = state_dict[key]")
+        add(lines, 12, "scale = state_dict[scale_key]")
+        add(lines, 12, "deq = q.float() * scale.float().unsqueeze(1)")
+        add(lines, 12, "state_dict[base] = deq.to(torch.bfloat16)")
+        add(lines, 12, "state_dict.pop(key, None)")
+        add(lines, 12, "state_dict.pop(scale_key, None)")
+        add(lines, 8, "return state_dict")
         add(lines, 4, "")
         add(lines, 4, "def setup(self):")
         add(lines, 8, "pass")
