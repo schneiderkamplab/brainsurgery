@@ -1,4 +1,4 @@
-import Math (floor)
+import Math (clamp, floor)
 import Tensor (
   and,
   arange,
@@ -6,6 +6,7 @@ import Tensor (
   dtype_value,
   eq,
   expand,
+  gather,
   le,
   reshape,
   size,
@@ -15,6 +16,8 @@ import Tensor (
 
 export (
   Mask,
+  banded_mask_for_input,
+  banded_positions_for_input,
   bidirectional_mask_for_input,
   blocksparse_mask,
   causal_mask_for_input,
@@ -103,6 +106,38 @@ bidirectional_mask_for_input x key_length ?padding_mask=null ?window=null = (pad
     mask <- ((values, key_length) :: Mask[B,K,C])
     return bidirectional_mask_for_input_keep x mask window=window
   : bidirectional_mask_for_input_masked x padding_mask window=window
+
+-- Band position for query row t, slot w: pos[t, w] = t + w - left, with
+-- w in [0, left + right + 1). Out-of-range slots are clamped into [0, S); the
+-- paired validity mask kills the clamped duplicates.
+banded_positions_for_input :: Tensor[B,Q] -> Dim -> Dim -> Dim -> (IdxTensor[S,W], Tensor[S,W])
+banded_positions_for_input x S left right = do
+  w <- ((left + right + 1) :: Dim)
+  row_ids <- arange x start=0 end=S |> reshape shape=[S, 1]
+  offsets <- arange x start=0 end=w |> reshape shape=[1, w]
+  pos <- (row_ids + offsets) - left
+  valid <- and (le 0 pos) (le pos (S - 1))
+  pos_c <- clamp pos min=0 max=(S - 1)
+  return (pos_c, valid)
+
+-- Clamped band positions plus the combined keep mask: geometric validity ∧
+-- key-side padding validity gathered at the clamped positions (queries are
+-- never masked).
+banded_mask_for_input :: Tensor[B,Q] -> Dim -> Dim -> Dim -> ?Mask[B,K,C] -> (IdxTensor[S,W], Tensor[B,S,W])
+banded_mask_for_input x S left right ?padding_mask=null = do
+  pos_c, valid <- banded_positions_for_input x S left right
+  w <- ((left + right + 1) :: Dim)
+  geo <- reshape valid shape=[1, S, w]
+  keep <- (padding_mask == null)
+    ? (expand geo shape=[B, S, w])
+    : do
+      values, _ <- padding_mask
+      sw <- ((S * w) :: Dim)
+      idx <- reshape pos_c shape=[1, sw] |> expand shape=[B, sw]
+      pad_keep <- cast values dtype="bool"
+      pad_win <- gather pad_keep idx -1 |> reshape shape=[B, S, w]
+      return and geo pad_win
+  return (pos_c, keep)
 
 blocksparse_mask :: Tensor[B,H,Q,HD] -> Tensor[B,H,K,HD] -> ?Mask[B,KM,K] -> ?Dim -> ?Dim -> ?Dim -> ?Bool -> Tensor[B,H,Q,K]
 blocksparse_mask q k ?padding_mask=null ?block_size=64 ?local_blocks=16 ?vert_stride=8 ?homo_head=false = do
