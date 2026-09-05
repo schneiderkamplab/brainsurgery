@@ -71,8 +71,27 @@ def main() -> int:
             print(f"MISMATCH {rel}")
         for rel in missing:
             print(f"MISSING  {rel}")
+        # Per-category summary: says whether the base checkpoints (HuggingFace revision),
+        # the generated inputs (CPU/BLAS-dependent), the references, or the doc pack differ.
+        def category(rel: str) -> str:
+            if rel.startswith("docpack/"):
+                return "docpack"
+            if rel.startswith("inputs/") and "/base/" in rel:
+                return "base checkpoints"
+            if rel.startswith("inputs/"):
+                return "generated inputs (ft1/ft2/lora)"
+            return "references"
+        from collections import Counter
+        total, failed = Counter(), Counter()
+        for rel in expected:
+            total[category(rel)] += 1
+        for rel in bad + missing:
+            failed[category(rel)] += 1
+        for cat in ("base checkpoints", "generated inputs (ft1/ft2/lora)", "references", "docpack"):
+            print(f"  {cat}: {total[cat] - failed[cat]}/{total[cat]} ok")
         print(f"verified {len(expected) - len(bad) - len(missing)}/{len(expected)} files"
-              + ("" if not (bad or missing) else " -- DO NOT RUN THE STUDY ON THIS COPY"))
+              + ("" if not (bad or missing) else " -- DO NOT RUN THE STUDY ON THIS COPY; see AGENTS.md, "
+                 "'Running the same study with another driver', item 2"))
         return 1 if (bad or missing) else 0
     lines = ["# sha256 of inputs, references and doc pack; verify with make_manifest.py --verify"]
     for p in files():

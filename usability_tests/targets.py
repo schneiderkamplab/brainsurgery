@@ -19,6 +19,7 @@ TARGETS: dict[str, dict] = {
     "gpt-2": {
         "display": "GPT-2 (124M)",
         "hf_id": "openai-community/gpt2",
+        "hf_revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
         "model_dir": "models/gpt2",
         "base_layout": "single",  # inputs/base/model.safetensors
         "base_dtype": "float32",
@@ -85,6 +86,7 @@ TARGETS: dict[str, dict] = {
     "olmo-1b": {
         "display": "OLMo-1B-0724-hf",
         "hf_id": "allenai/OLMo-1B-0724-hf",
+        "hf_revision": "d7cbab742d80589e714b1a2d7f838dcd21cbe143",
         "model_dir": "models/olmo-1b-0724-hf",
         "base_layout": "sharded",  # inputs/base/ holds two shards and an index
         "base_dtype": "float32",
@@ -144,6 +146,7 @@ TARGETS: dict[str, dict] = {
     "pythia-1b": {
         "display": "Pythia-1B",
         "hf_id": "EleutherAI/pythia-1b",
+        "hf_revision": "f73d7dcc545c8bd326d8559c8ef84ffe92fea6b2",
         "model_dir": "models/pythia-1b",
         "base_layout": "single",
         "base_dtype": "float16",
