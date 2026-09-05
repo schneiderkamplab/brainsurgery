@@ -1,0 +1,148 @@
+% Related systems and baselines.
+% This is a paper fragment and assumes tabularx, booktabs, hyperref, and natbib.
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+
+\begin{tabularx}{\textwidth}{
+    @{}
+    >{\raggedright\arraybackslash}X
+    >{\raggedright\arraybackslash}p{0.135\textwidth}
+    c
+    >{\raggedright\arraybackslash}p{0.16\textwidth}
+    >{\raggedright\arraybackslash}p{0.145\textwidth}
+    c
+    @{}
+}
+\toprule
+\textbf{System}
+& \textbf{Primary focus}
+& \textbf{Decl.}
+& \textbf{Targeting}
+& \textbf{Validation}
+& \textbf{Export} \\
+\midrule
+PyTorch/\texttt{safetensors} scripts
+& Scripts
+& --
+& Manual
+& Manual
+& Manual \\
+
+MergeKit~\citep{goddard2024mergekit}
+& Merging/MoE
+& Yes
+& Layer slices/filters
+& Limited
+& \textbf{Yes} \\
+
+LoRA/adapter tooling~\citep{hu2021lora}
+& Adapters
+& Partial
+& Adapter-specific
+& Limited
+& Partial \\
+
+\texttt{safetensors}/HF utilities
+& Storage/loading
+& --
+& --
+& --
+& \textbf{Yes} \\
+
+\href{https://docs.pytorch.org/docs/stable/distributed.checkpoint.html}{PyTorch DCP}
+& Distributed I/O
+& --
+& State dict/planner
+& Metadata/load
+& \textbf{Yes} \\
+
+\href{https://github.com/google/orbax}{Orbax}
+& JAX checkpointing
+& Partial
+& PyTree/partial
+& Restore/metadata
+& \textbf{Yes} \\
+
+\href{https://pypi.org/project/torch-state-bridge/}{\texttt{torch-state-bridge}}
+& Key rewriting
+& Partial
+& Rules/regex
+& Preview/diff/collision
+& Manual \\
+
+\href{https://dnhkng.github.io/posts/rys/}{RYS}/\href{https://github.com/alainnothere/llm-circuit-finder}{LLM Circuit Finder}
+& Layer-path surgery
+& Partial
+& Layer indices
+& Task probes
+& \textbf{Yes} \\
+
+TransformerLens~\citep{nanda2022transformerlens}
+& Interpretability
+& --
+& Model-internal
+& Analysis
+& -- \\
+
+nnsight~\citep{fiottokaufman2024nnsight}
+& Tracing
+& --
+& Activation
+& Analysis
+& -- \\
+
+\midrule
+\textbf{BrainSurgery}
+& \textbf{Rewriting}
+& \textbf{Yes}
+& \textbf{Regex/structured}
+& \textbf{Assert/diff}
+& \textbf{Yes} \\
+\bottomrule
+\end{tabularx}
+
+\caption{Qualitative comparison with related tooling. MergeKit, Orbax,
+\texttt{torch-state-bridge}, PyTorch Distributed Checkpoint (DCP), and
+RYS/LLM Circuit Finder overlap with particular parts of the workflow, but differ
+in scope: merging, JAX restoration, key rewriting, distributed checkpoint I/O,
+or layer-path surgery, respectively. BrainSurgery provides general-purpose
+checkpoint rewriting through declarative plans with structured targeting,
+executable postconditions, checkpoint diffs, and export.}
+\label{tab:tool-comparison}
+\end{table*}
+
+\paragraph{Overlapping systems.}
+MergeKit is a substantive baseline rather than only a generic merging utility:
+its YAML configurations support layer slicing and tensor filters, and its broader
+tooling includes out-of-core execution, LoRA extraction, MoE construction, and
+multi-stage workflows. Its abstraction nevertheless remains centered on merging
+and related model-building tasks. \texttt{torch-state-bridge} is narrower but
+more directly overlaps key transformation: it offers rule and regex-capture
+mappings, arithmetic substitutions, composable pipelines, previews, diffs, and
+collision detection over in-memory PyTorch state dictionaries. Because its
+currently published artifact is an early software release, comparisons should pin
+the exact package version.
+
+Orbax provides the closest JAX-oriented checkpointing comparison. Its current V1
+API supports partial PyTree restoration and restore-time dtype, shape, and
+sharding changes. The legacy regex/value-function transformations API is
+deprecated, while broader arbitrary V1 model surgery is documented as planned;
+claims should therefore identify the compared Orbax API version. PyTorch DCP is
+primarily an I/O and scaling baseline, providing parallel multi-rank checkpoint
+save/load and load-time resharding rather than a general tensor-rewrite language.
+Although BrainSurgery supports DCP directories, its present adapter uses
+single-process operations over plain tensor state dictionaries, so this support
+does not establish parity for multi-rank execution, optimizer states, or
+resharding.
+
+Finally, \href{https://dnhkng.github.io/posts/rys/}{RYS} and
+\href{https://github.com/alainnothere/llm-circuit-finder}{LLM Circuit Finder}
+illustrate a concrete structural-surgery use case: they alter layer execution
+paths and can materialize duplicated layers in GGUF checkpoints before downstream
+evaluation. They are best treated as motivating related software rather than a
+general framework baseline, and their current blog/repository status warrants
+separating capability comparisons from their unreviewed empirical claims.
