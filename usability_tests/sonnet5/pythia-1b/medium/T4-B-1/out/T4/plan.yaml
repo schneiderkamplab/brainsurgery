@@ -1,0 +1,129 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # -----------------------------------------------------------------
+  # Step 1: preflight verification, before touching anything.
+  # -----------------------------------------------------------------
+
+  # Same tensor count (244) on every checkpoint.
+  - assert: { count: { of: 'base::.*', is: 244 } }
+  - assert: { count: { of: 'ft1::.*', is: 244 } }
+  - assert: { count: { of: 'ft2::.*', is: 244 } }
+
+  # Exactly the expected 64 MLP tensors (16 layers x 4 tensors) present
+  # in every checkpoint, under the same names.
+  - assert:
+      count:
+        of: 'base::gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+        is: 64
+  - assert:
+      count:
+        of: 'ft1::gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+        is: 64
+  - assert:
+      count:
+        of: 'ft2::gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+        is: 64
+
+  # Every tensor outside the 64 MLP tensors must be bit-exact identical
+  # across all three checkpoints (same names, same values). Combined
+  # with the count checks above (244 total, 64 MLP), this pins down
+  # that base, ft1 and ft2 share exactly the same 244 tensor names and
+  # differ only inside the 64 MLP tensors.
+  - assert:
+      equal:
+        left: 'base::(?!.*\.mlp\.dense_(?:h_to_4h|4h_to_h)\.).+'
+        right: 'ft1::\g<0>'
+  - assert:
+      equal:
+        left: 'base::(?!.*\.mlp\.dense_(?:h_to_4h|4h_to_h)\.).+'
+        right: 'ft2::\g<0>'
+
+  # -----------------------------------------------------------------
+  # Step 2: task-vector merge of the 64 MLP tensors, in float32.
+  #   out = base + lambda*(ft1 - base) + lambda*(ft2 - base), lambda=0.4
+  # Each task vector is taken against the unmodified base (loaded once,
+  # never mutated), so the merge order of ft1/ft2 cannot bias the result.
+  # -----------------------------------------------------------------
+
+  # Upcast the three MLP slices to float32 scratch tensors.
+  - cast:
+      from: 'base::gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+      to: 'base::scratch.base32.\g<0>'
+      dtype: float32
+  - cast:
+      from: 'ft1::gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+      to: 'base::scratch.ft1_32.\g<0>'
+      dtype: float32
+  - cast:
+      from: 'ft2::gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+      to: 'base::scratch.ft2_32.\g<0>'
+      dtype: float32
+
+  # Placeholders for the two task vectors and the running merge, seeded
+  # from base32 so shape/dtype line up for the in-place ops below.
+  - copy:
+      from: 'base::scratch.base32\.(gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.diff1.\1'
+  - copy:
+      from: 'base::scratch.base32\.(gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.diff2.\1'
+  - copy:
+      from: 'base::scratch.base32\.(gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.merged32.\1'
+
+  # Task vectors: diff_i = ft_i_32 - base32.
+  - subtract:
+      from_a: 'base::scratch.ft1_32\.(gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias))'
+      from_b: 'base::scratch.base32.\1'
+      to: 'base::scratch.diff1.\1'
+  - subtract:
+      from_a: 'base::scratch.ft2_32\.(gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias))'
+      from_b: 'base::scratch.base32.\1'
+      to: 'base::scratch.diff2.\1'
+
+  # Scale each task vector by lambda = 0.4, in place.
+  - scale_: { target: 'base::scratch.diff1\.gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)', by: 0.4 }
+  - scale_: { target: 'base::scratch.diff2\.gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)', by: 0.4 }
+
+  # merged32 = base32 + 0.4*diff1 + 0.4*diff2 (merged32 starts as a
+  # base32 clone from the copy step above).
+  - add_:
+      from: 'base::scratch.diff1\.(gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.merged32.\1'
+  - add_:
+      from: 'base::scratch.diff2\.(gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.merged32.\1'
+
+  # Downcast the merge result back to float16.
+  - cast:
+      from: 'base::scratch.merged32\.(gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias))'
+      to: 'base::scratch.merged16.\1'
+      dtype: float16
+
+  # Required check: exactly 64 tensors were merged.
+  - assert:
+      count:
+        of: 'base::scratch.merged16\.gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+        is: 64
+
+  # Write the merged values back into the original base tensor slots
+  # (names unchanged, base holds the final result for every tensor).
+  - assign:
+      from: 'base::scratch.merged16\.(gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias))'
+      to: 'base::\1'
+
+  # -----------------------------------------------------------------
+  # Step 3: drop scratch tensors, final check, and save (base alias
+  # only: 244 tensors total, 180 untouched + 64 merged in place).
+  # -----------------------------------------------------------------
+  - delete: { target: 'base::scratch\..*' }
+
+  - assert: { count: { of: 'base::.*', is: 244 } }
+
+  - save:
+      path: out/T4/model.safetensors
+      alias: base

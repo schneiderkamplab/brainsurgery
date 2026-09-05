@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T5-defective.yaml",
+  "started_at": "2026-09-05T20:32:01+00:00",
+  "finished_at": "2026-09-05T20:32:06+00:00",
+  "wall_clock_s": 5.5,
+  "tokens_in": 2,
+  "tokens_out": 222,
+  "cost_usd": 0.0434138,
+  "verdict_text": "NO\n\nThe plan's own comment admits the defect: `delta = B @ A` is computed but never multiplied by `scale = alpha/r = 2` before being added to the base weight, so the merged result is `weight += B @ A` instead of `weight += 2 * B @ A`. This violates Required Result clause 1, which specifies `weight += scale * B @ A` with `scale = lora_alpha / r = 2`. Consequently the 32 merged tensors will fail the grading tolerance (relative Frobenius error \u2264 1e-5), even though all structural/shape/count checks (32 pairs, no lora_ names, correct shape, 114 total tensors) would pass.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

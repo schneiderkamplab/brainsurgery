@@ -1,0 +1,10 @@
+{
+  "task": "T4",
+  "passed": false,
+  "findings": [
+    "no checkpoint found under /home/rootkidd/Projects/brainsurgery/usability_tests/sonnet5/olmo-1b/medium/T4-B-1/out/T4"
+  ],
+  "metrics": {
+    "target": "olmo-1b"
+  }
+}

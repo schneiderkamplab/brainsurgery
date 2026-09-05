@@ -1,0 +1,69 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB
+
+transforms:
+  # Preflight: base has the expected tensor count and dtype, adapter has
+  # exactly 16 A/B pairs for attention.query_key_value across layers 0..15.
+  - assert: { count: { of: 'base::.*', is: 244 } }
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_A\.weight'
+        is: 16
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_B\.weight'
+        is: 16
+  - assert:
+      shape:
+        of: 'base::gpt_neox.layers.0.attention.query_key_value.weight'
+        is: [6144, 2048]
+
+  # delta = B @ A, computed in float32 (adapter tensors are already float32).
+  - matmul:
+      from_a: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_B\.weight'
+      from_b: 'lora::base_model.model.gpt_neox.layers.\1.attention.query_key_value.lora_A.weight'
+      to: 'base::gpt_neox.layers.\1.attention.query_key_value.lora_delta'
+
+  - assert: { count: { of: 'base::gpt_neox.layers\.(\d+)\.attention\.query_key_value\.lora_delta', is: 16 } }
+  - assert:
+      shape:
+        of: 'base::gpt_neox.layers.0.attention.query_key_value.lora_delta'
+        is: [6144, 2048]
+
+  # scale = lora_alpha / r = 32 / 16 = 2, applied in-place, still float32.
+  - scale_:
+      target: 'base::gpt_neox.layers\.(\d+)\.attention\.query_key_value\.lora_delta'
+      by: 2.0
+
+  # Cast the scaled delta down to the base dtype before adding.
+  - cast:
+      from: 'base::gpt_neox.layers\.(\d+)\.attention\.query_key_value\.lora_delta'
+      to: 'base::gpt_neox.layers.\1.attention.query_key_value.lora_delta_f16'
+      dtype: float16
+
+  # weight += scale * B @ A, in the base dtype.
+  - add_:
+      from: 'base::gpt_neox.layers\.(\d+)\.attention\.query_key_value\.lora_delta_f16'
+      to: 'base::gpt_neox.layers.\1.attention.query_key_value.weight'
+
+  # Drop the intermediate tensors; only the merged base weights remain.
+  - delete: { target: 'base::gpt_neox.layers\.(\d+)\.attention\.query_key_value\.lora_delta' }
+  - delete: { target: 'base::gpt_neox.layers\.(\d+)\.attention\.query_key_value\.lora_delta_f16' }
+
+  # Required checks before writing the output.
+  - assert: { count: { of: 'base::.*', is: 244 } }
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert:
+      shape:
+        of: 'base::gpt_neox.layers.0.attention.query_key_value.weight'
+        is: [6144, 2048]
+  - assert:
+      dtype:
+        of: 'base::gpt_neox.layers.0.attention.query_key_value.weight'
+        is: float16

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T5-defective.yaml",
+  "started_at": "2026-09-05T20:20:27+00:00",
+  "finished_at": "2026-09-05T20:20:31+00:00",
+  "wall_clock_s": 4.4,
+  "tokens_in": 2,
+  "tokens_out": 156,
+  "cost_usd": 0.0408578,
+  "verdict_text": "NO\n\nThe plan computes delta = (B @ A).T but never multiplies by scale = alpha/r = 2, as its own comment admits (\"defect: the alpha / r scale is missing\"). This violates Required Result clause 1, which requires `h.<i>.<module>.weight += scale * (B @ A).T`. The result will be off by a factor of 2, failing the grading tolerance of relative Frobenius error \u2264 1e-5 on the 12 merged weights.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

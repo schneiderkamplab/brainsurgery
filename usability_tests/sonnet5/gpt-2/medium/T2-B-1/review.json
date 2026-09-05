@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T2-defective.yaml",
+  "started_at": "2026-09-05T20:15:37+00:00",
+  "finished_at": "2026-09-05T20:15:42+00:00",
+  "wall_clock_s": 5.5,
+  "tokens_in": 2,
+  "tokens_out": 277,
+  "cost_usd": 0.0672348,
+  "verdict_text": "NO\n\nThe spec requires removing head 5 (columns/rows 320\u2013383, i.e., ranges `0..319, 384..767, ...`), but the artifact removes columns/rows 384\u2013447 (keeping `0:384` and `448:768`), which corresponds to removing head 6, not head 5. This violates the \"Required result\" clause item 1\u20133 (the exact column/row ranges specified for `c_attn.weight`, `c_attn.bias`, and `c_proj.weight`), even though the plan's own comment correctly states the goal is head 5's slice per the spec's numbering but implements head 6's boundaries. The resulting output shapes will coincidentally match (`[768,2112]`, `[2112]`, `[704,768]`) and pass the required checks, but the values will not be bit-exact with the hidden reference as required by the Grading section.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}
