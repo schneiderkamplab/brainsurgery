@@ -69,6 +69,47 @@ Condition F is ready: `conditions/F-allowed.md` lists the allowed packages
 their pinned lock; the pilot ran all 15 F cells with it. Replace both files
 before the full run only if the team wants a different list.
 
+## Repeats
+
+A repeat is one more complete pass over every cell with a fresh sandbox per
+cell; nothing but the model's sampling differs between repeats. Repeats give
+run-to-run variance for every measure, and they drive the bug-detection
+phase: on odd repeats the review shows the defective artifact (measures
+detection), on even repeats the correct reference (measures false alarms).
+Both are needed, so k is even and at least 2. Run all of repeat 1 before any
+of repeat 2, and never reuse a sandbox.
+
+## Running the same study with another driver (Codex or other)
+
+Everything below must hold, or the two vendors' numbers are not comparable:
+
+1. Same commit: check out the commit recorded in `run.json` of the Claude runs
+   (the study starts at 8b7c76a or later; `git log --oneline -1` here).
+2. Same data: after `setup.py` and `make_docpack.py`, run
+   `make_manifest.py --verify`. It checks every input, reference and doc-pack
+   file against `manifest.sha256`. If anything mismatches (a different torch
+   version can change the seeded random inputs), copy the generated data from
+   the Claude machine instead of regenerating it, then verify again.
+3. Same cells: 3 targets x 5 tests x 3 conditions x 3 effort tiers x k
+   repeats, with the tier directories named after the vendor's own levels
+   (`light`, `medium`, `high` for OpenAI models) and repeats run in order.
+4. Same sandbox: build it with `make_sandbox.py --venv`; the prompt, the
+   task, the pinned environment, the doc pack (B) and the allowed list (F)
+   come from the kit, never hand-edited.
+5. Same phases and records: `run_codex.py` mirrors `run_claude.py` (solve,
+   grade, review with the same review prompt and the same odd/even artifact
+   rule, cleanup) and writes `harness.json`, `grade.json`, `review.json` with
+   the same fields. A hand-written driver must do the same; `analyze.py`
+   reads nothing else.
+6. Same caps: 30 minutes per cell (`--timeout 1800`). Claude Code also has a
+   40-turn cap; Codex has no turn cap, so a Codex cell that would have been
+   turn-capped runs to the time cap instead. `cap_hit` records which one
+   fired; report cap hits per vendor.
+7. Same bookkeeping: after each run classify failed executions and confirm
+   `detected` in `review.json` against `review/<target>/answers.json`.
+8. Cost: Codex does not report it; pass `--price-in/--price-out` from the
+   vendor rate card so `cost_usd` is filled the same way for every cell.
+
 ## What is recorded, where
 
 | File in the run directory | Written by | Content |
