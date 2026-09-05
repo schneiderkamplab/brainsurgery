@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,24 +29,41 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 
 
+def infra_failure(run_dir: Path) -> bool:
+    """True when the solve phase ended with an API/CLI error rather than a model outcome."""
+    try:
+        harness = json.loads((run_dir / "harness.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return True
+    return harness.get("result_subtype") not in ("success", "error_max_turns") and harness.get("cap_hit") != "time"
+
+
 def run_cell(args, target: str, test: str, cond: str, log_dir: Path) -> str:
     run_dir = HERE / args.agent / target / args.effort / f"{test}-{cond}-{args.repeat}"
     tag = f"{target} {test} {cond} r{args.repeat}"
     if (run_dir / "grade.json").exists():
-        return f"skip   {tag} (already graded)"
-    if run_dir.exists():
+        if infra_failure(run_dir):
+            shutil.rmtree(run_dir)
+            note = " (previous attempt failed before the model could work: infrastructure error; rerunning)"
+        else:
+            return f"skip   {tag} (already graded)"
+    elif run_dir.exists():
         return f"stale  {tag} (run dir exists without grade.json; remove it to rerun)"
+    else:
+        note = ""
     cmd = [sys.executable, str(HERE / "run_claude.py"), test, cond, "--agent", args.agent, "--model", args.model,
            "--target", target, "--effort", args.effort, "--repeat", str(args.repeat),
            "--max-turns", str(args.max_turns), "--timeout", str(args.timeout)]
     if args.venv:
         cmd.append("--venv")
+    if args.keep_artifacts:
+        cmd.append("--keep-artifacts")
     log = log_dir / f"{target}-{test}-{cond}-{args.repeat}.log"
     start = dt.datetime.now()
     with log.open("w") as fh:
         rc = subprocess.run(cmd, cwd=REPO, stdout=fh, stderr=subprocess.STDOUT).returncode
     secs = (dt.datetime.now() - start).total_seconds()
-    return f"{'PASS' if rc == 0 else 'FAIL'}   {tag} {secs:.0f}s (log: {log.name})"
+    return f"{'PASS' if rc == 0 else 'FAIL'}   {tag} {secs:.0f}s (log: {log.name}){note}"
 
 
 def main() -> int:
@@ -58,6 +77,7 @@ def main() -> int:
     parser.add_argument("--conditions", nargs="+", default=["P", "F", "B"], choices=["P", "F", "B"])
     parser.add_argument("--parallel", type=int, default=3)
     parser.add_argument("--venv", action="store_true")
+    parser.add_argument("--keep-artifacts", action="store_true")
     parser.add_argument("--max-turns", type=int, default=40)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--log-dir", type=Path, default=None)
