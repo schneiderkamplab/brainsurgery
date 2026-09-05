@@ -141,6 +141,7 @@ outside the sandbox. Nothing from `references/`, `solutions/`, `review/` or
 | `grade.py` | Grades an output against `references/<target>/<test>`; independent of BrainSurgery |
 | `analyze.py` | Aggregates run records into the study tables |
 | `make_manifest.py`, `manifest.sha256` | Checksums of every input, reference and doc-pack file; `--verify` proves another machine runs the same study |
+| `pack_data.sh` | Bundles the generated inputs and references (~35 GB) for transfer to another machine |
 | `solutions/<target>/P/*.py`, `solutions/<target>/B/*.yaml` | Reference baselines and plans. Hidden from participants. The Python ones generate the references |
 | `review/<target>/` | Defective variants of the references, one injected defect per test, plus `answers.json` |
 | `AGENTS.md`, `CLAUDE.md` | Operating procedure for the experimenter agent |
@@ -154,9 +155,13 @@ cd /path/to/brainsurgery
 # base checkpoints (once): models/gpt2, models/olmo-1b-0724-hf, models/pythia-1b
 .venv/bin/python - <<'PY'
 from huggingface_hub import snapshot_download
-snapshot_download("openai-community/gpt2", local_dir="models/gpt2", allow_patterns=["*.json", "*.safetensors", "*.txt"])
-snapshot_download("allenai/OLMo-1B-0724-hf", local_dir="models/olmo-1b-0724-hf", allow_patterns=["*.json", "*.safetensors", "*.txt"])
-snapshot_download("EleutherAI/pythia-1b", local_dir="models/pythia-1b", allow_patterns=["*.json", "*.safetensors", "*.txt"])
+# pinned revisions (also in targets.py); a different revision changes every derived file
+snapshot_download("openai-community/gpt2", revision="607a30d783dfa663caf39e06633721c8d4cfcd7e",
+                  local_dir="models/gpt2", allow_patterns=["*.json", "*.safetensors", "*.txt"])
+snapshot_download("allenai/OLMo-1B-0724-hf", revision="d7cbab742d80589e714b1a2d7f838dcd21cbe143",
+                  local_dir="models/olmo-1b-0724-hf", allow_patterns=["*.json", "*.safetensors", "*.txt"])
+snapshot_download("EleutherAI/pythia-1b", revision="f73d7dcc545c8bd326d8559c8ef84ffe92fea6b2",
+                  local_dir="models/pythia-1b", allow_patterns=["*.json", "*.safetensors", "*.txt"])
 PY
 .venv/bin/python usability_tests/generate.py     # only after editing targets.py or generate.py
 .venv/bin/python usability_tests/setup.py        # ~5 min, writes ~48 GB under models/usability_tests

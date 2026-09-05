@@ -85,11 +85,19 @@ Everything below must hold, or the two vendors' numbers are not comparable:
 
 1. Same commit: check out the commit recorded in `run.json` of the Claude runs
    (the study starts at 8b7c76a or later; `git log --oneline -1` here).
-2. Same data: after `setup.py` and `make_docpack.py`, run
-   `make_manifest.py --verify`. It checks every input, reference and doc-pack
-   file against `manifest.sha256`. If anything mismatches (a different torch
-   version can change the seeded random inputs), copy the generated data from
-   the Claude machine instead of regenerating it, then verify again.
+2. Same data. Download the base models at the pinned revisions in
+   `targets.py` (`hf_revision`; the README snippet passes them), then run
+   `setup.py`, `make_docpack.py` and `make_manifest.py --verify`. The verifier
+   prints a per-category summary:
+   - base checkpoints differ: wrong HuggingFace revision, re-download;
+   - generated inputs or references differ: the seeded generation uses a QR
+     and matrix products whose low bits depend on the CPU and BLAS library,
+     so regeneration on other hardware is not expected to be bit-identical.
+     Do not regenerate: transfer the bundle made by `pack_data.sh` on the
+     Claude machine, extract it into `models/`, rerun `setup.py` (it links
+     the base files and keeps the transferred data) and verify again;
+   - doc pack differs: different commit or different BrainSurgery install.
+   Only a copy that verifies 126/126 runs the study.
 3. Same cells: 3 targets x 5 tests x 3 conditions x 3 effort tiers x k
    repeats, with the tier directories named after the vendor's own levels
    (`light`, `medium`, `high` for OpenAI models) and repeats run in order.
