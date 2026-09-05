@@ -22,7 +22,7 @@ confidence: high
   error now writes all shards and the index under the default provider.
 - Not changed: output is still not atomic (a failure during the final save can leave
   partial shards); a write-to-temp-then-rename output would close that gap.
-- Found while building `usability-tests/` (condition B needs the default provider to
+- Found while building `usability_tests/` (condition B needs the default provider to
   work for every task). Confidence: high.
 
 ## [2026-07-06] codegen2-mlx | timing bug fix + custom fast forward + bfloat16 fix
