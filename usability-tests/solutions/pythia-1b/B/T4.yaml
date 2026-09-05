@@ -1,0 +1,27 @@
+# T4 for Pythia-1B: task-vector merge of two fine-tunes, lambda 0.4 each, MLP tensors only.
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+transforms:
+  - assert: { count: { of: 'ft1::.*', is: 244 } }
+  - assert: { count: { of: 'ft2::.*', is: 244 } }
+  - assert: { equal: { left: 'base::(?!gpt_neox\.layers\.\d+\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)).+', right: 'ft1::\g<0>' } }
+  - assert: { equal: { left: 'base::(?!gpt_neox\.layers\.\d+\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)).+', right: 'ft2::\g<0>' } }
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)', to: float32 }
+  # task vector 1: tv1 = 0.4 * (ft1 - base), taken against the unmodified base
+  - copy: { from: 'ft1::gpt_neox\.layers\.(\d+)\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)', to: 'base::gpt_neox.layers.\1.\2.tv1' }
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)\.tv1', to: float32 }
+  - subtract_: { from: 'base::gpt_neox\.layers\.(\d+)\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)', to: 'base::gpt_neox.layers.\1.\2.tv1' }
+  - scale_: { target: 'base::gpt_neox\.layers\.\d+\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)\.tv1', by: 0.4 }
+  # task vector 2, also against the unmodified base (before tv1 is applied)
+  - copy: { from: 'ft2::gpt_neox\.layers\.(\d+)\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)', to: 'base::gpt_neox.layers.\1.\2.tv2' }
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)\.tv2', to: float32 }
+  - subtract_: { from: 'base::gpt_neox\.layers\.(\d+)\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)', to: 'base::gpt_neox.layers.\1.\2.tv2' }
+  - scale_: { target: 'base::gpt_neox\.layers\.\d+\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)\.tv2', by: 0.4 }
+  - add_: { from: 'base::gpt_neox\.layers\.(\d+)\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)\.tv1', to: 'base::gpt_neox.layers.\1.\2' }
+  - add_: { from: 'base::gpt_neox\.layers\.(\d+)\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)\.tv2', to: 'base::gpt_neox.layers.\1.\2' }
+  - delete: { target: 'base::gpt_neox\.layers\.\d+\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)\.tv[12]' }
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.(mlp\.dense_h_to_4h\.weight|mlp\.dense_h_to_4h\.bias|mlp\.dense_4h_to_h\.weight|mlp\.dense_4h_to_h\.bias)', to: float16 }
+  - assert: { count: { of: 'base::.*', is: 244 } }
+output: out/T4/model.safetensors

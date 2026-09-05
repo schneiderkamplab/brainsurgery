@@ -1,0 +1,24 @@
+# T5 for Pythia-1B: merge a PEFT-style LoRA adapter into the base weights, 512 MiB (536,870,912 bytes) shards.
+# delta = (alpha / r) * B @ A with alpha=32, r=16.
+inputs:
+  - model::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+transforms:
+  - assert: { count: { of: 'lora::.*lora_A\.weight', is: 16 } }
+  - matmul:
+      from_a: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.(attention\.query_key_value)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.gpt_neox.layers.\1.\2.lora_A.weight'
+      to: 'model::gpt_neox.layers.\1.\2.delta'
+  # nn.Linear layout: no transpose needed
+  - scale_: { target: 'model::gpt_neox\.layers\.\d+\.(attention\.query_key_value)\.delta', by: 2 }
+  - cast_: { target: 'model::gpt_neox\.layers\.\d+\.(attention\.query_key_value)\.weight', to: float32 }
+  - add_: { from: 'model::gpt_neox\.layers\.(\d+)\.(attention\.query_key_value)\.delta', to: 'model::gpt_neox.layers.\1.\2.weight' }
+  - cast_: { target: 'model::gpt_neox\.layers\.\d+\.(attention\.query_key_value)\.weight', to: float16 }
+  - delete: { target: 'model::gpt_neox\.layers\.\d+\.(attention\.query_key_value)\.delta(_t)?' }
+  - assert: { not: { exists: 'model::.*lora_.*' } }
+  - assert: { shape: { of: model::gpt_neox.layers.0.attention.query_key_value.weight, is: [6144, 2048] } }
+  - assert: { count: { of: 'model::.*', is: 244 } }
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

@@ -11,7 +11,7 @@ def _load_state_dict(path: Path) -> dict[str, torch.Tensor]:
 
 
 def _save_state_dict(state_dict: dict[str, torch.Tensor], path: Path) -> None:
-    _save_file(state_dict, str(path))
+    _save_file(_contiguous_state_dict(state_dict), str(path))
 
 
 def _load_single_tensor(path: Path) -> torch.Tensor:
@@ -24,7 +24,18 @@ def _load_single_tensor(path: Path) -> torch.Tensor:
 
 
 def _save_single_tensor(tensor_name: str, tensor: torch.Tensor, path: Path) -> None:
-    _save_file({tensor_name: tensor}, str(path))
+    _save_file({tensor_name: tensor.contiguous()}, str(path))
+
+
+def _contiguous_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Return a state_dict whose tensors are row-major contiguous.
+
+    safetensors refuses non-contiguous tensors. Transforms such as ``permute`` or
+    ``phlora`` (whose SVD factors come back column-major from LAPACK) leave such
+    tensors in the in-memory provider, so pack them at save time. Tensors that are
+    already contiguous are passed through unchanged, without a copy.
+    """
+    return {name: tensor.contiguous() for name, tensor in state_dict.items()}
 
 
 def _validate_state_dict_mapping(loaded: object, path: Path) -> dict[str, torch.Tensor]:

@@ -1,0 +1,63 @@
+# T2 for GPT-2 (124M): remove attention head 5 from every layer.
+# Each head-bearing tensor is rebuilt from the slices around the removed head.
+# concat takes single tensor references only, so the per-layer concats are spelled out.
+inputs:
+  - model::inputs/base/model.safetensors
+transforms:
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.weight::[:, 0:320]', to: 'h.\1.tmp_attn_c_attn_weight_0' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.weight::[:, 384:768]', to: 'h.\1.tmp_attn_c_attn_weight_1' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.weight::[:, 768:1088]', to: 'h.\1.tmp_attn_c_attn_weight_2' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.weight::[:, 1152:1536]', to: 'h.\1.tmp_attn_c_attn_weight_3' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.weight::[:, 1536:1856]', to: 'h.\1.tmp_attn_c_attn_weight_4' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.weight::[:, 1920:2304]', to: 'h.\1.tmp_attn_c_attn_weight_5' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.bias::[0:320]', to: 'h.\1.tmp_attn_c_attn_bias_0' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.bias::[384:768]', to: 'h.\1.tmp_attn_c_attn_bias_1' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.bias::[768:1088]', to: 'h.\1.tmp_attn_c_attn_bias_2' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.bias::[1152:1536]', to: 'h.\1.tmp_attn_c_attn_bias_3' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.bias::[1536:1856]', to: 'h.\1.tmp_attn_c_attn_bias_4' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_attn\.bias::[1920:2304]', to: 'h.\1.tmp_attn_c_attn_bias_5' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_proj\.weight::[0:320]', to: 'h.\1.tmp_attn_c_proj_weight_0' }
+  - copy: { from: 'h\.(\d+)\.attn\.c_proj\.weight::[384:768]', to: 'h.\1.tmp_attn_c_proj_weight_1' }
+  - delete: { target: 'h\.(\d+)\.(attn\.c_attn\.weight|attn\.c_attn\.bias|attn\.c_proj\.weight)' }
+  - concat: { from: [h.0.tmp_attn_c_attn_weight_0, h.0.tmp_attn_c_attn_weight_1, h.0.tmp_attn_c_attn_weight_2, h.0.tmp_attn_c_attn_weight_3, h.0.tmp_attn_c_attn_weight_4, h.0.tmp_attn_c_attn_weight_5], to: h.0.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.1.tmp_attn_c_attn_weight_0, h.1.tmp_attn_c_attn_weight_1, h.1.tmp_attn_c_attn_weight_2, h.1.tmp_attn_c_attn_weight_3, h.1.tmp_attn_c_attn_weight_4, h.1.tmp_attn_c_attn_weight_5], to: h.1.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.2.tmp_attn_c_attn_weight_0, h.2.tmp_attn_c_attn_weight_1, h.2.tmp_attn_c_attn_weight_2, h.2.tmp_attn_c_attn_weight_3, h.2.tmp_attn_c_attn_weight_4, h.2.tmp_attn_c_attn_weight_5], to: h.2.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.3.tmp_attn_c_attn_weight_0, h.3.tmp_attn_c_attn_weight_1, h.3.tmp_attn_c_attn_weight_2, h.3.tmp_attn_c_attn_weight_3, h.3.tmp_attn_c_attn_weight_4, h.3.tmp_attn_c_attn_weight_5], to: h.3.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.4.tmp_attn_c_attn_weight_0, h.4.tmp_attn_c_attn_weight_1, h.4.tmp_attn_c_attn_weight_2, h.4.tmp_attn_c_attn_weight_3, h.4.tmp_attn_c_attn_weight_4, h.4.tmp_attn_c_attn_weight_5], to: h.4.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.5.tmp_attn_c_attn_weight_0, h.5.tmp_attn_c_attn_weight_1, h.5.tmp_attn_c_attn_weight_2, h.5.tmp_attn_c_attn_weight_3, h.5.tmp_attn_c_attn_weight_4, h.5.tmp_attn_c_attn_weight_5], to: h.5.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.6.tmp_attn_c_attn_weight_0, h.6.tmp_attn_c_attn_weight_1, h.6.tmp_attn_c_attn_weight_2, h.6.tmp_attn_c_attn_weight_3, h.6.tmp_attn_c_attn_weight_4, h.6.tmp_attn_c_attn_weight_5], to: h.6.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.7.tmp_attn_c_attn_weight_0, h.7.tmp_attn_c_attn_weight_1, h.7.tmp_attn_c_attn_weight_2, h.7.tmp_attn_c_attn_weight_3, h.7.tmp_attn_c_attn_weight_4, h.7.tmp_attn_c_attn_weight_5], to: h.7.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.8.tmp_attn_c_attn_weight_0, h.8.tmp_attn_c_attn_weight_1, h.8.tmp_attn_c_attn_weight_2, h.8.tmp_attn_c_attn_weight_3, h.8.tmp_attn_c_attn_weight_4, h.8.tmp_attn_c_attn_weight_5], to: h.8.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.9.tmp_attn_c_attn_weight_0, h.9.tmp_attn_c_attn_weight_1, h.9.tmp_attn_c_attn_weight_2, h.9.tmp_attn_c_attn_weight_3, h.9.tmp_attn_c_attn_weight_4, h.9.tmp_attn_c_attn_weight_5], to: h.9.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.10.tmp_attn_c_attn_weight_0, h.10.tmp_attn_c_attn_weight_1, h.10.tmp_attn_c_attn_weight_2, h.10.tmp_attn_c_attn_weight_3, h.10.tmp_attn_c_attn_weight_4, h.10.tmp_attn_c_attn_weight_5], to: h.10.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.11.tmp_attn_c_attn_weight_0, h.11.tmp_attn_c_attn_weight_1, h.11.tmp_attn_c_attn_weight_2, h.11.tmp_attn_c_attn_weight_3, h.11.tmp_attn_c_attn_weight_4, h.11.tmp_attn_c_attn_weight_5], to: h.11.attn.c_attn.weight, dim: 1 }
+  - concat: { from: [h.0.tmp_attn_c_attn_bias_0, h.0.tmp_attn_c_attn_bias_1, h.0.tmp_attn_c_attn_bias_2, h.0.tmp_attn_c_attn_bias_3, h.0.tmp_attn_c_attn_bias_4, h.0.tmp_attn_c_attn_bias_5], to: h.0.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.1.tmp_attn_c_attn_bias_0, h.1.tmp_attn_c_attn_bias_1, h.1.tmp_attn_c_attn_bias_2, h.1.tmp_attn_c_attn_bias_3, h.1.tmp_attn_c_attn_bias_4, h.1.tmp_attn_c_attn_bias_5], to: h.1.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.2.tmp_attn_c_attn_bias_0, h.2.tmp_attn_c_attn_bias_1, h.2.tmp_attn_c_attn_bias_2, h.2.tmp_attn_c_attn_bias_3, h.2.tmp_attn_c_attn_bias_4, h.2.tmp_attn_c_attn_bias_5], to: h.2.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.3.tmp_attn_c_attn_bias_0, h.3.tmp_attn_c_attn_bias_1, h.3.tmp_attn_c_attn_bias_2, h.3.tmp_attn_c_attn_bias_3, h.3.tmp_attn_c_attn_bias_4, h.3.tmp_attn_c_attn_bias_5], to: h.3.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.4.tmp_attn_c_attn_bias_0, h.4.tmp_attn_c_attn_bias_1, h.4.tmp_attn_c_attn_bias_2, h.4.tmp_attn_c_attn_bias_3, h.4.tmp_attn_c_attn_bias_4, h.4.tmp_attn_c_attn_bias_5], to: h.4.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.5.tmp_attn_c_attn_bias_0, h.5.tmp_attn_c_attn_bias_1, h.5.tmp_attn_c_attn_bias_2, h.5.tmp_attn_c_attn_bias_3, h.5.tmp_attn_c_attn_bias_4, h.5.tmp_attn_c_attn_bias_5], to: h.5.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.6.tmp_attn_c_attn_bias_0, h.6.tmp_attn_c_attn_bias_1, h.6.tmp_attn_c_attn_bias_2, h.6.tmp_attn_c_attn_bias_3, h.6.tmp_attn_c_attn_bias_4, h.6.tmp_attn_c_attn_bias_5], to: h.6.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.7.tmp_attn_c_attn_bias_0, h.7.tmp_attn_c_attn_bias_1, h.7.tmp_attn_c_attn_bias_2, h.7.tmp_attn_c_attn_bias_3, h.7.tmp_attn_c_attn_bias_4, h.7.tmp_attn_c_attn_bias_5], to: h.7.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.8.tmp_attn_c_attn_bias_0, h.8.tmp_attn_c_attn_bias_1, h.8.tmp_attn_c_attn_bias_2, h.8.tmp_attn_c_attn_bias_3, h.8.tmp_attn_c_attn_bias_4, h.8.tmp_attn_c_attn_bias_5], to: h.8.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.9.tmp_attn_c_attn_bias_0, h.9.tmp_attn_c_attn_bias_1, h.9.tmp_attn_c_attn_bias_2, h.9.tmp_attn_c_attn_bias_3, h.9.tmp_attn_c_attn_bias_4, h.9.tmp_attn_c_attn_bias_5], to: h.9.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.10.tmp_attn_c_attn_bias_0, h.10.tmp_attn_c_attn_bias_1, h.10.tmp_attn_c_attn_bias_2, h.10.tmp_attn_c_attn_bias_3, h.10.tmp_attn_c_attn_bias_4, h.10.tmp_attn_c_attn_bias_5], to: h.10.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.11.tmp_attn_c_attn_bias_0, h.11.tmp_attn_c_attn_bias_1, h.11.tmp_attn_c_attn_bias_2, h.11.tmp_attn_c_attn_bias_3, h.11.tmp_attn_c_attn_bias_4, h.11.tmp_attn_c_attn_bias_5], to: h.11.attn.c_attn.bias, dim: 0 }
+  - concat: { from: [h.0.tmp_attn_c_proj_weight_0, h.0.tmp_attn_c_proj_weight_1], to: h.0.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.1.tmp_attn_c_proj_weight_0, h.1.tmp_attn_c_proj_weight_1], to: h.1.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.2.tmp_attn_c_proj_weight_0, h.2.tmp_attn_c_proj_weight_1], to: h.2.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.3.tmp_attn_c_proj_weight_0, h.3.tmp_attn_c_proj_weight_1], to: h.3.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.4.tmp_attn_c_proj_weight_0, h.4.tmp_attn_c_proj_weight_1], to: h.4.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.5.tmp_attn_c_proj_weight_0, h.5.tmp_attn_c_proj_weight_1], to: h.5.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.6.tmp_attn_c_proj_weight_0, h.6.tmp_attn_c_proj_weight_1], to: h.6.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.7.tmp_attn_c_proj_weight_0, h.7.tmp_attn_c_proj_weight_1], to: h.7.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.8.tmp_attn_c_proj_weight_0, h.8.tmp_attn_c_proj_weight_1], to: h.8.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.9.tmp_attn_c_proj_weight_0, h.9.tmp_attn_c_proj_weight_1], to: h.9.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.10.tmp_attn_c_proj_weight_0, h.10.tmp_attn_c_proj_weight_1], to: h.10.attn.c_proj.weight, dim: 0 }
+  - concat: { from: [h.11.tmp_attn_c_proj_weight_0, h.11.tmp_attn_c_proj_weight_1], to: h.11.attn.c_proj.weight, dim: 0 }
+  - delete: { target: 'h\.(\d+)\.tmp_.*' }
+  - assert: { shape: { of: h.0.attn.c_attn.weight, is: [768, 2112] } }
+  - assert: { shape: { of: h.0.attn.c_attn.bias, is: [2112] } }
+  - assert: { shape: { of: h.0.attn.c_proj.weight, is: [704, 768] } }
+  - assert: { count: { of: '.*', is: 160 } }
+output: out/T2/model.safetensors

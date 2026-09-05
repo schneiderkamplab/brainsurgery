@@ -1,0 +1,15 @@
+# T3 for Pythia-1B: bfloat16 projection matrices, float32 everything else, 256 MiB (268,435,456 bytes) shards.
+inputs:
+  - model::inputs/base/model.safetensors
+transforms:
+  - delete: { target: 'gpt_neox\.layers\.(\d+)\.(attention\.bias|attention\.masked_bias|attention\.rotary_emb\.inv_freq)' }
+  - cast_: { target: '.*', to: float32 }
+  - assert: { count: { of: 'gpt_neox\.layers\.(\d+)\.(attention\.query_key_value\.weight|attention\.dense\.weight|mlp\.dense_h_to_4h\.weight|mlp\.dense_4h_to_h\.weight)', is: 64 } }
+  - cast_: { target: 'gpt_neox\.layers\.(\d+)\.(attention\.query_key_value\.weight|attention\.dense\.weight|mlp\.dense_h_to_4h\.weight|mlp\.dense_4h_to_h\.weight)', to: bfloat16 }
+  - assert: { dtype: { of: gpt_neox.layers.0.attention.query_key_value.weight, is: bfloat16 } }
+  - assert: { dtype: { of: gpt_neox.embed_in.weight, is: float32 } }
+  - assert: { count: { of: '.*', is: 196 } }
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

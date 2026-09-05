@@ -1,0 +1,15 @@
+# T3 for GPT-2 (124M): bfloat16 projection matrices, float32 everything else, 64 MiB (67,108,864 bytes) shards.
+inputs:
+  - model::inputs/base/model.safetensors
+transforms:
+  - delete: { target: 'h\.(\d+)\.(attn\.bias)' }
+  - cast_: { target: '.*', to: float32 }
+  - assert: { count: { of: 'h\.(\d+)\.(attn\.c_attn\.weight|attn\.c_proj\.weight|mlp\.c_fc\.weight|mlp\.c_proj\.weight)', is: 48 } }
+  - cast_: { target: 'h\.(\d+)\.(attn\.c_attn\.weight|attn\.c_proj\.weight|mlp\.c_fc\.weight|mlp\.c_proj\.weight)', to: bfloat16 }
+  - assert: { dtype: { of: h.0.attn.c_attn.weight, is: bfloat16 } }
+  - assert: { dtype: { of: wte.weight, is: float32 } }
+  - assert: { count: { of: '.*', is: 148 } }
+output:
+  path: out/T3
+  format: safetensors
+  shard: 64MB

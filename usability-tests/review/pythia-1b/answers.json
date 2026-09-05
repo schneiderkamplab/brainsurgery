@@ -1,0 +1,7 @@
+{
+  "T1": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "T2": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "T3": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "T4": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "T5": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added."
+}

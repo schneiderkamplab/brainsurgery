@@ -32,3 +32,21 @@ def test_state_dict_validators_cover_non_mapping_non_tensor_and_success(validato
     assert isinstance(loaded, dict)
     assert set(loaded) == {"x"}
     assert torch.equal(loaded["x"], torch.ones(1))
+
+
+def test_safetensors_save_packs_non_contiguous_tensors(tmp_path: Path) -> None:
+    # Regression: permute/phlora outputs are non-contiguous and safetensors refused
+    # them at save time, aborting the run after all transforms had succeeded.
+    transposed = torch.arange(12, dtype=torch.float32).reshape(3, 4).t()
+    column_major = torch.linalg.svd(torch.randn(6, 5), full_matrices=False)[0][:, :2]
+    assert not transposed.is_contiguous()
+
+    path = tmp_path / "packed.safetensors"
+    safetensors_io._save_state_dict({"t": transposed, "u": column_major}, path)
+    loaded = safetensors_io._load_state_dict(path)
+    assert torch.equal(loaded["t"], transposed)
+    assert torch.equal(loaded["u"], column_major)
+
+    single = tmp_path / "single.safetensors"
+    safetensors_io._save_single_tensor("t", transposed, single)
+    assert torch.equal(safetensors_io._load_single_tensor(single), transposed)
