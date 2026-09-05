@@ -1,0 +1,146 @@
+{-# CHECKPOINTS "microsoft/Phi-3-small-8k-instruct" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "phi3small" #-}
+
+import Activations (gegelu)
+
+import Attention (attention, merge_heads, split_qkv_grouped)
+
+import Masking (Mask, blocksparse_mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Params (has_root)
+
+import Positions (position_ids, rope_pair_base, rope_pair_longrope)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+HAS_TEXT_CONFIG = false
+
+CFG = HAS_TEXT_CONFIG ? "text_config" : ""
+
+MODEL_DIM = HAS_TEXT_CONFIG ? (4096) : (4096)
+
+VOCAB_SIZE = HAS_TEXT_CONFIG ? (100352) : (100352)
+
+NUM_LAYERS = HAS_TEXT_CONFIG ? (32) : (32)
+
+NUM_HEADS = HAS_TEXT_CONFIG ? (32) : (32)
+
+KVH = HAS_TEXT_CONFIG ? (8) : (8)
+
+MODEL_HEAD_DIM = HAS_TEXT_CONFIG ? ((false) ? (128) : 128) : ((false) ? (128) : 128)
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+FFN = HAS_TEXT_CONFIG ? (14336) : (14336)
+
+EPS = HAS_TEXT_CONFIG ? (1e-05) : (1e-05)
+
+THETA = HAS_TEXT_CONFIG ? (1000000.0) : (1000000.0)
+
+ROPE_MODE = "default"
+
+ROPE_ORIGINAL_CONTEXT = 8192
+
+ROPE_MAX_CONTEXT = HAS_TEXT_CONFIG ? (8192) : (8192)
+
+ROPE_LONG_FACTOR = []
+
+ROPE_SHORT_FACTOR = []
+
+ROPE_LONG_MSCALE = -1.0
+
+ROPE_SHORT_MSCALE = -1.0
+
+HAS_LONGROPE = false
+
+GEGELU_LIMIT = HAS_TEXT_CONFIG ? (20.0) : (20.0)
+
+MUP_ATTN_MULT = HAS_TEXT_CONFIG ? (1.0) : (1.0)
+
+MUP_EMBED_MULT = HAS_TEXT_CONFIG ? (10.0) : (10.0)
+
+MUP_WIDTH_MULT = HAS_TEXT_CONFIG ? (8.0) : (8.0)
+
+ATTN_SCALE = MUP_ATTN_MULT / MODEL_HEAD_DIM
+
+BS_LOCAL_BLOCKS = HAS_TEXT_CONFIG ? (16) : (16)
+
+BS_BLOCK_SIZE = HAS_TEXT_CONFIG ? (64) : (64)
+
+BS_VERT_STRIDE = HAS_TEXT_CONFIG ? (8) : (8)
+
+BS_HOMO_HEAD = HAS_TEXT_CONFIG ? (false) : (false)
+
+WINDOW_LOCAL = BS_LOCAL_BLOCKS * BS_BLOCK_SIZE
+
+WINDOW_GLOBAL = HAS_TEXT_CONFIG ? (8192) : (8192)
+
+DENSE_EVERY = HAS_TEXT_CONFIG ? (2) : (2)
+
+HAS_LM_HEAD = has_root "lm_head"
+
+phi3small_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+phi3small_norm@path x = NN.layernorm@path x eps=EPS
+
+phi3small_block :: Tensor[B,S,D] -> Int -> IdxTensor[B,S] -> Tensor[B,1,S,K] -> ?Mask[B,KM,ROPE_MAX_CONTEXT] -> ?CacheLayer[B,KVH,P,ROPE_MAX_CONTEXT,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,ROPE_MAX_CONTEXT,DH])
+phi3small_block x i pos_ids dense_mask attn_mask past_kv = do
+  xn <- phi3small_norm@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    qkv <- NN.linear@query_key_value xn dim=(QD + KVD + KVD) bias=true
+    q, k, v <- split_qkv_grouped qkv heads=NUM_HEADS kv_heads=KVH
+    q, k <- HAS_LONGROPE ? (rope_pair_longrope q k pos_ids THETA ROPE_ORIGINAL_CONTEXT ROPE_MAX_CONTEXT ROPE_LONG_FACTOR ROPE_SHORT_FACTOR long_mscale=ROPE_LONG_MSCALE short_mscale=ROPE_SHORT_MSCALE) : (rope_pair_base q k pos_ids theta=THETA)
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    dense <- (DENSE_EVERY > 0) ? (((i + 1) % DENSE_EVERY) == 0) : false
+    a <- dense
+            ? do
+                return attention q k v keep=dense_mask scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
+            : do
+                add_mask <- blocksparse_mask q k padding_mask=attn_mask block_size=BS_BLOCK_SIZE local_blocks=BS_LOCAL_BLOCKS vert_stride=BS_VERT_STRIDE homo_head=false
+                keep <- Tensor.eq add_mask 0.0
+                return attention q k v keep=keep rel_bias=add_mask scale=ATTN_SCALE |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
+    return a, new_kv
+  x <- x + a
+  xn <- phi3small_norm@post_attention_layernorm x
+  m <- scope@mlp do
+    u <- NN.linear@up_proj xn dim=(2 * FFN) bias=true
+    return u |> gegelu limit=GEGELU_LIMIT |> NN.linear@down_proj dim=MODEL_DIM bias=true
+  return x + m, new_kv
+
+phi3small :: TokenIds[B,S] -> ?Mask[B,K,ROPE_MAX_CONTEXT] -> ?Cache[B,KVH,P,ROPE_MAX_CONTEXT,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,ROPE_MAX_CONTEXT,DH])
+phi3small input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  pos_ids <- position_ids input_ids past_length=past_length
+  attn_mask <- mask_for_input input_ids attn_mask ROPE_MAX_CONTEXT
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  dense_mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=WINDOW_GLOBAL
+  work_kv <- Cache.prepare past_kv use_cache ROPE_MAX_CONTEXT
+  read_kv <- Cache.read past_kv work_kv
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- (MUP_EMBED_MULT > 0.0) ? (x * MUP_EMBED_MULT) : x
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- phi3small_block x i pos_ids dense_mask attn_mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- phi3small_norm@final_layernorm x
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
+  logits <- (MUP_WIDTH_MULT > 0.0) ? (logits / MUP_WIDTH_MULT) : logits
+  return logits, new_kv

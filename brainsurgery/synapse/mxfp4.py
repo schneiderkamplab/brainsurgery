@@ -83,6 +83,7 @@ def materialize_mxfp4_aliases(
     *,
     dtype: torch.dtype | None = None,
     drop_packed: bool = False,
+    expert_index_aliases: bool = True,
 ) -> None:
     target_dtype = _infer_target_dtype(state_dict) if dtype is None else dtype
     blocks_suffix = "_blocks"
@@ -120,7 +121,8 @@ def materialize_mxfp4_aliases(
             if bias_src_key in state_dict and bias_dst_key in state_dict:
                 state_dict.pop(bias_src_key, None)
 
-    _materialize_moe_expert_index_aliases(state_dict)
+    if expert_index_aliases:
+        _materialize_moe_expert_index_aliases(state_dict)
 
 
 def _materialize_moe_expert_index_aliases(state_dict: dict[str, torch.Tensor]) -> None:
@@ -143,7 +145,7 @@ def _materialize_moe_expert_index_aliases(state_dict: dict[str, torch.Tensor]) -
         inner_suffix = matched_suffix[len(".mlp.experts.") :]
         for expert_idx in range(expert_count):
             alias = f"{base_prefix}.mlp.experts.{expert_idx}.{inner_suffix}"
-            state_dict.setdefault(alias, tensor)
+            state_dict.setdefault(alias, tensor[expert_idx])
 
 
 __all__ = ["materialize_mxfp4_aliases"]

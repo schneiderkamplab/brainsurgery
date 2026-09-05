@@ -1,0 +1,135 @@
+{-# CHECKPOINTS "sapientinc/HRM-Text-1B" #-}
+{-# TASK "causal_lm" #-}
+{-# MAIN "hrm_text" #-}
+
+import Activations (sigmoid, silu)
+import Attention (attention_with_additive_mask, mask_to_additive_for_input, merge_heads)
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+import Math (mul)
+import Params (param)
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+import Cache
+import Config
+import NN
+import Tensor
+
+
+MODEL_DIM <- ((Config.dim @@hidden_size default=1536) :: Dim)
+
+VOCAB_SIZE <- ((Config.dim @@vocab_size default=65536) :: Dim)
+
+HAS_STACK_LAYERS <- Config.has_value @@num_layers_per_stack
+
+NUM_LAYERS <- (HAS_STACK_LAYERS ? (Config.dim @@num_layers_per_stack default=16) : (Config.dim @@num_hidden_layers default=16) :: Dim)
+
+NUM_LAYERS_I <- (HAS_STACK_LAYERS ? (Config.int @@num_layers_per_stack default=16) : (Config.int @@num_hidden_layers default=16) :: Int)
+
+NUM_HEADS <- ((Config.dim @@num_attention_heads default=12) :: Dim)
+
+HAS_HEAD_DIM <- Config.has_value @@head_dim
+
+MODEL_HEAD_DIM <- (HAS_HEAD_DIM ? (Config.dim @@head_dim default=128) : (MODEL_DIM / NUM_HEADS) :: Dim)
+
+QD <- ((NUM_HEADS * MODEL_HEAD_DIM) :: Dim)
+
+GQKV_DIM <- ((4 * QD) :: Dim)
+
+FFN <- ((Config.dim @@intermediate_size default=4096) :: Dim)
+
+GATE_UP_DIM <- ((2 * FFN) :: Dim)
+
+H_CYCLES <- ((Config.int @@H_cycles default=2) :: Int)
+
+L_CYCLES <- ((Config.int @@L_cycles default=3) :: Int)
+
+EPS <- (Config.float @@rms_norm_eps default=1e-06)
+
+THETA <- (Config.float @@rope_theta default=10000.0)
+
+MAX_POSITIONS <- ((Config.dim @@max_position_embeddings default=4096) :: Dim)
+
+HAS_EMBED_SCALE <- Config.has_value @@embedding_scale
+
+INIT_RANGE <- (Config.float @@initializer_range default=0.025515518153991442)
+
+EMBED_SCALE <- (HAS_EMBED_SCALE ? (Config.float @@embedding_scale default=39.191835884530846) : (1.0 / INIT_RANGE) :: Float)
+
+
+hrm_rms :: Tensor[B,S,D] -> Tensor[B,S,D]
+hrm_rms x = NN.rmsnorm_noscale x eps=EPS cast_float=true
+
+
+hrm_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+hrm_block x rope_sin rope_cos additive_mask mask past_kv = do
+  xn <- hrm_rms x
+  a, new_kv <- scope@attn do
+    gqkv <- NN.linear@gqkv_proj xn dim=GQKV_DIM bias=false
+    gate_lin, q_lin, k_lin, v_lin <- Tensor.split gqkv sizes=[QD, QD, QD, QD]
+    q <- Tensor.reshape q_lin shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    k <- Tensor.reshape k_lin shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    v <- Tensor.reshape v_lin shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    gate <- Tensor.reshape gate_lin shape=[B, S, NUM_HEADS, MODEL_HEAD_DIM] |> Tensor.permute dims=[0, 2, 1, 3]
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    a <- attention_with_additive_mask q k v additive_mask mask
+    a <- sigmoid gate |> mul a
+    a <- merge_heads a |> NN.linear@o_proj dim=MODEL_DIM
+    return a, new_kv
+  x <- x + a
+  xn <- hrm_rms x
+  m <- scope@mlp do
+    gate_up <- NN.linear@gate_up_proj xn dim=GATE_UP_DIM bias=false
+    gate, up <- Tensor.split gate_up sizes=[FFN, FFN]
+    return gate |> silu |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+  return x + m, new_kv
+
+
+hrm_stack :: Path -> Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH] -> Int -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+hrm_stack@path x rope_sin rope_cos additive_mask mask read_kv work_kv cycle_offset = do
+  x, work_kv <- for@layers i <- [0..NUM_LAYERS_I) carry (x, work_kv) do
+    slot <- cycle_offset + i
+    past_i <- Cache.index read_kv slot
+    x, new_i <- hrm_block x rope_sin rope_cos additive_mask mask past_i
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  x <- hrm_rms x
+  return x, work_kv
+
+
+hrm_l_cycles :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,1,S,K] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH] -> Int -> (Tensor[B,S,D], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH], Int)
+hrm_l_cycles z_l z_h rope_sin rope_cos additive_mask mask read_kv work_kv slot_offset = do
+  z_l, work_kv, slot_offset <- for i <- [0..L_CYCLES) carry (z_l, work_kv, slot_offset) do
+    x_l <- z_l + z_h
+    z_l, work_kv <- hrm_stack@model.L_module x_l rope_sin rope_cos additive_mask mask read_kv work_kv slot_offset
+    slot_offset <- slot_offset + NUM_LAYERS_I
+    yield z_l, work_kv, slot_offset
+  return z_l, work_kv, slot_offset
+
+
+hrm_text :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+hrm_text input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids MODEL_HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  additive_mask <- mask_to_additive_for_input input_ids mask NUM_HEADS
+  x <- NN.embedding@@model.embed_tokens input_ids dim=MODEL_DIM scale=EMBED_SCALE
+  z0 <- ((param @@model.z_L_init) :: Tensor[MODEL_DIM])
+  z_l <- Tensor.reshape z0 shape=[1, 1, MODEL_DIM] |> Tensor.expand shape=[B, S, MODEL_DIM] |> Tensor.cast_like x
+  z_h <- x
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  slot_offset <- 0
+  z_h, z_l, work_kv, slot_offset <- for i <- [0..H_CYCLES) carry (z_h, z_l, work_kv, slot_offset) do
+    z_l, work_kv, slot_offset <- hrm_l_cycles z_l z_h rope_sin rope_cos additive_mask mask read_kv work_kv slot_offset
+    x_h <- z_h + z_l
+    z_h, work_kv <- hrm_stack@model.H_module x_h rope_sin rope_cos additive_mask mask read_kv work_kv slot_offset
+    slot_offset <- slot_offset + NUM_LAYERS_I
+    yield z_h, z_l, work_kv, slot_offset
+  logits <- NN.linear@@lm_head z_h dim=VOCAB_SIZE bias=false
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  return logits, new_kv

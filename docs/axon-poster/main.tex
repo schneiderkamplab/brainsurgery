@@ -1,0 +1,520 @@
+\documentclass{article}
+
+\usepackage[a0paper,portrait,margin=12mm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{inconsolata}
+\usepackage{newtxtext}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage[most]{tcolorbox}
+\usepackage{listings}
+\usetikzlibrary{arrows.meta,positioning,fit,calc,shapes.geometric}
+
+\pagestyle{empty}
+
+\definecolor{axonblue}{HTML}{12355B}
+\definecolor{axoncyan}{HTML}{1C6E8C}
+\definecolor{axonorange}{HTML}{D97D0D}
+\definecolor{axongreen}{HTML}{4A7C59}
+\definecolor{axonpaper}{HTML}{F7F3EA}
+\definecolor{axonink}{HTML}{202124}
+\definecolor{axonmuted}{HTML}{5E6670}
+\definecolor{axoncode}{HTML}{F2EFE7}
+\definecolor{axonred}{HTML}{B8331A}
+\definecolor{axonop}{HTML}{C25A0A}
+
+\newcommand{\axon}{\textsc{Axon}}
+\newcommand{\graphir}{\textsc{Graph IR}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\postertext}[1]{{\raggedright\fontsize{23}{29}\selectfont #1\par}}
+
+\lstdefinelanguage{Axon}{
+  morekeywords={do,return,import,true,false,null,scope,for,carry,yield},
+  sensitive=true,
+  morecomment=[l]{--}
+}
+\lstset{
+  language=Axon,
+  basicstyle=\ttfamily\fontsize{19}{21}\selectfont,
+  keywordstyle=\color{axonblue}\bfseries,
+  commentstyle=\color{axonmuted},
+  stringstyle=\color{axongreen},
+  literate=
+    {<-}{{{\textcolor{axonop}{\bfseries\texttt{<-}}}}}2
+    {->}{{{\textcolor{axonop}{\bfseries\texttt{->}}}}}2
+    {::}{{{\textcolor{axonop}{\bfseries\texttt{::}}}}}2
+    {|>}{{{\textcolor{axonop}{\bfseries\texttt{|>}}}}}2
+    {..}{{{\textcolor{axonop}{\bfseries\texttt{..}}}}}2
+    {?}{{{\textcolor{axonop}{\bfseries\texttt{?}}}}}1
+    {@}{{{\textcolor{axonop}{\bfseries\texttt{@}}}}}1
+    {=}{{{\textcolor{axonop}{\bfseries\texttt{=}}}}}1
+    {:}{{{\textcolor{axonop}{\bfseries\texttt{:}}}}}1
+    {+}{{{\textcolor{axonop}{\bfseries\texttt{+}}}}}1
+    {*}{{{\textcolor{axonop}{\bfseries\texttt{*}}}}}1,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  frame=none,
+  xleftmargin=0.04in,
+  xrightmargin=0.04in,
+}
+
+\tcbset{
+  posterbox/.style={
+    enhanced,
+    sharp corners=south,
+    rounded corners=north,
+    colback=white,
+    colframe=axonblue,
+    boxrule=2.3pt,
+    left=5mm,
+    right=5mm,
+    top=4mm,
+    bottom=4mm,
+    fonttitle=\bfseries\fontsize{30}{34}\selectfont,
+    coltitle=white,
+    colbacktitle=axonblue,
+    attach boxed title to top left={xshift=4mm,yshift=-1.4mm},
+    boxed title style={sharp corners=south,rounded corners=north,boxrule=0pt,colback=axonblue},
+  },
+  accentbox/.style={
+    enhanced,
+    colback=axonblue!6,
+    colframe=axoncyan,
+    boxrule=2pt,
+    arc=4mm,
+    left=5mm,
+    right=5mm,
+    top=4mm,
+    bottom=4mm,
+  },
+  codebox/.style={
+    enhanced,
+    colback=axoncode,
+    colframe=axonorange,
+    boxrule=1.8pt,
+    arc=3mm,
+    left=3mm,
+    right=3mm,
+    top=2mm,
+    bottom=2mm,
+  }
+}
+
+\begin{document}
+\pagecolor{axonpaper}
+\color{axonink}
+
+\begin{tcolorbox}[enhanced, colback=white, colframe=axonblue, boxrule=3pt, arc=6mm,
+  left=8mm,right=8mm,top=7mm,bottom=7mm]
+\begin{minipage}[c]{0.20\linewidth}
+\centering
+\includegraphics[width=1.00\linewidth]{logo.png}
+\end{minipage}
+\begin{minipage}[c]{0.61\linewidth}
+\centering
+{\fontsize{44}{49}\selectfont\bfseries \axon: A Tensors-First Functional Programming Language}\\[-1mm]
+{\fontsize{39}{44}\selectfont\bfseries for Machine Learning Models}\\[2mm]
+{\fontsize{30}{35}\selectfont From checkpoint-close model source to typed Graph IR}\\[2mm]
+{\fontsize{22}{26}\selectfont source Axon $\rightarrow$ closed typed core $\rightarrow$ structured \graphir{} $\rightarrow$ torch / pipeline / interpreter / tinygrad backends}
+\end{minipage}
+\begin{minipage}[c]{0.16\linewidth}
+\centering
+\includegraphics[width=0.86\linewidth]{sdu_logo.png}\\[2mm]
+{\fontsize{18}{21}\selectfont Brainsurgery contributors}
+\end{minipage}
+\end{tcolorbox}
+
+\vspace{8mm}
+
+\noindent
+\begin{minipage}[t]{0.49\linewidth}
+\begin{tcolorbox}[posterbox,title={Why Axon?}]
+\postertext{Modern checkpoints mix Python implementations, configuration
+conventions, parameter naming schemes, and backend-specific execution code.
+\axon{} separates the model-family description from those incidental details
+while preserving tensor shapes and checkpoint paths as typed data.}
+\vspace{3mm}
+{\fontsize{21}{27}\selectfont
+\begin{tabular}{@{}p{0.27\linewidth}p{0.65\linewidth}@{}}
+\toprule
+Challenge & Axon mechanism \\
+\midrule
+Model-family reuse & signatures, \code{do} blocks, pipes, scoped paths \\
+Shape reasoning & \code{Tensor[B,S,D]}, \code{?Cache[B,H,T,DH]} \\
+Checkpoint fidelity & parameter paths and config values remain first class \\
+Backend portability & one typed graph contract for multiple runtimes \\
+Inspection & rendered Axon remains readable at each source stage \\
+\bottomrule
+\end{tabular}
+}
+\end{tcolorbox}
+
+\vspace{7mm}
+
+\begin{tcolorbox}[posterbox,title={Surface Sugar $\rightarrow$ Flat Core}]
+\begin{minipage}[t]{0.49\linewidth}
+{\fontsize{22}{26}\selectfont\bfseries Sugared source}
+\begin{tcolorbox}[codebox]
+\begin{lstlisting}[basicstyle=\ttfamily\fontsize{18}{20}\selectfont]
+project :: Tensor[B,S,D] -> Tensor[B,S,O]
+project x = Tensor.reshape x shape=[B,S,D]
+  |> NN.linear@proj dim=O
+\end{lstlisting}
+\end{tcolorbox}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\linewidth}
+{\fontsize{22}{26}\selectfont\bfseries Desugared/flat core}
+\begin{tcolorbox}[codebox]
+\begin{lstlisting}[basicstyle=\ttfamily\fontsize{18}{20}\selectfont]
+project :: Tensor[B,S,D] -> Tensor[B,S,O]
+project x = do
+  _v1 <- Tensor.reshape x shape=[B,S,D]
+  y <- NN.linear @@proj _v1
+       dim=O bias=true transpose=false
+  return y
+\end{lstlisting}
+\end{tcolorbox}
+\end{minipage}
+\vspace{2mm}
+{\raggedright\fontsize{22}{28}\selectfont Surface syntax is optimized for
+model authors; compiler stages make evaluation order, defaults, lexical paths,
+and tensor metadata explicit for analysis and backend generation.\par}
+\end{tcolorbox}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\begin{tcolorbox}[posterbox,title={Typed Core}]
+\postertext{The type system tracks tensor ranks, symbolic dimensions, optional
+values, cache layouts, and primitive-specific shape rules. The result is a
+fully typed model program whose shapes can be inspected before execution.}
+\begin{tcolorbox}[codebox]
+\begin{lstlisting}[basicstyle=\ttfamily\fontsize{18}{20}\selectfont]
+_v1 <- (Tensor.reshape (x :: Tensor[B,S,D])
+          shape=([B,S,D] :: List[Dim])
+        :: Tensor[B,S,D])
+y <- (NN.linear (@@proj :: Path)
+        (_v1 :: Tensor[B,S,D])
+        dim=(O :: Dim)
+      :: Tensor[B,S,O])
+\end{lstlisting}
+\end{tcolorbox}
+\end{tcolorbox}
+
+\vspace{7mm}
+
+\begin{tcolorbox}[posterbox,title={Stage Contracts}]
+{\fontsize{21}{27}\selectfont
+\begin{tabular}{@{}p{0.25\linewidth}p{0.67\linewidth}@{}}
+\toprule
+Stage & Primary invariant \\
+\midrule
+Parse/load & model source plus imported builtin definitions \\
+Materialize & generic model families specialized with checkpoint metadata \\
+Resolve/validate & closed program: imported names and config paths resolved \\
+Normalize & uniform calls and canonical surface syntax \\
+Elaborate & explicit defaults and normalized optional arguments \\
+Flatten & surface control and scoped paths become a flat core program \\
+Typecheck & every expression has type, arity, and shape metadata \\
+Optimize-ast & optional safe typed-Axon pruning, alias cleanup, and literal folding \\
+Graph lowering & typed SSA-like graph modules with structured paths \\
+Optimize-graph & optional typed Graph IR DCE, folding, CSE, specialization, and safe inlining \\
+Backends & torch, interpreter, pipeline placement, and tinygrad consume the same graph \\
+\bottomrule
+\end{tabular}
+}
+\end{tcolorbox}
+\end{minipage}
+
+\vspace{8mm}
+
+\noindent
+\begin{minipage}[t]{0.49\linewidth}
+\begin{tcolorbox}[posterbox,title={Stage Pipeline}]
+\centering
+\begin{tikzpicture}[
+  transform shape,
+  scale=0.95,
+  stage/.style={draw, rounded corners=7pt, fill=axonblue!8, align=center, minimum width=1.95in, minimum height=0.52in, font=\bfseries\fontsize{13}{15}\selectfont},
+  rep/.style={draw, rounded corners=7pt, fill=black!5, align=center, minimum width=1.55in, minimum height=0.43in, font=\fontsize{12}{14}\selectfont},
+  opt/.style={draw, rounded corners=7pt, dashed, fill=axonorange!12, align=center, minimum width=1.75in, minimum height=0.46in, font=\fontsize{12}{14}\selectfont},
+  edge/.style={-{Latex[length=3.2mm]}, line width=1.4pt}
+]
+\node[rep] (src) {source\\Axon};
+\node[stage, right=0.25in of src] (parse) {parse/load\\materialize};
+\node[rep, right=0.25in of parse] (file) {one-file\\AST};
+\node[stage, below=0.25in of file] (resolve) {resolve\\validate};
+\node[rep, left=0.25in of resolve] (closed) {closed\\AST};
+\node[stage, left=0.25in of closed] (norm) {normalize};
+\node[rep, below=0.25in of norm] (normast) {normalized\\AST};
+\node[stage, right=0.25in of normast] (elab) {elaborate};
+\node[rep, right=0.25in of elab] (elabast) {elaborated\\AST};
+\node[stage, below=0.25in of elabast] (flatstage) {flatten};
+\node[rep, left=0.25in of flatstage] (flat) {flat\\AST};
+\node[stage, left=0.25in of flat] (tc) {typecheck2};
+\node[rep, below=0.25in of tc] (typed) {typed flat\\AST};
+\node[opt, right=0.25in of typed] (astopt) {optional\\optimize-ast};
+\node[stage, right=0.25in of astopt] (lower) {Graph IR\\lowering};
+\node[rep, below=0.25in of lower] (graph) {typed\\Graph IR};
+\node[opt, left=0.25in of graph] (graphopt) {optional\\optimize-graph};
+\node[stage, left=0.25in of graphopt] (backend) {torch / interpreter\\pipeline / tinygrad};
+\draw[edge] (src) -- (parse);
+\draw[edge] (parse) -- (file);
+\draw[edge] (file) -- (resolve);
+\draw[edge] (resolve) -- (closed);
+\draw[edge] (closed) -- (norm);
+\draw[edge] (norm) -- (normast);
+\draw[edge] (normast) -- (elab);
+\draw[edge] (elab) -- (elabast);
+\draw[edge] (elabast) -- (flatstage);
+\draw[edge] (flatstage) -- (flat);
+\draw[edge] (flat) -- (tc);
+\draw[edge] (tc) -- (typed);
+\draw[edge,dashed] (typed) -- (astopt);
+\draw[edge,dashed] (astopt) -- (lower);
+\draw[edge] (lower) -- (graph);
+\draw[edge,dashed] (graph) -- (graphopt);
+\draw[edge,dashed] (graphopt) -- (backend);
+\end{tikzpicture}
+\vspace{3mm}
+
+{\raggedright\fontsize{20}{25}\selectfont
+Each stage has a validation contract. Earlier stages preserve readable Axon while
+making names, imports, config access, defaults, and control forms explicit.
+Flattening removes surface control and scoped path sugar. Typecheck2 attaches
+shape, arity, optional/cache, and path metadata. Dashed optimizers are off by
+default: \code{optimize-ast} is narrow pre-Graph cleanup, while
+\code{optimize-graph} is the main typed rewrite home. Both run to fixpoint and
+validate rather than silently returning a non-converged result.\par}
+\end{tcolorbox}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\begin{tcolorbox}[posterbox,title={Graph IR}]
+\centering
+\begin{tikzpicture}[
+  transform shape,
+  scale=1.05,
+  value/.style={draw, rounded corners=7pt, fill=axonblue!9, align=center, minimum width=1.78in, minimum height=0.62in, font=\fontsize{14}{16}\selectfont},
+  op/.style={draw, rounded corners=7pt, fill=axonorange!14, align=center, minimum width=2.15in, minimum height=0.76in, font=\fontsize{14}{16}\selectfont},
+  attr/.style={draw, rounded corners=7pt, fill=axongreen!12, align=center, minimum width=1.62in, minimum height=0.48in, font=\fontsize{13}{15}\selectfont},
+  edge/.style={-{Latex[length=3mm]}, line width=1.4pt}
+]
+\node[value] (x) {\code{x}\\\code{Tensor[B,S,D]}};
+\node[op, right=0.55in of x] (reshape) {\code{Tensor.reshape}\\out \code{\_v1}\\\code{Tensor[B,S,D]}};
+\node[op, below=0.72in of reshape] (linear) {\code{NN.linear}\\out \code{y}\\\code{Tensor[B,S,O]}};
+\node[value, left=0.55in of linear] (ret) {\code{return y}\\\code{Tensor[B,S,O]}};
+\node[attr, above=0.46in of reshape] (shape) {\code{shape=[B,S,D]}};
+\node[attr, right=0.45in of linear] (path) {\code{path=@@proj}};
+\node[attr, below=0.42in of linear] (attrs) {\code{dim=O, bias=true}};
+\draw[edge] (x) -- (reshape);
+\draw[edge] (reshape) -- (linear);
+\draw[edge] (linear) -- (ret);
+\draw[edge] (shape) -- (reshape);
+\draw[edge] (path) -- (linear);
+\draw[edge] (attrs) -- (linear);
+\end{tikzpicture}
+\vspace{3mm}
+
+{\raggedright\fontsize{19.5}{24.5}\selectfont
+The graph is not serialized as backend strings. Nodes keep typed operands,
+named outputs, symbolic dimensions, optional/cache shapes, and structured
+parameter paths. Multi-output operations such as \code{Tensor.chunk} remain
+first-class. Optional \code{optimize-graph} performs metadata-aware pruning,
+dead-temp elimination for total-pure nodes, literal/scalar folding, proof-gated
+dimension simplification, total-pure CSE, call-site specialization, safe helper
+inlining, tuple-return cleanup, and final name canonicalization. Path-template
+symbols and constraints are dependencies, not strings to be reparsed.\par}
+\end{tcolorbox}
+\end{minipage}
+
+\vspace{8mm}
+
+\begin{tcolorbox}[posterbox,title={Full GPT-2 KV Axon Model}]
+\begin{minipage}[t]{0.66\linewidth}
+\vspace{0pt}
+\begin{tcolorbox}[codebox]
+\begin{lstlisting}[basicstyle=\ttfamily\fontsize{18.4}{19.8}\selectfont]
+{-# CHECKPOINTS ["gpt2", "openai-community/gpt2", "openai-community/gpt2-medium", "openai-community/gpt2-large", "openai-community/gpt2-xl"] #-}
+{-# TASK "causal_lm" #-}
+
+import Activations (gelu_new)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (causal_mask)
+import Positions (position_ids)
+import Cache (Cache, CacheLayer)
+import Config
+import NN
+import Tensor
+
+CONTEXT_SIZE = Config.dim @@n_positions default=1024
+MODEL_DIM = Config.dim @@n_embd default=768
+NUM_LAYERS = Config.dim @@n_layer default=12
+NUM_HEADS = Config.dim @@n_head default=12
+
+lin@path :: Path -> Tensor[B,S,D] -> Dim -> Tensor[B,S,O]
+lin@path x dim = NN.linear@path x dim=dim bias=true transpose=true
+
+gpt2_block :: Tensor[B,S,D] -> ?Tensor[B,K] -> ?CacheLayer[B,H,P,DH] -> (Tensor[B,S,D], ?CacheLayer[B,H,K,DH])
+gpt2_block x attn_mask past_kv = do
+  x1 <- NN.layernorm@ln_1 x
+  a, new_kv <- scope@attn do
+    q_lin, k_lin, v_lin <- lin@c_attn x1 dim=(3 * MODEL_DIM) |> Tensor.chunk parts=3
+    q <- reshape_heads q_lin heads=NUM_HEADS
+    k <- reshape_heads k_lin heads=NUM_HEADS
+    v <- reshape_heads v_lin heads=NUM_HEADS
+    k, v, new_kv <- Cache.update past_kv k v
+    mask <- causal_mask q k window=CONTEXT_SIZE padding_mask=attn_mask
+    a <- attention q k v mask |> merge_heads |> lin@c_proj dim=MODEL_DIM
+    return a, new_kv
+  x <- x + a
+  xn <- NN.layernorm@ln_2 x
+  m <- scope@mlp do
+    return lin@c_fc xn dim=(4 * MODEL_DIM) |> gelu_new |> lin@c_proj dim=MODEL_DIM
+  return x + m, new_kv
+
+gpt2 :: Tensor.TokenIds[B,S] -> ?Tensor[B,K] -> ?Cache[B,H,P,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,H,K,DH])
+gpt2 input_ids attn_mask past_kv use_cache = do
+  tok <- NN.embedding@wte input_ids dim=MODEL_DIM
+  pos <- position_ids input_ids attn_mask=attn_mask past_length=(Cache.past_length past_kv) pad_fill=1 |> NN.embedding@wpe
+  x <- tok + pos
+  new_kv <- use_cache ? Cache.init : null
+  x, new_kv <- for@h i <- [0..NUM_LAYERS) carry (x, new_kv) do
+    past_i <- Cache.index past_kv i
+    x, new_i <- gpt2_block x attn_mask past_i
+    new_kv <- Cache.append new_kv new_i
+    yield x, new_kv
+  logits <- NN.layernorm@ln_f x |> NN.linear@wte
+  return logits, new_kv
+\end{lstlisting}
+\end{tcolorbox}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.32\linewidth}
+\vspace{0pt}
+\begin{tcolorbox}[accentbox]
+{\raggedright\fontsize{22}{28}\selectfont
+\textbf{What this example shows.} This is a complete cached GPT-2 family model:
+token and position embeddings feed a stack of attention/MLP blocks, the cache is
+threaded through the loop, and the final projection reuses the input embedding
+weight.\par\medskip
+
+\textbf{Checkpoint paths stay in the source.} Calls such as \code{NN.embedding@wte},
+\code{lin@c\_attn}, and \code{lin@c\_proj} name the tensors in the checkpoint.
+The scopes \code{scope@attn}, \code{scope@mlp}, and \code{for@h} are resolved by
+the compiler into absolute or templated parameter paths.\par\medskip
+
+\textbf{Surface syntax is compact, not vague.} Pipes express data flow, multi-bind
+statements unpack tensor tuples, optional cache arguments are explicit, and
+\code{lin@path} is a small path-polymorphic wrapper around GPT-2 linear layers.\par
+\medskip
+
+\textbf{The lowered program is fully typed.} After elaboration and flattening,
+every expression has a tensor/cache type, symbolic shape, arity, and path
+metadata. The graph IR then carries this structured information to torch
+codegen, the interpreter, pipeline execution, or future backends.\par}
+\end{tcolorbox}
+\vspace{3mm}
+\begin{tcolorbox}[accentbox]
+{\raggedright\fontsize{21}{26}\selectfont
+\textbf{Compatible checkpoint runs.} The exact source shown here reads layer
+count, hidden size, head count, and context length from checkpoint config via
+\code{Config.dim}. One source covers the GPT-2 KV family below.\par\medskip
+
+{\fontsize{14.2}{17}\selectfont
+\begin{tabular}{@{}lrrrcc@{}}
+\toprule
+Checkpoint & HF & Axon & HF/Axon & Top-1 & Max abs \\
+\midrule
+\code{gpt2} & 0.0737s & 0.0567s & 1.30x & yes & $3.05{\cdot}10^{-5}$ \\
+\code{hf/gpt2} & 0.0332s & 0.0599s & 0.55x & yes & $3.05{\cdot}10^{-5}$ \\
+\code{gpt2-medium} & 0.0621s & 0.1144s & 0.54x & yes & $7.63{\cdot}10^{-5}$ \\
+\code{gpt2-large} & 0.1366s & 0.4665s & 0.29x & yes & $1.14{\cdot}10^{-5}$ \\
+\code{gpt2-xl} & 0.2324s & 0.3197s & 0.73x & yes & $7.63{\cdot}10^{-6}$ \\
+\bottomrule
+\end{tabular}\par\medskip
+}
+
+Prompt was \code{Hello world}, max length 16, float32, Axon $\rightarrow$ PyTorch
+codegen, no fallbacks. Timings are single short-run measurements, intended as a
+sanity check rather than a throughput benchmark.\par}
+\end{tcolorbox}
+\end{minipage}
+\end{tcolorbox}
+
+\vspace{8mm}
+
+\begin{tcolorbox}[posterbox,title={Evaluation Snapshot and Backends}]
+{\raggedright\fontsize{22}{28}\selectfont
+\begin{minipage}[t]{0.49\linewidth}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Repository snapshot & Count \\
+\midrule
+Model families & 54 \\
+Generic model-family files & 77 \\
+Declared generic file/checkpoint pairs & 301 \\
+Synthetic feature-coverage test pairs & 31 \\
+Stage round-trip artifacts & 4384 \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\begin{itemize}
+\setlength\itemsep{1mm}
+\item \textbf{Torch generation:} direct PyTorch modules from typed \graphir.
+\item \textbf{Interpreter:} graph-level debugging without regenerating code.
+\item \textbf{Pipeline execution:} parameter placement and model partitioning.
+\item \textbf{Tinygrad prototype:} backend independence from the same graph.
+\end{itemize}
+\end{minipage}
+}
+\end{tcolorbox}
+
+\vspace{7mm}
+
+\noindent
+\begin{minipage}[t]{0.49\linewidth}
+\begin{tcolorbox}[posterbox,title={Scientific Questions}]
+{\raggedright\fontsize{21}{27}\selectfont
+\begin{itemize}
+\setlength\itemsep{1mm}
+\item Can a small functional language describe many modern checkpoint families without encoding Python implementation details?
+\item Can symbolic tensor shapes and parameter paths remain inspectable through compilation?
+\item Can one typed graph representation support code generation, interpretation, and distributed execution?
+\item Can compiler-stage contracts make model-fidelity bugs easier to localize?
+\end{itemize}
+}
+\end{tcolorbox}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\begin{tcolorbox}[posterbox,title={What Attendees Can Inspect}]
+{\raggedright\fontsize{21}{27}\selectfont
+\begin{itemize}
+\setlength\itemsep{1mm}
+\item A readable source program close to the neural-network architecture.
+\item A flat typed core with explicit evaluation order and inferred shapes.
+\item A graph IR whose nodes retain tensor types, symbolic dims, and paths.
+\item Fidelity methodology: compare generated logits with reference models using masked top-1 and max absolute difference.
+\end{itemize}
+}
+\end{tcolorbox}
+\end{minipage}
+
+\vfill
+\begin{center}
+{\fontsize{24}{29}\selectfont\bfseries Axon treats model descriptions as typed programs: readable to humans, structured enough for compilers, and portable across tensor backends.}
+\end{center}
+
+\end{document}

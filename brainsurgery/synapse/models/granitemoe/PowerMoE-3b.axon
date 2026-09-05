@@ -1,0 +1,121 @@
+{-# CHECKPOINTS "ibm-research/PowerMoE-3b" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "granitemoe" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- (1536 :: Dim)
+
+VOCAB_SIZE <- (49152 :: Dim)
+
+NUM_LAYERS <- (32 :: Dim)
+
+NUM_HEADS <- (24 :: Dim)
+
+KVH <- (8 :: Dim)
+
+MODEL_HEAD_DIM <- (64 :: Dim)
+
+FFN <- (512 :: Dim)
+
+E <- (40 :: Dim)
+
+EPT <- 8
+
+EPS <- 1e-06
+
+THETA <- 10000.0
+
+MAX_POSITIONS <- (4096 :: Dim)
+
+EMBED_MUL <- 12.0
+
+LOGITS_SCALE <- 6.0
+
+RESID_MUL <- 0.22
+
+ATTN_SCALE <- 0.015625
+
+KVD = KVH * MODEL_HEAD_DIM
+
+ATTN_BIAS = false
+
+granitemoe_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+granitemoe_norm@path x = NN.rmsnorm@path x eps=EPS
+
+granitemoe_moe :: Tensor[B,S,D] -> Tensor[B,S,EPT] -> IdxTensor[B,S,EPT] -> Tensor[B,S,D]
+granitemoe_moe hidden topk_scores topk_indices = do
+  x_sel <- Tensor.unsqueeze hidden 2 |> Tensor.expand shape=[B, S, EPT, D]
+  scale <- Tensor.unsqueeze topk_scores -1
+  gate_up <- NN.expert_linear@w1 x_sel topk_indices dim=(2 * FFN) bias=false transpose=false weight_path=@input_linear.weight
+  gate, up <- Tensor.chunk gate_up parts=2
+  x_upd <- gate |> silu |> mul up |> NN.expert_linear@w2 topk_indices dim=D bias=false transpose=false weight_path=@output_linear.weight
+  x_weighted <- x_upd * scale
+  return Tensor.sum x_weighted dim=2 keepdim=false
+
+granitemoe_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+granitemoe_block x mask rope_sin rope_cos past_kv = do
+  xn <- granitemoe_norm@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=MODEL_DIM bias=ATTN_BIAS |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=ATTN_BIAS |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD bias=ATTN_BIAS |> reshape_heads heads=KVH
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=ATTN_BIAS
+    return a, new_kv
+  x <- x + (a * RESID_MUL)
+  xn <- granitemoe_norm@post_attention_layernorm x
+  m <- scope@block_sparse_moe do
+    logits <- NN.linear@router.layer xn dim=E bias=false
+    topk_logits, topk_indices <- Tensor.topk logits EPT -1 true false
+    topk_scores <- Tensor.softmax topk_logits -1 "float32"
+    return granitemoe_moe xn topk_scores topk_indices
+  return x + (m * RESID_MUL), new_kv
+
+granitemoe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+granitemoe input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x <- x * EMBED_MUL
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- granitemoe_block x mask rope_sin rope_cos past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- granitemoe_norm@norm x
+    return x, work_kv
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  logits <- logits / LOGITS_SCALE
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  return logits, new_kv

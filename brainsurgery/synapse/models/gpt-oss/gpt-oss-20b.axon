@@ -1,0 +1,158 @@
+{-# CHECKPOINTS "openai/gpt-oss-20b" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "gpt_oss_20b" #-}
+
+import Attention (attention_gqa_with_additive_mask, mask_to_additive_for_input, merge_heads, reshape_heads)
+
+import Activations (sigmoid, silu)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (clamp, sqrt)
+
+import Params (param)
+
+import Positions (position_ids, rope_hf_yarn_factors, rope_pair_hf_yarn_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM = 2880
+
+VOCAB_SIZE = 201088
+
+NUM_LAYERS = 24
+
+NUM_HEADS = 64
+
+KVH = 8
+
+MODEL_HEAD_DIM = 64
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+E = 32
+
+EPT = 4
+
+FFN = 2880
+
+MAX_POSITIONS = 131072
+
+SW = 128
+
+EPS = 1e-05
+
+THETA = 150000.0
+
+ROPE_SCALE = 32.0
+
+ROPE_LOW_FREQ = 1.0
+
+ROPE_HIGH_FREQ = 32.0
+
+ROPE_CONTEXT = 4096
+
+ROPE_ATTN_FACTOR = 1.3465735902799727
+
+ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
+
+SWIGLU_LIMIT = 7.0
+
+SWIGLU_ALPHA = 1.702
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+grouped_ffn_gated :: Tensor[B,T,K,W] -> Float -> Float -> Tensor[B,T,K,H]
+grouped_ffn_gated gate_up alpha limit = do
+  b <- Tensor.size gate_up 0
+  t <- Tensor.size gate_up 1
+  k <- Tensor.size gate_up 2
+  w <- Tensor.size gate_up -1
+  h <- w / 2
+  pair <- Tensor.reshape gate_up shape=[b, t, k, h, 2]
+  gate <- Tensor.slice pair dim=-1 start=0 end=1 |> Tensor.reshape shape=[b, t, k, h]
+  up <- Tensor.slice pair dim=-1 start=1 end=2 |> Tensor.reshape shape=[b, t, k, h]
+  gate <- clamp gate max=limit
+  up <- clamp up min=(0.0 - limit) max=limit
+  return (up + 1.0) * (gate * sigmoid (gate * alpha))
+
+grouped_ffn :: Tensor[B,T,D] -> Tensor[B,T,K] -> IdxTensor[B,T,K] -> ?Path -> ?Path -> ?Path -> ?Path -> ?Float -> ?Float -> ?Bool -> ?Bool -> ?Bool -> Tensor[B,T,D]
+grouped_ffn hidden topk_scores topk_indices ?gate_up_weight=@experts.gate_up_proj.weight ?gate_up_bias=@experts.gate_up_proj.bias ?out_weight=@experts.down_proj.weight ?out_bias=@experts.down_proj.bias ?alpha=1.702 ?limit=7.0 ?has_bias=true ?has_gate=true ?transpose=true = do
+  alpha <- (alpha == null) ? 1.702 : alpha
+  limit <- (limit == null) ? 7.0 : limit
+  has_bias <- (has_bias == null) ? true : has_bias
+  has_gate <- (has_gate == null) ? true : has_gate
+  transpose <- (transpose == null) ? true : transpose
+  x_sel <- Tensor.unsqueeze hidden 2 |> Tensor.expand shape=[B, T, K, D]
+  scale <- Tensor.unsqueeze topk_scores -1
+  gate_dim <- has_gate ? (2 * FFN) : FFN
+  gate_up <- NN.expert_linear@w1 x_sel topk_indices dim=gate_dim bias=has_bias transpose=transpose weight_path=gate_up_weight bias_path=gate_up_bias
+  ff <- has_gate ? (grouped_ffn_gated gate_up alpha limit) : (gate_up |> silu)
+  x_upd <- NN.expert_linear@w2 ff topk_indices dim=D bias=has_bias transpose=transpose weight_path=out_weight bias_path=out_bias
+  return Tensor.sum (x_upd * scale) dim=2 keepdim=false
+
+gpt_oss_block :: Tensor[B,S,D] -> Int -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,K] -> Tensor[B,1,S,K] -> Tensor[B,NUM_HEADS,S,K] -> Tensor[B,NUM_HEADS,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+gpt_oss_block x i rope_sin rope_cos mask_short mask_full additive_short additive_full past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj xn dim=KVD bias=true |> reshape_heads heads=KVH
+    q, k <- rope_pair_hf_yarn_factors q k rope_sin rope_cos
+    k_ctx, v_ctx, new_kv <- Cache.update past_kv k v
+    mask <- ((i % 2) == 1) ? mask_full : mask_short
+    additive_mask <- ((i % 2) == 1) ? additive_full : additive_short
+    sink <- param path=@sinks
+    sink_base <- Tensor.reshape sink shape=[1, NUM_HEADS, 1, 1]
+    sink_ref <- Tensor.slice q dim=-1 start=0 end=1
+    sink_logits <- (sink_ref * 0.0) + sink_base
+    a <- attention_gqa_with_additive_mask q k_ctx v_ctx additive_mask mask scale=ATTN_SCALE sink_logits=sink_logits |> merge_heads
+    a <- NN.linear@o_proj a dim=MODEL_DIM bias=true
+    return a, new_kv
+  x <- x + a
+  xn <- rms@post_attention_layernorm x
+  m <- scope@mlp do
+    router_topk, topk_indices <- NN.linear@router xn dim=E bias=true |> Tensor.topk k=EPT dim=-1
+    topk_scores <- Tensor.softmax router_topk dim=-1
+    return grouped_ffn xn topk_scores topk_indices
+  return x + m, new_kv
+
+gpt_oss_20b :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+gpt_oss_20b input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_ref <- Tensor.zeros input_ids shape=[B, 1, S, MODEL_HEAD_DIM] dtype="float32"
+  rope_sin, rope_cos <- rope_hf_yarn_factors rope_ref pos_ids THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT attention_factor=ROPE_ATTN_FACTOR truncate=false
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask_short <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=SW
+  mask_full <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  additive_short <- mask_to_additive_for_input input_ids mask_short NUM_HEADS dtype="float32"
+  additive_full <- mask_to_additive_for_input input_ids mask_full NUM_HEADS dtype="float32"
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- gpt_oss_block x i rope_sin rope_cos mask_short mask_full additive_short additive_full past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- rms@norm x
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE
+  return logits, new_kv

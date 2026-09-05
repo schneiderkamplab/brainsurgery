@@ -1,0 +1,104 @@
+{-# CHECKPOINTS "EleutherAI/gpt-neox-20b" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "gpt_neox" #-}
+
+import Activations (gelu, gelu_new)
+
+import Attention (attention, merge_heads, split_qkv_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (floor)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_prefix_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+MODEL_DIM <- do
+  return (6144)
+
+VOCAB_SIZE <- do
+  return (50432)
+
+NUM_LAYERS <- do
+  return (44)
+
+NUM_HEADS <- do
+  return (64)
+
+MODEL_HEAD_DIM <- do
+  return MODEL_DIM / NUM_HEADS
+
+FFN <- do
+  return (24576)
+
+EPS <- do
+  return (1e-05)
+
+THETA <- do
+  return (10000.0)
+
+ROTARY_PCT <- do
+  return (0.25)
+
+ROTARY_DIM <- floor (MODEL_HEAD_DIM * ROTARY_PCT)
+
+MAX_POSITIONS <- do
+  return (2048)
+
+PAR <- do
+  return (true)
+
+ACT <- do
+  return ("gelu_fast")
+
+neox_ln :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+neox_ln@path x = NN.layernorm@path x eps=EPS
+
+gpt_neox_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+gpt_neox_block x rope_sin rope_cos mask past_kv = do
+  xn <- neox_ln@input_layernorm x
+  a, new_kv <- scope@attention do
+    qkv <- NN.linear@query_key_value xn dim=(3 * MODEL_DIM) bias=true
+    q, k, v <- split_qkv_heads qkv heads=NUM_HEADS layout="interleaved"
+    q, k <- rope_pair_base_prefix_factors q k rope_sin rope_cos ROTARY_DIM
+    k, v, new_kv <- Cache.update past_kv k v
+    a <- attention q k v mask |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
+    return a, new_kv
+  x_attn <- x + a
+  xn2 <- neox_ln@post_attention_layernorm (PAR ? x : x_attn)
+  m <- scope@mlp do
+    h <- NN.linear@dense_h_to_4h xn2 dim=FFN bias=true
+    h_act <- (ACT == "gelu_fast") ? (gelu_new h) : (gelu h)
+    return h_act |> NN.linear@dense_4h_to_h dim=MODEL_DIM bias=true
+  x <- PAR ? (x + a + m) : (x_attn + m)
+  return x, new_kv
+
+gpt_neox :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+gpt_neox input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids ROTARY_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x <- NN.embedding@@gpt_neox.embed_in input_ids dim=MODEL_DIM
+  x, work_kv <- for@gpt_neox.layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+    past_i <- Cache.index read_kv i
+    x, new_i <- gpt_neox_block x rope_sin rope_cos mask past_i
+    work_kv <- Cache.append work_kv new_i
+    yield x, work_kv
+  x <- neox_ln@@gpt_neox.final_layer_norm x
+  new_length <- past_length + S
+  new_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@@embed_out x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

@@ -1,0 +1,163 @@
+{-# CHECKPOINTS ["Zyphra/BlackMamba-2.8B"] #-}
+{-# TASK "causal_lm" #-}
+{-# TOKENIZER "EleutherAI/gpt-neox-20b" #-}
+{-# PADDING_SIDE "right" #-}
+import Activations (silu)
+import Math (exp, mul)
+import MoE (scatter_add, select)
+import SSM (causal_conv1d_full, mamba_scan_step)
+import Config
+import List
+import NN
+import Params (param)
+import Tensor
+
+
+
+type MambaLayerCache[B,C,CK,D,N] = (Tensor[B,C,CK], Tensor[B,D,N])
+type BlackMambaCache[B,C,CK,D,N] = List[?MambaLayerCache[B,C,CK,D,N]]
+
+
+-- BlackMamba architectural constants.
+MODEL_DIM <- Config.int@@hidden_size default=1472                          -- residual hidden size
+VOCAB_SIZE <- Config.int@@vocab_size default=50304                          -- tokenizer vocabulary size
+NUM_LAYERS <- Config.int@@num_layers default=36                             -- number of decoder layers
+I <- MODEL_DIM * (Config.int@@expansion_factor default=2)                  -- mamba mixer inner width
+N <- Config.int@@state_size default=16                             -- state-space state dimension
+R <- Config.int@@time_step_rank default=92                         -- delta projection rank
+E <- Config.int@@num_experts default=8                             -- MoE expert count
+TOP_K <- Config.int@@num_experts_per_tok default=2                 -- routed experts per token
+CONV_KERNEL <- Config.int@@conv_dimension default=4                -- Mamba convolution state length
+FF <- Config.int@@ffn_hidden_size default=3872                     -- per-expert FFN width
+EPS <- Config.float@@rms_norm_eps default=1e-5                     -- RMSNorm epsilon
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+expert_ffn :: Tensor[Nt,D] -> Tensor[Nt,D]
+expert_ffn x = do
+  in_proj <- NN.linear@linear_fc1 x dim=2*FF
+  gate, up <- Tensor.split in_proj sizes=[FF, FF]
+  return gate |> silu |> mul up |> NN.linear@linear_fc2 dim=MODEL_DIM
+
+moe_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+moe_ffn x = do
+  x_norm <- rms@norm x
+  router_logits <- NN.linear@mixer.router x_norm dim=E bias=true
+  router_probs <- Tensor.softmax router_logits dim=-1 dtype="float32"
+  topk_scores, topk_indices <- Tensor.topk router_probs k=TOP_K dim=-1
+  m <- Tensor.zeros_like x_norm
+  x_upd <- scope@mixer do
+    m <- for@local_experts e <- [0..E) carry (m) do
+      x_sel, token_idx, topk_pos, sel_scores <- select x_norm topk_scores topk_indices e
+      x_expert <- expert_ffn x_sel
+      m <- scatter_add m token_idx x_expert sel_scores
+      yield m
+    return m
+  return x + x_upd
+
+causal_conv1d_cached :: Tensor[B,S,C] -> ?Tensor[B,C,CK] -> Tensor[C,1,CK] -> Tensor[C] -> String -> (Tensor[B,S,C], Tensor[B,C,CK])
+causal_conv1d_cached x past w b activation = do
+  x_c <- Tensor.transpose x dim1=1 dim2=2
+  kernel <- Tensor.size w dim=-1
+  zero_prefix <- Tensor.zeros x_c shape=[B, C, kernel - 1]
+  prefix <- (past == null) ? zero_prefix : Tensor.slice past dim=-1 start=1 end=kernel
+  conv_input <- Tensor.concat prefix x_c dim=-1
+  y_all <- causal_conv1d_full (Tensor.transpose conv_input dim1=1 dim2=2) w b activation
+  y <- Tensor.slice y_all dim=1 start=(kernel - 1) end=(kernel - 1 + S)
+  total <- Tensor.size conv_input dim=-1
+  state_start <- total - kernel
+  conv_state <- Tensor.slice conv_input dim=-1 start=state_start end=total
+  return y, conv_state
+
+causal_conv1d_cached_step :: Tensor[B,S,C] -> Tensor[B,C,CK] -> Tensor[C,1,CK] -> Tensor[C] -> String -> (Tensor[B,S,C], Tensor[B,C,CK])
+causal_conv1d_cached_step x past w b activation = do
+  x_c <- Tensor.transpose x dim1=1 dim2=2
+  kernel <- Tensor.size w dim=-1
+  past_tail <- Tensor.slice past dim=-1 start=1 end=kernel
+  conv_state <- Tensor.concat past_tail x_c dim=-1
+  y_all <- causal_conv1d_full (Tensor.transpose conv_state dim1=1 dim2=2) w b activation
+  y <- Tensor.slice y_all dim=1 start=(kernel - 1) end=kernel
+  y <- Tensor.reshape y shape=[B, S, C]
+  return y, conv_state
+
+mamba_scan_cached :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S,N] -> Tensor[B,S,N] -> ?Tensor[B,D,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,S,D], Tensor[B,D,N])
+mamba_scan_cached u delta b c past_state a d = do
+  u_t0 <- Tensor.slice u dim=1 start=0 end=1 |> Tensor.reshape shape=[B, D]
+  b_t0 <- Tensor.slice b dim=1 start=0 end=1 |> Tensor.reshape shape=[B, N]
+  zero_state <- ((Tensor.unsqueeze u_t0 dim=-1) * (Tensor.unsqueeze b_t0 dim=1)) * 0.0
+  state <- (past_state == null) ? zero_state : past_state
+  y_all <- Tensor.zeros_like u
+  state, y_all <- for t <- [0..S) carry (state, y_all) do
+    u_t <- Tensor.slice u dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, D]
+    delta_t <- Tensor.slice delta dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, D]
+    b_t <- Tensor.slice b dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, N]
+    c_t <- Tensor.slice c dim=1 start=t end=(t + 1) |> Tensor.reshape shape=[B, N]
+    state, y_t <- mamba_scan_step state u_t delta_t b_t c_t a d
+    y_step <- Tensor.reshape y_t shape=[B, 1, D]
+    idx <- Tensor.fill y_step t dtype="long"
+    y_all <- Tensor.scatter y_all idx y_step dim=1
+    yield state, y_all
+  return y_all, state
+
+mamba_scan_cached_step :: Tensor[B,S,D] -> Tensor[B,S,D] -> Tensor[B,S,N] -> Tensor[B,S,N] -> Tensor[B,D,N] -> Tensor[D,N] -> Tensor[D] -> (Tensor[B,S,D], Tensor[B,D,N])
+mamba_scan_cached_step u delta b c past_state a d = do
+  u_t <- Tensor.reshape u shape=[B, D]
+  delta_t <- Tensor.reshape delta shape=[B, D]
+  b_t <- Tensor.reshape b shape=[B, N]
+  c_t <- Tensor.reshape c shape=[B, N]
+  state, y_t <- mamba_scan_step past_state u_t delta_t b_t c_t a d
+  y <- Tensor.reshape y_t shape=[B, S, D]
+  return y, state
+
+mamba_mixer :: Tensor[B,S,D] -> ?MambaLayerCache[B,I,CONV_KERNEL,I,N] -> (Tensor[B,S,D], MambaLayerCache[B,I,CONV_KERNEL,I,N])
+mamba_mixer x past = do
+  x_norm <- rms@norm x
+  in_proj <- NN.linear@mixer.in_proj x_norm dim=2*I
+  u, gate <- Tensor.split in_proj sizes=[I, I]
+  past_conv, past_state <- (past == null) ? (null, null) : past
+  w <- param @mixer.conv1d.weight
+  b_conv <- param @mixer.conv1d.bias
+  seq <- Tensor.size u dim=1
+  cached_step <- (past_conv != null) and (seq == 1)
+  u_conv, conv_state <- cached_step
+    ? causal_conv1d_cached_step u (past_conv :: Tensor[B,I,CONV_KERNEL]) (w :: Tensor[I,1,CONV_KERNEL]) (b_conv :: Tensor[I]) "silu"
+    : causal_conv1d_cached u past_conv (w :: Tensor[I,1,CONV_KERNEL]) (b_conv :: Tensor[I]) "silu"
+  params <- NN.linear@mixer.x_proj u_conv dim=R + 2*N
+  dt, b, c <- Tensor.split params sizes=[R, N, N]
+  delta <- NN.linear@mixer.dt_proj dt dim=I bias=true
+  a_raw <- param @mixer.A_log
+  a_exp <- exp (a_raw :: Tensor[I,N])
+  a <- 0.0 - a_exp
+  d <- param @mixer.D
+  cached_scan_step <- (past_state != null) and (seq == 1)
+  y_scan, scan_state <- cached_scan_step
+    ? mamba_scan_cached_step u_conv delta b c (past_state :: Tensor[B,I,N]) a (d :: Tensor[I])
+    : mamba_scan_cached u_conv delta b c past_state a (d :: Tensor[I])
+  y <- y_scan |> mul (silu gate) |> NN.linear@mixer.out_proj dim=MODEL_DIM
+  new_state <- ((conv_state, scan_state) :: MambaLayerCache[B,I,CONV_KERNEL,I,N])
+  return x + y, new_state
+
+black_mamba_layer :: Tensor[B,S,D] -> ?MambaLayerCache[B,I,CONV_KERNEL,I,N] -> Int -> (Tensor[B,S,D], ?MambaLayerCache[B,I,CONV_KERNEL,I,N])
+black_mamba_layer x past i = ((i % 2) == 0)
+  ? do
+    x, new_state <- mamba_mixer x past
+    return x, (new_state :: MambaLayerCache[B,I,CONV_KERNEL,I,N])
+  : do
+    x <- moe_ffn x
+    return x, (null :: ?MambaLayerCache[B,I,CONV_KERNEL,I,N])
+
+black_mamba :: TokenIds[B,S] -> ?BlackMambaCache[B,I,CONV_KERNEL,I,N] -> ?Bool -> (Tensor[B,S,V], ?BlackMambaCache[B,I,CONV_KERNEL,I,N])
+black_mamba input_ids past_kv use_cache = do
+  x <- NN.embedding@embedding.word_embeddings input_ids dim=MODEL_DIM
+  new_kv <- use_cache ? List.init : null
+  x, new_kv <- for@decoder.layers i <- [0..NUM_LAYERS) carry (x, new_kv) do
+    past_i <- (past_kv == null)
+      ? (null :: ?MambaLayerCache[B,I,CONV_KERNEL,I,N])
+      : ((List.index past_kv i) :: ?MambaLayerCache[B,I,CONV_KERNEL,I,N])
+    x, new_i <- black_mamba_layer x past_i i
+    new_kv <- (new_kv == null) ? null : List.append new_kv new_i
+    yield x, new_kv
+  x <- rms@decoder.final_layernorm x
+  logits <- NN.linear@embedding.word_embeddings x dim=VOCAB_SIZE
+  return logits, new_kv

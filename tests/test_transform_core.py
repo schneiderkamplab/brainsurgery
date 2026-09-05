@@ -16,6 +16,7 @@ from brainsurgery.core import (
 )
 from brainsurgery.core.runtime.transform import REGISTRY
 from brainsurgery.core.specs.validation import (
+    TransformPayloadSchema,
     ensure_mapping_payload,
     require_expr,
     require_nonempty_string,
@@ -40,6 +41,14 @@ class _Spec:
 
 class _Transform(BaseTransform):
     name = "dummy"
+
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(),
+            common_allowed=set(),
+        )
 
     def compile(self, payload: dict, default_model: str | None) -> object:
         del payload, default_model

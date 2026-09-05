@@ -1,0 +1,109 @@
+{-# CHECKPOINTS "test/Apertus-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "apertus" #-}
+
+import Activations (xielu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Positions (position_ids, rope_freq_scale_factors_for_position_ids, rope_pair_base_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM = 128
+
+VOCAB_SIZE = 131072
+
+NUM_LAYERS = 4
+
+NUM_HEADS = 4
+
+KVH = 2
+
+MODEL_HEAD_DIM = 32
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+FFN = 256
+
+EPS = 1e-05
+
+THETA = 12000000.0
+
+MAX_POSITIONS = 512
+
+ROPE_SCALE = 8.0
+
+ROPE_LOW_FREQ = 1.0
+
+ROPE_HIGH_FREQ = 4.0
+
+ROPE_CONTEXT = 8192
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS dim=MODEL_DIM cast_float=true
+
+head_rms :: Path -> Tensor[B,H,S,D] -> Tensor[B,H,S,D]
+head_rms@path x = NN.rmsnorm@path x eps=EPS dim=MODEL_HEAD_DIM cast_float=true
+
+apertus_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+apertus_block x rope_sin rope_cos mask past_kv = do
+  xn <- rms@attention_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=(NUM_HEADS * MODEL_HEAD_DIM) bias=false
+    q <- reshape_heads q heads=NUM_HEADS
+    q <- head_rms@q_norm q
+    k <- NN.linear@k_proj xn dim=(KVH * MODEL_HEAD_DIM) bias=false
+    k <- reshape_heads k heads=KVH
+    k <- head_rms@k_norm k
+    v <- NN.linear@v_proj xn dim=(KVH * MODEL_HEAD_DIM) bias=false
+    v <- reshape_heads v heads=KVH
+    v <- (v :: Tensor[B,KVH,S,MODEL_HEAD_DIM])
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+    return a, new_kv
+  x <- x + a
+  xn <- rms@feedforward_layernorm x
+  m <- scope@mlp do
+    return NN.linear@up_proj xn dim=FFN bias=false |> xielu@act_fn alpha_p_path=@act_fn.alpha_p alpha_n_path=@act_fn.alpha_n beta_path=@act_fn.beta eps_path=@act_fn.eps |> NN.linear@down_proj dim=MODEL_DIM bias=false
+  return x + m, new_kv
+
+apertus :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+apertus input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- rope_freq_scale_factors_for_position_ids pos_ids MODEL_HEAD_DIM THETA ROPE_SCALE ROPE_LOW_FREQ ROPE_HIGH_FREQ ROPE_CONTEXT
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, work_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- apertus_block x rope_sin rope_cos mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- rms@norm x
+    return x, work_kv
+  new_length <- past_length + S
+  work_kv <- Cache.finish work_kv new_length
+  new_kv <- use_cache ? work_kv : null
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

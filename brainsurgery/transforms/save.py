@@ -5,6 +5,7 @@ from typing import Any
 from ..core import (
     StateDictProvider,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     complete_filesystem_paths,
@@ -12,7 +13,7 @@ from ..core import (
     parse_model_expr,
     register_transform,
     require_nonempty_string,
-    validate_payload_keys,
+    validate_payload_schema,
 )
 from ..engine import (
     emit_verbose_event,
@@ -45,8 +46,6 @@ class SaveTransform(TypedTransform[SaveSpec]):
     name = "save"
     error_type = SaveTransformError
     spec_type = SaveSpec
-    allowed_keys = {"path", "alias", "target", "format", "shard"}
-    required_keys = {"path"}
     help_text = (
         "Saves either a full state_dict or a single tensor to disk.\n"
         "\n"
@@ -62,6 +61,14 @@ class SaveTransform(TypedTransform[SaveSpec]):
         "  save: { path: /tmp/dcp_out, alias: a, format: dcp }\n"
         "  save: { path: /tmp/emb.npy, target: model::embed.weight, format: numpy }"
     )
+
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required={"path"},
+            common_allowed={"path", "alias", "target", "format", "shard"},
+        )
 
     def completion_reference_keys(self) -> list[str]:
         return ["target"]
@@ -88,11 +95,11 @@ class SaveTransform(TypedTransform[SaveSpec]):
         if isinstance(payload, str):
             payload = {"path": payload}
         payload = ensure_mapping_payload(payload, self.name)
-        validate_payload_keys(
+        validate_payload_schema(
             payload,
             op_name=self.name,
-            allowed_keys=self.allowed_keys,
-            required_keys=self.required_keys,
+            schema=self.payload_schema(),
+            error_type=self.error_type,
         )
 
         path = Path(require_nonempty_string(payload, op_name=self.name, key="path"))

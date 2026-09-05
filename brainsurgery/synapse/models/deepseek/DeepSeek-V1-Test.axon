@@ -1,0 +1,133 @@
+{-# CHECKPOINTS "test/DeepSeek-V1-Test" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# PADDING_SIDE "left" #-}
+
+{-# MAIN "deepseek_v1" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul)
+
+import MoE (grouped_swiglu_ffn_basic)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM = 128
+
+VOCAB_SIZE = 100015
+
+NUM_LAYERS = 4
+
+NUM_HEADS = 4
+
+KVH = 4
+
+MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+FFN = 256
+
+E = 4
+
+EPT = 2
+
+EM = 64
+
+SE = 1
+
+EPS = 1e-06
+
+THETA = 10000.0
+
+MAX_POSITIONS = 512
+
+FIRST_DENSE = 1
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+deepseek_v1_attn :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+deepseek_v1_attn x mask rope_sin rope_cos past_kv = do
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj x dim=MODEL_DIM bias=false |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@k_proj x dim=(KVH * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=KVH
+    v <- NN.linear@v_proj x dim=(KVH * MODEL_HEAD_DIM) bias=false |> reshape_heads heads=KVH
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k_all, v_all, new_kv <- Cache.update past_kv k v
+    k_all <- Tensor.repeat k_all repeats=(NUM_HEADS / KVH)
+    v_all <- Tensor.repeat v_all repeats=(NUM_HEADS / KVH)
+    a <- attention q k_all v_all mask |> merge_heads
+    a <- NN.linear@o_proj a dim=MODEL_DIM bias=false
+    return a, new_kv
+  return a, new_kv
+
+deepseek_v1_dense_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+deepseek_v1_dense_block x mask rope_sin rope_cos past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- deepseek_v1_attn xn mask rope_sin rope_cos past_kv
+  x <- x + a
+  xn <- rms@post_attention_layernorm x
+  m <- scope@mlp do
+    gate <- NN.linear@gate_proj xn dim=FFN bias=false
+    up <- NN.linear@up_proj xn dim=FFN bias=false
+    return gate |> silu |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+  return x + m, new_kv
+
+deepseek_v1_moe_block :: Tensor[B,S,D] -> Tensor[B,1,S,K] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> Tensor[B,1,S,MODEL_HEAD_DIM] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+deepseek_v1_moe_block x mask rope_sin rope_cos past_kv = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- deepseek_v1_attn xn mask rope_sin rope_cos past_kv
+  x <- x + a
+  xn <- rms@post_attention_layernorm x
+  m <- scope@mlp do
+    shared <- scope@shared_experts do
+      gate <- NN.linear@gate_proj xn dim=(EM * SE) bias=false
+      up <- NN.linear@up_proj xn dim=(EM * SE) bias=false
+      return gate |> silu |> mul up |> NN.linear@down_proj dim=MODEL_DIM bias=false
+    topk_scores, topk_indices <- NN.linear@gate xn dim=E bias=false |> Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=EPT dim=-1 sorted=false
+    routed <- grouped_swiglu_ffn_basic xn topk_scores topk_indices E gate_up_weight=@experts.gate_up_proj.weight out_weight=@experts.down_proj.weight
+    return shared + routed
+  return x + m, new_kv
+
+deepseek_v1 :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+deepseek_v1 input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids past_length=past_length
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  rope_sin, rope_cos <- rope_base_factors pos_ids MODEL_HEAD_DIM THETA
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..FIRST_DENSE) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- deepseek_v1_dense_block x mask rope_sin rope_cos past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x, work_kv <- for@layers i <- [FIRST_DENSE..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- deepseek_v1_moe_block x mask rope_sin rope_cos past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- rms@norm x
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@lm_head x dim=VOCAB_SIZE bias=false
+  return logits, new_kv

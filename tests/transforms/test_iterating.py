@@ -4,6 +4,7 @@ _module = import_module("brainsurgery.core")
 DestinationPolicy = _module.DestinationPolicy
 IteratingTransform = _module.IteratingTransform
 StateDictProvider = _module.StateDictProvider
+TransformPayloadSchema = _module.TransformPayloadSchema
 
 
 def test_destination_policy_values_are_stable() -> None:
@@ -16,6 +17,14 @@ def test_iterating_transform_default_validation_is_noop() -> None:
     class _Transform(IteratingTransform[int, int]):
         name = "dummy"
         spec_type = int
+
+        def payload_schema(self) -> TransformPayloadSchema:
+            return TransformPayloadSchema(
+                mode_key=None,
+                default_mode="default",
+                common_required=set(),
+                common_allowed=set(),
+            )
 
         def compile(self, payload: dict, default_model: str | None) -> object:
             del default_model

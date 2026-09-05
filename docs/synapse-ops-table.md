@@ -1,74 +1,162 @@
-# Synapse Ops Table
+# Synapse Ops Overview
 
-This table tracks current Synapse ops, their mathematical semantics, refactor guidance,
-and concrete authored usage in `examples/*.axon`.
+This document is a compact reference for the currently registered Synapse ops in
+`brainsurgery/synapse/ops`.
 
-## Typed Lowering Contract
+- `Op` is the canonical runtime `OP_NAME`.
+- `Surface Form` shows the usual Axon spelling when it differs from `OP_NAME`.
+- `Inputs` is the accepted positional-argument count from lowering validation.
+- `Outputs` is the runtime output arity at the op boundary.
+- `Key kwargs` lists the main supported kwargs, with required ones marked `required`.
 
-Lowering now validates op arity and kwarg names/types using this contract.
+## Core Layers
 
-- `Dim`: integer or symbolic dimension token/expression (for example `D`, `4*D`).
-- `Num`: integer, float, or symbolic numeric token/expression.
-- `Bool`: `true` or `false`.
-- `Str`: string/token.
-- `List[Int]`: list of integers.
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `embedding` | `embedding` | 1 | 1 | `dim`, `scale` | Looks up embeddings from a parameter table and can apply a scalar scale. |
+| `linear` | `linear` | 1 | 1 | `bias`, `bias_path`, `dim`, `expert`, `transpose`, `weight` | Applies an affine projection using inferred or explicit parameter paths. |
+| `layernorm` | `layernorm` | 1 | 1 | `bias`, `dim`, `eps`, `weight` | Applies LayerNorm over the final dimension with optional explicit parameter paths. |
+| `rmsnorm` | `rmsnorm` | 1 | 1 | `cast_float`, `dim`, `eps`, `unit_offset`, `with_scale` | Applies RMSNorm with optional float accumulation and scale handling. |
+| `activation` | `act::kind(...)` | 1 | 1 | `fp32_accum`, `limit` | Applies a named activation such as `gelu`, `relu`, `silu`, or capped variants. |
+| `param_scale` | `param_scale` | 1 | 1 | `scale` | Multiplies the input tensor by a resolved parameter tensor. |
 
-| Op | Positional Args | Kwargs (typed) |
+## Attention, Masks, And Positional Bias
+
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `attention` | `attention` | 3 | 1 | `causal`, `eager`, `float_mask_additive`, `float_mask_floor_keep`, `mask`, `padding_mask`, `scale`, `sink`, `sink_path` | Computes scaled dot-product attention with optional additive masks, padding masks, causal mode, and sink handling. |
+| `causal_mask` | `causal_mask` | 2 | 1 | `early_exit`, `padding_mask`, `window` | Builds an additive causal attention mask, optionally windowed or padding-aware. |
+| `bidirectional_mask` | `bidirectional_mask` | 2 | 1 | `padding_mask`, `window` | Builds a symmetric additive attention mask for full-context or local bidirectional attention. |
+| `blocksparse_mask` | `blocksparse_mask` | 2 | 1 | `block_size` `required`, `homo_head`, `local_blocks` `required`, `padding_mask`, `vert_stride` `required` | Builds a block-sparse additive mask with causal, local, and vertical-stride structure. |
+| `rope_pair` | `apply_rope_pair` | 2 | 2 | `position_ids` `required`, `theta`, `interleaved`, `scale_factor`, `rope_mode`, `truncate`, `partial_rotary_factor`, `attention_factor`, `short_factor`, `long_factor` | Applies rotary position embedding to a query/key tensor pair, including long-context variants. |
+| `position_ids` | `arange_positions` | 2 | 1 | `pad_fill`, `past_length`, `use_attention_mask` | Derives position ids from token ids plus an attention mask or past-length offset. |
+| `linear_position_bias` | `linear_position_bias` | 1 | 1 | `heads` `required`, `scale` | Builds a linear ALiBi-style additive bias tensor from an attention mask. |
+| `t5_relative_position_bias` | `t5_relative_position_bias` | 2 | 1 | `bidirectional`, `max_distance`, `num_buckets` | Builds learned T5-style relative position bias from query/key lengths. |
+| `disentangled_relative_bias` | `disentangled_relative_bias` | 2 | 1 | `rel_embeddings`, `position_buckets`, `max_relative_positions`, `c2p`, `p2c`, `share_att_key`, `apply_rel_layernorm` | Builds DeBERTa-style disentangled relative attention bias with optional projected content and position paths. |
+| `cache_update` | `Cache.update` | 3 | 3 | none | Merges new key/value tensors into the KV cache and returns `k_ctx`, `v_ctx`, and `present`. |
+| `cache_seq_len` | `Cache.seq_len` | 1 | 1 | none | Returns the current sequence length represented by a cache entry. |
+
+## Tensor Shape And Data Movement
+
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `reshape_heads` | `reshape_heads` | 1 | 1 | `head_dim`, `heads` | Reshapes hidden states into `[batch, heads, seq, head_dim]` form. |
+| `merge_heads` | `merge_heads` | 1 | 1 | none | Folds attention heads back into the final hidden dimension. |
+| `split` | `split` | 1 | dynamic | `dim`, `interleave`, `parts`, `sizes` | Splits one tensor into multiple outputs by part count or explicit sizes. |
+| `split_qkv_heads` | `split_qkv_heads` | 1 | 3 | `heads` `required`, `layout` | Splits packed QKV activations into separate query, key, and value head tensors. |
+| `split_qkv_grouped` | `split_qkv_grouped` | 1 | 3 | `head_dim`, `heads` `required`, `kv_heads` `required` | Splits grouped-query packed QKV activations into Q, K, and V tensors. |
+| `repeat` | `repeat` / `repeat_kv` | 1-3 | 1 | `dim`, `repeats` | Repeats values along a chosen axis, commonly for KV-head expansion. |
+| `concat` | `concat` | 2 | 1 | `dim` | Concatenates two tensors along a chosen dimension. |
+| `topk` | `topk` | 1 | 2 | `dim`, `k` `required`, `largest`, `sorted` | Returns top-k values and indices along an axis. |
+| `softmax` | `softmax` | 1 | 1 | `dim`, `dtype` | Applies softmax along a chosen dimension with optional dtype override. |
+| `zeros_like` | `zeros_like` | 1 | 1 | none | Allocates a zero tensor matching the input tensor shape and dtype. |
+
+## Math And Reductions
+
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `add` | `add` or `x + y` | 2 | 1 | none | Performs elementwise or broadcast addition. |
+| `mul` | `mul` or `x * y` | 2 | 1 | none | Performs elementwise or broadcast multiplication. |
+| `div` | `div` or `x / y` | 2 | 1 | none | Performs elementwise or broadcast division. |
+| `sum` | `sum` | 1 | 1 | `dim`, `keepdim` | Reduces by summation over all elements or along a specific axis. |
+| `log` | `log` | 1 | 1 | none | Applies the natural logarithm elementwise. |
+| `sqrt` | `sqrt` | 1 | 1 | none | Applies square root elementwise. |
+| `clamp` | `clamp` | 1 | 1 | `max`, `min` | Clips tensor values to a configured minimum, maximum, or both. |
+
+## State-Space And Sequence Ops
+
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `causal_conv1d` | `causal_conv1d` | 1-2 | 1 or 2 | `activation` | Runs depthwise causal 1D convolution and can optionally return updated decode state. |
+| `mamba_scan` | `mamba_scan` | 4-7 | 1 or 2 | `A`, `D`, `a_is_log` | Executes the selective state-space scan used by Mamba-style sequence blocks. |
+| `mamba2_scan` | `mamba2_scan` | 5-6 | 1 or 2 | `A` `required`, `D` `required`, `dt_bias` `required`, `norm_weight` `required`, `n_groups` `required`, `head_dim` `required`, `time_step_min`, `time_step_max` | Executes the Mamba-2 scan with gated group RMSNorm and optional recurrent state output. |
+
+## MoE And Routing
+
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `moe_select` | `moe_select_tokens` | 3 | 4 | `expert` `required` | Selects the tokens and routing metadata assigned to one expert from top-k routing outputs. |
+| `moe_scatter_add` | `moe_scatter_add` | 4 | 1 | `accum_dtype` | Accumulates expert updates back into token order using routing weights. |
+| `moe_grouped_ffn` | `moe_grouped_ffn` | 3 | 1 | `alpha`, `down_bias`, `down_weight`, `gate_up_bias`, `gate_up_weight`, `has_bias`, `has_gate`, `limit`, `transpose` | Runs grouped expert FFN execution and weighted aggregation in one fused generic MoE op. |
+| `gemma4_router` | `gemma4_router` | 1 | 2 | `top_k` `required`, `scalar_root_size`, `rms_eps` | Computes Gemma 4 router probabilities, top-k expert indices, and scaled routing weights. |
+| `gemma4_moe_experts` | `gemma4_moe_experts` | 3 | 1 | none | Executes Gemma 4 expert projections for routed tokens and accumulates the weighted outputs. |
+| `glm4_router` | `glm4_router` | 1 | 2 | `top_k` `required`, `n_group`, `topk_group`, `norm_topk_prob`, `routed_scaling_factor`, `weight`, `e_score_correction_bias` | Computes GLM-4 grouped router top-k indices and routing weights. |
+| `nemotron_moe` | `nemotron_moe` | 1 | 1 | `top_k` `required`, `n_group` `required`, `topk_group` `required`, `routed_scaling_factor` `required`, `norm_topk_prob` `required` | Runs the Nemotron routed-expert block, including shared-expert fallback. |
+| `nemotron_moe_expert_step` | `nemotron_moe_expert_step` | 3 | 1 | `expert` `required` | Executes one Nemotron expert update for the tokens routed to a specific expert id. |
+
+## Containers And Control Flow
+
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `list_init` | `init_list` | 0 | 1 | none | Creates an empty runtime list container. |
+| `list_append` | `append` | 2 | 1 | none | Appends one value to a runtime list. |
+| `list_index` | `index` | 2 | 1 | none | Reads one item from a list, tuple, or tensor by position. |
+| `select` | conditional expression lowering | 0 | dynamic | `cond` `required` | Executes either the `_then` or `_else` branch graph and forwards its bound outputs. |
+
+## Config And Parameter Introspection
+
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `config_has` | `Config.has` | 1 | 1 | `root` | Tests whether a config key exists, optionally under a config root. |
+| `config_int` | `Config.int` | 1 | 1 | `default`, `root` | Reads a config value and coerces it to an integer. |
+| `config_float` | `Config.float` | 1 | 1 | `default`, `root` | Reads a config value and coerces it to a float. |
+| `config_str` | `Config.str` | 1 | 1 | `default`, `root` | Reads a config value and coerces it to a string. |
+| `config_value` | `Config.value` | 1 | 1 | `default`, `root` | Reads a config value without type coercion. |
+| `params_has_root` | `Params.has_root` | 1 | 1 | none | Checks whether any parameter exists under a given root prefix. |
+| `params_root` | `Params.root` | 1 | 1 | `default` | Resolves the first usable parameter root, with optional fallback default. |
+
+## Model-Specific Utility Ops
+
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `gemma4_per_layer_inputs` | `gemma4_per_layer_inputs` | 2 | 1 | `num_layers` `required`, `per_layer_dim` `required`, `embed_scale`, `projection_scale`, `combine_scale`, `rms_eps` | Builds Gemma 4 per-layer inputs by combining per-layer token embeddings with projected hidden states. |
+| `gemma4_per_layer_input_at` | `gemma4_per_layer_input_at` | 2 | 1 | none | Selects one layer slice from a Gemma 4 per-layer input tensor. |
+
+## IR-Only Internal Ops
+
+| Op | Surface Form | Inputs | Outputs | Key kwargs | Description |
+|---|---|---:|---:|---|---|
+| `_ir_alias` | none | 1 | 1 | none | Internal IR node that aliases an existing value to a new binding. |
+| `_ir_expr` | `_ir_const` compatibility path | 0 | 1 | none | Internal IR node that materializes an expression or constant into the graph. |
+
+## Granularity Recommendations
+
+The current op surface is no longer just a small set of generic tensor primitives. It
+now mixes:
+
+- stable reusable primitives such as `linear`, `attention`, `split`, `topk`, and `softmax`
+- semantic model-domain primitives such as `cache_update`, `rope_pair`, and `mamba2_scan`
+- model-family-specific helpers such as `gemma4_*`, `glm4_router`, and `nemotron_*`
+
+That makes granularity the main design pressure. The goal should be to keep generic
+ops small and reusable, keep model-specific ops explicitly scoped, and avoid adding
+new "do everything" hybrids in the middle.
+
+| Ops | Recommendation | Why |
 |---|---|---|
-| `embedding` | `embedding(x)` | `dim: Dim`, `scale: Num` |
-| `linear` | `linear(x)` | `dim: Dim`, `bias: Bool`, `transpose: Bool` |
-| `layernorm` | `layernorm(x)` | `dim: Dim`, `eps: Num` |
-| `rmsnorm` | `rmsnorm(x)` | `dim: Dim`, `eps: Num`, `cast_float: Bool`, `unit_offset: Bool` |
-| `activation` | `act::kind(x)` or built-in `Act.kind(x)` | `kind: Str` (for example `gelu`, `gelu_new`, `gelu_pytorch_tanh`, `relu`, `silu`, `swiglu`) |
-| `attention` | `attention(q, k, v)` | `backend: Str`, `causal: Bool`, `mask: Str`, `scale: Num`, `rope_theta: Num`, `sliding_window: Dim`, `causal_mask_buffer: Str` |
-| `causal_mask` | `causal_mask(q)` | `key: Str`, `window: Dim`, `padding_mask: Str` |
-| `reshape_heads` | `reshape_heads(x)` | `heads: Dim`, `head_dim: Dim` |
-| `split` | `split(x)` | exactly one of `parts: Int` or `sizes: List[Int]` (or neither when inferred); output arity must match |
-| `apply_rope_pair` | `apply_rope_pair(q, k)` | `position_ids: Str`, `theta: Num` |
-| `repeat_kv` | `repeat_kv(x)` | `heads: Dim`, `kv_heads: Dim` |
-| `arange_positions` | `arange_positions(input_ids)` | `attention_mask: Str` |
-| `kv_cache_update` | `cache::update(past, k, v)` | no op kwargs (`when` is control-flow guard syntax) |
-| `coalesce` | `cache::coalesce(a, b, ...)` | no kwargs; input count must be divisible by output count |
-| `kv_seq_len` | `cache::seq_len(cache)` | none |
-| `topk` | `topk(x)` | `k: Dim` (required), `dim: Int` (default `-1`); requires exactly two outputs |
-| `softmax` | `softmax(x)` | single output only; `dim: Int` (default `-1`), `dtype: Str` in `{float32,float16,bfloat16}` |
-| `zeros_like` | `zeros_like(x)` | single output only; no kwargs |
-| `moe_select_tokens` | `moe_select_tokens(x, scores, indices)` | `expert: Dim` |
-| `moe_scatter_add` | `moe_scatter_add(acc, idx, upd, w)` | none |
-| `index` | `index(container, idx)` | none |
-| `init_list` | `init_list()` | none |
-| `append` | `append(xs, x)` | none (`when` is parsed as control-flow guard, not op kwarg) |
-| `add` | `add(x, y)` | single output only; no kwargs |
-| `mul` | `mul(x, y)` | single output only; no kwargs |
-| `merge_heads` | `merge_heads(x)` | none |
+| `attention` | Split policy extras from the core attention op. | `scale`, `mask`, `padding_mask`, and `causal` are core semantics. `eager`, `sink`, `sink_path`, and the float-mask behavior flags are execution-policy or compatibility knobs. Keeping them on one op makes attention mean both "compute attention" and "pick a backend/mask policy". |
+| `rope_pair` | Split surface variants, keep one shared rotary backend. | This op has grown into a family: base RoPE, interleaved layout, partial rotary, multiple scaling schemes, truncation, and mode switching. The math core can stay shared, but the public surface is too overloaded for one entry point. |
+| `mamba_scan` vs `mamba2_scan` | Keep separate and do not merge. | They are both scan-like, but they are not the same semantic primitive. `mamba2_scan` has a distinct contract around `dt_bias`, grouped RMSNorm, head grouping, and time-step clamping. Merging them would create an even more overloaded state-space op. |
+| `causal_mask`, `bidirectional_mask`, `blocksparse_mask` | Keep distinct public ops, but share internal mask-building utilities. | These are different semantic bias families, and the names carry useful intent. However, they all build additive attention masks and should share shape validation and mask materialization internals where possible. |
+| `linear_position_bias`, `t5_relative_position_bias`, `disentangled_relative_bias` | Keep separate; do not merge into one generic bias op. | These are genuinely different bias constructions with different parameterization and inductive bias. A catch-all relative-bias op would reduce clarity and encourage kwarg-driven branching. |
+| `split_qkv_heads` and `split_qkv_grouped` | Keep both for now, but treat them as domain sugar over lower-level shape ops. | They express common packed-attention layouts cleanly. They should not become the start of a large family of packing-specific ops; if more variants appear, a lowering rewrite layer is preferable to many near-duplicate runtime primitives. |
+| `repeat` | Keep one runtime op and prefer domain-specific surface aliases in Axon. | The runtime computation is generic axis repetition. The dominant semantic use is KV-head expansion, so aliases like `repeat_kv` are good at the language surface, but there is no need for another runtime op. |
+| `linear` | Keep as the dense affine primitive, but do not let routing/expert behavior grow further inside it. | `bias_path`, explicit `weight`, and `expert` already push `linear` toward parameter-routing logic. If more expert-specific behavior appears, it should move into dedicated helper ops rather than turning `linear` into a generic parameter lookup escape hatch. |
+| `gemma4_router`, `glm4_router`, `nemotron_moe` | Keep model-family-specific routing ops separate from generic MoE primitives. | These encode family-specific routing formulas and parameter conventions. They should stay explicit instead of being folded into `moe_select` or `moe_grouped_ffn`, which are more reusable sparse-execution primitives. |
+| `gemma4_moe_experts`, `nemotron_moe_expert_step` | Consider lowering these to generic MoE building blocks if another family needs the same execution pattern. | Right now they are justified as family helpers. If similar expert-step ops start appearing for more families, the right move is probably a shared expert-execution primitive plus model-specific lowering, not a growing list of per-family expert kernels. |
+| `gemma4_per_layer_inputs`, `gemma4_per_layer_input_at` | Keep isolated as model-specific utility ops and resist generalizing prematurely. | These are clear one-family helpers. They should not be expanded into a generic "per-layer tensor toolkit" unless multiple unrelated architectures need the same abstraction. |
+| `config_has`, `config_int`, `config_float`, `config_str`, `config_value` | Keep the typed surface split, merge implementation internals. | The surface is readable and precise. The runtime work is mostly the same lookup/default/root-resolution machinery, so the right merge point is internal helpers, not the public API. |
+| `params_has_root`, `params_root` | Keep distinct. | They answer different questions: existence versus resolution. Merging them would force sentinel-style behavior and make the API harder to reason about. |
+| `add`, `mul`, `div`, `sum`, `log`, `sqrt`, `clamp`, `softmax`, `topk`, `zeros_like` | Keep as focused leaf ops; do not merge for surface reduction. | These are low-complexity, recognizable tensor primitives. Their granularity is already appropriate, and explicit ops help readability and backend targeting. |
+| `list_init`, `list_append`, `list_index` | Keep minimal and avoid expanding the container family casually. | These ops are useful for cache/present plumbing, but every extra container primitive pushes Synapse closer to a general-purpose language. The current boundary is still reasonable. |
+| `_ir_alias`, `_ir_expr` | Keep internal-only. | These are lowering artifacts and should not leak into the authored DSL surface. |
 
-| Op | Mathematical Meaning | Merge / Extend / Rename Assessment | Exact Instances in Axon (`file:line: full text`) | Options / Changes |
-|---|---|---|---|---|
-| `embedding` | Lookup / gather:<br>$Y[b,t,:] = W[\mathrm{idx}_{b,t},:]$ | Keep as-is | `examples/gemma3_270m.axon:52: x <- embedding@model.embed_tokens input_ids num_embeddings=V dim=D scale=EMB_SCALE`<br>`examples/gpt2.axon:25: tok <- embedding@wte input_ids dim=D`<br>`examples/gpt2.axon:27: embedding@wpe dim=D`<br>`examples/gpt2_kv.axon:29: tok <- embedding@wte input_ids dim=D`<br>`examples/gpt2_kv.axon:31: pos <- embedding@wpe pos_ids dim=D`<br>`examples/olmoe_1b_7b_0924.axon:46: x <- embedding@model.embed_tokens input_ids num_embeddings=V dim=D` | Options: `dim`, `scale`.<br>Change: standardized on Axon `dim` (reject `embedding_dim` in Axon source). |
-| `linear` | Affine map:<br>$y = xW + b$ | Keep, with `transpose` (default `false`) and `bias` (default `false`) only | `examples/gemma3_270m.axon:21: q_lin <- x_norm |> linear@q_proj dim=QD`<br>`examples/gemma3_270m.axon:22: k_lin <- x_norm |> linear@k_proj dim=KVD`<br>`examples/gemma3_270m.axon:23: v_lin <- x_norm |> linear@v_proj dim=KVD`<br>`examples/gemma3_270m.axon:37: attn <- attention qr k_ctx v_ctx mask=mask backend=sdpa causal=true scale=ATTN_SCALE rope_theta=THETA_LONG sliding_window=WIN_LOCAL |> merge_heads |> linear@o_proj dim=D`<br>`examples/gemma3_270m.axon:42: g <- x3 |> linear@gate_proj dim=FFN`<br>`examples/gemma3_270m.axon:43: u <- x3 |> linear@up_proj dim=FFN`<br>`examples/gemma3_270m.axon:44: m <- g |> act::gelu_pytorch_tanh |> mul u |> linear@down_proj dim=D`<br>`examples/gemma3_270m.axon:59: linear@model.embed_tokens`<br>`examples/gpt2.axon:11: q_lin, k_lin, v_lin <- x1 |> linear@c_attn dim=3*D transpose=true bias=true |> split parts=3`<br>`examples/gpt2.axon:16: a <- attention q k v backend=sdpa causal=true mask=causal_attn_mask |> merge_heads |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/gpt2.axon:20: m <- x3 |> linear@c_fc dim=4*D transpose=true bias=true |> act::gelu_new |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/gpt2.axon:32: linear@wte`<br>`examples/gpt2_kv.axon:11: q_lin, k_lin, v_lin <- x1 |> linear@c_attn dim=3*D transpose=true bias=true |> split parts=3`<br>`examples/gpt2_kv.axon:19: a <- attention q k_ctx v_ctx backend=sdpa causal=true mask=causal_attn_mask |> merge_heads |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/gpt2_kv.axon:23: m <- x3 |> linear@c_fc dim=4*D transpose=true bias=true |> act::gelu_new |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/gpt2_kv.axon:39: linear@wte`<br>`examples/olmoe_1b_7b_0924.axon:17: q <- x_norm |> linear@q_proj dim=D |> rmsnorm@q_norm eps=EPS |> reshape_heads heads=H`<br>`examples/olmoe_1b_7b_0924.axon:18: k <- x_norm |> linear@k_proj dim=D |> rmsnorm@k_norm eps=EPS |> reshape_heads heads=H`<br>`examples/olmoe_1b_7b_0924.axon:19: v <- x_norm |> linear@v_proj dim=D |> reshape_heads heads=H`<br>`examples/olmoe_1b_7b_0924.axon:26: a <- linear@o_proj a dim=D`<br>`examples/olmoe_1b_7b_0924.axon:30: linear@mlp.gate dim=E |>`<br>`examples/olmoe_1b_7b_0924.axon:36: gate <- linear@gate_proj x_sel`<br>`examples/olmoe_1b_7b_0924.axon:37: up <- linear@up_proj x_sel`<br>`examples/olmoe_1b_7b_0924.axon:38: x_upd <- gate |> act::silu |> mul up |> linear@down_proj`<br>`examples/olmoe_1b_7b_0924.axon:53: linear@lm_head` | Options: `dim`, `transpose=false`, `bias=false`, optional explicit `weight` path.<br>Change: renamed `out_features -> dim`; removed `out_dim`, `weight_layout`, `tie_weight`, and `share` for linear nodes. |
-| `layernorm` | $y=\gamma\frac{x-\mu}{\sqrt{\sigma^2+\epsilon}}+\beta$ | Keep | `examples/gpt2.axon:9: x1 <- layernorm@ln_1 x`<br>`examples/gpt2.axon:18: x3 <- layernorm@ln_2 x`<br>`examples/gpt2.axon:31: logits <- layernorm@ln_f x |>`<br>`examples/gpt2_kv.axon:9: x1 <- layernorm@ln_1 x`<br>`examples/gpt2_kv.axon:21: x3 <- layernorm@ln_2 x`<br>`examples/gpt2_kv.axon:38: logits <- layernorm@ln_f x |>` |
-| `rmsnorm` | $y = w \odot x / \sqrt{\mathrm{mean}(x^2)+\epsilon}$ | Keep | `examples/gemma3_270m.axon:19: x_norm <- rmsnorm@input_layernorm x cast_float=true unit_offset=true`<br>`examples/gemma3_270m.axon:28: qn <- rmsnorm@q_norm q cast_float=true unit_offset=true`<br>`examples/gemma3_270m.axon:29: kn <- rmsnorm@k_norm k cast_float=true unit_offset=true`<br>`examples/gemma3_270m.axon:38: attn <- rmsnorm@post_attention_layernorm attn cast_float=true unit_offset=true`<br>`examples/gemma3_270m.axon:40: x3 <- rmsnorm@pre_feedforward_layernorm x2 cast_float=true unit_offset=true`<br>`examples/gemma3_270m.axon:45: m <- rmsnorm@post_feedforward_layernorm m cast_float=true unit_offset=true`<br>`examples/gemma3_270m.axon:58: logits <- rmsnorm@model.norm x cast_float=true unit_offset=true |>`<br>`examples/olmoe_1b_7b_0924.axon:15: x_norm <- rmsnorm@input_layernorm x eps=EPS`<br>`examples/olmoe_1b_7b_0924.axon:17: q <- x_norm |> linear@q_proj dim=D |> rmsnorm@q_norm eps=EPS |> reshape_heads heads=H`<br>`examples/olmoe_1b_7b_0924.axon:18: k <- x_norm |> linear@k_proj dim=D |> rmsnorm@k_norm eps=EPS |> reshape_heads heads=H`<br>`examples/olmoe_1b_7b_0924.axon:28: x3 <- rmsnorm@post_attention_layernorm x eps=EPS`<br>`examples/olmoe_1b_7b_0924.axon:52: logits <- rmsnorm@model.norm x eps=EPS |>` |
-| `activation` | Pointwise $y_i=f(x_i)$ | Keep | `examples/gemma3_270m.axon:44: m <- g |> act::gelu_pytorch_tanh |> mul u |> linear@down_proj dim=D`<br>`examples/gpt2.axon:20: m <- x3 |> linear@c_fc dim=4*D transpose=true bias=true |> act::gelu_new |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/gpt2_kv.axon:23: m <- x3 |> linear@c_fc dim=4*D transpose=true bias=true |> act::gelu_new |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/olmoe_1b_7b_0924.axon:38: x_upd <- gate |> act::silu |> mul up |> linear@down_proj` |
-| `attention` | $O=\mathrm{softmax}(sQK^\top+M)V$ | Keep | `examples/gemma3_270m.axon:37: attn <- attention qr k_ctx v_ctx mask=mask backend=sdpa causal=true scale=ATTN_SCALE rope_theta=THETA_LONG sliding_window=WIN_LOCAL |> merge_heads |> linear@o_proj dim=D`<br>`examples/gpt2.axon:16: a <- attention q k v backend=sdpa causal=true mask=causal_attn_mask |> merge_heads |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/gpt2_kv.axon:19: a <- attention q k_ctx v_ctx backend=sdpa causal=true mask=causal_attn_mask |> merge_heads |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/olmoe_1b_7b_0924.axon:24: a <- attention qr k_coalesced v_coalesced mask=mask causal=true scale=ATTN_SCALE |> merge_heads` |
-| `causal_mask` | Additive mask tensor $M$ enforcing causal/window/padding constraints | Keep | `examples/gemma3_270m.axon:35: mask <- causal_mask qr key=k_ctx window=WIN_LOCAL + (WIN_LONG - WIN_LOCAL) * (((i + 1) % ROPE_PERIOD) == 0) padding_mask=attn_mask`<br>`examples/gpt2.axon:15: causal_attn_mask <- causal_mask q key=k window=T padding_mask=attn_mask`<br>`examples/gpt2_kv.axon:18: causal_attn_mask <- causal_mask q key=k_ctx window=T padding_mask=attn_mask`<br>`examples/olmoe_1b_7b_0924.axon:23: mask <- causal_mask qr key=k_coalesced window=C padding_mask=attn_mask` | - |
-| `reshape_heads` | $(B,T,H\cdot D_h)\to(B,H,T,D_h)$ | Keep | `examples/gemma3_270m.axon:24: q <- q_lin |> reshape_heads heads=H`<br>`examples/gemma3_270m.axon:25: k <- k_lin |> reshape_heads heads=KVH`<br>`examples/gemma3_270m.axon:26: v <- v_lin |> reshape_heads heads=KVH`<br>`examples/gpt2.axon:12: q <- reshape_heads q_lin heads=H`<br>`examples/gpt2.axon:13: k <- reshape_heads k_lin heads=H`<br>`examples/gpt2.axon:14: v <- reshape_heads v_lin heads=H`<br>`examples/gpt2_kv.axon:12: q <- reshape_heads q_lin heads=H`<br>`examples/gpt2_kv.axon:13: k <- reshape_heads k_lin heads=H`<br>`examples/gpt2_kv.axon:14: v <- reshape_heads v_lin heads=H`<br>`examples/olmoe_1b_7b_0924.axon:17: q <- x_norm |> linear@q_proj dim=D |> rmsnorm@q_norm eps=EPS |> reshape_heads heads=H`<br>`examples/olmoe_1b_7b_0924.axon:18: k <- x_norm |> linear@k_proj dim=D |> rmsnorm@k_norm eps=EPS |> reshape_heads heads=H`<br>`examples/olmoe_1b_7b_0924.axon:19: v <- x_norm |> linear@v_proj dim=D |> reshape_heads heads=H` |
-| `merge_heads` | $(B,H,T,D_h)\to(B,T,H\cdot D_h)$ | Keep | `examples/gemma3_270m.axon:37: attn <- attention qr k_ctx v_ctx mask=mask backend=sdpa causal=true scale=ATTN_SCALE rope_theta=THETA_LONG sliding_window=WIN_LOCAL |> merge_heads |> linear@o_proj dim=D`<br>`examples/gpt2.axon:16: a <- attention q k v backend=sdpa causal=true mask=causal_attn_mask |> merge_heads |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/gpt2_kv.axon:19: a <- attention q k_ctx v_ctx backend=sdpa causal=true mask=causal_attn_mask |> merge_heads |> linear@c_proj dim=D transpose=true bias=true`<br>`examples/olmoe_1b_7b_0924.axon:24: a <- attention qr k_coalesced v_coalesced mask=mask causal=true scale=ATTN_SCALE |> merge_heads` |
-| `split` | Partition last dimension by `parts` or explicit `sizes` | Keep; supports `parts`, `sizes`, or inferred `sizes` from known last-dim | `examples/gpt2.axon:11: q_lin, k_lin, v_lin <- x1 |> linear@c_attn dim=3*D transpose=true bias=true |> split parts=3`<br>`examples/gpt2_kv.axon:11: q_lin, k_lin, v_lin <- x1 |> linear@c_attn dim=3*D transpose=true bias=true |> split parts=3` |
-| `apply_rope_pair` | Rotary transform on Q/K pair using positions and $\theta$ | Keep | `examples/gemma3_270m.axon:30: qr, kr <- apply_rope_pair qn kn position_ids=pos_ids theta=THETA_BASE + (THETA_LONG - THETA_BASE) * (((i + 1) % ROPE_PERIOD) == 0)`<br>`examples/olmoe_1b_7b_0924.axon:20: qr, kr <- apply_rope_pair q k position_ids=pos_ids theta=THETA` | - |
-| `repeat_kv` | Expand KV heads from $H_{kv}$ to $H$ | Keep | `examples/gemma3_270m.axon:33: k_ctx <- repeat_kv k_ctx_raw heads=H kv_heads=KVH`<br>`examples/gemma3_270m.axon:34: v_ctx <- repeat_kv v_ctx_raw heads=H kv_heads=KVH` | - |
-| `arange_positions` | Build position ids from token stream/mask | Keep | `examples/gemma3_270m.axon:51: pos_ids <- arange_positions input_ids attention_mask=attn_mask`<br>`examples/gpt2.axon:26: pos <- arange_positions input_ids attention_mask=attn_mask |>`<br>`examples/gpt2_kv.axon:30: pos_ids <- arange_positions input_ids attention_mask=attn_mask`<br>`examples/olmoe_1b_7b_0924.axon:45: pos_ids <- arange_positions input_ids attention_mask=attn_mask` |
-| `kv_cache_update` | $(K_{\text{all}},V_{\text{all}})=\begin{cases}(K,V)&\text{if no past}\\(\mathrm{concat}(K_{past},K),\mathrm{concat}(V_{past},V))&\text{otherwise}\end{cases}$ | Keep | `examples/gemma3_270m.axon:31: k_all, v_all, present_kv <- cache::update past_kv kr v when=use_cache`<br>`examples/gpt2_kv.axon:15: k_all, v_all, present_kv <- cache::update past_kv k v when=use_cache`<br>`examples/olmoe_1b_7b_0924.axon:21: k_all, v_all, present_kv <- cache::update past_kv kr v when=use_cache` | - |
-| `coalesce` | Grouped first-non-`None` fallback. For `out=[o_0,...,o_{n-1}]` and flattened `in=[c_0,...,c_{m-1}]` with `m % n == 0`, each output uses its strided group:<br>$o_j=\text{first non-None}(c_j,c_{j+n},c_{j+2n},...)$ | Keep as generic replacement; no need for `coalesce_triplet` | `examples/gemma3_270m.axon:32: k_ctx_raw, v_ctx_raw <- cache::coalesce k_all v_all kr v`<br>`examples/gpt2_kv.axon:16: k_ctx, v_ctx <- cache::coalesce k_all v_all k v`<br>`examples/olmoe_1b_7b_0924.axon:22: k_coalesced, v_coalesced <- cache::coalesce k_all v_all kr v` | - |
-| `topk` | Return top-$k$ values and indices along axis | Keep | `examples/olmoe_1b_7b_0924.axon:32: topk k=EPT dim=-1` | - |
-| `softmax` | $\mathrm{softmax}(x)_i=\frac{e^{x_i}}{\sum_j e^{x_j}}$ | Keep | `examples/olmoe_1b_7b_0924.axon:31: softmax dim=-1 dtype=float32 |>` |
-| `zeros_like` | Zero tensor with same shape/dtype/device as input | Keep | `examples/olmoe_1b_7b_0924.axon:33: m <- zeros_like x3` | - |
-| `moe_select_tokens` | Generic sparse dispatch selector. Flatten token axes, select positions where `topk_indices == expert`, and return `(selected_hidden, token_idx, topk_pos, selected_scores)` for downstream expert compute. Empty selections are valid and must return empty tensors with compatible dtypes/shapes. | Keep; mathematically a generic sparse dispatch selector | `examples/olmoe_1b_7b_0924.axon:35: x_sel, token_idx, topk_pos, sel_scores <- moe_select_tokens x3 topk_scores topk_indices expert=e` | - |
-| `moe_scatter_add` | Generic weighted sparse accumulation. Applies `accum[token_idx] += updates * scores` (with accumulation for repeated indices). Empty `token_idx` is a no-op returning `accum` unchanged. | Keep; generic weighted sparse accumulation | `examples/olmoe_1b_7b_0924.axon:39: m <- moe_scatter_add m token_idx x_upd sel_scores` | - |
-| `index` | Positional indexing into tensor/list/tuple | Keep | `examples/gemma3_270m.axon:55: past_i <- index past_key_values i`<br>`examples/gpt2_kv.axon:35: past_i <- index past_key_values i`<br>`examples/olmoe_1b_7b_0924.axon:49: past_i <- index past_key_values i` | - |
-| `init_list` | Create empty list container | Keep | `examples/gemma3_270m.axon:53: present_key_values <- init_list()`<br>`examples/gpt2_kv.axon:33: present_key_values <- init_list()`<br>`examples/olmoe_1b_7b_0924.axon:47: present_key_values <- init_list()` | - |
-| `append` | List append: $L' = L \mathbin{\|} [x]$ | Keep | `examples/gemma3_270m.axon:57: present_key_values <- append present_key_values present_i when=use_cache`<br>`examples/gpt2_kv.axon:37: present_key_values <- append present_key_values present_i when=use_cache`<br>`examples/olmoe_1b_7b_0924.axon:51: present_key_values <- append present_key_values present_i when=use_cache` |
-| `add` | Elementwise/broadcast $x+y$ | Keep | `examples/gemma3_270m.axon:39: x2 <- x + attn`<br>`examples/gemma3_270m.axon:46: y <- x2 + m`<br>`examples/gpt2.axon:17: x <- x + a`<br>`examples/gpt2.axon:21: return x + m`<br>`examples/gpt2.axon:28: x <- tok + pos`<br>`examples/gpt2_kv.axon:20: x <- x + a`<br>`examples/gpt2_kv.axon:24: y <- x + m`<br>`examples/gpt2_kv.axon:32: x <- tok + pos`<br>`examples/olmoe_1b_7b_0924.axon:27: x <- x + a`<br>`examples/olmoe_1b_7b_0924.axon:40: y <- x + m` | - |
-| `mul` | Elementwise/broadcast product $x\odot y$ | Keep | `examples/gemma3_270m.axon:44: m <- g |> act::gelu_pytorch_tanh |> mul u |> linear@down_proj dim=D`<br>`examples/olmoe_1b_7b_0924.axon:38: x_upd <- gate |> act::silu |> mul up |> linear@down_proj` |
-| `kv_seq_len` | Return cache sequence axis length | Keep | *(no current Axon instance)* | - |
-| `_ir_alias` | IR assignment $y:=x$ | IR-only | *(no authored Axon instance)* | - |
-| `_ir_const` | IR constant materialization $y:=c$ | IR-only | *(no authored Axon instance)* | - |
+### Practical Priorities
+
+If the immediate goal is to improve conceptual granularity without shrinking real
+capability, the highest-value moves are:
+
+1. Split `attention` into a smaller semantic core plus policy/backend wrappers or lowering rewrites.
+2. Split `rope_pair` into clearer surface variants while preserving one shared implementation backbone.
+3. Hold the line between generic MoE primitives and model-family routing/helper ops instead of adding more hybrid middle-ground ops.
+4. Keep adding model-specific helpers only when the behavior is genuinely architecture-specific; otherwise lower to existing generic primitives.

@@ -5,6 +5,7 @@ from ..core import (
     StateDictProvider,
     TransformControl,
     TransformError,
+    TransformPayloadSchema,
     TransformResult,
     TypedTransform,
     register_transform,
@@ -36,6 +37,14 @@ class ExitTransform(TypedTransform[ExitSpec]):
         "Examples:\n"
         "  exit"
     )
+
+    def payload_schema(self) -> TransformPayloadSchema:
+        return TransformPayloadSchema(
+            mode_key=None,
+            default_mode="default",
+            common_required=set(),
+            common_allowed=set(),
+        )
 
     def compile(self, payload: Any, default_model: str | None) -> ExitSpec:
         del default_model

@@ -1,0 +1,103 @@
+{-# CHECKPOINTS "microsoft/phi-1_5" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "phi1" #-}
+
+import Activations (gelu_new)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul)
+
+import Params (has_root)
+
+import Positions (position_ids, rope_pair_base)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM = 2048
+
+VOCAB_SIZE = 51200
+
+NUM_LAYERS = 24
+
+NUM_HEADS = 32
+
+KVH = 32
+
+MODEL_HEAD_DIM = 64
+
+QD = NUM_HEADS * MODEL_HEAD_DIM
+
+KVD = KVH * MODEL_HEAD_DIM
+
+FFN = 8192
+
+EPS = 1e-05
+
+THETA = 10000.0
+
+MAX_POSITIONS = 2048
+
+PARTIAL_ROTARY = 0.5
+
+HAS_LM_HEAD = has_root "lm_head"
+
+phi1_norm :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+phi1_norm@path x = NN.layernorm@path x eps=EPS
+
+phi1_block :: Tensor[B,S,D] -> Int -> IdxTensor[B,S] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+phi1_block x i pos_ids mask past_kv = do
+  xn <- phi1_norm@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=true
+    k <- NN.linear@k_proj xn dim=KVD bias=true
+    v <- NN.linear@v_proj xn dim=KVD bias=true
+    q <- reshape_heads q heads=NUM_HEADS
+    k <- reshape_heads k heads=KVH
+    v <- reshape_heads v heads=KVH
+    q, k <- rope_pair_base q k pos_ids theta=THETA partial_rotary_factor=PARTIAL_ROTARY
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    a <- attention q k v mask |> merge_heads |> NN.linear@dense dim=MODEL_DIM bias=true
+    return a, new_kv
+  x <- x + a
+  xn <- phi1_norm@post_attention_layernorm x
+  m <- scope@mlp do
+    h <- NN.linear@fc1 xn dim=FFN bias=true
+    return h |> gelu_new |> NN.linear@fc2 dim=MODEL_DIM bias=true
+  return x + m, new_kv
+
+phi1 :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+phi1 input_ids mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  pos_ids <- position_ids input_ids past_length=past_length
+  mask <- mask_for_input input_ids mask MAX_POSITIONS
+  key_len <- mask_length_for_input input_ids mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=mask
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- phi1_block x i pos_ids mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- phi1_norm@final_layernorm x
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- HAS_LM_HEAD ? (NN.linear@lm_head x dim=VOCAB_SIZE bias=true) : (NN.linear@model.embed_tokens x dim=VOCAB_SIZE)
+  return logits, new_kv

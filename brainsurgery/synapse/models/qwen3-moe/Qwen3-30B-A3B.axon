@@ -1,0 +1,146 @@
+{-# CHECKPOINTS "Qwen/Qwen3-30B-A3B" #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "qwen3_moe" #-}
+
+import Activations (silu)
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (mul)
+
+import MoE (grouped_swiglu_ffn_basic, softmax_topk_router)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM <- do
+  return ((2048 :: Dim) :: Dim)
+
+VOCAB_SIZE <- do
+  return ((151936 :: Dim) :: Dim)
+
+NUM_LAYERS <- do
+  return ((48 :: Dim) :: Dim)
+
+NUM_HEADS <- do
+  return ((32 :: Dim) :: Dim)
+
+KVH <- do
+  return ((4 :: Dim) :: Dim)
+
+MODEL_HEAD_DIM <- do
+  return ((128 :: Dim) :: Dim)
+
+KVD <- do
+  return ((KVH * MODEL_HEAD_DIM) :: Dim)
+
+QD <- do
+  return ((NUM_HEADS * MODEL_HEAD_DIM) :: Dim)
+
+FFN <- do
+  return ((6144 :: Dim) :: Dim)
+
+ME <- do
+  return ((128 :: Dim) :: Dim)
+
+MK <- do
+  return ((8 :: Dim) :: Dim)
+
+MFFN <- do
+  return ((768 :: Dim) :: Dim)
+
+SPARSE_STEP <- do
+  return ((1 :: Dim) :: Dim)
+
+EPS <- do
+  return (1e-06)
+
+THETA <- do
+  return (1000000.0)
+
+MAX_POSITIONS <- do
+  return ((40960 :: Dim) :: Dim)
+
+TIE <- do
+  return (false)
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+head_rms :: Path -> Tensor[B,H,S,HD] -> Tensor[B,H,S,HD]
+head_rms@path x = NN.rmsnorm@path x eps=EPS cast_float=true
+
+output_tied :: Tensor[B,S,D] -> Tensor[B,S,V]
+output_tied x = do
+  logits <- scope@model do
+    return NN.linear@embed_tokens x dim=VOCAB_SIZE
+  return logits
+
+output_untied :: Tensor[B,S,D] -> Tensor[B,S,V]
+output_untied x = NN.linear@lm_head x dim=VOCAB_SIZE
+
+dense_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+dense_ffn x = do
+  g <- NN.linear@gate_proj x dim=FFN
+  u <- NN.linear@up_proj x dim=FFN
+  return g |> silu |> mul u |> NN.linear@down_proj dim=MODEL_DIM
+
+sparse_ffn :: Tensor[B,S,D] -> Tensor[B,S,D]
+sparse_ffn x = do
+  scores, indices <- softmax_topk_router@gate x top_k=MK
+  return grouped_swiglu_ffn_basic x scores indices ME gate_up_weight=@experts.gate_up_proj.weight out_weight=@experts.down_proj.weight
+
+qwen3_moe_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,KVH,P,MAX_POSITIONS,DH] -> Int -> (Tensor[B,S,D], ?CacheLayer[B,KVH,K,MAX_POSITIONS,DH])
+qwen3_moe_block x rope_sin rope_cos mask past_kv layer_idx = do
+  xn <- rms@input_layernorm x
+  a, new_kv <- scope@self_attn do
+    q <- NN.linear@q_proj xn dim=QD bias=false |> reshape_heads heads=NUM_HEADS |> head_rms@q_norm
+    k <- NN.linear@k_proj xn dim=KVD bias=false |> reshape_heads heads=KVH |> head_rms@k_norm
+    v <- NN.linear@v_proj xn dim=KVD bias=false |> reshape_heads heads=KVH
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    k <- Tensor.repeat k repeats=(NUM_HEADS / KVH)
+    v <- Tensor.repeat v repeats=(NUM_HEADS / KVH)
+    a <- attention q k v mask |> merge_heads |> NN.linear@o_proj dim=MODEL_DIM bias=false
+    return a, new_kv
+  x <- x + a
+  xn <- rms@post_attention_layernorm x
+  m <- scope@mlp do
+    return (((layer_idx + 1) % SPARSE_STEP) == 0) ? sparse_ffn xn : dense_ffn xn
+  return x + m, new_kv
+
+qwen3_moe :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,KVH,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,KVH,K,MAX_POSITIONS,DH])
+qwen3_moe input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- ((rope_base_factors pos_ids MODEL_HEAD_DIM THETA) :: (Tensor[B,1,S,MODEL_HEAD_DIM], Tensor[B,1,S,MODEL_HEAD_DIM]))
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- qwen3_moe_block x rope_sin rope_cos mask past_i i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- rms@norm x
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- TIE ? output_tied x : output_untied x
+  return logits, new_kv

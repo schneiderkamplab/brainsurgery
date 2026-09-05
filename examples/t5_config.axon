@@ -1,0 +1,18 @@
+import Config
+
+-- Shared T5-family settings (small/base/large/3B/11B and compatible derivatives).
+D = Config.int "d_model" default=512                                 -- model hidden size
+V = Config.int "vocab_size" default=32128                            -- tokenizer vocabulary size
+L_ENC = Config.int "num_layers" default=6                            -- encoder layer count
+L_DEC_OVERRIDE = Config.int "num_decoder_layers" default=-1          -- optional decoder depth override (HF uses null when unset)
+L_DEC = (L_DEC_OVERRIDE > 0) ? L_DEC_OVERRIDE : L_ENC                -- decoder layer count (fallback to num_layers)
+H = Config.int "num_heads" default=8                                 -- attention head count
+FFN = Config.int "d_ff" default=2048                                 -- feed-forward hidden width
+EPS = Config.float "layer_norm_epsilon" default=1e-06               -- T5 layer norm epsilon
+NUM_BUCKETS = Config.int "relative_attention_num_buckets" default=32 -- relative-position bucket count
+MAX_DISTANCE = Config.int "relative_attention_max_distance" default=128 -- relative-position max distance
+
+-- Output logit scale used before shared LM head projection.
+LM_SCALE_DERIVED = 1.0 / sqrt D
+LM_SCALE_OVERRIDE = Config.float "output_logit_scale" default=-1.0
+LM_SCALE = (LM_SCALE_OVERRIDE > 0.0) ? LM_SCALE_OVERRIDE : LM_SCALE_DERIVED

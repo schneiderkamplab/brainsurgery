@@ -1,0 +1,81 @@
+{-# CHECKPOINTS ["microsoft/deberta-v3-xsmall"] #-}
+{-# TASK "masked_lm" #-}
+
+import Activations (gelu)
+import Attention (attention, merge_heads, reshape_heads)
+import Masking (Mask, bidirectional_mask_for_input, mask_for_input)
+import Params (has_root)
+import Positions (position_ids, relative_bias_disentangled)
+import Config
+import NN
+import Tensor
+
+
+
+MODEL_DIM <- Config.int @@hidden_size default=1536
+E <- (Config.has_key @@embedding_size) ? (Config.int @@embedding_size default=1536) : MODEL_DIM
+VOCAB_SIZE <- Config.int @@vocab_size default=128100
+NUM_LAYERS <- Config.int @@num_hidden_layers default=24
+NUM_HEADS <- Config.int @@num_attention_heads default=24
+FFN <- Config.int @@intermediate_size default=6144
+EPS <- Config.float @@layer_norm_eps default=1e-07
+POS_BUCKETS <- Config.int @@position_buckets default=256
+MAX_REL <- Config.int @@max_position_embeddings default=512
+REL_Q_SCALE <- Config.float @@deberta_rel_q_scale default=0.5773502691896257
+ATTN_SCALE <- Config.float @@deberta_attn_scale default=0.125
+
+deberta_block :: Tensor[B,S,D] -> Tensor[B,1,S,S] -> Tensor[B,S,D]
+deberta_block x keep = do
+  a <- scope@attention do
+    q0 <- NN.linear@self.query_proj x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    k <- NN.linear@self.key_proj x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    v <- NN.linear@self.value_proj x dim=MODEL_DIM bias=true |> reshape_heads heads=NUM_HEADS
+    rel_bias <- relative_bias_disentangled@self q0 k position_buckets=POS_BUCKETS max_relative_positions=MAX_REL rel_norm_eps=EPS weight_path=@@deberta.encoder.rel_embeddings.weight ln_weight_path=@@deberta.encoder.LayerNorm.weight ln_bias_path=@@deberta.encoder.LayerNorm.bias
+    q <- q0 * REL_Q_SCALE
+    return attention q k v keep rel_bias=rel_bias scale=ATTN_SCALE |> merge_heads |> NN.linear@output.dense dim=MODEL_DIM bias=true
+  x <- x + a
+  x <- NN.layernorm@attention.output.LayerNorm x eps=EPS
+  m <- NN.linear@intermediate.dense x dim=FFN bias=true |> gelu
+  m <- NN.linear@output.dense m dim=MODEL_DIM bias=true
+  y <- x + m
+  y <- NN.layernorm@output.LayerNorm y eps=EPS
+  return y
+
+deberta_legacy_head :: Tensor[B,S,D] -> Tensor[B,S,VOCAB_SIZE]
+deberta_legacy_head x = do
+  logits <- scope@cls.predictions do
+    x <- NN.linear@transform.dense x dim=E bias=true |> gelu
+    x <- NN.layernorm@transform.LayerNorm x eps=EPS
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@cls.predictions.bias
+  return logits
+
+deberta_modern_head :: Tensor[B,S,D] -> Tensor[B,S,VOCAB_SIZE]
+deberta_modern_head x = do
+  logits <- scope@lm_predictions.lm_head do
+    x <- NN.linear@dense x dim=MODEL_DIM bias=true |> gelu
+    x <- NN.layernorm@LayerNorm x eps=EPS
+    return NN.linear@decoder x dim=VOCAB_SIZE bias=true weight_path=@@deberta.embeddings.word_embeddings.weight bias_path=@@lm_predictions.lm_head.bias
+  return logits
+
+deberta_v2 :: TokenIds[B,S] -> ?Mask[B,S,S] -> Tensor[B,S,VOCAB_SIZE]
+deberta_v2 input_ids attn_mask = do
+  attn_mask <- mask_for_input input_ids attn_mask S
+  pos_ids <- position_ids input_ids
+  keep <- bidirectional_mask_for_input input_ids S padding_mask=attn_mask
+  tok_type_ids <- input_ids - input_ids
+  tok <- NN.embedding@deberta.embeddings.word_embeddings input_ids dim=E
+  pos <- Tensor.zeros_like tok
+  has_typ <- has_root "deberta.embeddings.token_type_embeddings"
+  typ <- has_typ ? NN.embedding@deberta.embeddings.token_type_embeddings tok_type_ids dim=E : Tensor.zeros_like tok
+  x <- tok + pos
+  x <- x + typ
+  has_proj <- has_root "deberta.embeddings.embed_proj"
+  x <- has_proj ? NN.linear@deberta.embeddings.embed_proj x dim=MODEL_DIM bias=false : x
+  x <- NN.layernorm@deberta.embeddings.LayerNorm x eps=EPS
+  x <- for@deberta.encoder.layer i <- [0..NUM_LAYERS) carry (x) do
+    x <- deberta_block x keep
+    yield x
+  modern_head <- has_root "lm_predictions.lm_head"
+  legacy_head <- has_root "cls.predictions"
+  logits <- modern_head ? deberta_modern_head x : (legacy_head ? deberta_legacy_head x : deberta_modern_head x)
+  return logits

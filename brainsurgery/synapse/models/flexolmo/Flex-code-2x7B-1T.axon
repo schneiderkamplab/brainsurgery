@@ -1,0 +1,95 @@
+{-# CHECKPOINTS ["allenai/Flex-math-2x7B-1T", "allenai/Flex-news-2x7B-1T", "allenai/Flex-pes2o-2x7B-1T", "allenai/Flex-code-2x7B-1T", "allenai/Flex-creative-2x7B-1T", "allenai/Flex-reddit-2x7B-1T"] #-}
+
+{-# TASK "causal_lm" #-}
+
+{-# MAIN "flexolmo" #-}
+
+import Attention (attention, merge_heads, reshape_heads)
+
+import Masking (Mask, causal_mask_for_input, mask_for_input, mask_length_for_input)
+
+import Math (sqrt)
+
+import MoE (grouped_swiglu_ffn_basic)
+
+import Positions (position_ids, rope_base_factors, rope_pair_base_factors)
+
+import Cache
+
+import Config
+
+import NN
+
+import Tensor
+
+MODEL_DIM = 4096
+
+VOCAB_SIZE = 100352
+
+NUM_LAYERS = 32
+
+NUM_HEADS = 32
+
+MODEL_HEAD_DIM = MODEL_DIM / NUM_HEADS
+
+E = 2
+
+EPT = 2
+
+MAX_POSITIONS = 4096
+
+FFN = 11008
+
+EPS = 1e-06
+
+THETA = 500000.0
+
+ATTN_SCALE = 1.0 / sqrt MODEL_HEAD_DIM
+
+rms :: Path -> Tensor[B,S,D] -> Tensor[B,S,D]
+rms@path x = NN.rmsnorm@path x eps=EPS
+
+flexolmo_decoder_block :: Tensor[B,S,D] -> Tensor[B,1,S,R] -> Tensor[B,1,S,R] -> Tensor[B,1,S,K] -> ?CacheLayer[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> (Tensor[B,S,D], ?CacheLayer[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+flexolmo_decoder_block x rope_sin rope_cos mask past_kv = do
+  a, new_kv <- scope@self_attn do
+    q <- x |> NN.linear@q_proj dim=MODEL_DIM |> rms@q_norm |> reshape_heads heads=NUM_HEADS
+    k <- x |> NN.linear@k_proj dim=MODEL_DIM |> rms@k_norm |> reshape_heads heads=NUM_HEADS
+    v <- x |> NN.linear@v_proj dim=MODEL_DIM |> reshape_heads heads=NUM_HEADS
+    q, k <- rope_pair_base_factors q k rope_sin rope_cos
+    k, v, new_kv <- Cache.update past_kv k v
+    a <- attention q k v mask scale=ATTN_SCALE |> merge_heads
+    a <- NN.linear@o_proj a dim=MODEL_DIM
+    return a, new_kv
+  a_norm <- rms@post_attention_layernorm a
+  x <- x + a_norm
+  m <- scope@mlp do
+    topk_scores, topk_indices <- NN.linear@gate x dim=E |> Tensor.softmax dim=-1 dtype="float32" |> Tensor.topk k=EPT dim=-1
+    m <- grouped_swiglu_ffn_basic x topk_scores topk_indices E gate_up_weight=@experts.gate_up_proj.weight out_weight=@experts.down_proj.weight
+    return m
+  m_norm <- rms@post_feedforward_layernorm m
+  return x + m_norm, new_kv
+
+flexolmo :: TokenIds[B,S] -> ?Mask[B,K,MAX_POSITIONS] -> ?Cache[B,NUM_HEADS,P,MAX_POSITIONS,DH] -> ?Bool -> (Tensor[B,S,V], ?Cache[B,NUM_HEADS,K,MAX_POSITIONS,DH])
+flexolmo input_ids attn_mask past_kv use_cache = do
+  past_length <- Cache.past_length past_kv
+  attn_mask <- mask_for_input input_ids attn_mask MAX_POSITIONS
+  pos_ids <- position_ids input_ids attn_mask=attn_mask past_length=past_length
+  rope_sin, rope_cos <- rope_base_factors pos_ids MODEL_HEAD_DIM THETA
+  key_len <- mask_length_for_input input_ids attn_mask past_length
+  mask <- causal_mask_for_input input_ids key_len padding_mask=attn_mask window=MAX_POSITIONS
+  work_kv <- Cache.prepare past_kv use_cache MAX_POSITIONS
+  read_kv <- Cache.read past_kv work_kv
+  x, new_kv <- scope@model do
+    x <- NN.embedding@embed_tokens input_ids dim=MODEL_DIM
+    x, work_kv <- for@layers i <- [0..NUM_LAYERS) carry (x, work_kv) do
+      past_i <- Cache.index read_kv i
+      x, new_i <- flexolmo_decoder_block x rope_sin rope_cos mask past_i
+      work_kv <- Cache.append work_kv new_i
+      yield x, work_kv
+    x <- rms@norm x
+    return x, work_kv
+  new_length <- past_length + S
+  new_kv <- Cache.finish new_kv new_length
+  new_kv <- use_cache ? new_kv : null
+  logits <- NN.linear@lm_head x
+  return logits, new_kv
