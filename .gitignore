@@ -7,6 +7,7 @@ __pycache__
 
 .env
 stuff/
+private/
 
 # Python cache/build artifacts
 *.py[cod]
