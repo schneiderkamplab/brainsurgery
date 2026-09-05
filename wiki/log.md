@@ -21,7 +21,7 @@ confidence: high
 - Validated-by: the `phlora` + `cast_` + sharded-output probe that reproduced the
   error now writes all shards and the index under the default provider.
 - Not changed: output is still not atomic (a failure during the final save can leave
-  partial shards). See `Paper/TODO.md` concern 7.
+  partial shards); a write-to-temp-then-rename output would close that gap.
 - Found while building `usability-tests/` (condition B needs the default provider to
   work for every task). Confidence: high.
 

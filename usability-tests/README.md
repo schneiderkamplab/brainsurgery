@@ -6,9 +6,8 @@ conditions by coding agents acting as proxy practitioners. It produces the
 evidence the reviewers of the paper ("BrainSurgery: Reproducible and Reliable
 Declarative Weight Manipulations for Model Editing and Upcycling") asked for:
 success rate, retries, errors, tokens and cost, time to solution, and
-bug-detection ability, per test, target, condition and agent. The study
-design is in `../Paper/user-study-plan.md`; `AGENTS.md` here is the operating
-procedure for the agent running the study.
+bug-detection ability, per test, target, condition and agent. `AGENTS.md`
+here is the operating procedure for the agent running the study.
 
 The tests are deliberately not the ones shown in the paper. They are
 realistic checkpoint-surgery jobs that exercise the same capability classes
@@ -198,8 +197,8 @@ The in-memory provider used to fail at save time on any output that still
 held a non-contiguous tensor (a `permute` result or a `phlora` factor),
 after all transforms had succeeded, leaving partial shards on disk. Fixed
 2026-09-05 in `brainsurgery/io/safetensors.py` (tensors are packed at save
-time), regression test in `tests/test_io.py`, recorded in `wiki/log.md` and
-`Paper/TODO.md`. Output is still not atomic on other save-time failures.
+time), regression test in `tests/test_io.py`, recorded in `wiki/log.md`.
+Output is still not atomic on other save-time failures.
 
 ## Open items
 
