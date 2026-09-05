@@ -64,8 +64,10 @@ OpenAI models. Results live at
 (405 runs per repeat). Run repeats with
 odd numbers first (their review phase gets the defective artifact), then even
 ones (correct artifact), so bug detection and false alarms are balanced.
-Condition F is blocked until `conditions/F-allowed.md` and
-`conditions/requirements-F.txt` hold the team's final list.
+Condition F is ready: `conditions/F-allowed.md` lists the allowed packages
+(derived from the paper's related-systems table) and `requirements-F.txt` is
+their pinned lock; the pilot ran all 15 F cells with it. Replace both files
+before the full run only if the team wants a different list.
 
 ## What is recorded, where
 
