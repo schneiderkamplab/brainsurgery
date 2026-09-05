@@ -140,6 +140,7 @@ outside the sandbox. Nothing from `references/`, `solutions/`, `review/` or
 | `resummarise.py` | Recomputes execution counts in `harness.json` from saved Claude transcripts |
 | `grade.py` | Grades an output against `references/<target>/<test>`; independent of BrainSurgery |
 | `analyze.py` | Aggregates run records into the study tables |
+| `make_manifest.py`, `manifest.sha256` | Checksums of every input, reference and doc-pack file; `--verify` proves another machine runs the same study |
 | `solutions/<target>/P/*.py`, `solutions/<target>/B/*.yaml` | Reference baselines and plans. Hidden from participants. The Python ones generate the references |
 | `review/<target>/` | Defective variants of the references, one injected defect per test, plus `answers.json` |
 | `AGENTS.md`, `CLAUDE.md` | Operating procedure for the experimenter agent |
@@ -203,6 +204,28 @@ tensor references only, so every per-layer concatenation is spelled out (16
 layers times up to four tensors for OLMo); the renumbering moves in T1 are
 spelled out for the same reason. Both are genuine usability findings about
 the DSL and stay in the task set.
+
+## Pilot, and what it changed
+
+A pilot (Sonnet 5, medium effort, one repeat, 45 cells) ran before the study
+and is preserved in git history (commit 603b806 on the `usability-study`
+branch); it is not part of the study data. It forced four changes, all made
+before the study started:
+
+- three documentation gaps that cost the plan condition most of its extra
+  turns were fixed in the BrainSurgery README, the interfaces reference and
+  the `assert equal` help text: shard sizes are binary units and count tensor
+  data only (an oversized tensor goes alone in its shard); which alias a
+  multi-input plan writes as output; and that `assert equal`'s `right` is a
+  rewrite of each `left` match, so capture groups work across aliases;
+- condition B installs BrainSurgery non-editable so the repository source is
+  not reachable from the sandbox;
+- inputs and base checkpoints are read-only (a participant wrote through a
+  copied symlink into the shared GPT-2 base);
+- execution counting matches real invocations only.
+
+The doc pack is regenerated from the fixed documentation; every study cell
+sees the same pack.
 
 ## Fixed on the way
 

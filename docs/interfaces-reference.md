@@ -38,7 +38,7 @@ Core options:
 
 - `--provider inmemory|arena`
 - `--num-workers`
-- `--shard-size`
+- `--shard-size` (binary units: `100MB` = 104,857,600 bytes of tensor data per shard)
 - `--summary-mode raw|resolve`
 - `--summarize-path`
 - `-i/--interactive` (switches to post-plan REPL)
@@ -69,6 +69,13 @@ Notes:
 - `inputs` is optional; aliases are required for multi-input plans.
 - `transforms` is a list of single-key mappings.
 - `output` may be omitted or string/mapping.
+- `output` writes one alias. With one input that is its alias; with several inputs it is
+  inferred as the single alias the transforms write to (destinations of `copy`/`move`/...,
+  in-place targets, `delete`). Writing to several aliases, or to none, fails with
+  `cannot infer output model uniquely`. `assert`, `diff` and `dump` do not count as writes.
+- `output.shard` (and `--shard-size`) use binary units (`100MB` = 104,857,600 bytes) and
+  count tensor data only; a tensor larger than the budget is written alone in its own shard,
+  and an index file `model.safetensors.index.json` maps every tensor to its shard.
 
 ## 4. Tensor reference interface
 

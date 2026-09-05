@@ -165,6 +165,9 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=900, help="solve-phase cap in seconds")
     parser.add_argument("--max-budget-usd", type=float, default=None)
     parser.add_argument("--skip-review", action="store_true")
+    parser.add_argument("--keep-artifacts", action="store_true",
+                        help="keep the sandbox environment and output checkpoints (default: delete them "
+                             "after grading and review; the study files stay)")
     parser.add_argument("--root", type=Path, default=HERE)
     args = parser.parse_args()
 
@@ -235,7 +238,20 @@ def main() -> int:
         }
         (sandbox / "review.json").write_text(json.dumps(review, indent=2) + "\n")
         print(f"[run] review ({kind}): says_defective={says_defective}", flush=True)
+
+    if not args.keep_artifacts:
+        cleanup_sandbox(sandbox)
     return 0 if grade.get("passed") else 1
+
+
+def cleanup_sandbox(sandbox: Path) -> None:
+    """Drop what is large and reproducible: the environment (env-freeze.txt records it)
+    and the output checkpoint (grade.json records its verdict). Everything else stays."""
+    import shutil
+    shutil.rmtree(sandbox / ".venv", ignore_errors=True)
+    for path in (sandbox / "out").rglob("*"):
+        if path.is_file() and (path.suffix in {".safetensors", ".pt", ".pth", ".bin"} or path.name.endswith(".index.json")):
+            path.unlink()
 
 
 if __name__ == "__main__":

@@ -59,7 +59,11 @@ class EqualExpr:
     required_keys={"left", "right"},
     description=(
         "Succeeds if two tensors have the same shape and dtype, and their values are equal "
-        "(or within 'eps' absolute tolerance when provided)."
+        "(or within 'eps' absolute tolerance when provided). 'right' is resolved as a rewrite "
+        "of each 'left' match, like 'to' in copy/move: capture groups from 'left' may be used "
+        "in 'right' (\\1, \\g<0>) and aliases may differ, e.g. "
+        "equal: { left: 'a::(.+)', right: 'b::\\1' } compares every tensor of alias a with "
+        "the same name in alias b."
     ),
 )
 def compile_equal_expr(payload: Any, default_model: str | None) -> EqualExpr:
