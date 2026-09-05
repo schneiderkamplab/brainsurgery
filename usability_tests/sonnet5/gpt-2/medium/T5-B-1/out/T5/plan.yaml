@@ -1,0 +1,66 @@
+inputs:
+  - model::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Preflight: confirm the base checkpoint and adapter shapes are what the
+  # task describes before doing any arithmetic.
+  - assert: { count: { of: 'model::.*', is: 160 } }
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_A\.weight'
+        is: 12
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_B\.weight'
+        is: 12
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.h\.0\.attn\.c_attn\.lora_A\.weight'
+        is: [16, 768]
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.h\.0\.attn\.c_attn\.lora_B\.weight'
+        is: [2304, 16]
+  - assert: { shape: { of: model::h.0.attn.c_attn.weight, is: [768, 2304] } }
+
+  # delta = B @ A, shape [2304, 768] (nn.Linear/out,in layout), one per layer.
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'model::tmp.h.\1.delta'
+  - assert: { count: { of: 'model::tmp\.h\.\d+\.delta', is: 12 } }
+
+  # Apply LoRA scale = alpha / r = 32 / 16 = 2, in place on the delta.
+  - scale_: { target: 'model::tmp\.h\.\d+\.delta', by: 2 }
+
+  # fan_in_fan_out=true: base weight uses Conv1D [in, out] layout, so
+  # transpose the Linear-convention [out, in] delta before adding it.
+  - permute:
+      from: 'model::tmp\.h\.(\d+)\.delta'
+      order: [1, 0]
+      to: 'model::tmp.h.\1.deltaT'
+  - assert:
+      shape:
+        of: 'model::tmp.h.0.deltaT'
+        is: [768, 2304]
+
+  # Merge into the base weight in place; every other base tensor is untouched.
+  - add_:
+      from: 'model::tmp\.h\.(\d+)\.deltaT'
+      to: 'model::h.\1.attn.c_attn.weight'
+
+  # Drop the intermediates; only base-named tensors may remain.
+  - delete: { target: 'model::tmp\.h\.\d+\.delta' }
+  - delete: { target: 'model::tmp\.h\.\d+\.deltaT' }
+
+  # Required checks (fail loudly before writing if anything is off).
+  - assert: { count: { of: 'model::.*', is: 160 } }
+  - assert: { not: { exists: 'model::.*lora_.*' } }
+  - assert: { shape: { of: model::h.0.attn.c_attn.weight, is: [768, 2304] } }
+  - assert: { dtype: { of: model::h.0.attn.c_attn.weight, is: float32 } }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

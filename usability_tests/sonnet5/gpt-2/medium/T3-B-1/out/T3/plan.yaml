@@ -1,0 +1,42 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Cast the 48 large projection matrices to bfloat16, in place (names unchanged).
+  - cast_:
+      target: 'h\.\d+\.(attn\.(c_attn|c_proj)|mlp\.(c_fc|c_proj))\.weight'
+      to: bfloat16
+
+  # Drop the 12 non-parameter causal-mask buffers.
+  - delete:
+      target: 'h\.\d+\.attn\.bias'
+
+  # --- Required checks ---
+  - assert:
+      count:
+        of: 'h\.\d+\.(attn\.(c_attn|c_proj)|mlp\.(c_fc|c_proj))\.weight'
+        is: 48
+  - assert:
+      dtype:
+        of: 'h\.\d+\.(attn\.(c_attn|c_proj)|mlp\.(c_fc|c_proj))\.weight'
+        is: bfloat16
+  - assert:
+      dtype:
+        of: h.0.attn.c_attn.weight
+        is: bfloat16
+  - assert:
+      dtype:
+        of: wte.weight
+        is: float32
+  - assert:
+      not:
+        exists: 'h\.\d+\.attn\.bias'
+  - assert:
+      count:
+        of: '.*'
+        is: 148
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 64MB

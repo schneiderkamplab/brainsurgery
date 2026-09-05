@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T4-defective.yaml",
+  "started_at": "2026-09-05T20:19:47+00:00",
+  "finished_at": "2026-09-05T20:20:02+00:00",
+  "wall_clock_s": 14.7,
+  "tokens_in": 2,
+  "tokens_out": 1284,
+  "cost_usd": 0.0530368,
+  "verdict_text": "NO\n\nThe plan computes the two task vectors sequentially against the same in-place tensor: `add_` folds `0.4*(ft1-base)` directly into `base::h.<i>.mlp....weight` before the ft2 task vector is computed, and the subsequent `subtract_` for `tv2` reads `from: 'base::h...'`, which is now the already-merged (base+0.4\u00b7(ft1-base)) value rather than the original base. This yields `out = base + 0.4*(ft1-base) + 0.4*(ft2 - (base+0.4*(ft1-base)))`, not the required `base + lambda*(ft1-base) + lambda*(ft2-base)`. This is exactly the ordering hazard the spec calls out: \"each task vector must be taken against the unmodified base, not against a base that the first merge already changed,\" violating Required Result step 2's formula.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}
