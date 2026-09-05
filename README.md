@@ -242,6 +242,12 @@ Supported operators:
 - `dimensions`: rank comparison (`of`, any of `is|ge|gt|le|lt`).
 - `dtype`: dtype check (`of`, `is` dtype string).
 - `equal`: pairwise equality between mapped tensors (`left`, `right`, optional `eps`).
+  `right` is resolved as a rewrite of each `left` match, exactly like `to` in `copy`/`move`:
+  capture groups from `left` can be used in `right` (`\1`, `\g<0>`), and aliases may differ.
+  `assert: { equal: { left: 'a::(.+)', right: 'b::\1' } }` checks every tensor of alias `a`
+  against the same name in alias `b`; `left: 'a::(?!h\.\d+\.mlp\.).+', right: 'b::\g<0>'`
+  does the same for the tensors outside `h.<i>.mlp.*`. Every `left` match must map to an
+  existing `right` tensor.
 - `iszero`: all-zero check (`of`, optional `eps`).
 - `reads`: access-count comparison for instrumented backends (`of`, any of `is|ge|gt|le|lt`; `at_least`/`at_most` accepted as compatibility aliases).
 - `writes`: access-count comparison for instrumented backends (`of`, any of `is|ge|gt|le|lt`; `at_least`/`at_most` accepted as compatibility aliases).
@@ -254,6 +260,19 @@ Supported operators:
 - If `output` is a directory-like path (or no suffix), safetensors output defaults to sharded writing using `--shard-size` unless shard is disabled.
 - `torch` output requires file suffix `.pt`, `.pth`, or `.bin`.
 - `output.shard` and `save.shard` are safetensors-only.
+- Which alias is written: with one input, its alias (`model` by default). With several
+  inputs, the alias is inferred as the single alias that the transforms write to
+  (`copy`/`move`/`fill`/... destinations, in-place targets such as `scale_`, `cast_`,
+  `add_`, and `delete`). `assert`, `diff`, `dump` and `help` do not count. If the transforms
+  write to more than one alias, or to none, the run fails with
+  `cannot infer output model uniquely`; keep every edit on one alias (use `alias::` on
+  destinations, e.g. copy from `ft::...` to `base::...`) so the output is unambiguous.
+- Shard sizes (`--shard-size`, `output.shard`, `save.shard`) accept `KB`, `MB`, `GB`, `TB` as
+  binary units: `100MB` = 100 x 1024 x 1024 = 104,857,600 bytes. The budget counts tensor
+  data only (file headers are extra). Tensors are packed into shards in state-dict order
+  up to the budget; a single tensor larger than the budget is written alone in its own
+  shard. Sharded output produces `model-00001-of-0000N.safetensors` files plus
+  `model.safetensors.index.json` whose `weight_map` maps every tensor name to its shard.
 
 ## Summary output
 When summarize is enabled (default), brainsurgery emits the exact transforms that actually ran:

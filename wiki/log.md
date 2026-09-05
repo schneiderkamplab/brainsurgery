@@ -7,6 +7,19 @@ confidence: high
 
 # Wiki Log
 
+## [2026-09-05] docs | three documentation gaps found by the usability pilot (fixed)
+
+- Found-by: the usability-study pilot (`usability_tests/`, Sonnet 5, condition B). Plan
+  authors repeatedly burned turns on: (1) shard-size units and the oversized-tensor rule;
+  (2) which alias a multi-input plan writes as `output`; (3) how `assert equal` maps
+  `left` names to `right` across aliases. One cell (OLMo-1B task-vector merge) hit the
+  turn cap twice on (2) and (3) without writing a plan.
+- Fixed-by: README "Output behavior" and "Assert expressions", `docs/interfaces-reference.md`
+  section 3, and the `equal` expression description in `brainsurgery/expressions/equal.py`
+  (shown by `help: { assert: equal }`). No behaviour change.
+- Study impact: the doc pack for condition B is regenerated from these files; the pilot
+  data collected with the old docs stays out of the study (git history only).
+
 ## [2026-09-05] engine | safetensors save failed on non-contiguous tensors (fixed)
 
 - Failure class: any plan whose output still held a tensor produced by `permute`,
