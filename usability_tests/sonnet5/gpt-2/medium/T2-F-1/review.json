@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-05T19:05:11+00:00",
+  "finished_at": "2026-09-05T19:05:17+00:00",
+  "wall_clock_s": 5.8,
+  "tokens_in": 2,
+  "tokens_out": 213,
+  "cost_usd": 0.038941800000000006,
+  "verdict_text": "NO\n\nThe artifact removes head 6 (`DROP_HEAD = 6`), but the specification requires removing head 5. This violates the \"Required result\" clause: \"For every layer `i`, remove head 5 (heads are numbered from 0).\" The kept column/row ranges (`0..319, 384..767, ...`) in the spec correspond to dropping the block at offset `320..383` (head 5), whereas the artifact drops the block at offset `384..447` (head 6), producing different values (though the same shapes) than required. Since grading is bit-exact against a reference with head 5 removed, this output will fail grading despite passing all the shape/count assertions.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,5 @@
+# Condition P environment. Pinned to the same core versions as condition F
+# (resolved 2026-09-05) so P, F and B run on identical torch/safetensors/numpy.
+torch==2.14.0
+safetensors==0.5.3
+numpy==2.5.2
