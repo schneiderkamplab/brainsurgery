@@ -2,7 +2,7 @@
 """Run one participant session with OpenAI Codex CLI and record everything.
 
     .venv/bin/python usability_tests/run_codex.py T2 B --agent <agent-name> --model <model-id> \
-        --target gpt-2 --effort light --repeat 1 [--reasoning-effort low] [--venv] [--timeout 900] [--skip-review]
+        --target gpt-2 --effort light --repeat 1 [--reasoning-effort low] [--venv] [--timeout 1800] [--skip-review]
 
 Same phases and the same record files as run_claude.py, so analyze.py treats
 both vendors alike:
@@ -181,10 +181,12 @@ def main() -> int:
                         help="value for model_reasoning_effort (default: the tier name; use low for light)")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--venv", action="store_true")
-    parser.add_argument("--timeout", type=int, default=900, help="solve-phase cap in seconds")
+    parser.add_argument("--timeout", type=int, default=1800, help="solve-phase cap in seconds (the study uses 1800)")
     parser.add_argument("--price-in", type=float, default=None, help="USD per 1M input tokens, for cost_usd")
     parser.add_argument("--price-out", type=float, default=None, help="USD per 1M output tokens, for cost_usd")
     parser.add_argument("--skip-review", action="store_true")
+    parser.add_argument("--keep-artifacts", action="store_true",
+                        help="keep the sandbox environment and output checkpoints (default: delete after grading)")
     parser.add_argument("--root", type=Path, default=HERE)
     args = parser.parse_args()
     if shutil.which("codex") is None:
@@ -256,6 +258,9 @@ def main() -> int:
         }
         (sandbox / "review.json").write_text(json.dumps(review, indent=2) + "\n")
         print(f"[run] review ({kind}): says_defective={says_defective}", flush=True)
+    if not args.keep_artifacts:
+        from run_claude import cleanup_sandbox
+        cleanup_sandbox(sandbox)
     return 0 if grade.get("passed") else 1
 
 

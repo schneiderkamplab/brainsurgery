@@ -140,6 +140,7 @@ outside the sandbox. Nothing from `references/`, `solutions/`, `review/` or
 | `resummarise.py` | Recomputes execution counts in `harness.json` from saved Claude transcripts |
 | `grade.py` | Grades an output against `references/<target>/<test>`; independent of BrainSurgery |
 | `analyze.py` | Aggregates run records into the study tables |
+| `make_manifest.py`, `manifest.sha256` | Checksums of every input, reference and doc-pack file; `--verify` proves another machine runs the same study |
 | `solutions/<target>/P/*.py`, `solutions/<target>/B/*.yaml` | Reference baselines and plans. Hidden from participants. The Python ones generate the references |
 | `review/<target>/` | Defective variants of the references, one injected defect per test, plus `answers.json` |
 | `AGENTS.md`, `CLAUDE.md` | Operating procedure for the experimenter agent |
