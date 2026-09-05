@@ -1,0 +1,24 @@
+# T5 for GPT-2 (124M): merge a PEFT-style LoRA adapter into the base weights, 100 MiB (104,857,600 bytes) shards.
+# delta = (alpha / r) * (B @ A).T with alpha=32, r=16.
+inputs:
+  - model::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+transforms:
+  - assert: { count: { of: 'lora::.*lora_A\.weight', is: 12 } }
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.(attn\.c_attn)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.\2.lora_A.weight'
+      to: 'model::h.\1.\2.delta_t'
+  - permute: { from: 'model::h\.(\d+)\.(attn\.c_attn)\.delta_t', to: 'model::h.\1.\2.delta', order: [1, 0] }
+  - scale_: { target: 'model::h\.\d+\.(attn\.c_attn)\.delta', by: 2 }
+  # base is float32 already
+  - add_: { from: 'model::h\.(\d+)\.(attn\.c_attn)\.delta', to: 'model::h.\1.\2.weight' }
+  # base is float32 already
+  - delete: { target: 'model::h\.\d+\.(attn\.c_attn)\.delta(_t)?' }
+  - assert: { not: { exists: 'model::.*lora_.*' } }
+  - assert: { shape: { of: model::h.0.attn.c_attn.weight, is: [768, 2304] } }
+  - assert: { count: { of: 'model::.*', is: 160 } }
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

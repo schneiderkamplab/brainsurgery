@@ -1,0 +1,27 @@
+# T4 for GPT-2 (124M): task-vector merge of two fine-tunes, lambda 0.4 each, MLP tensors only.
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+transforms:
+  - assert: { count: { of: 'ft1::.*', is: 160 } }
+  - assert: { count: { of: 'ft2::.*', is: 160 } }
+  - assert: { equal: { left: 'base::(?!h\.\d+\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)).+', right: 'ft1::\g<0>' } }
+  - assert: { equal: { left: 'base::(?!h\.\d+\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)).+', right: 'ft2::\g<0>' } }
+  # base is float32 already
+  # task vector 1: tv1 = 0.4 * (ft1 - base)
+  - copy: { from: 'ft1::h\.(\d+)\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)', to: 'base::h.\1.\2.tv1' }
+  # base is float32 already
+  - subtract_: { from: 'base::h\.(\d+)\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)', to: 'base::h.\1.\2.tv1' }
+  - scale_: { target: 'base::h\.\d+\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)\.tv1', by: 0.4 }
+  - add_: { from: 'base::h\.(\d+)\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)\.tv1', to: 'base::h.\1.\2' }
+  # task vector 2
+  - copy: { from: 'ft2::h\.(\d+)\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)', to: 'base::h.\1.\2.tv2' }
+  # base is float32 already
+  - subtract_: { from: 'base::h\.(\d+)\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)', to: 'base::h.\1.\2.tv2' }
+  - scale_: { target: 'base::h\.\d+\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)\.tv2', by: 0.4 }
+  - add_: { from: 'base::h\.(\d+)\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)\.tv2', to: 'base::h.\1.\2' }
+  - delete: { target: 'base::h\.\d+\.(mlp\.c_fc\.weight|mlp\.c_fc\.bias|mlp\.c_proj\.weight|mlp\.c_proj\.bias)\.tv[12]' }
+  # base is float32 already
+  - assert: { count: { of: 'base::.*', is: 160 } }
+output: out/T4/model.safetensors

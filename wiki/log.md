@@ -7,6 +7,24 @@ confidence: high
 
 # Wiki Log
 
+## [2026-09-05] engine | safetensors save failed on non-contiguous tensors (fixed)
+
+- Failure class: any plan whose output still held a tensor produced by `permute`,
+  or a `phlora` factor (LAPACK returns column-major singular vectors), aborted at
+  the final save with `ValueError: You are trying to save a non contiguous tensor`
+  under `--provider inmemory`. All transforms had already succeeded; with a sharded
+  output the shards written before the failing one were left on disk with no index
+  file. `--provider arena` did not fail because the arena copies tensors contiguously.
+- Fixed-by: `brainsurgery/io/safetensors.py` packs tensors with `.contiguous()` in
+  `_save_state_dict` and `_save_single_tensor` (no copy for tensors that are already
+  contiguous). Regression: `tests/test_io.py::test_safetensors_save_packs_non_contiguous_tensors`.
+- Validated-by: the `phlora` + `cast_` + sharded-output probe that reproduced the
+  error now writes all shards and the index under the default provider.
+- Not changed: output is still not atomic (a failure during the final save can leave
+  partial shards); a write-to-temp-then-rename output would close that gap.
+- Found while building `usability-tests/` (condition B needs the default provider to
+  work for every task). Confidence: high.
+
 ## [2026-07-06] codegen2-mlx | timing bug fix + custom fast forward + bfloat16 fix
 
 ### Timing Bug

@@ -1,0 +1,15 @@
+# T3 for OLMo-1B-0724-hf: bfloat16 projection matrices, float32 everything else, 256 MiB (268,435,456 bytes) shards.
+inputs:
+  - model::inputs/base
+transforms:
+  # no buffers to delete in this checkpoint
+  - cast_: { target: '.*', to: float32 }
+  - assert: { count: { of: 'model\.layers\.(\d+)\.(self_attn\.q_proj\.weight|self_attn\.k_proj\.weight|self_attn\.v_proj\.weight|mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)', is: 96 } }
+  - cast_: { target: 'model\.layers\.(\d+)\.(self_attn\.q_proj\.weight|self_attn\.k_proj\.weight|self_attn\.v_proj\.weight|mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)', to: bfloat16 }
+  - assert: { dtype: { of: model.layers.0.self_attn.q_proj.weight, is: bfloat16 } }
+  - assert: { dtype: { of: model.embed_tokens.weight, is: float32 } }
+  - assert: { count: { of: '.*', is: 114 } }
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

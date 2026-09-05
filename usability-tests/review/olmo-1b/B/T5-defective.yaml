@@ -1,0 +1,24 @@
+# T5 for OLMo-1B-0724-hf: merge a PEFT-style LoRA adapter into the base weights, 512 MiB (536,870,912 bytes) shards.
+# delta = (alpha / r) * B @ A with alpha=32, r=16.
+inputs:
+  - model::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+transforms:
+  - assert: { count: { of: 'lora::.*lora_A\.weight', is: 32 } }
+  - matmul:
+      from_a: 'lora::base_model\.model\.model\.layers\.(\d+)\.(self_attn\.q_proj|self_attn\.v_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.model.layers.\1.\2.lora_A.weight'
+      to: 'model::model.layers.\1.\2.delta'
+  # nn.Linear layout: no transpose needed
+  # defect: the alpha / r scale is missing
+  # base is float32 already
+  - add_: { from: 'model::model\.layers\.(\d+)\.(self_attn\.q_proj|self_attn\.v_proj)\.delta', to: 'model::model.layers.\1.\2.weight' }
+  # base is float32 already
+  - delete: { target: 'model::model\.layers\.\d+\.(self_attn\.q_proj|self_attn\.v_proj)\.delta(_t)?' }
+  - assert: { not: { exists: 'model::.*lora_.*' } }
+  - assert: { shape: { of: model::model.layers.0.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - assert: { count: { of: 'model::.*', is: 114 } }
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

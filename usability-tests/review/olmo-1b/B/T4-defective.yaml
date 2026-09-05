@@ -1,0 +1,27 @@
+# T4 for OLMo-1B-0724-hf: task-vector merge of two fine-tunes, lambda 0.4 each, MLP tensors only.
+inputs:
+  - base::inputs/base
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+transforms:
+  - assert: { count: { of: 'ft1::.*', is: 114 } }
+  - assert: { count: { of: 'ft2::.*', is: 114 } }
+  - assert: { equal: { left: 'base::(?!model\.layers\.\d+\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)).+', right: 'ft1::\g<0>' } }
+  - assert: { equal: { left: 'base::(?!model\.layers\.\d+\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)).+', right: 'ft2::\g<0>' } }
+  # base is float32 already
+  # task vector 1: tv1 = 0.4 * (ft1 - base)
+  - copy: { from: 'ft1::model\.layers\.(\d+)\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)', to: 'base::model.layers.\1.\2.tv1' }
+  # base is float32 already
+  - subtract_: { from: 'base::model\.layers\.(\d+)\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)', to: 'base::model.layers.\1.\2.tv1' }
+  - scale_: { target: 'base::model\.layers\.\d+\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)\.tv1', by: 0.4 }
+  - add_: { from: 'base::model\.layers\.(\d+)\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)\.tv1', to: 'base::model.layers.\1.\2' }
+  # task vector 2
+  - copy: { from: 'ft2::model\.layers\.(\d+)\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)', to: 'base::model.layers.\1.\2.tv2' }
+  # base is float32 already
+  - subtract_: { from: 'base::model\.layers\.(\d+)\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)', to: 'base::model.layers.\1.\2.tv2' }
+  - scale_: { target: 'base::model\.layers\.\d+\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)\.tv2', by: 0.4 }
+  - add_: { from: 'base::model\.layers\.(\d+)\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)\.tv2', to: 'base::model.layers.\1.\2' }
+  - delete: { target: 'base::model\.layers\.\d+\.(mlp\.gate_proj\.weight|mlp\.up_proj\.weight|mlp\.down_proj\.weight)\.tv[12]' }
+  # base is float32 already
+  - assert: { count: { of: 'base::.*', is: 114 } }
+output: out/T4/model.safetensors

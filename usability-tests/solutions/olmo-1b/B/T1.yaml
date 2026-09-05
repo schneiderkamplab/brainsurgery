@@ -1,0 +1,21 @@
+# T1 for OLMo-1B-0724-hf: remove blocks 2, 6, 10, 14 and renumber the rest contiguously.
+inputs:
+  - model::inputs/base
+transforms:
+  - assert: { count: { of: 'model\.layers\.(2|6|10|14)\..*', is: 28 } }
+  - delete: { target: 'model\.layers\.(2|6|10|14)\..*' }
+  # Shift surviving blocks down, lowest first, so each destination is free.
+  - move: { from: 'model\.layers\.3\.(.*)', to: 'model.layers.2.\1' }
+  - move: { from: 'model\.layers\.4\.(.*)', to: 'model.layers.3.\1' }
+  - move: { from: 'model\.layers\.5\.(.*)', to: 'model.layers.4.\1' }
+  - move: { from: 'model\.layers\.7\.(.*)', to: 'model.layers.5.\1' }
+  - move: { from: 'model\.layers\.8\.(.*)', to: 'model.layers.6.\1' }
+  - move: { from: 'model\.layers\.9\.(.*)', to: 'model.layers.7.\1' }
+  - move: { from: 'model\.layers\.11\.(.*)', to: 'model.layers.8.\1' }
+  - move: { from: 'model\.layers\.12\.(.*)', to: 'model.layers.9.\1' }
+  - move: { from: 'model\.layers\.13\.(.*)', to: 'model.layers.10.\1' }
+  - move: { from: 'model\.layers\.15\.(.*)', to: 'model.layers.11.\1' }
+  - assert: { not: { exists: 'model\.layers\.(12|13|14|15)\..*' } }
+  - assert: { count: { of: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight', is: 12 } }
+  - assert: { count: { of: '.*', is: 86 } }
+output: out/T1/model.safetensors

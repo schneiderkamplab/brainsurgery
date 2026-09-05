@@ -1,0 +1,86 @@
+# T2 for OLMo-1B-0724-hf: remove attention head 5 from every layer.
+# Each head-bearing tensor is rebuilt from the slices around the removed head.
+# concat takes single tensor references only, so the per-layer concats are spelled out.
+inputs:
+  - model::inputs/base
+transforms:
+  - copy: { from: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight::[0:640]', to: 'model.layers.\1.tmp_self_attn_q_proj_weight_0' }
+  - copy: { from: 'model\.layers\.(\d+)\.self_attn\.q_proj\.weight::[768:2048]', to: 'model.layers.\1.tmp_self_attn_q_proj_weight_1' }
+  - copy: { from: 'model\.layers\.(\d+)\.self_attn\.k_proj\.weight::[0:640]', to: 'model.layers.\1.tmp_self_attn_k_proj_weight_0' }
+  - copy: { from: 'model\.layers\.(\d+)\.self_attn\.k_proj\.weight::[768:2048]', to: 'model.layers.\1.tmp_self_attn_k_proj_weight_1' }
+  - copy: { from: 'model\.layers\.(\d+)\.self_attn\.v_proj\.weight::[0:640]', to: 'model.layers.\1.tmp_self_attn_v_proj_weight_0' }
+  - copy: { from: 'model\.layers\.(\d+)\.self_attn\.v_proj\.weight::[768:2048]', to: 'model.layers.\1.tmp_self_attn_v_proj_weight_1' }
+  - copy: { from: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight::[:, 0:640]', to: 'model.layers.\1.tmp_self_attn_o_proj_weight_0' }
+  - copy: { from: 'model\.layers\.(\d+)\.self_attn\.o_proj\.weight::[:, 768:2048]', to: 'model.layers.\1.tmp_self_attn_o_proj_weight_1' }
+  - delete: { target: 'model\.layers\.(\d+)\.(self_attn\.q_proj\.weight|self_attn\.k_proj\.weight|self_attn\.v_proj\.weight|self_attn\.o_proj\.weight)' }
+  - concat: { from: [model.layers.0.tmp_self_attn_q_proj_weight_0, model.layers.0.tmp_self_attn_q_proj_weight_1], to: model.layers.0.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.1.tmp_self_attn_q_proj_weight_0, model.layers.1.tmp_self_attn_q_proj_weight_1], to: model.layers.1.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.2.tmp_self_attn_q_proj_weight_0, model.layers.2.tmp_self_attn_q_proj_weight_1], to: model.layers.2.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.3.tmp_self_attn_q_proj_weight_0, model.layers.3.tmp_self_attn_q_proj_weight_1], to: model.layers.3.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.4.tmp_self_attn_q_proj_weight_0, model.layers.4.tmp_self_attn_q_proj_weight_1], to: model.layers.4.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.5.tmp_self_attn_q_proj_weight_0, model.layers.5.tmp_self_attn_q_proj_weight_1], to: model.layers.5.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.6.tmp_self_attn_q_proj_weight_0, model.layers.6.tmp_self_attn_q_proj_weight_1], to: model.layers.6.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.7.tmp_self_attn_q_proj_weight_0, model.layers.7.tmp_self_attn_q_proj_weight_1], to: model.layers.7.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.8.tmp_self_attn_q_proj_weight_0, model.layers.8.tmp_self_attn_q_proj_weight_1], to: model.layers.8.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.9.tmp_self_attn_q_proj_weight_0, model.layers.9.tmp_self_attn_q_proj_weight_1], to: model.layers.9.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.10.tmp_self_attn_q_proj_weight_0, model.layers.10.tmp_self_attn_q_proj_weight_1], to: model.layers.10.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.11.tmp_self_attn_q_proj_weight_0, model.layers.11.tmp_self_attn_q_proj_weight_1], to: model.layers.11.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.12.tmp_self_attn_q_proj_weight_0, model.layers.12.tmp_self_attn_q_proj_weight_1], to: model.layers.12.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.13.tmp_self_attn_q_proj_weight_0, model.layers.13.tmp_self_attn_q_proj_weight_1], to: model.layers.13.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.14.tmp_self_attn_q_proj_weight_0, model.layers.14.tmp_self_attn_q_proj_weight_1], to: model.layers.14.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.15.tmp_self_attn_q_proj_weight_0, model.layers.15.tmp_self_attn_q_proj_weight_1], to: model.layers.15.self_attn.q_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.0.tmp_self_attn_k_proj_weight_0, model.layers.0.tmp_self_attn_k_proj_weight_1], to: model.layers.0.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.1.tmp_self_attn_k_proj_weight_0, model.layers.1.tmp_self_attn_k_proj_weight_1], to: model.layers.1.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.2.tmp_self_attn_k_proj_weight_0, model.layers.2.tmp_self_attn_k_proj_weight_1], to: model.layers.2.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.3.tmp_self_attn_k_proj_weight_0, model.layers.3.tmp_self_attn_k_proj_weight_1], to: model.layers.3.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.4.tmp_self_attn_k_proj_weight_0, model.layers.4.tmp_self_attn_k_proj_weight_1], to: model.layers.4.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.5.tmp_self_attn_k_proj_weight_0, model.layers.5.tmp_self_attn_k_proj_weight_1], to: model.layers.5.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.6.tmp_self_attn_k_proj_weight_0, model.layers.6.tmp_self_attn_k_proj_weight_1], to: model.layers.6.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.7.tmp_self_attn_k_proj_weight_0, model.layers.7.tmp_self_attn_k_proj_weight_1], to: model.layers.7.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.8.tmp_self_attn_k_proj_weight_0, model.layers.8.tmp_self_attn_k_proj_weight_1], to: model.layers.8.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.9.tmp_self_attn_k_proj_weight_0, model.layers.9.tmp_self_attn_k_proj_weight_1], to: model.layers.9.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.10.tmp_self_attn_k_proj_weight_0, model.layers.10.tmp_self_attn_k_proj_weight_1], to: model.layers.10.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.11.tmp_self_attn_k_proj_weight_0, model.layers.11.tmp_self_attn_k_proj_weight_1], to: model.layers.11.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.12.tmp_self_attn_k_proj_weight_0, model.layers.12.tmp_self_attn_k_proj_weight_1], to: model.layers.12.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.13.tmp_self_attn_k_proj_weight_0, model.layers.13.tmp_self_attn_k_proj_weight_1], to: model.layers.13.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.14.tmp_self_attn_k_proj_weight_0, model.layers.14.tmp_self_attn_k_proj_weight_1], to: model.layers.14.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.15.tmp_self_attn_k_proj_weight_0, model.layers.15.tmp_self_attn_k_proj_weight_1], to: model.layers.15.self_attn.k_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.0.tmp_self_attn_v_proj_weight_0, model.layers.0.tmp_self_attn_v_proj_weight_1], to: model.layers.0.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.1.tmp_self_attn_v_proj_weight_0, model.layers.1.tmp_self_attn_v_proj_weight_1], to: model.layers.1.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.2.tmp_self_attn_v_proj_weight_0, model.layers.2.tmp_self_attn_v_proj_weight_1], to: model.layers.2.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.3.tmp_self_attn_v_proj_weight_0, model.layers.3.tmp_self_attn_v_proj_weight_1], to: model.layers.3.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.4.tmp_self_attn_v_proj_weight_0, model.layers.4.tmp_self_attn_v_proj_weight_1], to: model.layers.4.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.5.tmp_self_attn_v_proj_weight_0, model.layers.5.tmp_self_attn_v_proj_weight_1], to: model.layers.5.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.6.tmp_self_attn_v_proj_weight_0, model.layers.6.tmp_self_attn_v_proj_weight_1], to: model.layers.6.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.7.tmp_self_attn_v_proj_weight_0, model.layers.7.tmp_self_attn_v_proj_weight_1], to: model.layers.7.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.8.tmp_self_attn_v_proj_weight_0, model.layers.8.tmp_self_attn_v_proj_weight_1], to: model.layers.8.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.9.tmp_self_attn_v_proj_weight_0, model.layers.9.tmp_self_attn_v_proj_weight_1], to: model.layers.9.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.10.tmp_self_attn_v_proj_weight_0, model.layers.10.tmp_self_attn_v_proj_weight_1], to: model.layers.10.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.11.tmp_self_attn_v_proj_weight_0, model.layers.11.tmp_self_attn_v_proj_weight_1], to: model.layers.11.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.12.tmp_self_attn_v_proj_weight_0, model.layers.12.tmp_self_attn_v_proj_weight_1], to: model.layers.12.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.13.tmp_self_attn_v_proj_weight_0, model.layers.13.tmp_self_attn_v_proj_weight_1], to: model.layers.13.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.14.tmp_self_attn_v_proj_weight_0, model.layers.14.tmp_self_attn_v_proj_weight_1], to: model.layers.14.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.15.tmp_self_attn_v_proj_weight_0, model.layers.15.tmp_self_attn_v_proj_weight_1], to: model.layers.15.self_attn.v_proj.weight, dim: 0 }
+  - concat: { from: [model.layers.0.tmp_self_attn_o_proj_weight_0, model.layers.0.tmp_self_attn_o_proj_weight_1], to: model.layers.0.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.1.tmp_self_attn_o_proj_weight_0, model.layers.1.tmp_self_attn_o_proj_weight_1], to: model.layers.1.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.2.tmp_self_attn_o_proj_weight_0, model.layers.2.tmp_self_attn_o_proj_weight_1], to: model.layers.2.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.3.tmp_self_attn_o_proj_weight_0, model.layers.3.tmp_self_attn_o_proj_weight_1], to: model.layers.3.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.4.tmp_self_attn_o_proj_weight_0, model.layers.4.tmp_self_attn_o_proj_weight_1], to: model.layers.4.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.5.tmp_self_attn_o_proj_weight_0, model.layers.5.tmp_self_attn_o_proj_weight_1], to: model.layers.5.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.6.tmp_self_attn_o_proj_weight_0, model.layers.6.tmp_self_attn_o_proj_weight_1], to: model.layers.6.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.7.tmp_self_attn_o_proj_weight_0, model.layers.7.tmp_self_attn_o_proj_weight_1], to: model.layers.7.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.8.tmp_self_attn_o_proj_weight_0, model.layers.8.tmp_self_attn_o_proj_weight_1], to: model.layers.8.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.9.tmp_self_attn_o_proj_weight_0, model.layers.9.tmp_self_attn_o_proj_weight_1], to: model.layers.9.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.10.tmp_self_attn_o_proj_weight_0, model.layers.10.tmp_self_attn_o_proj_weight_1], to: model.layers.10.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.11.tmp_self_attn_o_proj_weight_0, model.layers.11.tmp_self_attn_o_proj_weight_1], to: model.layers.11.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.12.tmp_self_attn_o_proj_weight_0, model.layers.12.tmp_self_attn_o_proj_weight_1], to: model.layers.12.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.13.tmp_self_attn_o_proj_weight_0, model.layers.13.tmp_self_attn_o_proj_weight_1], to: model.layers.13.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.14.tmp_self_attn_o_proj_weight_0, model.layers.14.tmp_self_attn_o_proj_weight_1], to: model.layers.14.self_attn.o_proj.weight, dim: 1 }
+  - concat: { from: [model.layers.15.tmp_self_attn_o_proj_weight_0, model.layers.15.tmp_self_attn_o_proj_weight_1], to: model.layers.15.self_attn.o_proj.weight, dim: 1 }
+  - delete: { target: 'model\.layers\.(\d+)\.tmp_.*' }
+  - assert: { shape: { of: model.layers.0.self_attn.q_proj.weight, is: [1920, 2048] } }
+  - assert: { shape: { of: model.layers.0.self_attn.k_proj.weight, is: [1920, 2048] } }
+  - assert: { shape: { of: model.layers.0.self_attn.v_proj.weight, is: [1920, 2048] } }
+  - assert: { shape: { of: model.layers.0.self_attn.o_proj.weight, is: [2048, 1920] } }
+  - assert: { count: { of: '.*', is: 114 } }
+output: out/T2/model.safetensors
