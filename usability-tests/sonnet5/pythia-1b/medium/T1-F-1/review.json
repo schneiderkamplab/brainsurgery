@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T19:24:34+00:00",
+  "finished_at": "2026-09-05T19:24:39+00:00",
+  "wall_clock_s": 5.0,
+  "tokens_in": 2,
+  "tokens_out": 210,
+  "cost_usd": 0.0404418,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 6, 10, **15**} instead of the required {2, 6, 10, **14**}, violating clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\"). This also breaks the required mapping in clause 2: it keeps old block 14 and maps it to new index 11, whereas the spec requires old 14 removed and old 15 mapped to new index 11. The resulting checkpoint would pass the required checks (12 blocks, 184 tensors, no blocks 12\u201315 remaining) but would not match the hidden reference's exact key/value mapping, so grading would fail.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

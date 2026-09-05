@@ -1,0 +1,97 @@
+inputs:
+  - model::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+# LoRA "merge and unload" for the 16 gpt_neox.attention.query_key_value
+# layers: weight += (lora_alpha / r) * (lora_B @ lora_A), computed in
+# float32 and cast back to the base dtype (float16). fan_in_fan_out is
+# false, so B @ A already matches the base [out, in] layout with no
+# transposition. Intermediate and adapter tensors are deleted before the
+# sharded write so only the 244 original base tensor names remain.
+
+transforms:
+  # --- Preflight: confirm the adapter shape we expect before touching anything.
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_A\.weight'
+        is: 16
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_B\.weight'
+        is: 16
+  - assert:
+      shape:
+        of: 'lora::base_model.model.gpt_neox.layers.0.attention.query_key_value.lora_A.weight'
+        is: [16, 2048]
+  - assert:
+      shape:
+        of: 'lora::base_model.model.gpt_neox.layers.0.attention.query_key_value.lora_B.weight'
+        is: [6144, 16]
+  - assert:
+      dtype:
+        of: 'model::gpt_neox.layers.0.attention.query_key_value.weight'
+        is: float16
+
+  # --- delta_raw = lora_B @ lora_A, in float32 (both factors are float32).
+  - matmul:
+      from_a: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_B\.weight'
+      from_b: 'lora::base_model.model.gpt_neox.layers.\1.attention.query_key_value.lora_A.weight'
+      to: 'model::gpt_neox.layers.\1.attention.query_key_value.delta_raw'
+
+  # --- delta_scaled = delta_raw * (lora_alpha / r) = delta_raw * 2.
+  - scale:
+      from: 'model::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.delta_raw'
+      to: 'model::gpt_neox.layers.\1.attention.query_key_value.delta_scaled'
+      by: 2.0
+
+  # --- Upcast the base weight to float32 for the accumulation.
+  - cast:
+      from: 'model::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight'
+      to: 'model::gpt_neox.layers.\1.attention.query_key_value.basef32'
+      dtype: float32
+
+  # --- basef32 += delta_scaled (float32 accumulation).
+  - add_:
+      from: 'model::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.delta_scaled'
+      to: 'model::gpt_neox.layers.\1.attention.query_key_value.basef32'
+
+  # --- Cast the merged result back down to float16.
+  - cast:
+      from: 'model::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.basef32'
+      to: 'model::gpt_neox.layers.\1.attention.query_key_value.merged'
+      dtype: float16
+
+  # --- Write the merged float16 result back into the original tensor name.
+  - assign:
+      from: 'model::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.merged'
+      to: 'model::gpt_neox.layers.\1.attention.query_key_value.weight'
+
+  # --- Drop every intermediate and adapter tensor; only base names remain.
+  - delete: { target: 'model::gpt_neox\.layers\.\d+\.attention\.query_key_value\.delta_raw' }
+  - delete: { target: 'model::gpt_neox\.layers\.\d+\.attention\.query_key_value\.delta_scaled' }
+  - delete: { target: 'model::gpt_neox\.layers\.\d+\.attention\.query_key_value\.basef32' }
+  - delete: { target: 'model::gpt_neox\.layers\.\d+\.attention\.query_key_value\.merged' }
+  - delete: { target: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_A\.weight' }
+  - delete: { target: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_B\.weight' }
+
+  # --- Required checks (fail loudly before writing).
+  - assert:
+      count:
+        of: 'model::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight'
+        is: 16
+  - assert:
+      not:
+        exists: 'model::.*lora_.*'
+  - assert:
+      shape:
+        of: 'model::gpt_neox.layers.0.attention.query_key_value.weight'
+        is: [6144, 2048]
+  - assert:
+      count:
+        of: 'model::.*'
+        is: 244
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

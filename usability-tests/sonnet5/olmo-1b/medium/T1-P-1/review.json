@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T19:11:21+00:00",
+  "finished_at": "2026-09-05T19:11:26+00:00",
+  "wall_clock_s": 4.8,
+  "tokens_in": 2,
+  "tokens_out": 236,
+  "cost_usd": 0.0378658,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 6, 10, 15} instead of the required {2, 6, 10, 14}, violating \"Required result\" clause 1 (remove every tensor of blocks 2, 6, 10, 14). As a consequence the renumbering mapping is also wrong: it keeps old block 14 and drops old block 15, whereas the spec requires old 13\u219210 and old 15\u219211 (with old 14 removed). Block 15 (renumbered as old block 14 would have been) ends up misassigned to index 11 with the wrong source tensor, so the output content diverges from spec clause 2's exact old\u2192new mapping even though the internal self-consistency checks (12 layers, 86 tensors) pass.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

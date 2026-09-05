@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-05T19:14:23+00:00",
+  "finished_at": "2026-09-05T19:14:34+00:00",
+  "wall_clock_s": 11.4,
+  "tokens_in": 2,
+  "tokens_out": 777,
+  "cost_usd": 0.04512480000000001,
+  "verdict_text": "NO\n\nThe plan deletes blocks **2, 6, 10, 15** and keeps/renumbers block 14 \u2192 11, but the specification requires deleting blocks **2, 6, 10, 14** and renumbering old block **15** \u2192 11 (Required result, clause 1 and the explicit mapping in clause 2). The asserts in the plan (count of deleted-block tensors = 28, no blocks 12\u201315 remain, 12 q_proj tensors, 86 total tensors) all still pass with this wrong block set, so the plan runs successfully but writes the wrong block's weights into slot 11 \u2014 block 14's original data survives instead of block 15's, and block 15 is erroneously discarded. This will fail the hidden bit-exact comparison in Grading even though the mandated \"Required checks\" are satisfied.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T19:13:38+00:00",
+  "finished_at": "2026-09-05T19:13:42+00:00",
+  "wall_clock_s": 3.9,
+  "tokens_in": 2,
+  "tokens_out": 145,
+  "cost_usd": 0.0390728,
+  "verdict_text": "NO\n\nThe script removes head 6 instead of head 5 (`DROP_HEAD = 6`), so it keeps rows/columns 0..767, 896..2047 instead of the required 0..639, 768..2047, violating Required Result clauses 1\u20134. This produces a checkpoint of the correct shape but with the wrong slice removed, so it will fail the bit-exact comparison in Grading despite passing the shape-only Required Checks.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

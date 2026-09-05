@@ -1,0 +1,59 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-sonnet-5",
+  "agent": "sonnet5",
+  "target": "gpt-2",
+  "effort": "medium",
+  "test": "T3",
+  "condition": "B",
+  "repeat": 1,
+  "started_at": "2026-09-05T19:05:19+00:00",
+  "finished_at": "2026-09-05T19:08:46+00:00",
+  "wall_clock_s": 207.0,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 900,
+  "turns": 38,
+  "tool_calls": 37,
+  "tokens_in": 66,
+  "tokens_out": 11879,
+  "cache_read_tokens": 1512559,
+  "cache_write_tokens": 55673,
+  "tokens_in_total": 1568298,
+  "cost_usd": 0.6464988,
+  "duration_api_ms": 153404,
+  "session_id": "c12d6864-0ee3-4c6f-804f-cd4617944522",
+  "result_subtype": "success",
+  "executions": 5,
+  "failed_executions": [
+    {
+      "n": 1,
+      "command": "cd /tmp/shardtest && /home/rootkidd/Projects/brainsurgery/usability-tests/sonnet5/gpt-2/medium/T3-B-1/.venv/bin/brainsurgery plan.yaml 2>&1 | tail -40 && echo --- && ls -la out/ && cat out/model.safetensors.index.json 2>/dev/null | python3 -m json.tool 2>/dev/null | head -30",
+      "message": "ls: cannot access 'out/': No such file or directory",
+      "error_class": ""
+    },
+    {
+      "n": 2,
+      "command": "cd /tmp/shardtest && rm -rf out && /home/rootkidd/Projects/brainsurgery/usability-tests/sonnet5/gpt-2/medium/T3-B-1/.venv/bin/brainsurgery plan.yaml 2>&1 | tail -40 && echo --- && ls -la out/ && python3 -m json.tool out/model.safetensors.index.json 2>/dev/null | head -40",
+      "message": "ls: cannot access 'out/': No such file or directory",
+      "error_class": ""
+    },
+    {
+      "n": 3,
+      "command": "cd /tmp/shardtest && rm -rf out && /home/rootkidd/Projects/brainsurgery/usability-tests/sonnet5/gpt-2/medium/T3-B-1/.venv/bin/brainsurgery plan.yaml 2>&1 | tail -40 && echo --- && ls -la out/ && python3 -m json.tool out/model.safetensors.index.json 2>/dev/null | head -60",
+      "message": "ls: cannot access 'out/': No such file or directory",
+      "error_class": ""
+    },
+    {
+      "n": 4,
+      "command": "cd /tmp/shardtest && rm -rf out && /home/rootkidd/Projects/brainsurgery/usability-tests/sonnet5/gpt-2/medium/T3-B-1/.venv/bin/brainsurgery plan.yaml 2>&1 | tail -40 && echo --- && ls -la out/ && python3 -m json.tool out/model.safetensors.index.json 2>/dev/null",
+      "message": "ls: cannot access 'out/': No such file or directory",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 5,
+  "final_text": "Done. Summary:\n\n- **Plan**: `out/T3/plan.yaml` \u2014 casts the 48 named projection matrices to bfloat16 in place (`cast_`, preserving tensor names), deletes the 12 `h.<i>.attn.bias` buffers, runs the four required `assert` checks plus two extra sanity checks (buffers gone, total count), and writes a sharded safetensors checkpoint to `out/T3/` with `shard: 64MB` (which this tool parses as `1024**2` bytes = exactly 64 MiB).\n- **Result**: single execution, passed immediately. `out/T3/` has 4 shards + `model.safetensors.index.json`, 148 tensors total; `wte.weight` (154 MB) is correctly isolated alone in its own shard since it exceeds the 64 MiB limit, and every other shard's tensor data is under budget.\n- **Report**: `out/T3/REPORT.md` written with the participant self-report fields, including the one real pitfall (the `output.shard` unit grammar \u2014 decimal vs. binary \u2014 isn't documented, so I verified it empirically against a throwaway checkpoint outside `out/` before touching the real plan)."
+}

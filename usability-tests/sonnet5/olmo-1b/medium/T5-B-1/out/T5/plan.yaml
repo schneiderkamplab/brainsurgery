@@ -1,0 +1,69 @@
+inputs:
+  - model::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB
+
+transforms:
+  # Preflight: confirm the adapter has exactly 32 A/B pairs (16 layers x 2 modules).
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.model\.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_A\.weight'
+        is: 32
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.model\.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_B\.weight'
+        is: 32
+  - assert:
+      shape:
+        of: 'lora::base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight'
+        is: [16, 2048]
+  - assert:
+      shape:
+        of: 'lora::base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight'
+        is: [2048, 16]
+
+  # delta = B @ A for every adapted layer/module (fan_in_fan_out=false, so no transpose).
+  - matmul:
+      from_a: 'lora::base_model\.model\.model\.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.model.layers.\1.self_attn.\2.lora_A.weight'
+      to: 'model::model.layers.\1.self_attn.\2.lora_delta'
+
+  # Exactly 32 merges must have happened.
+  - assert:
+      count:
+        of: 'model::model.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_delta'
+        is: 32
+
+  # scale = lora_alpha / r = 32 / 16 = 2.
+  - scale:
+      from: 'model::model.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_delta'
+      to: 'model::model.layers.\1.self_attn.\2.lora_delta_scaled'
+      by: 2
+
+  # weight += scale * B @ A, in place, keeping name/shape/dtype.
+  - add_:
+      from: 'model::model.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_delta_scaled'
+      to: 'model::model.layers.\1.self_attn.\2.weight'
+
+  # Drop every intermediate tensor; only the merged base weights remain.
+  - delete:
+      target: 'model::model.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_delta'
+  - delete:
+      target: 'model::model.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_delta_scaled'
+
+  # Required checks.
+  - assert:
+      not:
+        exists: 'model::.*lora_.*'
+  - assert:
+      shape:
+        of: 'model::model.layers.0.self_attn.q_proj.weight'
+        is: [2048, 2048]
+  - assert:
+      count:
+        of: 'model::.*'
+        is: 114

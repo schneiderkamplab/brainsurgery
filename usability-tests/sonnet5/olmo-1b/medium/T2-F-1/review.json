@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T19:15:05+00:00",
+  "finished_at": "2026-09-05T19:15:12+00:00",
+  "wall_clock_s": 6.3,
+  "tokens_in": 2,
+  "tokens_out": 218,
+  "cost_usd": 0.0403348,
+  "verdict_text": "NO\n\nThe script drops head index 6 (`DROP_HEAD = 6`), but the specification requires removing head 5 (rows/columns `0..639, 768..2047`, which excludes the block for head index 5, i.e. `640..767`). Dropping head 6 instead removes rows/columns `768..895`, keeping `0..767, 896..2047` \u2014 a different set of rows/columns than required by clauses 1\u20134 of \"Required result\". This will produce shapes that pass the required checks (still `[1920, 2048]`/`[2048, 1920]`) but with the wrong slice content, so it will fail the grader's bit-exact comparison against the hidden reference.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,351 @@
+inputs:
+  - model::inputs/base
+
+transforms:
+  - assert: { count: { of: 'model\.layers\.\d+\.self_attn\.(q|k|v|o)_proj\.weight', is: 64 } }
+
+  - assert: { shape: { of: model.layers.0.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.0.self_attn.q_proj.weight::[:640, :]', 'model.layers.0.self_attn.q_proj.weight::[768:, :]'], to: model.layers.0.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.0.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.0.self_attn.q_proj.weight }
+  - move: { from: model.layers.0.self_attn.q_proj.weight__pruned, to: model.layers.0.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.0.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.0.self_attn.k_proj.weight::[:640, :]', 'model.layers.0.self_attn.k_proj.weight::[768:, :]'], to: model.layers.0.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.0.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.0.self_attn.k_proj.weight }
+  - move: { from: model.layers.0.self_attn.k_proj.weight__pruned, to: model.layers.0.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.0.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.0.self_attn.v_proj.weight::[:640, :]', 'model.layers.0.self_attn.v_proj.weight::[768:, :]'], to: model.layers.0.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.0.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.0.self_attn.v_proj.weight }
+  - move: { from: model.layers.0.self_attn.v_proj.weight__pruned, to: model.layers.0.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.0.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.0.self_attn.o_proj.weight::[:, :640]', 'model.layers.0.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.0.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.0.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.0.self_attn.o_proj.weight }
+  - move: { from: model.layers.0.self_attn.o_proj.weight__pruned, to: model.layers.0.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.1.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.1.self_attn.q_proj.weight::[:640, :]', 'model.layers.1.self_attn.q_proj.weight::[768:, :]'], to: model.layers.1.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.1.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.1.self_attn.q_proj.weight }
+  - move: { from: model.layers.1.self_attn.q_proj.weight__pruned, to: model.layers.1.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.1.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.1.self_attn.k_proj.weight::[:640, :]', 'model.layers.1.self_attn.k_proj.weight::[768:, :]'], to: model.layers.1.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.1.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.1.self_attn.k_proj.weight }
+  - move: { from: model.layers.1.self_attn.k_proj.weight__pruned, to: model.layers.1.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.1.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.1.self_attn.v_proj.weight::[:640, :]', 'model.layers.1.self_attn.v_proj.weight::[768:, :]'], to: model.layers.1.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.1.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.1.self_attn.v_proj.weight }
+  - move: { from: model.layers.1.self_attn.v_proj.weight__pruned, to: model.layers.1.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.1.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.1.self_attn.o_proj.weight::[:, :640]', 'model.layers.1.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.1.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.1.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.1.self_attn.o_proj.weight }
+  - move: { from: model.layers.1.self_attn.o_proj.weight__pruned, to: model.layers.1.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.2.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.2.self_attn.q_proj.weight::[:640, :]', 'model.layers.2.self_attn.q_proj.weight::[768:, :]'], to: model.layers.2.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.2.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.2.self_attn.q_proj.weight }
+  - move: { from: model.layers.2.self_attn.q_proj.weight__pruned, to: model.layers.2.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.2.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.2.self_attn.k_proj.weight::[:640, :]', 'model.layers.2.self_attn.k_proj.weight::[768:, :]'], to: model.layers.2.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.2.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.2.self_attn.k_proj.weight }
+  - move: { from: model.layers.2.self_attn.k_proj.weight__pruned, to: model.layers.2.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.2.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.2.self_attn.v_proj.weight::[:640, :]', 'model.layers.2.self_attn.v_proj.weight::[768:, :]'], to: model.layers.2.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.2.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.2.self_attn.v_proj.weight }
+  - move: { from: model.layers.2.self_attn.v_proj.weight__pruned, to: model.layers.2.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.2.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.2.self_attn.o_proj.weight::[:, :640]', 'model.layers.2.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.2.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.2.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.2.self_attn.o_proj.weight }
+  - move: { from: model.layers.2.self_attn.o_proj.weight__pruned, to: model.layers.2.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.3.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.3.self_attn.q_proj.weight::[:640, :]', 'model.layers.3.self_attn.q_proj.weight::[768:, :]'], to: model.layers.3.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.3.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.3.self_attn.q_proj.weight }
+  - move: { from: model.layers.3.self_attn.q_proj.weight__pruned, to: model.layers.3.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.3.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.3.self_attn.k_proj.weight::[:640, :]', 'model.layers.3.self_attn.k_proj.weight::[768:, :]'], to: model.layers.3.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.3.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.3.self_attn.k_proj.weight }
+  - move: { from: model.layers.3.self_attn.k_proj.weight__pruned, to: model.layers.3.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.3.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.3.self_attn.v_proj.weight::[:640, :]', 'model.layers.3.self_attn.v_proj.weight::[768:, :]'], to: model.layers.3.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.3.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.3.self_attn.v_proj.weight }
+  - move: { from: model.layers.3.self_attn.v_proj.weight__pruned, to: model.layers.3.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.3.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.3.self_attn.o_proj.weight::[:, :640]', 'model.layers.3.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.3.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.3.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.3.self_attn.o_proj.weight }
+  - move: { from: model.layers.3.self_attn.o_proj.weight__pruned, to: model.layers.3.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.4.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.4.self_attn.q_proj.weight::[:640, :]', 'model.layers.4.self_attn.q_proj.weight::[768:, :]'], to: model.layers.4.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.4.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.4.self_attn.q_proj.weight }
+  - move: { from: model.layers.4.self_attn.q_proj.weight__pruned, to: model.layers.4.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.4.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.4.self_attn.k_proj.weight::[:640, :]', 'model.layers.4.self_attn.k_proj.weight::[768:, :]'], to: model.layers.4.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.4.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.4.self_attn.k_proj.weight }
+  - move: { from: model.layers.4.self_attn.k_proj.weight__pruned, to: model.layers.4.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.4.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.4.self_attn.v_proj.weight::[:640, :]', 'model.layers.4.self_attn.v_proj.weight::[768:, :]'], to: model.layers.4.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.4.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.4.self_attn.v_proj.weight }
+  - move: { from: model.layers.4.self_attn.v_proj.weight__pruned, to: model.layers.4.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.4.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.4.self_attn.o_proj.weight::[:, :640]', 'model.layers.4.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.4.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.4.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.4.self_attn.o_proj.weight }
+  - move: { from: model.layers.4.self_attn.o_proj.weight__pruned, to: model.layers.4.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.5.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.5.self_attn.q_proj.weight::[:640, :]', 'model.layers.5.self_attn.q_proj.weight::[768:, :]'], to: model.layers.5.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.5.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.5.self_attn.q_proj.weight }
+  - move: { from: model.layers.5.self_attn.q_proj.weight__pruned, to: model.layers.5.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.5.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.5.self_attn.k_proj.weight::[:640, :]', 'model.layers.5.self_attn.k_proj.weight::[768:, :]'], to: model.layers.5.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.5.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.5.self_attn.k_proj.weight }
+  - move: { from: model.layers.5.self_attn.k_proj.weight__pruned, to: model.layers.5.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.5.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.5.self_attn.v_proj.weight::[:640, :]', 'model.layers.5.self_attn.v_proj.weight::[768:, :]'], to: model.layers.5.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.5.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.5.self_attn.v_proj.weight }
+  - move: { from: model.layers.5.self_attn.v_proj.weight__pruned, to: model.layers.5.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.5.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.5.self_attn.o_proj.weight::[:, :640]', 'model.layers.5.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.5.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.5.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.5.self_attn.o_proj.weight }
+  - move: { from: model.layers.5.self_attn.o_proj.weight__pruned, to: model.layers.5.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.6.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.6.self_attn.q_proj.weight::[:640, :]', 'model.layers.6.self_attn.q_proj.weight::[768:, :]'], to: model.layers.6.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.6.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.6.self_attn.q_proj.weight }
+  - move: { from: model.layers.6.self_attn.q_proj.weight__pruned, to: model.layers.6.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.6.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.6.self_attn.k_proj.weight::[:640, :]', 'model.layers.6.self_attn.k_proj.weight::[768:, :]'], to: model.layers.6.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.6.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.6.self_attn.k_proj.weight }
+  - move: { from: model.layers.6.self_attn.k_proj.weight__pruned, to: model.layers.6.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.6.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.6.self_attn.v_proj.weight::[:640, :]', 'model.layers.6.self_attn.v_proj.weight::[768:, :]'], to: model.layers.6.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.6.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.6.self_attn.v_proj.weight }
+  - move: { from: model.layers.6.self_attn.v_proj.weight__pruned, to: model.layers.6.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.6.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.6.self_attn.o_proj.weight::[:, :640]', 'model.layers.6.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.6.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.6.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.6.self_attn.o_proj.weight }
+  - move: { from: model.layers.6.self_attn.o_proj.weight__pruned, to: model.layers.6.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.7.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.7.self_attn.q_proj.weight::[:640, :]', 'model.layers.7.self_attn.q_proj.weight::[768:, :]'], to: model.layers.7.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.7.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.7.self_attn.q_proj.weight }
+  - move: { from: model.layers.7.self_attn.q_proj.weight__pruned, to: model.layers.7.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.7.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.7.self_attn.k_proj.weight::[:640, :]', 'model.layers.7.self_attn.k_proj.weight::[768:, :]'], to: model.layers.7.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.7.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.7.self_attn.k_proj.weight }
+  - move: { from: model.layers.7.self_attn.k_proj.weight__pruned, to: model.layers.7.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.7.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.7.self_attn.v_proj.weight::[:640, :]', 'model.layers.7.self_attn.v_proj.weight::[768:, :]'], to: model.layers.7.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.7.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.7.self_attn.v_proj.weight }
+  - move: { from: model.layers.7.self_attn.v_proj.weight__pruned, to: model.layers.7.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.7.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.7.self_attn.o_proj.weight::[:, :640]', 'model.layers.7.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.7.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.7.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.7.self_attn.o_proj.weight }
+  - move: { from: model.layers.7.self_attn.o_proj.weight__pruned, to: model.layers.7.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.8.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.8.self_attn.q_proj.weight::[:640, :]', 'model.layers.8.self_attn.q_proj.weight::[768:, :]'], to: model.layers.8.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.8.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.8.self_attn.q_proj.weight }
+  - move: { from: model.layers.8.self_attn.q_proj.weight__pruned, to: model.layers.8.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.8.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.8.self_attn.k_proj.weight::[:640, :]', 'model.layers.8.self_attn.k_proj.weight::[768:, :]'], to: model.layers.8.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.8.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.8.self_attn.k_proj.weight }
+  - move: { from: model.layers.8.self_attn.k_proj.weight__pruned, to: model.layers.8.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.8.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.8.self_attn.v_proj.weight::[:640, :]', 'model.layers.8.self_attn.v_proj.weight::[768:, :]'], to: model.layers.8.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.8.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.8.self_attn.v_proj.weight }
+  - move: { from: model.layers.8.self_attn.v_proj.weight__pruned, to: model.layers.8.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.8.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.8.self_attn.o_proj.weight::[:, :640]', 'model.layers.8.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.8.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.8.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.8.self_attn.o_proj.weight }
+  - move: { from: model.layers.8.self_attn.o_proj.weight__pruned, to: model.layers.8.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.9.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.9.self_attn.q_proj.weight::[:640, :]', 'model.layers.9.self_attn.q_proj.weight::[768:, :]'], to: model.layers.9.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.9.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.9.self_attn.q_proj.weight }
+  - move: { from: model.layers.9.self_attn.q_proj.weight__pruned, to: model.layers.9.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.9.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.9.self_attn.k_proj.weight::[:640, :]', 'model.layers.9.self_attn.k_proj.weight::[768:, :]'], to: model.layers.9.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.9.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.9.self_attn.k_proj.weight }
+  - move: { from: model.layers.9.self_attn.k_proj.weight__pruned, to: model.layers.9.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.9.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.9.self_attn.v_proj.weight::[:640, :]', 'model.layers.9.self_attn.v_proj.weight::[768:, :]'], to: model.layers.9.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.9.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.9.self_attn.v_proj.weight }
+  - move: { from: model.layers.9.self_attn.v_proj.weight__pruned, to: model.layers.9.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.9.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.9.self_attn.o_proj.weight::[:, :640]', 'model.layers.9.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.9.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.9.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.9.self_attn.o_proj.weight }
+  - move: { from: model.layers.9.self_attn.o_proj.weight__pruned, to: model.layers.9.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.10.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.10.self_attn.q_proj.weight::[:640, :]', 'model.layers.10.self_attn.q_proj.weight::[768:, :]'], to: model.layers.10.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.10.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.10.self_attn.q_proj.weight }
+  - move: { from: model.layers.10.self_attn.q_proj.weight__pruned, to: model.layers.10.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.10.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.10.self_attn.k_proj.weight::[:640, :]', 'model.layers.10.self_attn.k_proj.weight::[768:, :]'], to: model.layers.10.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.10.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.10.self_attn.k_proj.weight }
+  - move: { from: model.layers.10.self_attn.k_proj.weight__pruned, to: model.layers.10.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.10.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.10.self_attn.v_proj.weight::[:640, :]', 'model.layers.10.self_attn.v_proj.weight::[768:, :]'], to: model.layers.10.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.10.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.10.self_attn.v_proj.weight }
+  - move: { from: model.layers.10.self_attn.v_proj.weight__pruned, to: model.layers.10.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.10.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.10.self_attn.o_proj.weight::[:, :640]', 'model.layers.10.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.10.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.10.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.10.self_attn.o_proj.weight }
+  - move: { from: model.layers.10.self_attn.o_proj.weight__pruned, to: model.layers.10.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.11.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.11.self_attn.q_proj.weight::[:640, :]', 'model.layers.11.self_attn.q_proj.weight::[768:, :]'], to: model.layers.11.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.11.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.11.self_attn.q_proj.weight }
+  - move: { from: model.layers.11.self_attn.q_proj.weight__pruned, to: model.layers.11.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.11.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.11.self_attn.k_proj.weight::[:640, :]', 'model.layers.11.self_attn.k_proj.weight::[768:, :]'], to: model.layers.11.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.11.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.11.self_attn.k_proj.weight }
+  - move: { from: model.layers.11.self_attn.k_proj.weight__pruned, to: model.layers.11.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.11.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.11.self_attn.v_proj.weight::[:640, :]', 'model.layers.11.self_attn.v_proj.weight::[768:, :]'], to: model.layers.11.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.11.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.11.self_attn.v_proj.weight }
+  - move: { from: model.layers.11.self_attn.v_proj.weight__pruned, to: model.layers.11.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.11.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.11.self_attn.o_proj.weight::[:, :640]', 'model.layers.11.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.11.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.11.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.11.self_attn.o_proj.weight }
+  - move: { from: model.layers.11.self_attn.o_proj.weight__pruned, to: model.layers.11.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.12.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.12.self_attn.q_proj.weight::[:640, :]', 'model.layers.12.self_attn.q_proj.weight::[768:, :]'], to: model.layers.12.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.12.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.12.self_attn.q_proj.weight }
+  - move: { from: model.layers.12.self_attn.q_proj.weight__pruned, to: model.layers.12.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.12.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.12.self_attn.k_proj.weight::[:640, :]', 'model.layers.12.self_attn.k_proj.weight::[768:, :]'], to: model.layers.12.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.12.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.12.self_attn.k_proj.weight }
+  - move: { from: model.layers.12.self_attn.k_proj.weight__pruned, to: model.layers.12.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.12.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.12.self_attn.v_proj.weight::[:640, :]', 'model.layers.12.self_attn.v_proj.weight::[768:, :]'], to: model.layers.12.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.12.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.12.self_attn.v_proj.weight }
+  - move: { from: model.layers.12.self_attn.v_proj.weight__pruned, to: model.layers.12.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.12.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.12.self_attn.o_proj.weight::[:, :640]', 'model.layers.12.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.12.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.12.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.12.self_attn.o_proj.weight }
+  - move: { from: model.layers.12.self_attn.o_proj.weight__pruned, to: model.layers.12.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.13.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.13.self_attn.q_proj.weight::[:640, :]', 'model.layers.13.self_attn.q_proj.weight::[768:, :]'], to: model.layers.13.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.13.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.13.self_attn.q_proj.weight }
+  - move: { from: model.layers.13.self_attn.q_proj.weight__pruned, to: model.layers.13.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.13.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.13.self_attn.k_proj.weight::[:640, :]', 'model.layers.13.self_attn.k_proj.weight::[768:, :]'], to: model.layers.13.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.13.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.13.self_attn.k_proj.weight }
+  - move: { from: model.layers.13.self_attn.k_proj.weight__pruned, to: model.layers.13.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.13.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.13.self_attn.v_proj.weight::[:640, :]', 'model.layers.13.self_attn.v_proj.weight::[768:, :]'], to: model.layers.13.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.13.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.13.self_attn.v_proj.weight }
+  - move: { from: model.layers.13.self_attn.v_proj.weight__pruned, to: model.layers.13.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.13.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.13.self_attn.o_proj.weight::[:, :640]', 'model.layers.13.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.13.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.13.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.13.self_attn.o_proj.weight }
+  - move: { from: model.layers.13.self_attn.o_proj.weight__pruned, to: model.layers.13.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.14.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.14.self_attn.q_proj.weight::[:640, :]', 'model.layers.14.self_attn.q_proj.weight::[768:, :]'], to: model.layers.14.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.14.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.14.self_attn.q_proj.weight }
+  - move: { from: model.layers.14.self_attn.q_proj.weight__pruned, to: model.layers.14.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.14.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.14.self_attn.k_proj.weight::[:640, :]', 'model.layers.14.self_attn.k_proj.weight::[768:, :]'], to: model.layers.14.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.14.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.14.self_attn.k_proj.weight }
+  - move: { from: model.layers.14.self_attn.k_proj.weight__pruned, to: model.layers.14.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.14.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.14.self_attn.v_proj.weight::[:640, :]', 'model.layers.14.self_attn.v_proj.weight::[768:, :]'], to: model.layers.14.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.14.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.14.self_attn.v_proj.weight }
+  - move: { from: model.layers.14.self_attn.v_proj.weight__pruned, to: model.layers.14.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.14.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.14.self_attn.o_proj.weight::[:, :640]', 'model.layers.14.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.14.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.14.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.14.self_attn.o_proj.weight }
+  - move: { from: model.layers.14.self_attn.o_proj.weight__pruned, to: model.layers.14.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.15.self_attn.q_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.15.self_attn.q_proj.weight::[:640, :]', 'model.layers.15.self_attn.q_proj.weight::[768:, :]'], to: model.layers.15.self_attn.q_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.15.self_attn.q_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.15.self_attn.q_proj.weight }
+  - move: { from: model.layers.15.self_attn.q_proj.weight__pruned, to: model.layers.15.self_attn.q_proj.weight }
+  - assert: { shape: { of: model.layers.15.self_attn.k_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.15.self_attn.k_proj.weight::[:640, :]', 'model.layers.15.self_attn.k_proj.weight::[768:, :]'], to: model.layers.15.self_attn.k_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.15.self_attn.k_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.15.self_attn.k_proj.weight }
+  - move: { from: model.layers.15.self_attn.k_proj.weight__pruned, to: model.layers.15.self_attn.k_proj.weight }
+  - assert: { shape: { of: model.layers.15.self_attn.v_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.15.self_attn.v_proj.weight::[:640, :]', 'model.layers.15.self_attn.v_proj.weight::[768:, :]'], to: model.layers.15.self_attn.v_proj.weight__pruned, dim: 0 }
+  - assert: { shape: { of: model.layers.15.self_attn.v_proj.weight__pruned, is: [1920, 2048] } }
+  - delete: { target: model.layers.15.self_attn.v_proj.weight }
+  - move: { from: model.layers.15.self_attn.v_proj.weight__pruned, to: model.layers.15.self_attn.v_proj.weight }
+  - assert: { shape: { of: model.layers.15.self_attn.o_proj.weight, is: [2048, 2048] } }
+  - concat: { from: ['model.layers.15.self_attn.o_proj.weight::[:, :640]', 'model.layers.15.self_attn.o_proj.weight::[:, 768:]'], to: model.layers.15.self_attn.o_proj.weight__pruned, dim: 1 }
+  - assert: { shape: { of: model.layers.15.self_attn.o_proj.weight__pruned, is: [2048, 1920] } }
+  - delete: { target: model.layers.15.self_attn.o_proj.weight }
+  - move: { from: model.layers.15.self_attn.o_proj.weight__pruned, to: model.layers.15.self_attn.o_proj.weight }
+
+  - assert: { shape: { of: model.layers.0.self_attn.q_proj.weight, is: [1920, 2048] } }
+  - assert: { shape: { of: model.layers.0.self_attn.k_proj.weight, is: [1920, 2048] } }
+  - assert: { shape: { of: model.layers.0.self_attn.v_proj.weight, is: [1920, 2048] } }
+  - assert: { shape: { of: model.layers.0.self_attn.o_proj.weight, is: [2048, 1920] } }
+  - assert: { count: { of: '.*', is: 114 } }
+
+output:
+  path: out/T2/model.safetensors
+  format: safetensors

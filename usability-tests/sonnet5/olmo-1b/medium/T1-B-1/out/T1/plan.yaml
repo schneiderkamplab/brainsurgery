@@ -1,0 +1,37 @@
+inputs:
+  - model::inputs/base
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors
+
+transforms:
+  # --- Preflight: sanity-check the input we expect. ---
+  - assert: { count: { of: model.layers\.\d+\.self_attn\.q_proj\.weight, is: 16 } }
+  - assert: { count: { of: model.embed_tokens\.weight, is: 1 } }
+  - assert: { count: { of: lm_head\.weight, is: 1 } }
+
+  # --- Step 1: remove every tensor of the 4 dropped blocks. ---
+  - delete: { target: ["model", "layers", "2", "*rest"] }
+  - delete: { target: ["model", "layers", "6", "*rest"] }
+  - delete: { target: ["model", "layers", "10", "*rest"] }
+  - delete: { target: ["model", "layers", "14", "*rest"] }
+
+  # --- Step 2: renumber survivors so indices are contiguous 0..11. ---
+  # Ordered so every destination has already been vacated (or was deleted
+  # above) before its move runs, so nothing ever collides.
+  - move: { from: ["model", "layers", "3", "*rest"], to: ["model", "layers", "2", "*rest"] }
+  - move: { from: ["model", "layers", "4", "*rest"], to: ["model", "layers", "3", "*rest"] }
+  - move: { from: ["model", "layers", "5", "*rest"], to: ["model", "layers", "4", "*rest"] }
+  - move: { from: ["model", "layers", "7", "*rest"], to: ["model", "layers", "5", "*rest"] }
+  - move: { from: ["model", "layers", "8", "*rest"], to: ["model", "layers", "6", "*rest"] }
+  - move: { from: ["model", "layers", "9", "*rest"], to: ["model", "layers", "7", "*rest"] }
+  - move: { from: ["model", "layers", "11", "*rest"], to: ["model", "layers", "8", "*rest"] }
+  - move: { from: ["model", "layers", "12", "*rest"], to: ["model", "layers", "9", "*rest"] }
+  - move: { from: ["model", "layers", "13", "*rest"], to: ["model", "layers", "10", "*rest"] }
+  - move: { from: ["model", "layers", "15", "*rest"], to: ["model", "layers", "11", "*rest"] }
+
+  # --- Required checks: fail loudly if the result is wrong. ---
+  - assert: { not: { exists: model.layers\.(12|13|14|15)\..* } }
+  - assert: { count: { of: model.layers\.\d+\.self_attn\.q_proj\.weight, is: 12 } }
+  - assert: { count: { of: .*, is: 86 } }

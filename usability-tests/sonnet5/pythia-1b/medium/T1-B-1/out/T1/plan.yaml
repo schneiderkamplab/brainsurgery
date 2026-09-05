@@ -1,0 +1,35 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Preflight: confirm the expected starting shape of the 16-layer checkpoint.
+  - assert: { count: { of: "gpt_neox\\.layers\\.(\\d+)\\.attention\\.query_key_value\\.weight", is: 16 } }
+  - assert: { count: { of: ".+", is: 244 } }
+
+  # Step 1: remove every tensor belonging to blocks 2, 6, 10, 14.
+  - delete: { target: "gpt_neox\\.layers\\.(2|6|10|14)\\..+" }
+
+  # Step 2: renumber the surviving blocks so indices run 0..11 without gaps.
+  # Old->new: 3->2, 4->3, 5->4, 7->5, 8->6, 9->7, 11->8, 12->9, 13->10, 15->11
+  # (0 and 1 are unchanged). Processed in increasing old-index order so every
+  # destination slot has already been vacated by an earlier move before it is
+  # targeted again, avoiding any collision with a surviving block.
+  - move: { from: ["gpt_neox", "layers", "3", "*rest"], to: ["gpt_neox", "layers", "2", "*rest"] }
+  - move: { from: ["gpt_neox", "layers", "4", "*rest"], to: ["gpt_neox", "layers", "3", "*rest"] }
+  - move: { from: ["gpt_neox", "layers", "5", "*rest"], to: ["gpt_neox", "layers", "4", "*rest"] }
+  - move: { from: ["gpt_neox", "layers", "7", "*rest"], to: ["gpt_neox", "layers", "5", "*rest"] }
+  - move: { from: ["gpt_neox", "layers", "8", "*rest"], to: ["gpt_neox", "layers", "6", "*rest"] }
+  - move: { from: ["gpt_neox", "layers", "9", "*rest"], to: ["gpt_neox", "layers", "7", "*rest"] }
+  - move: { from: ["gpt_neox", "layers", "11", "*rest"], to: ["gpt_neox", "layers", "8", "*rest"] }
+  - move: { from: ["gpt_neox", "layers", "12", "*rest"], to: ["gpt_neox", "layers", "9", "*rest"] }
+  - move: { from: ["gpt_neox", "layers", "13", "*rest"], to: ["gpt_neox", "layers", "10", "*rest"] }
+  - move: { from: ["gpt_neox", "layers", "15", "*rest"], to: ["gpt_neox", "layers", "11", "*rest"] }
+
+  # Required checks: fail loudly if the renumbering did not land exactly right.
+  - assert: { not: { exists: "gpt_neox\\.layers\\.(12|13|14|15)\\..+" } }
+  - assert: { count: { of: "gpt_neox\\.layers\\.(\\d+)\\.attention\\.query_key_value\\.weight", is: 12 } }
+  - assert: { count: { of: ".+", is: 184 } }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

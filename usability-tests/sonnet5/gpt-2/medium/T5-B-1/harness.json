@@ -1,0 +1,41 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-sonnet-5",
+  "agent": "sonnet5",
+  "target": "gpt-2",
+  "effort": "medium",
+  "test": "T5",
+  "condition": "B",
+  "repeat": 1,
+  "started_at": "2026-09-05T19:16:48+00:00",
+  "finished_at": "2026-09-05T19:21:13+00:00",
+  "wall_clock_s": 265.4,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 900,
+  "turns": 36,
+  "tool_calls": 35,
+  "tokens_in": 72,
+  "tokens_out": 16672,
+  "cache_read_tokens": 2119211,
+  "cache_write_tokens": 69818,
+  "tokens_in_total": 2189101,
+  "cost_usd": 0.8724751999999998,
+  "duration_api_ms": 213049,
+  "session_id": "42b45507-1d2a-442f-956a-1fdd703ad46f",
+  "result_subtype": "success",
+  "executions": 4,
+  "failed_executions": [
+    {
+      "n": 1,
+      "command": "rm -rf out/T5/*.safetensors out/T5/model.safetensors.index.json && .venv/bin/brainsurgery out/T5/plan.yaml 2>&1 | tail -80",
+      "message": "(eval):1: no matches found: out/T5/*.safetensors",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 2,
+  "final_text": "Task complete. Summary:\n\n- **Plan**: `out/T5/plan.yaml` merges the LoRA adapter into GPT-2's `attn.c_attn` weights across all 12 layers in one batched pass each (`matmul` \u2192 `permute` \u2192 `scale` \u2192 `add_`), using regex capture/backreference matching (`from_a`/`from_b`/`to` with `\\1`), deletes the intermediate `merge.*` tensors, and asserts all four required checks before saving.\n- **Output**: `out/T5/` \u2014 5 safetensors shards + `model.safetensors.index.json`, 160 tensors, no `lora_` names, each shard \u2264100 MiB of tensor data (the oversized `wte.weight` alone in its own shard).\n- **Verification** (outside the plan, for my own confidence): merged `h.0.attn.c_attn.weight` matches a manual NumPy/Torch computation of `base + 2*(B@A).T` with 0 relative error; unchanged tensors (e.g. `ln_f.weight`) are bit-exact vs. the base checkpoint.\n- Two failed executions along the way (documented in `out/T5/REPORT.md`): `from_b` needed unescaped literal dots (it's a substitution template keyed off `from_a`'s regex, not its own regex), and `output.shard` only accepts `MB`/`GB`/etc., not `MiB` \u2014 but `MB` there is binary (1024\u00b2) so `100MB` hits the exact 104,857,600-byte budget.\n- `out/T5/REPORT.md` written with the required self-report fields."
+}

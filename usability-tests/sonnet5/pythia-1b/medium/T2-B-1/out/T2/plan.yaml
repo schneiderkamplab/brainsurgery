@@ -1,0 +1,338 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Sanity checks on input layout before we touch anything.
+  - assert: { shape: { of: 'gpt_neox.layers.0.attention.query_key_value.weight', is: [6144, 2048] } }
+  - assert: { shape: { of: 'gpt_neox.layers.0.attention.query_key_value.bias', is: [6144] } }
+  - assert: { shape: { of: 'gpt_neox.layers.0.attention.dense.weight', is: [2048, 2048] } }
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: 16 } }
+
+  # concat requires each source reference to resolve to exactly one tensor
+  # (no regex broadcasting across layers), so each of the 16 layers is spelled
+  # out explicitly below.
+  #
+  # Fused query_key_value.weight: drop head 5's 768-row block (rows 3840..4607),
+  # keep rows 0..3839 and 4608..6143, in that order. Same row layout applies
+  # to the bias. dense.weight: head 5 owns columns 1280..1535 (256-wide block);
+  # keep columns 0..1279 and 1536..2047, in that order.
+  - concat:
+      from:
+        - 'gpt_neox.layers.0.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.0.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.0.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.0.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.0.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.0.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.0.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.0.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.0.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.1.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.1.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.1.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.1.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.1.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.1.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.1.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.1.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.1.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.2.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.2.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.2.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.2.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.2.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.2.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.2.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.2.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.2.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.3.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.3.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.3.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.3.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.3.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.3.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.3.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.3.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.3.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.4.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.4.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.4.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.4.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.4.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.4.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.4.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.4.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.4.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.5.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.5.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.5.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.5.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.5.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.5.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.5.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.5.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.5.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.6.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.6.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.6.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.6.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.6.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.6.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.6.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.6.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.6.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.7.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.7.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.7.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.7.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.7.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.7.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.7.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.7.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.7.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.8.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.8.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.8.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.8.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.8.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.8.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.8.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.8.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.8.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.9.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.9.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.9.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.9.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.9.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.9.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.9.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.9.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.9.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.10.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.10.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.10.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.10.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.10.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.10.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.10.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.10.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.10.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.11.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.11.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.11.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.11.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.11.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.11.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.11.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.11.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.11.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.12.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.12.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.12.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.12.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.12.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.12.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.12.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.12.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.12.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.13.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.13.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.13.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.13.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.13.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.13.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.13.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.13.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.13.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.14.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.14.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.14.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.14.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.14.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.14.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.14.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.14.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.14.attention.dense.weight__pruned'
+      dim: 1
+  - concat:
+      from:
+        - 'gpt_neox.layers.15.attention.query_key_value.weight::[0:3840, :]'
+        - 'gpt_neox.layers.15.attention.query_key_value.weight::[4608:6144, :]'
+      to: 'gpt_neox.layers.15.attention.query_key_value.weight__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.15.attention.query_key_value.bias::[0:3840]'
+        - 'gpt_neox.layers.15.attention.query_key_value.bias::[4608:6144]'
+      to: 'gpt_neox.layers.15.attention.query_key_value.bias__pruned'
+      dim: 0
+  - concat:
+      from:
+        - 'gpt_neox.layers.15.attention.dense.weight::[:, 0:1280]'
+        - 'gpt_neox.layers.15.attention.dense.weight::[:, 1536:2048]'
+      to: 'gpt_neox.layers.15.attention.dense.weight__pruned'
+      dim: 1
+
+  # Drop the originals and put the pruned tensors back under the original names.
+  - delete: { target: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight' }
+  - delete: { target: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.bias' }
+  - delete: { target: 'gpt_neox\.layers\.\d+\.attention\.dense\.weight' }
+
+  - move:
+      from: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight__pruned'
+      to: 'gpt_neox.layers.\1.attention.query_key_value.weight'
+  - move:
+      from: 'gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias__pruned'
+      to: 'gpt_neox.layers.\1.attention.query_key_value.bias'
+  - move:
+      from: 'gpt_neox\.layers\.(\d+)\.attention\.dense\.weight__pruned'
+      to: 'gpt_neox.layers.\1.attention.dense.weight'
+
+  # Required checks from TASK.md.
+  - assert: { shape: { of: 'gpt_neox.layers.0.attention.query_key_value.weight', is: [5376, 2048] } }
+  - assert: { shape: { of: 'gpt_neox.layers.0.attention.query_key_value.bias', is: [5376] } }
+  - assert: { shape: { of: 'gpt_neox.layers.0.attention.dense.weight', is: [2048, 1792] } }
+  - assert: { count: { of: '.*', is: 244 } }
+
+  # Same checks, all layers.
+  - assert: { shape: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: [5376, 2048] } }
+  - assert: { shape: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.bias', is: [5376] } }
+  - assert: { shape: { of: 'gpt_neox\.layers\.\d+\.attention\.dense\.weight', is: [2048, 1792] } }
+  - assert: { dtype: { of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: float16 } }
+  - assert: { dtype: { of: 'gpt_neox\.layers\.\d+\.attention\.dense\.weight', is: float16 } }
+
+output:
+  path: out/T2/model.safetensors
+  format: safetensors

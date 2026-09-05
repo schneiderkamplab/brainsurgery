@@ -15,7 +15,7 @@ environment built with uv from the condition's pinned requirements:
 
     <agent>/<target>/<effort>/<test>-<condition>-<repeat>/
       PROMPT.md            condition preamble + task specification
-      CLAUDE.md, AGENTS.md copies of PROMPT.md so Claude Code / Codex-style agents load it automatically
+      CLAUDE.md, AGENTS.md copies of PROMPT.md so agents that read CLAUDE.md or AGENTS.md load it automatically
       TASK.md              the task specification alone
       record-template.md   self-report fields
       requirements-*.txt   what the environment contains (constraints-B.txt for B)
@@ -67,8 +67,15 @@ def make_venv(sandbox: Path, condition: str) -> str:
     sh(["uv", "venv", "--python", "3.13", str(venv)], sandbox)
     python = venv / "bin" / "python"
     if condition == "B":
+        # Non-editable install: the package is built into a wheel and copied into the
+        # sandbox environment, so the repository checkout (its docs, tests, wiki and
+        # this kit) is not reachable through the installed package. An editable
+        # install exposes the checkout path, and pilot participants followed it.
         sh(["uv", "pip", "install", "--python", str(python), "-c", str(sandbox / "constraints-B.txt"),
-            "-e", str(REPO)], sandbox)
+            "--no-cache-dir", str(REPO)], sandbox)
+        # The wheel metadata records where it was built from; drop that pointer too.
+        for direct_url in venv.glob("lib/python*/site-packages/brainsurgery-*.dist-info/direct_url.json"):
+            direct_url.unlink()
     else:
         sh(["uv", "pip", "install", "--python", str(python), "-r",
             str(sandbox / f"requirements-{condition}.txt")], sandbox)

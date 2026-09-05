@@ -1,0 +1,4 @@
+# Condition B: make_sandbox.py runs
+#   uv pip install -c constraints-B.txt -e <repository root>
+# so brainsurgery and its dependencies come from the pinned repository commit
+# recorded in run.json, with torch/safetensors/numpy pinned by constraints-B.txt.

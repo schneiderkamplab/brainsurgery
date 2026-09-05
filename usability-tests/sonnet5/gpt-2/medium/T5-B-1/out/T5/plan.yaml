@@ -1,0 +1,88 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Preflight: confirm the adapter has exactly 12 lora_A/lora_B pairs for
+  # attn.c_attn across the 12 layers, and the base weight has the expected
+  # Conv1D layout before we touch anything.
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_A\.weight'
+        is: 12
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+        is: 12
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_A\.weight'
+        is: [16, 768]
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+        is: [2304, 16]
+  - assert:
+      shape:
+        of: 'base::h\.(\d+)\.attn\.c_attn\.weight'
+        is: [768, 2304]
+
+  # merge_delta = B @ A, shape [2304, 768] (nn.Linear convention, out x in).
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'base::merge.h.\1.delta_raw'
+
+  # Confirm exactly 12 adapter pairs were actually merged (one delta per layer).
+  - assert:
+      count:
+        of: 'base::merge\.h\.(\d+)\.delta_raw'
+        is: 12
+
+  # fan_in_fan_out=true: transpose to Conv1D layout [in, out] = [768, 2304]
+  # before adding into the base weight.
+  - permute:
+      from: 'base::merge\.h\.(\d+)\.delta_raw'
+      to: 'base::merge.h.\1.delta_t'
+      order: [1, 0]
+
+  # Apply scale = lora_alpha / r = 32 / 16 = 2.
+  - scale:
+      from: 'base::merge\.h\.(\d+)\.delta_t'
+      to: 'base::merge.h.\1.delta_scaled'
+      by: 2.0
+
+  # h.<i>.attn.c_attn.weight += scale * (B @ A).T
+  - add_:
+      from: 'base::merge\.h\.(\d+)\.delta_scaled'
+      to: 'base::h.\1.attn.c_attn.weight'
+
+  # Drop every intermediate tensor created above; only the merged base
+  # weights must remain.
+  - delete: { target: 'base::merge\.h\.\d+\.delta_raw' }
+  - delete: { target: 'base::merge\.h\.\d+\.delta_t' }
+  - delete: { target: 'base::merge\.h\.\d+\.delta_scaled' }
+
+  # Required checks: no leftover intermediate tensors, base weight shape and
+  # tensor count are as expected. Adapter tensors live under the separate
+  # 'lora' alias and are never part of the output model, so they cannot leak
+  # into it; we still assert there is no stray 'lora_' name in the base alias.
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert: { not: { exists: 'base::merge\..*' } }
+  - assert:
+      shape:
+        of: 'base::h\.0\.attn\.c_attn\.weight'
+        is: [768, 2304]
+  - assert:
+      dtype:
+        of: 'base::h\.0\.attn\.c_attn\.weight'
+        is: float32
+  - assert:
+      count:
+        of: 'base::.*'
+        is: 160
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

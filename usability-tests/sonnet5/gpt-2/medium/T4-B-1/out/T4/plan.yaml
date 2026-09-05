@@ -1,0 +1,58 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors
+
+transforms:
+  # --- Step 1: verify the shared-tensor precondition before touching anything ---
+
+  # Same total tensor count in all three checkpoints.
+  - assert: { count: { of: 'base::.*', is: 160 } }
+  - assert: { count: { of: 'ft1::.*', is: 160 } }
+  - assert: { count: { of: 'ft2::.*', is: 160 } }
+
+  # The 48 MLP tensor names exist, by pattern, in all three checkpoints.
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft1::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft2::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+
+  # Every tensor outside the 48 MLP tensors is bit-identical across base/ft1/ft2.
+  # (also requires the matching name to exist on the right side of each pair)
+  - assert:
+      equal:
+        left: 'base::(?!.*\.mlp\.)(.+)'
+        right: 'ft1::\1'
+  - assert:
+      equal:
+        left: 'base::(?!.*\.mlp\.)(.+)'
+        right: 'ft2::\1'
+
+  # --- Step 2: build each fine-tune's scaled task vector for the MLP tensors ---
+  - prefixes: { mode: add, alias: delta1 }
+  - prefixes: { mode: add, alias: delta2 }
+
+  # delta1 = lambda * (ft1 - base)
+  - copy: { from: 'ft1::h\.(\d+)\.mlp\.(c_fc|c_proj)\.(weight|bias)', to: 'delta1::h.\1.mlp.\2.\3' }
+  - subtract_: { from: 'base::h\.(\d+)\.mlp\.(c_fc|c_proj)\.(weight|bias)', to: 'delta1::h.\1.mlp.\2.\3' }
+  - scale_: { target: 'delta1::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', by: 0.4 }
+
+  # delta2 = lambda * (ft2 - base)
+  - copy: { from: 'ft2::h\.(\d+)\.mlp\.(c_fc|c_proj)\.(weight|bias)', to: 'delta2::h.\1.mlp.\2.\3' }
+  - subtract_: { from: 'base::h\.(\d+)\.mlp\.(c_fc|c_proj)\.(weight|bias)', to: 'delta2::h.\1.mlp.\2.\3' }
+  - scale_: { target: 'delta2::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', by: 0.4 }
+
+  # --- Step 3: apply both task vectors onto the (still-unmodified) base tensors ---
+  - add_: { from: 'delta1::h\.(\d+)\.mlp\.(c_fc|c_proj)\.(weight|bias)', to: 'base::h.\1.mlp.\2.\3' }
+  - add_: { from: 'delta2::h\.(\d+)\.mlp\.(c_fc|c_proj)\.(weight|bias)', to: 'base::h.\1.mlp.\2.\3' }
+
+  # --- Required checks: exactly 48 tensors were merged, output has exactly 160 ---
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'base::.*', is: 160 } }
+
+  # Clean up scratch aliases so the output infers uniquely to "base".
+  - delete: { target: 'delta1::.*' }
+  - delete: { target: 'delta2::.*' }

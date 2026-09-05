@@ -38,7 +38,7 @@ allowed package list, B: BrainSurgery plan) by several coding-agent models.
 
 # one run with any other agent: build the sandbox, drive the agent yourself,
 # then grade and write harness.json / review.json with the same fields
-.venv/bin/python usability-tests/make_sandbox.py T2 B --agent gpt5 --target gpt-2 --effort light --repeat 1 --venv
+.venv/bin/python usability-tests/make_sandbox.py T2 B --agent <agent-name> --target gpt-2 --effort <tier> --repeat 1 --venv
 #   ... run the agent with <sandbox>/PROMPT.md as its prompt and <sandbox> as cwd ...
 .venv/bin/python usability-tests/grade.py T2 --target gpt-2 --out <sandbox>/out/T2 --json --write <sandbox>/grade.json
 
@@ -96,6 +96,14 @@ falls back to the heuristic).
   torch, safetensors and `targets.py`).
 
 ## Isolation
+
+Inputs are shared by every sandbox through symlinks and are made read-only by
+`setup.py` (input files and the base checkpoints they point at). Keep them
+that way: in the pilot a participant copied `inputs/base` with `cp -r`, got
+the symlinks, and wrote a corrupted test checkpoint straight through one of
+them into the shared GPT-2 base, invalidating a later cell. If a base file is
+ever modified, re-download it and re-verify against `references/` before
+running anything else.
 
 Each run has its own directory and, with `--venv`, its own environment. The
 sandbox `.claude/settings.json` denies web access, package installs and reads

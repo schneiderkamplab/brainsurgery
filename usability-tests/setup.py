@@ -103,6 +103,12 @@ def link_files(src_dir: Path, dst_dir: Path, *, weights: bool) -> None:
             dst.symlink_to(src.resolve())
 
 
+def make_read_only(root: Path) -> None:
+    for path in root.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            path.chmod(path.stat().st_mode & ~0o222)
+
+
 def ensure_link(link: Path, target: Path) -> None:
     if link.is_symlink():
         if Path(os.readlink(link)) == target:
@@ -142,6 +148,8 @@ def build_target(tname: str, t: dict, data_root: Path, force: bool) -> None:
         if force or not path.exists():
             print(f"[setup] {tname}: building synthetic fine-tune inputs/{name}", flush=True)
             base = base if base is not None else load_checkpoint(inputs / "base")
+            if path.exists():
+                path.chmod(0o644)
             save_file(make_finetune(base, t, SEED + k), str(path))
 
     lora_dir = inputs / "lora"
@@ -149,6 +157,9 @@ def build_target(tname: str, t: dict, data_root: Path, force: bool) -> None:
     if force or not lora_path.exists():
         print(f"[setup] {tname}: building LoRA adapter inputs/lora", flush=True)
         lora_dir.mkdir(exist_ok=True)
+        for old in (lora_path, lora_dir / "adapter_config.json"):
+            if old.exists():
+                old.chmod(0o644)
         save_file(make_lora_adapter(t, SEED + 3), str(lora_path))
         lo = t["lora"]
         (lora_dir / "adapter_config.json").write_text(json.dumps({
@@ -169,6 +180,13 @@ def build_target(tname: str, t: dict, data_root: Path, force: bool) -> None:
             shutil.rmtree(out_dir)
         if not out_dir.exists():
             run_reference(tname, test, root, out_dir)
+
+    # Inputs are shared by every sandbox through symlinks. Make every input file,
+    # including the base checkpoint files they point at, read-only: a participant
+    # that copies the directory with `cp -r` gets the symlinks and would otherwise
+    # write straight through them into the shared checkpoint.
+    make_read_only(inputs)
+    make_read_only(model_dir)
 
 
 def main() -> int:

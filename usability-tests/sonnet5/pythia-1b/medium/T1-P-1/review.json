@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T19:23:37+00:00",
+  "finished_at": "2026-09-05T19:23:42+00:00",
+  "wall_clock_s": 5.2,
+  "tokens_in": 2,
+  "tokens_out": 249,
+  "cost_usd": 0.0404078,
+  "verdict_text": "NO\n\nThe artifact drops blocks {2, 6, 10, 15} instead of the specified {2, 6, 10, 14}, violating Required Result clause 1 and the renumbering mapping in clause 2 (which requires old 14 dropped and old 15 \u2192 11, not old 15 dropped and old 14 kept as 11). This also fails the Required Checks: block 14 survives (renamed to index 11) rather than being absent, so \"no tensor of blocks 12, 13, 14, 15 remains\" would be violated \u2014 though the script's own asserts don't check for this specific set of dropped indices, so it would run to completion and produce an incorrect but self-consistent 184-tensor output that does not match the specified renumbering and would fail grading against the hidden reference.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}
