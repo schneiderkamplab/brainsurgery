@@ -12,7 +12,7 @@ Git.
 |---|---|---|
 | [`correctness/`](correctness/README.md) | Are transformations correct, and are tensors outside the declared write-set unchanged? | macOS; Linux confirmation only where backend-dependent |
 | [`robustness/`](robustness/README.md) | What happens for malformed plans, failed assertions, interrupted saves, and corrupted inputs? | macOS; Linux confirmation for OS-specific failures |
-| [`scaling/`](scaling/README.md) | How do time, peak memory, I/O, and sharding change with checkpoint size? | Linux/CUDA for reported measurements |
+| [`scaling/`](scaling/README.md) | How do time, peak memory, I/O, and sharding change with checkpoint size? | Linux CPU/I/O for reported measurements; CUDA deliberately disabled |
 | [`downstream/`](downstream/README.md) | Do intentionally lossy rewrites preserve useful model behavior or task quality? | Linux/CUDA |
 | [`competing_tools/`](competing_tools/README.md) | How does BrainSurgery compare on operations genuinely shared with other tools? | Linux |
 | [`behavioral/`](behavioral/README.md) | How is the prompt suite sourced, covered, and evaluated beyond the original 50 prompts? | macOS for design; Linux/CUDA for model execution |
@@ -54,7 +54,7 @@ Use a unique underscore-separated run identifier, for example:
 
 ```text
 2026_09_06_correctness_mac_<short_commit>
-2026_09_06_scaling_cuda_<short_commit>
+2026_09_06_scaling_linux_<short_commit>
 ```
 
 Before accepting a result, record:
@@ -73,7 +73,8 @@ Before accepting a result, record:
    work.
 2. Freeze the protocols and prepare a verified transferable data bundle.
 3. Run the Linux-only usability and competing-tool work.
-4. Run CUDA-dependent inference, downstream, and 7B+ scaling work.
+4. Run CUDA-dependent inference/downstream work and the separate CPU/I/O
+   scaling matrix on the same Linux host.
 5. Bring back closed, audited results and then update paper claims.
 
 The full gates and commands are in

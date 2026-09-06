@@ -50,16 +50,16 @@ that should be handled through scope/claim changes in this revision.
 | 2 | Correctness | Add hand-verifiable fixtures, independent oracles, write-set hashing, and metamorphic tests. | P0 | `revision_tests/correctness/` |
 | 3 | Robustness | Test malformed plans, bad regexes and matches, failed assertions, corrupt inputs, interrupted execution, and save failures. | P0 | `revision_tests/robustness/` |
 | 4 | Failure semantics | Define and report output-publication behavior, including whether partial output can remain after failure. | P0 | `revision_tests/robustness/` |
-| 5 | Claims and positioning | Frame BrainSurgery as checkpoint-editing systems/tooling; replace universal “easier” or “efficient” claims with claims directly supported by results. | P0 | paper and final evidence map |
+| 5 | Claims and positioning | Frame BrainSurgery as checkpoint-editing systems/tooling; replace universal “easier” or “efficient” claims with claims directly supported by results. | P0 | `revision_tests/plans/claim_boundaries.md` and final evidence map |
 | 6 | Reproducibility | Preserve protocols, commands, manifests, machine fingerprints, compact summaries, and raw-result locations. | P0 | this directory and `log/revision_tests/` |
-| 7 | Competing tools | Benchmark a small number of genuinely shared operations against MergeKit and `torch-state-bridge`; improve Orbax positioning. | P1 | `revision_tests/competing_tools/` |
-| 8 | Scaling | Add controlled time, peak-memory, I/O, and sharding measurements through at least one 7B checkpoint. | P1 | `revision_tests/scaling/` |
+| 7 | Competing tools | Benchmark a small number of genuinely shared operations against MergeKit and `torch-state-bridge`; improve Orbax positioning and distinguish direct comparisons from adjacent feature coverage. | P1 | `revision_tests/competing_tools/` |
+| 8 | Scaling | Add a controlled four-point Pythia curve through 12B plus paired GPT-2, OLMo, and Qwen2.5 architecture/storage checks, with time, memory, I/O, dtype, and sharding measurements. Protocol and harness are frozen/Mac-preflighted; real measurements remain Linux work. | P1 | `revision_tests/scaling/` |
 | 9 | Behavioral evaluation | Replace the undocumented prompt set with a versioned, sourced, categorized manifest and stated evaluation procedure. | P1 | `revision_tests/behavioral/` |
 | 10 | Demo video | Create a narrated valid-plan → intentional failure → diagnosis → correction → validation/diff → export walkthrough. | P1 | demo script/storyboard, then submission asset |
 | 11 | Downstream quality | Evaluate one defensible intentionally lossy transformation against an unchanged baseline if compute and methodology permit. | P2 | `revision_tests/downstream/` |
 | 12 | RYS/circuit duplication | Consider a realistic block-duplication and reindexing case only if it can be completed and evaluated without displacing P0/P1 evidence. | P2 | future case-study protocol |
 | 13 | Additional use cases | Add none merely for breadth; choose only cases answering a specific reviewer concern. | defer | claim narrowing |
-| 14 | Distributed support | Evaluate only if a real distributed-format/resharding protocol is ready; otherwise narrow claims about distributed checkpoint support. | defer | limitations and claims |
+| 14 | Distributed support | No distributed-format/resharding experiment is planned for this revision. Explicitly limit evaluation to single-process single-file/indexed-shard safetensors and exclude rank-local state, optimizer state, multi-rank execution, and resharding claims. | defer | `revision_tests/plans/claim_boundaries.md` |
 | 15 | Community adoption | Do not imply adoption from the coding-agent study; report adoption evidence only if independently available. | defer | claims |
 
 ## Correctness claim
@@ -116,8 +116,12 @@ reviewed more accurately is still informative.
 - [x] Behavioral prompts have documented provenance and coverage. See
       `revision_tests/behavioral/`.
 - [ ] Baseline comparisons use genuinely equivalent operations and one oracle.
+- [x] Direct comparisons and adjacent related-system capabilities are separated
+      in Markdown and LaTeX. See
+      `revision_tests/competing_tools/feature_coverage.{md,tex}`.
 - [ ] Every table is reproducible from a named commit, command, and run ID.
-- [ ] Unsupported distributed and downstream claims are narrowed.
+- [x] Distributed claim boundaries and safe manuscript wording are prepared.
+      Applying them to the final paper remains part of manuscript integration.
 - [ ] The narrated demo follows the final documented behavior.
 - [ ] The abstract, introduction, conclusion, and limitations make no claim
       stronger than the completed evidence.

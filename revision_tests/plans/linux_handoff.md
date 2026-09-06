@@ -35,6 +35,22 @@ uv sync --frozen
 .venv/bin/python -c "import torch, safetensors, brainsurgery"
 ```
 
+Run the frozen protocol checks before downloading evaluation checkpoints:
+
+```bash
+test -z "$(git status --porcelain)"
+.venv/bin/python -m pytest -q \
+  revision_tests/scaling/test_scaling.py \
+  revision_tests/competing_tools/test_competing_tools.py
+.venv/bin/python revision_tests/scaling/validate_protocol.py
+.venv/bin/python revision_tests/competing_tools/validate_protocol.py
+```
+
+Stop if any command fails. The feature-coverage and distributed-claim boundary
+used when interpreting the results are frozen in
+`revision_tests/competing_tools/feature_coverage.md` and
+`revision_tests/plans/claim_boundaries.md`.
+
 Before starting Codex, record the exact model id, Codex CLI version, reasoning
 settings, and the current official rate-card source and access date. Do not
 invent prices. If no official per-token prices exist for the exact model and
@@ -167,16 +183,45 @@ repeat. If any of those must change between repeats, record and disclose it.
 
 With no competing jobs, run the operation-matched comparison from
 `../competing_tools/README.md`; it requires Linux but not CUDA. Then repeat the
-filesystem-sensitive robustness cases described in the execution plan. Keep
-these runs separate from CUDA results.
+frozen robustness protocol with a Linux-specific run ID:
 
-## 7. Run CUDA-dependent evidence
+```bash
+REVISION_COMMIT_SHORT="$(git rev-parse --short HEAD)"
+.venv/bin/python revision_tests/robustness/run.py \
+  --run-id "eacl2027_robustness_linux_${REVISION_COMMIT_SHORT}"
+```
+
+Keep these runs separate from CUDA results. True disk exhaustion is not part
+of the frozen 19-case protocol; attempt it only with a bounded disposable
+filesystem or quota and a separately versioned protocol, never by filling the
+host filesystem.
+
+## 7. Run CUDA-dependent and large-model evidence
 
 After the usability and CPU/Linux work is closed:
 
 1. run the frozen behavioral regression suite;
 2. run the selected downstream-quality case, if retained;
-3. run GPT-2, Pythia-1B, OLMo-1B, and the selected sharded 7B scaling points.
+3. run the four Pythia scaling points and the paired GPT-2, OLMo, and Qwen2.5
+   architecture/storage checks.
+
+The ten exact model revisions and expected checkpoint layouts/dtypes are
+frozen in `revision_tests/scaling/cases.yaml`. Download and validate the full
+matrix, then execute the CPU/I/O protocol (CUDA is deliberately disabled):
+
+```bash
+.venv/bin/python revision_tests/scaling/download_models.py
+.venv/bin/python revision_tests/scaling/validate_protocol.py --check-models
+.venv/bin/python revision_tests/scaling/run.py \
+  --run-id eacl2027_scaling_linux \
+  --repetitions 5 \
+  --num-workers 1 \
+  --workload-note "exclusive host; no concurrent user jobs"
+```
+
+All three methods and all ten model points must pass the independent oracle.
+The GPU inventory is provenance only and no GPU performance claim is permitted
+for this workload.
 
 Use one hardware/filesystem configuration per reported comparison and retain
 raw data under `log/revision_tests/<run_id>/`. Do not mix the Mac preflight

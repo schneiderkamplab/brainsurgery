@@ -1,0 +1,355 @@
+{
+  "claim_boundary": "Frozen CPU checkpoint rewrite on the enumerated revisions and one recorded Linux system; not GPU, training, inference, usability, or general tool superiority evidence.",
+  "correct_measured_attempts": 3,
+  "correctness_complete": true,
+  "eligibility_reasons": [
+    "run was explicitly requested as a synthetic smoke preflight",
+    "reported systems run requires Linux",
+    "Git worktree is dirty",
+    "reported evaluation requires the complete ordered ten-checkpoint matrix",
+    "correct, fully sampled measured repetitions are incomplete"
+  ],
+  "execution_device": "cpu",
+  "git_commit": "299671ec49bb4c5c2705c92680ed82f281ef3bd8",
+  "gpu_used": false,
+  "measured_attempts": 3,
+  "measurement_complete": false,
+  "models": {
+    "SMOKE": {
+      "analysis_role": "smoke",
+      "display": "deterministic tiny fixture",
+      "family": "synthetic",
+      "input_manifest": {
+        "checkpoint_file_bytes": 432,
+        "data_file_count": 1,
+        "dtype_logical_bytes": {
+          "float16": 32,
+          "float32": 112,
+          "int64": 8
+        },
+        "dtype_tensor_counts": {
+          "float16": 1,
+          "float32": 2,
+          "int64": 1
+        },
+        "files": {
+          "model.safetensors": {
+            "bytes": 432,
+            "sha256": "8e4a25e31f99a9a20f323cd67369d0f6de984902f0b65c59eda9b802d86ea6a3"
+          }
+        },
+        "layout": "single",
+        "logical_tensor_bytes": 152,
+        "model_id": "local/synthetic",
+        "operation_contract": {
+          "matched_dtype_counts": {
+            "float16": 1,
+            "float32": 1
+          },
+          "matched_nonfloating_tensors": [],
+          "matched_tensor_count": 2,
+          "matched_tensors": [
+            "block.0.weight",
+            "block.1.weight"
+          ],
+          "passed": true,
+          "target_regex": ".*\\.weight"
+        },
+        "revision": "70886eb18596422df93b0486ec41c72c3c5f4254eb413d3aea87f19141ecb182",
+        "revision_evidence": {
+          "passed": true,
+          "scope": "synthetic_fixture"
+        },
+        "stored_tensor_element_count": 45,
+        "tensor_count": 4,
+        "tensors": {
+          "block.0.bias": {
+            "dtype": "float32",
+            "is_floating_point": true,
+            "nbytes": 16,
+            "numel": 4,
+            "shape": [
+              4
+            ]
+          },
+          "block.0.weight": {
+            "dtype": "float32",
+            "is_floating_point": true,
+            "nbytes": 96,
+            "numel": 24,
+            "shape": [
+              6,
+              4
+            ]
+          },
+          "block.1.weight": {
+            "dtype": "float16",
+            "is_floating_point": true,
+            "nbytes": 32,
+            "numel": 16,
+            "shape": [
+              4,
+              4
+            ]
+          },
+          "counter": {
+            "dtype": "int64",
+            "is_floating_point": false,
+            "nbytes": 8,
+            "numel": 1,
+            "shape": [
+              1
+            ]
+          }
+        }
+      },
+      "model_id": "local/synthetic",
+      "nominal_parameter_count": null,
+      "revision": "70886eb18596422df93b0486ec41c72c3c5f4254eb413d3aea87f19141ecb182",
+      "source_integrity": {
+        "after": {
+          "model.safetensors": "8e4a25e31f99a9a20f323cd67369d0f6de984902f0b65c59eda9b802d86ea6a3"
+        },
+        "before": {
+          "model.safetensors": "8e4a25e31f99a9a20f323cd67369d0f6de984902f0b65c59eda9b802d86ea6a3"
+        },
+        "passed": true
+      }
+    }
+  },
+  "pairs": {
+    "SMOKE:brainsurgery_arena": {
+      "analysis_role": "smoke",
+      "correct_attempts": 1,
+      "display": "deterministic tiny fixture",
+      "effective_logical_bytes_per_second": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "family": "synthetic",
+      "measured_attempts": 1,
+      "method": "brainsurgery_arena",
+      "model_id": "SMOKE",
+      "output_checkpoint_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "output_shard_counts": [
+        1
+      ],
+      "peak_rss_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "peak_temp_allocated_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "process_read_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "process_write_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "timing_eligible_attempts": 0,
+      "wall_seconds": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      }
+    },
+    "SMOKE:brainsurgery_inmemory": {
+      "analysis_role": "smoke",
+      "correct_attempts": 1,
+      "display": "deterministic tiny fixture",
+      "effective_logical_bytes_per_second": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "family": "synthetic",
+      "measured_attempts": 1,
+      "method": "brainsurgery_inmemory",
+      "model_id": "SMOKE",
+      "output_checkpoint_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "output_shard_counts": [
+        1
+      ],
+      "peak_rss_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "peak_temp_allocated_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "process_read_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "process_write_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "timing_eligible_attempts": 0,
+      "wall_seconds": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      }
+    },
+    "SMOKE:python_pytorch": {
+      "analysis_role": "smoke",
+      "correct_attempts": 1,
+      "display": "deterministic tiny fixture",
+      "effective_logical_bytes_per_second": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "family": "synthetic",
+      "measured_attempts": 1,
+      "method": "python_pytorch",
+      "model_id": "SMOKE",
+      "output_checkpoint_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "output_shard_counts": [
+        1
+      ],
+      "peak_rss_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "peak_temp_allocated_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "process_read_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "process_write_bytes": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      },
+      "timing_eligible_attempts": 0,
+      "wall_seconds": {
+        "count": 0,
+        "maximum": null,
+        "mean": null,
+        "median": null,
+        "minimum": null,
+        "sample_standard_deviation": null,
+        "values": []
+      }
+    }
+  },
+  "protocol_id": "eacl2027_scaling_v1",
+  "reported_eligible": false,
+  "run_directory": "log/revision_tests/mac_scaling_preflight_2026_09_06_v11/scaling",
+  "run_id": "mac_scaling_preflight_2026_09_06_v11",
+  "warmup_attempts": 3
+}

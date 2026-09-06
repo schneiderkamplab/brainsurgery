@@ -1,0 +1,114 @@
+protocol_id: eacl2027_scaling_v1
+operation:
+  description: Scale every floating-point tensor whose complete key ends in .weight by 0.5.
+  target_regex: '.*\.weight'
+  factor: 0.5
+  output_shard_size: 512MB
+  output_shard_size_bytes: 536870912
+  execution_device: cpu
+  arena_segment_size: 4GB
+methods:
+  - python_pytorch
+  - brainsurgery_inmemory
+  - brainsurgery_arena
+models:
+  - id: P01
+    family: pythia
+    analysis_role: primary_scaling
+    display: Pythia 70M
+    nominal_parameter_count: 70000000
+    model_id: EleutherAI/pythia-70m
+    revision: a39f36b100fe8a5377810d56c3f4789b9c53ac42
+    input: models/pythia-70m
+    expected_layout: single
+    expected_weight_dtype: float16
+  - id: P02
+    family: pythia
+    analysis_role: primary_scaling
+    display: Pythia 410M
+    nominal_parameter_count: 410000000
+    model_id: EleutherAI/pythia-410m
+    revision: 9879c9b5f8bea9051dcb0e68dff21493d67e9d4f
+    input: models/pythia-410m
+    expected_layout: single
+    expected_weight_dtype: float16
+  - id: P03
+    family: pythia
+    analysis_role: primary_scaling
+    display: Pythia 2.8B
+    nominal_parameter_count: 2800000000
+    model_id: EleutherAI/pythia-2.8b
+    revision: 2a259cdd96a4beb1cdf467512e3904197345f6a9
+    input: models/pythia-2.8b
+    expected_layout: single
+    expected_weight_dtype: float16
+  - id: P04
+    family: pythia
+    analysis_role: primary_scaling
+    display: Pythia 12B
+    nominal_parameter_count: 12000000000
+    model_id: EleutherAI/pythia-12b
+    revision: bb1e3e710cdf6b524461d543cfb5ba773f0a81b6
+    input: models/pythia-12b
+    expected_layout: sharded
+    expected_weight_dtype: float16
+  - id: G01
+    family: gpt2
+    analysis_role: architecture_pair
+    display: GPT-2 124M
+    nominal_parameter_count: 124000000
+    model_id: openai-community/gpt2
+    revision: 607a30d783dfa663caf39e06633721c8d4cfcd7e
+    input: models/gpt2
+    expected_layout: single
+    expected_weight_dtype: float32
+  - id: G02
+    family: gpt2
+    analysis_role: architecture_pair
+    display: GPT-2 XL 1.5B
+    nominal_parameter_count: 1500000000
+    model_id: openai-community/gpt2-xl
+    revision: 15ea56dee5df4983c59b2538573817e1667135e2
+    input: models/gpt2-xl
+    expected_layout: single
+    expected_weight_dtype: float32
+  - id: O01
+    family: olmo
+    analysis_role: architecture_pair
+    display: OLMo 1B (sharded)
+    nominal_parameter_count: 1000000000
+    model_id: allenai/OLMo-1B-0724-hf
+    revision: d7cbab742d80589e714b1a2d7f838dcd21cbe143
+    input: models/olmo-1b-0724-hf
+    expected_layout: sharded
+    expected_weight_dtype: float32
+  - id: O02
+    family: olmo
+    analysis_role: architecture_pair
+    display: OLMo 7B (sharded, FP32)
+    nominal_parameter_count: 7000000000
+    model_id: allenai/OLMo-7B-0724-hf
+    revision: 1ee306df318ee15bfe4a76ebd5c002b0105b1ab6
+    input: models/olmo-7b-0724-hf
+    expected_layout: sharded
+    expected_weight_dtype: float32
+  - id: Q01
+    family: qwen2_5
+    analysis_role: architecture_pair
+    display: Qwen2.5 0.5B
+    nominal_parameter_count: 500000000
+    model_id: Qwen/Qwen2.5-0.5B
+    revision: 060db6499f32faf8b98477b0a26969ef7d8b9987
+    input: models/qwen2_5-0_5b
+    expected_layout: single
+    expected_weight_dtype: bfloat16
+  - id: Q02
+    family: qwen2_5
+    analysis_role: architecture_pair
+    display: Qwen2.5 7B (sharded, BF16)
+    nominal_parameter_count: 7000000000
+    model_id: Qwen/Qwen2.5-7B
+    revision: d149729398750b98c0af14eb82c78cfe92750796
+    input: models/qwen2_5-7b
+    expected_layout: sharded
+    expected_weight_dtype: bfloat16

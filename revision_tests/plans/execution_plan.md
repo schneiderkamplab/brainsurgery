@@ -89,9 +89,15 @@ semantic failure matrix can be established here.
 - [x] Define tool-neutral overlapping operations for MergeKit and
       `torch-state-bridge`; treat Orbax primarily as related-work positioning
       unless a genuinely equivalent executable case exists.
+- [x] Create a paper-facing feature-coverage matrix that distinguishes direct
+      tool comparisons from correctness, usability, systems, adjacent, and
+      deferred evidence.
 - [x] Build and unit-test analysis code against small synthetic data.
 - [x] Validate Linux/CUDA launch commands without claiming local timings as
       final performance results.
+- [x] Freeze the scaling operation, ten pinned model revisions, three
+      operation-matched methods, independent exact oracle, resource metrics,
+      cache policy, repetition schedule, and reporting gates.
 
 Behavioral evidence: `revision_tests/behavioral/`. The committed 70-prompt
 manifest contains 30 parallel Belebele prompts, 30 stratified MMLU prompts, and
@@ -107,6 +113,17 @@ arithmetic operations with MergeKit using an independent oracle. Actual-package
 macOS preflights pass all six pairings on tiny and pinned GPT-2-derived inputs;
 the runner labels those timings non-reportable. The controlled Linux run in
 Phase 2 remains required for paper performance evidence.
+
+Feature-coverage evidence:
+`revision_tests/competing_tools/feature_coverage.{md,tex}`. It freezes the
+reportable direct-comparison count at three operations (two MergeKit and one
+`torch-state-bridge`) while keeping adjacent and deferred capabilities visible.
+
+Scaling protocol: `revision_tests/scaling/`. Its synthetic Mac preflight
+exercises the direct PyTorch baseline, BrainSurgery in-memory and arena paths,
+sharded serialization, monitoring, and independent oracle. It suppresses Mac
+performance values. All ten real checkpoint points and their systems
+measurements remain a Linux run below.
 
 ### 5. Prepare transfer and handoff
 
@@ -144,6 +161,21 @@ codex --version
 nvidia-smi
 ```
 
+Before downloading models or starting a reported run, execute the frozen
+protocol checks from the repository root:
+
+```bash
+test -z "$(git status --porcelain)"
+.venv/bin/python -m pytest -q \
+  revision_tests/scaling/test_scaling.py \
+  revision_tests/competing_tools/test_competing_tools.py
+.venv/bin/python revision_tests/scaling/validate_protocol.py
+.venv/bin/python revision_tests/competing_tools/validate_protocol.py
+```
+
+All tests and both validators must pass. The checkout must remain clean until
+the reported run is closed.
+
 - [ ] Record the output under a new `log/revision_tests/<run_id>/` directory.
 - [ ] Download base checkpoints at the revisions pinned in
       `usability_tests/targets.py`.
@@ -177,15 +209,26 @@ helps package compatibility and is not itself the variable being measured.
 
 ### 9. Confirm OS-dependent robustness cases
 
-- [ ] Repeat filesystem and interruption cases whose outcome may differ from
-      macOS.
+- [ ] Repeat the frozen 19-case protocol with a unique Linux run ID:
+
+      ```bash
+      REVISION_COMMIT_SHORT="$(git rev-parse --short HEAD)"
+      .venv/bin/python revision_tests/robustness/run.py \
+        --run-id "eacl2027_robustness_linux_${REVISION_COMMIT_SHORT}"
+      ```
 - [ ] Confirm partial-output visibility, rename behavior, permissions, and
-      insufficient-disk handling on the target Linux filesystem.
+      interruption behavior on the target Linux filesystem.
 - [ ] Keep these results separate from the macOS results when behavior differs.
+- [ ] Treat true insufficient-disk behavior as optional: test it only in a
+      bounded disposable filesystem/quota under a separately versioned
+      protocol. Do not fill or risk the host filesystem.
 
-## Phase 3: run with Linux and CUDA
+## Phase 3: run CUDA inference and the remaining large-model systems work
 
-These tasks load or execute models and therefore require the CUDA backend.
+Behavioral and downstream inference require the CUDA backend. The scaling
+experiment runs on the same Linux host for operational convenience and
+hardware consistency, but it is explicitly a CPU/I/O workload with CUDA
+disabled.
 
 ### 10. Behavioral regression suite
 
@@ -206,15 +249,23 @@ These tasks load or execute models and therefore require the CUDA backend.
 
 ### 12. Scaling and systems measurements
 
-- [ ] Measure GPT-2 124M, Pythia 1B, OLMo 1B/sharded, and at least one sharded
-      7B checkpoint.
-- [ ] Compare equivalent Python/PyTorch, BrainSurgery in-memory, and
-      BrainSurgery arena operations.
-- [ ] Record wall time, peak RSS, peak GPU memory, bytes read/written, effective
-      I/O throughput, temporary disk, output bytes, shard count, and validation.
-- [ ] Separate checkpoint bytes from parameter count.
-- [ ] Use the same hardware, filesystem, cache policy, inputs, and operation for
-      every point in a reported comparison.
+- [ ] Run the frozen four-point Pythia scaling curve plus two-point GPT-2,
+      OLMo, and Qwen2.5 architecture/storage checks from
+      `revision_tests/scaling/cases.yaml` (ten checkpoints total).
+- [ ] Run the equivalent direct Python/PyTorch, BrainSurgery in-memory, and
+      BrainSurgery arena operation with `revision_tests/scaling/run.py`.
+- [ ] Confirm the runner records wall time, peak process-tree RSS, process I/O,
+      effective logical throughput, temporary arena disk, output bytes/shards,
+      and exact independent validation. GPU memory is intentionally N/A because
+      this checkpoint rewrite is forced to CPU; do not present it as GPU work.
+- [ ] Confirm checkpoint bytes and measured parameter counts are reported
+      separately, with checkpoint bytes as the primary systems-size axis.
+- [ ] Fit or connect the primary curve only within Pythia; show the GPT-2,
+      OLMo, and Qwen2.5 pairs separately rather than pooling architectures.
+- [ ] Use the same hardware, filesystem, warm-cache policy, inputs, operation,
+      and one-worker setting for every point in the reported comparison.
+- [ ] Require all automated reportability gates plus human artifact/anonymity
+      review before copying compact summaries into `scaling/results/`.
 
 Small smoke cases may run on any CUDA-capable Linux host. Use the larger GPU
 backend for 7B+ execution and downstream evaluation when the smaller GPU cannot

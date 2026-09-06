@@ -1,0 +1,54 @@
+% Qualitative coverage map. This is not a performance-results table.
+% Status before the reported Linux runs and official usability cohort.
+\begin{table*}[t]
+  \centering
+  \small
+  \begin{tabular}{@{}p{0.23\textwidth}p{0.20\textwidth}p{0.18\textwidth}p{0.31\textwidth}@{}}
+    \toprule
+    Capability & Relevant comparison & Status & Evidence boundary \\
+    \midrule
+    Regex/capture key rewriting
+      & \texttt{torch-state-bridge}
+      & Direct (R01)
+      & Same contract; exact tensor oracle. \\
+    Weighted checkpoint merge
+      & MergeKit
+      & Direct (M01)
+      & Same contract; independent numerical oracle. \\
+    Task-vector arithmetic
+      & MergeKit
+      & Direct (M02)
+      & Same contract; independent numerical oracle. \\
+    Block deletion/reindexing
+      & MergeKit slicing (adjacent)
+      & Usability T1
+      & Agent study, not a fixed MergeKit benchmark. \\
+    Tensor slicing/concatenation
+      & MergeKit slicing (adjacent)
+      & Correctness C06; usability T2
+      & Not an equivalent MergeKit head-pruning task. \\
+    Mixed precision and sharded export
+      & PyTorch/safetensors
+      & Usability T3; scaling
+      & Operation-matched systems evidence; Linux run pending. \\
+    LoRA merge and export
+      & PEFT; MergeKit (adjacent)
+      & Usability T5
+      & No fixed-tool result; report the package actually selected. \\
+    File-backed/out-of-core execution
+      & PyTorch in-memory; MergeKit (adjacent)
+      & Scaling
+      & Arena is compared directly with Python/PyTorch, not MergeKit. \\
+    MoE construction/upcycling
+      & MergeKit
+      & Not evaluated
+      & Outside the present revision. \\
+    Distributed resharding/optimizer state
+      & Orbax; PyTorch DCP
+      & Not evaluated
+      & Deferred and excluded from evaluated-capability claims. \\
+    \bottomrule
+  \end{tabular}
+  \caption{Coverage of capabilities that overlap with or are adjacent to related systems. Only R01, M01, and M02 are direct competing-tool comparisons; the table must not be interpreted as an overall tool ranking.}
+  \label{tab:related-system-feature-coverage}
+\end{table*}

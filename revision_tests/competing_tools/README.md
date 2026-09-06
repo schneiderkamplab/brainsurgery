@@ -122,6 +122,16 @@ The usability study's condition F remains separate: it measures an agent
 choosing among allowed packages, while this directory controls the operation,
 fixture, oracle, and execution environment.
 
+## Broader feature coverage
+
+[`feature_coverage.md`](feature_coverage.md) and
+[`feature_coverage.tex`](feature_coverage.tex) map direct comparisons,
+complementary evaluation, and deliberately unevaluated capabilities. Only
+R01, M01, and M02 count as direct competing-tool comparisons. In particular,
+the scaling study's arena comparison is against the operation-matched
+Python/PyTorch baseline, and ordinary sharded safetensors are not evidence of
+Orbax-style distributed resharding.
+
 ## Source and submission boundary
 
 Tool scope and version choices were checked against the official
