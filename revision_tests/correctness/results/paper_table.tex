@@ -1,0 +1,21 @@
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{lrrr}
+    \toprule
+    Evaluation & Cases & Oracle exact & Untouched exact \\
+    \midrule
+    Controlled primitives & 10/10 & 161/161 & 149/149 \\
+    Pinned real checkpoints & 3/3 & 518/518 & 515/515 \\
+    \midrule
+    Total & 13/13 & 679/679 & 664/664 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Independent correctness and preservation checks. Counts in the last
+  two columns are tensor--case comparisons. Exact means identical names,
+  shapes, dtypes, and tensor bytes. The real-checkpoint row covers GPT-2 124M,
+  OLMo 1B with sharded input, and Pythia 1B at pinned revisions. Custom
+  safetensors header metadata is outside the tensor-state claim and was not
+  preserved.}
+  \label{tab:correctness-preservation}
+\end{table}

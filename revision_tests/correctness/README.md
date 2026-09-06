@@ -59,6 +59,15 @@ The published directory contains only the environment, manifests, generated
 plans, summary, and paper table. It excludes checkpoint tensors and verbose raw
 logs.
 
+## Reported results
+
+The audited compact results and combined paper-ready material are in
+[`results/`](results/README.md):
+
+- controlled primitive evaluation at commit `30adb808`;
+- real-checkpoint preservation evaluation at commit `c5e464b9`;
+- combined Markdown and LaTeX tables with the exact claim boundary.
+
 ## Interpretation
 
 The primary claim is about the tensor state dictionary: names, shapes, dtypes,

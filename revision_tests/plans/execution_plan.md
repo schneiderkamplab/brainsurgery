@@ -40,17 +40,23 @@ agents or loading models on a GPU.
 
 ### 2. Correctness and no-unintended-change tests
 
-- [ ] Implement small, hand-verifiable fixtures for identity, rename and
+- [x] Implement small, hand-verifiable fixtures for identity, rename and
       inverse rename, copy, move, delete, split/concatenate, dtype conversion,
       arithmetic, and shard/save/reload.
-- [ ] Declare the expected write-set for every case.
-- [ ] Hash every tensor outside the write-set before and after execution.
-- [ ] Compare changed tensors with an independent PyTorch or NumPy oracle.
-- [ ] Use exact comparisons for lossless operations and declared tolerances for
+- [x] Declare the expected write-set for every case.
+- [x] Hash every tensor outside the write-set before and after execution.
+- [x] Compare changed tensors with an independent PyTorch oracle.
+- [x] Use exact comparisons for lossless operations and declared rules for
       lossy arithmetic or dtype changes.
-- [ ] Check relevant configuration, metadata, tensor names, shapes, dtypes, and
+- [x] Check container metadata, tensor names, shapes, dtypes, source files, and
       shard indexes in addition to tensor values.
-- [ ] Save compact summaries in Git and raw results under `log/revision_tests/`.
+- [x] Confirm the same exact-preservation property across the pinned GPT-2,
+      OLMo 1B sharded, and Pythia 1B base checkpoints.
+- [x] Save compact summaries in Git and raw results under `log/revision_tests/`.
+
+Evidence: `revision_tests/correctness/results/`. The primary tensor endpoints
+all pass; custom safetensors header metadata is not preserved and is recorded as
+a limitation outside the tensor-state claim.
 
 ### 3. Robustness and failure-semantics tests
 

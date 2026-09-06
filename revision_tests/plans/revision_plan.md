@@ -106,7 +106,8 @@ reviewed more accurately is still informative.
 ## Completion checklist
 
 - [ ] The usability study has complete repeats and manual bookkeeping.
-- [ ] Correctness uses independent, hand-verifiable evidence.
+- [x] Correctness uses independent, hand-verifiable evidence. See
+      `revision_tests/correctness/results/`.
 - [ ] Robustness and current failure-publication semantics are demonstrated.
 - [ ] Scaling claims match the largest tested checkpoint and controlled metrics.
 - [ ] Behavioral prompts have documented provenance and coverage.
