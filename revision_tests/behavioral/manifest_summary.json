@@ -1,0 +1,67 @@
+{
+  "language_counts": {
+    "dan_Latn": 5,
+    "deu_Latn": 5,
+    "eng_Latn": 45,
+    "fra_Latn": 5,
+    "spa_Latn": 5,
+    "zho_Hans": 5
+  },
+  "license_counts": {
+    "CC-BY-SA-4.0": 30,
+    "MIT": 40
+  },
+  "manifest": "prompt_manifest.jsonl",
+  "manifest_sha256": "abe5a763d3f39a77c720950826e45ab32b6d1e71910769a73ad77555a4d7e412",
+  "multiple_choice_count": 60,
+  "prompt_count": 70,
+  "protocol_id": "eacl2027_behavioral_v1",
+  "selection_seed": "eacl2027_behavioral_v1_sha256_rank",
+  "source_counts": {
+    "belebele": 30,
+    "human_eval": 10,
+    "mmlu": 30
+  },
+  "source_fingerprints": {
+    "belebele": {
+      "archive_sha256": "c645e750e111404806751509b5aa3f808a01e6029cd225d37e966dc694aca9e4",
+      "archive_url": "https://dl.fbaipublicfiles.com/belebele/Belebele.zip",
+      "citation_key": "bandarkar-etal-2024-belebele",
+      "license": "CC-BY-SA-4.0",
+      "name": "Belebele",
+      "repository": "https://github.com/facebookresearch/belebele",
+      "repository_revision": "918890beb2290a8d3ef2d7a90369925959e1bacf",
+      "split": "test"
+    },
+    "human_eval": {
+      "citation_key": "chen-etal-2021-evaluating",
+      "data_path": "data/HumanEval.jsonl.gz",
+      "data_sha256": "b796127e635a67f93fb35c04f4cb03cf06f38c8072ee7cee8833d7bee06979ef",
+      "license": "MIT",
+      "name": "HumanEval",
+      "repository": "https://github.com/openai/human-eval",
+      "repository_revision": "6d43fb980f9fee3c892a914eda09951f772ad10d",
+      "split": "test"
+    },
+    "mmlu": {
+      "citation_key": "hendrycks-etal-2021-mmlu",
+      "data_revision": "c30699e8356da336a370243923dbaf21066bb9fe",
+      "data_sha256": "74a41822ce7d3def56e1682f958469c04642a5336a5ce912fa375fdb90fb25d7",
+      "data_url": "https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/all/test-00000-of-00001.parquet",
+      "license": "MIT",
+      "name": "MMLU",
+      "repository": "https://github.com/hendrycks/test",
+      "repository_revision": "4450500f923c49f1fb1dd3d99108a0bd9717b660",
+      "split": "test"
+    }
+  },
+  "task_category_counts": {
+    "knowledge_reasoning:STEM": 5,
+    "knowledge_reasoning:STEM_applied": 5,
+    "knowledge_reasoning:humanities": 10,
+    "knowledge_reasoning:other": 5,
+    "knowledge_reasoning:social_science_professional": 5,
+    "multilingual_reading_comprehension": 30,
+    "python_code_completion": 10
+  }
+}

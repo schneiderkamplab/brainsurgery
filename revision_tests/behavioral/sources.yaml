@@ -1,0 +1,53 @@
+protocol_id: eacl2027_behavioral_v1
+retrieved_at_utc: '2026-09-06'
+selection_seed: eacl2027_behavioral_v1_sha256_rank
+sources:
+  belebele:
+    name: Belebele
+    repository: https://github.com/facebookresearch/belebele
+    repository_revision: 918890beb2290a8d3ef2d7a90369925959e1bacf
+    archive_url: https://dl.fbaipublicfiles.com/belebele/Belebele.zip
+    archive_sha256: c645e750e111404806751509b5aa3f808a01e6029cd225d37e966dc694aca9e4
+    split: test
+    license: CC-BY-SA-4.0
+    citation_key: bandarkar-etal-2024-belebele
+  mmlu:
+    name: MMLU
+    repository: https://github.com/hendrycks/test
+    repository_revision: 4450500f923c49f1fb1dd3d99108a0bd9717b660
+    data_url: https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/all/test-00000-of-00001.parquet
+    data_revision: c30699e8356da336a370243923dbaf21066bb9fe
+    data_sha256: 74a41822ce7d3def56e1682f958469c04642a5336a5ce912fa375fdb90fb25d7
+    split: test
+    license: MIT
+    citation_key: hendrycks-etal-2021-mmlu
+  human_eval:
+    name: HumanEval
+    repository: https://github.com/openai/human-eval
+    repository_revision: 6d43fb980f9fee3c892a914eda09951f772ad10d
+    data_path: data/HumanEval.jsonl.gz
+    data_sha256: b796127e635a67f93fb35c04f4cb03cf06f38c8072ee7cee8833d7bee06979ef
+    split: test
+    license: MIT
+    citation_key: chen-etal-2021-evaluating
+
+strata:
+  belebele_languages:
+    eng_Latn: {language: English, script: Latin}
+    dan_Latn: {language: Danish, script: Latin}
+    deu_Latn: {language: German, script: Latin}
+    fra_Latn: {language: French, script: Latin}
+    spa_Latn: {language: Spanish, script: Latin}
+    zho_Hans: {language: Chinese, script: Simplified_Han}
+  mmlu_subjects:
+    abstract_algebra: STEM
+    computer_security: STEM_applied
+    high_school_world_history: humanities
+    moral_disputes: humanities
+    professional_law: social_science_professional
+    global_facts: other
+
+sample_sizes:
+  belebele_parallel_question_ids: 5
+  mmlu_per_subject: 5
+  human_eval: 10

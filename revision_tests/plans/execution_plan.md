@@ -82,16 +82,24 @@ semantic failure matrix can be established here.
 
 ### 4. Prepare behavioral and baseline protocols
 
-- [ ] Create a versioned behavioral prompt manifest with source, license,
+- [x] Create a versioned behavioral prompt manifest with source, license,
       identifier, language, task category, split, and filtering procedure.
-- [ ] Freeze tokenizer, prompting, decoding, random seeds, metrics, and decision
+- [x] Freeze tokenizer, prompting, decoding, random seeds, metrics, and decision
       rules.
 - [ ] Define tool-neutral overlapping operations for MergeKit and
       `torch-state-bridge`; treat Orbax primarily as related-work positioning
       unless a genuinely equivalent executable case exists.
-- [ ] Build and unit-test analysis code against small synthetic data.
-- [ ] Validate Linux/CUDA launch commands without claiming local timings as
+- [x] Build and unit-test analysis code against small synthetic data.
+- [x] Validate Linux/CUDA launch commands without claiming local timings as
       final performance results.
+
+Behavioral evidence: `revision_tests/behavioral/`. The committed 70-prompt
+manifest contains 30 parallel Belebele prompts, 30 stratified MMLU prompts, and
+10 HumanEval regression prompts. Its validator reports 70/70 and the analyzer's
+five synthetic controls pass. A one-prompt GPT-2 CPU smoke run exercised both
+model roles and the analyzer; it is stored only under `log/revision_tests/` and
+is explicitly non-reportable. The full model comparison remains a Linux/CUDA
+task in Phase 3.
 
 ### 5. Prepare transfer and handoff
 
