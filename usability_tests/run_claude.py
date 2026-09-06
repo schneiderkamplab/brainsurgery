@@ -131,6 +131,8 @@ def summarise(events: list[dict]) -> dict:
         "duration_api_ms": result.get("duration_api_ms"),
         "session_id": result.get("session_id"),
         "result_subtype": result.get("subtype"),
+        "is_error": bool(result.get("is_error")),
+        "api_error_status": result.get("api_error_status"),
         "executions": len(executions),
         "failed_executions": [{k: v for k, v in e.items() if k != "is_error"} | {"error_class": ""} for e in failed],
         "first_execution_success": (executions[0].get("is_error") is False) if executions else False,
