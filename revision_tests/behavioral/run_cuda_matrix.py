@@ -106,6 +106,18 @@ def write_plan(
     path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")
 
 
+def copy_model_sidecars(source: Path, transformed: Path) -> list[str]:
+    copied = []
+    for name, required in (("config.json", True), ("generation_config.json", False)):
+        source_file = source / name
+        if required and not source_file.is_file():
+            raise RuntimeError(f"missing required model sidecar: {source_file}")
+        if source_file.is_file():
+            shutil.copy2(source_file, transformed / name)
+            copied.append(name)
+    return copied
+
+
 def run_case(
     *,
     args: argparse.Namespace,
@@ -143,6 +155,8 @@ def run_case(
             "warning",
         ]
     )
+
+    copied_sidecars = copy_model_sidecars(source, transformed)
 
     comparison = compare_output(
         source,
