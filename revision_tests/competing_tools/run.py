@@ -341,6 +341,8 @@ def run_monitored(
     started = time.perf_counter()
     peak_rss = 0
     io_by_pid: dict[int, tuple[int, int]] = {}
+    rss_sampled_pids: set[int] = set()
+    sampling_failure_pids: set[int] = set()
     timed_out = False
     process_tree_sampling_degraded = False
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
@@ -351,7 +353,11 @@ def run_monitored(
             stdout=stdout,
             stderr=stderr,
         )
-        root = psutil.Process(process.pid)
+        try:
+            root: psutil.Process | None = psutil.Process(process.pid)
+        except psutil.NoSuchProcess:
+            root = None
+            process_tree_sampling_degraded = True
         while process.poll() is None:
             if time.perf_counter() - started > timeout:
                 timed_out = True
@@ -361,33 +367,40 @@ def run_monitored(
                 except subprocess.TimeoutExpired:
                     process.kill()
                 break
-            processes = [root]
-            try:
-                processes.extend(root.children(recursive=True))
-            except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError):
-                process_tree_sampling_degraded = True
+            processes = [root] if root is not None else []
+            if root is not None:
+                try:
+                    processes.extend(root.children(recursive=True))
+                except psutil.NoSuchProcess:
+                    processes = []
+                except (psutil.AccessDenied, PermissionError):
+                    process_tree_sampling_degraded = True
             rss = 0
             for child in processes:
                 try:
                     rss += child.memory_info().rss
+                    rss_sampled_pids.add(child.pid)
                     io = child.io_counters()
                     old = io_by_pid.get(child.pid, (0, 0))
                     io_by_pid[child.pid] = (
                         max(old[0], io.read_bytes),
                         max(old[1], io.write_bytes),
                     )
-                except (
-                    psutil.NoSuchProcess,
-                    psutil.AccessDenied,
-                    AttributeError,
-                    PermissionError,
-                ):
-                    process_tree_sampling_degraded = True
+                except psutil.NoSuchProcess:
+                    continue
+                except (psutil.AccessDenied, AttributeError, PermissionError):
+                    sampling_failure_pids.add(child.pid)
                     continue
             peak_rss = max(peak_rss, rss)
             time.sleep(interval_seconds)
         returncode = process.wait()
     duration = time.perf_counter() - started
+    unresolved_sampling_pids = {
+        pid
+        for pid in sampling_failure_pids
+        if pid not in rss_sampled_pids or pid not in io_by_pid
+    }
+    process_tree_sampling_degraded |= bool(unresolved_sampling_pids)
     return {
         "command": command,
         "command_shell_display": shlex.join(command),

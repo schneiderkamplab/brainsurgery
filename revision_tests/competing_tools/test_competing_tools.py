@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from copy import deepcopy
 from pathlib import Path
 
@@ -9,6 +11,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from revision_tests.competing_tools import run as competing_run
 from revision_tests.competing_tools.export_anonymous import sanitize_value
 from revision_tests.competing_tools.oracle import (
     compare_output,
@@ -174,3 +177,79 @@ def test_nonreportable_presentations_suppress_performance_values() -> None:
     assert "NOT REPORTABLE" in markdown
     assert "NON-REPORTABLE" in latex
     assert "no runtime" in narrative
+
+
+def test_process_exit_race_does_not_degrade_sampling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    real_process = competing_run.psutil.Process
+
+    class VanishedSample:
+        pid = -1
+
+        def memory_info(self) -> object:
+            raise competing_run.psutil.NoSuchProcess(self.pid)
+
+    class VanishedChildProcess:
+        def __init__(self, pid: int) -> None:
+            self._process = real_process(pid)
+            self._io_calls = 0
+            self.pid = pid
+
+        def children(self, *, recursive: bool) -> list[object]:
+            return [VanishedSample()]
+
+        def memory_info(self) -> object:
+            return self._process.memory_info()
+
+        def io_counters(self) -> object:
+            self._io_calls += 1
+            if self._io_calls == 1:
+                raise competing_run.psutil.AccessDenied(self.pid)
+            return self._process.io_counters()
+
+    monkeypatch.setattr(competing_run.psutil, "Process", VanishedChildProcess)
+    result = competing_run.run_monitored(
+        [sys.executable, "-c", "import time; time.sleep(0.03)"],
+        stdout_path=tmp_path / "stdout.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        timeout=1,
+        interval_seconds=0.001,
+        environment=os.environ.copy(),
+    )
+
+    assert result["returncode"] == 0
+    assert result["process_tree_sampling_degraded"] is False
+
+
+def test_persistent_sampling_access_denial_is_degraded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    real_process = competing_run.psutil.Process
+
+    class DeniedProcess:
+        def __init__(self, pid: int) -> None:
+            self._process = real_process(pid)
+            self.pid = pid
+
+        def children(self, *, recursive: bool) -> list[object]:
+            return []
+
+        def memory_info(self) -> object:
+            return self._process.memory_info()
+
+        def io_counters(self) -> object:
+            raise competing_run.psutil.AccessDenied(self.pid)
+
+    monkeypatch.setattr(competing_run.psutil, "Process", DeniedProcess)
+    result = competing_run.run_monitored(
+        [sys.executable, "-c", "import time; time.sleep(0.03)"],
+        stdout_path=tmp_path / "stdout.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        timeout=1,
+        interval_seconds=0.001,
+        environment=os.environ.copy(),
+    )
+
+    assert result["returncode"] == 0
+    assert result["process_tree_sampling_degraded"] is True

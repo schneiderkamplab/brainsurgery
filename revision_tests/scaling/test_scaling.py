@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from copy import deepcopy
 from pathlib import Path
 
 import torch
 from safetensors.torch import load_file, save_file
 
-from revision_tests.scaling import baseline, oracle
+from revision_tests.scaling import baseline, oracle, run as scaling_run
 from revision_tests.scaling.run import render_csv, render_latex, render_markdown
 from revision_tests.scaling.validate_protocol import load_cases
 
@@ -175,3 +177,41 @@ def test_revision_metadata_is_checked_for_every_checkpoint_file(tmp_path: Path) 
     metadata.write_text(f"{revision}\nunused-etag\n", encoding="utf-8")
     assert oracle.verify_huggingface_revision(source, revision)["passed"]
     assert not oracle.verify_huggingface_revision(source, "b" * 40)["passed"]
+
+
+def test_transient_sampling_denial_does_not_degrade_scaling_monitor(
+    monkeypatch, tmp_path: Path
+) -> None:
+    real_process = scaling_run.psutil.Process
+
+    class TransientlyDeniedProcess:
+        def __init__(self, pid: int) -> None:
+            self._process = real_process(pid)
+            self._io_calls = 0
+            self.pid = pid
+
+        def children(self, *, recursive: bool) -> list[object]:
+            return []
+
+        def memory_info(self) -> object:
+            return self._process.memory_info()
+
+        def io_counters(self) -> object:
+            self._io_calls += 1
+            if self._io_calls == 1:
+                raise scaling_run.psutil.AccessDenied(self.pid)
+            return self._process.io_counters()
+
+    monkeypatch.setattr(scaling_run.psutil, "Process", TransientlyDeniedProcess)
+    result = scaling_run.run_monitored(
+        [sys.executable, "-c", "import time; time.sleep(0.03)"],
+        stdout_path=tmp_path / "stdout.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        temp_path=tmp_path / "arena",
+        timeout=1,
+        interval_seconds=0.001,
+        environment=os.environ.copy(),
+    )
+
+    assert result["returncode"] == 0
+    assert result["resource_sampling_degraded"] is False

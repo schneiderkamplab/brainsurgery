@@ -386,3 +386,11 @@ All 8 spot-checked models pass on GPU/bf16 with `masked_top1_eq=True`:
 
 - 27 PASS, 2 pre-existing FAIL (SmolLM2-135M, granite-3.1-2b), 0 ERROR, 0 regressions
 - Updated `wiki/vllm-backend-debug.md` with full B200 backend status table
+
+
+## [2026-09-06] Revision comparison | transient Linux `/proc` I/O denial
+
+- The first Linux comparison run at commit `6dd84b5c` produced 30/30 correct measured outputs but was non-reportable because every attempt set the degraded process-tree sampling flag. Raw evidence: `log/revision_tests/eacl2027_competing_linux_6dd84b5/competing_tools/`.
+- Caused-by: while importing Torch in this container, `psutil.Process.io_counters()` intermittently raises `AccessDenied` for the live root PID even though later samples succeed; a minimal probe observed successful RSS/I/O samples around the transient denials.
+- Fixed-by: the comparison and scaling monitors treat `NoSuchProcess` as a normal exit race and resolve transient access failures per PID. Sampling remains degraded if a PID with a permission/counter failure never produces both an RSS and I/O sample.
+- Validated-by: focused negative controls cover vanished processes, transient denial, and persistent denial; `linux_sampling_fix_smoke_v2_6dd84b5` completed 6/6 correct measured attempts with no sampling degradation.

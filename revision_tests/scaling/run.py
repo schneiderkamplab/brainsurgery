@@ -228,6 +228,8 @@ def run_monitored(
     peak_temp_logical = 0
     peak_temp_allocated = 0
     io_by_pid: dict[int, tuple[int, int]] = {}
+    rss_sampled_pids: set[int] = set()
+    sampling_failure_pids: set[int] = set()
     timed_out = False
     degraded = False
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
@@ -258,6 +260,7 @@ def run_monitored(
             for child in processes:
                 try:
                     rss += child.memory_info().rss
+                    rss_sampled_pids.add(child.pid)
                     counters = child.io_counters()
                     previous = io_by_pid.get(child.pid, (0, 0))
                     io_by_pid[child.pid] = (
@@ -267,7 +270,7 @@ def run_monitored(
                 except psutil.NoSuchProcess:
                     continue
                 except (psutil.AccessDenied, AttributeError, PermissionError):
-                    degraded = True
+                    sampling_failure_pids.add(child.pid)
             peak_rss = max(peak_rss, rss)
             logical, allocated = directory_usage(temp_path)
             peak_temp_logical = max(peak_temp_logical, logical)
@@ -275,6 +278,12 @@ def run_monitored(
             time.sleep(interval_seconds)
         returncode = process.wait()
     logical, allocated = directory_usage(temp_path)
+    unresolved_sampling_pids = {
+        pid
+        for pid in sampling_failure_pids
+        if pid not in rss_sampled_pids or pid not in io_by_pid
+    }
+    degraded |= bool(unresolved_sampling_pids)
     return {
         "command": command,
         "command_shell_display": shlex.join(command),
