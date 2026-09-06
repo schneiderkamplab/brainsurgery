@@ -16,6 +16,7 @@ from revision_tests.competing_tools.oracle import (
     validate_comparison_record,
 )
 from revision_tests.competing_tools.prepare import canonicalize_gpt2_merge_state, prepare
+from revision_tests.competing_tools.run import render_latex, render_narrative, render_table
 from revision_tests.competing_tools.validate_protocol import validate
 
 
@@ -137,3 +138,39 @@ def test_anonymous_export_redacts_nested_paths_and_hostname() -> None:
         "command": ["<REPOSITORY_ROOT>/.venv/bin/tool", "/tmp/run/input"],
         "nested": {"path": "<REPOSITORY_ROOT>/model"},
     }
+
+
+def test_nonreportable_presentations_suppress_performance_values() -> None:
+    summary = {
+        "reported_eligible": False,
+        "eligibility_reasons": ["smoke"],
+        "correct_measured_attempts": 1,
+        "measured_attempts": 1,
+        "pairs": {
+            "R01:brainsurgery": {
+                "case_id": "R01",
+                "tool": "brainsurgery",
+                "correct_attempts": 1,
+                "measured_attempts": 1,
+                "wall_seconds": {"median": 123.456789},
+                "peak_process_tree_rss_bytes": {"median": 987 * 1024 * 1024},
+                "output_bytes": {"median": 10 * 1024 * 1024},
+                "specification_metrics": {"nonblank_noncomment_lines": 7},
+            }
+        },
+        "comparisons": {
+            "R01": {
+                "competitor": "torch_state_bridge",
+                "brain_to_competitor_median_wall_ratio": 12.3456,
+            }
+        },
+    }
+    markdown = render_table(summary)
+    latex = render_latex(summary)
+    narrative = render_narrative(summary)
+    for rendered in (markdown, latex, narrative):
+        assert "123.456" not in rendered
+        assert "12.3456" not in rendered
+    assert "NOT REPORTABLE" in markdown
+    assert "NON-REPORTABLE" in latex
+    assert "no runtime" in narrative

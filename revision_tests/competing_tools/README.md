@@ -98,6 +98,11 @@ Raw artifacts are written to
 `log/revision_tests/<run_id>/competing_tools/`. The runner refuses to overwrite
 an existing run, preserves failed outputs and diagnostics, and deletes only
 successfully validated repetition outputs unless `--keep-outputs` is supplied.
+Every completed run generates `paper_table.md`, `paper_table.tex`, and
+`paper_text.md`; non-reportable runs automatically suppress timing, memory, and
+ratio values in the presentation files while retaining them in private raw
+records for diagnosis. The LaTeX fragment uses `booktabs` and fits an ACL-style
+two-column paper as a `table*`.
 The runner records the upstream identifier and revision label, hashes the local
 checkpoint files and every derived tensor, rechecks fixture and protocol hashes
 before and after measurement, and rejects reportable runs with a dirty checkout,

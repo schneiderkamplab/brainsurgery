@@ -1,0 +1,21 @@
+% NON-REPORTABLE PREFLIGHT: do not use this fragment as paper evidence.
+% Requires \usepackage{booktabs}.
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{llrrrr}
+\toprule
+Case & Tool & Correct & Wall (s) & Peak RSS (MiB) & Output (MiB) \\
+\midrule
+R01 & \textsc{BrainSurgery} & 1/1 & -- & -- & 522.7 \\
+R01 & \texttt{torch-state-bridge} & 1/1 & -- & -- & 522.7 \\
+M01 & \textsc{BrainSurgery} & 1/1 & -- & -- & 474.7 \\
+M01 & \textsc{MergeKit} & 1/1 & -- & -- & 474.7 \\
+M02 & \textsc{BrainSurgery} & 1/1 & -- & -- & 474.7 \\
+M02 & \textsc{MergeKit} & 1/1 & -- & -- & 474.7 \\
+\bottomrule
+\end{tabular}
+\caption{Non-reportable integration preflight. Timing and memory are
+suppressed; correctness counts are shown only to validate the harness.}
+\label{tab:competing-tools-preflight}
+\end{table*}

@@ -582,6 +582,22 @@ def build_summary(
             "specification_metrics": (
                 pair_results[0]["specification_metrics"] if pair_results else None
             ),
+            "tensors_checked": sorted(
+                {
+                    result["validation"]["tensors_checked"]
+                    for result in correct
+                    if result["validation"] is not None
+                }
+            ),
+            "maximum_absolute_difference": max(
+                (
+                    result["validation"]["maximum_absolute_difference"]
+                    for result in correct
+                    if result["validation"] is not None
+                    and result["validation"]["maximum_absolute_difference"] is not None
+                ),
+                default=None,
+            ),
         }
     complete = all(pair["correct_attempts"] == args.repetitions for pair in pairs.values())
     final_reasons = list(eligibility_reasons)
@@ -639,14 +655,14 @@ def render_table(summary: dict[str, Any]) -> str:
         rss = pair["peak_process_tree_rss_bytes"]["median"]
         output_bytes = pair["output_bytes"]["median"]
         spec_lines = pair["specification_metrics"]["nonblank_noncomment_lines"]
+        timing_usable = summary["reported_eligible"] and wall is not None and rss is not None
+        wall_text = f"{wall:.6f}" if timing_usable else "—"
+        rss_text = f"{rss / (1024 * 1024):.2f}" if timing_usable else "—"
+        output_text = f"{output_bytes / (1024 * 1024):.2f}" if output_bytes else "—"
         table_lines.append(
             f"| {pair['case_id']} | {pair['tool']} | "
             f"{pair['correct_attempts']}/{pair['measured_attempts']} | "
-            f"{wall:.6f} | {rss / (1024 * 1024):.2f} | "
-            f"{output_bytes / (1024 * 1024):.2f} | {spec_lines} |"
-            if wall is not None and rss is not None and output_bytes is not None
-            else f"| {pair['case_id']} | {pair['tool']} | "
-            f"{pair['correct_attempts']}/{pair['measured_attempts']} | — | — | — | {spec_lines} |"
+            f"{wall_text} | {rss_text} | {output_text} | {spec_lines} |"
         )
     ratio_lines = [
         "| Case | Competitor | BrainSurgery / competitor median wall ratio |",
@@ -656,7 +672,11 @@ def render_table(summary: dict[str, Any]) -> str:
         ratio = comparison["brain_to_competitor_median_wall_ratio"]
         ratio_lines.append(
             f"| {case_id} | {comparison['competitor']} | "
-            + (f"{ratio:.4f} |" if ratio is not None else "— |")
+            + (
+                f"{ratio:.4f} |"
+                if summary["reported_eligible"] and ratio is not None
+                else "— |"
+            )
         )
     if summary["reported_eligible"]:
         status = "REPORTABLE CANDIDATE: all automated eligibility gates passed."
@@ -673,6 +693,108 @@ def render_table(summary: dict[str, Any]) -> str:
         + "\n\nTimings include process startup, input loading, transformation, and output save. "
         "Specification lines are descriptive only and are not a usability measure.\n"
     )
+
+
+def latex_tool_name(tool: str) -> str:
+    names = {
+        "brainsurgery": r"\textsc{BrainSurgery}",
+        "mergekit": r"\textsc{MergeKit}",
+        "torch_state_bridge": r"\texttt{torch-state-bridge}",
+    }
+    return names[tool]
+
+
+def render_latex(summary: dict[str, Any]) -> str:
+    reportable = summary["reported_eligible"]
+    rows = []
+    for pair in summary["pairs"].values():
+        wall = pair["wall_seconds"]["median"]
+        rss = pair["peak_process_tree_rss_bytes"]["median"]
+        output_bytes = pair["output_bytes"]["median"]
+        wall_text = f"{wall:.3f}" if reportable and wall is not None else "--"
+        rss_text = f"{rss / (1024 * 1024):.1f}" if reportable and rss is not None else "--"
+        output_text = f"{output_bytes / (1024 * 1024):.1f}" if output_bytes else "--"
+        rows.append(
+            f"{pair['case_id']} & {latex_tool_name(pair['tool'])} & "
+            f"{pair['correct_attempts']}/{pair['measured_attempts']} & "
+            f"{wall_text} & {rss_text} & {output_text} \\\\"
+        )
+    if reportable:
+        caption = (
+            "Controlled checkpoint-operation comparison. Runtime and peak RSS are "
+            "medians over correctness-validated measured runs."
+        )
+        warning = "% All automated reporting gates passed; complete human audit before use."
+    else:
+        caption = (
+            "Non-reportable integration preflight. Timing and memory are suppressed; "
+            "correctness counts are shown only to validate the harness."
+        )
+        warning = "% NON-REPORTABLE PREFLIGHT: do not use this fragment as paper evidence."
+    return (
+        f"{warning}\n"
+        "\\begin{table*}[t]\n"
+        "\\centering\n"
+        "\\small\n"
+        "\\begin{tabular}{llrrrr}\n"
+        "\\toprule\n"
+        "Case & Tool & Correct & Wall (s) & Peak RSS (MiB) & Output (MiB) \\\\\n"
+        "\\midrule\n"
+        + "\n".join(rows)
+        + "\n\\bottomrule\n"
+        "\\end{tabular}\n"
+        f"\\caption{{{caption}}}\n"
+        "\\label{tab:competing-tools}\n"
+        "\\end{table*}\n"
+    )
+
+
+def render_narrative(summary: dict[str, Any]) -> str:
+    correct = summary["correct_measured_attempts"]
+    measured = summary["measured_attempts"]
+    if not summary["reported_eligible"]:
+        return (
+            "# Competing-tool preflight interpretation\n\n"
+            f"This non-reportable integration preflight produced correct outputs in "
+            f"{correct}/{measured} measured tool/case attempts. It establishes that the "
+            "frozen adapters, common-operation contracts, and independent oracle execute "
+            "together. Because the reporting gates did not pass, no runtime, memory, "
+            "efficiency, scaling, usability, downstream-quality, or general tool-ranking "
+            "claim may be drawn from this run.\n"
+        )
+    case_text = []
+    for case_id in sorted(summary["comparisons"]):
+        case_pairs = [
+            pair for pair in summary["pairs"].values() if pair["case_id"] == case_id
+        ]
+        maximum = max(
+            (
+                pair["maximum_absolute_difference"]
+                for pair in case_pairs
+                if pair["maximum_absolute_difference"] is not None
+            ),
+            default=None,
+        )
+        ratio = summary["comparisons"][case_id][
+            "brain_to_competitor_median_wall_ratio"
+        ]
+        case_text.append(
+            f"{case_id}: all outputs passed; maximum absolute difference "
+            f"{maximum:.3g}; BrainSurgery/competitor median wall-time ratio {ratio:.3f}."
+        )
+    return (
+        "# Competing-tool result interpretation\n\n"
+        f"All {correct}/{measured} measured outputs passed the independent oracle. "
+        + " ".join(case_text)
+        + " These narrow, operation-matched results must not be interpreted as a "
+        "general ranking of the tools or as usability evidence.\n"
+    )
+
+
+def write_reports(run_dir: Path, summary: dict[str, Any]) -> None:
+    (run_dir / "paper_table.md").write_text(render_table(summary), encoding="utf-8")
+    (run_dir / "paper_table.tex").write_text(render_latex(summary), encoding="utf-8")
+    (run_dir / "paper_text.md").write_text(render_narrative(summary), encoding="utf-8")
 
 
 def main() -> int:
@@ -729,7 +851,7 @@ def main() -> int:
         summary = build_summary(args, environment, eligibility_reasons, results)
         write_json(run_dir / "summary.json", summary)
         write_json(run_dir / "preflight_failure.json", {"failed_warmups": failed_warmups})
-        (run_dir / "paper_table.md").write_text(render_table(summary), encoding="utf-8")
+        write_reports(run_dir, summary)
         print("warm-up correctness failed: " + ", ".join(failed_warmups))
         print(f"raw results: {run_dir.relative_to(REPO)}")
         return 1
@@ -762,7 +884,7 @@ def main() -> int:
         args, environment, eligibility_reasons + integrity_errors, results
     )
     write_json(run_dir / "summary.json", summary)
-    (run_dir / "paper_table.md").write_text(render_table(summary), encoding="utf-8")
+    write_reports(run_dir, summary)
     print(f"raw results: {run_dir.relative_to(REPO)}")
     print(
         f"correct measured attempts: {summary['correct_measured_attempts']}/"

@@ -1,21 +1,21 @@
 {
   "protocol_id": "eacl2027_competing_tools_v1",
-  "run_id": "2026_09_06_competing_tools_gpt2_mac_smoke_v3",
+  "run_id": "2026_09_06_competing_tools_gpt2_mac_smoke_v4",
   "status": "preflight_only_nonreportable",
   "purpose": "actual-package integration and correctness preflight",
   "created_at_utc_date": "2026-09-06",
-  "code_git_commit_at_run": "0716dd7d0e0cde3cb38f4dc4cc5e3eadd27b42f3",
+  "code_git_commit_at_run": "399e6ddff9d4f16c3fa9dba368789df12abe2a7c",
   "protocol_source_manifest": {
-    "README.md": "997bc8e13f333359e66f9270cdb0cde9f4f70bb67648e744d5926113da71851a",
+    "README.md": "210ae3ecc527255aff436c9440361b0f9903d583358a5eaba84ee8e27a162ab4",
     "adapter_torch_state_bridge.py": "bbaf4ac254c622d3ef39f52a9f476c41463f77199814273d41c373f8187315e8",
     "cases.yaml": "1b166f6933e87bc3f3431d4653e75e4d26d722d58789b85145eb0cad9a2df14a",
     "oracle.py": "8a1642ee8f8462444fc739b41a9ffb6586792bfcfd8cecb15715b1a1a7a6f9e1",
     "prepare.py": "5352863412b8b54709d7bf250b8212ee35d922849ad90a293d16de63f9357a60",
     "protocol.md": "cdb4ccb0c5a5d32d826e89d669c242f0075d31d04493d6b06dabd2c6aab9e81f",
-    "run.py": "6fdb7fa3f5ff70ca4edcf37bd66c455057828baf22be3746c141c93d52d90988",
+    "run.py": "4e9c679e5f0fbb2982d397821e2ba636cabab0f508f059f2eb825366321984a1",
     "tools.yaml": "dcf99e362571b10031a7e4b50c3fc6599ac3920d1e0638f9a973828bf80285cd"
   },
-  "raw_artifact_location": "log/revision_tests/2026_09_06_competing_tools_gpt2_mac_smoke_v3/competing_tools",
+  "raw_artifact_location": "log/revision_tests/2026_09_06_competing_tools_gpt2_mac_smoke_v4/competing_tools",
   "source": {
     "model_id": "openai-community/gpt2",
     "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
