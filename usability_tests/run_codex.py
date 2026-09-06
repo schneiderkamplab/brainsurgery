@@ -2,7 +2,8 @@
 """Run one participant session with OpenAI Codex CLI and record everything.
 
     .venv/bin/python usability_tests/run_codex.py T2 B --agent <agent-name> --model <model-id> \
-        --target gpt-2 --effort light --repeat 1 [--reasoning-effort low] [--venv] [--timeout 1800] [--skip-review]
+        --target gpt-2 --effort light --repeat 1 [--reasoning-effort low] [--venv] [--timeout 1800] \
+        --price-in <usd/M> --price-out <usd/M> [--price-cache-read <usd/M>] [--price-cache-write <usd/M>]
 
 Same phases and the same record files as run_claude.py, so analyze.py treats
 both vendors alike:
@@ -15,9 +16,10 @@ both vendors alike:
    and `--json`, which streams JSONL events. The stream is saved as
    transcript.jsonl and summarised into harness.json: turns, tool calls,
    tokens, executions of the participant's artifact and which failed, cap hit.
-   Codex does not report cost; cost_usd is computed from --price-in/--price-out
-   (USD per million tokens) when given, otherwise left null for the analysis
-   to fill from the vendor rate card.
+   Codex does not report cost; cost_usd is computed from the input, output,
+   cache-read and cache-write price arguments (USD per million tokens) when
+   given, otherwise left null for the analysis to fill from the vendor rate
+   card.
 3. grade: grade.py writes grade.json.
 4. review (bug detection): a fresh single-turn `codex exec --sandbox read-only`
    session judges one artifact for the same task (defective on odd repeats,
@@ -28,13 +30,14 @@ as agreed for the study); --reasoning-effort is the value passed to Codex as
 `-c model_reasoning_effort=...` (Codex accepts minimal, low, medium, high; it
 defaults to the tier name, so pass --reasoning-effort low for the light tier).
 
-Codex CLI is a moving target. This driver was written against `codex exec
---json` as of Codex CLI 0.4x (events: thread.started, turn.started,
+Codex CLI is a moving target. This driver is validated against `codex exec
+--json` as of Codex CLI 0.153.0 (events: thread.started, turn.started,
 item.started/item.completed with item.type in {agent_message, reasoning,
-command_execution, ...}, turn.completed with usage) without a Codex
-installation to test on. On first use, run one cell, then compare
-harness.json with transcript.jsonl and adjust summarise_codex() if the event
-names differ. Everything downstream only needs the harness.json fields.
+command_execution, ...}, turn.completed with usage). On each new CLI version,
+run one cell, then compare
+harness.json with transcript.jsonl (or run audit_codex.py) and adjust
+summarise_codex() if the event names differ. Everything downstream only needs
+the harness.json fields.
 """
 
 from __future__ import annotations
@@ -57,6 +60,21 @@ from targets import TARGETS, TESTS  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
+SHELL_LC_RE = re.compile(r"^(?:\S*/)?(?:zsh|bash|sh)\s+-lc\s+(['\"])(.*)\1$", re.DOTALL)
+
+
+def is_execution_command(command: str) -> bool:
+    """Recognize artifact runs, including commands wrapped by `codex exec` in a shell."""
+    command = command.strip()
+    shell_match = SHELL_LC_RE.match(command)
+    if shell_match:
+        command = shell_match.group(2)
+    return bool(EXEC_RE.search(command))
+
+
+def is_tool_item(item_type: str) -> bool:
+    """Return whether a Codex stream item represents one tool invocation."""
+    return item_type in {"command_execution", "file_change", "mcp_tool_call", "web_search"}
 
 
 def now() -> str:
@@ -110,7 +128,9 @@ def _walk(obj, key):
 def summarise_codex(events: list[dict], final_text: str) -> dict:
     turns = 0
     tool_calls = 0
-    executions: list[dict] = []
+    execution_order: list[str] = []
+    execution_results: dict[str, dict] = {}
+    unkeyed_executions: list[dict] = []
     usage: dict = {}
     for ev in events:
         etype = ev.get("type", "")
@@ -125,32 +145,47 @@ def summarise_codex(events: list[dict], final_text: str) -> dict:
             continue
         item = ev.get("item") if isinstance(ev.get("item"), dict) else ev
         itype = item.get("type", "") or item.get("item_type", "")
+        if etype.endswith("completed") and is_tool_item(itype):
+            tool_calls += 1
         if "command" in itype or "command" in item:
             cmd = item.get("command")
             if isinstance(cmd, list):
                 cmd = " ".join(map(str, cmd))
             cmd = str(cmd or "")
-            if etype.endswith("completed") or item.get("status") in ("completed", "failed") or "exit_code" in item:
-                tool_calls += 1
-                if EXEC_RE.search(cmd):
+            item_id = str(item.get("id") or "")
+            if etype.endswith("started") and is_execution_command(cmd) and item_id:
+                execution_order.append(item_id)
+            if etype.endswith("completed"):
+                if is_execution_command(cmd):
                     exit_code = item.get("exit_code")
                     output = str(item.get("aggregated_output") or item.get("output") or "")
-                    executions.append({
-                        "n": len(executions) + 1, "command": cmd[:300],
+                    result = {
+                        "command": cmd[:300],
                         "is_error": (exit_code not in (0, None)) or item.get("status") == "failed",
                         "message": output.strip().splitlines()[-1][:300] if output.strip() else "",
-                    })
+                    }
+                    if item_id:
+                        execution_results[item_id] = result
+                        if item_id not in execution_order:
+                            execution_order.append(item_id)
+                    else:
+                        unkeyed_executions.append(result)
+    executions = [execution_results[item_id] for item_id in execution_order if item_id in execution_results]
+    executions.extend(unkeyed_executions)
+    for n, execution in enumerate(executions, 1):
+        execution["n"] = n
     failed = [e for e in executions if e["is_error"]]
     first_ok = next((e["n"] for e in executions if not e["is_error"]), None)
     tokens_in = usage.get("input_tokens")
     cached = usage.get("cached_input_tokens") or usage.get("cache_read_input_tokens") or 0
+    cache_written = usage.get("cache_write_input_tokens") or usage.get("cache_creation_input_tokens") or 0
     return {
         "turns": turns or None,
         "tool_calls": tool_calls,
-        "tokens_in": (tokens_in - cached) if tokens_in is not None else None,
+        "tokens_in": max(0, tokens_in - cached - cache_written) if tokens_in is not None else None,
         "tokens_out": usage.get("output_tokens"),
         "cache_read_tokens": cached or None,
-        "cache_write_tokens": None,
+        "cache_write_tokens": cache_written or None,
         "tokens_in_total": tokens_in,
         "reasoning_tokens": usage.get("reasoning_output_tokens"),
         "usage_raw": usage,
@@ -162,10 +197,19 @@ def summarise_codex(events: list[dict], final_text: str) -> dict:
     }
 
 
-def cost(summary: dict, price_in: float | None, price_out: float | None) -> float | None:
+def cost(summary: dict, price_in: float | None, price_out: float | None,
+         price_cache_read: float | None = None, price_cache_write: float | None = None) -> float | None:
     if price_in is None or price_out is None or summary["tokens_in_total"] is None:
         return None
-    return round(summary["tokens_in_total"] / 1e6 * price_in + (summary["tokens_out"] or 0) / 1e6 * price_out, 6)
+    cache_read_rate = price_in if price_cache_read is None else price_cache_read
+    cache_write_rate = price_in if price_cache_write is None else price_cache_write
+    return round(
+        (summary["tokens_in"] or 0) / 1e6 * price_in
+        + (summary["cache_read_tokens"] or 0) / 1e6 * cache_read_rate
+        + (summary["cache_write_tokens"] or 0) / 1e6 * cache_write_rate
+        + (summary["tokens_out"] or 0) / 1e6 * price_out,
+        6,
+    )
 
 
 def main() -> int:
@@ -184,6 +228,10 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=1800, help="solve-phase cap in seconds (the study uses 1800)")
     parser.add_argument("--price-in", type=float, default=None, help="USD per 1M input tokens, for cost_usd")
     parser.add_argument("--price-out", type=float, default=None, help="USD per 1M output tokens, for cost_usd")
+    parser.add_argument("--price-cache-read", type=float, default=None,
+                        help="USD per 1M cache-read tokens (default: --price-in)")
+    parser.add_argument("--price-cache-write", type=float, default=None,
+                        help="USD per 1M cache-write tokens (default: --price-in)")
     parser.add_argument("--skip-review", action="store_true")
     parser.add_argument("--keep-artifacts", action="store_true",
                         help="keep the sandbox environment and output checkpoints (default: delete after grading)")
@@ -215,8 +263,10 @@ def main() -> int:
         "target": args.target, "effort": args.effort, "reasoning_effort": reasoning, "test": args.test,
         "condition": args.condition, "repeat": args.repeat, "started_at": started, "finished_at": now(),
         "wall_clock_s": round(wall, 1), "exit_code": rc, "cap_hit": "time" if timed_out else "none",
-        "timeout_s": args.timeout, "cost_usd": cost(summary, args.price_in, args.price_out),
-        "cost_source": "rate card via --price-in/--price-out" if args.price_in is not None else None,
+        "timeout_s": args.timeout,
+        "cost_usd": cost(summary, args.price_in, args.price_out,
+                         args.price_cache_read, args.price_cache_write),
+        "cost_source": "rate card via run_codex.py price arguments" if args.price_in is not None else None,
         **summary,
     }
     (sandbox / "harness.json").write_text(json.dumps(harness, indent=2) + "\n")
@@ -250,7 +300,8 @@ def main() -> int:
             "phase": "review", "artifact_kind": kind, "artifact": str(art.relative_to(HERE)),
             "started_at": rstart, "finished_at": now(), "wall_clock_s": round(rwall, 1),
             "tokens_in": rsum["tokens_in_total"], "tokens_out": rsum["tokens_out"],
-            "cost_usd": cost(rsum, args.price_in, args.price_out),
+            "cost_usd": cost(rsum, args.price_in, args.price_out,
+                             args.price_cache_read, args.price_cache_write),
             "verdict_text": verdict, "auto_says_defective": says_defective,
             "detected": None, "expected_defect": answers[args.test] if kind == "defective" else None,
             "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a "

@@ -48,6 +48,13 @@ allowed package list, B: BrainSurgery plan) by several coding-agent models.
 
 # after any number of runs
 .venv/bin/python usability_tests/analyze.py
+
+# one complete Codex repeat on Linux (all targets, efforts, tests and conditions)
+PRICE_IN=<usd/M> PRICE_OUT=<usd/M> PRICE_CACHE_READ=<usd/M> PRICE_CACHE_WRITE=<usd/M> \
+    usability_tests/run_full_codex.sh 1 1
+
+# verify transcript-derived fields and list manual bookkeeping still required
+.venv/bin/python usability_tests/audit_codex.py --agent <agent-name>
 ```
 
 Agent directory names are short and stable for the whole study: `fable51`,
@@ -115,8 +122,17 @@ Everything below must hold, or the two vendors' numbers are not comparable:
    fired; report cap hits per vendor.
 7. Same bookkeeping: after each run classify failed executions and confirm
    `detected` in `review.json` against `review/<target>/answers.json`.
-8. Cost: Codex does not report it; pass `--price-in/--price-out` from the
-   vendor rate card so `cost_usd` is filled the same way for every cell.
+8. Cost: Codex does not report it; pass `--price-in`, `--price-out`,
+   `--price-cache-read` and `--price-cache-write` from the vendor rate card so
+   `cost_usd` is filled the same way for every cell. Cache rates default to
+   the full input rate only for backward compatibility.
+
+`run_matrix_codex.py` runs one effort tier and repeat resumably;
+`run_full_codex.sh` runs all three effort tiers for one repeat and refuses to
+run outside Linux. Use parallelism 1 initially because checkpoint operations
+have substantial RAM peaks. Run `audit_codex.py` afterward: it proves the
+saved harness fields match the transcript and reports the error classes and
+review confirmations that still need experimenter judgment.
 
 ## What is recorded, where
 

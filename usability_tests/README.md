@@ -69,10 +69,18 @@ vendors alike:
   this machine for Fable 5.1, Opus 5 and Sonnet 5.
 - `run_codex.py`: OpenAI models through the Codex CLI (`codex exec --json`).
   The model ids are chosen by whoever runs it; nothing in the kit names one.
-  Codex does not report cost, so pass `--price-in/--price-out` (USD per
-  million tokens) or leave `cost_usd` null for the analysis. Written without
+  Codex does not report cost, so pass the input, output, cache-read and
+  cache-write rates (USD per million tokens), or leave `cost_usd` null for
+  the analysis. Written without
   a Codex installation to test on: on first use run one cell and compare
   `harness.json` with `transcript.jsonl` (see the docstring).
+
+For full Codex runs on Linux, `run_matrix_codex.py` runs one resumable effort
+tier and repeat, while `run_full_codex.sh` covers all three effort tiers for
+one repeat. The full launcher verifies the data manifest before starting and
+defaults to sequential cells. After each batch, `audit_codex.py --agent NAME`
+checks every transcript-derived harness field and lists the failed-execution
+classes and review decisions that still require experimenter confirmation.
 
 Any other agent can be driven from a copy of this repository with
 `make_sandbox.py` plus a driver that writes the same record files (see
@@ -136,7 +144,9 @@ outside the sandbox. Nothing from `references/`, `solutions/`, `review/` or
 | `make_docpack.py` | Assembles `docpack/` for condition B (README, interfaces reference, full `help` dump, two frozen example plans) |
 | `make_sandbox.py` | Creates one run directory (and optionally its environment) |
 | `run_claude.py`, `run_codex.py` | Drive one participant session with Claude Code or Codex CLI: sandbox, solve, grade, review |
-| `run_matrix.py` | Runs many cells with `run_claude.py`, resumably and in parallel |
+| `run_matrix.py`, `run_matrix_codex.py` | Run a Claude or Codex matrix resumably and in parallel |
+| `run_full_claude.sh`, `run_full_codex.sh` | Run a full vendor matrix; the Codex launcher handles one repeat at a time on Linux |
+| `audit_codex.py` | Recompute Codex harness fields from transcripts and report manual bookkeeping still required |
 | `resummarise.py` | Recomputes execution counts in `harness.json` from saved Claude transcripts |
 | `grade.py` | Grades an output against `references/<target>/<test>`; independent of BrainSurgery |
 | `analyze.py` | Aggregates run records into the study tables |
