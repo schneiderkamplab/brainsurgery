@@ -1,27 +1,32 @@
 # Robustness and failure semantics
 
-## Questions under test
+This directory contains the EACL 2027 demo-track robustness evaluation for
+BrainSurgery's public checkpoint-transformation CLI. The study characterizes
+the current implementation; it does not change runtime or publication
+semantics.
 
-- Does an invalid plan fail before publishing an output?
-- Can a failed or interrupted save leave visible partial output?
-- Is a pre-existing destination preserved?
-- Are errors specific enough to diagnose the failing plan step?
+The frozen protocol is in `protocol.md`, and the cases are declared in
+`cases.yaml`. Run it from the repository root with:
 
-## Planned cases
+```bash
+.venv/bin/python revision_tests/robustness/run.py
+```
 
-- invalid YAML and invalid top-level structure;
-- unknown transformation and invalid arguments;
-- invalid regex, zero matches, and unintended multiple matches;
-- missing aliases, files, tensors, and shards;
-- failed assertions;
-- corrupt or truncated safetensors and shard indexes;
-- injected save exception and process interruption;
-- pre-existing destination and insufficient disk space.
+Raw plans, stdout, stderr, fixtures, and output remnants are written below
+`log/revision_tests/<run_id>/robustness/`. Use `--publish-dir` only for a new
+compact-results directory after the evaluated source is committed.
 
-## Recorded outcome
+Two outcomes are deliberately kept separate:
 
-For every case record the exit code, error class, relevant diagnostic, source
-hash, destination visibility and loadability, changes to pre-existing output,
-and leftover temporary or partial files. The initial study characterizes the
-current behavior; it does not silently change publication semantics after the
-usability-study freeze.
+- **evaluation pass** means the harness elicited and correctly classified the
+  frozen expected behavior;
+- **observed safe** means the source was unchanged and no new partial output
+  was exposed (or a pre-existing destination remained byte-identical).
+
+Consequently, an injected save failure can pass the evaluation while exposing
+an unsafe partial-output behavior. Such a result is a finding, not a hidden
+test failure.
+
+The injection wrapper in `fault_injector.py` is evaluation instrumentation. It
+patches the shard writer only inside its subprocess and is never imported by
+the normal CLI cases or by the BrainSurgery package.

@@ -1,0 +1,238 @@
+protocol_id: eacl2027_robustness_v1
+provider: inmemory
+cases:
+  - id: R01
+    name: malformed_yaml
+    category: plan_validation
+    driver: cli
+    input: valid
+    plan_kind: malformed_yaml
+    expected_process: failure
+    diagnostic_regex: '(?i)(yaml|parser|scan|mapping)'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R02
+    name: non_mapping_plan
+    category: plan_validation
+    driver: cli
+    input: valid
+    plan_kind: non_mapping
+    expected_process: failure
+    diagnostic_regex: '(?i)YAML file must contain a mapping'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R03
+    name: unknown_transform
+    category: plan_validation
+    driver: cli
+    input: valid
+    transforms:
+      - definitely_unknown_transform: {}
+    expected_process: failure
+    diagnostic_regex: '(?i)unknown transform'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R04
+    name: missing_required_argument
+    category: plan_validation
+    driver: cli
+    input: valid
+    transforms:
+      - scale_: {target: 'math\.a'}
+    expected_process: failure
+    diagnostic_regex: '(?i)(missing|required|by)'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R05
+    name: invalid_regex
+    category: tensor_selection
+    driver: cli
+    input: valid
+    transforms:
+      - scale_: {target: '[', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)(regex|unterminated|character set)'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R06
+    name: zero_tensor_matches
+    category: tensor_selection
+    driver: cli
+    input: valid
+    transforms:
+      - scale_: {target: 'definitely_missing', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)matched zero tensors'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R07
+    name: excessive_tensor_matches
+    category: tensor_selection
+    driver: cli
+    input: valid
+    transforms:
+      - split:
+          from: 'layer\..*\.weight'
+          to: [split.left, split.right]
+          sizes: [2, 2]
+          dim: 0
+    expected_process: failure
+    diagnostic_regex: '(?i)must match exactly one tensor'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R08
+    name: unknown_model_alias
+    category: reference_validation
+    driver: cli
+    input: valid
+    transforms:
+      - scale_: {target: 'missing::math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)unknown model alias'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R09
+    name: missing_input_file
+    category: input_validation
+    driver: cli
+    input: missing
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)checkpoint path does not exist'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R10
+    name: failed_assertion
+    category: runtime_guard
+    driver: cli
+    input: valid
+    transforms:
+      - assert: {exists: 'definitely_missing'}
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)exists failed.*matched zero tensors'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R11
+    name: corrupt_safetensors
+    category: input_integrity
+    driver: cli
+    input: corrupt
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)(safetensor|header|metadata)'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R12
+    name: truncated_safetensors
+    category: input_integrity
+    driver: cli
+    input: truncated
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)(safetensor|header|metadata|incomplete)'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R13
+    name: missing_shard
+    category: input_integrity
+    driver: cli
+    input: missing_shard
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)((missing|does not exist).*shard|shard.*(missing|does not exist))'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R14
+    name: preexisting_destination_before_runtime_failure
+    category: destination_preservation
+    driver: cli
+    input: valid
+    output_setup: preexisting
+    transforms:
+      - assert: {exists: 'definitely_missing'}
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)exists failed.*matched zero tensors'
+    expected_artifact: preexisting_unchanged
+    expected_safety: safe
+
+  - id: R15
+    name: unavailable_output_parent
+    category: publication_failure
+    driver: cli
+    input: valid
+    output_setup: blocked_parent
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: '(?i)(not a directory|file exists)'
+    expected_artifact: absent
+    expected_safety: safe
+
+  - id: R16
+    name: injected_save_exception_after_first_shard
+    category: publication_failure
+    driver: inject_exception
+    input: valid
+    output_mode: sharded
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: 'InjectedSaveFailure'
+    expected_artifact: partial_without_index
+    expected_safety: unsafe
+
+  - id: R17
+    name: process_interruption_after_first_shard
+    category: interruption
+    driver: interrupt
+    input: valid
+    output_mode: sharded
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: interrupted
+    expected_artifact: partial_without_index
+    expected_safety: unsafe
+
+  - id: R18
+    name: preexisting_sharded_destination_during_save_failure
+    category: destination_preservation
+    driver: inject_exception
+    input: valid
+    output_mode: sharded
+    output_setup: preexisting_sharded
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: failure
+    diagnostic_regex: 'InjectedSaveFailure'
+    expected_artifact: preexisting_changed_with_unindexed_shard
+    expected_safety: unsafe
+
+  - id: R19
+    name: successful_publication_control
+    category: positive_control
+    driver: cli
+    input: valid
+    transforms:
+      - scale_: {target: 'math\.a', by: 1.0}
+    expected_process: success
+    expected_artifact: valid_complete
+    expected_safety: safe
