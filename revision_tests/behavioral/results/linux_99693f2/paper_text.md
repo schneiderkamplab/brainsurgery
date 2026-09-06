@@ -1,0 +1,3 @@
+# Paper-ready interpretation
+
+Across ten pinned checkpoints spanning four model families, 70M--12B parameters, single-file and sharded inputs, and FP16, BF16, and FP32 storage, all 3,243 transformed tensors were byte-exact. The reference and transformed checkpoints then produced identical final-token logits, top-1 predictions, greedy continuations, and multiple-choice predictions on all 700 paired prompt evaluations. This supports lossless preservation for the enumerated rewrite/export path and architectures; it does not establish general model quality or cover intentionally lossy transformations.

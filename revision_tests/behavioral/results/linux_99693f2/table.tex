@@ -1,0 +1,23 @@
+% Reportable candidate; human anonymity review required.
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llrrrr}
+\toprule
+Model & Dtype & Tensors & Logits & Greedy & MCQ \\
+\midrule
+Pythia~70M & float16 & 94/94 & 70/70 & 70/70 & 60/60 \\
+Pythia~410M & float16 & 364/364 & 70/70 & 70/70 & 60/60 \\
+Pythia~2.8B & float16 & 484/484 & 70/70 & 70/70 & 60/60 \\
+Pythia~12B & float16 & 544/544 & 70/70 & 70/70 & 60/60 \\
+GPT-2~124M & float32 & 160/160 & 70/70 & 70/70 & 60/60 \\
+GPT-2~XL 1.5B & float32 & 628/628 & 70/70 & 70/70 & 60/60 \\
+OLMo~1B (sharded) & float32 & 114/114 & 70/70 & 70/70 & 60/60 \\
+OLMo~7B (sharded, FP32) & float32 & 226/226 & 70/70 & 70/70 & 60/60 \\
+Qwen2.5~0.5B & bfloat16 & 290/290 & 70/70 & 70/70 & 60/60 \\
+Qwen2.5~7B (sharded, BF16) & bfloat16 & 339/339 & 70/70 & 70/70 & 60/60 \\
+\bottomrule
+\end{tabular}
+\caption{Lossless behavioral regression across ten pinned checkpoints. Each transformed checkpoint passed an independent byte-exact tensor oracle before both versions were evaluated on the same 70 prompts on one NVIDIA B200.}
+\label{tab:behavioral-matrix}
+\end{table}
