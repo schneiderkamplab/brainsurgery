@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T22:23:55+00:00",
+  "finished_at": "2026-09-05T22:24:00+00:00",
+  "wall_clock_s": 4.9,
+  "tokens_in": 2,
+  "tokens_out": 279,
+  "cost_usd": 0.041219799999999994,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 6, 10, 15} instead of {2, 6, 10, 14} as required by clause 1 of \"Required result.\" This means block 14 is incorrectly kept (renumbered) while block 15 is incorrectly discarded, so the surviving-block set and the resulting renumbering mapping (e.g. old 12\u21929, old 13\u219210, old 14\u219211) diverge from the spec's required mapping (old 12\u21929, old 13\u219210, old 15\u219211). The \"Required checks\" as literally written (no tensor of blocks 12\u201315 remains, exactly 12 blocks, 184 tensors) would still pass since they don't explicitly check block 14 is dropped, but the artifact violates the explicit renumbering table in clause 2 and will fail `grade.py`'s bit-exact comparison against the hidden reference.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

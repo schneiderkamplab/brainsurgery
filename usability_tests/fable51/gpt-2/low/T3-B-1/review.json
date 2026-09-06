@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T3-defective.yaml",
+  "started_at": "2026-09-06T00:29:29+00:00",
+  "finished_at": "2026-09-06T00:29:35+00:00",
+  "wall_clock_s": 5.8,
+  "tokens_in": 2,
+  "tokens_out": 267,
+  "cost_usd": 0.179083,
+  "verdict_text": "NO\n\nThe bfloat16 cast pattern omits `attn.c_proj.weight`, so only 36 of the 48 projection matrices listed in Required result clause 1 are cast, and the 12 `h.<i>.attn.c_proj.weight` tensors stay float32. The plan's own count assert confirms 36 rather than 48, and it never checks that exactly 48 tensors are bfloat16, violating the first item under Required checks. The shard size is written as `64MB` rather than 64 MiB (67,108,864 bytes) required by clause 5, so shard boundaries may not match the reference if the tool interprets MB as 10^6 bytes. The remaining steps (delete of the 12 buffers, float32 upcast, name preservation, 148-tensor count, index file) are consistent with the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

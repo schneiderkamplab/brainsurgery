@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T22:58:48+00:00",
+  "finished_at": "2026-09-05T22:58:54+00:00",
+  "wall_clock_s": 6.4,
+  "tokens_in": 2,
+  "tokens_out": 329,
+  "cost_usd": 0.10013649999999999,
+  "verdict_text": "NO\n\nThe script drops blocks 2, 6, 10, and **15** (`DROP = {2, 6, 10, 15}`) instead of 2, 6, 10, and **14**, violating Required result clause 1. As a consequence the renumbering also diverges from clause 2: old block 11\u21928, 12\u21929, 13\u219210, and old 14 (which should have been removed) becomes 11, while old 15 (which should have survived as 11) is discarded. The output would still have 184 tensors and 12 contiguous blocks, so all three \"Required checks\" pass and the error is silent \u2014 exactly the failure mode the task describes \u2014 but the key/value mapping does not match the hidden reference.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

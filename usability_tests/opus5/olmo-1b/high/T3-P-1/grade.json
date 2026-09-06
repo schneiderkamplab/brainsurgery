@@ -1,0 +1,13 @@
+{
+  "task": "T3",
+  "passed": true,
+  "findings": [],
+  "metrics": {
+    "target": "olmo-1b",
+    "shards": 10,
+    "tensors_expected": 114,
+    "tensors_found": 114,
+    "shape_dtype_mismatches": 0,
+    "value_mismatches": 0
+  }
+}

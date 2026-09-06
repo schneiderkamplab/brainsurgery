@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-05T22:57:56+00:00",
+  "finished_at": "2026-09-05T22:58:05+00:00",
+  "wall_clock_s": 9.0,
+  "tokens_in": 2,
+  "tokens_out": 521,
+  "cost_usd": 0.10565450000000001,
+  "verdict_text": "NO\n\nThe plan applies the first task vector to `base` in place (`add_` of `tv1`) *before* computing the second, so `tv2 = ft2 - (base + 0.4\u00b7(ft1 \u2212 base))` rather than `ft2 \u2212 base`; the result is `base + 0.4(ft1\u2212base) + 0.4(ft2\u2212base) \u2212 0.16(ft1\u2212base)`, which violates required-result clause 2 and the explicit ordering requirement that each task vector be taken against the unmodified base (error is well above the 1e-5 Frobenius tolerance). It also omits the required check that exactly 48 tensors were merged, violating the second bullet of \"Required checks\". The shared-tensor verification is only partial in spirit \u2014 it never asserts that `base` itself has 114 tensors, only `ft1`/`ft2` and the post-edit base count \u2014 though the name-set equality is effectively covered by the two `equal` asserts plus counts.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

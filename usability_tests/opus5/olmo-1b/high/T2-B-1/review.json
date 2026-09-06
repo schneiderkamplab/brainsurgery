@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-05T23:56:00+00:00",
+  "finished_at": "2026-09-05T23:56:11+00:00",
+  "wall_clock_s": 10.3,
+  "tokens_in": 2,
+  "tokens_out": 545,
+  "cost_usd": 0.1727525,
+  "verdict_text": "NO\n\nThe plan prunes the wrong head: it keeps rows `[0:768]` and `[896:2048]`, which discards rows 768..895 \u2014 head 6 \u2014 whereas the specification's \"Required result\" clauses 1\u20134 require removing head 5, i.e. keeping rows `0..639` and `768..2047` (o_proj: the same ranges on the column axis). The plan's own leading comment states \"remove attention head 6\", so the error is consistent across q, k, v and o_proj in all 16 layers. Because both slice pairs total 1920, every required shape and count assert still passes, so the run succeeds while producing wrong values in 64 tensors. Grading is bit-exact, so all four head-bearing tensors per layer would mismatch the reference. The structure otherwise conforms: correct concat order and dims, tmp tensors deleted, single output file with 114 tensors, and all five required checks present.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

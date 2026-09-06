@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-05T23:27:53+00:00",
+  "finished_at": "2026-09-05T23:28:01+00:00",
+  "wall_clock_s": 8.0,
+  "tokens_in": 2,
+  "tokens_out": 486,
+  "cost_usd": 0.10821049999999999,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 6, 10, **15** instead of 2, 6, 10, **14**, violating Required result clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\"). Consequently the last move (`gpt_neox.layers.14.* -> gpt_neox.layers.11.*`) puts old block 14 at index 11, whereas clause 2 requires old block 15 to become 11; blocks 12 and 13 map correctly to 9 and 10, so only the final surviving block is wrong. The required checks are all satisfied by this incorrect result (no layers 12\u201315 remain, 12 blocks, 184 tensors), so the plan runs clean but produces a checkpoint that grading would reject on key-to-value correspondence (bit-exact value comparison of `gpt_neox.layers.11.*`). Everything else \u2014 the delete-then-ascending-move ordering to avoid collisions, the non-block tensors left untouched, and the assert coverage \u2014 matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

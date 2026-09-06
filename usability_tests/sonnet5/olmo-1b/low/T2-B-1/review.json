@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-05T21:17:06+00:00",
+  "finished_at": "2026-09-05T21:17:11+00:00",
+  "wall_clock_s": 5.4,
+  "tokens_in": 2,
+  "tokens_out": 210,
+  "cost_usd": 0.0704758,
+  "verdict_text": "NO\n\nThe plan removes head 6 (rows/cols 768:896) instead of head 5 (rows/cols 640:768), as stated in its own header comment \"remove attention head 6 from every layer.\" The spec's Required result explicitly requires keeping rows/columns \"0..639, 768..2047\" (i.e., removing head 5, indices 640..767), but the artifact keeps \"0:768\" and \"896:2048\" (removing indices 768..895, head 6). This violates Required result clauses 1\u20134 for every layer, even though the resulting shapes ([1920,2048] and [2048,1920]) coincidentally match and the assert checks pass.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T3-defective.py",
+  "started_at": "2026-09-05T22:54:05+00:00",
+  "finished_at": "2026-09-05T22:54:11+00:00",
+  "wall_clock_s": 5.5,
+  "tokens_in": 2,
+  "tokens_out": 231,
+  "cost_usd": 0.09448550000000001,
+  "verdict_text": "NO\n\nThe `matrix_re` alternation omits `self_attn.o_proj.weight`, so only 6 of the 7 projection matrices per layer are cast \u2014 96 tensors instead of the required 112, violating Required result clause 1. The 16 `o_proj` weights are left float32, which also makes the shard sizes and layout differ from the reference (clause 5). The guard `assert sum(...) == 96` was written to match the buggy behaviour rather than the specification, so it does not fail loudly as the \"exactly 112 tensors are bfloat16\" required check demands.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

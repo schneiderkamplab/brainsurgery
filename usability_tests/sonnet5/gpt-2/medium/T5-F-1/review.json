@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T5-defective.py",
+  "started_at": "2026-09-05T21:39:08+00:00",
+  "finished_at": "2026-09-05T21:39:12+00:00",
+  "wall_clock_s": 4.3,
+  "tokens_in": 2,
+  "tokens_out": 215,
+  "cost_usd": 0.039855800000000004,
+  "verdict_text": "NO\n\nThe script sets `scale = 1.0` with an explicit comment \"defect: alpha / r forgotten,\" instead of computing `scale = lora_alpha / r = 32 / 16 = 2`. This violates Required Result clause 1, which mandates `h.<i>.<module>.weight += scale * (B @ A).T` with `scale = lora_alpha / r = 2`. As a result, the merged deltas are half the correct magnitude, which will fail the grading criterion of \u22641e-5 relative Frobenius error on the 12 merged weights, even though the required checks (tensor counts, shapes, no `lora_` names) all still pass.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

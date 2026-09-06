@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T22:51:03+00:00",
+  "finished_at": "2026-09-05T22:51:11+00:00",
+  "wall_clock_s": 7.1,
+  "tokens_in": 2,
+  "tokens_out": 328,
+  "cost_usd": 0.09490950000000001,
+  "verdict_text": "NO\n\nThe script drops blocks `{2, 6, 10, 15}` instead of `{2, 6, 10, 14}`, violating Required result clause 1 and the renumbering map in clause 2 (old 14 must become 11 and old 15 must be removed; here old 14 becomes 11 and old 15's weights are discarded). The output would therefore contain the wrong block at index 11 and be bit-inexact against the hidden reference under Grading. The assertions do not catch this: both `layers == set(range(12))` and `len(out) == 86` hold for any 4-block drop set, so the required checks pass on a silently wrong result \u2014 exactly the failure mode the specification's rationale warns about.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

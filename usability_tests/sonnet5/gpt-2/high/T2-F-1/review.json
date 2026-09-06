@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-05T22:04:41+00:00",
+  "finished_at": "2026-09-05T22:04:47+00:00",
+  "wall_clock_s": 5.9,
+  "tokens_in": 2,
+  "tokens_out": 287,
+  "cost_usd": 0.0397938,
+  "verdict_text": "NO\n\nThe script drops head 6 (`DROP_HEAD = 6`), but the specification requires removing head 5 in clause \"Required result: For every layer `i`, remove head 5\". The resulting kept-column ranges therefore differ from the spec: the artifact keeps columns `0..383, 448..2303` (dropping `384..447`), whereas the spec requires keeping `0..319, 384..767, 768..1087, 1152..1535, 1536..1855, 1920..2303` (dropping `320..383`), and analogously for `c_attn.bias` and `c_proj.weight`. The shape assertions (768,2112 / 2112 / 704,768) pass since only which head is dropped differs, not the resulting size, but the values will not be bit-exact against the hidden reference, violating the Grading clause's exact-values requirement and the \"remove head 5\" requirement.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

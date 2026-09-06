@@ -1,0 +1,41 @@
+inputs:
+  - model::inputs/base
+
+transforms:
+  # Preflight: confirm the input layout matches what TASK.md describes before
+  # touching anything (114 tensors total, no pre-existing bf16 tensors).
+  - assert: { count: { of: '.*', is: 114 } }
+  - assert:
+      count:
+        of: 'model\.layers\.\d+\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)\.weight'
+        is: 112
+  - assert: { dtype: { of: 'model.embed_tokens.weight', is: float32 } }
+  - assert: { dtype: { of: 'lm_head.weight', is: float32 } }
+
+  # Cast exactly the 112 attention/MLP projection matrices to bfloat16,
+  # in place (tensor.to(torch.bfloat16) semantics, round-to-nearest-even).
+  # Names are unchanged; embeddings, lm_head, and any norms/biases are not
+  # matched by this pattern and stay float32.
+  - cast_:
+      target: 'model\.layers\.\d+\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)\.weight'
+      to: bfloat16
+
+  # Required checks: fail loudly before writing if the cast did not land
+  # exactly as intended.
+  - assert:
+      count:
+        of: 'model\.layers\.\d+\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)\.weight'
+        is: 112
+  - assert:
+      dtype:
+        of: 'model\.layers\.\d+\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)\.weight'
+        is: bfloat16
+  - assert: { dtype: { of: 'model.layers.0.self_attn.q_proj.weight', is: bfloat16 } }
+  - assert: { dtype: { of: 'model.embed_tokens.weight', is: float32 } }
+  - assert: { dtype: { of: 'lm_head.weight', is: float32 } }
+  - assert: { count: { of: '.*', is: 114 } }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T5-defective.py",
+  "started_at": "2026-09-06T00:28:39+00:00",
+  "finished_at": "2026-09-06T00:28:47+00:00",
+  "wall_clock_s": 7.8,
+  "tokens_in": 2,
+  "tokens_out": 205,
+  "cost_usd": 0.18400899999999998,
+  "verdict_text": "NO\n\nThe script sets `scale = 1.0` instead of `lora_alpha / r = 2`, so each merged weight receives `(B @ A).T` rather than `2 * (B @ A).T`. This violates \"Required result\" clause 1, which requires `h.<i>.<module>.weight += scale * (B @ A).T` with `scale = lora_alpha / r = 2`. The 12 merged tensors would therefore fail the grading tolerance of relative Frobenius error at most 1e-5. The name mapping, transpose handling, float32 arithmetic, required checks, and sharding call otherwise match the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

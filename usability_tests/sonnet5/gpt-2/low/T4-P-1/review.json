@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-05T21:08:42+00:00",
+  "finished_at": "2026-09-05T21:08:48+00:00",
+  "wall_clock_s": 5.4,
+  "tokens_in": 2,
+  "tokens_out": 348,
+  "cost_usd": 0.0382008,
+  "verdict_text": "NO\n\nThe merge is computed as `tmp = base + lambda*(ft1-base)`, then `out = tmp + lambda*(ft2-tmp)`, i.e. the second task vector is taken against `tmp` (already merged with ft1), not against the unmodified base. This violates step 2's formula `out[X] = base[X] + lambda*(ft1[X]-base[X]) + lambda*(ft2[X]-base[X])`, and specifically the ordering hazard called out in \"Why it is meaningful\": each task vector must be computed against the unmodified base, not a base already modified by the first merge. Algebraically, `tmp + lambda*(ft2-tmp) = (1-lambda)*base + lambda*ft1 + lambda*ft2*... ` \u2014 expanding shows it equals `base + lambda*(ft1-base) + lambda*(1-lambda)*(ft2-base)`, an extra `(1-lambda)` factor on the second task vector, which will exceed the 1e-5 relative Frobenius error tolerance in grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

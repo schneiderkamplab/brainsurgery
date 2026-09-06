@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-06T01:46:08+00:00",
+  "finished_at": "2026-09-06T01:46:16+00:00",
+  "wall_clock_s": 8.8,
+  "tokens_in": 2,
+  "tokens_out": 531,
+  "cost_usd": 0.19462,
+  "verdict_text": "NO\n\nThe merge arithmetic is wrong: the script computes `tmp = base + \u03bb(ft1 \u2212 base)` and then `out = tmp + \u03bb(ft2 \u2212 tmp)`, so the second task vector is taken against the already-modified base rather than the unmodified base. That yields `base + \u03bb(ft1\u2212base) + \u03bb(ft2\u2212base) \u2212 \u03bb\u00b2(ft1\u2212base)`, which differs from the required formula by 0.16 \u00d7 (ft1 \u2212 base) on every merged tensor. This violates \"Required result\" step 2, which specifies `out[X] = base[X] + lambda * (ft1[X] - base[X]) + lambda * (ft2[X] - base[X])`, and it is exactly the ordering hazard the Objective section warns about. The shared-tensor verification, the 64/244 counts, the float32 computation, and the float16 cast are otherwise correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-06T01:14:34+00:00",
+  "finished_at": "2026-09-06T01:14:40+00:00",
+  "wall_clock_s": 5.7,
+  "tokens_in": 2,
+  "tokens_out": 235,
+  "cost_usd": 0.181875,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 5 and 9 instead of blocks 2, 5 and 8, violating Required result clause 1 (\"Remove every tensor of blocks 2, 5, 8\"). The renumbering then keeps old block 8 (moved to index 6) and drops old block 9, whereas clause 2 requires old 9 to become 6 and old 8 to be removed. The output still has 121 tensors and 9 contiguous blocks, so all three Required checks pass, but the key-to-value mapping differs from the reference and the bit-exact grading would fail. The header comment also misstates the target blocks as 2, 5, 9, so the plan is internally consistent but wrong against the spec.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

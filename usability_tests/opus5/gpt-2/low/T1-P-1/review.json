@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-05T22:44:52+00:00",
+  "finished_at": "2026-09-05T22:44:58+00:00",
+  "wall_clock_s": 5.9,
+  "tokens_in": 2,
+  "tokens_out": 256,
+  "cost_usd": 0.120692,
+  "verdict_text": "NO\n\nThe artifact drops blocks {2, 5, 9} instead of the specified {2, 5, 8}, violating Required result clause 1 (\"Remove every tensor of blocks 2, 5, 8\"). This also breaks clause 2's renumbering map: with 9 dropped, old 8 becomes 6, old 10 becomes 7, old 11 becomes 8, so surviving blocks carry the wrong weights at indices 6 and up, and grading against the hidden reference will fail on values. The tensor-count and contiguity assertions still pass (121 tensors, indices 0..8), so the error is silent \u2014 exactly the failure mode the specification's rationale warns about. Everything else \u2014 non-block tensors untouched, name suffix and values preserved, single output file \u2014 conforms.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

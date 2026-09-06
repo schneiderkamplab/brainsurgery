@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T5-defective.py",
+  "started_at": "2026-09-05T23:04:22+00:00",
+  "finished_at": "2026-09-05T23:04:27+00:00",
+  "wall_clock_s": 4.8,
+  "tokens_in": 2,
+  "tokens_out": 215,
+  "cost_usd": 0.09721450000000001,
+  "verdict_text": "NO\n\nThe script sets `scale = 1.0` instead of `lora_alpha / r = 32 / 16 = 2`, as the comment `# defect: alpha / r forgotten` admits. This violates \"Required result\" clause 1, which requires `weight += scale * B @ A` with `scale = lora_alpha / r = 2`; the merged delta is half the required magnitude, which would exceed the 1e-3 relative Frobenius tolerance in grading. Everything else \u2014 name mapping, float32 accumulation with cast back to float16, `fan_in_fan_out` handling, the four required checks, and 512 MiB sharded export \u2014 matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

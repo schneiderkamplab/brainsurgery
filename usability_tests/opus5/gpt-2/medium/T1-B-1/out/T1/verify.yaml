@@ -1,0 +1,17 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - new::out/T1/model.safetensors
+transforms:
+  - assert:
+      all:
+        - count: { of: 'new::.*', is: 121 }
+        - equal: { left: 'new::h\.0\.(.*)', right: 'base::h.0.\1' }
+        - equal: { left: 'new::h\.1\.(.*)', right: 'base::h.1.\1' }
+        - equal: { left: 'new::h\.2\.(.*)', right: 'base::h.3.\1' }
+        - equal: { left: 'new::h\.3\.(.*)', right: 'base::h.4.\1' }
+        - equal: { left: 'new::h\.4\.(.*)', right: 'base::h.6.\1' }
+        - equal: { left: 'new::h\.5\.(.*)', right: 'base::h.7.\1' }
+        - equal: { left: 'new::h\.6\.(.*)', right: 'base::h.9.\1' }
+        - equal: { left: 'new::h\.7\.(.*)', right: 'base::h.10.\1' }
+        - equal: { left: 'new::h\.8\.(.*)', right: 'base::h.11.\1' }
+        - equal: { left: 'new::((?!h\.).*)', right: 'base::\1' }

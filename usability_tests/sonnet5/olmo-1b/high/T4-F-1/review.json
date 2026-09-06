@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T22:20:38+00:00",
+  "finished_at": "2026-09-05T22:20:50+00:00",
+  "wall_clock_s": 12.2,
+  "tokens_in": 2,
+  "tokens_out": 1115,
+  "cost_usd": 0.046522799999999996,
+  "verdict_text": "NO\n\nThe merge formula in step 2 is wrong: after computing `tmp = base + lambda*(ft1-base)`, the code computes `out = tmp + lambda*(ft2 - tmp)`, i.e. it takes ft2's task vector relative to the already-updated `tmp`, not relative to the unmodified `base`. This is exactly the ordering hazard the spec warns against (\"each task vector must be taken against the unmodified base, not against a base that the first merge already changed\"). Algebraically this yields `out = (1-\u03bb)\u00b2\u00b7base + \u03bb(1-\u03bb)\u00b7ft1 + \u03bb\u00b7ft2`, which for \u03bb=0.4 gives `0.36\u00b7base + 0.24\u00b7ft1 + 0.4\u00b7ft2` \u2014 not the required `out = base + \u03bb(ft1-base) + \u03bb(ft2-base) = 0.2\u00b7base + 0.4\u00b7ft1 + 0.4\u00b7ft2` from Required result, step 2. The verification (step 1) and tensor counts (48 merged, 114 total) are correctly implemented, but the merged-tensor values will fail the grader's relative-Frobenius-error check.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

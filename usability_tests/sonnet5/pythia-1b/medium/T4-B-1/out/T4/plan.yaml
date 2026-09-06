@@ -1,0 +1,82 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors
+
+transforms:
+  # --- Step 1: preflight verification ---
+  # Same tensor count on all three checkpoints.
+  - assert: { count: { of: 'base::.+', is: 244 } }
+  - assert: { count: { of: 'ft1::.+', is: 244 } }
+  - assert: { count: { of: 'ft2::.+', is: 244 } }
+
+  # Exactly 64 MLP tensors per checkpoint (the ones allowed to differ).
+  - assert: { count: { of: 'base::gpt_neox\.layers\.\d+\.mlp\..+', is: 64 } }
+  - assert: { count: { of: 'ft1::gpt_neox\.layers\.\d+\.mlp\..+', is: 64 } }
+  - assert: { count: { of: 'ft2::gpt_neox\.layers\.\d+\.mlp\..+', is: 64 } }
+
+  # Every tensor outside the 64 MLP tensors is bit-identical (name, shape,
+  # dtype and value) across base/ft1 and base/ft2. A missing/renamed tensor
+  # on the right side also fails this assertion.
+  - assert:
+      equal:
+        left: 'base::(?!gpt_neox\.layers\.\d+\.mlp\.)(.+)'
+        right: 'ft1::\1'
+  - assert:
+      equal:
+        left: 'base::(?!gpt_neox\.layers\.\d+\.mlp\.)(.+)'
+        right: 'ft2::\1'
+
+  # --- Step 2: task-vector merge of the 64 MLP tensors, in float32 ---
+  # out = base*(1 - 2*lambda) + lambda*ft1 + lambda*ft2
+  # algebraically identical to base + lambda*(ft1-base) + lambda*(ft2-base),
+  # with lambda = 0.4 -> coefficients 0.2 / 0.4 / 0.4.
+  # All scratch tensors are created under the 'base' alias (and deleted
+  # again below) so the output alias stays unambiguous.
+  - cast:
+      from: 'base::(gpt_neox\.layers\.\d+\.mlp\..+)'
+      to: 'base::_wbase_\1'
+      dtype: float32
+  - cast:
+      from: 'ft1::(gpt_neox\.layers\.\d+\.mlp\..+)'
+      to: 'base::_wft1_\1'
+      dtype: float32
+  - cast:
+      from: 'ft2::(gpt_neox\.layers\.\d+\.mlp\..+)'
+      to: 'base::_wft2_\1'
+      dtype: float32
+
+  - scale_: { target: 'base::_wbase_gpt_neox\.layers\.\d+\.mlp\..+', by: 0.2 }
+  - scale_: { target: 'base::_wft1_gpt_neox\.layers\.\d+\.mlp\..+', by: 0.4 }
+  - scale_: { target: 'base::_wft2_gpt_neox\.layers\.\d+\.mlp\..+', by: 0.4 }
+
+  - add_:
+      from: 'base::_wft1_(gpt_neox\.layers\.\d+\.mlp\..+)'
+      to: 'base::_wbase_\1'
+  - add_:
+      from: 'base::_wft2_(gpt_neox\.layers\.\d+\.mlp\..+)'
+      to: 'base::_wbase_\1'
+
+  # Cast merged float32 result back to float16 and write it back over the
+  # original base MLP tensors (same names).
+  - cast:
+      from: 'base::_wbase_(gpt_neox\.layers\.\d+\.mlp\..+)'
+      to: 'base::_wf16_\1'
+      dtype: float16
+  - assign:
+      from: 'base::_wf16_(gpt_neox\.layers\.\d+\.mlp\..+)'
+      to: 'base::\1'
+
+  # Drop scratch tensors so the output alias only contains the 244 originals.
+  - delete: { target: 'base::_wbase_.+' }
+  - delete: { target: 'base::_wft1_.+' }
+  - delete: { target: 'base::_wft2_.+' }
+  - delete: { target: 'base::_wf16_.+' }
+
+  # --- Step 3: final sanity checks ---
+  - assert: { count: { of: 'base::.+', is: 244 } }
+  - assert: { dtype: { of: 'base::gpt_neox\.layers\.\d+\.mlp\..+', is: float16 } }

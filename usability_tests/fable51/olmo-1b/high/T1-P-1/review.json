@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T1-defective.py",
+  "started_at": "2026-09-06T01:28:49+00:00",
+  "finished_at": "2026-09-06T01:28:57+00:00",
+  "wall_clock_s": 7.9,
+  "tokens_in": 2,
+  "tokens_out": 411,
+  "cost_usd": 0.187314,
+  "verdict_text": "NO\n\nThe artifact drops blocks 2, 6, 10 and 15, but Required result clause 1 says to remove blocks 2, 6, 10 and 14. As a consequence the renumbering also violates clause 2: old block 14 is kept and becomes new block 11, whereas the specification says old 14 must be deleted and old 15 must become 11. The script's own checks (12 contiguous blocks, 86 tensors) still pass, so it does not fail loudly, but the output would contain block 14's weights at index 11 and would not be bit-exact against the reference under the Grading clause. The wrong block set is also stated in the module docstring, so it is a deliberate but incorrect choice, not a typo in one place.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

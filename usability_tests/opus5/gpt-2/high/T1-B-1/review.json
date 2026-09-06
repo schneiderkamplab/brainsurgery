@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-05T23:38:27+00:00",
+  "finished_at": "2026-09-05T23:38:40+00:00",
+  "wall_clock_s": 12.8,
+  "tokens_in": 2,
+  "tokens_out": 882,
+  "cost_usd": 0.10937050000000001,
+  "verdict_text": "NO\n\nThe plan prunes the wrong blocks: it deletes blocks 2, 5, **9** (`assert`/`delete` pattern `h\\.(2|5|9)\\..*`) instead of blocks 2, 5, **8**, violating \"Required result\" clause 1. Consequently the renumbering keeps old block 8 (mapped to new index 6) and shifts 10\u21927, 11\u21928, whereas clause 2 requires old 9\u21926, 10\u21927, 11\u21928 \u2014 so new blocks 6 onward carry the wrong weights and grading against the hidden reference will fail on bit-exact values even though the key set, shapes and dtypes match. The three required checks are all implemented but none of them detect this: after the moves no `h.9/10/11` keys exist, exactly 9 `c_attn.weight` tensors match, and the total is 121, so the plan exits successfully while producing a silently wrong checkpoint \u2014 precisely the failure mode the task description warns about.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

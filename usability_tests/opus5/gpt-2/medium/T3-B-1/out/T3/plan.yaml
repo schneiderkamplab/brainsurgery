@@ -1,0 +1,59 @@
+# T3: mixed-precision export with sharding (GPT-2 124M)
+#
+# - cast the 48 projection matrices to bfloat16 in place
+# - drop the 12 causal-mask buffers h.<i>.attn.bias
+# - everything else stays float32, untouched
+# - write out/T3 as a sharded safetensors checkpoint (64 MiB budget)
+
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # --- sanity: the input is what we expect -------------------------------
+  - assert: { count: { of: '.*', is: 160 } }
+
+  # --- 1. projection matrices -> bfloat16 --------------------------------
+  # exactly h.<i>.{attn.c_attn, attn.c_proj, mlp.c_fc, mlp.c_proj}.weight
+  - assert:
+      count:
+        of: 'h\.\d+\.(?:attn\.(?:c_attn|c_proj)|mlp\.(?:c_fc|c_proj))\.weight'
+        is: 48
+  - cast_:
+      target: 'h\.\d+\.(?:attn\.(?:c_attn|c_proj)|mlp\.(?:c_fc|c_proj))\.weight'
+      to: bfloat16
+
+  # --- 2. drop the causal-mask buffers -----------------------------------
+  # 'h.<i>.attn.bias' only; 'h.<i>.attn.c_attn.bias' etc. do not full-match.
+  - assert: { count: { of: 'h\.\d+\.attn\.bias', is: 12 } }
+  - delete: { target: 'h\.\d+\.attn\.bias' }
+
+  # --- Required checks ---------------------------------------------------
+  - assert:
+      all:
+        # exactly 48 tensors are bfloat16: 48 matches are bfloat16 ...
+        - count:
+            of: 'h\.\d+\.(?:attn\.(?:c_attn|c_proj)|mlp\.(?:c_fc|c_proj))\.weight'
+            is: 48
+        - dtype:
+            of: 'h\.\d+\.(?:attn\.(?:c_attn|c_proj)|mlp\.(?:c_fc|c_proj))\.weight'
+            is: bfloat16
+        # ... and every other tensor is still float32
+        - dtype:
+            of: '(?!h\.\d+\.(?:attn\.(?:c_attn|c_proj)|mlp\.(?:c_fc|c_proj))\.weight$).*'
+            is: float32
+        - count:
+            of: '(?!h\.\d+\.(?:attn\.(?:c_attn|c_proj)|mlp\.(?:c_fc|c_proj))\.weight$).*'
+            is: 100
+        # named spot checks
+        - dtype: { of: 'h\.0\.attn\.c_attn\.weight', is: bfloat16 }
+        - dtype: { of: 'wte\.weight', is: float32 }
+        # the output has exactly 148 tensors
+        - count: { of: '.*', is: 148 }
+        # the buffers are gone and no parameter went with them
+        - not: { exists: 'h\.\d+\.attn\.bias' }
+        - count: { of: '.*\.bias', is: 73 }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 64MB

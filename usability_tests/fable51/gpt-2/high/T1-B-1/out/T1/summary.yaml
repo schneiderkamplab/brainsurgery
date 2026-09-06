@@ -1,0 +1,104 @@
+transforms:
+- assert:
+    count:
+      of: h\.\d+\.attn\.c_attn\.weight
+      is: 12
+- assert:
+    count:
+      of: .*
+      is: 160
+- delete:
+    target: h\.(2|5|8)\..*
+- assert:
+    not:
+      exists: h\.(2|5|8)\..*
+- assert:
+    count:
+      of: .*
+      is: 121
+- move:
+    from:
+    - h
+    - '3'
+    - '*rest'
+    to:
+    - h
+    - '2'
+    - '*rest'
+- move:
+    from:
+    - h
+    - '4'
+    - '*rest'
+    to:
+    - h
+    - '3'
+    - '*rest'
+- move:
+    from:
+    - h
+    - '6'
+    - '*rest'
+    to:
+    - h
+    - '4'
+    - '*rest'
+- move:
+    from:
+    - h
+    - '7'
+    - '*rest'
+    to:
+    - h
+    - '5'
+    - '*rest'
+- move:
+    from:
+    - h
+    - '9'
+    - '*rest'
+    to:
+    - h
+    - '6'
+    - '*rest'
+- move:
+    from:
+    - h
+    - '10'
+    - '*rest'
+    to:
+    - h
+    - '7'
+    - '*rest'
+- move:
+    from:
+    - h
+    - '11'
+    - '*rest'
+    to:
+    - h
+    - '8'
+    - '*rest'
+- assert:
+    not:
+      exists: h\.(9|10|11)\..*
+- assert:
+    count:
+      of: h\.\d+\.attn\.c_attn\.weight
+      is: 9
+- assert:
+    count:
+      of: .*
+      is: 121
+- assert:
+    count:
+      of: h\.[0-8]\..*
+      is: 117
+- assert:
+    count:
+      of: h\.\d+\..*
+      is: 117
+- assert:
+    count:
+      of: (wte\.weight|wpe\.weight|ln_f\.weight|ln_f\.bias)
+      is: 4

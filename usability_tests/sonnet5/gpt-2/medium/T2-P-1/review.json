@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-05T21:33:01+00:00",
+  "finished_at": "2026-09-05T21:33:06+00:00",
+  "wall_clock_s": 4.5,
+  "tokens_in": 2,
+  "tokens_out": 223,
+  "cost_usd": 0.038737799999999996,
+  "verdict_text": "NO\n\nThe spec requires removing head 5 (zero-indexed), but the script hardcodes `DROP_HEAD = 6`, removing head 6 instead. This violates the \"Required result\" clause (\"remove head 5\") for all three tensors (`c_attn.weight`, `c_attn.bias`, `c_proj.weight`). Although the resulting shapes ([768,2112], [2112], [704,768]) match and pass the required checks, the kept column/row ranges will differ from the specified `0..319, 384..767, ...` pattern once past the point where head 5 vs head 6 diverges, so the values will not be bit-exact with the hidden reference despite matching shapes.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

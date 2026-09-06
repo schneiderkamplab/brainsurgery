@@ -1,0 +1,80 @@
+# T5: LoRA "merge and unload" for Pythia-1B, written as a BrainSurgery plan.
+#
+# W <- W + (lora_alpha / r) * B @ A , computed in float32, stored back as float16.
+# All destinations live on the `base` alias so the output alias is unambiguous;
+# the adapter factors are copied over as temporaries and deleted before writing.
+
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # ---- pre-flight: the adapter is the shape the task describes -------------
+  - assert:
+      all:
+        - count:
+            of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_A\.weight'
+            is: 16
+        - count:
+            of: 'lora::base_model\.model\.gpt_neox\.layers\.\d+\.attention\.query_key_value\.lora_B\.weight'
+            is: 16
+        - shape: { of: 'lora::base_model.model.gpt_neox.layers.0.attention.query_key_value.lora_A.weight', is: [16, 2048] }
+        - shape: { of: 'lora::base_model.model.gpt_neox.layers.0.attention.query_key_value.lora_B.weight', is: [6144, 16] }
+        - count:
+            of: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight'
+            is: 16
+        - count: { of: 'base::.*', is: 244 }
+
+  # ---- bring the adapter factors onto the base alias (float32) -------------
+  - copy:
+      from: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_A\.weight'
+      to: 'base::mergetmp.\1.A'
+  - copy:
+      from: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_B\.weight'
+      to: 'base::mergetmp.\1.B'
+
+  # ---- delta = (alpha / r) * B @ A , float32, [6144, 2048] ----------------
+  # fan_in_fan_out = false: adapter and base share the [out, in] layout, so no
+  # transpose is needed.
+  - matmul:
+      from_a: 'base::mergetmp\.(\d+)\.B'
+      from_b: 'base::mergetmp.\1.A'
+      to: 'base::mergetmp.\1.delta'
+  - scale_: { target: 'base::mergetmp\.\d+\.delta', by: 2.0 }
+
+  # exactly 16 adapter pairs were found and merged
+  - assert:
+      all:
+        - count: { of: 'base::mergetmp\.\d+\.delta', is: 16 }
+        - shape: { of: 'base::mergetmp.0.delta', is: [6144, 2048] }
+        - dtype: { of: 'base::mergetmp\.\d+\.delta', is: float32 }
+
+  # ---- W32 = base weight in float32, += delta, back to float16 ------------
+  - cast:
+      from: 'base::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight'
+      to: 'base::mergetmp.\1.W32'
+      dtype: float32
+  - add_:
+      from: 'base::mergetmp\.(\d+)\.delta'
+      to: 'base::mergetmp.\1.W32'
+  - cast_: { target: 'base::mergetmp\.\d+\.W32', to: float16 }
+  - assign:
+      from: 'base::mergetmp\.(\d+)\.W32'
+      to: 'base::gpt_neox.layers.\1.attention.query_key_value.weight'
+
+  # ---- drop every temporary; nothing adapter-shaped may survive -----------
+  - delete: { target: 'base::mergetmp\..*' }
+
+  # ---- required checks, all before the output is written ------------------
+  - assert:
+      all:
+        - not: { exists: 'base::.*lora_.*' }
+        - not: { exists: 'base::mergetmp.*' }
+        - shape: { of: 'base::gpt_neox.layers.0.attention.query_key_value.weight', is: [6144, 2048] }
+        - dtype: { of: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', is: float16 }
+        - count: { of: 'base::.*', is: 244 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

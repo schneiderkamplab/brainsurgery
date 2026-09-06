@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T22:32:04+00:00",
+  "finished_at": "2026-09-05T22:32:14+00:00",
+  "wall_clock_s": 9.4,
+  "tokens_in": 2,
+  "tokens_out": 846,
+  "cost_usd": 0.0445218,
+  "verdict_text": "NO\n\nThe merge formula in the script is wrong: it computes `tmp = base + \u03bb(ft1\u2212base)` and then `out = tmp + \u03bb(ft2\u2212tmp)`, which expands to `base + \u03bb(ft1\u2212base) + \u03bb(ft2\u2212base) \u2212 \u03bb\u00b2(ft1\u2212base)`, not the required `base + \u03bb(ft1\u2212base) + \u03bb(ft2\u2212base)`. This takes ft2's task vector against the already-merged `tmp` rather than against the unmodified `base`, exactly the ordering hazard the spec warns about in \"Required result\" step 2 (\"each task vector must be taken against the unmodified base, not against a base that the first merge already changed\"). The spurious `\u03bb\u00b2(ft1\u2212base)` term is not a rounding artifact \u2014 with \u03bb=0.4 it's a ~16%-of-delta systematic bias on every merged tensor, which will almost certainly exceed the 1e-3 relative Frobenius tolerance in grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

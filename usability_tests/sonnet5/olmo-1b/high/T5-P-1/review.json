@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T5-defective.py",
+  "started_at": "2026-09-05T22:20:56+00:00",
+  "finished_at": "2026-09-05T22:21:01+00:00",
+  "wall_clock_s": 4.8,
+  "tokens_in": 2,
+  "tokens_out": 221,
+  "cost_usd": 0.040234799999999994,
+  "verdict_text": "NO\n\nThe script hardcodes `scale = 1.0` with a comment admitting \"alpha / r forgotten,\" instead of computing `scale = lora_alpha / r = 32/16 = 2` as required by \"Required result\" clause 1. This makes the merged weights `weight += 1 * B @ A` instead of `weight += 2 * B @ A`, which will produce merged values far outside the 1e-5 relative Frobenius error tolerance specified in \"Grading.\" None of the \"Required checks\" catch this, since they only verify tensor count, absence of `lora_` names, and shape \u2014 not the numeric correctness of the merge \u2014 so the script's assertions pass despite the wrong result.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

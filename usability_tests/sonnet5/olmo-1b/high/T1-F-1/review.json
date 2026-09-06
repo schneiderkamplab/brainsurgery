@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T22:12:15+00:00",
+  "finished_at": "2026-09-05T22:12:20+00:00",
+  "wall_clock_s": 5.2,
+  "tokens_in": 2,
+  "tokens_out": 283,
+  "cost_usd": 0.039043800000000004,
+  "verdict_text": "NO\n\nThe artifact drops blocks {2, 6, 10, 15} instead of the required {2, 6, 10, 14}, violating clause \"Remove every tensor of blocks 2, 6, 10, 14\" (Required result #1). This also breaks the required renumbering mapping in clause #2: since block 14 survives but is treated as dropped, and block 15 is dropped instead of renumbered to 11, the surviving old indices {0,1,3,4,5,7,8,9,11,12,13,14} map to 0..11 in an order that does not match the specified mapping (e.g., old 14 would become new 11 instead of being removed, and old 15 is missing entirely rather than becoming new 11). The \"Required checks\" for blocks 12-15 being absent is also violated in spirit since block 14 remains present under a new index while block 15 is wrongly excluded.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

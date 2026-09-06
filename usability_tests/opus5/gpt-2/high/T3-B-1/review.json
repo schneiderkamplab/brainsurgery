@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T3-defective.yaml",
+  "started_at": "2026-09-05T23:42:45+00:00",
+  "finished_at": "2026-09-05T23:42:57+00:00",
+  "wall_clock_s": 12.7,
+  "tokens_in": 2,
+  "tokens_out": 845,
+  "cost_usd": 0.10604849999999999,
+  "verdict_text": "NO\n\nThe `cast_` to bfloat16 targets only `attn.c_attn.weight`, `mlp.c_fc.weight` and `mlp.c_proj.weight`, omitting `h.<i>.attn.c_proj.weight`; only 36 of the required 48 projection matrices are cast, violating \"Required result\" clause 1, and the remaining 12 `attn.c_proj.weight` tensors stay float32. The plan also fails to implement the required check \"exactly 48 tensors are bfloat16\": its `assert count` checks that a name pattern matches 36 tensors, which is a count of names rather than of bfloat16 dtypes, and it hard-codes the wrong number, so the run cannot fail loudly on the miscast \u2014 a violation of the \"Required checks\" section. The other three required checks (`h.0.attn.c_attn.weight` bfloat16, `wte.weight` float32, 148 tensors total) are present and would pass, so the error is silent. Separately, the output specifies `shard: 64MB`, whereas the specification states the limit as 64 MiB = 67,108,864 bytes; if the tool reads `MB` as 10^6 bytes this yields a different shard boundary than the reference and fails clause 5. Deletion of the 12 `h.<i>.attn.bias` buffers and the name-preservation requirement are handled correctly.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-06T00:26:26+00:00",
+  "finished_at": "2026-09-06T00:26:31+00:00",
+  "wall_clock_s": 5.3,
+  "tokens_in": 2,
+  "tokens_out": 161,
+  "cost_usd": 0.180311,
+  "verdict_text": "NO\n\nThe script sets DROP_HEAD = 6, but the specification's \"Required result\" requires removing head 5 in every layer. With head 6 dropped, the kept column ranges become 0..383, 448..767 per segment instead of the required 0..319, 384..767, so clauses 1, 2 and 3 are all violated even though the shapes match. The shape asserts and tensor-count check pass, so the required checks do not catch the error, and the grader's bit-exact value comparison would fail.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

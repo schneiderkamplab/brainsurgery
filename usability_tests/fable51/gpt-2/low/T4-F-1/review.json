@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-06T00:27:43+00:00",
+  "finished_at": "2026-09-06T00:27:49+00:00",
+  "wall_clock_s": 6.3,
+  "tokens_in": 2,
+  "tokens_out": 268,
+  "cost_usd": 0.177801,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-modified tensor, not the base. The script computes `tmp = base + 0.4*(ft1 - base)` and then `tmp + 0.4*(ft2 - tmp)`, so the ft2 delta is measured relative to `tmp` rather than `base`. That yields `0.6*tmp + 0.4*ft2` instead of `base + 0.4*(ft1 - base) + 0.4*(ft2 - base)`, which differs by `0.4*0.4*(ft1 - base)` and will exceed the 1e-5 relative Frobenius tolerance. This violates Required result step 2 and the \"Why it is meaningful\" ordering hazard: each task vector must be taken against the unmodified base. The verification, counting, and output checks are otherwise correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

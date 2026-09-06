@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T21:54:32+00:00",
+  "finished_at": "2026-09-05T21:54:41+00:00",
+  "wall_clock_s": 9.7,
+  "tokens_in": 2,
+  "tokens_out": 866,
+  "cost_usd": 0.04430579999999999,
+  "verdict_text": "NO\n\nThe merge formula is wrong. Spec step 2 requires each task vector to be computed against the unmodified base: `out = base + lambda*(ft1-base) + lambda*(ft2-base)`. The artifact instead applies the fine-tunes sequentially, taking ft2's task vector against `tmp` (the already-lambda-blended intermediate) rather than against `base`: `tmp = base + lambda*(ft1-base)`, then `out = tmp + lambda*(ft2-tmp)`. Algebraically this yields `out = (1-lambda)^2*base + lambda*(1-lambda)*ft1 + lambda*ft2`, which for lambda=0.4 gives coefficients (0.36, 0.24, 0.4) instead of the required (0.2, 0.4, 0.4) \u2014 exactly the \"ordering hazard\" the spec's \"Why it is meaningful\" section warns against (\"each task vector must be taken against the unmodified base, not against a base that the first merge already changed\"). This will produce merged-tensor values far outside the 1e-3 relative Frobenius tolerance required by Grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

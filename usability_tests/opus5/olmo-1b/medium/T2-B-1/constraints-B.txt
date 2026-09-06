@@ -1,0 +1,5 @@
+# Condition B environment: brainsurgery installed editable from the kit's repository
+# checkout, constrained to the same core versions as conditions P and F.
+torch==2.14.0
+safetensors==0.5.3
+numpy==2.5.2

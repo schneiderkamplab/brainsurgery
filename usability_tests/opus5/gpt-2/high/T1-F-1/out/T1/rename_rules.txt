@@ -1,0 +1,12 @@
+# torch-state-bridge rules: renumber the surviving GPT-2 blocks to 0..8.
+# Rules are applied in order to every key, so they MUST be listed in
+# ascending source order: each rule maps source S to a target T < S, and every
+# later rule has a source > S > T, so an already-renamed key can never be
+# rewritten a second time. (Blocks 0 and 1 keep their index and need no rule.)
+h.3., h.2.
+h.4., h.3.
+h.6., h.4.
+h.7., h.5.
+h.9., h.6.
+h.10., h.7.
+h.11., h.8.

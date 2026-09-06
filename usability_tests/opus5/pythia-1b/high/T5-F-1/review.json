@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T5-defective.py",
+  "started_at": "2026-09-06T00:17:03+00:00",
+  "finished_at": "2026-09-06T00:17:10+00:00",
+  "wall_clock_s": 7.7,
+  "tokens_in": 2,
+  "tokens_out": 460,
+  "cost_usd": 0.1033395,
+  "verdict_text": "NO\n\nThe scaling factor is wrong: the script hardcodes `scale = 1.0` (with a comment admitting `alpha / r` was forgotten) instead of reading `lora_alpha / r = 32 / 16 = 2` from `adapter_config.json`. This violates \"Required result\" clause 1, which requires `weight += scale * B @ A` with `scale = lora_alpha / r = 2`; every one of the 16 merged tensors receives only half the intended LoRA delta. The four required checks are all satisfied (16 pairs, no `lora_` names, shape `[6144, 2048]`, 244 tensors), so nothing fails loudly \u2014 the defect passes silently to the output. Grading compares merged weights against the reference with a relative Frobenius tolerance of 1e-3, which a 50% deficit in the delta will not meet. The rest of the artifact \u2014 name mapping, float32 accumulation with cast back to float16, `fan_in_fan_out` handling, and the 512 MiB sharded export \u2014 matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

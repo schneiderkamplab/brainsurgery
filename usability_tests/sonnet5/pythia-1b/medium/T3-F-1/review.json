@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T3-defective.py",
+  "started_at": "2026-09-05T21:54:35+00:00",
+  "finished_at": "2026-09-05T21:54:40+00:00",
+  "wall_clock_s": 5.0,
+  "tokens_in": 2,
+  "tokens_out": 272,
+  "cost_usd": 0.0413528,
+  "verdict_text": "NO\n\nThe `matrix_re` regex only matches three of the four projection matrix types per layer (`query_key_value.weight`, `dense_h_to_4h.weight`, `dense_4h_to_h.weight`) but omits `attention.dense.weight`, so only 48 tensors are cast to bfloat16 instead of the required 64, violating Required result clause 1 (and consequently clause 2, since `attention.dense.weight` should remain float32 only if excluded but here it stays float32 when it should be bf16). The corresponding check asserts exactly 48 bfloat16 tensors and passes, but the specification's own required check demands exactly 64, so the check itself is wrong per \"exactly 64 tensors are bfloat16.\" This is a self-consistent but incorrect implementation that will fail grading against the hidden reference.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

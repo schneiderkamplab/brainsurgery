@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T23:22:03+00:00",
+  "finished_at": "2026-09-05T23:22:11+00:00",
+  "wall_clock_s": 8.0,
+  "tokens_in": 2,
+  "tokens_out": 532,
+  "cost_usd": 0.09796550000000001,
+  "verdict_text": "NO\n\nThe merge arithmetic takes the second task vector against the already-merged tensor rather than the unmodified base, which is exactly the ordering hazard the specification warns about. The script computes `tmp = b + \u03bb(f1 - b)` and then `out = tmp + \u03bb(f2 - tmp)`, i.e. `(1-\u03bb)\u00b2\u00b7b + \u03bb(1-\u03bb)\u00b7f1 + \u03bb\u00b7f2`, instead of the required `b + \u03bb(f1 - b) + \u03bb(f2 - b)` = `(1-2\u03bb)\u00b7b + \u03bb\u00b7f1 + \u03bb\u00b7f2` from \"Required result\" clause 2. With \u03bb = 0.4 the base coefficient is 0.36 instead of 0.2 and the two fine-tunes are weighted 0.24 and 0.4 instead of 0.4 each, so the 48 merged tensors will exceed the 1e-5 relative Frobenius tolerance. The verification, the merged-count and 114-tensor checks, and the untouched-tensor handling are otherwise correct (though using bare `assert` means the required checks vanish under `python -O`).",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

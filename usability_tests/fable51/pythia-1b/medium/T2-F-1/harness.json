@@ -1,0 +1,41 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-fable-5-1",
+  "agent": "fable51",
+  "target": "pythia-1b",
+  "effort": "medium",
+  "test": "T2",
+  "condition": "F",
+  "repeat": 1,
+  "started_at": "2026-09-06T00:56:16+00:00",
+  "finished_at": "2026-09-06T00:57:32+00:00",
+  "wall_clock_s": 76.4,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 1800,
+  "turns": 7,
+  "tool_calls": 6,
+  "tokens_in": 194,
+  "tokens_out": 4774,
+  "cache_read_tokens": 194014,
+  "cache_write_tokens": 20108,
+  "tokens_in_total": 214316,
+  "cost_usd": 0.6937905,
+  "duration_api_ms": 60447,
+  "session_id": "4a21f6c0-c400-435c-b0cf-b62f94cb89ef",
+  "result_subtype": "success",
+  "executions": 2,
+  "failed_executions": [
+    {
+      "n": 1,
+      "command": "python out/T2/solution.py && ls -la out/T2/",
+      "message": "CHECK FAILED: all tensors must stay float16",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 2,
+  "final_text": "Done. The pruned checkpoint is written and verified.\n\n**Result**\n- `out/T2/model.safetensors`: 244 tensors, head 5 removed from all 16 layers. Layer 0 shapes confirmed as `[5376, 2048]`, `[5376]`, `[2048, 1792]`, all float16.\n- `out/T2/solution.py`: plain safetensors and torch script. It slices the fused QKV rows and the dense columns via index selection, enforces the required checks before writing, then reloads the output and compares every tensor bit-exactly against the expected slices of the source.\n- `out/T2/REPORT.md`: self-report with the fields from the record template.\n\n**Executions**\n- Two runs. The first failed on an extra check of my own, which asserted every tensor is float16. The causal-mask buffers named `attention.bias` are stored as U8, so that assertion was wrong. No output was written on that failure. I narrowed the check to the 48 edited projection tensors and the second run passed.\n\n**Tool choice**\n- I used safetensors 0.5.3 and torch 2.14.0 directly rather than transformers `prune_heads`. Loading the model would add config edits and indirect slicing, while a state-dict slice is shorter and keeps untouched tensors byte-identical."
+}

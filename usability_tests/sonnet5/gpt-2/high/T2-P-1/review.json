@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-05T22:02:45+00:00",
+  "finished_at": "2026-09-05T22:02:52+00:00",
+  "wall_clock_s": 6.9,
+  "tokens_in": 2,
+  "tokens_out": 257,
+  "cost_usd": 0.039089799999999994,
+  "verdict_text": "NO\n\nThe specification requires removing head 5 (zero-indexed), but the artifact sets `DROP_HEAD = 6` and its docstring/comment says \"remove attention head 6\" \u2014 it drops the wrong head throughout, violating the \"Required result\" clause (\"For every layer `i`, remove head 5\"). Consequently the kept column/row ranges do not match clauses 1\u20133 (which specify keeping `0..319, 384..767, ...`, i.e., dropping columns/rows `320..383`, corresponding to head 5); the artifact instead drops `384..447`. Shapes will still pass the required checks (2112, 2112, 704\u00d7768, 160 tensors) since those only test dimensions, not content, but the values will not be bit-exact to the hidden reference and grading will fail.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

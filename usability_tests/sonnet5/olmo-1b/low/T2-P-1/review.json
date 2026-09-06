@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T21:13:45+00:00",
+  "finished_at": "2026-09-05T21:13:51+00:00",
+  "wall_clock_s": 6.1,
+  "tokens_in": 2,
+  "tokens_out": 201,
+  "cost_usd": 0.0398858,
+  "verdict_text": "NO\n\nThe artifact drops head 6 (`DROP_HEAD = 6`), but the specification requires removing head 5 (rows/columns 640..767 kept out, everything else kept), violating \"Required result\" clause item 1-4 (\"remove head 5 ... keep rows `0..639`, `768..2047`\"). Because the wrong head is dropped, the kept index ranges will be `0..767, 896..2047` instead of the required `0..639, 768..2047`, so despite matching shapes, the actual tensor slices and values will not match the hidden reference (bit-exact grading in \"Grading\" will fail).",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

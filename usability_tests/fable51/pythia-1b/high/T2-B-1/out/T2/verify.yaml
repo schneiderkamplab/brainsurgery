@@ -1,0 +1,22 @@
+# Verification only: no output. Compares out/T2 with the input.
+inputs:
+  - base::inputs/base/model.safetensors
+  - out::out/T2/model.safetensors
+transforms:
+  - assert: { count: { of: 'out::.*', is: 244 } }
+  - assert: { count: { of: 'base::.*', is: 244 } }
+  # Untouched tensors are bit-identical.
+  - assert:
+      equal:
+        left: 'out::(?!gpt_neox\.layers\.\d+\.attention\.(query_key_value\.(weight|bias)|dense\.weight)$).+'
+        right: 'base::\g<0>'
+  # Pruned tensors equal the kept slices of the originals.
+  - assert: { equal: { left: 'out::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight::[:3840]', right: 'base::gpt_neox.layers.\1.attention.query_key_value.weight::[:3840]' } }
+  - assert: { equal: { left: 'out::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight::[3840:]', right: 'base::gpt_neox.layers.\1.attention.query_key_value.weight::[4608:]' } }
+  - assert: { equal: { left: 'out::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias::[:3840]', right: 'base::gpt_neox.layers.\1.attention.query_key_value.bias::[:3840]' } }
+  - assert: { equal: { left: 'out::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.bias::[3840:]', right: 'base::gpt_neox.layers.\1.attention.query_key_value.bias::[4608:]' } }
+  - assert: { equal: { left: 'out::gpt_neox\.layers\.(\d+)\.attention\.dense\.weight::[:, :1280]', right: 'base::gpt_neox.layers.\1.attention.dense.weight::[:, :1280]' } }
+  - assert: { equal: { left: 'out::gpt_neox\.layers\.(\d+)\.attention\.dense\.weight::[:, 1280:]', right: 'base::gpt_neox.layers.\1.attention.dense.weight::[:, 1536:]' } }
+  - assert: { shape: { of: 'out::gpt_neox\.layers\.15\.attention\.dense\.weight', is: [2048, 1792] } }
+  - assert: { dtype: { of: 'out::gpt_neox\.layers\.15\.attention\.query_key_value\.bias', is: float16 } }
+  - dump: { target: 'out::gpt_neox\.layers\.15\.attention\..*', format: compact }

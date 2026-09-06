@@ -1,0 +1,78 @@
+# T4: task-vector merge of two fine-tunes of GPT-2 (124M).
+#
+#   out[X] = base[X] + 0.4 * (ft1[X] - base[X]) + 0.4 * (ft2[X] - base[X])
+#          = 0.2 * base[X] + 0.4 * ft1[X] + 0.4 * ft2[X]
+#
+# for the 48 MLP tensors; every other tensor stays the base tensor bit-exactly.
+# The scaled fine-tune tensors are materialised as temporaries on the base
+# alias, so each task vector is taken against the untouched base weights.
+
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # --- step 1: preconditions -------------------------------------------------
+  # Same number of tensors in all three checkpoints.
+  - assert: { count: { of: 'base::.+', is: 160 } }
+  - assert: { count: { of: 'ft1::.+', is: 160 } }
+  - assert: { count: { of: 'ft2::.+', is: 160 } }
+
+  # The MLP set is exactly 48 tensors in each checkpoint, so the 112 remaining
+  # tensors below are the complete non-MLP set.
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft1::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft2::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'base::(?!h\.\d+\.mlp\.).+', is: 112 } }
+  - assert: { count: { of: 'ft1::(?!h\.\d+\.mlp\.).+', is: 112 } }
+  - assert: { count: { of: 'ft2::(?!h\.\d+\.mlp\.).+', is: 112 } }
+
+  # Every tensor outside the MLPs is present under the same name and bit-equal
+  # in all three checkpoints (equal also checks shape and dtype).
+  - assert: { equal: { left: 'base::(?!h\.\d+\.mlp\.).+', right: 'ft1::\g<0>' } }
+  - assert: { equal: { left: 'base::(?!h\.\d+\.mlp\.).+', right: 'ft2::\g<0>' } }
+
+  # The MLP tensors are float32 everywhere; their names/shapes are checked by
+  # the merge itself, which fails if a name is missing or a shape mismatches.
+  - assert: { dtype: { of: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: float32 } }
+  - assert: { dtype: { of: 'ft1::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: float32 } }
+  - assert: { dtype: { of: 'ft2::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: float32 } }
+
+  # --- step 2: the merge -----------------------------------------------------
+  # 1 - 2*lambda = 0.2 on the base MLP tensors.
+  - scale_: { target: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', by: 0.2 }
+
+  # lambda * ft1 and lambda * ft2, staged as temporaries on the base alias.
+  - scale:
+      from: 'ft1::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::tv1.\1'
+      by: 0.4
+  - scale:
+      from: 'ft2::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::tv2.\1'
+      by: 0.4
+  - assert: { count: { of: 'base::tv1\..+', is: 48 } }
+  - assert: { count: { of: 'base::tv2\..+', is: 48 } }
+
+  - add_:
+      from: 'base::tv1\.(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::\1'
+  - add_:
+      from: 'base::tv2\.(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::\1'
+
+  - delete: { target: 'base::tv1\..+' }
+  - delete: { target: 'base::tv2\..+' }
+
+  # --- step 3: postconditions ------------------------------------------------
+  - assert: { count: { of: 'base::.+', is: 160 } }
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  # The 112 untouched tensors are still bit-identical to the fine-tunes, i.e.
+  # to the base they all shared.
+  - assert: { equal: { left: 'base::(?!h\.\d+\.mlp\.).+', right: 'ft1::\g<0>' } }
+  - assert: { dtype: { of: 'base::.+', is: float32 } }
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

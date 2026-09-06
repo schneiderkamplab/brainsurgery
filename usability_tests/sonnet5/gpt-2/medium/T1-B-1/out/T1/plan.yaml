@@ -1,0 +1,31 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Sanity check the input before touching anything.
+  - assert: { count: { of: '^h\.\d+\.attn\.c_attn\.weight$', is: 12 } }
+
+  # 1. Remove every tensor of blocks 2, 5, 8.
+  - delete: { target: '^h\.2\..*$' }
+  - delete: { target: '^h\.5\..*$' }
+  - delete: { target: '^h\.8\..*$' }
+
+  # 2. Renumber survivors in ascending old-index order so each move's
+  # destination slot is already free (moved out or originally deleted)
+  # before the move runs. 0 and 1 keep their index and need no move.
+  - move: { from: '^h\.3\.(.*)$', to: 'h.2.\1' }
+  - move: { from: '^h\.4\.(.*)$', to: 'h.3.\1' }
+  - move: { from: '^h\.6\.(.*)$', to: 'h.4.\1' }
+  - move: { from: '^h\.7\.(.*)$', to: 'h.5.\1' }
+  - move: { from: '^h\.9\.(.*)$', to: 'h.6.\1' }
+  - move: { from: '^h\.10\.(.*)$', to: 'h.7.\1' }
+  - move: { from: '^h\.11\.(.*)$', to: 'h.8.\1' }
+
+  # Required checks: fail loudly if any does not hold.
+  - assert: { not: { exists: '^h\.(9|10|11)\..*$' } }
+  - assert: { count: { of: '^h\.\d+\.attn\.c_attn\.weight$', is: 9 } }
+  - assert: { count: { of: '.*', is: 121 } }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

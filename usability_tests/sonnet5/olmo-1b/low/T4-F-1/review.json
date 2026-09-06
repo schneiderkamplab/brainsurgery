@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T21:17:43+00:00",
+  "finished_at": "2026-09-05T21:17:48+00:00",
+  "wall_clock_s": 5.5,
+  "tokens_in": 2,
+  "tokens_out": 370,
+  "cost_usd": 0.0390168,
+  "verdict_text": "NO\n\nThe merge formula is wrong: it computes `out = base + \u03bb(ft1-base)` then applies the second lambda step against that intermediate result (`tmp + \u03bb(ft2-tmp)`) instead of against the unmodified base. This is exactly the ordering hazard the spec warns about \u2014 clause \"Required result\" step 2 requires `out = base + \u03bb*(ft1-base) + \u03bb*(ft2-base)`, i.e. each task vector computed against the original base, not a chained/compounded update. Algebraically `tmp + \u03bb(ft2-tmp) = (1-\u03bb)*base + \u03bb*ft1 + \u03bb*ft2 - \u03bb\u00b2*(f1-b)` \u2014 wait, expanding: `tmp=b+\u03bb(f1-b)`, then `tmp+\u03bb(f2-tmp) = (1-\u03bb)tmp + \u03bbf2 = (1-\u03bb)(b+\u03bb(f1-b)) + \u03bbf2`, which is not equal to `b+\u03bb(f1-b)+\u03bb(f2-b)`. This produces values differing from spec by more than the allowed 1e-5 relative Frobenius error for non-trivial \u03bb.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

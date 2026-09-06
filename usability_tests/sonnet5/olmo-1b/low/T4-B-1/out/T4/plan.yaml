@@ -1,0 +1,88 @@
+inputs:
+  - base::inputs/base
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # --- Step 1: verify preconditions before touching anything ---
+
+  # Same tensor count in every checkpoint.
+  - assert: { count: { of: "base::.*", is: 114 } }
+  - assert: { count: { of: "ft1::.*", is: 114 } }
+  - assert: { count: { of: "ft2::.*", is: 114 } }
+
+  # Exactly 48 MLP tensors present in each checkpoint (16 layers x 3 tensors).
+  - assert:
+      count:
+        of: "base::model\\.layers\\.\\d+\\.mlp\\.(gate_proj|up_proj|down_proj)\\.weight"
+        is: 48
+  - assert:
+      count:
+        of: "ft1::model\\.layers\\.\\d+\\.mlp\\.(gate_proj|up_proj|down_proj)\\.weight"
+        is: 48
+  - assert:
+      count:
+        of: "ft2::model\\.layers\\.\\d+\\.mlp\\.(gate_proj|up_proj|down_proj)\\.weight"
+        is: 48
+
+  # Every tensor outside the 48 MLP tensors is bit-identical across all three checkpoints.
+  # (Combined with the counts above, this pins the name sets: 66 identical non-MLP names
+  # plus 48 MLP names in each checkpoint.)
+  - assert:
+      equal:
+        left: "base::(?!model\\.layers\\.\\d+\\.mlp\\.(gate_proj|up_proj|down_proj)\\.weight$).+"
+        right: "ft1::\\g<0>"
+        eps: 0.0
+  - assert:
+      equal:
+        left: "base::(?!model\\.layers\\.\\d+\\.mlp\\.(gate_proj|up_proj|down_proj)\\.weight$).+"
+        right: "ft2::\\g<0>"
+        eps: 0.0
+
+  # --- Step 2: start the output as an unmodified copy of base ---
+  # Everything below writes only to the "out" alias (temp delta tensors included)
+  # so the output model stays uniquely inferable.
+  - prefixes: { mode: add, alias: out }
+  - copy: { from: "base::(.+)", to: "out::\\1" }
+
+  # --- Step 3: task-vector merge of the 48 MLP tensors, against the unmodified base ---
+  # delta1 = ft1 - base, stashed under out::__delta1__<name> (temp tensors, deleted below)
+  - copy:
+      from: "ft1::(model\\.layers\\.\\d+\\.mlp\\.(?:gate_proj|up_proj|down_proj)\\.weight)"
+      to: "out::__delta1__\\1"
+  - subtract_:
+      from: "base::(model\\.layers\\.\\d+\\.mlp\\.(?:gate_proj|up_proj|down_proj)\\.weight)"
+      to: "out::__delta1__\\1"
+  - scale_: { target: "out::__delta1__.*", by: 0.4 }
+
+  # delta2 = ft2 - base, stashed under out::__delta2__<name>
+  - copy:
+      from: "ft2::(model\\.layers\\.\\d+\\.mlp\\.(?:gate_proj|up_proj|down_proj)\\.weight)"
+      to: "out::__delta2__\\1"
+  - subtract_:
+      from: "base::(model\\.layers\\.\\d+\\.mlp\\.(?:gate_proj|up_proj|down_proj)\\.weight)"
+      to: "out::__delta2__\\1"
+  - scale_: { target: "out::__delta2__.*", by: 0.4 }
+
+  # out[mlp] = base[mlp] + 0.4*(ft1[mlp]-base[mlp]) + 0.4*(ft2[mlp]-base[mlp])
+  - add_:
+      from: "out::__delta1__(model\\.layers\\.\\d+\\.mlp\\.(?:gate_proj|up_proj|down_proj)\\.weight)"
+      to: "out::\\1"
+  - add_:
+      from: "out::__delta2__(model\\.layers\\.\\d+\\.mlp\\.(?:gate_proj|up_proj|down_proj)\\.weight)"
+      to: "out::\\1"
+
+  # Drop the temporary delta tensors so the output has exactly 114 tensors.
+  - delete: { target: "out::__delta1__.*" }
+  - delete: { target: "out::__delta2__.*" }
+
+  # --- Step 4: final sanity checks ---
+  - assert: { count: { of: "out::.*", is: 114 } }
+  - assert:
+      count:
+        of: "out::model\\.layers\\.\\d+\\.mlp\\.(gate_proj|up_proj|down_proj)\\.weight"
+        is: 48
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

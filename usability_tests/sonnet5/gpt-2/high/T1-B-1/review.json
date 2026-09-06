@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-05T22:04:33+00:00",
+  "finished_at": "2026-09-05T22:04:46+00:00",
+  "wall_clock_s": 12.7,
+  "tokens_in": 2,
+  "tokens_out": 1148,
+  "cost_usd": 0.0479508,
+  "verdict_text": "NO\n\nThe plan removes blocks **2, 5, 9** (see the delete pattern `h\\.(2|5|9)\\..*` and its preceding assert) instead of blocks **2, 5, 8** as Required Result item 1 specifies. Consequently the surviving-block renumbering also diverges from item 2's exact mapping: old block 8 (which should have been deleted) is kept and renamed to index 6, while old block 9 (which should have survived and become index 6) is deleted instead. All in-plan asserts still pass because they only check counts/patterns (39 removed, 9 blocks remain, 121 total tensors), not *which* blocks survive, so the plan runs to completion and produces a checkpoint with the wrong block content at index 6 \u2014 which will fail the hidden bit-exact grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

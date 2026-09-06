@@ -1,0 +1,285 @@
+inputs:
+  - model::inputs/base/model.safetensors
+output: { path: out/T2/model.safetensors }
+transforms:
+  # layer 0: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.0.attn.c_attn.weight::[:, 0:320]', 'h.0.attn.c_attn.weight::[:, 384:768]',
+             'h.0.attn.c_attn.weight::[:, 768:1088]', 'h.0.attn.c_attn.weight::[:, 1152:1536]',
+             'h.0.attn.c_attn.weight::[:, 1536:1856]', 'h.0.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.0.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.0.attn.c_attn.bias::[0:320]', 'h.0.attn.c_attn.bias::[384:768]',
+             'h.0.attn.c_attn.bias::[768:1088]', 'h.0.attn.c_attn.bias::[1152:1536]',
+             'h.0.attn.c_attn.bias::[1536:1856]', 'h.0.attn.c_attn.bias::[1920:2304]']
+      to: h.0.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.0.attn.c_proj.weight::[0:320, :]', 'h.0.attn.c_proj.weight::[384:768, :]']
+      to: h.0.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.0\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.0\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.0\.attn\.c_proj\.weight' }
+  - move: { from: h.0.attn.c_attn.weight_pruned, to: h.0.attn.c_attn.weight }
+  - move: { from: h.0.attn.c_attn.bias_pruned, to: h.0.attn.c_attn.bias }
+  - move: { from: h.0.attn.c_proj.weight_pruned, to: h.0.attn.c_proj.weight }
+  # layer 1: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.1.attn.c_attn.weight::[:, 0:320]', 'h.1.attn.c_attn.weight::[:, 384:768]',
+             'h.1.attn.c_attn.weight::[:, 768:1088]', 'h.1.attn.c_attn.weight::[:, 1152:1536]',
+             'h.1.attn.c_attn.weight::[:, 1536:1856]', 'h.1.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.1.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.1.attn.c_attn.bias::[0:320]', 'h.1.attn.c_attn.bias::[384:768]',
+             'h.1.attn.c_attn.bias::[768:1088]', 'h.1.attn.c_attn.bias::[1152:1536]',
+             'h.1.attn.c_attn.bias::[1536:1856]', 'h.1.attn.c_attn.bias::[1920:2304]']
+      to: h.1.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.1.attn.c_proj.weight::[0:320, :]', 'h.1.attn.c_proj.weight::[384:768, :]']
+      to: h.1.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.1\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.1\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.1\.attn\.c_proj\.weight' }
+  - move: { from: h.1.attn.c_attn.weight_pruned, to: h.1.attn.c_attn.weight }
+  - move: { from: h.1.attn.c_attn.bias_pruned, to: h.1.attn.c_attn.bias }
+  - move: { from: h.1.attn.c_proj.weight_pruned, to: h.1.attn.c_proj.weight }
+  # layer 2: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.2.attn.c_attn.weight::[:, 0:320]', 'h.2.attn.c_attn.weight::[:, 384:768]',
+             'h.2.attn.c_attn.weight::[:, 768:1088]', 'h.2.attn.c_attn.weight::[:, 1152:1536]',
+             'h.2.attn.c_attn.weight::[:, 1536:1856]', 'h.2.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.2.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.2.attn.c_attn.bias::[0:320]', 'h.2.attn.c_attn.bias::[384:768]',
+             'h.2.attn.c_attn.bias::[768:1088]', 'h.2.attn.c_attn.bias::[1152:1536]',
+             'h.2.attn.c_attn.bias::[1536:1856]', 'h.2.attn.c_attn.bias::[1920:2304]']
+      to: h.2.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.2.attn.c_proj.weight::[0:320, :]', 'h.2.attn.c_proj.weight::[384:768, :]']
+      to: h.2.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.2\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.2\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.2\.attn\.c_proj\.weight' }
+  - move: { from: h.2.attn.c_attn.weight_pruned, to: h.2.attn.c_attn.weight }
+  - move: { from: h.2.attn.c_attn.bias_pruned, to: h.2.attn.c_attn.bias }
+  - move: { from: h.2.attn.c_proj.weight_pruned, to: h.2.attn.c_proj.weight }
+  # layer 3: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.3.attn.c_attn.weight::[:, 0:320]', 'h.3.attn.c_attn.weight::[:, 384:768]',
+             'h.3.attn.c_attn.weight::[:, 768:1088]', 'h.3.attn.c_attn.weight::[:, 1152:1536]',
+             'h.3.attn.c_attn.weight::[:, 1536:1856]', 'h.3.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.3.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.3.attn.c_attn.bias::[0:320]', 'h.3.attn.c_attn.bias::[384:768]',
+             'h.3.attn.c_attn.bias::[768:1088]', 'h.3.attn.c_attn.bias::[1152:1536]',
+             'h.3.attn.c_attn.bias::[1536:1856]', 'h.3.attn.c_attn.bias::[1920:2304]']
+      to: h.3.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.3.attn.c_proj.weight::[0:320, :]', 'h.3.attn.c_proj.weight::[384:768, :]']
+      to: h.3.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.3\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.3\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.3\.attn\.c_proj\.weight' }
+  - move: { from: h.3.attn.c_attn.weight_pruned, to: h.3.attn.c_attn.weight }
+  - move: { from: h.3.attn.c_attn.bias_pruned, to: h.3.attn.c_attn.bias }
+  - move: { from: h.3.attn.c_proj.weight_pruned, to: h.3.attn.c_proj.weight }
+  # layer 4: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.4.attn.c_attn.weight::[:, 0:320]', 'h.4.attn.c_attn.weight::[:, 384:768]',
+             'h.4.attn.c_attn.weight::[:, 768:1088]', 'h.4.attn.c_attn.weight::[:, 1152:1536]',
+             'h.4.attn.c_attn.weight::[:, 1536:1856]', 'h.4.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.4.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.4.attn.c_attn.bias::[0:320]', 'h.4.attn.c_attn.bias::[384:768]',
+             'h.4.attn.c_attn.bias::[768:1088]', 'h.4.attn.c_attn.bias::[1152:1536]',
+             'h.4.attn.c_attn.bias::[1536:1856]', 'h.4.attn.c_attn.bias::[1920:2304]']
+      to: h.4.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.4.attn.c_proj.weight::[0:320, :]', 'h.4.attn.c_proj.weight::[384:768, :]']
+      to: h.4.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.4\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.4\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.4\.attn\.c_proj\.weight' }
+  - move: { from: h.4.attn.c_attn.weight_pruned, to: h.4.attn.c_attn.weight }
+  - move: { from: h.4.attn.c_attn.bias_pruned, to: h.4.attn.c_attn.bias }
+  - move: { from: h.4.attn.c_proj.weight_pruned, to: h.4.attn.c_proj.weight }
+  # layer 5: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.5.attn.c_attn.weight::[:, 0:320]', 'h.5.attn.c_attn.weight::[:, 384:768]',
+             'h.5.attn.c_attn.weight::[:, 768:1088]', 'h.5.attn.c_attn.weight::[:, 1152:1536]',
+             'h.5.attn.c_attn.weight::[:, 1536:1856]', 'h.5.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.5.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.5.attn.c_attn.bias::[0:320]', 'h.5.attn.c_attn.bias::[384:768]',
+             'h.5.attn.c_attn.bias::[768:1088]', 'h.5.attn.c_attn.bias::[1152:1536]',
+             'h.5.attn.c_attn.bias::[1536:1856]', 'h.5.attn.c_attn.bias::[1920:2304]']
+      to: h.5.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.5.attn.c_proj.weight::[0:320, :]', 'h.5.attn.c_proj.weight::[384:768, :]']
+      to: h.5.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.5\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.5\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.5\.attn\.c_proj\.weight' }
+  - move: { from: h.5.attn.c_attn.weight_pruned, to: h.5.attn.c_attn.weight }
+  - move: { from: h.5.attn.c_attn.bias_pruned, to: h.5.attn.c_attn.bias }
+  - move: { from: h.5.attn.c_proj.weight_pruned, to: h.5.attn.c_proj.weight }
+  # layer 6: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.6.attn.c_attn.weight::[:, 0:320]', 'h.6.attn.c_attn.weight::[:, 384:768]',
+             'h.6.attn.c_attn.weight::[:, 768:1088]', 'h.6.attn.c_attn.weight::[:, 1152:1536]',
+             'h.6.attn.c_attn.weight::[:, 1536:1856]', 'h.6.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.6.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.6.attn.c_attn.bias::[0:320]', 'h.6.attn.c_attn.bias::[384:768]',
+             'h.6.attn.c_attn.bias::[768:1088]', 'h.6.attn.c_attn.bias::[1152:1536]',
+             'h.6.attn.c_attn.bias::[1536:1856]', 'h.6.attn.c_attn.bias::[1920:2304]']
+      to: h.6.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.6.attn.c_proj.weight::[0:320, :]', 'h.6.attn.c_proj.weight::[384:768, :]']
+      to: h.6.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.6\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.6\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.6\.attn\.c_proj\.weight' }
+  - move: { from: h.6.attn.c_attn.weight_pruned, to: h.6.attn.c_attn.weight }
+  - move: { from: h.6.attn.c_attn.bias_pruned, to: h.6.attn.c_attn.bias }
+  - move: { from: h.6.attn.c_proj.weight_pruned, to: h.6.attn.c_proj.weight }
+  # layer 7: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.7.attn.c_attn.weight::[:, 0:320]', 'h.7.attn.c_attn.weight::[:, 384:768]',
+             'h.7.attn.c_attn.weight::[:, 768:1088]', 'h.7.attn.c_attn.weight::[:, 1152:1536]',
+             'h.7.attn.c_attn.weight::[:, 1536:1856]', 'h.7.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.7.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.7.attn.c_attn.bias::[0:320]', 'h.7.attn.c_attn.bias::[384:768]',
+             'h.7.attn.c_attn.bias::[768:1088]', 'h.7.attn.c_attn.bias::[1152:1536]',
+             'h.7.attn.c_attn.bias::[1536:1856]', 'h.7.attn.c_attn.bias::[1920:2304]']
+      to: h.7.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.7.attn.c_proj.weight::[0:320, :]', 'h.7.attn.c_proj.weight::[384:768, :]']
+      to: h.7.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.7\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.7\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.7\.attn\.c_proj\.weight' }
+  - move: { from: h.7.attn.c_attn.weight_pruned, to: h.7.attn.c_attn.weight }
+  - move: { from: h.7.attn.c_attn.bias_pruned, to: h.7.attn.c_attn.bias }
+  - move: { from: h.7.attn.c_proj.weight_pruned, to: h.7.attn.c_proj.weight }
+  # layer 8: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.8.attn.c_attn.weight::[:, 0:320]', 'h.8.attn.c_attn.weight::[:, 384:768]',
+             'h.8.attn.c_attn.weight::[:, 768:1088]', 'h.8.attn.c_attn.weight::[:, 1152:1536]',
+             'h.8.attn.c_attn.weight::[:, 1536:1856]', 'h.8.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.8.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.8.attn.c_attn.bias::[0:320]', 'h.8.attn.c_attn.bias::[384:768]',
+             'h.8.attn.c_attn.bias::[768:1088]', 'h.8.attn.c_attn.bias::[1152:1536]',
+             'h.8.attn.c_attn.bias::[1536:1856]', 'h.8.attn.c_attn.bias::[1920:2304]']
+      to: h.8.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.8.attn.c_proj.weight::[0:320, :]', 'h.8.attn.c_proj.weight::[384:768, :]']
+      to: h.8.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.8\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.8\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.8\.attn\.c_proj\.weight' }
+  - move: { from: h.8.attn.c_attn.weight_pruned, to: h.8.attn.c_attn.weight }
+  - move: { from: h.8.attn.c_attn.bias_pruned, to: h.8.attn.c_attn.bias }
+  - move: { from: h.8.attn.c_proj.weight_pruned, to: h.8.attn.c_proj.weight }
+  # layer 9: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.9.attn.c_attn.weight::[:, 0:320]', 'h.9.attn.c_attn.weight::[:, 384:768]',
+             'h.9.attn.c_attn.weight::[:, 768:1088]', 'h.9.attn.c_attn.weight::[:, 1152:1536]',
+             'h.9.attn.c_attn.weight::[:, 1536:1856]', 'h.9.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.9.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.9.attn.c_attn.bias::[0:320]', 'h.9.attn.c_attn.bias::[384:768]',
+             'h.9.attn.c_attn.bias::[768:1088]', 'h.9.attn.c_attn.bias::[1152:1536]',
+             'h.9.attn.c_attn.bias::[1536:1856]', 'h.9.attn.c_attn.bias::[1920:2304]']
+      to: h.9.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.9.attn.c_proj.weight::[0:320, :]', 'h.9.attn.c_proj.weight::[384:768, :]']
+      to: h.9.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.9\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.9\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.9\.attn\.c_proj\.weight' }
+  - move: { from: h.9.attn.c_attn.weight_pruned, to: h.9.attn.c_attn.weight }
+  - move: { from: h.9.attn.c_attn.bias_pruned, to: h.9.attn.c_attn.bias }
+  - move: { from: h.9.attn.c_proj.weight_pruned, to: h.9.attn.c_proj.weight }
+  # layer 10: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.10.attn.c_attn.weight::[:, 0:320]', 'h.10.attn.c_attn.weight::[:, 384:768]',
+             'h.10.attn.c_attn.weight::[:, 768:1088]', 'h.10.attn.c_attn.weight::[:, 1152:1536]',
+             'h.10.attn.c_attn.weight::[:, 1536:1856]', 'h.10.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.10.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.10.attn.c_attn.bias::[0:320]', 'h.10.attn.c_attn.bias::[384:768]',
+             'h.10.attn.c_attn.bias::[768:1088]', 'h.10.attn.c_attn.bias::[1152:1536]',
+             'h.10.attn.c_attn.bias::[1536:1856]', 'h.10.attn.c_attn.bias::[1920:2304]']
+      to: h.10.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.10.attn.c_proj.weight::[0:320, :]', 'h.10.attn.c_proj.weight::[384:768, :]']
+      to: h.10.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.10\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.10\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.10\.attn\.c_proj\.weight' }
+  - move: { from: h.10.attn.c_attn.weight_pruned, to: h.10.attn.c_attn.weight }
+  - move: { from: h.10.attn.c_attn.bias_pruned, to: h.10.attn.c_attn.bias }
+  - move: { from: h.10.attn.c_proj.weight_pruned, to: h.10.attn.c_proj.weight }
+  # layer 11: drop head 5 (columns 320..383 of each q/k/v segment; rows 320..383 of c_proj)
+  - concat:
+      from: ['h.11.attn.c_attn.weight::[:, 0:320]', 'h.11.attn.c_attn.weight::[:, 384:768]',
+             'h.11.attn.c_attn.weight::[:, 768:1088]', 'h.11.attn.c_attn.weight::[:, 1152:1536]',
+             'h.11.attn.c_attn.weight::[:, 1536:1856]', 'h.11.attn.c_attn.weight::[:, 1920:2304]']
+      to: h.11.attn.c_attn.weight_pruned
+      dim: 1
+  - concat:
+      from: ['h.11.attn.c_attn.bias::[0:320]', 'h.11.attn.c_attn.bias::[384:768]',
+             'h.11.attn.c_attn.bias::[768:1088]', 'h.11.attn.c_attn.bias::[1152:1536]',
+             'h.11.attn.c_attn.bias::[1536:1856]', 'h.11.attn.c_attn.bias::[1920:2304]']
+      to: h.11.attn.c_attn.bias_pruned
+      dim: 0
+  - concat:
+      from: ['h.11.attn.c_proj.weight::[0:320, :]', 'h.11.attn.c_proj.weight::[384:768, :]']
+      to: h.11.attn.c_proj.weight_pruned
+      dim: 0
+  - delete: { target: 'h\.11\.attn\.c_attn\.weight' }
+  - delete: { target: 'h\.11\.attn\.c_attn\.bias' }
+  - delete: { target: 'h\.11\.attn\.c_proj\.weight' }
+  - move: { from: h.11.attn.c_attn.weight_pruned, to: h.11.attn.c_attn.weight }
+  - move: { from: h.11.attn.c_attn.bias_pruned, to: h.11.attn.c_attn.bias }
+  - move: { from: h.11.attn.c_proj.weight_pruned, to: h.11.attn.c_proj.weight }
+  # required checks
+  - assert: { shape: { of: 'h\.0\.attn\.c_attn\.weight', is: [768, 2112] } }
+  - assert: { shape: { of: 'h\.0\.attn\.c_attn\.bias', is: [2112] } }
+  - assert: { shape: { of: 'h\.0\.attn\.c_proj\.weight', is: [704, 768] } }
+  - assert: { count: { of: '.*', is: 160 } }

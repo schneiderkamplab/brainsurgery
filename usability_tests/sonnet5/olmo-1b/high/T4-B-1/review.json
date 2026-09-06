@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-05T22:26:22+00:00",
+  "finished_at": "2026-09-05T22:26:44+00:00",
+  "wall_clock_s": 21.8,
+  "tokens_in": 2,
+  "tokens_out": 2091,
+  "cost_usd": 0.0597898,
+  "verdict_text": "NO\n\nThe plan violates the ordering requirement described in the spec (\"each task vector must be taken against the unmodified base\"): after computing tv1 = 0.4*(ft1-base) it does `add_: from tv1, to base::...` which overwrites the base MLP tensor in place with `base + 0.4*(ft1-base)`. The subsequent `subtract_: from base::..., to base::...tv2` for the second task vector then subtracts this already-merged value instead of the original base, so tv2 = ft2 \u2212 (base + 0.4*(ft1\u2212base)) rather than ft2 \u2212 base. This makes the final merged value `0.36*base + 0.24*ft1 + 0.4*ft2` instead of the required `0.2*base + 0.4*ft1 + 0.4*ft2` (Required result step 2), a discrepancy far exceeding the 1e-5 relative Frobenius tolerance. Additionally, the plan never explicitly asserts that exactly 48 tensors were matched/merged as required by \"Required checks,\" relying only on input/output tensor counts of 114.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

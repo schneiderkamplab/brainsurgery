@@ -1,0 +1,41 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-fable-5-1",
+  "agent": "fable51",
+  "target": "pythia-1b",
+  "effort": "low",
+  "test": "T2",
+  "condition": "P",
+  "repeat": 1,
+  "started_at": "2026-09-06T00:37:50+00:00",
+  "finished_at": "2026-09-06T00:38:52+00:00",
+  "wall_clock_s": 61.8,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 1800,
+  "turns": 5,
+  "tool_calls": 4,
+  "tokens_in": 130,
+  "tokens_out": 2463,
+  "cache_read_tokens": 122158,
+  "cache_write_tokens": 15567,
+  "tokens_in_total": 137855,
+  "cost_usd": 0.4687374999999999,
+  "duration_api_ms": 49254,
+  "session_id": "2a800641-ccf6-43bc-a926-70516c2eb2e1",
+  "result_subtype": "success",
+  "executions": 2,
+  "failed_executions": [
+    {
+      "n": 1,
+      "command": "mkdir -p out/T2 && cat > out/T2/solution.py <<'EOF'\n\"\"\"T2: remove attention head 5 from every layer of Pythia-1B (GPT-NeoX layout).\"\"\"\nimport os\nimport sys\n\nimport torch\nfrom safetensors.torch import load_file, save_file\n\nSRC = \"inputs/base/model.safetensors\"\nDST = \"out/T2/model.safetensors\"\nN_LAYER",
+      "message": "CHECK FAILED: all tensors float16",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 2,
+  "final_text": "Done. The pruned checkpoint is written to `out/T2/model.safetensors` with 244 tensors, and the report is at `out/T2/REPORT.md`.\n\n- **Script** `out/T2/solution.py` builds the kept-index lists for heads 0-4 and 6-7, slices rows of the fused QKV weight and bias in 768-row blocks and columns of the dense weight in 256-wide blocks for all 16 layers, and runs the required layer-0 shape checks and tensor-count check before and after saving.\n- **Two executions.** The first failed on an extra check I added that required every tensor to be float16. The attention buffers are bool and float32, so that check was wrong and I removed it. Nothing was written on that attempt. The second execution succeeded."
+}

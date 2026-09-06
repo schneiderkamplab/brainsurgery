@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-05T23:12:06+00:00",
+  "finished_at": "2026-09-05T23:12:15+00:00",
+  "wall_clock_s": 9.0,
+  "tokens_in": 2,
+  "tokens_out": 508,
+  "cost_usd": 0.09594150000000001,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-merged tensor instead of the unmodified base: `tmp = b + \u03bb(f1 \u2212 b)` and then `out = tmp + \u03bb(f2 \u2212 tmp)`, which expands to `0.36\u00b7b + 0.24\u00b7f1 + 0.4\u00b7f2` rather than the required `0.2\u00b7b + 0.4\u00b7f1 + 0.4\u00b7f2`. This violates \"Required result\" clause 2, whose formula subtracts `base[X]` in both task vectors, and it is precisely the ordering hazard the objective warns about (each task vector must be taken against the unmodified base). The error is not an associativity/rounding difference, so the merged tensors will exceed the 1e-5 relative Frobenius tolerance in grading. The verification in step 1, the merged-count check, and the 160-tensor check are otherwise correct (minor caveat: they use bare `assert`, so they vanish under `python -O`).",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

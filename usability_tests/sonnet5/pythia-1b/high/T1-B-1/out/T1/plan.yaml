@@ -1,0 +1,40 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # 1. Remove every tensor of the 4 blocks being pruned.
+  - delete: { target: 'gpt_neox\.layers\.(2|6|10|14)\..*' }
+
+  # 2. Renumber the surviving blocks in ascending order of their old index.
+  #    Processing old->new moves in ascending source order guarantees each
+  #    destination slot is already vacated (deleted above, or moved out by an
+  #    earlier step in this same list) before anything is written into it, so
+  #    no move ever collides with a still-live tensor.
+  - move: { from: 'gpt_neox\.layers\.3\.(.*)', to: 'gpt_neox.layers.2.\1' }
+  - move: { from: 'gpt_neox\.layers\.4\.(.*)', to: 'gpt_neox.layers.3.\1' }
+  - move: { from: 'gpt_neox\.layers\.5\.(.*)', to: 'gpt_neox.layers.4.\1' }
+  - move: { from: 'gpt_neox\.layers\.7\.(.*)', to: 'gpt_neox.layers.5.\1' }
+  - move: { from: 'gpt_neox\.layers\.8\.(.*)', to: 'gpt_neox.layers.6.\1' }
+  - move: { from: 'gpt_neox\.layers\.9\.(.*)', to: 'gpt_neox.layers.7.\1' }
+  - move: { from: 'gpt_neox\.layers\.11\.(.*)', to: 'gpt_neox.layers.8.\1' }
+  - move: { from: 'gpt_neox\.layers\.12\.(.*)', to: 'gpt_neox.layers.9.\1' }
+  - move: { from: 'gpt_neox\.layers\.13\.(.*)', to: 'gpt_neox.layers.10.\1' }
+  - move: { from: 'gpt_neox\.layers\.15\.(.*)', to: 'gpt_neox.layers.11.\1' }
+  # old 0->0 and old 1->1 need no move: their names are already correct.
+
+  # Required checks: fail loudly if the result is not exactly right.
+  - assert:
+      not:
+        exists: 'gpt_neox\.layers\.(12|13|14|15)\..*'
+  - assert:
+      count:
+        of: 'gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight'
+        is: 12
+  - assert:
+      count:
+        of: '.*'
+        is: 184
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

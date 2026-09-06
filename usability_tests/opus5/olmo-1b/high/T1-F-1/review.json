@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T23:48:39+00:00",
+  "finished_at": "2026-09-05T23:48:49+00:00",
+  "wall_clock_s": 10.4,
+  "tokens_in": 2,
+  "tokens_out": 600,
+  "cost_usd": 0.1017045,
+  "verdict_text": "NO\n\nThe script sets `DROP = {2, 6, 10, 15}` instead of `{2, 6, 10, 14}`, so it deletes the final block 15 and keeps block 14, remapping old 14 to new index 11. This violates Required result clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\") and clause 2, whose mapping explicitly requires old 15 \u2192 new 11 and no surviving old 14. The output would therefore differ from the hidden reference in the values of the 7 tensors at `model.layers.11.*`, failing the bit-exact grading. The failure is silent: the two assertions only verify that the surviving indices form `set(range(12))` and that the tensor count is 86, both of which hold for any choice of four dropped blocks, so the required checks do not catch the wrong drop set. Everything else \u2014 the whole-block regex match, the non-block tensors passing through untouched, collision-free renumbering via a precomputed old\u2192new map, and writing a single `out/T1/model.safetensors` \u2014 is correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

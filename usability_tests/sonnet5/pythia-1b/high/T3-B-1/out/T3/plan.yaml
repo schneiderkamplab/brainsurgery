@@ -1,0 +1,70 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # --- Sanity check the input layout before touching anything ---
+  - assert: { count: { of: '.*', is: 244 } }
+  - assert:
+      count:
+        of: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)'
+        is: 48
+  - assert:
+      count:
+        of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)\.weight|mlp\.(dense_h_to_4h|dense_4h_to_h)\.weight)'
+        is: 64
+
+  # --- Drop the non-parameter buffers (causal mask, masked_bias scalar,
+  #     rotary inv_freq) for every layer. Nothing named "*.weight" or
+  #     "*.bias" on a Linear/LayerNorm module is touched here. ---
+  - delete:
+      target: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)'
+
+  # --- Upcast everything that remains (float16 -> float32). This covers
+  #     embeddings, layer norms, and every bias, plus (temporarily) the
+  #     projection weights, which get downcast to bfloat16 next. ---
+  - cast_:
+      target: '.*'
+      to: float32
+
+  # --- Downcast exactly the 64 large projection matrices to bfloat16. ---
+  - cast_:
+      target: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)\.weight|mlp\.(dense_h_to_4h|dense_4h_to_h)\.weight)'
+      to: bfloat16
+
+  # --- Required checks from TASK.md ---
+  - assert:
+      count:
+        of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)\.weight|mlp\.(dense_h_to_4h|dense_4h_to_h)\.weight)'
+        is: 64
+  - assert:
+      dtype:
+        of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)\.weight|mlp\.(dense_h_to_4h|dense_4h_to_h)\.weight)'
+        is: bfloat16
+  - assert:
+      dtype:
+        of: 'gpt_neox.layers.0.attention.query_key_value.weight'
+        is: bfloat16
+  - assert:
+      dtype:
+        of: 'gpt_neox.embed_in.weight'
+        is: float32
+  - assert: { count: { of: '.*', is: 196 } }
+
+  # --- Additional checks: everything that is not a projection matrix must
+  #     be float32, and the buffers are really gone. ---
+  - assert:
+      dtype:
+        of: 'gpt_neox\.layers\.\d+\.(?!attention\.(query_key_value|dense)\.weight$)(?!mlp\.(dense_h_to_4h|dense_4h_to_h)\.weight$).+'
+        is: float32
+  - assert:
+      dtype:
+        of: '(gpt_neox\.embed_in\.weight|embed_out\.weight|gpt_neox\.final_layer_norm\.(weight|bias))'
+        is: float32
+  - assert:
+      not:
+        exists: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)'
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

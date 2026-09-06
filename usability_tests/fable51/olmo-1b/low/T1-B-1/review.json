@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-06T00:33:27+00:00",
+  "finished_at": "2026-09-06T00:33:36+00:00",
+  "wall_clock_s": 9.0,
+  "tokens_in": 2,
+  "tokens_out": 203,
+  "cost_usd": 0.185076,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 6, 10 and 15 instead of the required 2, 6, 10 and 14, violating Required result clause 1. As a consequence it keeps block 14 and renumbers it to 11 while discarding block 15, which should have become new block 11 per clause 2. The values of output block 11 will therefore differ from the reference, so grading fails on bit-exact values even though the count assertions (28 deleted, 12 q_proj, 86 total) still pass. The assert checking that blocks 12 to 15 no longer exist also passes, so the plan does not fail loudly on this error.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

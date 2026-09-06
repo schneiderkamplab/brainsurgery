@@ -1,0 +1,68 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # --- Step 1: verify preconditions before touching anything ---
+  - assert: { count: { of: 'base::.*', is: 160 } }
+  - assert: { count: { of: 'ft1::.*', is: 160 } }
+  - assert: { count: { of: 'ft2::.*', is: 160 } }
+
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft1::h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft2::h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)', is: 48 } }
+
+  # every non-MLP tensor must be identical (name, shape, dtype, values) across all three checkpoints
+  - assert: { equal: { left: 'base::^(?!h\.\d+\.mlp\.).*$', right: 'ft1::\g<0>' } }
+  - assert: { equal: { left: 'base::^(?!h\.\d+\.mlp\.).*$', right: 'ft2::\g<0>' } }
+
+  # the 48 MLP tensors must exist with matching name/shape/dtype in all three (values are allowed to
+  # differ - that's the task vector); a huge eps turns 'equal' into a pure shape/dtype/existence check
+  - assert:
+      equal:
+        left: 'base::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+        right: 'ft1::\1'
+        eps: 1.0e30
+  - assert:
+      equal:
+        left: 'base::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+        right: 'ft2::\1'
+        eps: 1.0e30
+
+  # --- Step 2: merge, computed as base*(1-2*lambda) + lambda*ft1 + lambda*ft2, lambda=0.4 ---
+  # scratch tensors are created under the 'base' alias itself (with a tmp*_ name prefix) so the
+  # whole plan writes to a single destination alias, as brainsurgery's output inference requires.
+  - scale:
+      from: 'base::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::tmp1_\1'
+      by: 0.2
+  - scale:
+      from: 'ft1::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::tmp2_\1'
+      by: 0.4
+  - scale:
+      from: 'ft2::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::tmp3_\1'
+      by: 0.4
+
+  # overwrite base's MLP tensors in place with the merged result; every other base tensor is untouched
+  - assign:
+      from: 'base::tmp1_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::\1'
+  - add_:
+      from: 'base::tmp2_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::\1'
+  - add_:
+      from: 'base::tmp3_(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))'
+      to: 'base::\1'
+
+  # drop the scratch tensors so the output has exactly the original 160 names
+  - delete: { target: 'base::tmp[123]_h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias)' }
+
+  # --- Required checks: final shape of the output ---
+  - assert: { count: { of: 'base::.*', is: 160 } }
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

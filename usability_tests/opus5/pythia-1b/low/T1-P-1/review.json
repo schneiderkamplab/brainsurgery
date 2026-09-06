@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T22:57:43+00:00",
+  "finished_at": "2026-09-05T22:57:50+00:00",
+  "wall_clock_s": 7.1,
+  "tokens_in": 2,
+  "tokens_out": 400,
+  "cost_usd": 0.1008665,
+  "verdict_text": "NO\n\nThe script drops blocks `{2, 6, 10, 15}` instead of `{2, 6, 10, 14}`, violating Required result clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\"). As a consequence the renumbering is also wrong for the tail: old 14 is kept and mapped to new index 11, whereas clause 2 requires old 15 to become 11 (and old 14 to be removed), so the final block's weights are wrong. The tensor count (184) and the contiguity assertion still pass, so the required checks do not catch the error \u2014 exactly the silently-wrong outcome the task description warns about. Everything else (non-block tensors passed through unchanged, values/shapes/dtypes untouched, single output file at `out/T1/model.safetensors`) conforms.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

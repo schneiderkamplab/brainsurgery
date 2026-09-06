@@ -1,0 +1,35 @@
+inputs:
+  - model::inputs/base
+
+transforms:
+  # Sanity: the input has exactly 114 tensors, all float32.
+  - assert: { count: { of: '.*', is: 114 } }
+  - assert: { dtype: { of: '.*', is: float32 } }
+
+  # Cast exactly the 112 projection matrices (7 per layer x 16 layers) to bfloat16.
+  # Dots are escaped so the pattern cannot overreach onto embeddings or lm_head.
+  - assert: { count: { of: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', is: 112 } }
+  - cast_:
+      target: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight'
+      to: bfloat16
+
+  # Required checks (fail before writing):
+  # - exactly 112 tensors are bfloat16: the 112 projections are bfloat16 and everything else is float32
+  - assert:
+      all:
+        - count: { of: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', is: 112 }
+        - dtype: { of: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', is: bfloat16 }
+        - dtype: { of: '(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).+', is: float32 }
+        - count: { of: '(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).+', is: 2 }
+  # - model.layers.0.self_attn.q_proj.weight is bfloat16
+  - assert: { dtype: { of: 'model\.layers\.0\.self_attn\.q_proj\.weight', is: bfloat16 } }
+  # - model.embed_tokens.weight is float32
+  - assert: { dtype: { of: 'model\.embed_tokens\.weight', is: float32 } }
+  - assert: { dtype: { of: 'lm_head\.weight', is: float32 } }
+  # - the output has exactly 114 tensors
+  - assert: { count: { of: '.*', is: 114 } }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

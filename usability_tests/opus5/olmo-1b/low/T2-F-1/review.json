@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T22:52:34+00:00",
+  "finished_at": "2026-09-05T22:52:38+00:00",
+  "wall_clock_s": 4.9,
+  "tokens_in": 2,
+  "tokens_out": 196,
+  "cost_usd": 0.0965395,
+  "verdict_text": "NO\n\nThe artifact sets `DROP_HEAD = 6`, so it removes rows/columns `768..895` and keeps `0..767`, `896..2047`, whereas the specification's \"Required result\" clauses 1\u20134 require dropping head 5, i.e. keeping `0..639`, `768..2047`. All shapes still come out `[1920, 2048]` / `[2048, 1920]` with 114 tensors, so the required checks pass and the error is silent \u2014 but the values are wrong on every one of the 64 head-bearing tensors, which fails the bit-exact comparison in \"Grading\".",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

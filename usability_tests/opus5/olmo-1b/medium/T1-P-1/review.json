@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T23:14:37+00:00",
+  "finished_at": "2026-09-05T23:14:49+00:00",
+  "wall_clock_s": 12.0,
+  "tokens_in": 2,
+  "tokens_out": 490,
+  "cost_usd": 0.09793450000000001,
+  "verdict_text": "NO\n\nThe script drops blocks `{2, 6, 10, 15}` instead of the required `{2, 6, 10, 14}` (`DROP` on line 12 and the docstring), violating Required-result clause 1. As a consequence the renumbering also deviates from clause 2: old 14 is kept and mapped to new index 11, while old 15 \u2014 which clause 2 requires to become 11 \u2014 is deleted, so the last block's values are wrong. Everything downstream still looks healthy (12 contiguous blocks, 86 tensors), which is exactly why both assertions pass and the error would slip through to grading as a bit-exactness mismatch. The non-block tensors and the shapes/dtypes handling are otherwise correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

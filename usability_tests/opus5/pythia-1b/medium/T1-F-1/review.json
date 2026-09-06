@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T23:26:52+00:00",
+  "finished_at": "2026-09-05T23:27:01+00:00",
+  "wall_clock_s": 8.7,
+  "tokens_in": 2,
+  "tokens_out": 537,
+  "cost_usd": 0.1053715,
+  "verdict_text": "NO\n\nThe artifact drops blocks 2, 6, 10, **15** (`DROP = {2, 6, 10, 15}`) instead of blocks 2, 6, 10, **14** as required by clause 1 of \"Required result\". As a consequence the renumbering map is also wrong from old block 11 onward: it maps old 11\u21928, 12\u21929, 13\u219210, 14\u219211 and discards block 15, whereas the specification requires old 11\u21928, 12\u21929, 13\u219210, 15\u219211 with block 14 discarded. The result therefore contains the wrong 12 blocks and the wrong values under indices 11 (violating clause 2), so the bit-exact comparison in grading would fail. Everything else \u2014 non-block tensors passed through unchanged, the 184-tensor count, contiguity of indices, and failing before any file is written \u2014 conforms, and the required checks all pass despite the error, which is exactly the silent-but-wrong outcome the task warns about.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T2-defective.yaml",
+  "started_at": "2026-09-05T23:42:17+00:00",
+  "finished_at": "2026-09-05T23:42:29+00:00",
+  "wall_clock_s": 11.9,
+  "tokens_in": 2,
+  "tokens_out": 787,
+  "cost_usd": 0.1677335,
+  "verdict_text": "NO\n\nThe plan removes head 6, not head 5. Every slice keeps `0..383` and `448..767` within each 768-wide segment (`[:, 0:384]` + `[:, 448:768]`, and the corresponding bias/`c_proj` slices), which drops columns `384..447` \u2014 head 6's block \u2014 whereas the specification's \"Required result\" clauses 1\u20133 require keeping `0..319` and `384..767`, i.e. dropping `320..383` (head 5). The same off-by-one-head shift is repeated in the second and third q/k/v segments (`768:1152`/`1216:1536` and `1536:1920`/`1984:2304` instead of `768:1088`/`1152:1536` and `1536:1856`/`1920:2304`). The plan's own header comment states the intent as \"remove attention head 6\", so this is a misreading of the task rather than a slicing typo. The failure is silent: all removed blocks are 64 wide, so the resulting shapes are `[768, 2112]`, `[2112]` and `[704, 768]` and every required `assert` passes, but the values are bit-wise wrong against the hidden reference.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

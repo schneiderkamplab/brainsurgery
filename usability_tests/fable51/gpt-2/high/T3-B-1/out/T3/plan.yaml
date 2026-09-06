@@ -1,0 +1,37 @@
+# T3: mixed-precision export with sharding (GPT-2 124M)
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Sanity on the input: 160 tensors, 48 projection matrices, 12 causal-mask buffers.
+  - assert: { count: { of: '.+', is: 160 } }
+  - assert: { count: { of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', is: 48 } }
+  - assert: { count: { of: 'h\.\d+\.attn\.bias', is: 12 } }
+
+  # 1. Cast exactly the 48 projection matrices to bfloat16 (in place, RNE via torch .to()).
+  - cast_: { target: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', to: bfloat16 }
+
+  # 3. Drop the 12 non-parameter causal-mask buffers (full-match, so c_proj.bias is untouched).
+  - delete: { target: 'h\.\d+\.attn\.bias' }
+
+  # Required checks (fail loudly before writing).
+  # exactly 48 tensors are bfloat16: the 48 projections are bfloat16 and everything else is float32
+  - assert: { count: { of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', is: 48 } }
+  - assert: { dtype: { of: 'h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight', is: bfloat16 } }
+  - assert: { count: { of: '(?!h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight$).+', is: 100 } }
+  - assert: { dtype: { of: '(?!h\.\d+\.(attn\.c_attn|attn\.c_proj|mlp\.c_fc|mlp\.c_proj)\.weight$).+', is: float32 } }
+  # h.0.attn.c_attn.weight is bfloat16
+  - assert: { dtype: { of: 'h\.0\.attn\.c_attn\.weight', is: bfloat16 } }
+  # wte.weight is float32
+  - assert: { dtype: { of: 'wte\.weight', is: float32 } }
+  # buffers gone, biases of the projections still present
+  - assert: { not: { exists: 'h\.\d+\.attn\.bias' } }
+  - assert: { count: { of: 'h\.\d+\.attn\.c_proj\.bias', is: 12 } }
+  # the output has exactly 148 tensors
+  - assert: { count: { of: '.+', is: 148 } }
+
+# 5. Sharded safetensors: 64MB = 64 MiB of tensor data per shard, plus model.safetensors.index.json.
+output:
+  path: out/T3
+  format: safetensors
+  shard: 64MB

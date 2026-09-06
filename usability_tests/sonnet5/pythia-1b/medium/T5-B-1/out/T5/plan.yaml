@@ -1,0 +1,83 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.0.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.0.attention.query_key_value.lora_A.weight, to: base::merge_delta.0.weight }
+  - scale: { from: base::merge_delta.0.weight, to: base::merge_delta_scaled.0.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.0.weight, to: base::merge_delta_fp16.0.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.0.weight, to: base::gpt_neox.layers.0.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.1.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.1.attention.query_key_value.lora_A.weight, to: base::merge_delta.1.weight }
+  - scale: { from: base::merge_delta.1.weight, to: base::merge_delta_scaled.1.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.1.weight, to: base::merge_delta_fp16.1.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.1.weight, to: base::gpt_neox.layers.1.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.2.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.2.attention.query_key_value.lora_A.weight, to: base::merge_delta.2.weight }
+  - scale: { from: base::merge_delta.2.weight, to: base::merge_delta_scaled.2.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.2.weight, to: base::merge_delta_fp16.2.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.2.weight, to: base::gpt_neox.layers.2.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.3.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.3.attention.query_key_value.lora_A.weight, to: base::merge_delta.3.weight }
+  - scale: { from: base::merge_delta.3.weight, to: base::merge_delta_scaled.3.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.3.weight, to: base::merge_delta_fp16.3.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.3.weight, to: base::gpt_neox.layers.3.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.4.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.4.attention.query_key_value.lora_A.weight, to: base::merge_delta.4.weight }
+  - scale: { from: base::merge_delta.4.weight, to: base::merge_delta_scaled.4.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.4.weight, to: base::merge_delta_fp16.4.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.4.weight, to: base::gpt_neox.layers.4.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.5.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.5.attention.query_key_value.lora_A.weight, to: base::merge_delta.5.weight }
+  - scale: { from: base::merge_delta.5.weight, to: base::merge_delta_scaled.5.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.5.weight, to: base::merge_delta_fp16.5.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.5.weight, to: base::gpt_neox.layers.5.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.6.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.6.attention.query_key_value.lora_A.weight, to: base::merge_delta.6.weight }
+  - scale: { from: base::merge_delta.6.weight, to: base::merge_delta_scaled.6.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.6.weight, to: base::merge_delta_fp16.6.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.6.weight, to: base::gpt_neox.layers.6.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.7.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.7.attention.query_key_value.lora_A.weight, to: base::merge_delta.7.weight }
+  - scale: { from: base::merge_delta.7.weight, to: base::merge_delta_scaled.7.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.7.weight, to: base::merge_delta_fp16.7.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.7.weight, to: base::gpt_neox.layers.7.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.8.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.8.attention.query_key_value.lora_A.weight, to: base::merge_delta.8.weight }
+  - scale: { from: base::merge_delta.8.weight, to: base::merge_delta_scaled.8.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.8.weight, to: base::merge_delta_fp16.8.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.8.weight, to: base::gpt_neox.layers.8.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.9.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.9.attention.query_key_value.lora_A.weight, to: base::merge_delta.9.weight }
+  - scale: { from: base::merge_delta.9.weight, to: base::merge_delta_scaled.9.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.9.weight, to: base::merge_delta_fp16.9.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.9.weight, to: base::gpt_neox.layers.9.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.10.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.10.attention.query_key_value.lora_A.weight, to: base::merge_delta.10.weight }
+  - scale: { from: base::merge_delta.10.weight, to: base::merge_delta_scaled.10.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.10.weight, to: base::merge_delta_fp16.10.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.10.weight, to: base::gpt_neox.layers.10.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.11.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.11.attention.query_key_value.lora_A.weight, to: base::merge_delta.11.weight }
+  - scale: { from: base::merge_delta.11.weight, to: base::merge_delta_scaled.11.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.11.weight, to: base::merge_delta_fp16.11.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.11.weight, to: base::gpt_neox.layers.11.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.12.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.12.attention.query_key_value.lora_A.weight, to: base::merge_delta.12.weight }
+  - scale: { from: base::merge_delta.12.weight, to: base::merge_delta_scaled.12.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.12.weight, to: base::merge_delta_fp16.12.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.12.weight, to: base::gpt_neox.layers.12.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.13.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.13.attention.query_key_value.lora_A.weight, to: base::merge_delta.13.weight }
+  - scale: { from: base::merge_delta.13.weight, to: base::merge_delta_scaled.13.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.13.weight, to: base::merge_delta_fp16.13.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.13.weight, to: base::gpt_neox.layers.13.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.14.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.14.attention.query_key_value.lora_A.weight, to: base::merge_delta.14.weight }
+  - scale: { from: base::merge_delta.14.weight, to: base::merge_delta_scaled.14.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.14.weight, to: base::merge_delta_fp16.14.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.14.weight, to: base::gpt_neox.layers.14.attention.query_key_value.weight }
+  - matmul: { from_a: lora::base_model.model.gpt_neox.layers.15.attention.query_key_value.lora_B.weight, from_b: lora::base_model.model.gpt_neox.layers.15.attention.query_key_value.lora_A.weight, to: base::merge_delta.15.weight }
+  - scale: { from: base::merge_delta.15.weight, to: base::merge_delta_scaled.15.weight, by: 2.0 }
+  - cast: { from: base::merge_delta_scaled.15.weight, to: base::merge_delta_fp16.15.weight, dtype: float16 }
+  - add_: { from: base::merge_delta_fp16.15.weight, to: base::gpt_neox.layers.15.attention.query_key_value.weight }
+
+  - delete: { target: 'base::merge_delta.*' }
+
+  - assert: { count: { of: 'lora::.*lora_A\.weight', is: 16 } }
+  - assert: { count: { of: 'lora::.*lora_B\.weight', is: 16 } }
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert: { shape: { of: base::gpt_neox.layers.0.attention.query_key_value.weight, is: [6144, 2048] } }
+  - assert: { count: { of: 'base::.*', is: 244 } }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB
+

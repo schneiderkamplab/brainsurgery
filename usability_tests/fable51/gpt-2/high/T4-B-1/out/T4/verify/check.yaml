@@ -1,0 +1,19 @@
+# Read-only verification of out/T4/model.safetensors (no output section).
+# expected.X = 0.2*base.X + 0.4*ft1.X + 0.4*ft2.X, algebraically equal to the task formula.
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+  - out::out/T4/model.safetensors
+transforms:
+  - assert: { count: { of: 'out::.*', is: 160 } }
+  - assert: { equal: { left: 'out::(?!h\.\d+\.mlp\.).+', right: 'base::\g<0>' } }
+  - scale: { from: 'base::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))', to: 'base::exp.\1', by: 0.2 }
+  - scale: { from: 'ft1::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))', to: 'base::t1.\1', by: 0.4 }
+  - scale: { from: 'ft2::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))', to: 'base::t2.\1', by: 0.4 }
+  - add_: { from: 'base::t1\.(h\..+)', to: 'base::exp.\1' }
+  - add_: { from: 'base::t2\.(h\..+)', to: 'base::exp.\1' }
+  - assert: { count: { of: 'base::exp\..+', is: 48 } }
+  - assert: { equal: { left: 'base::exp\.(h\..+)', right: 'out::\1', eps: 1.0e-6 } }
+  - assert: { not: { equal: { left: 'out::h\.0\.mlp\.c_fc\.weight', right: 'base::h\.0\.mlp\.c_fc\.weight' } } }
+  - dump: { target: 'out::h\.0\.mlp\..*', format: compact, verbosity: stat }

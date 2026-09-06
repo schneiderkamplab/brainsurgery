@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T5-defective.yaml",
+  "started_at": "2026-09-06T01:50:07+00:00",
+  "finished_at": "2026-09-06T01:50:14+00:00",
+  "wall_clock_s": 6.7,
+  "tokens_in": 2,
+  "tokens_out": 332,
+  "cost_usd": 0.19822100000000004,
+  "verdict_text": "NO\n\nThe plan adds the raw product `B @ A` to the base weight and never multiplies it by `scale = lora_alpha / r = 2` (the plan's own comment admits the scale is missing). This violates \"Required result\" clause 1, which requires `weight += scale * B @ A` with `scale = 2`. The merged weights therefore carry half the intended delta, so the relative Frobenius error against the reference will far exceed the 1e-3 tolerance in \"Grading\". Sharding, name mapping, dtype handling, intermediate cleanup and the four required asserts otherwise appear to satisfy the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

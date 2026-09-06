@@ -1,0 +1,49 @@
+inputs:
+  - model::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # B @ A for every layer / adapted module (regex capture groups \1=layer, \2=module)
+  - matmul:
+      from_a: 'lora::base_model\.model\.model\.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.model.layers.\1.self_attn.\2.lora_A.weight'
+      to: 'model::tmp.\1.\2.weight'
+
+  - assert:
+      count:
+        of: 'model::tmp\..*\.weight'
+        is: 32
+
+  # scale by alpha / r = 32 / 16 = 2
+  - scale:
+      from: 'model::tmp\.(\d+)\.(q_proj|v_proj)\.weight'
+      to: 'model::tmp2.\1.\2.weight'
+      by: 2.0
+
+  # merge into the base weight in place
+  - add_:
+      from: 'model::tmp2\.(\d+)\.(q_proj|v_proj)\.weight'
+      to: 'model::model.layers.\1.self_attn.\2.weight'
+
+  # drop intermediate tensors, only the merged base tensors remain
+  - delete: { target: 'model::tmp\..*\.weight' }
+  - delete: { target: 'model::tmp2\..*\.weight' }
+
+  - assert:
+      not:
+        exists: 'model::.*lora_.*'
+
+  - assert:
+      shape:
+        of: model::model.layers.0.self_attn.q_proj.weight
+        is: [2048, 2048]
+
+  - assert:
+      count:
+        of: 'model::.*'
+        is: 114
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

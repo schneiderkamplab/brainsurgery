@@ -1,0 +1,72 @@
+# T5: LoRA "merge and unload" for OLMo-1B-0724-hf, with sharded export.
+#
+#   W <- W + (lora_alpha / r) * B @ A          scale = 32 / 16 = 2
+#
+# fan_in_fan_out = false, so base weights and adapter factors share the
+# nn.Linear [out, in] layout and B @ A is added without transposition.
+#
+# Every tensor that ends up in the output lives in the `model` alias; the
+# adapter alias `lora` is read-only, so the output alias is unambiguous.
+
+inputs:
+  - model::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB   # binary units: 512 * 1024 * 1024 = 536,870,912 bytes of tensor data
+
+transforms:
+
+  # ---- Preflight -----------------------------------------------------------
+  # Required check: exactly 32 adapter pairs are present (32 A factors and the
+  # 32 matching B factors, and nothing else in the adapter checkpoint).
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_A\.weight'
+        is: 32
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_B\.weight'
+        is: 32
+  - assert: { count: { of: 'lora::.+', is: 64 } }
+
+  # The base is the expected 114-tensor float32 checkpoint.
+  - assert: { count: { of: 'model::.+', is: 114 } }
+  - assert: { shape: { of: 'model::model\.layers\.0\.self_attn\.q_proj\.weight', is: [2048, 2048] } }
+  - assert: { dtype: { of: 'model::model\.layers\.0\.self_attn\.q_proj\.weight', is: float32 } }
+  - assert: { shape: { of: 'lora::base_model\.model\.model\.layers\.0\.self_attn\.q_proj\.lora_A\.weight', is: [16, 2048] } }
+  - assert: { shape: { of: 'lora::base_model\.model\.model\.layers\.0\.self_attn\.q_proj\.lora_B\.weight', is: [2048, 16] } }
+
+  # ---- delta = B @ A -------------------------------------------------------
+  # [2048, 16] @ [16, 2048] -> [2048, 2048], float32. Written into the `model`
+  # alias under a scratch prefix that cannot collide with any base name.
+  - matmul:
+      from_a: 'lora::base_model\.model\.model\.layers\.(\d+)\.(self_attn\.[qv]_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.model.layers.\1.\2.lora_A.weight'
+      to: 'model::merge_delta.\1.\2.weight'
+
+  # Required check: exactly 32 pairs were actually merged.
+  - assert: { count: { of: 'model::merge_delta\..+', is: 32 } }
+  - assert: { shape: { of: 'model::merge_delta\.0\.self_attn\.q_proj\.weight', is: [2048, 2048] } }
+  - assert: { dtype: { of: 'model::merge_delta\.0\.self_attn\.q_proj\.weight', is: float32 } }
+  - assert: { not: { iszero: 'model::merge_delta\.0\.self_attn\.q_proj\.weight' } }
+
+  # ---- delta <- scale * delta ---------------------------------------------
+  - scale_: { target: 'model::merge_delta\..+', by: 2.0 }
+
+  # ---- W <- W + delta ------------------------------------------------------
+  - add_:
+      from: 'model::merge_delta\.(\d+)\.(self_attn\.[qv]_proj)\.weight'
+      to: 'model::model.layers.\1.\2.weight'
+
+  # ---- Drop every intermediate --------------------------------------------
+  - delete: { target: 'model::merge_delta\..+' }
+
+  # ---- Required checks before writing -------------------------------------
+  - assert: { not: { exists: 'model::.*merge_delta.*' } }
+  - assert: { not: { exists: 'model::.*lora_.*' } }
+  - assert: { shape: { of: 'model::model\.layers\.0\.self_attn\.q_proj\.weight', is: [2048, 2048] } }
+  - assert: { dtype: { of: 'model::model\.layers\.0\.self_attn\.q_proj\.weight', is: float32 } }
+  - assert: { count: { of: 'model::.+', is: 114 } }

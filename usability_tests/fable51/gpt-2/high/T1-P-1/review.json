@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-06T01:52:44+00:00",
+  "finished_at": "2026-09-06T01:52:52+00:00",
+  "wall_clock_s": 8.3,
+  "tokens_in": 2,
+  "tokens_out": 476,
+  "cost_usd": 0.18979000000000001,
+  "verdict_text": "NO\n\nThe script drops blocks {2, 5, 9} instead of blocks {2, 5, 8}, violating \"Required result\" clause 1 (\"Remove every tensor of blocks 2, 5, 8\"). Consequently the renumbering is wrong under clause 2: old block 8 survives and becomes new index 6, and old block 9 is deleted, whereas the specification requires old 8 to be removed and old 9 to become 6. The output will still have 121 tensors and 9 contiguous blocks, so the script's own assertions pass, but new blocks 6 through 8 hold the wrong weights and the grader's bit-exact comparison against the reference will fail. The docstring even states the wrong set explicitly (\"remove blocks 2, 5, 9\").",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

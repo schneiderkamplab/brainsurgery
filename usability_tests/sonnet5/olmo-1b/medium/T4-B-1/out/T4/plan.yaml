@@ -1,0 +1,85 @@
+inputs:
+  - base::inputs/base
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors
+
+transforms:
+  # --- Step 1: preflight verification -------------------------------------
+  # Same tensor count in every checkpoint.
+  - assert: { count: { of: 'base::.*', is: 114 } }
+  - assert: { count: { of: 'ft1::.*', is: 114 } }
+  - assert: { count: { of: 'ft2::.*', is: 114 } }
+
+  # The 48 MLP tensors exist under the same names in all three checkpoints.
+  - assert:
+      count:
+        of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+        is: 48
+  - assert:
+      count:
+        of: 'ft1::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+        is: 48
+  - assert:
+      count:
+        of: 'ft2::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+        is: 48
+
+  # Every tensor outside the 48 MLP tensors must be bit-identical across all
+  # three checkpoints (frozen-backbone assumption).
+  - assert:
+      equal:
+        left: 'base::(?!model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight$).+'
+        right: 'ft1::\g<0>'
+  - assert:
+      equal:
+        left: 'base::(?!model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight$).+'
+        right: 'ft2::\g<0>'
+
+  # --- Step 2: task-vector merge on the 48 MLP tensors ---------------------
+  # out = base + lambda*(ft1-base) + lambda*(ft2-base)
+  #     = (1 - 2*lambda)*base + lambda*ft1 + lambda*ft2   (lambda = 0.4)
+  # Computed as a weighted sum directly against the *unmodified* base/ft1/ft2,
+  # so there is no ordering hazard from one merge changing the base the other
+  # reads from.
+  - scale:
+      from: 'ft1::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: 'base::tmp1.\1.\2'
+      by: 0.4
+  - scale:
+      from: 'ft2::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: 'base::tmp2.\1.\2'
+      by: 0.4
+  - scale:
+      from: 'base::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: 'base::tmp0.\1.\2'
+      by: 0.2
+
+  - assert: { count: { of: 'base::tmp0\..*', is: 48 } }
+  - assert: { count: { of: 'base::tmp1\..*', is: 48 } }
+  - assert: { count: { of: 'base::tmp2\..*', is: 48 } }
+
+  - add_:
+      from: 'base::tmp1\.(\d+)\.(gate_proj|up_proj|down_proj)'
+      to: 'base::tmp0.\1.\2'
+  - add_:
+      from: 'base::tmp2\.(\d+)\.(gate_proj|up_proj|down_proj)'
+      to: 'base::tmp0.\1.\2'
+
+  # Exactly 48 tensors were merged.
+  - assert: { count: { of: 'base::tmp0\..*', is: 48 } }
+
+  - assign:
+      from: 'base::tmp0\.(\d+)\.(gate_proj|up_proj|down_proj)'
+      to: 'base::model.layers.\1.mlp.\2.weight'
+
+  # --- Step 3: drop scratch tensors, leave everything else untouched ------
+  - delete: { target: 'base::tmp0\..*' }
+  - delete: { target: 'base::tmp1\..*' }
+  - delete: { target: 'base::tmp2\..*' }
+
+  # Final shape of the output: exactly the original 114 tensors.
+  - assert: { count: { of: 'base::.*', is: 114 } }

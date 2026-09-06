@@ -1,0 +1,46 @@
+# Read-only verification of out/T5 (no `output:` section, nothing is written).
+inputs:
+  - base::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+  - new::out/T5
+
+transforms:
+  - prefixes: { mode: add, alias: chk }
+  - assert: { count: { of: 'new::.+', is: 114 } }
+  - assert: { not: { exists: 'new::.*lora_.*' } }
+
+  # The 82 untouched tensors must be bit-identical to the base.
+  - assert:
+      count:
+        of: 'base::(?!model\.layers\.\d+\.self_attn\.[qv]_proj\.weight$).+'
+        is: 82
+  - assert: { count: { of: 'new::model\.layers\.\d+\.self_attn\.[qv]_proj\.weight', is: 32 } }
+  - assert:
+      equal:
+        left: 'base::(?!model\.layers\.\d+\.self_attn\.[qv]_proj\.weight$).+'
+        right: 'new::\g<0>'
+
+  # Rebuild the expectation independently: expected = base + 2 * B @ A.
+  - matmul:
+      from_a: 'lora::base_model\.model\.model\.layers\.(\d+)\.(self_attn\.[qv]_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.model.layers.\1.\2.lora_A.weight'
+      to: 'chk::expect.\1.\2.weight'
+  - assert: { count: { of: 'chk::.+', is: 32 } }
+  - scale_: { target: 'chk::expect\..+', by: 2.0 }
+  - add_:
+      from: 'base::model\.layers\.(\d+)\.(self_attn\.[qv]_proj)\.weight'
+      to: 'chk::expect.\1.\2.weight'
+  - assert:
+      equal:
+        left: 'chk::expect\.(\d+)\.(self_attn\.[qv]_proj)\.weight'
+        right: 'new::model.layers.\1.\2.weight'
+        eps: 1e-4
+
+  # The merged tensors must actually differ from the base (the merge was not a no-op).
+  - assert:
+      not:
+        equal:
+          left: 'base::model\.layers\.0\.self_attn\.q_proj\.weight'
+          right: 'new::model.layers.0.self_attn.q_proj.weight'
+  - assert: { shape: { of: 'new::model\.layers\.0\.self_attn\.q_proj\.weight', is: [2048, 2048] } }
+  - assert: { dtype: { of: 'new::model\.layers\.\d+\.self_attn\.[qv]_proj\.weight', is: float32 } }

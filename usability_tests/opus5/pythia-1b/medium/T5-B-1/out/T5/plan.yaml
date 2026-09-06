@@ -1,0 +1,57 @@
+# T5: merge a PEFT LoRA adapter into the Pythia-1B base weights, sharded export.
+#
+#   W <- W + (lora_alpha / r) * (B @ A)     with alpha/r = 32/16 = 2
+#   fan_in_fan_out = false, so B @ A is [out, in] like the base weight: no transpose.
+#
+# The delta is built in float32 (the adapter dtype); the base weight is cast up to
+# float32 for the accumulation and cast back to float16 afterwards.
+
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # --- required check: exactly 16 adapter pairs ---------------------------
+  - assert:
+      all:
+        - count: { of: 'lora::.*\.lora_A\.weight', is: 16 }
+        - count: { of: 'lora::.*\.lora_B\.weight', is: 16 }
+        - count: { of: 'lora::.*', is: 32 }
+
+  # --- delta = B @ A, one per adapted module ------------------------------
+  - matmul:
+      from_a: 'lora::base_model\.model\.(gpt_neox\.layers\.\d+\.attention\.query_key_value)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.\1.lora_A.weight'
+      to: 'base::\1.mergedelta'
+  - assert:
+      all:
+        - count: { of: 'base::.*\.mergedelta', is: 16 }
+        - dtype: { of: 'base::gpt_neox\.layers\.0\.attention\.query_key_value\.mergedelta', is: float32 }
+        - shape: { of: 'base::gpt_neox\.layers\.0\.attention\.query_key_value\.mergedelta', is: [6144, 2048] }
+
+  # --- scale by alpha / r -------------------------------------------------
+  - scale_: { target: 'base::.*\.mergedelta', by: 2.0 }
+
+  # --- accumulate in float32, then back to the base dtype -----------------
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', to: float32 }
+  - add_:
+      from: 'base::(gpt_neox\.layers\.\d+\.attention\.query_key_value)\.mergedelta'
+      to: 'base::\1.weight'
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', to: float16 }
+
+  # --- drop the intermediates ---------------------------------------------
+  - delete: { target: 'base::.*\.mergedelta' }
+
+  # --- required checks before writing -------------------------------------
+  - assert:
+      all:
+        - not: { exists: 'base::.*lora_.*' }
+        - not: { exists: 'base::.*mergedelta.*' }
+        - shape: { of: 'base::gpt_neox\.layers\.0\.attention\.query_key_value\.weight', is: [6144, 2048] }
+        - dtype: { of: 'base::gpt_neox\.layers\.0\.attention\.query_key_value\.weight', is: float16 }
+        - count: { of: 'base::.*', is: 244 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

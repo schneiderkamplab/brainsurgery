@@ -1,0 +1,41 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-opus-5",
+  "agent": "opus5",
+  "target": "gpt-2",
+  "effort": "high",
+  "test": "T1",
+  "condition": "F",
+  "repeat": 1,
+  "started_at": "2026-09-05T23:35:07+00:00",
+  "finished_at": "2026-09-05T23:38:29+00:00",
+  "wall_clock_s": 202.3,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 1800,
+  "turns": 18,
+  "tool_calls": 17,
+  "tokens_in": 36,
+  "tokens_out": 14539,
+  "cache_read_tokens": 627940,
+  "cache_write_tokens": 38713,
+  "tokens_in_total": 666689,
+  "cost_usd": 1.067126,
+  "duration_api_ms": 176344,
+  "session_id": "f0408931-4f58-40cb-a267-d954629fd9b3",
+  "result_subtype": "success",
+  "executions": 2,
+  "failed_executions": [
+    {
+      "n": 1,
+      "command": "cd /home/rootkidd/Projects/brainsurgery/usability_tests/opus5/gpt-2/high/T1-F-1 && cat > out/T1/run.sh <<'EOF'\n#!/bin/sh\n# Run T1 from the sandbox root: sh out/T1/run.sh\nset -e\nexec \"$(dirname \"$0\")/../../.venv/bin/python\" \"$(dirname \"$0\")/solution.py\"\nEOF\nchmod +x out/T1/run.sh && sh out/T1/run.sh",
+      "message": "CHECK FAILED: drop/keep partition does not cover the input blocks exactly once",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 2,
+  "final_text": "Done. `out/T1/model.safetensors` is written with 121 tensors.\n\n**Approach:** `safetensors` for I/O, `torch-state-bridge` 0.1.0 for the renumbering (declarative rules in `out/T1/rename_rules.txt`), plain Python for the block deletion and the assertions, and a `transformers` meta-device `GPT2Model(n_layer=9)` to confirm the result loads into a 9-layer config.\n\n**The collision hazard is real with this tool.** `RuleEngine` applies every rule in order to every key, so a descending rule set cascades (`h.9.`\u2192`h.6.`\u2192`h.4.`\u2192`h.3.`\u2192`h.2.`) \u2014 I measured 26 colliding keys for that variant. Ascending source order makes each rule's target smaller than every later rule's source, so no key is rewritten twice; `state_bridge_preview` plus `detect_collision=True` guard it.\n\n**Executions: 2.** The first failed on my own input sanity check (`sorted(DROP) + sorted(KEEP)` compared a concatenation of two separately-sorted lists against a sorted list) \u2014 nothing was written. The second passed.\n\nTwo things worth flagging:\n\n- `h.<i>.attn.bias` is part of the 13 tensors per block, but `transformers` 5.12 no longer registers that buffer \u2014 a 9-layer `GPT2Model` state dict has 112 keys. The load check requires those 112 and allows exactly the 9 mask buffers as extras.\n- I did not use mergekit's passthrough layer slicing, the route `F-allowed.md` suggests: it goes through `save_pretrained`, which renames keys to `transformer.h.*` and drops the `attn.bias` buffers, so it cannot produce the graded 121-key set.\n\nChecks are all fatal and run before publication; the file is written to a `.tmp`, read back, re-verified bit-exactly, then `os.replace`d, so a failure leaves no output. I also verified the result independently of the solution script: key set matches the expected mapping exactly, all 121 tensors bit-exact with matching shapes and dtypes, 9 `c_attn.weight` keys. Self-report is in `out/T1/REPORT.md`."
+}

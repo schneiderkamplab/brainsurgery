@@ -1,0 +1,67 @@
+# T3: Mixed-precision export with sharding (Pythia-1B)
+#
+# 1. drop the 48 non-parameter buffers
+# 2. upcast everything that is left to float32
+# 3. downcast exactly the 64 projection matrices to bfloat16
+# 4. verify, then write sharded safetensors with a 256 MiB budget
+
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # --- sanity: the input is what the task describes -------------------------
+  - assert: { count: { of: '.*', is: 244 } }
+
+  # --- 3. drop the non-parameter buffers ------------------------------------
+  # attention.bias (causal mask, uint8), attention.masked_bias (scalar),
+  # attention.rotary_emb.inv_freq. Nothing else matches.
+  - assert:
+      count:
+        of: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)'
+        is: 48
+  - delete:
+      target: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)'
+  - assert: { count: { of: '.*', is: 196 } }
+
+  # --- 2. everything that survives becomes float32 ---------------------------
+  - cast_: { target: '.*', to: float32 }
+
+  # --- 1. the 64 projection matrices become bfloat16 ------------------------
+  # Deliberately narrow: only the four *.weight matrices per layer, never the
+  # embeddings, the layer norms or any bias.
+  - assert:
+      count:
+        of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+        is: 64
+  - cast_:
+      target: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+      to: bfloat16
+
+  # --- required checks ------------------------------------------------------
+  - assert:
+      all:
+        # exactly 64 tensors are bfloat16: the 64 projections are bfloat16 ...
+        - count:
+            of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+            is: 64
+        - dtype:
+            of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight'
+            is: bfloat16
+        # ... and every tensor that is not one of them is float32
+        - dtype:
+            of: '(?!gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight$).*'
+            is: float32
+        - count:
+            of: '(?!gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.(dense_h_to_4h|dense_4h_to_h))\.weight$).*'
+            is: 132
+        # named spot checks
+        - dtype: { of: 'gpt_neox\.layers\.0\.attention\.query_key_value\.weight', is: bfloat16 }
+        - dtype: { of: 'gpt_neox\.embed_in\.weight', is: float32 }
+        - dtype: { of: 'embed_out\.weight', is: float32 }
+        # the output has exactly 196 tensors
+        - count: { of: '.*', is: 196 }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

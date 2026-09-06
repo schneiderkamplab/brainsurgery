@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-05T23:09:53+00:00",
+  "finished_at": "2026-09-05T23:10:01+00:00",
+  "wall_clock_s": 8.3,
+  "tokens_in": 2,
+  "tokens_out": 486,
+  "cost_usd": 0.1005015,
+  "verdict_text": "NO\n\nThe artifact prunes head 6 (`DROP_HEAD = 6`) instead of head 5, violating \"Required result\" clause: for every layer the kept ranges must be `0..319`, `384..767` (per 768-wide segment), i.e. dropping indices 320..383, whereas this script drops 384..447 and keeps 0..383, 448..767. This is wrong in all three head-bearing tensors (`c_attn.weight` columns, `c_attn.bias` rows, `c_proj.weight` rows) in all 12 layers, so the output is shape-correct but not bit-exact against the reference and grading fails. The required checks are all shape/count checks, which still pass, so nothing fails loudly \u2014 but that is permitted by the spec, which only mandates those four checks. The rest (structure, untouched tensors, names, single 160-tensor output file) is correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

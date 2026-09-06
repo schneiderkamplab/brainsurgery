@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-06T00:52:15+00:00",
+  "finished_at": "2026-09-06T00:52:26+00:00",
+  "wall_clock_s": 10.7,
+  "tokens_in": 2,
+  "tokens_out": 397,
+  "cost_usd": 0.194876,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 6, 10 and 15, but Required result clause 1 says to remove blocks 2, 6, 10 and 14. As a consequence, the final move renames old block 14 to new index 11, whereas clause 2 requires old block 15 to become 11. The output therefore contains block 14's weights where block 15's should be and lacks block 15 entirely, so the values at `model.layers.11.*` differ from the reference and grading fails on bit-exact values. All three Required checks still pass (28 deleted tensors, 12 q_proj tensors, 86 total, no indices 12 through 15), so the plan does not fail loudly on this error.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

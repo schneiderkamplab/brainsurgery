@@ -1,0 +1,105 @@
+# T4: task-vector merge of two OLMo-1B-0724-hf fine-tunes into the base.
+#
+# out[X] = base[X] + lambda*(ft1[X]-base[X]) + lambda*(ft2[X]-base[X])
+#        = (1 - 2*lambda)*base[X] + lambda*ft1[X] + lambda*ft2[X]   (lambda = 0.4)
+# for the 48 MLP tensors; every other tensor is the base value, unchanged.
+#
+# The rewritten form avoids the base/ft1/ft2 ordering hazard entirely: each
+# scratch tensor below is computed straight from the *unmodified* ft1/ft2
+# source, so it does not matter that base's own MLP tensors get scaled
+# in-place before the scratch values are added back in.
+#
+# All destinations below stay on the 'base' alias (scratch tensors included)
+# so the output alias can be inferred unambiguously; ft1/ft2 are read-only.
+
+inputs:
+  - base::inputs/base
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors
+
+transforms:
+  # --- Preflight: structural shape of all three checkpoints ---
+  - assert: { count: { of: 'base::.*', is: 114 } }
+  - assert: { count: { of: 'ft1::.*', is: 114 } }
+  - assert: { count: { of: 'ft2::.*', is: 114 } }
+
+  - assert:
+      count:
+        of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+        is: 48
+  - assert:
+      count:
+        of: 'ft1::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+        is: 48
+  - assert:
+      count:
+        of: 'ft2::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+        is: 48
+
+  # Representative shape/dtype sanity checks for the MLP tensor family.
+  - assert: { shape: { of: 'base::model\.layers\.0\.mlp\.gate_proj\.weight', is: [8192, 2048] } }
+  - assert: { shape: { of: 'base::model\.layers\.0\.mlp\.up_proj\.weight', is: [8192, 2048] } }
+  - assert: { shape: { of: 'base::model\.layers\.0\.mlp\.down_proj\.weight', is: [2048, 8192] } }
+  - assert: { dtype: { of: 'base::model\.layers\.0\.mlp\.gate_proj\.weight', is: float32 } }
+  - assert: { dtype: { of: 'ft1::model\.layers\.0\.mlp\.gate_proj\.weight', is: float32 } }
+  - assert: { dtype: { of: 'ft2::model\.layers\.0\.mlp\.gate_proj\.weight', is: float32 } }
+
+  # --- Required result, step 1: abort unless the three checkpoints share the
+  # same tensor names and every non-MLP tensor is bit-identical across all
+  # three. Combined with the count asserts above (114 total, 48 MLP each),
+  # matching every non-MLP name pins the full name set: the 66 non-MLP names
+  # matched here plus the 48 canonical MLP names account for all 114 tensors
+  # in each of ft1 and ft2, so no tensor can be missing, renamed or extra. ---
+  - assert:
+      count:
+        of: 'base::(?!model\.layers\.\d+\.mlp\.).+'
+        is: 66
+  - assert:
+      equal:
+        left: 'base::(?!model\.layers\.\d+\.mlp\.).+'
+        right: 'ft1::\g<0>'
+  - assert:
+      equal:
+        left: 'base::(?!model\.layers\.\d+\.mlp\.).+'
+        right: 'ft2::\g<0>'
+
+  # --- Step 2: merge, computed in float32 against the unmodified base/ft1/ft2 ---
+  # scratch1.<layer>.<proj> = 0.4 * ft1[<layer>.<proj>]  (new tensors on 'base')
+  - scale:
+      from: 'ft1::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: 'base::scratch1.\1.\2'
+      by: 0.4
+  # scratch2.<layer>.<proj> = 0.4 * ft2[<layer>.<proj>]  (new tensors on 'base')
+  - scale:
+      from: 'ft2::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: 'base::scratch2.\1.\2'
+      by: 0.4
+  # base's own MLP tensors, in place: base[X] <- 0.2 * base[X]
+  - scale_:
+      target: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      by: 0.2
+  # base[X] <- base[X] + scratch1[X]  (adds 0.4*ft1)
+  - add_:
+      from: 'base::scratch1\.(\d+)\.(gate_proj|up_proj|down_proj)'
+      to: 'base::model.layers.\1.mlp.\2.weight'
+  # base[X] <- base[X] + scratch2[X]  (adds 0.4*ft2)
+  - add_:
+      from: 'base::scratch2\.(\d+)\.(gate_proj|up_proj|down_proj)'
+      to: 'base::model.layers.\1.mlp.\2.weight'
+
+  # Drop the scratch tensors; only the 114 canonical names may remain.
+  - delete: { target: 'base::scratch1\..*' }
+  - delete: { target: 'base::scratch2\..*' }
+
+  # --- Required checks: exactly 48 tensors were merged, output has exactly
+  # 114 tensors, and no scratch leftovers. ---
+  - assert:
+      count:
+        of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+        is: 48
+  - assert: { not: { exists: 'base::scratch\d\..*' } }
+  - assert: { count: { of: 'base::.*', is: 114 } }

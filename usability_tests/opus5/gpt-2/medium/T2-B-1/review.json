@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T2-defective.yaml",
+  "started_at": "2026-09-05T23:10:40+00:00",
+  "finished_at": "2026-09-05T23:10:50+00:00",
+  "wall_clock_s": 10.0,
+  "tokens_in": 2,
+  "tokens_out": 575,
+  "cost_usd": 0.1624335,
+  "verdict_text": "NO\n\nThe plan removes head 6 instead of head 5. Every slice keeps `0:384` and `448:768` within each 768-wide segment (and in the `c_proj` rows), which drops columns/rows 384\u2013447 \u2014 that is head 6 \u2014 whereas Required result clauses 1\u20133 specify keeping `0..319` and `384..767` (i.e. dropping 320\u2013383, head 5); the same off-by-one-head error repeats in the q, k and v segments (`768:1152`/`1216:1536` and `1536:1920`/`1984:2304` instead of `768:1087`/`1152:1535` and `1536:1855`/`1920:2303`). The plan's own header comment states the intent as \"remove attention head 6\", confirming this is a wrong-head selection rather than a typo in one slice. Because the resulting shapes are still `[768, 2112]`, `[2112]`, `[704, 768]` and 160 tensors, all four required `assert` transforms pass and the run silently writes an incorrect checkpoint. Grading against the hidden reference would fail on bit-exact values for all 36 head-bearing tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-06T00:24:37+00:00",
+  "finished_at": "2026-09-06T00:24:46+00:00",
+  "wall_clock_s": 9.1,
+  "tokens_in": 2,
+  "tokens_out": 241,
+  "cost_usd": 0.26023300000000005,
+  "verdict_text": "NO\n\nThe script drops head 6, but the specification requires removing head 5 (clause \"Required result\", items 1 to 3, which keep columns and rows `0..319` and `384..767`, i.e. head 5 at offsets 320..383 is removed). With `DROP_HEAD = 6` the script keeps `0..383` and `448..767` in each segment, so the resulting c_attn.weight, c_attn.bias and c_proj.weight are the wrong head slices even though the shape checks pass. The output will fail the bit-exact value comparison in grading. Minor additional deviations: the docstring names head 6 too, and the script imports a helper module `_ckpt` rather than being fully standalone, though that does not affect correctness of the result.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

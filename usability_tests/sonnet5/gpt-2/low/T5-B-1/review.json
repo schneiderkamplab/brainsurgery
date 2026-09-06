@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T5-defective.yaml",
+  "started_at": "2026-09-05T21:13:55+00:00",
+  "finished_at": "2026-09-05T21:13:59+00:00",
+  "wall_clock_s": 4.2,
+  "tokens_in": 2,
+  "tokens_out": 139,
+  "cost_usd": 0.0392918,
+  "verdict_text": "NO\n\nThe plan's own comment admits the defect: the `scale = alpha/r = 2` multiplication is missing entirely before the `add_` step, so it computes `weight += (B @ A).T` instead of `weight += 2 * (B @ A).T`, violating Required Result clause 1. This will produce merged weights off by a factor of 2, failing the grading's Frobenius-error check for the 12 merged tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

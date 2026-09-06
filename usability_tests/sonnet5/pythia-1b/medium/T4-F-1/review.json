@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-05T21:55:54+00:00",
+  "finished_at": "2026-09-05T21:56:03+00:00",
+  "wall_clock_s": 9.2,
+  "tokens_in": 2,
+  "tokens_out": 767,
+  "cost_usd": 0.043739799999999995,
+  "verdict_text": "NO\n\nThe merge formula in the script is wrong. Spec requires `out = base + \u03bb*(ft1-base) + \u03bb*(ft2-base)` (both task vectors computed against the *unmodified* base), which simplifies to `0.2*base + 0.4*ft1 + 0.4*ft2`. The script instead computes `tmp = base + \u03bb*(ft1-base)` and then `out = tmp + \u03bb*(ft2-tmp)`, i.e. it applies the second task vector relative to the already-modified `tmp`, not the original base \u2014 this simplifies to `0.36*base + 0.24*ft1 + 0.4*ft2`, a materially different result, not just a different summation order. This directly violates Required-result clause 2 and reintroduces the exact \"ordering hazard\" the spec warns against (task vectors must each be taken against the unmodified base). The verification (step 1) and tensor-count checks are otherwise implemented correctly, but the core arithmetic is incorrect and will fail the grader's Frobenius-error tolerance.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

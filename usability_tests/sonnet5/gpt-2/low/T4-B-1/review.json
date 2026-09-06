@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T4-defective.yaml",
+  "started_at": "2026-09-05T21:13:29+00:00",
+  "finished_at": "2026-09-05T21:13:38+00:00",
+  "wall_clock_s": 9.1,
+  "tokens_in": 2,
+  "tokens_out": 621,
+  "cost_usd": 0.0452028,
+  "verdict_text": "NO\n\nThe ordering hazard described in the spec is violated: the plan computes `tv1 = ft1 \u2212 base`, merges it into `base` in place (`add_` writes back onto `base::h.\\1.\\2`), and only afterward computes `tv2 = ft2 \u2212 base` \u2014 but at that point `base` already holds the lambda\u00b7tv1-updated values, not the original base. This makes `out[X] = base + 0.4\u00b7(ft1\u2212base) + 0.4\u00b7(ft2 \u2212 (base+0.4\u00b7(ft1\u2212base)))`, which is not the required `base + \u03bb(ft1\u2212base) + \u03bb(ft2\u2212base)`, violating Required Result step 2. Additionally, the plan never asserts that exactly 48 tensors were merged, omitting one of the three explicitly Required Checks.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

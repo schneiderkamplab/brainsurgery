@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-05T23:36:17+00:00",
+  "finished_at": "2026-09-05T23:36:30+00:00",
+  "wall_clock_s": 12.3,
+  "tokens_in": 2,
+  "tokens_out": 798,
+  "cost_usd": 0.134282,
+  "verdict_text": "NO\n\nThe artifact drops blocks `{2, 5, 9}` instead of the required `{2, 5, 8}`, violating Required result clause 1 (\"Remove every tensor of blocks 2, 5, 8\"). This also breaks clause 2's renumbering map: with `kept = [0,1,3,4,6,7,8,10,11]`, old block 8 becomes new 6 and old 10/11 become 7/8, whereas the specification requires old 9\u21926, 10\u21927, 11\u21928 and no surviving old block 8. The resulting checkpoint carries the wrong 9 blocks' weights and will fail the hidden reference's bit-exact value comparison, even though the key set, shapes and dtypes look plausible. The script's own checks do not catch this: the layer-index assertion and the 121-tensor assertion both pass for any 3-block drop set, so the error is silent \u2014 precisely the failure mode the specification's \"Why it is meaningful\" section describes. The docstring repeats the same error (\"remove blocks 2, 5, 9\"), indicating a misread of the task rather than a typo in one place.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

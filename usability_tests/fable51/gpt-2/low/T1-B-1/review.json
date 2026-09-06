@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-06T00:26:29+00:00",
+  "finished_at": "2026-09-06T00:26:35+00:00",
+  "wall_clock_s": 6.1,
+  "tokens_in": 2,
+  "tokens_out": 213,
+  "cost_usd": 0.18106500000000003,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 5, 9 instead of 2, 5, 8, violating Required result clause 1 (\"Remove every tensor of blocks 2, 5, 8\"). It then keeps block 8 (moved to index 6) and drops block 9, so the mapping also violates clause 2, which requires old 8 removed and old 9 to become 6. The three asserts still pass (no h.9/10/11, 9 c_attn weights, 121 tensors), so the plan runs successfully but produces a checkpoint with the wrong key-to-value assignment for indices 6 through 8, and grading against the reference will fail on values.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

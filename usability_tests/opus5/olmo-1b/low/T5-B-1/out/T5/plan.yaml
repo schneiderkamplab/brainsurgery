@@ -1,0 +1,43 @@
+inputs:
+  - model::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # sanity: adapter has exactly 32 pairs
+  - assert:
+      all:
+        - count: { of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_A\.weight', is: 32 }
+        - count: { of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.[qv]_proj\.lora_B\.weight', is: 32 }
+
+  # delta = B @ A, stored on the model alias under a temporary name
+  - matmul:
+      from_a: 'lora::base_model\.model\.model\.layers\.(\d+)\.(self_attn\.[qv]_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.model.layers.\1.\2.lora_A.weight'
+      to: 'model::__delta__.\1.\2.weight'
+
+  - assert:
+      all:
+        - count: { of: 'model::__delta__\..*', is: 32 }
+        - shape: { of: 'model::__delta__.0.self_attn.q_proj.weight', is: [2048, 2048] }
+
+  # scale by lora_alpha / r = 2 and fold into the base weights
+  - scale_: { target: 'model::__delta__\..*', by: 2.0 }
+  - add_:
+      from: 'model::__delta__\.(\d+)\.(self_attn\.[qv]_proj)\.weight'
+      to: 'model::model.layers.\1.\2.weight'
+
+  # remove every intermediate tensor
+  - delete: { target: 'model::__delta__\..*' }
+
+  # required checks
+  - assert:
+      all:
+        - not: { exists: 'model::.*lora_.*' }
+        - not: { exists: 'model::__delta__.*' }
+        - shape: { of: 'model::model.layers.0.self_attn.q_proj.weight', is: [2048, 2048] }
+        - count: { of: 'model::.*', is: 114 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

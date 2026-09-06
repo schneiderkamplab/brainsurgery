@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-06T01:40:14+00:00",
+  "finished_at": "2026-09-06T01:40:25+00:00",
+  "wall_clock_s": 11.3,
+  "tokens_in": 2,
+  "tokens_out": 482,
+  "cost_usd": 0.203226,
+  "verdict_text": "NO\n\nThe script drops blocks 2, 6, 10, 15, but the specification's Required result clause 1 says to remove blocks 2, 6, 10, 14. As a consequence, old block 14 survives and is renumbered to 11, while old block 15 (which clause 2 says must become 11) is discarded, so the tensor values of output layer 11 are wrong and the checkpoint will fail the bit-exact grading. The docstring repeats the same mistake (\"2, 6, 10, 15\"), so it is a specification error, not a typo in one place. The required checks are otherwise enforced by the asserts before the write, and the assertions on 12 contiguous layers and 184 tensors would still pass, so this error is silent, exactly the hazard the spec warns about.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

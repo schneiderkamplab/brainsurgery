@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T4-defective.py",
+  "started_at": "2026-09-06T01:36:33+00:00",
+  "finished_at": "2026-09-06T01:36:41+00:00",
+  "wall_clock_s": 8.1,
+  "tokens_in": 2,
+  "tokens_out": 438,
+  "cost_usd": 0.18670500000000004,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-modified tensor, not the unmodified base: the script computes `tmp = b + \u03bb(f1 - b)` and then `tmp + \u03bb(f2 - tmp)`, whereas step 2 of \"Required result\" specifies `base + \u03bb(ft1 - base) + \u03bb(ft2 - base)`. Expanding the artifact's formula gives `base + \u03bb(1-\u03bb)(ft1 - base) + \u03bb(ft2 - base)`, so the ft1 contribution is scaled by 0.24 instead of 0.4. This is exactly the ordering hazard the specification calls out (\"each task vector must be taken against the unmodified base, not against a base that the first merge already changed\"), and the merged tensors will exceed the 1e-5 relative Frobenius tolerance in grading. A minor secondary weakness is that the required checks are plain `assert` statements, which are silently stripped under `python -O`, so they do not reliably \"fail loudly\".",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

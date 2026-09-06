@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T3-defective.yaml",
+  "started_at": "2026-09-05T22:20:06+00:00",
+  "finished_at": "2026-09-05T22:20:14+00:00",
+  "wall_clock_s": 8.1,
+  "tokens_in": 2,
+  "tokens_out": 579,
+  "cost_usd": 0.0429448,
+  "verdict_text": "NO\n\nThe transform pattern (and its count assert) lists only q_proj, k_proj, v_proj, gate_proj, up_proj, down_proj \u2014 it omits `self_attn.o_proj.weight`. That leaves only 6 of the 7 projection matrices per layer being cast, i.e. 96 tensors instead of 112, so all 16 `o_proj.weight` tensors stay float32 instead of being cast to bfloat16. This violates Required Result clause 1 (\"Cast exactly the 112 projection matrices listed above to bfloat16\") and the Required Checks clause \"exactly 112 tensors are bfloat16\" \u2014 the plan's own assert is miscalibrated to check for 96, which will pass despite the shortfall, so it does not \"fail loudly\" as required.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

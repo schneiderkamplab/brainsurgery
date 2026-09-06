@@ -1,0 +1,43 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-fable-5-1",
+  "agent": "fable51",
+  "target": "pythia-1b",
+  "effort": "low",
+  "test": "T5",
+  "condition": "B",
+  "repeat": 1,
+  "started_at": "2026-09-06T01:09:47+00:00",
+  "finished_at": "2026-09-06T01:11:45+00:00",
+  "wall_clock_s": 118.6,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 1800,
+  "turns": 13,
+  "tool_calls": 12,
+  "tokens_in": 386,
+  "tokens_out": 6126,
+  "cache_read_tokens": 447474,
+  "cache_write_tokens": 33479,
+  "tokens_in_total": 481339,
+  "cost_usd": 1.0941535,
+  "duration_api_ms": 87652,
+  "session_id": "7fc688f1-eb25-41e5-9fa3-131c6620daf3",
+  "result_subtype": "success",
+  "is_error": false,
+  "api_error_status": null,
+  "executions": 3,
+  "failed_executions": [
+    {
+      "n": 3,
+      "command": "cd /home/rootkidd/Projects/brainsurgery/usability_tests/fable51/pythia-1b/low/T5-B-1; sed -i \"s|from_b: 'lora::base_model\\\\\\\\.model\\\\\\\\.\\\\\\\\1\\\\\\\\.lora_A\\\\\\\\.weight'|from_b: 'lora::base_model.model.\\\\\\\\1.lora_A.weight'|\" out/T5/plan.yaml; grep -n from_b out/T5/plan.yaml; brainsurgery out/T5/plan.yaml",
+      "message": "244 ['model-00001-of-00004.safetensors', 'model-00002-of-00004.safetensors', 'model-00003-of-00004.safetensors', 'model-00004-of-00004.safetensors']",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": true,
+  "executions_until_first_success": 1,
+  "final_text": "Done. The merged, sharded checkpoint is in `out/T5/`, produced by `out/T5/plan.yaml`, and the self-report is in `out/T5/REPORT.md`.\n\n**What the plan does.** It loads the base and adapter under separate aliases, checks that 16 lora_A and 16 lora_B tensors exist, computes B @ A with `matmul` into a float32 delta on the base alias, scales it by 2, casts the 16 target weights to float32, adds the delta in place, casts back to float16, deletes the delta, and then asserts the required checks before writing with a 512MB shard budget.\n\n**Execution history.** Three attempts. The first failed at compile time because the `exists` assert takes a bare string rather than an `of` mapping. The second failed because the second matmul source is a rewrite template, so regex-escaped dots were taken literally. The third ran clean.\n\n**Independent verification of the output.**\n\n| Check | Result |\n|---|---|\n| Tensor count and key set | 244, identical to the base |\n| Shards | 4, each at most 529.6 MB of tensor data |\n| Unchanged tensors | 228 bit-exact |\n| Merged weights | float16, shape 6144 x 2048, worst relative Frobenius error 2.1e-4 |\n\nThe REPORT.md notes the two documentation gaps that caused the failed attempts: inconsistent assert argument shapes, and the unstated regex-versus-template distinction between `from_a` and `from_b`."
+}

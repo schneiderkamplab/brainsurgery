@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T5-defective.yaml",
+  "started_at": "2026-09-05T22:01:06+00:00",
+  "finished_at": "2026-09-05T22:01:10+00:00",
+  "wall_clock_s": 4.1,
+  "tokens_in": 2,
+  "tokens_out": 130,
+  "cost_usd": 0.0403078,
+  "verdict_text": "NO\n\nThe plan computes `delta = B @ A` but never multiplies by `scale = alpha/r = 2` (the comment even admits \"the alpha / r scale is missing\"), so the merged weights will be off by a factor of 2 from the required `weight += scale * B @ A`, violating clause 1 of \"Required result\" and causing the merged-tensor Frobenius error check in grading to fail.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

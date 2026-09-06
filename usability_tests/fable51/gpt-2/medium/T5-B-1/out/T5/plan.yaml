@@ -1,0 +1,56 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Required check: exactly 12 adapter pairs (12 A factors, 12 B factors).
+  - assert:
+      all:
+        - count: { of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_A\.weight', is: 12 }
+        - count: { of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight', is: 12 }
+        - count: { of: 'lora::.*', is: 24 }
+        - count: { of: 'base::h\.(\d+)\.attn\.c_attn\.weight', is: 12 }
+
+  # delta_lin = B @ A  -> shape [out, in] = [2304, 768] (nn.Linear layout)
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'base::__lora_lin.\1'
+
+  # scale = lora_alpha / r = 32 / 16 = 2
+  - scale_: { target: 'base::__lora_lin\.\d+', by: 2.0 }
+
+  # fan_in_fan_out = true: transpose to Conv1D layout [in, out] = [768, 2304],
+  # written as a temporary tensor on the base alias.
+  - permute:
+      from: 'base::__lora_lin\.(\d+)'
+      to: 'base::__lora_delta.\1'
+      order: [1, 0]
+
+  # Exactly 12 deltas were built and shaped correctly before merging.
+  - assert:
+      all:
+        - count: { of: 'base::__lora_delta\.\d+', is: 12 }
+        - shape: { of: 'base::__lora_delta.0', is: [768, 2304] }
+
+  # Merge: h.<i>.attn.c_attn.weight += delta
+  - add_:
+      from: 'base::__lora_delta\.(\d+)'
+      to: 'base::h.\1.attn.c_attn.weight'
+
+  # Remove intermediates from the output alias.
+  - delete: { target: 'base::__lora_(lin|delta)\.\d+' }
+
+  # Required checks before writing.
+  - assert:
+      all:
+        - not: { exists: 'base::.*lora_.*' }
+        - not: { exists: 'base::__lora_.*' }
+        - shape: { of: 'base::h.0.attn.c_attn.weight', is: [768, 2304] }
+        - dtype: { of: 'base::h.0.attn.c_attn.weight', is: float32 }
+        - count: { of: 'base::.*', is: 160 }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB

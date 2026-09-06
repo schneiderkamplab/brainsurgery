@@ -1,0 +1,57 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Cast exactly the 48 large projection matrices to bfloat16, in place.
+  # (attn.c_attn, attn.c_proj, mlp.c_fc, mlp.c_proj per layer; excludes
+  # embeddings, layer norms, and all biases.)
+  - cast_:
+      target: 'h\.\d+\.(attn\.(c_attn|c_proj)|mlp\.(c_fc|c_proj))\.weight'
+      to: bfloat16
+
+  # Drop the 12 non-parameter causal-mask buffers. Nothing else is deleted.
+  - delete:
+      target: 'h\.\d+\.attn\.bias'
+
+  # --- Required checks: fail loudly before writing if anything is off. ---
+
+  # Exactly the 48 intended projection weights matched the cast pattern.
+  - assert:
+      count:
+        of: 'h\.\d+\.(attn\.(c_attn|c_proj)|mlp\.(c_fc|c_proj))\.weight'
+        is: 48
+
+  # All 48 matched tensors are indeed bfloat16.
+  - assert:
+      dtype:
+        of: 'h\.\d+\.(attn\.(c_attn|c_proj)|mlp\.(c_fc|c_proj))\.weight'
+        is: bfloat16
+
+  # Spot check named in the task.
+  - assert:
+      dtype: { of: h.0.attn.c_attn.weight, is: bfloat16 }
+
+  # Numerically sensitive tensors remain float32.
+  - assert:
+      dtype: { of: wte.weight, is: float32 }
+  - assert:
+      dtype: { of: wpe.weight, is: float32 }
+  - assert:
+      dtype: { of: 'ln_f\.(weight|bias)', is: float32 }
+  - assert:
+      dtype: { of: 'h\.\d+\.ln_(1|2)\.(weight|bias)', is: float32 }
+  - assert:
+      dtype:
+        of: 'h\.\d+\.(attn\.(c_attn|c_proj)|mlp\.(c_fc|c_proj))\.bias'
+        is: float32
+
+  # Final tensor count matches the spec exactly (160 - 12 buffers = 148),
+  # which also confirms the causal-mask buffers are gone and nothing else
+  # was dropped.
+  - assert:
+      count: { of: '.*', is: 148 }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 64MB

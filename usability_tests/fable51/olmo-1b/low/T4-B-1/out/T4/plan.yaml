@@ -1,0 +1,48 @@
+inputs:
+  - base::inputs/base
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # Step 1: same tensor names (114 each) and every non-MLP tensor identical in all three.
+  - assert:
+      all:
+        - count: { of: 'base::.*', is: 114 }
+        - count: { of: 'ft1::.*', is: 114 }
+        - count: { of: 'ft2::.*', is: 114 }
+        - count: { of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: 48 }
+        - count: { of: 'ft1::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: 48 }
+        - count: { of: 'ft2::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: 48 }
+        # both directions so the non-MLP name sets are identical, not just subsets
+        - equal: { left: 'base::(?!model\.layers\.\d+\.mlp\.).+', right: 'ft1::\g<0>' }
+        - equal: { left: 'ft1::(?!model\.layers\.\d+\.mlp\.).+', right: 'base::\g<0>' }
+        - equal: { left: 'base::(?!model\.layers\.\d+\.mlp\.).+', right: 'ft2::\g<0>' }
+        - equal: { left: 'ft2::(?!model\.layers\.\d+\.mlp\.).+', right: 'base::\g<0>' }
+
+  # Step 2: task vectors, both taken against the unmodified base before any merge.
+  - copy: { from: 'ft1::(model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight)', to: 'base::tv1.\1' }
+  - copy: { from: 'ft2::(model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight)', to: 'base::tv2.\1' }
+  - subtract_: { from: 'base::(model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight)', to: 'base::tv1.\1' }
+  - subtract_: { from: 'base::(model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight)', to: 'base::tv2.\1' }
+  - scale_: { target: 'base::tv1\..*', by: 0.4 }
+  - scale_: { target: 'base::tv2\..*', by: 0.4 }
+  # exactly 48 tensors are being merged
+  - assert:
+      all:
+        - count: { of: 'base::tv1\..*', is: 48 }
+        - count: { of: 'base::tv2\..*', is: 48 }
+        - dtype: { of: 'base::tv1\..*', is: float32 }
+        - dtype: { of: 'base::tv2\..*', is: float32 }
+  - add_: { from: 'base::tv1\.(.+)', to: 'base::\1' }
+  - add_: { from: 'base::tv2\.(.+)', to: 'base::\1' }
+  - delete: { target: 'base::tv[12]\..*' }
+
+  # Step 4: output has exactly 114 tensors, no temporaries left.
+  - assert:
+      all:
+        - count: { of: 'base::.*', is: 114 }
+        - not: { exists: 'base::tv[12]\..*' }
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

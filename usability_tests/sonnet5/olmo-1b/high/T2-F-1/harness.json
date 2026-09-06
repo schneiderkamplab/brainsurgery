@@ -1,0 +1,41 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-sonnet-5",
+  "agent": "sonnet5",
+  "target": "olmo-1b",
+  "effort": "high",
+  "test": "T2",
+  "condition": "F",
+  "repeat": 1,
+  "started_at": "2026-09-05T22:13:18+00:00",
+  "finished_at": "2026-09-05T22:15:24+00:00",
+  "wall_clock_s": 125.4,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 1800,
+  "turns": 13,
+  "tool_calls": 12,
+  "tokens_in": 26,
+  "tokens_out": 6846,
+  "cache_read_tokens": 400381,
+  "cache_write_tokens": 26402,
+  "tokens_in_total": 426809,
+  "cost_usd": 0.2566742,
+  "duration_api_ms": 83144,
+  "session_id": "3e8ce2c0-7d70-4730-873e-74b1c0eca1a8",
+  "result_subtype": "success",
+  "executions": 2,
+  "failed_executions": [
+    {
+      "n": 1,
+      "command": ".venv/bin/python out/T2/solution.py",
+      "message": "FileNotFoundError: [Errno 2] No such file or directory: '/home/rootkidd/Projects/brainsurgery/usability_tests/sonnet5/olmo-1b/high/inputs/base/model.safetensors.index.json'",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 2,
+  "final_text": "Done. Summary:\n\n**Task T2 (OLMo-1B head pruning, condition F)** \u2014 completed.\n\n- **Approach:** plain script on top of `safetensors` + `torch` (both allowed in F). Loaded all 114 tensors directly from the two input shards, dropped rows `640:768` from each layer's `q_proj`/`k_proj`/`v_proj` and columns `640:768` from `o_proj` (that's exactly head 5's 128-wide block), left every other tensor byte-identical, asserted the required shapes and the 114-tensor count before writing, then saved a single merged `out/T2/model.safetensors`.\n- I deliberately skipped `transformers.prune_heads` \u2014 it's built around models that implement `_prune_heads` and reloads shapes from a mutated config, which is more machinery than needed when the task already gives exact row/column ranges to keep.\n- **Verified:** output has 114 tensors, `q/k/v_proj` are `[1920, 2048]`, `o_proj` is `[2048, 1920]` on layer 0 (and spot-checked layers 7/15), and the values match a manual `torch.cat` reconstruction from the originals bit-for-bit; MLP tensors, embeddings, and `lm_head` are untouched.\n- One execution failed first (wrong relative path depth to `inputs/base`), fixed, second execution succeeded. `out/T2/REPORT.md` has the full self-report."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T5-defective.yaml",
+  "started_at": "2026-09-06T00:03:56+00:00",
+  "finished_at": "2026-09-06T00:04:11+00:00",
+  "wall_clock_s": 15.1,
+  "tokens_in": 2,
+  "tokens_out": 937,
+  "cost_usd": 0.11580549999999999,
+  "verdict_text": "NO\n\nThe plan computes `delta = B @ A` and adds it unscaled, omitting the LoRA scaling factor `alpha / r = 32 / 16 = 2` (the comment `# defect: the alpha / r scale is missing` acknowledges this). This violates Required result clause 1, which specifies `weight += scale * B @ A` with `scale = 2`; the merged weights receive only half the intended delta, so the 32 adapted tensors will exceed the 1e-5 relative Frobenius tolerance under `grade.py`. Everything else \u2014 name mapping, no transpose for `fan_in_fan_out = false`, float32 arithmetic, deletion of the `delta` intermediates, and all four required asserts \u2014 matches the specification. One secondary point to verify: the output declares `shard: 512MB` while the specification states the limit as 512 MiB (536,870,912 bytes), so if the tool interprets `MB` as 10^6 bytes the shard boundaries could differ from the reference packing.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

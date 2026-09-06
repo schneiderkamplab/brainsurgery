@@ -1,0 +1,22 @@
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # 1. drop the non-parameter buffers
+  - delete: { target: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)' }
+  # 2. everything remaining to float32 (float16 -> float32 is exact)
+  - cast_: { target: '.*', to: float32 }
+  # 3. exactly the 64 projection matrices to bfloat16
+  - cast_: { target: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.dense_(h_to_4h|4h_to_h))\.weight', to: bfloat16 }
+  # required checks
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.dense_(h_to_4h|4h_to_h))\.weight', is: 64 } }
+  - assert: { dtype: { of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.dense_(h_to_4h|4h_to_h))\.weight', is: bfloat16 } }
+  - assert: { dtype: { of: 'gpt_neox\.layers\.0\.attention\.query_key_value\.weight', is: bfloat16 } }
+  - assert: { dtype: { of: 'gpt_neox\.embed_in\.weight', is: float32 } }
+  - assert: { dtype: { of: '(?!gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.dense_(h_to_4h|4h_to_h))\.weight$).*', is: float32 } }
+  - assert: { count: { of: '.*', is: 196 } }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

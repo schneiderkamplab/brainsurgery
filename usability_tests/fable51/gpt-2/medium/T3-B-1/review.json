@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T3-defective.yaml",
+  "started_at": "2026-09-06T01:17:28+00:00",
+  "finished_at": "2026-09-06T01:17:37+00:00",
+  "wall_clock_s": 8.6,
+  "tokens_in": 2,
+  "tokens_out": 426,
+  "cost_usd": 0.18678799999999998,
+  "verdict_text": "NO\n\nThe plan casts only three of the four projection matrices per layer: the regex in the second `cast_` omits `h.<i>.attn.c_proj.weight`, so 36 tensors become bfloat16 instead of the required 48, violating Required result 1 and leaving 12 `attn.c_proj.weight` tensors in float32 (also violating result 2's implied exact set). The accompanying `assert count ... is: 36` codifies the wrong number, and no assert verifies that exactly 48 tensors are bfloat16, violating the first bullet of Required checks. The plan's `delete` regex spelled as `attn\\.bias` still matches only the buffers, so the buffer removal and 148-tensor count are fine. The `shard: 64MB` setting may or may not mean 64 MiB depending on the tool's unit parsing, which is a secondary risk against result 5.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

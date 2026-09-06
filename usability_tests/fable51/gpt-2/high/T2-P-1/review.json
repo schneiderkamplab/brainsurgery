@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-06T01:52:39+00:00",
+  "finished_at": "2026-09-06T01:52:49+00:00",
+  "wall_clock_s": 10.2,
+  "tokens_in": 2,
+  "tokens_out": 295,
+  "cost_usd": 0.18458599999999997,
+  "verdict_text": "NO\n\nThe script removes head 6 instead of head 5, so it keeps columns 0..383 and 448..767 of each 768-wide segment rather than the required 0..319 and 384..767. This violates Required result clauses 1, 2 and 3, which all specify removing head 5 (columns/rows 320..383 of each segment). The shapes still come out right, so the Required checks pass, but the values will not be bit-exact against the reference. It also uses an undeclared `_ckpt` helper rather than `safetensors` directly, though that alone would not change the output.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

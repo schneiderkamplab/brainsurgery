@@ -1,0 +1,77 @@
+# T5: LoRA "merge and unload" for GPT-2 (124M), sharded safetensors export.
+#
+# adapter_config.json: r = 16, lora_alpha = 32  ->  scale = alpha / r = 2
+# fan_in_fan_out = true: the base Conv1D weight is [in, out] = [768, 2304]
+# while the adapter factors follow the nn.Linear convention, so the low-rank
+# product B @ A ([2304, 768] = [out, in]) has to be transposed before it is
+# added:  h.<i>.attn.c_attn.weight += 2 * (B @ A).T
+
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB
+
+transforms:
+  # ---------------------------------------------------------------- preflight
+  - assert: { count: { of: 'base::.*', is: 160 } }
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_A\.weight'
+        is: 12
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+        is: 12
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_A\.weight'
+        is: [16, 768]
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+        is: [2304, 16]
+  - assert:
+      shape:
+        of: 'base::h\.(\d+)\.attn\.c_attn\.weight'
+        is: [768, 2304]
+  - assert: { dtype: { of: 'base::h\.(\d+)\.attn\.c_attn\.weight', is: float32 } }
+  - assert:
+      dtype:
+        of: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_[AB]\.weight'
+        is: float32
+
+  # ------------------------------------------------------------ delta = B @ A
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'base::merged.\1.delta'
+  - assert: { count: { of: 'base::merged\.(\d+)\.delta', is: 12 } }
+  - assert: { shape: { of: 'base::merged\.(\d+)\.delta', is: [2304, 768] } }
+
+  # ------------------------------------------------- transpose, then scale x 2
+  - permute:
+      from: 'base::merged\.(\d+)\.delta'
+      to: 'base::merged.\1.deltaT'
+      order: [1, 0]
+  - delete: { target: 'base::merged\.(\d+)\.delta' }
+  - scale_: { target: 'base::merged\.(\d+)\.deltaT', by: 2.0 }
+
+  # exactly 12 adapter pairs were found and are about to be merged
+  - assert: { count: { of: 'base::merged\.(\d+)\.deltaT', is: 12 } }
+  - assert: { shape: { of: 'base::merged\.(\d+)\.deltaT', is: [768, 2304] } }
+
+  # ------------------------------------------------------------------- merge
+  - add_:
+      from: 'base::merged\.(\d+)\.deltaT'
+      to: 'base::h.\1.attn.c_attn.weight'
+  - delete: { target: 'base::merged\.(\d+)\.deltaT' }
+
+  # ------------------------------------------------------- required post-checks
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert: { shape: { of: 'base::h\.0\.attn\.c_attn\.weight', is: [768, 2304] } }
+  - assert: { dtype: { of: 'base::h\.0\.attn\.c_attn\.weight', is: float32 } }
+  - assert: { count: { of: 'base::.*', is: 160 } }

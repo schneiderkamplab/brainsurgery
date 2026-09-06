@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T3-defective.yaml",
+  "started_at": "2026-09-05T22:55:54+00:00",
+  "finished_at": "2026-09-05T22:56:02+00:00",
+  "wall_clock_s": 7.5,
+  "tokens_in": 2,
+  "tokens_out": 427,
+  "cost_usd": 0.0995985,
+  "verdict_text": "NO\n\nThe transform list omits `model.layers.<i>.self_attn.o_proj.weight`, so only 96 of the 112 projection matrices are cast to bfloat16 and the 16 `o_proj` weights stay float32, violating required result 1. The plan then hard-codes `count ... is: 96` in its assert, so the shortfall is asserted as correct rather than caught, and the mandated check \"exactly 112 tensors are bfloat16\" is never expressed at all, violating the Required checks clause. Additionally, `shard: 256MB` states a decimal-MB budget rather than the specified 256 MiB (268,435,456 bytes) limit of required result 5, so the shard boundaries need not match the reference layout.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

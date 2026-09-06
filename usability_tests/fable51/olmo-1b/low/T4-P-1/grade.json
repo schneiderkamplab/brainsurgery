@@ -1,0 +1,13 @@
+{
+  "task": "T4",
+  "passed": true,
+  "findings": [],
+  "metrics": {
+    "target": "olmo-1b",
+    "tensors_expected": 114,
+    "tensors_found": 114,
+    "max_rel_error_tolerant": 4.290067475757253e-08,
+    "shape_dtype_mismatches": 0,
+    "value_mismatches": 0
+  }
+}

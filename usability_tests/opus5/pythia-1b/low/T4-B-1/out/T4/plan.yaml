@@ -1,0 +1,113 @@
+# T4: task-vector merge of two fine-tunes into the base (lambda = 0.4).
+#
+#   out = base + L*(ft1-base) + L*(ft2-base)  ==  (1-2L)*base + L*ft1 + L*ft2
+#
+# with L = 0.4, i.e. 0.2*base + 0.4*ft1 + 0.4*ft2. Using this algebraic form
+# means both task vectors are taken against the *unmodified* base by
+# construction. All arithmetic happens in float32; the result is cast back to
+# float16 at the end.
+
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # ---------------------------------------------------------------- step 1 --
+  # Preconditions: same number of tensors, same 64 MLP tensors in each
+  # checkpoint, and everything outside the MLP tensors bit-identical.
+  # (`equal` without `eps` is a bit-exact comparison; an eps-based one would
+  # compare -inf against -inf as NaN and spuriously fail.)
+  - assert:
+      all:
+        - count: { of: 'base::.+', is: 244 }
+        - count: { of: 'ft1::.+', is: 244 }
+        - count: { of: 'ft2::.+', is: 244 }
+        - count: { of: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)', is: 64 }
+        - count: { of: 'ft1::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)', is: 64 }
+        - count: { of: 'ft2::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)', is: 64 }
+
+  # Every non-MLP tensor of ft1 / ft2 must exist in base under the same name
+  # and be identical to it. Together with the counts above this also pins the
+  # name sets: 180 shared non-MLP names + 64 MLP names = 244 in each model.
+  - assert:
+      all:
+        - equal:
+            left: 'ft1::(?!gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)$).+'
+            right: 'base::\g<0>'
+        - equal:
+            left: 'ft2::(?!gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)$).+'
+            right: 'base::\g<0>'
+
+  # The MLP names themselves must also map one-to-one onto base names.
+  # `equal` fails if a left match has no right counterpart; the huge eps means
+  # this checks the name mapping only, not the values (which do differ).
+  - assert:
+      all:
+        - equal:
+            left: 'ft1::(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+            right: 'base::\1'
+            eps: 1.0e9
+        - equal:
+            left: 'ft2::(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+            right: 'base::\1'
+            eps: 1.0e9
+
+  # ---------------------------------------------------------------- step 2 --
+  # float32 working copies of the two fine-tunes' MLP tensors, held in the
+  # `base` alias so that every write in this plan targets a single alias.
+  - cast:
+      from: 'ft1::(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::tv1__\1'
+      dtype: float32
+  - cast:
+      from: 'ft2::(gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias))'
+      to: 'base::tv2__\1'
+      dtype: float32
+
+  # Required check: exactly 64 tensors take part in the merge.
+  - assert:
+      all:
+        - count: { of: 'base::tv1__.+', is: 64 }
+        - count: { of: 'base::tv2__.+', is: 64 }
+        - count: { of: 'base::.+', is: 372 }   # 244 + 2 * 64
+
+  # base MLP tensors to float32 as well, then apply the weights.
+  - cast_:
+      target: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+      to: float32
+  - scale_:
+      target: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+      by: 0.2
+  - scale_: { target: 'base::tv1__.+', by: 0.4 }
+  - scale_: { target: 'base::tv2__.+', by: 0.4 }
+
+  - add_:
+      from: 'base::tv1__(.+)'
+      to: 'base::\1'
+  - add_:
+      from: 'base::tv2__(.+)'
+      to: 'base::\1'
+
+  # Back to the base dtype and drop the scratch tensors.
+  - cast_:
+      target: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)'
+      to: float16
+  - delete: { target: 'base::tv1__.+' }
+  - delete: { target: 'base::tv2__.+' }
+
+  # ---------------------------------------------------------------- step 4 --
+  # Required check: the output has exactly 244 tensors, the merged ones back in float16, and the
+  # non-MLP tensors are still exactly the base ones.
+  - assert:
+      all:
+        - count: { of: 'base::.+', is: 244 }
+        - count: { of: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)', is: 64 }
+        - dtype: { of: 'base::gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)', is: float16 }
+        - equal:
+            left: 'base::(?!gpt_neox\.layers\.\d+\.mlp\.(?:dense_h_to_4h|dense_4h_to_h)\.(?:weight|bias)$).+'
+            right: 'ft1::\g<0>'
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

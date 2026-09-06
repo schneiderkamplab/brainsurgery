@@ -1,0 +1,41 @@
+{
+  "phase": "solve",
+  "driver": "run_claude.py",
+  "model_id": "claude-sonnet-5",
+  "agent": "sonnet5",
+  "target": "gpt-2",
+  "effort": "medium",
+  "test": "T5",
+  "condition": "F",
+  "repeat": 1,
+  "started_at": "2026-09-05T21:37:16+00:00",
+  "finished_at": "2026-09-05T21:39:05+00:00",
+  "wall_clock_s": 109.0,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "max_turns": 40,
+  "timeout_s": 1800,
+  "turns": 13,
+  "tool_calls": 12,
+  "tokens_in": 26,
+  "tokens_out": 7467,
+  "cache_read_tokens": 382623,
+  "cache_write_tokens": 25255,
+  "tokens_in_total": 407904,
+  "cost_usd": 0.25471160000000004,
+  "duration_api_ms": 82637,
+  "session_id": "e0782d50-28a6-45d9-be48-93c9f6f42cdc",
+  "result_subtype": "success",
+  "executions": 2,
+  "failed_executions": [
+    {
+      "n": 1,
+      "command": "chmod +x out/T5/run.sh && ./out/T5/run.sh",
+      "message": "FAILED: adapter targets missing base tensor: h.0.attn.c_attn",
+      "error_class": ""
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 2,
+  "final_text": "Task T5 is done. Summary:\n\n- **`out/T5/solution.py`** loads `inputs/base/model.safetensors` and `inputs/lora/adapter_model.safetensors` directly with `safetensors`, matches the 12 `lora_A`/`lora_B` pairs by regex, applies `weight += scale * (B @ A).T` in float32 (accounting for the Conv1D `[in,out]` vs Linear `[out,in]` layout per `fan_in_fan_out=true`), and asserts all four required checks (exactly 12 pairs, no `lora_` names, `h.0.attn.c_attn.weight` shape `[768,2304]`, 160 total tensors) before writing anything.\n- Sharding uses `huggingface_hub.split_torch_state_dict_into_shards` with a 100 MiB budget and writes `out/T5/model.safetensors.index.json` plus 5 shard files. `wte.weight` (154 MB) correctly lands alone in its own oversized shard; all others are \u2264100 MiB.\n- Verified independently: rel. error 0.0 on the merged layer-0 weight vs a manual recompute, exactly 12 tensors changed vs base, no `lora_` leakage, 160/160 tensor names match, dtype float32.\n- `out/T5/run.sh` runs it, and `out/T5/REPORT.md` has the self-report (one failed execution: a regex left off the `.weight` suffix on base tensor names \u2014 fixed)."
+}

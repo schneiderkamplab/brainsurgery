@@ -1,0 +1,73 @@
+inputs:
+  - base::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB   # binary MB -> 512 * 1024 * 1024 = 536,870,912 bytes, matches the 512 MiB budget
+
+transforms:
+  # --- Preflight: confirm the adapter shape we expect from adapter_config.json
+  # (r=16, lora_alpha=32, target_modules=[q_proj, v_proj], fan_in_fan_out=false). ---
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.(?:q|v)_proj\.lora_A\.weight'
+        is: 32
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.(?:q|v)_proj\.lora_B\.weight'
+        is: 32
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.(?:q|v)_proj\.lora_A\.weight'
+        is: [16, 2048]
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.(?:q|v)_proj\.lora_B\.weight'
+        is: [2048, 16]
+  - assert:
+      dtype:
+        of: 'lora::base_model\.model\.model\.layers\.\d+\.self_attn\.(?:q|v)_proj\.lora_(?:A|B)\.weight'
+        is: float32
+  - assert:
+      count:
+        of: 'base::model\.layers\.\d+\.self_attn\.(?:q|v)_proj\.weight'
+        is: 32
+
+  # --- Merge: delta = scale * (B @ A), scale = lora_alpha / r = 32 / 16 = 2. ---
+  # fan_in_fan_out=false and both the base weight and the adapter factors use the
+  # nn.Linear [out, in] layout, so B @ A (shape [2048, 2048]) is added untransposed.
+  - matmul:
+      from_a: 'lora::base_model\.model\.model\.layers\.(\d+)\.(self_attn\.(?:q|v)_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.model.layers.\1.\2.lora_A.weight'
+      to: 'base::model.layers.\1.\2.merge_delta.weight'
+
+  - assert:
+      count:
+        of: 'base::model\.layers\.\d+\.self_attn\.(?:q|v)_proj\.merge_delta\.weight'
+        is: 32
+
+  - scale_:
+      target: 'base::model\.layers\.\d+\.self_attn\.(?:q|v)_proj\.merge_delta\.weight'
+      by: 2.0
+
+  - add_:
+      from: 'base::model\.layers\.(\d+)\.(self_attn\.(?:q|v)_proj)\.merge_delta\.weight'
+      to: 'base::model.layers.\1.\2.weight'
+
+  - delete:
+      target: 'base::model\.layers\.\d+\.self_attn\.(?:q|v)_proj\.merge_delta\.weight'
+
+  # --- Required checks (must hold before the output is written) ---
+  - assert:
+      not:
+        exists: 'base::.*lora_.*'
+  - assert:
+      shape:
+        of: base::model.layers.0.self_attn.q_proj.weight
+        is: [2048, 2048]
+  - assert:
+      count:
+        of: 'base::.*'
+        is: 114

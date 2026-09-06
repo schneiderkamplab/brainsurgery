@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-05T21:14:39+00:00",
+  "finished_at": "2026-09-05T21:14:43+00:00",
+  "wall_clock_s": 4.7,
+  "tokens_in": 2,
+  "tokens_out": 165,
+  "cost_usd": 0.0391398,
+  "verdict_text": "NO\n\nThe plan removes blocks 2, 6, 10, and 15 instead of the required blocks 2, 6, 10, and 14 (see the header comment and the `(2|6|10|15)` regex used in the delete/assert), violating Required result clause 1. Consequently the renumbering also moves old block 14 into slot 11 instead of old block 15, and leaves old block 15 removed while old block 14 (which should have been deleted) survives, contradicting clause 2's exact old\u2192new mapping.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

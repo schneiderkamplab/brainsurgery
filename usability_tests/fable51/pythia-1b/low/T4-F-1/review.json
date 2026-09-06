@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-06T01:06:24+00:00",
+  "finished_at": "2026-09-06T01:06:30+00:00",
+  "wall_clock_s": 6.0,
+  "tokens_in": 2,
+  "tokens_out": 255,
+  "cost_usd": 0.18084499999999998,
+  "verdict_text": "NO\n\nThe second task vector is computed against the already-merged intermediate, not the unmodified base: the script forms `tmp = b + 0.4*(f1 - b)` and then adds `0.4*(f2 - tmp)` instead of `0.4*(f2 - b)`. This yields `b + 0.4*(f1-b) + 0.4*(f2-b) - 0.16*(f1-b)`, which differs from the required formula by `0.16*(f1 - b)` and will exceed the 1e-3 relative Frobenius tolerance wherever ft1 changed the tensor. This violates Required result step 2 (and the ordering hazard called out in \"Why it is meaningful\"). The verification, merged-count, and 244-tensor checks are otherwise present and correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

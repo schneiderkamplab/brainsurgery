@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-06T00:03:22+00:00",
+  "finished_at": "2026-09-06T00:03:37+00:00",
+  "wall_clock_s": 16.0,
+  "tokens_in": 2,
+  "tokens_out": 1185,
+  "cost_usd": 0.1222545,
+  "verdict_text": "NO\n\nThe second task vector is computed against a base that the first merge has already modified, which is exactly the ordering hazard \"Required result\" step 2 forbids: after `add_` of `tv1`, `base::model.layers.<i>.mlp.*` holds `base + 0.4*(ft1-base)`, so the next `subtract_` yields `tv2 = ft2 - base - 0.4*(ft1-base)` rather than `ft2 - base`. The written output is therefore `base + 0.24*(ft1-base) + 0.4*(ft2-base)`, not the required `base + 0.4*(ft1-base) + 0.4*(ft2-base)`, so all 48 merged tensors are wrong beyond the 1e-5 tolerance whenever ft1 differs from the base. Additionally, the plan never asserts that exactly 48 tensors were merged, which the \"Required checks\" section demands as a loud failure condition; only the 114-tensor counts and the non-MLP equality checks are present. The unchanged 66 tensors and the output key set are handled correctly.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

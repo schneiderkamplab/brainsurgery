@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T3-defective.yaml",
+  "started_at": "2026-09-05T23:55:31+00:00",
+  "finished_at": "2026-09-05T23:55:47+00:00",
+  "wall_clock_s": 16.5,
+  "tokens_in": 2,
+  "tokens_out": 1311,
+  "cost_usd": 0.12170850000000001,
+  "verdict_text": "NO\n\nThe bfloat16 `cast_` pattern lists only `q_proj`, `k_proj`, `v_proj`, `gate_proj`, `up_proj` and `down_proj` \u2014 it omits `self_attn.o_proj.weight`, so only 96 of the 112 projection matrices are cast and all 16 `o_proj` weights remain float32, violating Required result clause 1. The required check \"exactly 112 tensors are bfloat16\" is not implemented either: the plan asserts its own (already-wrong) pattern matches 96, so the omission passes silently instead of failing loudly, violating the Required checks clause; the remaining asserts (q_proj bfloat16, embed_tokens float32, 114 tensors) all hold and do not catch it. Secondarily, `shard: 256MB` specifies decimal megabytes (256,000,000 bytes) rather than the 256 MiB (268,435,456 bytes) the spec names, which stays under the stated cap but may not reproduce the hidden reference's shard boundaries that grading compares.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

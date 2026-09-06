@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T4-defective.yaml",
+  "started_at": "2026-09-05T21:42:27+00:00",
+  "finished_at": "2026-09-05T21:42:36+00:00",
+  "wall_clock_s": 9.5,
+  "tokens_in": 2,
+  "tokens_out": 550,
+  "cost_usd": 0.0445568,
+  "verdict_text": "NO\n\nThe plan violates the ordering requirement in Required Result step 2 (\"each task vector must be taken against the unmodified base, not against a base that the first merge already changed\"). It computes `tv1 = ft1 - base` and immediately does `add_` to fold `0.4*tv1` into `base::h.*.mlp.*`, mutating those tensors in place. It then computes `tv2 = ft2 - base` using that *already-updated* base rather than the original base, so `tv2` is really `ft2 - (base + 0.4*(ft1-base))` instead of `ft2 - base`. The final merged value is therefore `base + 0.4*(ft1-base) + 0.4*(ft2-base-0.4*(ft1-base))`, which does not equal the specified `base + lambda*(ft1-base) + lambda*(ft2-base)` and will fail the grader's relative-Frobenius-error check on the 48 merged tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

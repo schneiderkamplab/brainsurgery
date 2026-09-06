@@ -1,0 +1,85 @@
+# T4: task-vector merge of two fine-tunes into the OLMo-1B base.
+#
+#   out[X] = base[X] + 0.4 * (ft1[X] - base[X]) + 0.4 * (ft2[X] - base[X])
+#
+# for the 48 MLP tensors only. Both task vectors are materialised against the
+# *unmodified* base before either of them is added back, so the second vector is
+# not contaminated by the first merge.
+
+inputs:
+  - base::inputs/base
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors
+
+transforms:
+  # --- Step 1: preconditions -------------------------------------------------
+  # Same number of tensors in all three checkpoints.
+  - assert: { count: { of: 'base::.+', is: 114 } }
+  - assert: { count: { of: 'ft1::.+', is: 114 } }
+  - assert: { count: { of: 'ft2::.+', is: 114 } }
+
+  # The 48 MLP tensors exist under the same names in all three.
+  - assert: { count: { of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: 48 } }
+  - assert: { count: { of: 'ft1::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: 48 } }
+  - assert: { count: { of: 'ft2::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: 48 } }
+
+  # Every tensor outside the 48 MLP tensors is bit-identical in all three.
+  # 'equal' also fails if a left match has no counterpart on the right, so this
+  # doubles as the shared-name check for the remaining 66 tensors
+  # (66 + 48 = 114 in each checkpoint, hence the name sets are identical).
+  - assert:
+      equal:
+        left: 'base::(?!model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight$).+'
+        right: 'ft1::\g<0>'
+  - assert:
+      equal:
+        left: 'base::(?!model\.layers\.\d+\.mlp\.(?:gate_proj|up_proj|down_proj)\.weight$).+'
+        right: 'ft2::\g<0>'
+
+  # --- Step 2: build both task vectors against the pristine base -------------
+  - copy:
+      from: 'ft1::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: 'base::tv1.\1.\2'
+  - copy:
+      from: 'ft2::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: 'base::tv2.\1.\2'
+
+  - assert: { count: { of: 'base::tv1\..+', is: 48 } }
+  - assert: { count: { of: 'base::tv2\..+', is: 48 } }
+
+  # tv = ft - base  (base is still untouched here)
+  - subtract_:
+      from: 'base::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: 'base::tv1.\1.\2'
+  - subtract_:
+      from: 'base::model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight'
+      to: 'base::tv2.\1.\2'
+
+  # tv *= lambda
+  - scale_: { target: 'base::tv1\..+', by: 0.4 }
+  - scale_: { target: 'base::tv2\..+', by: 0.4 }
+
+  # --- Step 3: merge ---------------------------------------------------------
+  - add_:
+      from: 'base::tv1\.(\d+)\.(gate_proj|up_proj|down_proj)'
+      to: 'base::model.layers.\1.mlp.\2.weight'
+  - add_:
+      from: 'base::tv2\.(\d+)\.(gate_proj|up_proj|down_proj)'
+      to: 'base::model.layers.\1.mlp.\2.weight'
+
+  # --- Step 4: clean up the scratch tensors and check the result -------------
+  - delete: { target: 'base::tv1\..+' }
+  - delete: { target: 'base::tv2\..+' }
+  - assert: { not: { exists: 'base::tv1\..+' } }
+  - assert: { not: { exists: 'base::tv2\..+' } }
+
+  # Exactly 48 merged tensors, 114 tensors in the output, names unchanged.
+  - assert: { count: { of: 'base::model\.layers\.\d+\.mlp\.(gate_proj|up_proj|down_proj)\.weight', is: 48 } }
+  - assert: { count: { of: 'base::.+', is: 114 } }
+  - assert: { dtype: { of: 'base::model.layers.0.mlp.gate_proj.weight', is: float32 } }
+  - assert: { shape: { of: 'base::model.layers.0.mlp.gate_proj.weight', is: [8192, 2048] } }
+  - assert: { shape: { of: 'base::model.layers.0.mlp.down_proj.weight', is: [2048, 8192] } }

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-05T23:00:47+00:00",
+  "finished_at": "2026-09-05T23:00:54+00:00",
+  "wall_clock_s": 6.5,
+  "tokens_in": 2,
+  "tokens_out": 319,
+  "cost_usd": 0.10405049999999998,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 6, 10, **15** instead of 2, 6, 10, **14** (both in the `delete` target and its preceding count assert), and correspondingly moves old block 14 to index 11 instead of old block 15. This violates Required result clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\") and clause 2 (\"old 15 becomes 11\"), so the 15 tensors at output index 11 hold the wrong block's values and the grader's bit-exact value comparison will fail. The required checks all still pass \u2014 184 tensors, 12 blocks, nothing left at 12\u201315 \u2014 so the error is silent, exactly the failure mode the task describes.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T4-defective.py",
+  "started_at": "2026-09-06T00:12:47+00:00",
+  "finished_at": "2026-09-06T00:12:57+00:00",
+  "wall_clock_s": 10.4,
+  "tokens_in": 2,
+  "tokens_out": 725,
+  "cost_usd": 0.1044255,
+  "verdict_text": "NO\n\nThe merge is computed sequentially rather than as two task vectors against the unmodified base: `tmp = b + \u03bb(f1-b)` and then `out = tmp + \u03bb(f2-tmp)`, which expands to `(1-\u03bb)\u00b2\u00b7b + \u03bb(1-\u03bb)\u00b7f1 + \u03bb\u00b7f2` = `0.36\u00b7b + 0.24\u00b7f1 + 0.40\u00b7f2`, whereas the spec's formula `base + \u03bb(ft1-base) + \u03bb(ft2-base)` gives `0.20\u00b7b + 0.40\u00b7f1 + 0.40\u00b7f2`. This violates \"Required result\" clause 2, and specifically the stated arithmetic hazard in the \"Why it is meaningful\" section \u2014 the second task vector is taken against a base the first merge has already changed. The error is systematic across all 64 MLP tensors and far exceeds the 1e-3 relative Frobenius tolerance, so grading would fail. Everything else (name-set check, shared-tensor bit-equality check, `merged == 64`, `len(out) == 244`, float32 accumulation with cast back to the base dtype, output path) matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T2-defective.yaml",
+  "started_at": "2026-09-06T01:15:33+00:00",
+  "finished_at": "2026-09-06T01:15:41+00:00",
+  "wall_clock_s": 7.2,
+  "tokens_in": 2,
+  "tokens_out": 263,
+  "cost_usd": 0.299943,
+  "verdict_text": "NO\n\nThe plan prunes head 6 instead of head 5. The specification's \"Required result\" clauses 1 to 3 require keeping columns and rows `0..319`, `384..767` (and the analogous ranges in the k and v segments), which removes columns 320 to 383. The plan instead keeps `0:384` and `448:768` in every slice, removing columns 384 to 447, which is head 6. The resulting shapes still satisfy the asserts, so the plan will run without failing, but the values will not match the hidden reference and the grader's bit-exact comparison will fail.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

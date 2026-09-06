@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T3-defective.yaml",
+  "started_at": "2026-09-05T23:03:09+00:00",
+  "finished_at": "2026-09-05T23:03:18+00:00",
+  "wall_clock_s": 8.6,
+  "tokens_in": 2,
+  "tokens_out": 516,
+  "cost_usd": 0.1053945,
+  "verdict_text": "NO\n\nThe plan's bfloat16 cast targets only three of the four projection matrices per layer \u2014 `attention.dense.weight` is missing from both the cast pattern and the count assert \u2014 so only 48 tensors become bfloat16 and the 16 `gpt_neox.layers.<i>.attention.dense.weight` matrices are left float32, violating Required result clause 1 (\"Cast exactly the 64 projection matrices ... to bfloat16\"). Consequently the required check \"exactly 64 tensors are bfloat16\" is not implemented either; the plan instead asserts `is: 48` over the same too-narrow pattern, so it passes silently rather than failing loudly, violating the Required checks clause. Additionally `shard: 256MB` specifies decimal megabytes rather than the required 256 MiB (268,435,456 bytes) limit, which can produce a sharding layout that disagrees with the reference under clause 5. The delete, name-preservation, and 196-tensor count parts are correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

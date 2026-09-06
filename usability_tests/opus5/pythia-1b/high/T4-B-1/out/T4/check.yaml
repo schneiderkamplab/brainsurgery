@@ -1,0 +1,51 @@
+# Independent verification of out/T4/model.safetensors (not part of the solution).
+# Recomputes the merge in the algebraically rearranged form
+#   0.2 * base + 0.4 * ft1 + 0.4 * ft2
+# and compares it against the written file. No `output`: nothing is saved.
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+  - out::out/T4/model.safetensors
+
+transforms:
+  - assert:
+      all:
+        - count: { of: 'out::.*', is: 244 }
+        - equal: { left: 'out::(?!.*\.mlp\.).*', right: 'base::\g<0>' }
+
+  - cast:
+      from: 'base::gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+      to: 'out::chk_ref.\g<0>'
+      dtype: float32
+  - scale_: { target: 'out::chk_ref\..*', by: 0.2 }
+
+  - cast:
+      from: 'ft1::gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+      to: 'out::chk_a.\g<0>'
+      dtype: float32
+  - scale_: { target: 'out::chk_a\..*', by: 0.4 }
+  - add_: { from: 'out::chk_a\.(.+)', to: 'out::chk_ref.\1' }
+
+  - cast:
+      from: 'ft2::gpt_neox\.layers\.\d+\.mlp\.dense_(?:h_to_4h|4h_to_h)\.(?:weight|bias)'
+      to: 'out::chk_b.\g<0>'
+      dtype: float32
+  - scale_: { target: 'out::chk_b\..*', by: 0.4 }
+  - add_: { from: 'out::chk_b\.(.+)', to: 'out::chk_ref.\1' }
+
+  - cast_: { target: 'out::chk_ref\..*', to: float16 }
+
+  # The written MLP tensors match the independently computed reference.
+  - assert: { count: { of: 'out::chk_ref\..*', is: 64 } }
+  - assert:
+      equal: { left: 'out::chk_ref\.(.+)', right: 'out::\1', eps: 1.0e-3 }
+
+  # Sanity: the merge really changed the MLP tensors, and the result is
+  # neither the base nor either fine-tune.
+  - assert:
+      not: { equal: { left: 'out::gpt_neox\.layers\.0\.mlp\.dense_h_to_4h\.weight', right: 'base::\g<0>', eps: 1.0e-4 } }
+  - assert:
+      not: { equal: { left: 'out::gpt_neox\.layers\.0\.mlp\.dense_h_to_4h\.weight', right: 'ft1::\g<0>', eps: 1.0e-4 } }
+  - assert:
+      not: { equal: { left: 'out::gpt_neox\.layers\.0\.mlp\.dense_h_to_4h\.weight', right: 'ft2::\g<0>', eps: 1.0e-4 } }

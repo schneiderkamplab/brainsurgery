@@ -1,0 +1,47 @@
+inputs:
+  - base::inputs/base
+  - lora::inputs/lora/adapter_model.safetensors
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB
+
+transforms:
+  # --- Preflight -----------------------------------------------------------
+  - assert: { count: { of: 'lora::.*\.lora_A\.weight', is: 32 } }
+  - assert: { count: { of: 'lora::.*\.lora_B\.weight', is: 32 } }
+  - assert: { count: { of: 'base::.*', is: 114 } }
+  - assert:
+      shape:
+        of: base::model.layers.0.self_attn.q_proj.weight
+        is: [2048, 2048]
+
+  # --- Merge: delta = scale * (B @ A) for every layer/module pair ----------
+  # from_a enumerates every lora_B factor; from_b and to are rewrites of the
+  # from_a match (same capture groups: \1 = layer index, \2 = q_proj|v_proj).
+  - matmul:
+      from_a: 'lora::base_model\.model\.model\.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.model.layers.\1.self_attn.\2.lora_A.weight'
+      to: 'base::model.layers.\1.self_attn.\2.delta.weight'
+
+  - assert: { count: { of: 'base::model\.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.delta\.weight', is: 32 } }
+
+  # scale = lora_alpha / r = 32 / 16 = 2
+  - scale_:
+      target: 'base::model\.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.delta\.weight'
+      by: 2
+
+  - add_:
+      from: 'base::model\.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.delta\.weight'
+      to: 'base::model.layers.\1.self_attn.\2.weight'
+
+  - delete: { target: 'base::model\.layers\.(\d+)\.self_attn\.(q_proj|v_proj)\.delta\.weight' }
+
+  # --- Required checks -------------------------------------------------------
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert:
+      shape:
+        of: base::model.layers.0.self_attn.q_proj.weight
+        is: [2048, 2048]
+  - assert: { count: { of: 'base::.*', is: 114 } }

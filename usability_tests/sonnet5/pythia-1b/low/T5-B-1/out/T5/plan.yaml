@@ -1,0 +1,59 @@
+inputs:
+  - model::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # Sanity: exactly 16 layers x 1 target module each.
+  - assert: { count: { of: 'lora::.*lora_A\.weight', is: 16 } }
+  - assert: { count: { of: 'lora::.*lora_B\.weight', is: 16 } }
+
+  # delta_raw[i] = B[i] @ A[i]  (fp32, since both factors are fp32).
+  # Everything below writes only into the "model" alias so output-alias
+  # inference stays unambiguous; the "lora" alias is only ever read.
+  - matmul:
+      from_a: 'lora::base_model\.model\.gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.lora_B\.weight'
+      from_b: 'lora::base_model.model.gpt_neox.layers.\1.attention.query_key_value.lora_A.weight'
+      to: 'model::tmp_delta_raw.\1'
+
+  - assert: { count: { of: 'model::tmp_delta_raw\..*', is: 16 } }
+
+  # delta_scaled[i] = (lora_alpha / r) * delta_raw[i] = 2 * delta_raw[i]
+  - scale:
+      from: 'model::tmp_delta_raw\.(\d+)'
+      to: 'model::tmp_delta_scaled.\1'
+      by: 2.0
+
+  # Promote the base weight to fp32 for the accumulation.
+  - cast:
+      from: 'model::gpt_neox\.layers\.(\d+)\.attention\.query_key_value\.weight'
+      to: 'model::tmp_base32.\1'
+      dtype: float32
+
+  # tmp_base32[i] += delta_scaled[i]   (fp32 accumulation)
+  - add_:
+      from: 'model::tmp_delta_scaled\.(\d+)'
+      to: 'model::tmp_base32.\1'
+
+  # Cast the merged fp32 weight back down to the base dtype (fp16).
+  - cast:
+      from: 'model::tmp_base32\.(\d+)'
+      to: 'model::tmp_merged16.\1'
+      dtype: float16
+
+  # Write the merged fp16 values back into the original weight tensors.
+  - assign:
+      from: 'model::tmp_merged16\.(\d+)'
+      to: 'model::gpt_neox.layers.\1.attention.query_key_value.weight'
+
+  # Drop every scratch tensor created above.
+  - delete: { target: 'model::tmp_.*' }
+
+  # Required checks.
+  - assert: { not: { exists: 'model::.*lora_.*' } }
+  - assert: { shape: { of: 'model::gpt_neox.layers.0.attention.query_key_value.weight', is: [6144, 2048] } }
+  - assert: { count: { of: 'model::.*', is: 244 } }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

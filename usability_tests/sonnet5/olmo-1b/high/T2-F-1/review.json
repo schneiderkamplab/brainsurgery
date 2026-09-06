@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T2-defective.py",
+  "started_at": "2026-09-05T22:15:26+00:00",
+  "finished_at": "2026-09-05T22:15:39+00:00",
+  "wall_clock_s": 13.1,
+  "tokens_in": 2,
+  "tokens_out": 230,
+  "cost_usd": 0.0406708,
+  "verdict_text": "NO\n\nThe script drops head index 6, but the specification requires removing head 5 (rows/columns `0..639, 768..2047` correspond to dropping the block `640..767`, i.e. head 5, not head 6), violating the \"Required result\" clause items 1\u20134. This is confirmed by the docstring itself (\"remove attention head 6\") contradicting the task's \"remove head 5\". As a result the kept row/column ranges for q_proj, k_proj, v_proj, and o_proj will all be shifted by one head block relative to the required `0..639, 768..2047`, so the output will not bit-exact match the hidden reference despite passing the shape/count assertions (which only check final shapes, not which head was dropped).",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

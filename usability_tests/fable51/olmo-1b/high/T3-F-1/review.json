@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T3-defective.py",
+  "started_at": "2026-09-06T01:33:53+00:00",
+  "finished_at": "2026-09-06T01:34:02+00:00",
+  "wall_clock_s": 9.1,
+  "tokens_in": 2,
+  "tokens_out": 321,
+  "cost_usd": 0.18883,
+  "verdict_text": "NO\n\nThe regex `matrix_re` omits `self_attn.o_proj.weight`, so only 6 of the 7 projection matrices per layer are cast, leaving all 16 `o_proj` weights in float32. That yields 96 bfloat16 tensors instead of the 112 required by Required result 1. The assertion was written to expect 96, so it silently accepts the wrong result instead of enforcing the Required check \"exactly 112 tensors are bfloat16\". The other checks and the sharding call look consistent with the spec, but the dtype of the o_proj matrices would fail grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

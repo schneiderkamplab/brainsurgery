@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T2-defective.py",
+  "started_at": "2026-09-06T00:06:35+00:00",
+  "finished_at": "2026-09-06T00:06:43+00:00",
+  "wall_clock_s": 8.5,
+  "tokens_in": 2,
+  "tokens_out": 453,
+  "cost_usd": 0.1024195,
+  "verdict_text": "NO\n\nThe artifact sets `DROP_HEAD = 6`, but the specification's \"Required result\" clause states head 5 must be removed from every layer. Consequently the fused `query_key_value` weight/bias keep rows `0..4607, 5376..6143` instead of the required `0..3839, 4608..6143` (clauses 1 and 2), and `attention.dense.weight` keeps columns `0..1535, 1792..2047` instead of the required `0..1279, 1536..2047` (clause 3). The slicing machinery, interleaved-block width (768 rows for qkv, 256 columns for dense), axis selection and ordering are otherwise correct, and the tensor count is preserved. The required checks pass regardless, because dropping any one of the 8 heads yields the same shapes \u2014 so they do not catch the off-by-one head index, and grading against the hidden reference would fail on bit-exact values for all 48 head-bearing tensors.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

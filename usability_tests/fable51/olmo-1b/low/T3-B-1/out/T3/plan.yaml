@@ -1,0 +1,23 @@
+inputs:
+  - model::inputs/base
+
+transforms:
+  # Sanity on the input before editing.
+  - assert: { count: { of: '.*', is: 114 } }
+  - assert: { count: { of: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', is: 112 } }
+
+  # Cast exactly the 112 projection matrices in place.
+  - cast_: { target: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', to: bfloat16 }
+
+  # Required checks.
+  - assert: { count: { of: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', is: 112 } }
+  - assert: { dtype: { of: 'model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight', is: bfloat16 } }
+  - assert: { dtype: { of: '(?!model\.layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj)\.weight$).*', is: float32 } }
+  - assert: { dtype: { of: model.layers.0.self_attn.q_proj.weight, is: bfloat16 } }
+  - assert: { dtype: { of: model.embed_tokens.weight, is: float32 } }
+  - assert: { count: { of: '.*', is: 114 } }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

@@ -1,0 +1,34 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+transforms:
+  # exactly 16 adapter pairs present
+  - assert: { count: { of: 'lora::base_model\.model\.(.+)\.lora_A\.weight', is: 16 } }
+  - assert: { count: { of: 'lora::base_model\.model\.(.+)\.lora_B\.weight', is: 16 } }
+  # delta = B @ A  (float32, shape [out, in]; fan_in_fan_out = false, no transpose)
+  - matmul:
+      from_a: 'lora::base_model\.model\.(.+)\.lora_B\.weight'
+      from_b: 'lora::base_model.model.\1.lora_A.weight'
+      to: 'base::\1.lora_delta'
+  - assert: { count: { of: 'base::.*\.lora_delta', is: 16 } }
+  - assert: { shape: { of: 'base::gpt_neox.layers.0.attention.query_key_value.lora_delta', is: [6144, 2048] } }
+  # scale = lora_alpha / r = 32 / 16 = 2
+  - scale_: { target: 'base::.*\.lora_delta', by: 2.0 }
+  # merge in float32, then cast back to float16
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', to: float32 }
+  - add_:
+      from: 'base::(.+)\.lora_delta'
+      to: 'base::\1.weight'
+  - cast_: { target: 'base::gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight', to: float16 }
+  - delete: { target: 'base::.*\.lora_delta' }
+  # required checks
+  - assert: { not: { exists: 'base::.*lora_.*' } }
+  - assert: { shape: { of: 'base::gpt_neox.layers.0.attention.query_key_value.weight', is: [6144, 2048] } }
+  - assert: { dtype: { of: 'base::gpt_neox.layers.0.attention.query_key_value.weight', is: float16 } }
+  - assert: { count: { of: 'base::.*', is: 244 } }
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 512MB

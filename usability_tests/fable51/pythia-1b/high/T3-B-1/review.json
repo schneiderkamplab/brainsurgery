@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T3-defective.yaml",
+  "started_at": "2026-09-06T01:46:31+00:00",
+  "finished_at": "2026-09-06T01:46:46+00:00",
+  "wall_clock_s": 15.3,
+  "tokens_in": 2,
+  "tokens_out": 491,
+  "cost_usd": 0.20485899999999999,
+  "verdict_text": "NO\n\nThe plan casts only three of the four projection matrices per layer to bfloat16: `attention.dense.weight` is missing from the bfloat16 pattern, so 16 matrices stay float32 and only 48 tensors are bfloat16, violating Required result 1 (cast exactly the 64 listed matrices). The count assert checks that 48 tensors match a three-name pattern rather than that exactly 64 tensors are bfloat16, so it does not implement the first Required check and would pass despite the error. The shard size is given as `256MB`, which may be parsed as 256,000,000 bytes rather than the required 268,435,456-byte cap, risking a shard layout that differs from the reference under Required result 5.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

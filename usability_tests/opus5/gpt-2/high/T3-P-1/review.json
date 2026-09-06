@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T3-defective.py",
+  "started_at": "2026-09-05T23:40:53+00:00",
+  "finished_at": "2026-09-05T23:41:02+00:00",
+  "wall_clock_s": 9.6,
+  "tokens_in": 2,
+  "tokens_out": 659,
+  "cost_usd": 0.10046650000000001,
+  "verdict_text": "NO\n\nThe `matrix_re` alternation lists only `attn.c_attn.weight`, `mlp.c_fc.weight` and `mlp.c_proj.weight`, omitting `attn.c_proj.weight`, so only 36 of the 48 projection matrices are cast to bfloat16 and the 12 `h.<i>.attn.c_proj.weight` tensors are left in float32. That violates \"Required result\" clause 1 (\"Cast exactly the 48 projection matrices listed above to bfloat16\"), which explicitly includes `h.<i>.attn.c_proj.weight` `[768, 768]`. The bfloat16-count guard was also weakened to `== 36` instead of `== 48`, so it silently ratifies the bug rather than failing loudly, violating the first \"Required checks\" bullet (\"exactly 48 tensors are bfloat16\"). The remaining behaviour is consistent with the spec: the 12 `attn.bias` buffers are dropped, names are unchanged, and the tensor count is 148, so the dtype error is the only substantive defect and grading would fail on dtype for those 12 keys.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "One projection family is missing from the bfloat16 cast pattern (the attention output projection stays float32); the artifact's own count check was adjusted to the wrong number.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,12 @@
+{
+  "task": "T1",
+  "passed": true,
+  "findings": [],
+  "metrics": {
+    "target": "olmo-1b",
+    "tensors_expected": 86,
+    "tensors_found": 86,
+    "shape_dtype_mismatches": 0,
+    "value_mismatches": 0
+  }
+}

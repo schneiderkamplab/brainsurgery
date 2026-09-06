@@ -1,0 +1,43 @@
+# T1: depth pruning of GPT-2 (124M) from 12 to 9 blocks, removing blocks 2, 5, 8
+# and renumbering the survivors so indices run 0..8.
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Sanity check on the input: 12 blocks, 160 tensors.
+  - assert: { count: { of: 'h\.\d+\.attn\.c_attn\.weight', is: 12 } }
+  - assert: { count: { of: '.*', is: 160 } }
+
+  # 1. Remove every tensor of blocks 2, 5, 8 (anchored on the full block index).
+  - delete: { target: 'h\.(2|5|8)\..*' }
+  - assert: { not: { exists: 'h\.(2|5|8)\..*' } }
+  - assert: { count: { of: '.*', is: 121 } }
+
+  # 2. Renumber survivors in ascending order. Each destination index is either
+  #    deleted (2, 5, 8) or vacated by the previous move, so no move collides;
+  #    `move` also refuses to overwrite an existing destination.
+  - move: { from: ["h", "3", "*rest"], to: ["h", "2", "*rest"] }
+  - move: { from: ["h", "4", "*rest"], to: ["h", "3", "*rest"] }
+  - move: { from: ["h", "6", "*rest"], to: ["h", "4", "*rest"] }
+  - move: { from: ["h", "7", "*rest"], to: ["h", "5", "*rest"] }
+  - move: { from: ["h", "9", "*rest"], to: ["h", "6", "*rest"] }
+  - move: { from: ["h", "10", "*rest"], to: ["h", "7", "*rest"] }
+  - move: { from: ["h", "11", "*rest"], to: ["h", "8", "*rest"] }
+
+  # Required checks.
+  # - no tensor of blocks 9, 10, 11 remains
+  - assert: { not: { exists: 'h\.(9|10|11)\..*' } }
+  # - exactly 9 blocks remain
+  - assert: { count: { of: 'h\.\d+\.attn\.c_attn\.weight', is: 9 } }
+  # - exactly 121 tensors in the output
+  - assert: { count: { of: '.*', is: 121 } }
+
+  # Extra structural checks: all 117 block tensors sit in blocks 0..8
+  # (13 per block), and the 4 non-block tensors are still there.
+  - assert: { count: { of: 'h\.[0-8]\..*', is: 117 } }
+  - assert: { count: { of: 'h\.\d+\..*', is: 117 } }
+  - assert: { count: { of: '(wte\.weight|wpe\.weight|ln_f\.weight|ln_f\.bias)', is: 4 } }
+
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

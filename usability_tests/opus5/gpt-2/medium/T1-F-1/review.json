@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T1-defective.py",
+  "started_at": "2026-09-05T23:09:27+00:00",
+  "finished_at": "2026-09-05T23:09:35+00:00",
+  "wall_clock_s": 8.1,
+  "tokens_in": 2,
+  "tokens_out": 456,
+  "cost_usd": 0.0977305,
+  "verdict_text": "NO\n\nThe artifact drops blocks {2, 5, 9} instead of {2, 5, 8}, violating Required result clause 1 (\"Remove every tensor of blocks 2, 5, 8\"). Consequently the renumbering map is also wrong: it produces old 8 \u2192 6, old 10 \u2192 7, old 11 \u2192 8, whereas clause 2 requires old 9 \u2192 6, old 10 \u2192 7, old 11 \u2192 8, so 13 tensors of block 8 are kept in place of block 9's and the surviving-block values do not match the reference. The tensor count (121) and the index-contiguity assertion still pass, so the error is silent \u2014 exactly the failure mode the specification warns about \u2014 and grading on bit-exact values would fail. A secondary weakness: the required checks are implemented with bare `assert`, which is stripped under `python -O`, and the count check is asserted before writing but the block-membership check does not verify the *source* blocks were the intended ones.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

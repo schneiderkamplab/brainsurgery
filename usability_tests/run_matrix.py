@@ -19,6 +19,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -30,12 +31,26 @@ REPO = HERE.parent
 
 
 def infra_failure(run_dir: Path) -> bool:
-    """True when the solve phase ended with an API/CLI error rather than a model outcome."""
+    """True when the solve phase ended with an API/CLI error rather than a model outcome
+    (rate limit or session limit: is_error with an api_error_status; CLI crash: unknown subtype)."""
     try:
         harness = json.loads((run_dir / "harness.json").read_text())
     except (OSError, json.JSONDecodeError):
         return True
+    if harness.get("is_error") or harness.get("api_error_status"):
+        return True
     return harness.get("result_subtype") not in ("success", "error_max_turns") and harness.get("cap_hit") != "time"
+
+
+def rate_limited(run_dir: Path) -> str | None:
+    """The limit message when the cell died on a 429 (rate or session limit), else None."""
+    try:
+        harness = json.loads((run_dir / "harness.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if harness.get("api_error_status") == 429 or (harness.get("is_error") and "limit" in (harness.get("final_text") or "")):
+        return (harness.get("final_text") or "429")[:120]
+    return None
 
 
 def run_cell(args, target: str, test: str, cond: str, log_dir: Path) -> str:
@@ -60,8 +75,20 @@ def run_cell(args, target: str, test: str, cond: str, log_dir: Path) -> str:
         cmd.append("--keep-artifacts")
     log = log_dir / f"{target}-{test}-{cond}-{args.repeat}.log"
     start = dt.datetime.now()
-    with log.open("w") as fh:
-        rc = subprocess.run(cmd, cwd=REPO, stdout=fh, stderr=subprocess.STDOUT).returncode
+    for attempt in range(1, args.max_attempts + 1):
+        with log.open("a") as fh:
+            fh.write(f"# attempt {attempt} {dt.datetime.now().isoformat(timespec='seconds')}\n")
+            fh.flush()
+            rc = subprocess.run(cmd, cwd=REPO, stdout=fh, stderr=subprocess.STDOUT).returncode
+        limit = rate_limited(run_dir)
+        if limit is None:
+            break
+        # Rate or session limit: this attempt never reached the model. Discard it,
+        # wait, and try again so the cell is measured, not lost.
+        shutil.rmtree(run_dir, ignore_errors=True)
+        note = f" (attempt {attempt} hit a limit: {limit!r}; waited {args.limit_wait_s}s)"
+        print(f"limit  {tag}: {limit!r}; waiting {args.limit_wait_s}s before attempt {attempt + 1}", flush=True)
+        time.sleep(args.limit_wait_s)
     secs = (dt.datetime.now() - start).total_seconds()
     return f"{'PASS' if rc == 0 else 'FAIL'}   {tag} {secs:.0f}s (log: {log.name}){note}"
 
@@ -81,6 +108,9 @@ def main() -> int:
     parser.add_argument("--max-turns", type=int, default=40)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--log-dir", type=Path, default=None)
+    parser.add_argument("--max-attempts", type=int, default=6,
+                        help="attempts per cell when the API returns a rate/session limit")
+    parser.add_argument("--limit-wait-s", type=int, default=900, help="wait between such attempts")
     args = parser.parse_args()
     log_dir = args.log_dir or REPO / "log" / f"usability-{args.agent}-{args.effort}"
     log_dir.mkdir(parents=True, exist_ok=True)

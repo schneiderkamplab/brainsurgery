@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T5-defective.py",
+  "started_at": "2026-09-05T22:49:42+00:00",
+  "finished_at": "2026-09-05T22:49:51+00:00",
+  "wall_clock_s": 8.5,
+  "tokens_in": 2,
+  "tokens_out": 238,
+  "cost_usd": 0.0960995,
+  "verdict_text": "NO\n\nThe scaling factor is wrong: `scale = 1.0` is hardcoded (with an in-code comment marking it as a defect) instead of `lora_alpha / r = 32 / 16 = 2` read from `adapter_config.json`. This violates Required result clause 1, which mandates `h.<i>.<module>.weight += scale * (B @ A).T` with `scale = 2`; the merged delta is half its required magnitude, so all 12 merged tensors will exceed the 1e-5 relative Frobenius error tolerance in grading. Everything else \u2014 name mapping, the `fan_in_fan_out` transpose, float32 arithmetic, the four required assertions, and the sharded export \u2014 matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

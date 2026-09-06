@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T2-defective.py",
+  "started_at": "2026-09-05T22:44:53+00:00",
+  "finished_at": "2026-09-05T22:44:59+00:00",
+  "wall_clock_s": 6.8,
+  "tokens_in": 2,
+  "tokens_out": 340,
+  "cost_usd": 0.09574150000000001,
+  "verdict_text": "NO\n\nThe script sets `DROP_HEAD = 6` and therefore removes head 6 from every layer, while the specification's \"Required result\" clause states head 5 must be removed (keeping columns/rows `0..319`, `384..767`, etc.). Concretely, it keeps indices `0..383, 448..767` per 768-wide segment instead of `0..319, 384..767`, so `c_attn.weight`, `c_attn.bias` and `c_proj.weight` all hold the wrong slices in all 12 layers. The shape and count assertions still pass because dropping any single head yields the same shapes, so the error is silent and only bit-exact value comparison in grading catches it. Everything else \u2014 layout axes, fused q|k|v segment handling, order preservation, tensor count and names \u2014 matches the spec.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

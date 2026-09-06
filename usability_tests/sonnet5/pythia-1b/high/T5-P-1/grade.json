@@ -1,0 +1,14 @@
+{
+  "task": "T5",
+  "passed": true,
+  "findings": [],
+  "metrics": {
+    "target": "pythia-1b",
+    "shards": 6,
+    "tensors_expected": 244,
+    "tensors_found": 244,
+    "max_rel_error_tolerant": 0.0,
+    "shape_dtype_mismatches": 0,
+    "value_mismatches": 0
+  }
+}

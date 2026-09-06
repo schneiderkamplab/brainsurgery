@@ -1,0 +1,47 @@
+# T4: task-vector merge of two fine-tunes into the base (lambda = 0.4).
+# All edits target the `base` alias so the output alias is unambiguous.
+inputs:
+  - base::inputs/base/model.safetensors
+  - ft1::inputs/ft1/model.safetensors
+  - ft2::inputs/ft2/model.safetensors
+
+transforms:
+  # --- Step 1: verification before touching anything ------------------------
+  # Same tensor count in all three checkpoints.
+  - assert: { count: { of: 'base::.+', is: 160 } }
+  - assert: { count: { of: 'ft1::.+', is: 160 } }
+  - assert: { count: { of: 'ft2::.+', is: 160 } }
+  # Exactly 48 MLP tensors in each checkpoint, and each exists in base under the same name.
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft1::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'ft2::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  # Every non-MLP tensor (112 of them) is bit-identical across the three checkpoints.
+  # `equal` maps every left match to the same name in the other alias, so this also
+  # proves the name sets agree (160 = 112 + 48 on each side).
+  - assert: { count: { of: 'ft1::(?!h\.\d+\.mlp\.).+', is: 112 } }
+  - assert: { count: { of: 'ft2::(?!h\.\d+\.mlp\.).+', is: 112 } }
+  - assert: { equal: { left: 'ft1::(?!h\.\d+\.mlp\.).+', right: 'base::\g<0>' } }
+  - assert: { equal: { left: 'ft2::(?!h\.\d+\.mlp\.).+', right: 'base::\g<0>' } }
+
+  # --- Step 2: merge --------------------------------------------------------
+  # out = base + 0.4*(ft1-base) + 0.4*(ft2-base) = 0.2*base + 0.4*ft1 + 0.4*ft2.
+  # Both task vectors are taken against the unmodified fine-tunes/base inputs;
+  # the scaled copies are built from ft1/ft2 before base is combined.
+  - scale: { from: 'ft1::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))', to: 'base::tv1.\1', by: 0.4 }
+  - scale: { from: 'ft2::(h\.\d+\.mlp\.(?:c_fc|c_proj)\.(?:weight|bias))', to: 'base::tv2.\1', by: 0.4 }
+  - assert: { count: { of: 'base::tv1\..+', is: 48 } }
+  - assert: { count: { of: 'base::tv2\..+', is: 48 } }
+  - scale_: { target: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', by: 0.2 }
+  - add_: { from: 'base::tv1\.(.+)', to: 'base::\1' }
+  - add_: { from: 'base::tv2\.(.+)', to: 'base::\1' }
+  - delete: { target: 'base::tv[12]\..+' }
+
+  # --- Step 3: final checks -------------------------------------------------
+  - assert: { count: { of: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', is: 48 } }
+  - assert: { count: { of: 'base::.+', is: 160 } }
+  - assert: { equal: { left: 'base::(?!h\.\d+\.mlp\.).+', right: 'ft1::\g<0>' } }
+  - assert: { not: { equal: { left: 'base::h\.\d+\.mlp\.(c_fc|c_proj)\.(weight|bias)', right: 'ft1::\g<0>' } } }
+
+output:
+  path: out/T4/model.safetensors
+  format: safetensors

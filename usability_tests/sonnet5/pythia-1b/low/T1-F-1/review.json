@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T21:21:16+00:00",
+  "finished_at": "2026-09-05T21:21:21+00:00",
+  "wall_clock_s": 5.7,
+  "tokens_in": 2,
+  "tokens_out": 289,
+  "cost_usd": 0.041263799999999996,
+  "verdict_text": "NO\n\nThe script drops block **14** in its DROP set but instead specifies `DROP = {2, 6, 10, 15}`, dropping block 15 instead of block 14 \u2014 violating clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\"). This also breaks the renumbering mapping in clause 2, since old block 14 would survive and be renumbered as new index 11, while old block 15 (which should survive as new index 11) is instead removed \u2014 the actual output's block-11 tensors would be old block 14's values, not old block 15's, contradicting the specified mapping \"old 15 becomes 11.\" Although the assertions in the script (layer count, tensor count) would still pass since they don't check *which* blocks survived, the resulting checkpoint contains the wrong set of surviving blocks and thus would fail the hidden-reference bit-exact comparison in grading.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-05T22:47:44+00:00",
+  "finished_at": "2026-09-05T22:47:53+00:00",
+  "wall_clock_s": 8.9,
+  "tokens_in": 2,
+  "tokens_out": 497,
+  "cost_usd": 0.0956515,
+  "verdict_text": "NO\n\nThe second task vector is computed against the already-merged intermediate rather than the unmodified base: `tmp = b + \u03bb(f1-b)` and then `out = tmp + \u03bb(f2-tmp)`, which expands to `0.6\u00b7tmp + 0.4\u00b7f2 = 0.6\u00b7b + 0.24\u00b7(f1-b) + 0.4\u00b7(f2-b)`, not the required `b + 0.4(f1-b) + 0.4(f2-b)`. This violates Required result step 2 (and is precisely the ordering hazard the objective calls out), so the 48 merged tensors will exceed the 1e-5 relative Frobenius tolerance in grading. Everything else \u2014 name/shared-tensor verification, the 48 and 160 count checks, unchanged tensors copied bit-exactly from the base, single output file \u2014 conforms.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

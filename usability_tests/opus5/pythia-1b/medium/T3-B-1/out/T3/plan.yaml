@@ -1,0 +1,35 @@
+# T3: mixed-precision export with sharding (Pythia-1B)
+inputs:
+  - model::inputs/base/model.safetensors
+
+transforms:
+  # Sanity: the expected input checkpoint.
+  - assert: { count: { of: '.*', is: 244 } }
+
+  # 1. Drop the 48 non-parameter buffers (causal mask, masked_bias, inv_freq).
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)', is: 48 } }
+  - delete: { target: 'gpt_neox\.layers\.\d+\.attention\.(bias|masked_bias|rotary_emb\.inv_freq)' }
+
+  # 2. Everything that survives becomes float32 ...
+  - cast_: { target: '.*', to: float32 }
+
+  # 3. ... except the 64 projection matrices, which go to bfloat16.
+  - assert: { count: { of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.dense_(h_to_4h|4h_to_h))\.weight', is: 64 } }
+  - cast_: { target: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.dense_(h_to_4h|4h_to_h))\.weight', to: bfloat16 }
+
+  # Required checks.
+  - assert:
+      all:
+        # exactly 64 tensors are bfloat16: the 64 projections are bfloat16 ...
+        - count: { of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.dense_(h_to_4h|4h_to_h))\.weight', is: 64 }
+        - dtype: { of: 'gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.dense_(h_to_4h|4h_to_h))\.weight', is: bfloat16 }
+        # ... and every other tensor is float32
+        - dtype: { of: '(?!gpt_neox\.layers\.\d+\.(attention\.(query_key_value|dense)|mlp\.dense_(h_to_4h|4h_to_h))\.weight$).*', is: float32 }
+        - dtype: { of: 'gpt_neox\.layers\.0\.attention\.query_key_value\.weight', is: bfloat16 }
+        - dtype: { of: 'gpt_neox\.embed_in\.weight', is: float32 }
+        - count: { of: '.*', is: 196 }
+
+output:
+  path: out/T3
+  format: safetensors
+  shard: 256MB

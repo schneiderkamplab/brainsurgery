@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/pythia-1b/B/T4-defective.yaml",
+  "started_at": "2026-09-06T01:10:04+00:00",
+  "finished_at": "2026-09-06T01:10:23+00:00",
+  "wall_clock_s": 19.0,
+  "tokens_in": 2,
+  "tokens_out": 1321,
+  "cost_usd": 0.267212,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-modified base: the tv2 `subtract_` runs after `add_` has folded tv1 into `base::...`, so tv2 = ft2 \u2212 (base + 0.4\u00b7(ft1 \u2212 base)), giving out = base + 0.24\u00b7(ft1 \u2212 base) + 0.4\u00b7(ft2 \u2212 base) instead of the required 0.4/0.4 formula. This violates Required result step 2 (and the ordering hazard called out in the objective), and the error will exceed the 1e\u20113 relative Frobenius tolerance wherever ft1 differs from base. The plan also omits an explicit check that exactly 64 tensors were merged: the only count assert is the final 244, which would still pass if the MLP regex matched nothing, violating the \"exactly 64 tensors were merged\" required check. Step 1's name-set verification is also only partial, since the base count is never asserted before the merge and MLP-tensor presence in ft1/ft2 is never checked.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

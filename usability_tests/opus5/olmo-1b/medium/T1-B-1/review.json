@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T1-defective.yaml",
+  "started_at": "2026-09-05T23:18:57+00:00",
+  "finished_at": "2026-09-05T23:19:07+00:00",
+  "wall_clock_s": 9.6,
+  "tokens_in": 2,
+  "tokens_out": 578,
+  "cost_usd": 0.1041315,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 6, 10, **15** instead of 2, 6, 10, **14**, and correspondingly maps old block 14 \u2192 11 rather than old block 15 \u2192 11. This violates required-result clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\") and clause 2's mapping (\"old 15 becomes 11\"), so the final layer 11 holds the wrong block's weights and grading against the hidden reference will fail on bit-exact values. The regexes are also unanchored (`count`/`delete`/`not exists` on `model\\.layers\\.(2|6|10|15)\\.` etc.), which happens to be harmless for the given key set but is incidental. Note that all three required checks still pass under this plan \u2014 12 blocks, none of 12\u201315, 86 tensors \u2014 so the error is exactly the \"silently wrong\" failure mode the spec warns about.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

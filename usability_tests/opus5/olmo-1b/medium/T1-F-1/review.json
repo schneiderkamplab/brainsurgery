@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/P/T1-defective.py",
+  "started_at": "2026-09-05T23:16:22+00:00",
+  "finished_at": "2026-09-05T23:16:30+00:00",
+  "wall_clock_s": 7.7,
+  "tokens_in": 2,
+  "tokens_out": 490,
+  "cost_usd": 0.09901449999999999,
+  "verdict_text": "NO\n\nThe artifact drops blocks {2, 6, 10, 15} instead of {2, 6, 10, 14}, violating Required result clause 1 (\"Remove every tensor of blocks 2, 6, 10, 14\"). As a consequence the renumbering map is also wrong for the tail: it keeps old block 14 and maps it to new index 11, whereas clause 2 requires old 15 \u2192 11 and old 14 to be gone. The output still has 86 tensors and 12 contiguous block indices, so the script's own assertions pass and the error is silent \u2014 exactly the failure mode the specification warns about; grading against the hidden reference will fail on bit-exact values for new index 11. Everything else (non-block tensors passed through unchanged, single output file at `out/T1/model.safetensors`, name suffix and dtype preservation) matches the specification.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

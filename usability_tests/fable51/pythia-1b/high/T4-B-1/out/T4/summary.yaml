@@ -1,0 +1,109 @@
+transforms:
+- assert:
+    all:
+    - count:
+        of: base::.*
+        is: 244
+    - count:
+        of: ft1::.*
+        is: 244
+    - count:
+        of: ft2::.*
+        is: 244
+    - count:
+        of: base::gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)
+        is: 64
+    - count:
+        of: ft1::gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)
+        is: 64
+    - count:
+        of: ft2::gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)
+        is: 64
+    - count:
+        of: base::(?!gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)$).+
+        is: 180
+    - count:
+        of: ft1::(?!gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)$).+
+        is: 180
+    - count:
+        of: ft2::(?!gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)$).+
+        is: 180
+    - equal:
+        left: ft1::(?!gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)$).+
+        right: base::\g<0>
+    - equal:
+        left: ft2::(?!gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)$).+
+        right: base::\g<0>
+    - equal:
+        left: base::(?!gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)$).+
+        right: ft1::\g<0>
+    - equal:
+        left: base::(?!gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)$).+
+        right: ft2::\g<0>
+- cast:
+    from: base::gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)
+    to: base::work.acc.\g<0>
+    dtype: float32
+- cast:
+    from: ft1::gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)
+    to: base::work.tv1.\g<0>
+    dtype: float32
+- cast:
+    from: ft2::gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)
+    to: base::work.tv2.\g<0>
+    dtype: float32
+- assert:
+    all:
+    - count:
+        of: base::work\.acc\..+
+        is: 64
+    - count:
+        of: base::work\.tv1\..+
+        is: 64
+    - count:
+        of: base::work\.tv2\..+
+        is: 64
+- subtract_:
+    from: base::work\.acc\.(.+)
+    to: base::work.tv1.\1
+- subtract_:
+    from: base::work\.acc\.(.+)
+    to: base::work.tv2.\1
+- scale_:
+    target: base::work\.tv1\..+
+    by: 0.4
+- scale_:
+    target: base::work\.tv2\..+
+    by: 0.4
+- add_:
+    from: base::work\.tv1\.(.+)
+    to: base::work.acc.\1
+- add_:
+    from: base::work\.tv2\.(.+)
+    to: base::work.acc.\1
+- cast_:
+    target: base::work\.acc\..+
+    to: float16
+- assert:
+    count:
+      of: base::work\.acc\..+
+      is: 64
+- assign:
+    from: base::work\.acc\.(.+)
+    to: base::\1
+- delete:
+    target: base::work\..+
+- assert:
+    all:
+    - count:
+        of: base::.*
+        is: 244
+    - count:
+        of: base::gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)
+        is: 64
+    - equal:
+        left: base::(?!gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)$).+
+        right: ft1::\g<0>
+    - equal:
+        left: base::(?!gpt_neox\.layers\.\d+\.mlp\.dense_(h_to_4h|4h_to_h)\.(weight|bias)$).+
+        right: ft2::\g<0>

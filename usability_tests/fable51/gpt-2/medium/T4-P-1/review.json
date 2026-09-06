@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/P/T4-defective.py",
+  "started_at": "2026-09-06T01:15:27+00:00",
+  "finished_at": "2026-09-06T01:15:35+00:00",
+  "wall_clock_s": 7.3,
+  "tokens_in": 2,
+  "tokens_out": 366,
+  "cost_usd": 0.18034599999999998,
+  "verdict_text": "NO\n\nThe second task vector is taken against the already-merged intermediate rather than the unmodified base: the script computes `tmp = base + 0.4*(ft1 - base)` and then `tmp + 0.4*(ft2 - tmp)`, so the ft2 delta is `ft2 - tmp` instead of `ft2 - base`. This violates Required result step 2, which specifies `out[X] = base[X] + lambda*(ft1[X] - base[X]) + lambda*(ft2[X] - base[X])`, and is exactly the ordering hazard the Objective warns about. The result differs from the reference by `0.4*0.4*(ft1 - base)` on every merged tensor, which will exceed the 1e-5 relative Frobenius tolerance. The shared-tensor verification, merged-count check, and output-count check are otherwise present and fail loudly.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "Task vector 2 is computed against the base after task vector 1 has already been added, so the second delta is taken from the wrong reference point.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

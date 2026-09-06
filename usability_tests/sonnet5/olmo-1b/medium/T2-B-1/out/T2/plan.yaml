@@ -1,0 +1,433 @@
+inputs:
+  - model::inputs/base
+
+transforms:
+  - concat:
+      from:
+        - "model::model.layers.0.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.0.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.0.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.0.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.0.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.0.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.0.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.0.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.0.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.0.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.0.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.0.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.1.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.1.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.1.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.1.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.1.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.1.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.1.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.1.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.1.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.1.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.1.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.1.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.2.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.2.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.2.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.2.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.2.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.2.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.2.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.2.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.2.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.2.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.2.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.2.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.3.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.3.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.3.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.3.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.3.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.3.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.3.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.3.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.3.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.3.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.3.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.3.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.4.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.4.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.4.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.4.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.4.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.4.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.4.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.4.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.4.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.4.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.4.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.4.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.5.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.5.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.5.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.5.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.5.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.5.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.5.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.5.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.5.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.5.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.5.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.5.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.6.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.6.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.6.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.6.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.6.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.6.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.6.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.6.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.6.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.6.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.6.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.6.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.7.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.7.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.7.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.7.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.7.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.7.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.7.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.7.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.7.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.7.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.7.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.7.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.8.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.8.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.8.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.8.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.8.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.8.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.8.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.8.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.8.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.8.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.8.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.8.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.9.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.9.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.9.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.9.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.9.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.9.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.9.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.9.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.9.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.9.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.9.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.9.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.10.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.10.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.10.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.10.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.10.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.10.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.10.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.10.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.10.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.10.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.10.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.10.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.11.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.11.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.11.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.11.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.11.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.11.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.11.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.11.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.11.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.11.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.11.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.11.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.12.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.12.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.12.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.12.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.12.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.12.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.12.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.12.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.12.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.12.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.12.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.12.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.13.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.13.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.13.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.13.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.13.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.13.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.13.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.13.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.13.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.13.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.13.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.13.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.14.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.14.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.14.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.14.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.14.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.14.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.14.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.14.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.14.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.14.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.14.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.14.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - concat:
+      from:
+        - "model::model.layers.15.self_attn.q_proj.weight::[0:640, :]"
+        - "model::model.layers.15.self_attn.q_proj.weight::[768:2048, :]"
+      to: "model::model.layers.15.self_attn.q_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.15.self_attn.k_proj.weight::[0:640, :]"
+        - "model::model.layers.15.self_attn.k_proj.weight::[768:2048, :]"
+      to: "model::model.layers.15.self_attn.k_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.15.self_attn.v_proj.weight::[0:640, :]"
+        - "model::model.layers.15.self_attn.v_proj.weight::[768:2048, :]"
+      to: "model::model.layers.15.self_attn.v_proj.weight__pruned"
+      dim: 0
+  - concat:
+      from:
+        - "model::model.layers.15.self_attn.o_proj.weight::[:, 0:640]"
+        - "model::model.layers.15.self_attn.o_proj.weight::[:, 768:2048]"
+      to: "model::model.layers.15.self_attn.o_proj.weight__pruned"
+      dim: 1
+  - delete:
+      target: 'model::model\.layers\.\d+\.self_attn\.(?:q_proj|k_proj|v_proj|o_proj)\.weight'
+  - move:
+      from: 'model::(model\.layers\.\d+\.self_attn\.(?:q_proj|k_proj|v_proj|o_proj)\.weight)__pruned'
+      to: 'model::\1'
+  - assert:
+      shape:
+        of: model::model.layers.0.self_attn.q_proj.weight
+        is: [1920, 2048]
+  - assert:
+      shape:
+        of: model::model.layers.0.self_attn.k_proj.weight
+        is: [1920, 2048]
+  - assert:
+      shape:
+        of: model::model.layers.0.self_attn.v_proj.weight
+        is: [1920, 2048]
+  - assert:
+      shape:
+        of: model::model.layers.0.self_attn.o_proj.weight
+        is: [2048, 1920]
+  - assert:
+      shape:
+        of: 'model::model\.layers\.\d+\.self_attn\.(?:q_proj|k_proj|v_proj)\.weight'
+        is: [1920, 2048]
+  - assert:
+      shape:
+        of: 'model::model\.layers\.\d+\.self_attn\.o_proj\.weight'
+        is: [2048, 1920]
+  - assert:
+      count:
+        of: 'model::model\.layers\.\d+\.self_attn\.(?:q_proj|k_proj|v_proj)\.weight'
+        is: 48
+  - assert:
+      count:
+        of: 'model::model\.layers\.\d+\.self_attn\.o_proj\.weight'
+        is: 16
+  - assert:
+      count:
+        of: 'model::.*'
+        is: 114
+
+output:
+  path: out/T2/model.safetensors
+  format: safetensors

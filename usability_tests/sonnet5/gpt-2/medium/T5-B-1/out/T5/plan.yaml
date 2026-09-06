@@ -1,0 +1,72 @@
+inputs:
+  - base::inputs/base/model.safetensors
+  - lora::inputs/lora/adapter_model.safetensors
+
+output:
+  path: out/T5
+  format: safetensors
+  shard: 100MB
+
+transforms:
+  # Preflight: exactly 12 adapter pairs are present (r=16, alpha=32 => scale=2).
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_A\.weight'
+        is: 12
+  - assert:
+      count:
+        of: 'lora::base_model\.model\.h\.\d+\.attn\.c_attn\.lora_B\.weight'
+        is: 12
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.h\.0\.attn\.c_attn\.lora_A\.weight'
+        is: [16, 768]
+  - assert:
+      shape:
+        of: 'lora::base_model\.model\.h\.0\.attn\.c_attn\.lora_B\.weight'
+        is: [2304, 16]
+
+  # ba = B @ A, shape [2304, 768] (nn.Linear "out,in" layout), one per layer.
+  - matmul:
+      from_a: 'lora::base_model\.model\.h\.(\d+)\.attn\.c_attn\.lora_B\.weight'
+      from_b: 'lora::base_model.model.h.\1.attn.c_attn.lora_A.weight'
+      to: 'base::merge.\1.ba'
+
+  # Transpose into the base's Conv1D "in,out" layout, shape [768, 2304].
+  - permute:
+      from: 'base::merge\.(\d+)\.ba'
+      to: 'base::merge.\1.ba_t'
+      order: [1, 0]
+
+  # Apply scale = lora_alpha / r = 32 / 16 = 2.
+  - scale:
+      from: 'base::merge\.(\d+)\.ba_t'
+      to: 'base::merge.\1.delta'
+      by: 2.0
+
+  - assert:
+      count:
+        of: 'base::merge\.\d+\.delta'
+        is: 12
+
+  # Fold the delta into the base weight in place.
+  - add_:
+      from: 'base::merge\.(\d+)\.delta'
+      to: 'base::h.\1.attn.c_attn.weight'
+
+  # Drop the adapter tensors and every intermediate; only base tensors remain.
+  - delete: { target: 'lora::.*' }
+  - delete: { target: 'base::merge\..*' }
+
+  # Required checks.
+  - assert:
+      shape:
+        of: 'base::h.0.attn.c_attn.weight'
+        is: [768, 2304]
+  - assert:
+      not:
+        exists: 'base::.*lora_.*'
+  - assert:
+      count:
+        of: 'base::.*'
+        is: 160

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T5-defective.yaml",
+  "started_at": "2026-09-06T00:39:00+00:00",
+  "finished_at": "2026-09-06T00:39:09+00:00",
+  "wall_clock_s": 8.4,
+  "tokens_in": 2,
+  "tokens_out": 215,
+  "cost_usd": 0.19101999999999997,
+  "verdict_text": "NO\n\nThe plan adds the raw product `B @ A` to the base weights without multiplying by the scaling factor `alpha / r = 2`. This violates Required result clause 1, which specifies `weight += scale * B @ A` with `scale = 2`, so every merged weight is off by half the intended delta and will fail the grader's 1e-5 relative Frobenius tolerance. The plan's own comment admits the defect (\"the alpha / r scale is missing\"). Additionally, the `shard: 512MB` setting is ambiguous relative to the required 512 MiB (536,870,912 bytes) limit, though the scale omission alone is disqualifying.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The adapter scaling factor alpha / r is missing: the raw low-rank product is added.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

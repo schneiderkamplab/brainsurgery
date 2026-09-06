@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-06T00:34:15+00:00",
+  "finished_at": "2026-09-06T00:34:24+00:00",
+  "wall_clock_s": 8.9,
+  "tokens_in": 2,
+  "tokens_out": 192,
+  "cost_usd": 0.318192,
+  "verdict_text": "NO\n\nThe plan removes head 6 instead of head 5: it slices rows/columns `[0:768]` and `[896:2048]`, dropping indices 768..895, whereas the specification (Required result, items 1-4) requires keeping `0..639` and `768..2047`, i.e. dropping head 5 at indices 640..767. The resulting shapes still pass the shape asserts, so the plan would run without failing, but the values would not be bit-exact against the reference (Grading clause). The header comment even states \"remove attention head 6\", confirming the misread of the \"remove head 5\" clause.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-05T22:54:59+00:00",
+  "finished_at": "2026-09-05T22:55:06+00:00",
+  "wall_clock_s": 6.3,
+  "tokens_in": 2,
+  "tokens_out": 310,
+  "cost_usd": 0.1668775,
+  "verdict_text": "NO\n\nThe plan slices at the wrong head boundary: it keeps rows `0:768` and `896:2048`, which removes rows 768\u2013895, i.e. head 6, not head 5 (rows 640\u2013767). The comment in the plan even states \"remove attention head 6\". This violates required-result clauses 1\u20134, which specify keeping rows/columns `0..639` and `768..2047`. The shapes come out to `[1920, 2048]` and `[2048, 1920]` anyway, so the required `assert` checks pass and the error is not caught; grading is bit-exact, so the output would fail on values. Everything else (name preservation, temp cleanup, 114-tensor count, single output file) is correct.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

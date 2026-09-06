@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/olmo-1b/B/T2-defective.yaml",
+  "started_at": "2026-09-05T21:46:31+00:00",
+  "finished_at": "2026-09-05T21:46:37+00:00",
+  "wall_clock_s": 6.5,
+  "tokens_in": 2,
+  "tokens_out": 259,
+  "cost_usd": 0.0710598,
+  "verdict_text": "NO\n\nThe plan removes head 5 by slicing rows/cols `[0:768]` and `[896:2048]`, which excludes rows/cols 768..895 (i.e., it removes two heads' worth of rows, 640-895, leaving only 1792 kept + gap) \u2014 actually checking: 768 to 896 is 128 rows removed, but the kept ranges are `[0:768]` and `[896:2048]`, which skip rows 768..895, not 640..767. This removes head 6 (rows 768-895), not head 5 (rows 640-767) as required, and the comment in the plan even says \"remove attention head 6.\" This violates Required-Result clauses 1\u20134, which specify keeping rows/cols `0..639, 768..2047` (removing head 5, rows/cols 640..767).",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The removed head is off by one (head N+1 instead of head N). All shapes are still correct, so the artifact's own shape checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

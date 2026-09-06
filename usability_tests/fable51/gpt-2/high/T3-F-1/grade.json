@@ -1,0 +1,13 @@
+{
+  "task": "T3",
+  "passed": true,
+  "findings": [],
+  "metrics": {
+    "target": "gpt-2",
+    "shards": 5,
+    "tensors_expected": 148,
+    "tensors_found": 148,
+    "shape_dtype_mismatches": 0,
+    "value_mismatches": 0
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-05T21:34:29+00:00",
+  "finished_at": "2026-09-05T21:34:35+00:00",
+  "wall_clock_s": 6.8,
+  "tokens_in": 2,
+  "tokens_out": 306,
+  "cost_usd": 0.039528799999999996,
+  "verdict_text": "NO\n\nThe plan removes blocks 2, 5, and 9, but the specification requires removing blocks 2, 5, and 8 (Required result clause 1). This also breaks the required renumbering mapping (clause 2): the spec requires old 8\u2192 deleted... actually the spec keeps old 9\u21926, 10\u21927, 11\u21928, but this plan keeps block 8 unmoved and deletes 9, shifting 10\u21927 and 11\u21928, which does not match the required mapping (old 3\u21922, old 4\u21923, old 6\u21924, old 7\u21925, old 9\u21926, old 10\u21927, old 11\u21928) since old 8 must be deleted and old 9,10,11 must map to 6,7,8 respectively. The result will pass the artifact's own asserts (9 blocks, 121 tensors) but will not bit-exact match the hidden reference per the Grading clause, since the wrong block was deleted and the wrong renumbering was applied.",
+  "auto_says_defective": true,
+  "detected": null,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}
