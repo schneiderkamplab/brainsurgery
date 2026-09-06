@@ -27,3 +27,5 @@ dist/
 build/
 *.egg-info/
 tmp
+# Large usability-study transfer bundle (copied between machines, never committed).
+/usability_tests_data.tar
