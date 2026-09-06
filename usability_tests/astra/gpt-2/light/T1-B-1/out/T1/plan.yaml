@@ -1,0 +1,21 @@
+inputs:
+  - inputs/base/model.safetensors
+transforms:
+  - assert: { count: { of: '.*', is: 160 } }
+  - assert: { count: { of: 'h\.(2|5|8)\..+', is: 39 } }
+  - delete: { target: 'h\.(2|5|8)\..+' }
+  # Move upward in original index order so each destination is vacant.
+  - move: { from: 'h\.3\.(.+)', to: 'h.2.\1' }
+  - move: { from: 'h\.4\.(.+)', to: 'h.3.\1' }
+  - move: { from: 'h\.6\.(.+)', to: 'h.4.\1' }
+  - move: { from: 'h\.7\.(.+)', to: 'h.5.\1' }
+  - move: { from: 'h\.9\.(.+)', to: 'h.6.\1' }
+  - move: { from: 'h\.10\.(.+)', to: 'h.7.\1' }
+  - move: { from: 'h\.11\.(.+)', to: 'h.8.\1' }
+  - assert: { not: { exists: 'h\.(9|10|11)\..+' } }
+  - assert: { count: { of: 'h\.[0-9]+\.attn\.c_attn\.weight', is: 9 } }
+  - assert: { count: { of: 'h\.[0-8]\..+', is: 117 } }
+  - assert: { count: { of: '.*', is: 121 } }
+output:
+  path: out/T1/model.safetensors
+  format: safetensors

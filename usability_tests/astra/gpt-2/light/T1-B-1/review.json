@@ -1,0 +1,16 @@
+{
+  "phase": "review",
+  "artifact_kind": "defective",
+  "artifact": "review/gpt-2/B/T1-defective.yaml",
+  "started_at": "2026-09-05T22:41:52+00:00",
+  "finished_at": "2026-09-05T22:42:02+00:00",
+  "wall_clock_s": 10.8,
+  "tokens_in": 21250,
+  "tokens_out": 82,
+  "cost_usd": 0.2166,
+  "verdict_text": "NO\n\nThe plan deletes blocks 2, 5, and 9 instead of 2, 5, and 8, violating Required result clause 1. It then maps old block 8 to new block 6 instead of old block 9 to new block 6, violating clause 2. The final assertions check counts and indices but cannot detect this incorrect block selection.",
+  "auto_says_defective": true,
+  "detected": true,
+  "expected_defect": "The drop set is off by one: the last dropped block is the one after the specified block (for example blocks 2, 5, 9 instead of 2, 5, 8). Block counts still match, so the artifact's own checks pass.",
+  "note": "experimenter: set `detected` (true if the stated problem matches expected_defect; for a correct artifact, true means a false alarm)."
+}

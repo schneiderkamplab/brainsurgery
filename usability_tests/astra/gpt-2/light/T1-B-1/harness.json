@@ -1,0 +1,47 @@
+{
+  "phase": "solve",
+  "driver": "run_codex.py",
+  "model_id": "gpt-6-astra",
+  "agent": "astra",
+  "target": "gpt-2",
+  "effort": "light",
+  "reasoning_effort": "low",
+  "test": "T1",
+  "condition": "B",
+  "repeat": 1,
+  "started_at": "2026-09-05T22:39:48+00:00",
+  "finished_at": "2026-09-05T22:41:51+00:00",
+  "wall_clock_s": 122.8,
+  "exit_code": 0,
+  "cap_hit": "none",
+  "timeout_s": 1800,
+  "cost_usd": 3.7423,
+  "cost_source": "rate card via --price-in/--price-out",
+  "turns": 1,
+  "tool_calls": 13,
+  "tokens_in": 21300,
+  "tokens_out": 1850,
+  "cache_read_tokens": 343680,
+  "cache_write_tokens": null,
+  "tokens_in_total": 364980,
+  "reasoning_tokens": 36,
+  "usage_raw": {
+    "input_tokens": 364980,
+    "cached_input_tokens": 343680,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 1850,
+    "reasoning_output_tokens": 36
+  },
+  "executions": 2,
+  "failed_executions": [
+    {
+      "command": "/bin/zsh -lc \"mkdir -p out/T1\ncat > out/T1/plan.yaml <<'EOF'\ninputs:\n  - inputs/base/model.safetensors\ntransforms:\n  - assert: { count: { of: '.*', is: 160 } }\n  - assert: { count: { of: 'h\\\\.(2|5|8)\\\\..+', is: 39 } }\n  - delete: { target: 'h\\\\.(2|5|8)\\\\..+' }\n  # Move upward in original index order",
+      "message": "TransformError: count.of matched zero tensors: model::h\\.(9|10|11)\\..+",
+      "n": 1,
+      "error_class": "no_match"
+    }
+  ],
+  "first_execution_success": false,
+  "executions_until_first_success": 2,
+  "final_text": "Created `out/T1/model.safetensors` using `out/T1/plan.yaml`.\n\nAll required assertions passed: 9 blocks, 121 tensors, and no blocks 9\u201311. Execution succeeded on attempt 2; the initial assertion issue is documented in `out/T1/REPORT.md`."
+}
