@@ -113,7 +113,8 @@ reviewed more accurately is still informative.
       safe in all 15 enumerated cases, while three mid-save cases expose
       partial or mixed output and rule out an atomic-publication claim.
 - [ ] Scaling claims match the largest tested checkpoint and controlled metrics.
-- [ ] Behavioral prompts have documented provenance and coverage.
+- [x] Behavioral prompts have documented provenance and coverage. See
+      `revision_tests/behavioral/`.
 - [ ] Baseline comparisons use genuinely equivalent operations and one oracle.
 - [ ] Every table is reproducible from a named commit, command, and run ID.
 - [ ] Unsupported distributed and downstream claims are narrowed.

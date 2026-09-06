@@ -86,7 +86,7 @@ semantic failure matrix can be established here.
       identifier, language, task category, split, and filtering procedure.
 - [x] Freeze tokenizer, prompting, decoding, random seeds, metrics, and decision
       rules.
-- [ ] Define tool-neutral overlapping operations for MergeKit and
+- [x] Define tool-neutral overlapping operations for MergeKit and
       `torch-state-bridge`; treat Orbax primarily as related-work positioning
       unless a genuinely equivalent executable case exists.
 - [x] Build and unit-test analysis code against small synthetic data.
@@ -100,6 +100,13 @@ five synthetic controls pass. A one-prompt GPT-2 CPU smoke run exercised both
 model roles and the analyzer; it is stored only under `log/revision_tests/` and
 is explicitly non-reportable. The full model comparison remains a Linux/CUDA
 task in Phase 3.
+
+Competing-tool protocol: `revision_tests/competing_tools/`. The frozen cases
+compare regex key rewriting with `torch-state-bridge` and two checkpoint
+arithmetic operations with MergeKit using an independent oracle. Actual-package
+macOS preflights pass all six pairings on tiny and pinned GPT-2-derived inputs;
+the runner labels those timings non-reportable. The controlled Linux run in
+Phase 2 remains required for paper performance evidence.
 
 ### 5. Prepare transfer and handoff
 

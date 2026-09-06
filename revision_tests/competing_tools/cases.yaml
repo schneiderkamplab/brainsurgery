@@ -1,0 +1,43 @@
+protocol_id: eacl2027_competing_tools_v1
+fixture_design: deterministic_gpt2_shaped_v1
+arithmetic_tolerance:
+  absolute: 1.0e-6
+  relative: 1.0e-6
+cases:
+  - id: R01
+    name: regex_layer_key_rename
+    classification: lossless_structural
+    tools: [brainsurgery, torch_state_bridge]
+    input_set: rename
+    output_contract: >-
+      Rename every layer.<n>.weight and layer.<n>.bias key to block.<n>.weight
+      and block.<n>.bias; preserve nonmatching keys and every tensor value,
+      shape, dtype, and byte representation exactly.
+    selection:
+      source_regex: '^layer\.(\d+)\.(weight|bias)$'
+      destination_template: 'block.\1.\2'
+    comparison: exact
+
+  - id: M01
+    name: weighted_linear_merge
+    classification: deterministic_float32_arithmetic
+    tools: [brainsurgery, mergekit]
+    input_set: [model_a, model_b]
+    output_contract: >-
+      For every named tensor, output 0.25 * model_a + 0.75 * model_b in
+      float32 with the original name and shape.
+    formula: 0.25 * model_a + 0.75 * model_b
+    weights: {model_a: 0.25, model_b: 0.75}
+    comparison: tolerance
+
+  - id: M02
+    name: two_task_vector_arithmetic
+    classification: deterministic_float32_arithmetic
+    tools: [brainsurgery, mergekit]
+    input_set: [base, finetune_1, finetune_2]
+    output_contract: >-
+      For every named tensor, output base + 0.5 * (finetune_1 - base) +
+      0.25 * (finetune_2 - base) in float32 with the original name and shape.
+    formula: base + 0.5 * (finetune_1 - base) + 0.25 * (finetune_2 - base)
+    weights: {finetune_1: 0.5, finetune_2: 0.25}
+    comparison: tolerance

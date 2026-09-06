@@ -1,0 +1,45 @@
+protocol_id: eacl2027_competing_tools_v1
+checked_at_utc: '2026-09-06'
+tools:
+  brainsurgery:
+    version_source: repository_commit
+    license: MIT
+    repository: https://github.com/TheRootKIDD/brainsurgery
+  mergekit:
+    package: mergekit
+    version: 0.1.4
+    repository: https://github.com/arcee-ai/mergekit
+    repository_revision: 7683563fbcd046fbcc3aa0f5980ec94b84135de5
+    wheel_sha256: 3fb375cff7f5ba0a73081555d337f56ad9086a2f35f8c3a03ae8b63c5c3b790b
+    license: LGPL-3.0-only
+    role: model_merging_and_layer_assembly
+    compatibility_constraints:
+      transformers: 4.57.1
+  torch_state_bridge:
+    package: torch-state-bridge
+    version: 0.1.0
+    index: https://pypi.org/project/torch-state-bridge/0.1.0/
+    wheel_sha256: fe1e55dfc19b107b672ac4477164f548f1a48bf762e96fd5d5cffb74edc2fa56
+    installed_module_sha256: 48a04fbfa14ae1d56f7b70b657d45aedc3773930d6cfa99455c7d51f72389ff8
+    license_claim_in_description: MIT
+    core_metadata_license: null
+    core_metadata_project_url: null
+    role: pytorch_state_dict_key_rewriting
+    persistence_dependencies:
+      safetensors: 0.5.3
+      numpy: 2.4.6
+  orbax_checkpoint:
+    package: orbax-checkpoint
+    version_reviewed: 0.12.3
+    repository: https://github.com/google/orbax
+    license: Apache-2.0
+    role: jax_checkpointing_restore_and_resharding
+    executable_baseline: false
+    exclusion_reason: >-
+      The frozen cases produce PyTorch/Hugging Face safetensors checkpoints.
+      Orbax transformations operate during JAX PyTree checkpoint restoration;
+      conversion and framework migration would dominate and change the task.
+shared_execution_dependencies:
+  torch: 2.14.0
+  safetensors: 0.5.3
+  numpy: 2.4.6
