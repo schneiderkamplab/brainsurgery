@@ -1,0 +1,16 @@
+# Frozen lossless behavioral case: nontrivial key round-trip plus sharded export.
+inputs:
+  - models/gpt2/model.safetensors
+transforms:
+  - assert: { count: { of: '.*', is: 160 } }
+  - copy: { from: 'ln_f.weight', to: '__behavioral_roundtrip.ln_f.weight' }
+  - assert: { equal: { left: 'ln_f.weight', right: '__behavioral_roundtrip.ln_f.weight' } }
+  - delete: { target: '__behavioral_roundtrip.ln_f.weight' }
+  - move: { from: '^h\.(.*)', to: '__behavioral_roundtrip.h.\1' }
+  - move: { from: '^__behavioral_roundtrip\.h\.(.*)', to: 'h.\1' }
+  - scale_: { target: 'wte.weight', by: 1.0 }
+  - assert: { count: { of: '.*', is: 160 } }
+output:
+  path: models/behavioral_gpt2_lossless
+  format: safetensors
+  shard: 256MB

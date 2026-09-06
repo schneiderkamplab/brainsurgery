@@ -205,6 +205,15 @@ After the usability and CPU/Linux work is closed:
 3. run the four Pythia scaling points and the paired GPT-2, OLMo, and Qwen2.5
    architecture/storage checks.
 
+Run the now-frozen CUDA behavioral case with:
+
+```bash
+revision_tests/behavioral/run_cuda.sh
+```
+
+Do not substitute another model or transformation inside this reported run.
+The command independently checks all tensors before starting CUDA inference.
+
 The ten exact model revisions and expected checkpoint layouts/dtypes are
 frozen in `revision_tests/scaling/cases.yaml`. Download and validate the full
 matrix, then execute the CPU/I/O protocol (CUDA is deliberately disabled):

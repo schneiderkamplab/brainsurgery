@@ -232,6 +232,9 @@ disabled.
 
 ### 10. Behavioral regression suite
 
+- [ ] Run `revision_tests/behavioral/run_cuda.sh` on the pinned GPT-2 reference
+      and frozen byte-exact, sharded lossless transformation.
+- [ ] Confirm the independent pre-inference tensor gate reports 160/160 exact.
 - [ ] Run the frozen, versioned prompt suite on the unmodified reference model.
 - [ ] Run it on each transformed model under identical inference settings.
 - [ ] Record tensor-level validation separately from behavioral agreement.

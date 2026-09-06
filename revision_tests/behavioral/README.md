@@ -54,9 +54,32 @@ Each model run creates `metadata.json`, `predictions.jsonl`, and
 manifest and tokenizer fingerprints, architecture, software, hardware, dtype,
 and decoding settings. It refuses to compare incompatible bundles.
 
-## Model execution
+## Frozen reported CUDA case
 
-The final behavioral comparison is deliberately split into three commands so
+The reported case uses the pinned GPT-2 124M checkpoint at revision
+`607a30d783dfa663caf39e06633721c8d4cfcd7e`. The frozen BrainSurgery plan
+performs a copy/assert/delete round trip, moves all transformer-block keys to a
+temporary namespace and back, applies an exact multiply-by-one operation, and
+exports the final 160 tensors as indexed 256 MiB safetensors shards. Before
+inference, `validate_lossless.py` independently requires every final tensor to
+be byte-exact and validates the shard index and budget.
+
+On the clean Linux/CUDA checkout, run:
+
+```bash
+revision_tests/behavioral/run_cuda.sh
+```
+
+This single command validates CUDA and the prompt manifest, creates and checks
+the transformed checkpoint, copies the pinned configuration sidecars, runs all
+70 prompts on the reference and
+transformed models sequentially on `cuda:0`, and writes the comparison below
+`log/revision_tests/eacl2027_behavioral_cuda_<commit>/behavioral/`. It refuses
+to overwrite an existing transformed checkpoint or result bundle.
+
+## Component model-execution commands
+
+Internally, the behavioral comparison is deliberately split into three commands so
 the reference and transformed models need not coexist in GPU memory:
 
 ```bash

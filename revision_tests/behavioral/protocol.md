@@ -4,6 +4,11 @@ Protocol identifier: `eacl2027_behavioral_v1`
 
 Status: frozen before the first reported model run
 
+Frozen model case: GPT-2 124M (`openai-community/gpt2`) at revision
+`607a30d783dfa663caf39e06633721c8d4cfcd7e`, transformed by
+`lossless_gpt2_plan.yaml`. The final checkpoint must contain the same 160
+tensors byte-for-byte and use an indexed 256 MiB safetensors shard layout.
+
 ## Research question and scope
 
 For a transformation declared lossless and independently verified at the
