@@ -1,0 +1,151 @@
+{
+  "file": "fixture/model.safetensors",
+  "file_sha256": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+  "metadata": {
+    "format": "pt",
+    "purpose": "independent_correctness_fixture",
+    "revision_test_protocol": "eacl2027_correctness_v1"
+  },
+  "protocol_id": "eacl2027_correctness_v1",
+  "tensor_payload_bytes": 4524,
+  "tensors": {
+    "cast.lossy": {
+      "dtype": "float32",
+      "payload_bytes": 16,
+      "sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+      "shape": [
+        4
+      ]
+    },
+    "cast.same": {
+      "dtype": "float32",
+      "payload_bytes": 16,
+      "sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+      "shape": [
+        4
+      ]
+    },
+    "copy.source": {
+      "dtype": "float64",
+      "payload_bytes": 24,
+      "sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+      "shape": [
+        3
+      ]
+    },
+    "delete.target": {
+      "dtype": "bool",
+      "payload_bytes": 4,
+      "sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+      "shape": [
+        4
+      ]
+    },
+    "embedding.weight": {
+      "dtype": "float32",
+      "payload_bytes": 48,
+      "sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+      "shape": [
+        3,
+        4
+      ]
+    },
+    "layer.0.bias": {
+      "dtype": "float32",
+      "payload_bytes": 16,
+      "sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+      "shape": [
+        4
+      ]
+    },
+    "layer.0.weight": {
+      "dtype": "float32",
+      "payload_bytes": 64,
+      "sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+      "shape": [
+        4,
+        4
+      ]
+    },
+    "math.a": {
+      "dtype": "float32",
+      "payload_bytes": 24,
+      "sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+      "shape": [
+        2,
+        3
+      ]
+    },
+    "math.add": {
+      "dtype": "float32",
+      "payload_bytes": 24,
+      "sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+      "shape": [
+        2,
+        3
+      ]
+    },
+    "math.b": {
+      "dtype": "float32",
+      "payload_bytes": 24,
+      "sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+      "shape": [
+        2,
+        3
+      ]
+    },
+    "math.multiply": {
+      "dtype": "float32",
+      "payload_bytes": 24,
+      "sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+      "shape": [
+        2,
+        3
+      ]
+    },
+    "math.subtract": {
+      "dtype": "float32",
+      "payload_bytes": 24,
+      "sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+      "shape": [
+        2,
+        3
+      ]
+    },
+    "matrix.weight": {
+      "dtype": "float32",
+      "payload_bytes": 64,
+      "sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+      "shape": [
+        4,
+        4
+      ]
+    },
+    "move.source": {
+      "dtype": "int64",
+      "payload_bytes": 40,
+      "sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+      "shape": [
+        5
+      ]
+    },
+    "unchanged.large": {
+      "dtype": "float32",
+      "payload_bytes": 4096,
+      "sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "unchanged.sentinel": {
+      "dtype": "float32",
+      "payload_bytes": 16,
+      "sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+      "shape": [
+        2,
+        2
+      ]
+    }
+  }
+}

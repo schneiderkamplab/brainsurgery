@@ -602,8 +602,8 @@ def render_paper_table(summary: dict[str, Any]) -> str:
     lines = [
         "# Correctness and preservation result",
         "",
-        f"Protocol: `{summary['protocol_id']}`  ",
-        f"Run: `{summary['run_id']}`  ",
+        f"Protocol: `{summary['protocol_id']}`",
+        f"Run: `{summary['run_id']}`",
         f"Commit: `{summary['repository_commit']}`",
         "",
         "| Case | Operation | Class | Oracle exact | Untouched exact | Input unchanged | Result |",
@@ -734,7 +734,7 @@ def tensor_identity(left: torch.Tensor, right: torch.Tensor) -> bool:
 
 
 def tensor_sha256(tensor: torch.Tensor) -> str:
-    data = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+    data = tensor.detach().cpu().contiguous().view(torch.uint8).numpy()
     return hashlib.sha256(data).hexdigest()
 
 

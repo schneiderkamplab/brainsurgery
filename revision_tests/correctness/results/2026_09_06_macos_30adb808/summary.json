@@ -1,0 +1,4276 @@
+{
+  "cases": [
+    {
+      "classification": "lossless",
+      "comparison": {
+        "actual_tensor_count": 16,
+        "expected_tensor_count": 16,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 16,
+        "unexpected_names": [],
+        "untouched_checked": 15,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 15
+      },
+      "id": "C01",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C01_identity_serialization/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C01_identity_serialization/executed_plan.yaml",
+        "duration_seconds": 2.628781709005125,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "identity_serialization",
+      "output_mode": "single",
+      "passed": true,
+      "reload_comparison": null,
+      "reload_invocation": null,
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": null,
+      "write_set": [
+        "math.a"
+      ]
+    },
+    {
+      "classification": "lossless_metamorphic",
+      "comparison": {
+        "actual_tensor_count": 16,
+        "expected_tensor_count": 16,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 16,
+        "unexpected_names": [],
+        "untouched_checked": 15,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "math.a"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 15
+      },
+      "id": "C02",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C02_rename_inverse/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C02_rename_inverse/executed_plan.yaml",
+        "duration_seconds": 2.655689125000208,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "rename_inverse",
+      "output_mode": "single",
+      "passed": true,
+      "reload_comparison": null,
+      "reload_invocation": null,
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": null,
+      "write_set": [
+        "layer.0.weight"
+      ]
+    },
+    {
+      "classification": "lossless_structural",
+      "comparison": {
+        "actual_tensor_count": 17,
+        "expected_tensor_count": 17,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.clone",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 17,
+        "unexpected_names": [],
+        "untouched_checked": 16,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.a"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 16
+      },
+      "id": "C03",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C03_copy/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C03_copy/executed_plan.yaml",
+        "duration_seconds": 2.6115248749993043,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "copy",
+      "output_mode": "single",
+      "passed": true,
+      "reload_comparison": null,
+      "reload_invocation": null,
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": null,
+      "write_set": [
+        "copy.clone"
+      ]
+    },
+    {
+      "classification": "lossless_structural",
+      "comparison": {
+        "actual_tensor_count": 16,
+        "expected_tensor_count": 16,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.destination",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 16,
+        "unexpected_names": [],
+        "untouched_checked": 15,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.a"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 15
+      },
+      "id": "C04",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C04_move/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C04_move/executed_plan.yaml",
+        "duration_seconds": 2.617750707999221,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "move",
+      "output_mode": "single",
+      "passed": true,
+      "reload_comparison": null,
+      "reload_invocation": null,
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": null,
+      "write_set": [
+        "move.source",
+        "move.destination"
+      ]
+    },
+    {
+      "classification": "lossless_structural",
+      "comparison": {
+        "actual_tensor_count": 15,
+        "expected_tensor_count": 15,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 15,
+        "unexpected_names": [],
+        "untouched_checked": 15,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.a"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 15
+      },
+      "id": "C05",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C05_delete/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C05_delete/executed_plan.yaml",
+        "duration_seconds": 2.6354605829983484,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "delete",
+      "output_mode": "single",
+      "passed": true,
+      "reload_comparison": null,
+      "reload_invocation": null,
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": null,
+      "write_set": [
+        "delete.target"
+      ]
+    },
+    {
+      "classification": "lossless_metamorphic",
+      "comparison": {
+        "actual_tensor_count": 16,
+        "expected_tensor_count": 16,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 16,
+        "unexpected_names": [],
+        "untouched_checked": 15,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.a"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 15
+      },
+      "id": "C06",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C06_split_concat_inverse/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C06_split_concat_inverse/executed_plan.yaml",
+        "duration_seconds": 2.6097000000008848,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "split_concat_inverse",
+      "output_mode": "single",
+      "passed": true,
+      "reload_comparison": null,
+      "reload_invocation": null,
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": null,
+      "write_set": [
+        "matrix.weight"
+      ]
+    },
+    {
+      "classification": "exact_arithmetic_oracle",
+      "comparison": {
+        "actual_tensor_count": 17,
+        "expected_tensor_count": 17,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "bd14effdacf3bb333412e0aa1d4974f770b843e4bb937bbfb6abdba4c3c3dcf6",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "bd14effdacf3bb333412e0aa1d4974f770b843e4bb937bbfb6abdba4c3c3dcf6",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "83f097ba4994304c32353c1256fc21b0ad74452e880ed85bb56032c5b2bb407b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "83f097ba4994304c32353c1256fc21b0ad74452e880ed85bb56032c5b2bb407b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6b306d5bbcb7c0992649f1da579a8c6dedf0d7cd56fd3f7838bbad74c6c0bb05",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6b306d5bbcb7c0992649f1da579a8c6dedf0d7cd56fd3f7838bbad74c6c0bb05",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.scaled",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "dc3c9893b07eaeff1351f3173b1616c097b3c21e0bcb3ac1b60dad31fd927016",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "dc3c9893b07eaeff1351f3173b1616c097b3c21e0bcb3ac1b60dad31fd927016",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 17,
+        "unexpected_names": [],
+        "untouched_checked": 13,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.a"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 13
+      },
+      "id": "C07",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C07_arithmetic/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C07_arithmetic/executed_plan.yaml",
+        "duration_seconds": 2.6167805829973076,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "arithmetic",
+      "output_mode": "single",
+      "passed": true,
+      "reload_comparison": null,
+      "reload_invocation": null,
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": null,
+      "write_set": [
+        "math.add",
+        "math.subtract",
+        "math.multiply",
+        "math.scaled"
+      ]
+    },
+    {
+      "classification": "lossless",
+      "comparison": {
+        "actual_tensor_count": 16,
+        "expected_tensor_count": 16,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 16,
+        "unexpected_names": [],
+        "untouched_checked": 15,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.a"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 15
+      },
+      "id": "C08",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C08_same_dtype_cast/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C08_same_dtype_cast/executed_plan.yaml",
+        "duration_seconds": 2.630859708006028,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "same_dtype_cast",
+      "output_mode": "single",
+      "passed": true,
+      "reload_comparison": null,
+      "reload_invocation": null,
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": null,
+      "write_set": [
+        "cast.same"
+      ]
+    },
+    {
+      "classification": "intentionally_lossy_oracle",
+      "comparison": {
+        "actual_tensor_count": 16,
+        "expected_tensor_count": 16,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "bfloat16",
+            "actual_sha256": "ee5cd10ef4b71d0a2f05f98859c38250dce50226a60679838feb04ebb23abf46",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bfloat16",
+            "expected_sha256": "ee5cd10ef4b71d0a2f05f98859c38250dce50226a60679838feb04ebb23abf46",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 16,
+        "unexpected_names": [],
+        "untouched_checked": 15,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.a"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 15
+      },
+      "id": "C09",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C09_float32_to_bfloat16/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C09_float32_to_bfloat16/executed_plan.yaml",
+        "duration_seconds": 2.6013200410015997,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "float32_to_bfloat16",
+      "output_mode": "single",
+      "passed": true,
+      "reload_comparison": null,
+      "reload_invocation": null,
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": null,
+      "write_set": [
+        "cast.lossy"
+      ]
+    },
+    {
+      "classification": "lossless_serialization",
+      "comparison": {
+        "actual_tensor_count": 16,
+        "expected_tensor_count": 16,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 16,
+        "unexpected_names": [],
+        "untouched_checked": 15,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 15
+      },
+      "id": "C10",
+      "input_file_sha256_after": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_sha256_before": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+      "input_file_unchanged": true,
+      "invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C10_sharded_save_reload/plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C10_sharded_save_reload/executed_plan.yaml",
+        "duration_seconds": 2.627431749999232,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "name": "sharded_save_reload",
+      "output_mode": "sharded_reload",
+      "passed": true,
+      "reload_comparison": {
+        "actual_tensor_count": 16,
+        "expected_tensor_count": 16,
+        "missing_names": [],
+        "names_equal": true,
+        "passed": true,
+        "tensor_checks": [
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "02fb1b901a33bed9e1e6e6a7bc919b35917b965bb1ea7c010d33decec5b38b7d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.lossy",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "1c49c09855ad2e0faac6a540ba362ce004540724c1505259a8f01056a229dc6d",
+            "expected_shape": [
+              4
+            ],
+            "name": "cast.same",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float64",
+            "actual_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "actual_shape": [
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float64",
+            "expected_sha256": "c3e3f6133edae08eb7267998631363255942d9e39927bfdb2358b0551f319f0d",
+            "expected_shape": [
+              3
+            ],
+            "name": "copy.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "bool",
+            "actual_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "bool",
+            "expected_sha256": "52a5c4a10657220cac05c63adfa923c7771c55d868a58ee360eb3d1511985c3e",
+            "expected_shape": [
+              4
+            ],
+            "name": "delete.target",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "actual_shape": [
+              3,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "10370a5d3d41642879c72ee3d636a2f4adc2fa4d26c37243f288c193e3e21f26",
+            "expected_shape": [
+              3,
+              4
+            ],
+            "name": "embedding.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "actual_shape": [
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "06bc4b361bd8ce20b6665452ead88512990782504365958b92a49ee8134eb812",
+            "expected_shape": [
+              4
+            ],
+            "name": "layer.0.bias",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "714949d01ce54d7ff62af0d8931164e6f0f30f77104d8b6a73505c9e5cf00c86",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "layer.0.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "aa27717865aa598bf7ee6a3d387c311dffbcf3f38504663041ddceda70f6934b",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.a",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.add",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "48437102294ebc99df48c4dd4b4b10fa512969938e6b83e916496744335f33c8",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.b",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.multiply",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "actual_shape": [
+              2,
+              3
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0",
+            "expected_shape": [
+              2,
+              3
+            ],
+            "name": "math.subtract",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "actual_shape": [
+              4,
+              4
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+            "expected_shape": [
+              4,
+              4
+            ],
+            "name": "matrix.weight",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "int64",
+            "actual_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "actual_shape": [
+              5
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "int64",
+            "expected_sha256": "b2df6fbc118c9722ad2f03e994950e62407eaa2bdd8962a5b6c628869fb520f5",
+            "expected_shape": [
+              5
+            ],
+            "name": "move.source",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "actual_shape": [
+              32,
+              32
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "4bb6f3b6bfdcf6284097c6bedeab700bb1d6fdf0a72706ac75ce1f9bdce140ed",
+            "expected_shape": [
+              32,
+              32
+            ],
+            "name": "unchanged.large",
+            "shape_equal": true
+          },
+          {
+            "actual_dtype": "float32",
+            "actual_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "actual_shape": [
+              2,
+              2
+            ],
+            "bytes_equal": true,
+            "dtype_equal": true,
+            "expected_dtype": "float32",
+            "expected_sha256": "6287362a6fcfbb8081817d62fd7659b1cf30fec393a9cd9c79cbe3e8c95034af",
+            "expected_shape": [
+              2,
+              2
+            ],
+            "name": "unchanged.sentinel",
+            "shape_equal": true
+          }
+        ],
+        "tensors_exact": 16,
+        "unexpected_names": [],
+        "untouched_checked": 15,
+        "untouched_checks": [
+          {
+            "exact": true,
+            "name": "cast.lossy"
+          },
+          {
+            "exact": true,
+            "name": "cast.same"
+          },
+          {
+            "exact": true,
+            "name": "copy.source"
+          },
+          {
+            "exact": true,
+            "name": "delete.target"
+          },
+          {
+            "exact": true,
+            "name": "embedding.weight"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.bias"
+          },
+          {
+            "exact": true,
+            "name": "layer.0.weight"
+          },
+          {
+            "exact": true,
+            "name": "math.add"
+          },
+          {
+            "exact": true,
+            "name": "math.b"
+          },
+          {
+            "exact": true,
+            "name": "math.multiply"
+          },
+          {
+            "exact": true,
+            "name": "math.subtract"
+          },
+          {
+            "exact": true,
+            "name": "matrix.weight"
+          },
+          {
+            "exact": true,
+            "name": "move.source"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.large"
+          },
+          {
+            "exact": true,
+            "name": "unchanged.sentinel"
+          }
+        ],
+        "untouched_exact": 15
+      },
+      "reload_invocation": {
+        "command": ".venv/bin/brainsurgery log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C10_sharded_save_reload/reload_plan.yaml --provider inmemory --num-workers 1 --summary-mode resolve --summarize-path log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness/cases/C10_sharded_save_reload/reload_executed_plan.yaml",
+        "duration_seconds": 2.663063667001552,
+        "returncode": 0,
+        "timed_out": false
+      },
+      "secondary_container_metadata": {
+        "all_outputs_equal_input": false,
+        "input": {
+          "format": "pt",
+          "purpose": "independent_correctness_fixture",
+          "revision_test_protocol": "eacl2027_correctness_v1"
+        },
+        "outputs": [
+          null,
+          null,
+          null
+        ],
+        "primary_endpoint": false
+      },
+      "sharding": {
+        "assigned_tensors_present": true,
+        "duplicate_tensor_names": [],
+        "index_total_size": 4524,
+        "index_total_size_exact": true,
+        "multiple_shards": true,
+        "no_duplicate_tensors": true,
+        "observed_total_size": 4524,
+        "shard_count": 3,
+        "shard_names": [
+          "model-00001-of-00003.safetensors",
+          "model-00002-of-00003.safetensors",
+          "model-00003-of-00003.safetensors"
+        ],
+        "weight_map_exact": true
+      },
+      "write_set": [
+        "math.a"
+      ]
+    }
+  ],
+  "cases_passed": 10,
+  "cases_total": 10,
+  "claim_boundary": "Exact tensor-state correctness for the enumerated cases; custom safetensors metadata and arbitrary sidecar files are not covered by the primary claim.",
+  "fixture_file_sha256": "e2e1bcbc1cc94a4b6e9aba68aa98695c0a23b8a91d66ffb947727542b7fa0348",
+  "input_files_unchanged": 10,
+  "metadata_cases_checked": 10,
+  "metadata_cases_equal": 0,
+  "metadata_is_primary_endpoint": false,
+  "oracle_tensors_checked": 161,
+  "oracle_tensors_exact": 161,
+  "passed": true,
+  "protocol_id": "eacl2027_correctness_v1",
+  "relevant_paths_clean": true,
+  "repository_commit": "30adb808fff539374dd567ebee67d385decd8b7a",
+  "run_directory": "log/revision_tests/2026_09_06_correctness_macos_30adb808/correctness",
+  "run_id": "2026_09_06_correctness_macos_30adb808",
+  "source_manifest": {
+    "cases.yaml": "36cb3988301b65392b8588189dd6630973405ed0bbb61112d744d9212e0729f6",
+    "oracle.py": "49a8e366e5a28d5161da597814185179e4f525ac7db94cd95f4df41284efb95a",
+    "protocol.md": "bb26745ae6345ffeaed0004c05739e9d53221367a4fe54f63b415c5ab30d715a",
+    "run.py": "38922fb490dad97b922953a19944a196b011219aac69b4b6b7be6dc107a98220"
+  },
+  "untouched_tensors_checked": 149,
+  "untouched_tensors_exact": 149,
+  "validator_controls": {
+    "baseline_accepted": true,
+    "dtype_corruption_detected": true,
+    "missing_key_detected": true,
+    "oracle_import_guard_passed": true,
+    "passed": true,
+    "value_corruption_detected": true
+  }
+}

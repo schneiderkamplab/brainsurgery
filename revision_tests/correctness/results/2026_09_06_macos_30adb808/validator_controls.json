@@ -1,0 +1,8 @@
+{
+  "baseline_accepted": true,
+  "dtype_corruption_detected": true,
+  "missing_key_detected": true,
+  "oracle_import_guard_passed": true,
+  "passed": true,
+  "value_corruption_detected": true
+}

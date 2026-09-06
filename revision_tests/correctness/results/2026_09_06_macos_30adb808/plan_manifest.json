@@ -1,0 +1,37 @@
+{
+  "case_definition_sha256": "36cb3988301b65392b8588189dd6630973405ed0bbb61112d744d9212e0729f6",
+  "generated_plan_sha256": {
+    "C01": {
+      "primary": "c7d269c4b1487c7a7a3f80661a73836947113d3ed81c8ce3cc2185ae032064e9"
+    },
+    "C02": {
+      "primary": "8ffc35dc3664b1397a17a384e27f1ce27c3de5be3214f29891b9d564073a8082"
+    },
+    "C03": {
+      "primary": "58bedf35d4ad913618ee097d977597d0815db47d1993889054cce0d8a4eeeee1"
+    },
+    "C04": {
+      "primary": "4dd25d0ad723dae9695f213e95a7f8a782a1a26a1d2af22dd44aa8b85609b4e0"
+    },
+    "C05": {
+      "primary": "99642f7a833071aceeb5d768ddaef7a1db608571fb24f8c47432db7d0e9f8165"
+    },
+    "C06": {
+      "primary": "e5c888fe367358b9feb4ab3089b26b0f2648cf348d84a313bef303f8e1947df8"
+    },
+    "C07": {
+      "primary": "58d8cf54497cf3ca75061d33bc079904a59a6ddf04351291b8053374cceb4e6e"
+    },
+    "C08": {
+      "primary": "ed499936ad707a478ffde1eddfb4a384a8a52bef500f709fa368dcbeee24e17a"
+    },
+    "C09": {
+      "primary": "314de7078d2bb72192631e756dc588a7a3e51d1b26acba31e5bafc35516042be"
+    },
+    "C10": {
+      "primary": "ddca00c93354004329b67ce00800928f6e115e801340c3077ebaf7e414b469a3",
+      "reload": "5d208045afd103a2ea1f42895ffcb40adc4afc2d870ca05119edd69c073811f5"
+    }
+  },
+  "protocol_id": "eacl2027_correctness_v1"
+}

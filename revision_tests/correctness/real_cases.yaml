@@ -1,0 +1,23 @@
+protocol_id: eacl2027_real_preservation_v1
+provider: inmemory
+cases:
+  - id: R01
+    target: gpt_2_124m
+    model_id: openai-community/gpt2
+    revision: 607a30d783dfa663caf39e06633721c8d4cfcd7e
+    input: models/gpt2/model.safetensors
+    identity_tensor: wte.weight
+
+  - id: R02
+    target: olmo_1b_0724_hf
+    model_id: allenai/OLMo-1B-0724-hf
+    revision: d7cbab742d80589e714b1a2d7f838dcd21cbe143
+    input: models/olmo-1b-0724-hf
+    identity_tensor: model.embed_tokens.weight
+
+  - id: R03
+    target: pythia_1b
+    model_id: EleutherAI/pythia-1b
+    revision: f73d7dcc545c8bd326d8559c8ef84ffe92fea6b2
+    input: models/pythia-1b/model.safetensors
+    identity_tensor: gpt_neox.embed_in.weight

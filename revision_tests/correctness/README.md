@@ -16,12 +16,19 @@ fixture and expected outputs using PyTorch only; it deliberately does not import
 BrainSurgery. `run.py` invokes the installed `brainsurgery` CLI in fresh
 subprocesses and compares its serialized outputs with those oracles.
 
+The complementary [`real_protocol.md`](real_protocol.md) applies an explicit
+identity-preserving transformation to the pinned GPT-2, OLMo 1B, and Pythia 1B
+base checkpoints and independently verifies every tensor and source file. Its
+matrix is in [`real_cases.yaml`](real_cases.yaml), and its runner is
+`run_real.py`.
+
 ## Run
 
 From the repository root:
 
 ```bash
 .venv/bin/python revision_tests/correctness/run.py
+.venv/bin/python revision_tests/correctness/run_real.py
 ```
 
 The runner creates a unique directory below
@@ -43,6 +50,9 @@ To publish a compact, reviewable copy without raw artifacts:
 ```bash
 .venv/bin/python revision_tests/correctness/run.py \
   --publish-dir revision_tests/correctness/results/<result_id>
+
+.venv/bin/python revision_tests/correctness/run_real.py \
+  --publish-dir revision_tests/correctness/results/<real_result_id>
 ```
 
 The published directory contains only the environment, manifests, generated
