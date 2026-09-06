@@ -1,0 +1,108 @@
+{
+  "fixtures": {
+    "corrupt": {
+      "exists": true,
+      "files": [
+        {
+          "path": "model.safetensors",
+          "sha256": "a4ffe3af223080f2317bbd06ee6c3c33568d5d7345db2ee562d3ca86f0ddeb18",
+          "size": 42
+        }
+      ],
+      "kind": "file"
+    },
+    "missing": {
+      "exists": false,
+      "files": [],
+      "kind": null
+    },
+    "missing_shard": {
+      "exists": true,
+      "files": [
+        {
+          "path": "model-00001-of-00002.safetensors",
+          "sha256": "21593c7dd09afd2c0f6d6e5a97f65f6b1201d71c1a1eb1adac846a01b84dcc20",
+          "size": 88
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "sha256": "fd132eda07d62e2c4767a942a971ea69b75982a429e5c1a5ceaa73ca41fa3e46",
+          "size": 167
+        }
+      ],
+      "kind": "directory"
+    },
+    "truncated": {
+      "exists": true,
+      "files": [
+        {
+          "path": "model.safetensors",
+          "sha256": "e909f3afaa5c481ab26f3bdfee1d3e40b3329307b21e832124f3a3b91e5a0151",
+          "size": 4428
+        }
+      ],
+      "kind": "file"
+    },
+    "valid": {
+      "exists": true,
+      "files": [
+        {
+          "path": "model.safetensors",
+          "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+          "size": 8856
+        }
+      ],
+      "kind": "file"
+    }
+  },
+  "logical_payload_bytes": 8368,
+  "logical_tensor_count": 6,
+  "logical_tensors": {
+    "large.a": {
+      "dtype": "float32",
+      "sha256": "3c95c030570166ea376baed933c14cb30e5c7d88f067b58b4d44ab6b1311bb5c",
+      "shape": [
+        1024
+      ]
+    },
+    "large.b": {
+      "dtype": "float32",
+      "sha256": "dff4194e8704026a29a612b66156f9469448c30fafe9782e1951d0fa349f6028",
+      "shape": [
+        1024
+      ]
+    },
+    "layer.0.weight": {
+      "dtype": "float32",
+      "sha256": "58dda328598e2f7fe472621bfc54935aaa354d1a6ebcaf9562cd743fd575eb19",
+      "shape": [
+        4,
+        4
+      ]
+    },
+    "layer.1.weight": {
+      "dtype": "float32",
+      "sha256": "775a5513d73478ed6d7885831889c71ab6b5394163fa32a212f3a40fb963728f",
+      "shape": [
+        4,
+        4
+      ]
+    },
+    "math.a": {
+      "dtype": "float32",
+      "sha256": "480c4a600899b1d9b587827585b851c43c4d7c618b5f2370b71e31a483c2b913",
+      "shape": [
+        2,
+        2
+      ]
+    },
+    "unchanged.sentinel": {
+      "dtype": "int64",
+      "sha256": "7619ca01a1b9a46414e79abedd7f53596fa0db1da4ce2f005ddab98636cc410e",
+      "shape": [
+        4
+      ]
+    }
+  },
+  "protocol_id": "eacl2027_robustness_v1"
+}

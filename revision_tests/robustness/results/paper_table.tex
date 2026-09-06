@@ -1,0 +1,24 @@
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{lrrr}
+    \toprule
+    Scenario & Proc. & Source & Safe dest. \\
+    \midrule
+    Before-save failures & 15/15 & 15/15 & 15/15 \\
+    Fresh-dest. mid-save faults & 2/2 & 2/2 & 0/2 \\
+    Existing-dest. mid-save fault & 1/1 & 1/1 & 0/1 \\
+    Successful save control & 1/1 & 1/1 & 1/1 \\
+    \midrule
+    Total & 19/19 & 19/19 & 16/19 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Robustness and failure-semantics results. ``Proc.'' indicates the
+  expected success, failure, or interruption outcome. ``Source'' denotes
+  byte-identical input files. A destination is safe if a failed operation
+  publishes nothing or preserves an existing destination, or if the successful
+  control publishes a complete loadable checkpoint. Mid-save faults left
+  partial or mixed shard directories; evaluation detection of these expected
+  negative findings is not a safety pass.}
+  \label{tab:robustness}
+\end{table}

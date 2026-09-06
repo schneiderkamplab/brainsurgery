@@ -108,7 +108,10 @@ reviewed more accurately is still informative.
 - [ ] The usability study has complete repeats and manual bookkeeping.
 - [x] Correctness uses independent, hand-verifiable evidence. See
       `revision_tests/correctness/results/`.
-- [ ] Robustness and current failure-publication semantics are demonstrated.
+- [x] Robustness and current failure-publication semantics are demonstrated.
+      See `revision_tests/robustness/results/`; failures before publication are
+      safe in all 15 enumerated cases, while three mid-save cases expose
+      partial or mixed output and rule out an atomic-publication claim.
 - [ ] Scaling claims match the largest tested checkpoint and controlled metrics.
 - [ ] Behavioral prompts have documented provenance and coverage.
 - [ ] Baseline comparisons use genuinely equivalent operations and one oracle.

@@ -1,0 +1,32 @@
+{
+  "brainsurgery": "0.2.12",
+  "cpu": "arm",
+  "logical_cpu_count": 15,
+  "macos_version": "26.6.2",
+  "memory_bytes": null,
+  "platform_machine": "arm64",
+  "platform_release": "25.6.0",
+  "platform_system": "Darwin",
+  "protocol_id": "eacl2027_robustness_v1",
+  "python": "3.13.14",
+  "pyyaml": "6.0.3",
+  "recorded_at_utc": "2026-09-06T08:14:29.606077+00:00",
+  "repository": {
+    "commit": "fd20fa2726f0cde5d39a2870242c83b26b8f46b9",
+    "relevant_paths_clean": true,
+    "relevant_status_porcelain": [],
+    "status_porcelain": [
+      "M .gitignore",
+      " D coding_agent_evaluation/related_work.md",
+      " D coding_agent_evaluation/related_work.tex"
+    ],
+    "worktree_clean": false
+  },
+  "run_id": "2026_09_06_robustness_macos_fd20fa27",
+  "safetensors": "0.8.0",
+  "subprocess_environment": {
+    "OMP_NUM_THREADS": "1",
+    "PYTHONHASHSEED": "0"
+  },
+  "torch": "2.11.0"
+}

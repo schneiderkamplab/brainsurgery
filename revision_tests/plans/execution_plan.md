@@ -60,17 +60,22 @@ a limitation outside the tensor-state claim.
 
 ### 3. Robustness and failure-semantics tests
 
-- [ ] Exercise invalid YAML and invalid top-level structures.
-- [ ] Exercise unknown transformations, invalid arguments, invalid regexes,
+- [x] Exercise invalid YAML and invalid top-level structures.
+- [x] Exercise unknown transformations, invalid arguments, invalid regexes,
       zero matches, and unintended multiple matches.
-- [ ] Exercise missing aliases, files, tensors, and shards.
-- [ ] Exercise failed assertions and corrupted/truncated safetensors.
-- [ ] Inject save exceptions and interrupt a save process.
-- [ ] Test behavior when the destination already exists.
-- [ ] Record exit code, error class, diagnostic, source hash, output visibility,
+- [x] Exercise missing aliases, files, tensors, and shards.
+- [x] Exercise failed assertions and corrupted/truncated safetensors.
+- [x] Inject save exceptions and interrupt a save process.
+- [x] Test behavior when the destination already exists.
+- [x] Record exit code, error class, diagnostic, source hash, output visibility,
       output loadability, changes to existing output, and leftover files.
-- [ ] Characterize current partial-publication behavior without changing
+- [x] Characterize current partial-publication behavior without changing
       BrainSurgery semantics during the frozen usability study.
+
+Evidence: `revision_tests/robustness/results/`. All 19 evaluation cases and all
+source-preservation checks pass. Three expected negative findings show that a
+mid-save exception or interruption leaves a partial or mixed shard directory;
+BrainSurgery therefore does not currently provide atomic publication.
 
 Repeat only genuinely OS-dependent cases later on Linux; the malformed-plan and
 semantic failure matrix can be established here.

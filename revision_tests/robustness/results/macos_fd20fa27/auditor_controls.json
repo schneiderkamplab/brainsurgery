@@ -1,0 +1,17 @@
+{
+  "expected": {
+    "absent": "absent",
+    "partial_without_index": "partial_without_index",
+    "preexisting_changed_with_unindexed_shard": "preexisting_changed_with_unindexed_shard",
+    "preexisting_unchanged": "preexisting_unchanged",
+    "valid_complete": "valid_complete"
+  },
+  "observed": {
+    "absent": "absent",
+    "partial_without_index": "partial_without_index",
+    "preexisting_changed_with_unindexed_shard": "preexisting_changed_with_unindexed_shard",
+    "preexisting_unchanged": "preexisting_unchanged",
+    "valid_complete": "valid_complete"
+  },
+  "passed": true
+}
