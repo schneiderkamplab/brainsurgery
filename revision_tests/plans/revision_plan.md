@@ -112,14 +112,14 @@ reviewed more accurately is still informative.
       See `revision_tests/robustness/results/`; failures before publication are
       safe in all 15 enumerated cases, while three mid-save cases expose
       partial or mixed output and rule out an atomic-publication claim.
-- [ ] Scaling claims match the largest tested checkpoint and controlled metrics.
+- [x] Scaling claims match the largest tested checkpoint and controlled metrics.
 - [x] Behavioral prompts have documented provenance and coverage. See
       `revision_tests/behavioral/`.
-- [ ] Baseline comparisons use genuinely equivalent operations and one oracle.
+- [x] Baseline comparisons use genuinely equivalent operations and one oracle.
 - [x] Direct comparisons and adjacent related-system capabilities are separated
       in Markdown and LaTeX. See
       `revision_tests/competing_tools/feature_coverage.{md,tex}`.
-- [ ] Every table is reproducible from a named commit, command, and run ID.
+- [x] Every table is reproducible from a named commit, command, and run ID.
 - [x] Distributed claim boundaries and safe manuscript wording are prepared.
       Applying them to the final paper remains part of manuscript integration.
 - [ ] The narrated demo follows the final documented behavior.

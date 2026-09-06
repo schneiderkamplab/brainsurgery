@@ -1,0 +1,1139 @@
+{
+  "auditor_controls": {
+    "expected": {
+      "absent": "absent",
+      "partial_without_index": "partial_without_index",
+      "preexisting_changed_with_unindexed_shard": "preexisting_changed_with_unindexed_shard",
+      "preexisting_unchanged": "preexisting_unchanged",
+      "valid_complete": "valid_complete"
+    },
+    "observed": {
+      "absent": "absent",
+      "partial_without_index": "partial_without_index",
+      "preexisting_changed_with_unindexed_shard": "preexisting_changed_with_unindexed_shard",
+      "preexisting_unchanged": "preexisting_unchanged",
+      "valid_complete": "valid_complete"
+    },
+    "passed": true
+  },
+  "cases": [
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "plan_validation",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.0540719630080275,
+      "evaluation_passed": true,
+      "exception_type": "ParserError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R01",
+      "interruption_marker_observed": false,
+      "name": "malformed_yaml",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "plan_validation",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 3.932638889993541,
+      "evaluation_passed": true,
+      "exception_type": null,
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R02",
+      "interruption_marker_observed": false,
+      "name": "non_mapping_plan",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 2,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "plan_validation",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.314403835975099,
+      "evaluation_passed": true,
+      "exception_type": "PlanLoaderError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R03",
+      "interruption_marker_observed": false,
+      "name": "unknown_transform",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "plan_validation",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.013880493992474,
+      "evaluation_passed": true,
+      "exception_type": "PlanLoaderError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R04",
+      "interruption_marker_observed": false,
+      "name": "missing_required_argument",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "tensor_selection",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.423951330012642,
+      "evaluation_passed": true,
+      "exception_type": "TransformError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R05",
+      "interruption_marker_observed": false,
+      "name": "invalid_regex",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "tensor_selection",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.185136657994008,
+      "evaluation_passed": true,
+      "exception_type": "TransformError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R06",
+      "interruption_marker_observed": false,
+      "name": "zero_tensor_matches",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "tensor_selection",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 3.962081132020103,
+      "evaluation_passed": true,
+      "exception_type": "SplitTransformError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R07",
+      "interruption_marker_observed": false,
+      "name": "excessive_tensor_matches",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "reference_validation",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.2074835329840425,
+      "evaluation_passed": true,
+      "exception_type": "PlanLoaderError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R08",
+      "interruption_marker_observed": false,
+      "name": "unknown_model_alias",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "input_validation",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.120272004976869,
+      "evaluation_passed": true,
+      "exception_type": "RuntimeError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R09",
+      "interruption_marker_observed": false,
+      "name": "missing_input_file",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": false,
+        "files": [],
+        "kind": null
+      },
+      "source_before": {
+        "exists": false,
+        "files": [],
+        "kind": null
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "runtime_guard",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.404703703999985,
+      "evaluation_passed": true,
+      "exception_type": "TransformError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R10",
+      "interruption_marker_observed": false,
+      "name": "failed_assertion",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "input_integrity",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.008017429005122,
+      "evaluation_passed": true,
+      "exception_type": "SafetensorError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R11",
+      "interruption_marker_observed": false,
+      "name": "corrupt_safetensors",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "a4ffe3af223080f2317bbd06ee6c3c33568d5d7345db2ee562d3ca86f0ddeb18",
+            "size": 42
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "a4ffe3af223080f2317bbd06ee6c3c33568d5d7345db2ee562d3ca86f0ddeb18",
+            "size": 42
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "input_integrity",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 3.9794053489749786,
+      "evaluation_passed": true,
+      "exception_type": "SafetensorError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R12",
+      "interruption_marker_observed": false,
+      "name": "truncated_safetensors",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "e909f3afaa5c481ab26f3bdfee1d3e40b3329307b21e832124f3a3b91e5a0151",
+            "size": 4428
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "e909f3afaa5c481ab26f3bdfee1d3e40b3329307b21e832124f3a3b91e5a0151",
+            "size": 4428
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "input_integrity",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.058395011990797,
+      "evaluation_passed": true,
+      "exception_type": "RuntimeError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R13",
+      "interruption_marker_observed": false,
+      "name": "missing_shard",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model-00001-of-00002.safetensors",
+            "sha256": "21593c7dd09afd2c0f6d6e5a97f65f6b1201d71c1a1eb1adac846a01b84dcc20",
+            "size": 88
+          },
+          {
+            "path": "model.safetensors.index.json",
+            "sha256": "fd132eda07d62e2c4767a942a971ea69b75982a429e5c1a5ceaa73ca41fa3e46",
+            "size": 167
+          }
+        ],
+        "kind": "directory"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model-00001-of-00002.safetensors",
+            "sha256": "21593c7dd09afd2c0f6d6e5a97f65f6b1201d71c1a1eb1adac846a01b84dcc20",
+            "size": 88
+          },
+          {
+            "path": "model.safetensors.index.json",
+            "sha256": "fd132eda07d62e2c4767a942a971ea69b75982a429e5c1a5ceaa73ca41fa3e46",
+            "size": 167
+          }
+        ],
+        "kind": "directory"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": true,
+          "files": [
+            {
+              "path": "output.safetensors",
+              "sha256": "d9ea3cf67bc52f709555f32effa4f49246998770f600ef10466193ed8b1c65dc",
+              "size": 160
+            }
+          ],
+          "kind": "file"
+        },
+        "state": "preexisting_unchanged"
+      },
+      "artifact_matched": true,
+      "category": "destination_preservation",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 3.96962750601233,
+      "evaluation_passed": true,
+      "exception_type": "TransformError",
+      "expected_artifact": "preexisting_unchanged",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R14",
+      "interruption_marker_observed": false,
+      "name": "preexisting_destination_before_runtime_failure",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": false,
+          "files": [],
+          "kind": null
+        },
+        "state": "absent"
+      },
+      "artifact_matched": true,
+      "category": "publication_failure",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "cli",
+      "duration_seconds": 4.2649434650084,
+      "evaluation_passed": true,
+      "exception_type": "FileExistsError",
+      "expected_artifact": "absent",
+      "expected_process": "failure",
+      "expected_safety": "safe",
+      "id": "R15",
+      "interruption_marker_observed": false,
+      "name": "unavailable_output_parent",
+      "observed_process": "failure",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": "shard index absent",
+        "manifest": {
+          "exists": true,
+          "files": [
+            {
+              "path": "model-00001-of-00004.safetensors",
+              "sha256": "5946aa78f26aac5c93a95add89856cc2fffc65cf8a4b643f63ec753de447a31b",
+              "size": 112
+            }
+          ],
+          "kind": "directory"
+        },
+        "state": "partial_without_index"
+      },
+      "artifact_matched": true,
+      "category": "publication_failure",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "inject_exception",
+      "duration_seconds": 4.28769452299457,
+      "evaluation_passed": true,
+      "exception_type": null,
+      "expected_artifact": "partial_without_index",
+      "expected_process": "failure",
+      "expected_safety": "unsafe",
+      "id": "R16",
+      "interruption_marker_observed": false,
+      "name": "injected_save_exception_after_first_shard",
+      "observed_process": "failure",
+      "observed_safe": false,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": "shard index absent",
+        "manifest": {
+          "exists": true,
+          "files": [
+            {
+              "path": "model-00001-of-00004.safetensors",
+              "sha256": "5946aa78f26aac5c93a95add89856cc2fffc65cf8a4b643f63ec753de447a31b",
+              "size": 112
+            }
+          ],
+          "kind": "directory"
+        },
+        "state": "partial_without_index"
+      },
+      "artifact_matched": true,
+      "category": "interruption",
+      "diagnostic_applicable": false,
+      "diagnostic_matched": null,
+      "driver": "interrupt",
+      "duration_seconds": 3.3929504029802047,
+      "evaluation_passed": true,
+      "exception_type": null,
+      "expected_artifact": "partial_without_index",
+      "expected_process": "interrupted",
+      "expected_safety": "unsafe",
+      "id": "R17",
+      "interruption_marker_observed": true,
+      "name": "process_interruption_after_first_shard",
+      "observed_process": "interrupted",
+      "observed_safe": false,
+      "process_matched": true,
+      "returncode": -15,
+      "safety_matched": true,
+      "signal": 15,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": "visible safetensors do not exactly match the shard index",
+        "manifest": {
+          "exists": true,
+          "files": [
+            {
+              "path": "model-00001-of-00004.safetensors",
+              "sha256": "5946aa78f26aac5c93a95add89856cc2fffc65cf8a4b643f63ec753de447a31b",
+              "size": 112
+            },
+            {
+              "path": "model.safetensors.index.json",
+              "sha256": "a34dfc2e9efe715c151d037d78572eb4c3763028665ffb907a98c0bcd0e79ed9",
+              "size": 121
+            },
+            {
+              "path": "preexisting.safetensors",
+              "sha256": "b50219ddd186abc5651eb202adbbdceb7bb24ef44a817985ad54ea29878ed7d0",
+              "size": 112
+            }
+          ],
+          "kind": "directory"
+        },
+        "state": "preexisting_changed_with_unindexed_shard",
+        "tensor_count": 1,
+        "unindexed_shards": [
+          "model-00001-of-00004.safetensors"
+        ]
+      },
+      "artifact_matched": true,
+      "category": "destination_preservation",
+      "diagnostic_applicable": true,
+      "diagnostic_matched": true,
+      "driver": "inject_exception",
+      "duration_seconds": 4.113295613991795,
+      "evaluation_passed": true,
+      "exception_type": null,
+      "expected_artifact": "preexisting_changed_with_unindexed_shard",
+      "expected_process": "failure",
+      "expected_safety": "unsafe",
+      "id": "R18",
+      "interruption_marker_observed": false,
+      "name": "preexisting_sharded_destination_during_save_failure",
+      "observed_process": "failure",
+      "observed_safe": false,
+      "process_matched": true,
+      "returncode": 1,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    },
+    {
+      "artifact": {
+        "load_error": null,
+        "manifest": {
+          "exists": true,
+          "files": [
+            {
+              "path": "output.safetensors",
+              "sha256": "031fa4a4066f01f6eb2655fd22fd78166dc4e8c81346b77b5ec14f9f06468c85",
+              "size": 8800
+            }
+          ],
+          "kind": "file"
+        },
+        "state": "valid_complete",
+        "tensor_count": 6
+      },
+      "artifact_matched": true,
+      "category": "positive_control",
+      "diagnostic_applicable": false,
+      "diagnostic_matched": null,
+      "driver": "cli",
+      "duration_seconds": 4.026575711992336,
+      "evaluation_passed": true,
+      "exception_type": null,
+      "expected_artifact": "valid_complete",
+      "expected_process": "success",
+      "expected_safety": "safe",
+      "id": "R19",
+      "interruption_marker_observed": false,
+      "name": "successful_publication_control",
+      "observed_process": "success",
+      "observed_safe": true,
+      "process_matched": true,
+      "returncode": 0,
+      "safety_matched": true,
+      "signal": null,
+      "source_after": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_before": {
+        "exists": true,
+        "files": [
+          {
+            "path": "model.safetensors",
+            "sha256": "921866ca6a9d63c99495607a95447956a2ed6e15ebd3ece3555d9ef996590adf",
+            "size": 8856
+          }
+        ],
+        "kind": "file"
+      },
+      "source_unchanged": true,
+      "timed_out": false
+    }
+  ],
+  "cases_passed": 19,
+  "cases_total": 19,
+  "claim_boundary": "The result characterizes 19 deterministic cases using the in-memory provider, safetensors, and the recorded local filesystem. It supports rejection, source-preservation, and diagnostic claims only for these cases. Because injected save failure and interruption expose partial or mixed shard directories, it does not support transactional or crash-safe publication claims.",
+  "diagnostics_applicable": 17,
+  "diagnostics_matched": 17,
+  "evaluation_passed": true,
+  "expected_non_success_detected": 18,
+  "expected_non_success_total": 18,
+  "observed_safe_cases": 16,
+  "partial_or_mixed_output_findings": 3,
+  "preexisting_destination_cases": 2,
+  "preexisting_destinations_preserved": 1,
+  "prepublication_failure_cases": 15,
+  "prepublication_outputs_withheld_or_preserved": 15,
+  "protocol_id": "eacl2027_robustness_v1",
+  "relevant_paths_clean": true,
+  "repository_commit": "2dbcd505115100f892e906413076ae93b3fcaa16",
+  "run_id": "eacl2027_robustness_linux_2dbcd50",
+  "source_manifest": {
+    "cases.yaml": "cbb89a93bec93fa820a5b439d7ef8bc5af2676cfc6d339188d8626a668855ea3",
+    "fault_injector.py": "e48dbcebebada17f64681840336f88f65072c030aedeeab25f5892f9c13ddb60",
+    "protocol.md": "da0129d51a6d0bd8e394c5344d039d3df25126c0b1389a907a9ef4003383a335",
+    "run.py": "d602b1efa92bf29fb96b80c6708d353f3f4ea908dddc12be046e810f8de070d2"
+  },
+  "sources_unchanged": 19,
+  "unsafe_case_ids": [
+    "R16",
+    "R17",
+    "R18"
+  ]
+}

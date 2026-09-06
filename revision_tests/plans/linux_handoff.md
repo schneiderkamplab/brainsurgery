@@ -7,6 +7,33 @@ reported from macOS. It uses the underscore data root exclusively and keeps
 the 47 GB transfer archive outside Git. Do not substitute the obsolete local
 `models/usability-tests` directory.
 
+## Non-usability Linux execution status
+
+Executed on 2026-09-06 at commit
+`2dbcd505115100f892e906413076ae93b3fcaa16`, excluding sections 3--5 and all
+participant/usability work by operator request:
+
+- competing tools: 30/30 correct measured attempts, all automated reporting
+  gates passed; compact evidence in `revision_tests/competing_tools/results/linux_2dbcd50/`;
+- robustness: 19/19 evaluation cases and 19/19 unchanged sources, with the
+  expected three partial/mixed-output findings; compact evidence in
+  `revision_tests/robustness/results/linux_2dbcd50/`;
+- scaling: 150/150 correct measured attempts over all ten checkpoints and three
+  methods, all automated reporting gates passed; compact evidence in
+  `revision_tests/scaling/results/linux_2dbcd50/`.
+
+CUDA behavioral evidence was subsequently completed on the same Linux host:
+
+- the frozen GPT-2 case passed 160/160 exact tensors and 70/70 exact behavioral
+  comparisons;
+- the supplementary ten-checkpoint matrix passed 3,243/3,243 exact tensors and
+  700/700 exact behavioral comparisons across Pythia, GPT-2, OLMo, and Qwen2.5;
+  compact evidence is in `revision_tests/behavioral/results/linux_99693f2/`.
+
+No downstream case was retained or specified. Raw records remain under
+`log/revision_tests/`. Compact artifacts passed automated identifier/path scans;
+a human anonymity review remains required before anonymous reviewer upload.
+
 ## 1. Freeze the checkout and machine record
 
 Push the prepared commits from the source machine, then on Linux check out one

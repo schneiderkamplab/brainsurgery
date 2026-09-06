@@ -1,0 +1,19 @@
+% All automated reporting gates passed; complete human audit before use.
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{llrrrr}
+\toprule
+Case & Tool & Correct & Wall (s) & Peak RSS (MiB) & Output (MiB) \\
+\midrule
+R01 & \textsc{BrainSurgery} & 5/5 & 5.042 & 1785.7 & 522.7 \\
+R01 & \texttt{torch-state-bridge} & 5/5 & 1.478 & 1571.9 & 522.7 \\
+M01 & \textsc{BrainSurgery} & 5/5 & 5.292 & 2166.7 & 474.7 \\
+M01 & \textsc{MergeKit} & 5/5 & 4.887 & 2890.4 & 474.7 \\
+M02 & \textsc{BrainSurgery} & 5/5 & 5.480 & 3115.1 & 474.7 \\
+M02 & \textsc{MergeKit} & 5/5 & 5.289 & 3895.3 & 474.7 \\
+\bottomrule
+\end{tabular}
+\caption{Controlled checkpoint-operation comparison. Runtime and peak RSS are medians over correctness-validated measured runs.}
+\label{tab:competing-tools}
+\end{table*}

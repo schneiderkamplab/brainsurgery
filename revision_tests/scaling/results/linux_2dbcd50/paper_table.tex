@@ -1,0 +1,43 @@
+% Human-audit reportable candidate.
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{lllrrr}
+\toprule
+Model & Method & Correct & Wall (s) & Peak RSS (GiB) & Effective GiB/s \\
+\midrule
+P01 & Python/PyTorch & 5/5 & 1.17 & 0.77 & 0.26 \\
+P01 & BrainSurgery (memory) & 5/5 & 4.34 & 0.82 & 0.07 \\
+P01 & BrainSurgery (arena) & 5/5 & 4.38 & 0.88 & 0.07 \\
+P02 & Python/PyTorch & 5/5 & 1.62 & 2.10 & 1.05 \\
+P02 & BrainSurgery (memory) & 5/5 & 5.23 & 1.52 & 0.32 \\
+P02 & BrainSurgery (arena) & 5/5 & 5.09 & 2.32 & 0.33 \\
+P03 & Python/PyTorch & 5/5 & 4.30 & 10.96 & 2.46 \\
+P03 & BrainSurgery (memory) & 5/5 & 9.06 & 5.97 & 1.17 \\
+P03 & BrainSurgery (arena) & 5/5 & 9.26 & 11.21 & 1.14 \\
+P04 & Python/PyTorch & 5/5 & 15.50 & 44.77 & 2.86 \\
+P04 & BrainSurgery (memory) & 5/5 & 24.59 & 22.88 & 1.81 \\
+P04 & BrainSurgery (arena) & 5/5 & 26.54 & 28.18 & 1.67 \\
+G01 & Python/PyTorch & 5/5 & 1.42 & 1.47 & 0.72 \\
+G01 & BrainSurgery (memory) & 5/5 & 5.07 & 1.18 & 0.20 \\
+G01 & BrainSurgery (arena) & 5/5 & 5.05 & 1.61 & 0.20 \\
+G02 & Python/PyTorch & 5/5 & 5.02 & 12.29 & 2.38 \\
+G02 & BrainSurgery (memory) & 5/5 & 9.94 & 6.66 & 1.21 \\
+G02 & BrainSurgery (arena) & 5/5 & 10.77 & 12.50 & 1.11 \\
+O01 & Python/PyTorch & 5/5 & 4.51 & 9.65 & 2.11 \\
+O01 & BrainSurgery (memory) & 5/5 & 9.70 & 5.44 & 0.98 \\
+O01 & BrainSurgery (arena) & 5/5 & 9.35 & 9.37 & 1.02 \\
+O02 & Python/PyTorch & 5/5 & 18.40 & 30.81 & 2.79 \\
+O02 & BrainSurgery (memory) & 5/5 & 24.98 & 26.33 & 2.05 \\
+O02 & BrainSurgery (arena) & 5/5 & 30.23 & 29.02 & 1.70 \\
+Q01 & Python/PyTorch & 5/5 & 1.79 & 2.34 & 1.03 \\
+Q01 & BrainSurgery (memory) & 5/5 & 5.39 & 1.59 & 0.34 \\
+Q01 & BrainSurgery (arena) & 5/5 & 5.36 & 2.35 & 0.34 \\
+Q02 & Python/PyTorch & 5/5 & 10.79 & 28.87 & 2.63 \\
+Q02 & BrainSurgery (memory) & 5/5 & 16.09 & 14.86 & 1.76 \\
+Q02 & BrainSurgery (arena) & 5/5 & 17.96 & 18.04 & 1.58 \\
+\bottomrule
+\end{tabular}
+\caption{Controlled CPU checkpoint rewrite; medians over correctness-validated measured repetitions.}
+\label{tab:checkpoint-scaling}
+\end{table*}

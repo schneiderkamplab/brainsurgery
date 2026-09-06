@@ -51,8 +51,8 @@ success.
 > preserved the pre-existing destination exactly.
 
 This claim is limited to the enumerated cases, in-memory provider,
-safetensors, and recorded macOS filesystem. Mid-save failure and interruption
-are explicitly excluded from that safety claim.
+safetensors, and the recorded macOS and Linux filesystems. Mid-save failure and
+interruption are explicitly excluded from that safety claim.
 
 ## Evidence
 
@@ -61,8 +61,10 @@ are explicitly excluded from that safety claim.
   `fd20fa2726f0cde5d39a2870242c83b26b8f46b9`.
 - [`paper_table.tex`](paper_table.tex): compact LaTeX table for the paper.
 - [`paper_text.md`](paper_text.md): conservative result and limitation text.
+- [`linux_2dbcd50/`](linux_2dbcd50/paper_table.md): Linux repeat with 19/19 evaluation cases passing, 19/19 sources unchanged, and the same three partial/mixed-output findings, at commit `2dbcd505115100f892e906413076ae93b3fcaa16`.
 
 Raw plans, process logs, fixtures, and output remnants remain under the ignored
 `log/revision_tests/2026_09_06_robustness_macos_fd20fa27/` directory. Repeat the
-filesystem-sensitive publication cases on Linux. A true out-of-space case
-requires a bounded disposable filesystem and is not part of this macOS result.
+filesystem-sensitive publication cases on Linux. That repeat is now recorded
+above. A true out-of-space case requires a bounded disposable filesystem and was
+not attempted in either run.

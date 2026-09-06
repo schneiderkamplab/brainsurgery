@@ -10,15 +10,15 @@ only the backend-dependent work to Linux/CUDA.
 
 Complete this phase before starting a reported Linux run.
 
-- [ ] Select and record one revision-test Git commit.
+- [x] Select and record one revision-test Git commit.
 - [x] Confirm that all model names and Hugging Face revisions are pinned.
 - [x] Verify the usability-study data manifest reports `126/126`.
 - [x] Record the SHA-256 of `usability_tests_data.tar`.
-- [ ] Freeze correctness fixtures, robustness cases, behavioral prompt
+- [x] Freeze correctness fixtures, robustness cases, behavioral prompt
       manifest, baseline operations, metrics, tolerances, and stop conditions.
-- [ ] Ensure every runner writes raw output to
+- [x] Ensure every runner writes raw output to
       `log/revision_tests/<run_id>/` and records the Git commit and environment.
-- [ ] Do not change a frozen protocol during a reported cohort. Fix centrally,
+- [x] Do not change a frozen protocol during a reported cohort. Fix centrally,
       choose a new commit, and restart the affected cohort if necessary.
 
 ## Phase 1: run here on macOS
@@ -176,8 +176,8 @@ test -z "$(git status --porcelain)"
 All tests and both validators must pass. The checkout must remain clean until
 the reported run is closed.
 
-- [ ] Record the output under a new `log/revision_tests/<run_id>/` directory.
-- [ ] Download base checkpoints at the revisions pinned in
+- [x] Record the output under a new `log/revision_tests/<run_id>/` directory.
+- [x] Download base checkpoints at the revisions pinned in
       `usability_tests/targets.py`.
 - [ ] Extract the transferred data bundle into `models/`.
 - [ ] Run `usability_tests/setup.py` and
@@ -201,24 +201,24 @@ helps package compatibility and is not itself the variable being measured.
 
 ### 8. Run competing-tool comparisons
 
-- [ ] Install each pinned competing tool in an isolated environment.
-- [ ] Run the frozen common operations on identical checkpoint copies.
-- [ ] Validate every output with the same independent oracle.
-- [ ] Record unsupported operations and dependency failures explicitly.
-- [ ] Run all timed comparisons on the same Linux hardware and storage.
+- [x] Install each pinned competing tool in an isolated environment.
+- [x] Run the frozen common operations on identical checkpoint copies.
+- [x] Validate every output with the same independent oracle.
+- [x] Record unsupported operations and dependency failures explicitly.
+- [x] Run all timed comparisons on the same Linux hardware and storage.
 
 ### 9. Confirm OS-dependent robustness cases
 
-- [ ] Repeat the frozen 19-case protocol with a unique Linux run ID:
+- [x] Repeat the frozen 19-case protocol with a unique Linux run ID:
 
       ```bash
       REVISION_COMMIT_SHORT="$(git rev-parse --short HEAD)"
       .venv/bin/python revision_tests/robustness/run.py \
         --run-id "eacl2027_robustness_linux_${REVISION_COMMIT_SHORT}"
       ```
-- [ ] Confirm partial-output visibility, rename behavior, permissions, and
+- [x] Confirm partial-output visibility, rename behavior, permissions, and
       interruption behavior on the target Linux filesystem.
-- [ ] Keep these results separate from the macOS results when behavior differs.
+- [x] Keep these results separate from the macOS results when behavior differs.
 - [ ] Treat true insufficient-disk behavior as optional: test it only in a
       bounded disposable filesystem/quota under a separately versioned
       protocol. Do not fill or risk the host filesystem.
@@ -232,13 +232,18 @@ disabled.
 
 ### 10. Behavioral regression suite
 
-- [ ] Run `revision_tests/behavioral/run_cuda.sh` on the pinned GPT-2 reference
+- [x] Run `revision_tests/behavioral/run_cuda.sh` on the pinned GPT-2 reference
       and frozen byte-exact, sharded lossless transformation.
-- [ ] Confirm the independent pre-inference tensor gate reports 160/160 exact.
-- [ ] Run the frozen, versioned prompt suite on the unmodified reference model.
-- [ ] Run it on each transformed model under identical inference settings.
-- [ ] Record tensor-level validation separately from behavioral agreement.
-- [ ] Report task and language coverage, exclusions, failures, and uncertainty.
+- [x] Confirm the independent pre-inference tensor gate reports 160/160 exact.
+- [x] Run the frozen, versioned prompt suite on the unmodified reference model.
+- [x] Run it on each transformed model under identical inference settings.
+- [x] Record tensor-level validation separately from behavioral agreement.
+- [x] Report task and language coverage, exclusions, failures, and uncertainty.
+
+Evidence: the primary GPT-2 CUDA case passed 160/160 tensors and 70/70 prompt
+comparisons. The supplementary ten-checkpoint matrix passed 3,243/3,243 tensors
+and 700/700 prompt comparisons; see
+`revision_tests/behavioral/results/linux_99693f2/`.
 
 ### 11. Downstream quality
 
@@ -252,20 +257,20 @@ disabled.
 
 ### 12. Scaling and systems measurements
 
-- [ ] Run the frozen four-point Pythia scaling curve plus two-point GPT-2,
+- [x] Run the frozen four-point Pythia scaling curve plus two-point GPT-2,
       OLMo, and Qwen2.5 architecture/storage checks from
       `revision_tests/scaling/cases.yaml` (ten checkpoints total).
-- [ ] Run the equivalent direct Python/PyTorch, BrainSurgery in-memory, and
+- [x] Run the equivalent direct Python/PyTorch, BrainSurgery in-memory, and
       BrainSurgery arena operation with `revision_tests/scaling/run.py`.
-- [ ] Confirm the runner records wall time, peak process-tree RSS, process I/O,
+- [x] Confirm the runner records wall time, peak process-tree RSS, process I/O,
       effective logical throughput, temporary arena disk, output bytes/shards,
       and exact independent validation. GPU memory is intentionally N/A because
       this checkpoint rewrite is forced to CPU; do not present it as GPU work.
-- [ ] Confirm checkpoint bytes and measured parameter counts are reported
+- [x] Confirm checkpoint bytes and measured parameter counts are reported
       separately, with checkpoint bytes as the primary systems-size axis.
-- [ ] Fit or connect the primary curve only within Pythia; show the GPT-2,
+- [x] Fit or connect the primary curve only within Pythia; show the GPT-2,
       OLMo, and Qwen2.5 pairs separately rather than pooling architectures.
-- [ ] Use the same hardware, filesystem, warm-cache policy, inputs, operation,
+- [x] Use the same hardware, filesystem, warm-cache policy, inputs, operation,
       and one-worker setting for every point in the reported comparison.
 - [ ] Require all automated reportability gates plus human artifact/anonymity
       review before copying compact summaries into `scaling/results/`.
@@ -278,23 +283,23 @@ as CPU/I/O work rather than attributed to the GPU.
 ## Phase 4: return results and integrate on macOS
 
 - [ ] Copy or merge only completed, audited result summaries.
-- [ ] Keep raw artifacts under `log/revision_tests/<run_id>/` or in the external
+- [x] Keep raw artifacts under `log/revision_tests/<run_id>/` or in the external
       archival location; do not add large outputs to Git.
-- [ ] Re-run analysis from the imported raw records.
-- [ ] Link every paper table to its protocol, command, manifest, and run ID.
-- [ ] State the current failure-publication behavior exactly as observed.
-- [ ] Limit scale and downstream claims to the largest and strongest completed
+- [x] Re-run analysis from the imported raw records.
+- [x] Link every paper table to its protocol, command, manifest, and run ID.
+- [x] State the current failure-publication behavior exactly as observed.
+- [x] Limit scale and downstream claims to the largest and strongest completed
       experiments.
 - [ ] Update the revision-plan checkboxes and prepare the narrated demo only
       after the corresponding evidence is final.
 
 ## Submission gate
 
-- [ ] Every reported result has a commit, command, environment, manifest, and
+- [x] Every reported result has a commit, command, environment, manifest, and
       raw-record location.
 - [ ] All usability failures and reviews have completed manual bookkeeping.
-- [ ] Correctness references are independent of the tested BrainSurgery path.
-- [ ] Lossless and lossy claims use appropriate comparison rules.
-- [ ] macOS and Linux/CUDA performance measurements are not silently mixed.
-- [ ] Negative results and unsupported features remain visible.
+- [x] Correctness references are independent of the tested BrainSurgery path.
+- [x] Lossless and lossy claims use appropriate comparison rules.
+- [x] macOS and Linux/CUDA performance measurements are not silently mixed.
+- [x] Negative results and unsupported features remain visible.
 - [ ] Paper claims do not exceed the completed evidence.

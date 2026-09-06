@@ -1,0 +1,571 @@
+{
+  "comparisons": {
+    "M01": {
+      "brain_to_competitor_median_wall_ratio": 1.0829082774874303,
+      "competitor": "mergekit"
+    },
+    "M02": {
+      "brain_to_competitor_median_wall_ratio": 1.0360001703207835,
+      "competitor": "mergekit"
+    },
+    "R01": {
+      "brain_to_competitor_median_wall_ratio": 3.41156431810787,
+      "competitor": "torch_state_bridge"
+    }
+  },
+  "correct_measured_attempts": 30,
+  "correctness_complete": true,
+  "eligibility_reasons": [],
+  "fixture_scope": "real_shape_derived",
+  "git_commit": "2dbcd505115100f892e906413076ae93b3fcaa16",
+  "measured_attempts": 30,
+  "pairs": {
+    "M01:brainsurgery": {
+      "case_id": "M01",
+      "correct_attempts": 5,
+      "incorrect_or_failed_attempts": 0,
+      "maximum_absolute_difference": 0.0,
+      "measured_attempts": 5,
+      "output_bytes": {
+        "count": 5,
+        "maximum": 497785193,
+        "mean": 497785193,
+        "median": 497785193,
+        "minimum": 497785193,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          497785193,
+          497785193,
+          497785193,
+          497785193,
+          497785193
+        ]
+      },
+      "peak_process_tree_rss_bytes": {
+        "count": 5,
+        "maximum": 2272731136,
+        "mean": 2272089702.4,
+        "median": 2271920128,
+        "minimum": 2271608832,
+        "sample_standard_deviation": 509384.9891906906,
+        "values": [
+          2272522240,
+          2272731136,
+          2271920128,
+          2271608832,
+          2271666176
+        ]
+      },
+      "read_bytes": {
+        "count": 5,
+        "maximum": 1085440,
+        "mean": 217088,
+        "median": 0,
+        "minimum": 0,
+        "sample_standard_deviation": 485423.52509947435,
+        "values": [
+          0,
+          0,
+          0,
+          1085440,
+          0
+        ]
+      },
+      "specification_metrics": {
+        "bytes": 625,
+        "nonblank_noncomment_lines": 17
+      },
+      "tensors_checked": [
+        148
+      ],
+      "tool": "brainsurgery",
+      "wall_seconds": {
+        "count": 5,
+        "maximum": 5.415952754992759,
+        "mean": 5.295045132999076,
+        "median": 5.292274487001123,
+        "minimum": 5.188136293989373,
+        "sample_standard_deviation": 0.08413673227959859,
+        "values": [
+          5.256286729010753,
+          5.292274487001123,
+          5.322575400001369,
+          5.188136293989373,
+          5.415952754992759
+        ]
+      },
+      "write_bytes": {
+        "count": 5,
+        "maximum": 497803264,
+        "mean": 497803264,
+        "median": 497803264,
+        "minimum": 497803264,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          497803264,
+          497803264,
+          497803264,
+          497803264,
+          497803264
+        ]
+      }
+    },
+    "M01:mergekit": {
+      "case_id": "M01",
+      "correct_attempts": 5,
+      "incorrect_or_failed_attempts": 0,
+      "maximum_absolute_difference": 0.0,
+      "measured_attempts": 5,
+      "output_bytes": {
+        "count": 5,
+        "maximum": 497775082,
+        "mean": 497775082,
+        "median": 497775082,
+        "minimum": 497775082,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          497775082,
+          497775082,
+          497775082,
+          497775082,
+          497775082
+        ]
+      },
+      "peak_process_tree_rss_bytes": {
+        "count": 5,
+        "maximum": 3032879104,
+        "mean": 3030289612.8,
+        "median": 3030822912,
+        "minimum": 3024392192,
+        "sample_standard_deviation": 3432189.424150596,
+        "values": [
+          3030822912,
+          3030810624,
+          3024392192,
+          3032543232,
+          3032879104
+        ]
+      },
+      "read_bytes": {
+        "count": 5,
+        "maximum": 0,
+        "mean": 0,
+        "median": 0,
+        "minimum": 0,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "specification_metrics": {
+        "bytes": 397,
+        "nonblank_noncomment_lines": 11
+      },
+      "tensors_checked": [
+        148
+      ],
+      "tool": "mergekit",
+      "wall_seconds": {
+        "count": 5,
+        "maximum": 4.950452946999576,
+        "mean": 4.866373234800994,
+        "median": 4.887093946017558,
+        "minimum": 4.735243959992658,
+        "sample_standard_deviation": 0.08639178217063045,
+        "values": [
+          4.928598455997417,
+          4.735243959992658,
+          4.887093946017558,
+          4.950452946999576,
+          4.830476864997763
+        ]
+      },
+      "write_bytes": {
+        "count": 5,
+        "maximum": 497786880,
+        "mean": 497786880,
+        "median": 497786880,
+        "minimum": 497786880,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          497786880,
+          497786880,
+          497786880,
+          497786880,
+          497786880
+        ]
+      }
+    },
+    "M02:brainsurgery": {
+      "case_id": "M02",
+      "correct_attempts": 5,
+      "incorrect_or_failed_attempts": 0,
+      "maximum_absolute_difference": 0.0,
+      "measured_attempts": 5,
+      "output_bytes": {
+        "count": 5,
+        "maximum": 497785193,
+        "mean": 497785193,
+        "median": 497785193,
+        "minimum": 497785193,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          497785193,
+          497785193,
+          497785193,
+          497785193,
+          497785193
+        ]
+      },
+      "peak_process_tree_rss_bytes": {
+        "count": 5,
+        "maximum": 3267325952,
+        "mean": 3266516582.4,
+        "median": 3266371584,
+        "minimum": 3266129920,
+        "sample_standard_deviation": 466446.10648262466,
+        "values": [
+          3266129920,
+          3266371584,
+          3266433024,
+          3266322432,
+          3267325952
+        ]
+      },
+      "read_bytes": {
+        "count": 5,
+        "maximum": 0,
+        "mean": 0,
+        "median": 0,
+        "minimum": 0,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "specification_metrics": {
+        "bytes": 1100,
+        "nonblank_noncomment_lines": 32
+      },
+      "tensors_checked": [
+        148
+      ],
+      "tool": "brainsurgery",
+      "wall_seconds": {
+        "count": 5,
+        "maximum": 5.619976129994029,
+        "mean": 5.444100370397791,
+        "median": 5.479855418991065,
+        "minimum": 5.301038719015196,
+        "sample_standard_deviation": 0.13093427986852962,
+        "values": [
+          5.619976129994029,
+          5.492116871988401,
+          5.479855418991065,
+          5.327514712000266,
+          5.301038719015196
+        ]
+      },
+      "write_bytes": {
+        "count": 5,
+        "maximum": 497803264,
+        "mean": 497803264,
+        "median": 497803264,
+        "minimum": 497803264,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          497803264,
+          497803264,
+          497803264,
+          497803264,
+          497803264
+        ]
+      }
+    },
+    "M02:mergekit": {
+      "case_id": "M02",
+      "correct_attempts": 5,
+      "incorrect_or_failed_attempts": 0,
+      "maximum_absolute_difference": 2.9802322387695312e-08,
+      "measured_attempts": 5,
+      "output_bytes": {
+        "count": 5,
+        "maximum": 497775082,
+        "mean": 497775082,
+        "median": 497775082,
+        "minimum": 497775082,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          497775082,
+          497775082,
+          497775082,
+          497775082,
+          497775082
+        ]
+      },
+      "peak_process_tree_rss_bytes": {
+        "count": 5,
+        "maximum": 4100255744,
+        "mean": 4082085888,
+        "median": 4084506624,
+        "minimum": 4056956928,
+        "sample_standard_deviation": 18829540.989688728,
+        "values": [
+          4084506624,
+          4069515264,
+          4099194880,
+          4056956928,
+          4100255744
+        ]
+      },
+      "read_bytes": {
+        "count": 5,
+        "maximum": 0,
+        "mean": 0,
+        "median": 0,
+        "minimum": 0,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "specification_metrics": {
+        "bytes": 558,
+        "nonblank_noncomment_lines": 13
+      },
+      "tensors_checked": [
+        148
+      ],
+      "tool": "mergekit",
+      "wall_seconds": {
+        "count": 5,
+        "maximum": 5.557045738998568,
+        "mean": 5.212607083999319,
+        "median": 5.289434863021597,
+        "minimum": 4.871294466982363,
+        "sample_standard_deviation": 0.26145648970289354,
+        "values": [
+          4.871294466982363,
+          5.051785480987746,
+          5.557045738998568,
+          5.293474870006321,
+          5.289434863021597
+        ]
+      },
+      "write_bytes": {
+        "count": 5,
+        "maximum": 497786880,
+        "mean": 497786880,
+        "median": 497786880,
+        "minimum": 497786880,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          497786880,
+          497786880,
+          497786880,
+          497786880,
+          497786880
+        ]
+      }
+    },
+    "R01:brainsurgery": {
+      "case_id": "R01",
+      "correct_attempts": 5,
+      "incorrect_or_failed_attempts": 0,
+      "maximum_absolute_difference": 0.0,
+      "measured_attempts": 5,
+      "output_bytes": {
+        "count": 5,
+        "maximum": 548114543,
+        "mean": 548114543,
+        "median": 548114543,
+        "minimum": 548114543,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          548114543,
+          548114543,
+          548114543,
+          548114543,
+          548114543
+        ]
+      },
+      "peak_process_tree_rss_bytes": {
+        "count": 5,
+        "maximum": 1873301504,
+        "mean": 1872600268.8,
+        "median": 1872433152,
+        "minimum": 1872232448,
+        "sample_standard_deviation": 416579.51118507975,
+        "values": [
+          1873301504,
+          1872232448,
+          1872433152,
+          1872404480,
+          1872629760
+        ]
+      },
+      "read_bytes": {
+        "count": 5,
+        "maximum": 0,
+        "mean": 0,
+        "median": 0,
+        "minimum": 0,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "specification_metrics": {
+        "bytes": 391,
+        "nonblank_noncomment_lines": 7
+      },
+      "tensors_checked": [
+        161
+      ],
+      "tool": "brainsurgery",
+      "wall_seconds": {
+        "count": 5,
+        "maximum": 5.105713277007453,
+        "mean": 5.030740389396669,
+        "median": 5.042379885999253,
+        "minimum": 4.915032127988525,
+        "sample_standard_deviation": 0.07073648269680682,
+        "values": [
+          5.105713277007453,
+          5.042379885999253,
+          5.030346751998877,
+          5.060229903989239,
+          4.915032127988525
+        ]
+      },
+      "write_bytes": {
+        "count": 5,
+        "maximum": 548134912,
+        "mean": 548134912,
+        "median": 548134912,
+        "minimum": 548134912,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          548134912,
+          548134912,
+          548134912,
+          548134912,
+          548134912
+        ]
+      }
+    },
+    "R01:torch_state_bridge": {
+      "case_id": "R01",
+      "correct_attempts": 5,
+      "incorrect_or_failed_attempts": 0,
+      "maximum_absolute_difference": 0.0,
+      "measured_attempts": 5,
+      "output_bytes": {
+        "count": 5,
+        "maximum": 548104920,
+        "mean": 548104920,
+        "median": 548104920,
+        "minimum": 548104920,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          548104920,
+          548104920,
+          548104920,
+          548104920,
+          548104920
+        ]
+      },
+      "peak_process_tree_rss_bytes": {
+        "count": 5,
+        "maximum": 1648340992,
+        "mean": 1648132096,
+        "median": 1648250880,
+        "minimum": 1647742976,
+        "sample_standard_deviation": 261983.95114204992,
+        "values": [
+          1648340992,
+          1648340992,
+          1648250880,
+          1647742976,
+          1647984640
+        ]
+      },
+      "read_bytes": {
+        "count": 5,
+        "maximum": 0,
+        "mean": 0,
+        "median": 0,
+        "minimum": 0,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "specification_metrics": {
+        "bytes": 66,
+        "nonblank_noncomment_lines": 2
+      },
+      "tensors_checked": [
+        161
+      ],
+      "tool": "torch_state_bridge",
+      "wall_seconds": {
+        "count": 5,
+        "maximum": 1.653856275981525,
+        "mean": 1.5022704799892381,
+        "median": 1.4780257429811172,
+        "minimum": 1.3701789749902673,
+        "sample_standard_deviation": 0.10526386611340974,
+        "values": [
+          1.5452438319916837,
+          1.653856275981525,
+          1.4640475740015972,
+          1.3701789749902673,
+          1.4780257429811172
+        ]
+      },
+      "write_bytes": {
+        "count": 5,
+        "maximum": 548110336,
+        "mean": 548110336,
+        "median": 548110336,
+        "minimum": 548110336,
+        "sample_standard_deviation": 0.0,
+        "values": [
+          548110336,
+          548110336,
+          548110336,
+          548110336,
+          548110336
+        ]
+      }
+    }
+  },
+  "protocol_id": "eacl2027_competing_tools_v1",
+  "reported_eligible": true,
+  "run_id": "eacl2027_competing_linux_2dbcd50",
+  "source_id": "openai-community/gpt2",
+  "source_model": "<SOURCE_MODEL>",
+  "source_revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
+  "warmup_attempts": 6
+}
