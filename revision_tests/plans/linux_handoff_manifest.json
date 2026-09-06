@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "prepared_on": "2026-09-06",
+  "data_root": "models/usability_tests",
+  "legacy_data_root_not_used": "models/usability-tests",
+  "bundle": {
+    "filename": "usability_tests_data.tar",
+    "bytes": 50568509440,
+    "sha256": "7001fedf486d026eea60213108278e4ddba41de40cb5b4a6d0db28f4dbcd28fe",
+    "archive_members": 105,
+    "regular_files_hashed_against_study_manifest": 71,
+    "content_digest_mismatches": 0,
+    "unexpected_regular_files": 0,
+    "unsafe_absolute_or_parent_paths": 0,
+    "base_checkpoint_members": 0
+  },
+  "study_manifest": {
+    "path": "usability_tests/manifest.sha256",
+    "sha256": "ce5df9acbfff01c7f776ff6ecb0d5d4b0c0792beec5cb1236b147cc998f99145",
+    "last_changed_in_commit": "d99272f9b50268a2fc6df754ae9b36ad13f3b576",
+    "verification": {
+      "base_checkpoints": "20/20",
+      "generated_inputs": "42/42",
+      "references": "59/59",
+      "docpack": "5/5",
+      "overall": "126/126"
+    }
+  },
+  "base_models_not_in_bundle": {
+    "openai-community/gpt2": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
+    "allenai/OLMo-1B-0724-hf": "d7cbab742d80589e714b1a2d7f838dcd21cbe143",
+    "EleutherAI/pythia-1b": "f73d7dcc545c8bd326d8559c8ef84ffe92fea6b2"
+  },
+  "official_codex_cohort": {
+    "agent_directory": "astra_eacl2027",
+    "model_id": "gpt-6-astra",
+    "excluded_pilot_directory": "usability_tests/astra",
+    "first_cell": "gpt-2/light/T1-P-1",
+    "first_cell_requires_transcript_audit_before_continuation": true
+  },
+  "git_exclusions": [
+    "usability_tests_data.tar",
+    "models/",
+    "log/",
+    ".comparison_envs/"
+  ],
+  "interpretation": "The bundle and local 126-file study state agree. This verifies transfer inputs only and is not an experimental result."
+}

@@ -11,9 +11,9 @@ only the backend-dependent work to Linux/CUDA.
 Complete this phase before starting a reported Linux run.
 
 - [ ] Select and record one revision-test Git commit.
-- [ ] Confirm that all model names and Hugging Face revisions are pinned.
-- [ ] Verify the usability-study data manifest reports `126/126`.
-- [ ] Record the SHA-256 of `usability_tests_data.tar`.
+- [x] Confirm that all model names and Hugging Face revisions are pinned.
+- [x] Verify the usability-study data manifest reports `126/126`.
+- [x] Record the SHA-256 of `usability_tests_data.tar`.
 - [ ] Freeze correctness fixtures, robustness cases, behavioral prompt
       manifest, baseline operations, metrics, tolerances, and stop conditions.
 - [ ] Ensure every runner writes raw output to
@@ -110,12 +110,19 @@ Phase 2 remains required for paper performance evidence.
 
 ### 5. Prepare transfer and handoff
 
-- [ ] Commit the frozen protocols, fixtures, runners, and plans.
-- [ ] Confirm the worktree diff contains no checkpoints, archives, credentials,
+- [x] Commit the frozen protocols, fixtures, runners, and plans.
+- [x] Confirm the worktree diff contains no checkpoints, archives, credentials,
       environments, caches, or raw logs.
 - [ ] Transfer `usability_tests_data.tar` separately from Git.
-- [ ] Write the exact Linux setup and verification commands into the applicable
+- [x] Write the exact Linux setup and verification commands into the applicable
       runner README.
+
+Handoff evidence: `linux_handoff_manifest.json` records the 47 GB archive's
+size and SHA-256, its archive/path audit, the pinned base-model revisions, and
+the successful 126/126 local verification. `linux_handoff.md` contains the
+ordered Linux commands, the first-cell transcript gate, and the official Codex
+cohort namespace. Physical transfer remains unchecked until the archive is
+copied to and verified on the receiving machine.
 
 ## Phase 2: run on Linux
 

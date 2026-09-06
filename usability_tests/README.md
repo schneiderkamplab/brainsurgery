@@ -186,6 +186,34 @@ biases, everything else bit-identical); the adapters are seeded PEFT-style
 LoRA factors with an `adapter_config.json`. References come from the Python
 baselines only, so grading is independent of the tool under test.
 
+## Verified Linux handoff
+
+Do not regenerate the seeded inputs on the receiving machine: QR and matrix
+operations are not bit-identical across CPU/BLAS implementations. Transfer the
+root-level `usability_tests_data.tar` separately from Git. The current bundle
+is 50,568,509,440 bytes with SHA-256
+`7001fedf486d026eea60213108278e4ddba41de40cb5b4a6d0db28f4dbcd28fe`.
+Its tracked verification record and the complete receiving-machine sequence
+are in `revision_tests/plans/linux_handoff_manifest.json` and
+`revision_tests/plans/linux_handoff.md`.
+
+The active data root is `models/usability_tests` (underscore). Do not use or
+transfer the obsolete local `models/usability-tests` directory (hyphen). With
+the three base checkpoints already downloaded at the revisions in
+`targets.py`, the receiving sequence is:
+
+```bash
+echo "7001fedf486d026eea60213108278e4ddba41de40cb5b4a6d0db28f4dbcd28fe  usability_tests_data.tar" | sha256sum -c -
+tar -xf usability_tests_data.tar -C models/
+.venv/bin/python usability_tests/setup.py
+.venv/bin/python usability_tests/make_docpack.py
+.venv/bin/python usability_tests/make_manifest.py --verify
+```
+
+Stop unless the last command says `verified 126/126 files`. The official
+Codex namespace is `astra_eacl2027`; `astra` is reserved for the two excluded
+macOS pilot cells and an incomplete pilot sandbox already tracked in the kit.
+
 ## Grading
 
 `grade.py <test> --target <target> [--out PATH] [--json] [--write FILE]`

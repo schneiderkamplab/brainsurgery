@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="${1:-log/usability_tests_data.tar}"
 DATA_ROOT="$(readlink -f models/usability_tests)"
-echo "packing $DATA_ROOT -> $OUT (generated inputs and references, ~35 GB)"
+echo "packing $DATA_ROOT -> $OUT (generated inputs and references; current bundle is ~47 GB)"
 tar -cf "$OUT" -C "$(dirname "$DATA_ROOT")" \
   --exclude='usability_tests/*/inputs/base' \
   --exclude='usability_tests/*/inputs/ft1/*.json' --exclude='usability_tests/*/inputs/ft1/*.txt' \

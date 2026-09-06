@@ -7,7 +7,8 @@
 #     nohup usability_tests/run_full_codex.sh 1 1 \
 #     > log/usability-codex-full-r1.txt 2>&1 &
 #
-# Environment: AGENT (default astra), MODEL (default gpt-6-astra),
+# Environment: AGENT and MODEL are required. Do not use AGENT=astra: that
+# namespace contains the excluded macOS pilot cells committed with the kit.
 # TIMEOUT (default 1800 seconds). The second positional argument is parallelism
 # and defaults to 1 because checkpoint cells have substantial RAM peaks.
 set -euo pipefail
@@ -19,8 +20,12 @@ fi
 
 REPEAT="${1:-1}"
 PARALLEL="${2:-1}"
-AGENT="${AGENT:-astra}"
-MODEL="${MODEL:-gpt-6-astra}"
+: "${AGENT:?set AGENT to the frozen official cohort id (not astra)}"
+: "${MODEL:?set MODEL to the exact participant model id}"
+if [[ "$AGENT" == "astra" ]]; then
+  echo "AGENT=astra is reserved for excluded macOS pilot cells; choose a new official cohort id" >&2
+  exit 2
+fi
 TIMEOUT="${TIMEOUT:-1800}"
 : "${PRICE_IN:?set PRICE_IN from the current vendor rate card (USD per million input tokens)}"
 : "${PRICE_OUT:?set PRICE_OUT from the current vendor rate card (USD per million output tokens)}"

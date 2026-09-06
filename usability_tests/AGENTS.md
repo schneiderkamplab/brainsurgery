@@ -50,7 +50,9 @@ allowed package list, B: BrainSurgery plan) by several coding-agent models.
 .venv/bin/python usability_tests/analyze.py
 
 # one complete Codex repeat on Linux (all targets, efforts, tests and conditions)
-PRICE_IN=<usd/M> PRICE_OUT=<usd/M> PRICE_CACHE_READ=<usd/M> PRICE_CACHE_WRITE=<usd/M> \
+AGENT=astra_eacl2027 MODEL=gpt-6-astra \
+PRICE_IN="<usd/M>" PRICE_OUT="<usd/M>" \
+PRICE_CACHE_READ="<usd/M>" PRICE_CACHE_WRITE="<usd/M>" \
     usability_tests/run_full_codex.sh 1 1
 
 # verify transcript-derived fields and list manual bookkeeping still required
@@ -64,6 +66,11 @@ directory level and use the vendor's own names: `low`, `medium`, `high` for
 Claude Code (passed as `claude --effort`), `light`, `medium`, `high` for
 OpenAI models. Results live at
 `<agent>/<target>/<effort>/<test>-<condition>-<repeat>/`.
+
+The tracked `astra/` directory contains two excluded macOS pilot cells and one
+incomplete pilot sandbox. Never use `AGENT=astra` for the official Linux
+cohort. Use the frozen official namespace `astra_eacl2027` for every official
+repeat; the model id remains a separate field in `harness.json`.
 
 ## Full matrix on this machine
 
