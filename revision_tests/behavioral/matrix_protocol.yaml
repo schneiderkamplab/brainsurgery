@@ -1,0 +1,20 @@
+protocol_id: eacl2027_behavioral_matrix_v2
+bundle_protocol_id: eacl2027_behavioral_v1
+source_matrix: revision_tests/scaling/cases.yaml
+expected_model_ids: [P01, P02, P03, P04, G01, G02, O01, O02, Q01, Q02]
+operation:
+  description: Scale every floating-point tensor whose complete key ends in .weight by exactly 1.0.
+  target_regex: '.*\.weight'
+  factor: 1.0
+  output_shard_size: 256MB
+  output_shard_size_bytes: 268435456
+inference:
+  device: cuda:0
+  dtype: source_checkpoint_weight_dtype
+  prompts: 70
+  max_new_tokens: 32
+  do_sample: false
+  seed: 0
+decision_rule:
+  tensors: Every transformed tensor must be byte-exact under the independent oracle.
+  behavior: Every next-token logit vector, top-1 token, greedy sequence, and multiple-choice prediction must match.

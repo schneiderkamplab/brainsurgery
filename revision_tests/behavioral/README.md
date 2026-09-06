@@ -123,3 +123,22 @@ must not use the lossless pass rule.
 
 The old 50 prompts remain under `validation/` for historical compatibility but
 are excluded from this protocol.
+
+## Ten-checkpoint CUDA extension
+
+The versioned `eacl2027_behavioral_matrix_v2` extension applies the same
+multiply-by-one, 256 MiB sharded rewrite to all ten checkpoints pinned by the
+scaling protocol, independently requires every output tensor to be byte-exact,
+and then runs the full 70-prompt comparison on `cuda:0` at each checkpoint's
+native stored dtype. It covers four Pythia scales and paired GPT-2, OLMo, and
+Qwen2.5 checkpoints without changing the primary GPT-2 case above.
+
+Run the complete extension from a clean checkout with:
+
+```bash
+.venv/bin/python revision_tests/behavioral/run_cuda_matrix.py
+```
+
+Use `--smoke-limit 1 --model P01` only for a non-reportable pipeline check.
+Successful generated checkpoints are removed after their evidence bundles are
+complete unless `--keep-transformed` is supplied.

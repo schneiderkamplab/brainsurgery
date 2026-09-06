@@ -9,6 +9,12 @@ Frozen model case: GPT-2 124M (`openai-community/gpt2`) at revision
 `lossless_gpt2_plan.yaml`. The final checkpoint must contain the same 160
 tensors byte-for-byte and use an indexed 256 MiB safetensors shard layout.
 
+The supplementary `eacl2027_behavioral_matrix_v2` protocol freezes the ten
+checkpoint matrix in `matrix_protocol.yaml`. It repeats a model-neutral,
+multiply-by-one sharded rewrite and this same 70-prompt comparison at each
+checkpoint's native stored dtype. This extension supplements rather than
+redefines the primary GPT-2 result.
+
 ## Research question and scope
 
 For a transformation declared lossless and independently verified at the
